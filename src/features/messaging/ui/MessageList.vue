@@ -9,6 +9,7 @@ import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
 import { useToast } from "@/shared/lib/use-toast";
 import MessageBubble from "./MessageBubble.vue";
+import CallEventCard from "./CallEventCard.vue";
 import { MessageSkeleton } from "@/shared/ui/skeleton";
 import MessageContextMenu from "./MessageContextMenu.vue";
 import EmojiPicker from "./EmojiPicker.vue";
@@ -483,6 +484,30 @@ defineExpose({ scrollToMessage, setSearchQuery });
             <span class="rounded-full bg-neutral-grad-0/80 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">
               {{ item.label }}
             </span>
+          </div>
+
+          <!-- Call event card (bubble-style, aligned like a message) -->
+          <div
+            v-else-if="item.type === 'message' && item.message?.callInfo"
+            :data-message-id="item.message.id"
+            :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
+          >
+            <div
+              class="flex gap-2"
+              :class="item.message.senderId === authStore.address ? 'flex-row-reverse' : 'flex-row'"
+            >
+              <!-- Avatar (incoming only) -->
+              <div v-if="item.message.senderId !== authStore.address && themeStore.showAvatarsInChat" class="shrink-0 self-end">
+                <UserAvatar :address="item.message.senderId" size="sm" />
+              </div>
+              <div class="min-w-0 max-w-[70%]">
+                <CallEventCard
+                  :message="item.message"
+                  :is-own="item.message.senderId === authStore.address"
+                  :tail-class="item.message.senderId === authStore.address ? 'rounded-br-bubble-sm' : 'rounded-bl-bubble-sm'"
+                />
+              </div>
+            </div>
           </div>
 
           <!-- System message (join/leave/kick/name change) -->

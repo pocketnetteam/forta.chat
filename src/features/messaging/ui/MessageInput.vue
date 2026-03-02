@@ -11,6 +11,8 @@ import AttachmentPanel from "./AttachmentPanel.vue";
 import MediaPreview from "./MediaPreview.vue";
 import VoiceRecorder from "./VoiceRecorder.vue";
 import { useVoiceRecorder } from "../model/use-voice-recorder";
+import { useMentionAutocomplete } from "../model/use-mention-autocomplete";
+import MentionAutocomplete from "./MentionAutocomplete.vue";
 
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
@@ -20,6 +22,7 @@ const voiceRecorder = useVoiceRecorder();
 
 const text = ref("");
 const textareaRef = ref<HTMLTextAreaElement>();
+const mention = useMentionAutocomplete(text, textareaRef);
 const fileInputRef = ref<HTMLInputElement>();
 const sending = ref(false);
 let typingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -37,6 +40,7 @@ watch(text, (val) => {
 watch(() => chatStore.activeRoomId, (newId, oldId) => {
   if (oldId) saveDraft(oldId, text.value);
   text.value = newId ? getDraft(newId) : "";
+  mention.clearMentions();
   chatStore.editingMessage = null;
   chatStore.replyingTo = null;
   nextTick(() => {
@@ -77,15 +81,17 @@ const autoResize = () => {
 
 const handleSend = () => {
   if (!text.value.trim()) return;
+  const rawText = mention.resolveText();
   if (isEditing.value) {
-    editMessage(chatStore.editingMessage!.id, text.value);
+    editMessage(chatStore.editingMessage!.id, rawText);
     chatStore.editingMessage = null;
   } else if (chatStore.replyingTo) {
-    sendReply(text.value);
+    sendReply(rawText);
   } else {
-    sendMessage(text.value);
+    sendMessage(rawText);
   }
   text.value = "";
+  mention.clearMentions();
   const roomId = chatStore.activeRoomId;
   if (roomId) clearDraft(roomId);
   setTyping(false);
@@ -97,6 +103,7 @@ const handleSend = () => {
 };
 
 const handleKeydown = (e: KeyboardEvent) => {
+  if (mention.handleKeydown(e)) return;
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     handleSend();
@@ -105,6 +112,7 @@ const handleKeydown = (e: KeyboardEvent) => {
 
 const handleInput = () => {
   autoResize();
+  mention.onCursorChange();
   setTyping(true);
   if (typingTimeout) clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => {
@@ -233,7 +241,7 @@ const insertEmoji = (emoji: string) => {
 </script>
 
 <template>
-  <div class="overflow-hidden border-t border-neutral-grad-0 bg-background-total-theme">
+  <div class="border-t border-neutral-grad-0 bg-background-total-theme">
     <!-- Editing bar -->
     <transition name="input-bar">
       <div
@@ -303,7 +311,14 @@ const insertEmoji = (emoji: string) => {
     />
 
     <!-- Input row -->
-    <div v-else class="flex items-end gap-1 px-2 py-2">
+    <div v-else class="relative flex items-end gap-1 px-2 py-2">
+      <!-- Mention autocomplete dropdown -->
+      <MentionAutocomplete
+        v-if="mention.active.value && mention.filteredMembers.value.length > 0 && chatStore.activeRoom?.isGroup"
+        :members="mention.filteredMembers.value"
+        :selected-index="mention.selectedIndex.value"
+        @select="mention.insertMention"
+      />
       <!-- Hidden file inputs -->
       <input
         ref="photoInputRef"
@@ -343,6 +358,8 @@ const insertEmoji = (emoji: string) => {
         :disabled="sending"
         @keydown="handleKeydown"
         @input="handleInput"
+        @click="mention.onCursorChange()"
+        @keyup="mention.onCursorChange()"
       />
 
       <!-- Attachment button (right of textarea) -->

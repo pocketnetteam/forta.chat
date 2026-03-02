@@ -25,6 +25,7 @@ export type TypingCallback = (event: unknown, member: unknown) => void;
 export type ReceiptCallback = (event: unknown, room: unknown) => void;
 export type RedactionCallback = (event: unknown, room: unknown) => void;
 export type MyMembershipCallback = (room: unknown, membership: string, prevMembership: string | undefined) => void;
+export type IncomingCallCallback = (call: unknown) => void;
 
 export class MatrixClientService {
   private baseUrl: string;
@@ -46,6 +47,7 @@ export class MatrixClientService {
   private onReceipt: ReceiptCallback | null = null;
   private onRedaction: RedactionCallback | null = null;
   private onMyMembership: MyMembershipCallback | null = null;
+  private onIncomingCall: IncomingCallCallback | null = null;
 
   constructor(domain?: string) {
     this.baseUrl = `https://${domain ?? MATRIX_SERVER}`;
@@ -64,6 +66,7 @@ export class MatrixClientService {
     onReceipt?: ReceiptCallback;
     onRedaction?: RedactionCallback;
     onMyMembership?: MyMembershipCallback;
+    onIncomingCall?: IncomingCallCallback;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
     if (handlers.onTimeline) this.onTimeline = handlers.onTimeline;
@@ -72,6 +75,7 @@ export class MatrixClientService {
     if (handlers.onReceipt) this.onReceipt = handlers.onReceipt;
     if (handlers.onRedaction) this.onRedaction = handlers.onRedaction;
     if (handlers.onMyMembership) this.onMyMembership = handlers.onMyMembership;
+    if (handlers.onIncomingCall) this.onIncomingCall = handlers.onIncomingCall;
   }
 
   /** Custom request function using axios (matching bastyon-chat pattern) */
@@ -176,7 +180,9 @@ export class MatrixClientService {
       timelineSupport: true,
       store: indexedDBStore,
       deviceId: userData.device_id,
-      request: this.request.bind(this)
+      request: this.request.bind(this),
+      iceCandidatePoolSize: 20,
+      fallbackICEServerAllowed: true,
     };
 
     const userClient = this.createMtrxClient(userClientData);
@@ -232,6 +238,12 @@ export class MatrixClientService {
       // Pass state events (membership, room name, power levels) from anyone
       const stateTypes = ["m.room.member", "m.room.name", "m.room.power_levels"];
       if (stateTypes.includes(msg.event.type)) {
+        this.onTimeline?.(message, msg.event.room_id);
+        return;
+      }
+
+      // Pass call hangup events from anyone for system message display
+      if (msg.event.type === "m.call.hangup") {
         this.onTimeline?.(message, msg.event.room_id);
         return;
       }
@@ -293,6 +305,10 @@ export class MatrixClientService {
     // Fires when MY membership changes in a room (join→leave = kicked, join→ban, etc.)
     this.client.on("Room.myMembership", (room: unknown, membership: string, prevMembership: string | undefined) => {
       this.onMyMembership?.(room, membership, prevMembership);
+    });
+
+    this.client.on("Call.incoming" as string, (call: unknown) => {
+      this.onIncomingCall?.(call);
     });
 
     this.client.on("sync", (state: string) => {

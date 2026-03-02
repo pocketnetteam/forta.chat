@@ -76,14 +76,23 @@ function syncRemoteVideoMuted(call: MatrixCall) {
   const callStore = useCallStore();
   const remoteFeed = call.remoteUsermediaFeed as CallFeed | undefined;
 
+  /** Upgrade call type to "video" when remote peer enables camera */
+  const maybeUpgradeToVideo = (videoMuted: boolean) => {
+    if (!videoMuted && callStore.activeCall?.type === "voice") {
+      callStore.setActiveCall({ ...callStore.activeCall, type: "video" });
+    }
+  };
+
   // If feed changed, re-wire listener
   if (remoteFeed !== trackedRemoteFeed) {
     cleanupRemoteFeedListener();
 
     if (remoteFeed) {
       callStore.remoteVideoMuted = remoteFeed.isVideoMuted();
+      maybeUpgradeToVideo(remoteFeed.isVideoMuted());
       remoteFeedMuteHandler = (_audioMuted: boolean, videoMuted: boolean) => {
         callStore.remoteVideoMuted = videoMuted;
+        maybeUpgradeToVideo(videoMuted);
       };
       trackedRemoteFeed = remoteFeed;
       remoteFeed.on("mute_state_changed" as any, remoteFeedMuteHandler);
@@ -94,6 +103,7 @@ function syncRemoteVideoMuted(call: MatrixCall) {
   } else if (remoteFeed) {
     // Same feed, just re-check state
     callStore.remoteVideoMuted = remoteFeed.isVideoMuted();
+    maybeUpgradeToVideo(remoteFeed.isVideoMuted());
   }
 }
 

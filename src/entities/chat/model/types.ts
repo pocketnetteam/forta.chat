@@ -60,6 +60,13 @@ export interface Message {
   edited?: boolean;
   /** Forwarded from another user */
   forwardedFrom?: { senderId: string; senderName?: string };
+  /** Call event metadata for card-style rendering */
+  callInfo?: {
+    callType: "voice" | "video";
+    missed: boolean;
+    /** Call duration in seconds (0 or absent for missed/unanswered) */
+    duration?: number;
+  };
 }
 
 export enum MessageStatus {

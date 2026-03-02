@@ -48,6 +48,10 @@ const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
       preview = `📎 ${msg.content || t("message.file")}`;
       break;
     case MessageType.system:
+      if (msg.callInfo) {
+        const icon = msg.callInfo.callType === "video" ? "📹" : "📞";
+        return `${icon} ${msg.content}`;
+      }
       // System messages already contain the actor name, no sender prefix needed
       return msg.content;
     default:
@@ -75,7 +79,10 @@ const getTypingText = (roomId: string): string => {
   return `${others.length} typing...`;
 };
 
-const filteredRooms = computed(() => {
+const PAGE_SIZE = 30;
+const displayLimit = ref(PAGE_SIZE);
+
+const allFilteredRooms = computed(() => {
   const rooms = chatStore.sortedRooms;
   if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite");
   if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite");
@@ -83,10 +90,58 @@ const filteredRooms = computed(() => {
   return rooms;
 });
 
+const filteredRooms = computed(() => allFilteredRooms.value.slice(0, displayLimit.value));
+const hasMoreRooms = computed(() => displayLimit.value < allFilteredRooms.value.length);
+
+// Reset page when filter changes
+watch(() => props.filter, () => { displayLimit.value = PAGE_SIZE; });
+
+const loadMoreRooms = () => {
+  if (hasMoreRooms.value) {
+    displayLimit.value += PAGE_SIZE;
+  }
+};
+
+const scrollerRef = ref<InstanceType<typeof RecycleScroller>>();
+
+const onScrollerScroll = () => {
+  if (!hasMoreRooms.value) return;
+  const el = scrollerRef.value?.$el as HTMLElement | undefined;
+  if (!el) return;
+  const { scrollTop, scrollHeight, clientHeight } = el;
+  if (scrollHeight - scrollTop - clientHeight < 200) {
+    loadMoreRooms();
+  }
+};
+
+// Attach native scroll listener to RecycleScroller's root element
+let scrollEl: HTMLElement | null = null;
+const attachScrollListener = () => {
+  if (scrollEl) scrollEl.removeEventListener("scroll", onScrollerScroll);
+  scrollEl = (scrollerRef.value?.$el as HTMLElement) ?? null;
+  scrollEl?.addEventListener("scroll", onScrollerScroll, { passive: true });
+};
+
+onMounted(attachScrollListener);
+watch(scrollerRef, attachScrollListener);
+onUnmounted(() => { scrollEl?.removeEventListener("scroll", onScrollerScroll); });
+
 // Context menu
 const ctxMenu = ref<{ show: boolean; x: number; y: number; roomId: string | null }>({
   show: false, x: 0, y: 0, roomId: null,
 });
+
+const svg = (d: string) =>
+  `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+
+const ICONS = {
+  pin:    svg('<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>'),
+  unpin:  svg('<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/><line x1="2" y1="2" x2="22" y2="22"/>'),
+  mute:   svg('<path d="M18 16.5a9 9 0 0 0 .38-10.17"/><path d="M13.73 7.73a4 4 0 0 1 .52 4.52"/><path d="m2 2 20 20"/><path d="M9.34 9.34 3 16h4v4l4.65-4.65"/><path d="M15 2 9.34 7.66"/>'),
+  unmute: svg('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>'),
+  read:   svg('<polyline points="20 6 9 17 4 12"/>'),
+  delete: svg('<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>'),
+};
 
 const ctxMenuItems = computed<ContextMenuItem[]>(() => {
   const roomId = ctxMenu.value.roomId;
@@ -94,10 +149,10 @@ const ctxMenuItems = computed<ContextMenuItem[]>(() => {
   const isPinned = chatStore.pinnedRoomIds.has(roomId);
   const isMuted = chatStore.mutedRoomIds.has(roomId);
   return [
-    { label: isPinned ? "Unpin" : "Pin", icon: "\u{1F4CC}", action: "pin" },
-    { label: isMuted ? "Unmute" : "Mute", icon: isMuted ? "\u{1F514}" : "\u{1F515}", action: "mute" },
-    { label: "Mark as Read", icon: "\u{2705}", action: "read" },
-    { label: "Delete", icon: "\u{1F5D1}", action: "delete", danger: true },
+    { label: isPinned ? "Unpin" : "Pin", icon: isPinned ? ICONS.unpin : ICONS.pin, action: "pin" },
+    { label: isMuted ? "Unmute" : "Mute", icon: isMuted ? ICONS.unmute : ICONS.mute, action: "mute" },
+    { label: "Mark as Read", icon: ICONS.read, action: "read" },
+    { label: "Delete", icon: ICONS.delete, action: "delete", danger: true },
   ];
 });
 
@@ -154,6 +209,7 @@ const getRoomLongPress = (room: ChatRoom) => {
 
     <RecycleScroller
       v-if="filteredRooms.length > 0"
+      ref="scrollerRef"
       :items="filteredRooms"
       :item-size="68"
       key-field="id"
@@ -225,6 +281,13 @@ const getRoomLongPress = (room: ChatRoom) => {
               </span>
               <span v-else-if="room.membership === 'invite'" class="truncate text-sm italic text-color-bg-ac">
                 Invitation to chat
+              </span>
+              <span
+                v-else-if="room.lastMessage?.callInfo"
+                class="truncate text-sm"
+                :class="room.lastMessage.callInfo.missed ? 'text-red-400' : 'italic text-text-on-main-bg-color'"
+              >
+                {{ formatPreview(room.lastMessage, room) }}
               </span>
               <span
                 v-else-if="room.lastMessage?.type === MessageType.system"

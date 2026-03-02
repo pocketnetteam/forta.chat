@@ -3,6 +3,9 @@ import { useAuthStore } from "@/entities/auth";
 import { useToast } from "@/shared/lib/use-toast";
 import Toast from "@/shared/ui/toast/Toast.vue";
 import TitleBar from "@/widgets/title-bar/TitleBar.vue";
+import IncomingCallModal from "@/features/video-calls/ui/IncomingCallModal.vue";
+import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
+import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 
@@ -66,6 +69,9 @@ onUnmounted(() => {
       </transition>
     </div>
     <Toast :message="toastMessage" :type="toastType" :show="toastShow" @close="toastClose" />
+    <IncomingCallModal />
+    <CallWindow />
+    <CallStatusBar />
   </div>
 </template>
 

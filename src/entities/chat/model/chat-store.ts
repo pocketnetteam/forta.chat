@@ -129,7 +129,11 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
           };
         }
       } else if (raw.type === "m.call.hangup") {
-        const reason = (raw.content as Record<string, unknown>).reason as string | undefined;
+        const callContent = raw.content as Record<string, unknown>;
+        const reason = callContent.reason as string | undefined;
+        const isVideo = (callContent as any).offer_type === "video"
+          || (callContent as any).version === 1;
+        const durationMs = typeof callContent.duration === "number" ? callContent.duration : 0;
         const sender = matrixIdToAddress(raw.sender as string);
         const senderName = nameHints?.[sender] || sender.slice(0, 8) + "...";
         const text = reason === "invite_timeout" ? `Missed call from ${senderName}` : `Call with ${senderName}`;
@@ -137,6 +141,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
           id: raw.event_id as string, roomId, senderId: sender,
           content: text, timestamp: (raw.origin_server_ts as number) ?? 0,
           status: MessageStatus.sent, type: MessageType.system,
+          callInfo: { callType: isVideo ? "video" : "voice", missed: reason === "invite_timeout", duration: Math.round(durationMs / 1000) },
         };
       }
     }
@@ -431,36 +436,42 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
         }
 
-        // Use loaded messages as preview (avoids "[encrypted]" for our own optimistic messages),
-        // but only if the loaded message is newer than what matrixRoomToChatRoom found.
+        // Determine best lastMessage: prefer decrypted over "[encrypted]", newer over older.
+        // Sources (priority order): loaded messages > previous room state > Matrix SDK.
+        const candidates: Array<Message | undefined> = [chatRoom.lastMessage];
+
+        // From loaded messages (user opened this room before)
         const loadedMsgs = messages.value[chatRoom.id];
         if (loadedMsgs?.length) {
-          const lastLoaded = loadedMsgs[loadedMsgs.length - 1];
-          if (!chatRoom.lastMessage
-              || chatRoom.lastMessage.content === "[encrypted]"
-              || lastLoaded.timestamp >= chatRoom.lastMessage.timestamp) {
-            chatRoom.lastMessage = lastLoaded;
-            chatRoom.updatedAt = Math.max(chatRoom.updatedAt, lastLoaded.timestamp);
-          }
+          candidates.push(loadedMsgs[loadedMsgs.length - 1]);
         }
 
-        // Preserve previous lastMessage if the new one is missing/encrypted/older.
-        // addMessage or cache may have set a good preview that matrixRoomToChatRoom can't reproduce.
+        // From previous room state (addMessage may have set a decrypted preview)
         const prevLast = prevLastMessageMap.get(chatRoom.id);
-        if (prevLast) {
-          if (!chatRoom.lastMessage || chatRoom.lastMessage.content === "[encrypted]") {
-            chatRoom.lastMessage = prevLast;
-            chatRoom.updatedAt = Math.max(chatRoom.updatedAt, prevLast.timestamp);
-          } else if (prevLast.timestamp > chatRoom.lastMessage.timestamp) {
-            chatRoom.lastMessage = prevLast;
-            chatRoom.updatedAt = Math.max(chatRoom.updatedAt, prevLast.timestamp);
+        if (prevLast) candidates.push(prevLast);
+
+        // Pick best candidate: non-encrypted with highest timestamp
+        let best: Message | undefined;
+        for (const c of candidates) {
+          if (!c) continue;
+          const cEncrypted = c.content === "[encrypted]";
+          const bestEncrypted = best ? best.content === "[encrypted]" : true;
+          // Prefer decrypted over encrypted; among same encryption status, prefer newer
+          if (!best || (bestEncrypted && !cEncrypted) || (bestEncrypted === cEncrypted && c.timestamp > best.timestamp)) {
+            best = c;
           }
+        }
+        if (best) {
+          chatRoom.lastMessage = best;
+          chatRoom.updatedAt = Math.max(chatRoom.updatedAt, best.timestamp);
         }
 
         // Apply cached decrypted previews (survives across rebuilds)
         if (chatRoom.lastMessage?.content === "[encrypted]") {
           const cached = decryptedPreviewCache.get(chatRoom.id);
-          if (cached) chatRoom.lastMessage.content = cached;
+          if (cached) {
+            chatRoom.lastMessage = { ...chatRoom.lastMessage, content: cached };
+          }
         }
 
         return chatRoom;
@@ -487,9 +498,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
-    decryptRoomPreviews(interactiveRooms);
+    // After decryption completes, re-cache rooms with decrypted previews
+    decryptRoomPreviews(interactiveRooms).then(() => {
+      cacheRooms(rooms.value).catch(() => {});
+    });
 
-    // Fire-and-forget: cache rooms to IndexedDB
+    // Also cache immediately (with whatever previews are available now)
     cacheRooms(rooms.value).catch(() => {});
 
     // Mark rooms as initialized (first sync-based refresh complete)
@@ -529,47 +543,52 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     if (toDecrypt.length === 0) return;
 
-    // Decrypt all in parallel
-    await Promise.all(toDecrypt.map(async ({ roomId, matrixRoom }) => {
-      try {
-        const roomCrypto = await ensureRoomCrypto(roomId);
-        if (!roomCrypto) return;
+    // Decrypt in small batches (5 at a time) with incremental UI updates
+    const BATCH = 5;
+    for (let i = 0; i < toDecrypt.length; i += BATCH) {
+      const batch = toDecrypt.slice(i, i + BATCH);
+      let batchUpdated = false;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let timelineEvents: unknown[] = [];
+      await Promise.all(batch.map(async ({ roomId, matrixRoom }) => {
         try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const lt = (matrixRoom as any).getLiveTimeline?.();
-          if (lt) timelineEvents = lt.getEvents?.() ?? [];
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          if (!timelineEvents.length) timelineEvents = (matrixRoom as any).timeline ?? [];
-        } catch { /* ignore */ }
+          const roomCrypto = await ensureRoomCrypto(roomId);
+          if (!roomCrypto) return;
 
-        for (let i = timelineEvents.length - 1; i >= 0; i--) {
-          const raw = getRawEvent(timelineEvents[i]);
-          if (!raw?.content || raw.type !== "m.room.message") continue;
-          const content = raw.content as Record<string, unknown>;
-          if (content.msgtype !== "m.encrypted") continue;
-
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let timelineEvents: unknown[] = [];
           try {
-            const decrypted = await roomCrypto.decryptEvent(raw);
-            if (decrypted.body) {
-              // Store in persistent cache
-              decryptedPreviewCache.set(roomId, decrypted.body);
-              // Update current rooms.value reactively
-              const room = rooms.value.find(r => r.id === roomId);
-              if (room?.lastMessage) {
-                room.lastMessage = { ...room.lastMessage, content: decrypted.body };
-              }
-            }
-          } catch { /* leave as [encrypted] */ }
-          break;
-        }
-      } catch { /* ignore */ }
-    }));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const lt = (matrixRoom as any).getLiveTimeline?.();
+            if (lt) timelineEvents = lt.getEvents?.() ?? [];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            if (!timelineEvents.length) timelineEvents = (matrixRoom as any).timeline ?? [];
+          } catch { /* ignore */ }
 
-    // Trigger reactivity once after all decryptions
-    triggerRef(rooms);
+          for (let j = timelineEvents.length - 1; j >= 0; j--) {
+            const raw = getRawEvent(timelineEvents[j]);
+            if (!raw?.content || raw.type !== "m.room.message") continue;
+            const content = raw.content as Record<string, unknown>;
+            if (content.msgtype !== "m.encrypted") continue;
+
+            try {
+              const decrypted = await roomCrypto.decryptEvent(raw);
+              if (decrypted.body) {
+                decryptedPreviewCache.set(roomId, decrypted.body);
+                const room = rooms.value.find(r => r.id === roomId);
+                if (room?.lastMessage) {
+                  room.lastMessage = { ...room.lastMessage, content: decrypted.body };
+                  batchUpdated = true;
+                }
+              }
+            } catch { /* leave as [encrypted] */ }
+            break;
+          }
+        } catch { /* ignore */ }
+      }));
+
+      // Trigger reactivity after each batch so UI updates incrementally
+      if (batchUpdated) triggerRef(rooms);
+    }
   };
 
   // Pending read receipt: sent when tab becomes visible
@@ -852,6 +871,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       triggerRef(rooms);
     }
+
+    // Update decrypted preview cache so refreshRoomsImmediate() preserves this preview
+    if (message.content && message.content !== "[encrypted]") {
+      decryptedPreviewCache.set(roomId, message.content);
+    }
   };
 
   const setMessages = (roomId: string, msgs: Message[]) => {
@@ -1014,6 +1038,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const reason = callContent.reason as string | undefined;
       const isVideo = (callContent as any).offer_type === "video"
         || (callContent as any).version === 1;
+      const durationMs = typeof callContent.duration === "number" ? callContent.duration : 0;
       const sender = matrixIdToAddress(raw.sender as string);
       let text: string;
       if (reason === "invite_timeout") {
@@ -1029,6 +1054,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         timestamp: (raw.origin_server_ts as number) ?? 0,
         status: MessageStatus.sent,
         type: MessageType.system,
+        callInfo: { callType: isVideo ? "video" : "voice", missed: reason === "invite_timeout", duration: Math.round(durationMs / 1000) },
       };
     }
 
@@ -1527,6 +1553,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const reason = callContent.reason as string | undefined;
         const isVideo = (callContent as any).offer_type === "video"
           || (callContent as any).version === 1;
+        const durationMs = typeof callContent.duration === "number" ? callContent.duration : 0;
         // Determine if call was answered (has duration) or missed
         const sender = matrixIdToAddress(raw.sender as string);
         const senderName = getDisplayName(sender) || sender.slice(0, 8) + "...";
@@ -1544,6 +1571,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           timestamp: (raw.origin_server_ts as number) ?? 0,
           status: MessageStatus.sent,
           type: MessageType.system,
+          callInfo: { callType: isVideo ? "video" : "voice", missed: reason === "invite_timeout", duration: Math.round(durationMs / 1000) },
         };
         addMessage(roomId, sysMsg);
         return;
@@ -1852,7 +1880,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     try {
       const cached = await getCachedRooms();
       if (cached.length > 0 && rooms.value.length === 0) {
-        rooms.value = cached as ChatRoom[];
+        const cachedRooms = cached as ChatRoom[];
+        // Backfill callInfo for lastMessage in cached rooms
+        const lastMsgs = cachedRooms.map(r => r.lastMessage).filter((m): m is Message => !!m);
+        backfillCallInfo(lastMsgs);
+        rooms.value = cachedRooms;
       }
     } catch (e) {
       console.warn("[chat-store] loadCachedRooms failed:", e);
@@ -1860,12 +1892,31 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Load cached messages for a room from IndexedDB (used as instant preview) */
+  /** Backfill callInfo for cached system messages that look like call events */
+  const backfillCallInfo = (msgs: Message[]) => {
+    const callPatterns = [
+      /^(Missed (?:voice |video )?call|Missed call from )/i,
+      /^(Voice call|Video call|Call with )/i,
+    ];
+    for (const msg of msgs) {
+      if (msg.type !== MessageType.system || msg.callInfo) continue;
+      const text = msg.content;
+      const isMissed = callPatterns[0].test(text);
+      const isCall = isMissed || callPatterns[1].test(text);
+      if (!isCall) continue;
+      const isVideo = /video/i.test(text);
+      msg.callInfo = { callType: isVideo ? "video" : "voice", missed: isMissed };
+    }
+  };
+
   const loadCachedMessages = async (roomId: string) => {
     if (messages.value[roomId]?.length) return; // already have messages
     try {
       const cached = await getCachedMessages(roomId);
       if (cached.length > 0 && !messages.value[roomId]?.length) {
-        messages.value[roomId] = cached as Message[];
+        const msgs = cached as Message[];
+        backfillCallInfo(msgs);
+        messages.value[roomId] = msgs;
       }
     } catch (e) {
       console.warn("[chat-store] loadCachedMessages failed:", e);

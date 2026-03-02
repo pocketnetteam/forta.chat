@@ -57,7 +57,7 @@ const handleSelect = (action: string) => {
             :class="item.danger ? 'text-color-bad' : 'text-text-color'"
             @click="handleSelect(item.action)"
           >
-            <span v-if="item.icon" class="w-5 text-center">{{ item.icon }}</span>
+            <span v-if="item.icon" class="flex w-5 items-center justify-center" v-html="item.icon" />
             {{ item.label }}
           </button>
         </div>

@@ -1,35 +1,61 @@
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 
-export interface MediaDeviceInfo {
+export interface DeviceInfo {
   deviceId: string;
   label: string;
   kind: "audioinput" | "videoinput" | "audiooutput";
 }
 
+/** Virtual device IDs that duplicate physical devices */
+const VIRTUAL_IDS = new Set(["default", "communications"]);
+
 export function useMediaDevices() {
-  const audioDevices = ref<MediaDeviceInfo[]>([]);
-  const videoDevices = ref<MediaDeviceInfo[]>([]);
-  const audioOutputDevices = ref<MediaDeviceInfo[]>([]);
+  const audioDevices = ref<DeviceInfo[]>([]);
+  const videoDevices = ref<DeviceInfo[]>([]);
+  const audioOutputDevices = ref<DeviceInfo[]>([]);
+
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   const enumerateDevices = async () => {
-    const devices = await navigator.mediaDevices.enumerateDevices();
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
 
-    audioDevices.value = devices
-      .filter(d => d.kind === "audioinput")
-      .map(d => ({ deviceId: d.deviceId, label: d.label || `Mic ${d.deviceId.slice(0, 4)}`, kind: d.kind as "audioinput" }));
+      audioDevices.value = devices
+        .filter(d => d.kind === "audioinput" && !VIRTUAL_IDS.has(d.deviceId))
+        .map(d => ({ deviceId: d.deviceId, label: d.label || `Mic ${d.deviceId.slice(0, 4)}`, kind: d.kind as "audioinput" }));
 
-    videoDevices.value = devices
-      .filter(d => d.kind === "videoinput")
-      .map(d => ({ deviceId: d.deviceId, label: d.label || `Camera ${d.deviceId.slice(0, 4)}`, kind: d.kind as "videoinput" }));
+      videoDevices.value = devices
+        .filter(d => d.kind === "videoinput" && !VIRTUAL_IDS.has(d.deviceId))
+        .map(d => ({ deviceId: d.deviceId, label: d.label || `Camera ${d.deviceId.slice(0, 4)}`, kind: d.kind as "videoinput" }));
 
-    audioOutputDevices.value = devices
-      .filter(d => d.kind === "audiooutput")
-      .map(d => ({ deviceId: d.deviceId, label: d.label || `Speaker ${d.deviceId.slice(0, 4)}`, kind: d.kind as "audiooutput" }));
+      audioOutputDevices.value = devices
+        .filter(d => d.kind === "audiooutput" && !VIRTUAL_IDS.has(d.deviceId))
+        .map(d => ({ deviceId: d.deviceId, label: d.label || `Speaker ${d.deviceId.slice(0, 4)}`, kind: d.kind as "audiooutput" }));
+    } catch (e) {
+      console.warn("[media-devices] enumerate error:", e);
+    }
   };
 
-  onMounted(enumerateDevices);
+  const onDeviceChange = () => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      enumerateDevices();
+    }, 300);
+  };
 
-  navigator.mediaDevices?.addEventListener("devicechange", enumerateDevices);
+  onMounted(() => {
+    enumerateDevices();
+    navigator.mediaDevices?.addEventListener("devicechange", onDeviceChange);
+  });
+
+  onUnmounted(() => {
+    navigator.mediaDevices?.removeEventListener("devicechange", onDeviceChange);
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  });
 
   return {
     audioDevices,

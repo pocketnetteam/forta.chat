@@ -10,6 +10,8 @@ import { ChatInfoPanel } from "@/features/chat-info";
 import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
 import { useConnectivity } from "@/shared/lib/connectivity";
+import { useCallService } from "@/features/video-calls/model/call-service";
+import type { CallType } from "@/entities/call";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -22,6 +24,13 @@ const showForwardPicker = ref(false);
 const showSearch = ref(false);
 const showInfoPanel = ref(false);
 const messageListRef = ref<InstanceType<typeof MessageList>>();
+
+const callService = useCallService();
+
+const startCallFromHeader = (type: CallType) => {
+  const roomId = chatStore.activeRoomId;
+  if (roomId) callService.startCall(roomId, type);
+};
 
 const handleScrollToMessage = (messageId: string) => {
   messageListRef.value?.scrollToMessage(messageId);
@@ -181,10 +190,24 @@ onUnmounted(() => {
         </svg>
       </button>
 
-      <!-- Video call button -->
+      <!-- Voice call button (1:1 only) -->
       <button
+        v-if="!chatStore.activeRoom.isGroup"
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        :title="t('chat.videoCall')"
+        :title="t('call.voiceCall')"
+        @click="startCallFromHeader('voice')"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
+        </svg>
+      </button>
+
+      <!-- Video call button (1:1 only) -->
+      <button
+        v-if="!chatStore.activeRoom.isGroup"
+        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+        :title="t('call.videoCall')"
+        @click="startCallFromHeader('video')"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polygon points="23 7 16 12 23 17 23 7" />

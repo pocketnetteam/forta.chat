@@ -21,19 +21,33 @@ const emit = defineEmits<{
   openEmojiPicker: [message: Message];
 }>();
 
+// Monochrome SVG icons (Telegram-style, inherit currentColor)
+const svg = (d: string, extra = "") =>
+  `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"${extra}>${d}</svg>`;
+
+const ICONS = {
+  reply:   svg('<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>'),
+  copy:    svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  forward: svg('<polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/>'),
+  edit:    svg('<path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>'),
+  select:  svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  pin:     svg('<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>'),
+  delete:  svg('<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>'),
+};
+
 const menuItems = computed<ContextMenuItem[]>(() => {
   const items: ContextMenuItem[] = [
-    { label: "Reply", icon: "\u21A9", action: "reply" },
-    { label: "Copy", icon: "\uD83D\uDCCB", action: "copy" },
-    { label: "Forward", icon: "\u21AA", action: "forward" },
+    { label: "Reply", icon: ICONS.reply, action: "reply" },
+    { label: "Copy", icon: ICONS.copy, action: "copy" },
+    { label: "Forward", icon: ICONS.forward, action: "forward" },
   ];
   if (props.isOwn) {
-    items.push({ label: "Edit", icon: "\u270F\uFE0F", action: "edit" });
+    items.push({ label: "Edit", icon: ICONS.edit, action: "edit" });
   }
-  items.push({ label: "Select", icon: "\u2611", action: "select" });
-  items.push({ label: "Pin", icon: "\uD83D\uDCCC", action: "pin" });
+  items.push({ label: "Select", icon: ICONS.select, action: "select" });
+  items.push({ label: "Pin", icon: ICONS.pin, action: "pin" });
   if (props.isOwn) {
-    items.push({ label: "Delete", icon: "\uD83D\uDDD1", action: "delete", danger: true });
+    items.push({ label: "Delete", icon: ICONS.delete, action: "delete", danger: true });
   }
   return items;
 });
