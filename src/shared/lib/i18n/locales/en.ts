@@ -302,6 +302,7 @@ export const en = {
   "chatInfo.forward": "Forward",
   "chatInfo.goToMessage": "Go to message",
   "chatInfo.delete": "Delete",
+  "chatInfo.loadingMessages": "Loading messages...",
 
   // ── Polls ──
   "poll.createPoll": "Create Poll",
