@@ -3,6 +3,18 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 
+export interface BastyonPostData {
+  txid: string;
+  address: string;
+  caption: string;
+  message: string;
+  images: string[];
+  url: string;
+  tags: string[];
+  settings: { v?: string };
+  time: number;
+}
+
 type OnLoadUserData = (userData: UserData) => void;
 
 export class AppInitializer {
@@ -10,6 +22,7 @@ export class AppInitializer {
   private api: InstanceType<typeof Api> | null = null;
   private psdk: InstanceType<typeof pSDK> | null = null;
   private _available = false;
+  private postCache = new Map<string, BastyonPostData>();
 
   constructor(pocketnetInstance: PocketnetInstanceType) {
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
@@ -141,6 +154,59 @@ export class AppInitializer {
     } catch (e) {
       console.error("[appInit] searchUsers error:", e);
       return [];
+    }
+  }
+
+  async loadPost(txid: string): Promise<BastyonPostData | null> {
+    const cached = this.postCache.get(txid);
+    if (cached) return cached;
+    if (!this.api) {
+      console.warn("[appInit] loadPost: api not available");
+      return null;
+    }
+    try {
+      const data = await this.api.rpc("getrawtransactionwithmessagebyid", [[txid]]);
+      console.log("[appInit] loadPost raw response:", data);
+
+      // Response may be a single object or an array — normalize
+      let raw: Record<string, unknown> | undefined;
+      if (Array.isArray(data)) {
+        raw = data[0] as Record<string, unknown> | undefined;
+      } else if (data && typeof data === "object") {
+        raw = data as Record<string, unknown>;
+      }
+      if (!raw) {
+        console.warn("[appInit] loadPost: empty response for", txid);
+        return null;
+      }
+
+      // Post content fields may be at top level or nested in 'msg'/'p'
+      const content = (raw.msg ?? raw.p ?? raw) as Record<string, unknown>;
+
+      const tryDecode = (val: unknown): string => {
+        if (typeof val !== "string") return "";
+        try { return decodeURIComponent(val); } catch { return val; }
+      };
+
+      const rawImages = content.i ?? content.images;
+      const rawTags = content.t ?? content.tags;
+
+      const post: BastyonPostData = {
+        txid,
+        address: (raw.address as string) ?? (content.address as string) ?? "",
+        caption: tryDecode(content.c ?? content.caption),
+        message: tryDecode(content.m ?? content.message),
+        images: Array.isArray(rawImages) ? (rawImages as string[]) : [],
+        url: tryDecode(content.u ?? content.url),
+        tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
+        settings: (content.s as { v?: string }) ?? (content.settings as { v?: string }) ?? {},
+        time: (raw.time as number) ?? (content.time as number) ?? 0,
+      };
+      this.postCache.set(txid, post);
+      return post;
+    } catch (e) {
+      console.error("[appInit] loadPost error:", e);
+      return null;
     }
   }
 

@@ -30,7 +30,19 @@ interface BitcoinLib {
   ecc: any;
   payments: {
     p2pkh(opts: { pubkey: Buffer }): { address: string };
+    embed(opts: { data: Buffer[] }): { output: Buffer };
     [key: string]: (opts: { pubkey: Buffer }) => { address: string };
+  };
+  networks: {
+    bitcoin: { pubKeyHash: number; scriptHash: number; wif: number };
+    [key: string]: { pubKeyHash: number; scriptHash: number; wif: number };
+  };
+  TransactionBuilder: new (network?: unknown) => {
+    addInput(txId: string, vout: number, sequence?: number | null, scriptPubKey?: Buffer): void;
+    addOutput(address: string | Buffer, amount: number): void;
+    sign(index: number, keyPair: { privateKey: Buffer; publicKey: Buffer }): void;
+    build(): { toHex(): string; getId(): string; virtualSize(): number };
+    setLockTime(n: number): void;
   };
 }
 
@@ -68,6 +80,39 @@ interface PocketnetInstanceType {
         init(): void;
         off(eventType: string, lStorageProp: string): void;
         on(eventType: string, lStorageProp: string, callback: (e: StorageEvent) => void): void;
+      };
+      /** Wallet API — only available when running inside Bastyon main app */
+      wallet?: {
+        txbase(
+          inputs: string[],
+          outputs: Array<{ address: string; amount: number }>,
+          fees: number,
+          feeDirection: string,
+          callback: (err: unknown, inputs: unknown[], outputs: unknown[]) => void,
+        ): void;
+        embed(outputs: unknown[], message: string): void;
+        saveTempInfoWallet(txId: string, inputs: unknown[], outputs: unknown[]): void;
+      };
+      /** Address API — only available when running inside Bastyon main app */
+      address?: {
+        pnet(): { address: string };
+      };
+      /** Node API — only available when running inside Bastyon main app */
+      node?: {
+        fee: {
+          estimate(callback: (fees: { feerate: number }) => void): void;
+        };
+        transactions: {
+          get: {
+            canSpend(address: string, callback: (balance: number) => void): void;
+          };
+          create: {
+            wallet(inputs: unknown[], outputs: unknown[]): { virtualSize(): number };
+          };
+          send(tx: unknown, callback: (txId: string, err?: unknown) => void): void;
+          releaseCS(inputs: unknown[]): void;
+          clearUnspents(txIds: string[]): void;
+        };
       };
     };
     timeDifference: number;

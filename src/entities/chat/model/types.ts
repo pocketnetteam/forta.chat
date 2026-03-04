@@ -71,6 +71,8 @@ export interface Message {
   };
   /** Poll metadata — present when type === poll */
   pollInfo?: PollInfo;
+  /** Transfer metadata — present when type === transfer */
+  transferInfo?: TransferInfo;
 }
 
 export enum MessageStatus {
@@ -89,6 +91,7 @@ export enum MessageType {
   audio = "audio",
   system = "system",
   poll = "poll",
+  transfer = "transfer",
 }
 
 export interface PollInfo {
@@ -102,4 +105,14 @@ export interface PollInfo {
   ended?: boolean;
   /** Address of the user who ended the poll */
   endedBy?: string;
+}
+
+export interface TransferInfo {
+  txId: string;
+  amount: number;
+  /** Sender blockchain address */
+  from: string;
+  /** Receiver blockchain address */
+  to: string;
+  message?: string;
 }

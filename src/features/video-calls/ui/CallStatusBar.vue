@@ -3,21 +3,30 @@ import { useCallStore } from "@/entities/call";
 import { useChatStore } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { formatDuration } from "@/shared/lib/format";
+import { useCallService } from "../model/call-service";
 
 const callStore = useCallStore();
 const chatStore = useChatStore();
+const callService = useCallService();
 const { t } = useI18n();
 
 const show = computed(
   () =>
     callStore.isInCall &&
-    callStore.activeCall?.roomId !== chatStore.activeRoomId,
+    (callStore.minimized ||
+      callStore.activeCall?.roomId !== chatStore.activeRoomId),
 );
 
 const returnToCall = () => {
   if (callStore.activeCall) {
+    callStore.minimized = false;
     chatStore.setActiveRoom(callStore.activeCall.roomId);
   }
+};
+
+const endCall = (e: Event) => {
+  e.stopPropagation();
+  callService.hangup();
 };
 </script>
 
@@ -51,6 +60,18 @@ const returnToCall = () => {
       <!-- Return button -->
       <button class="return-btn">
         {{ t("call.returnToCall") }}
+      </button>
+
+      <!-- Hangup button -->
+      <button
+        class="hangup-btn"
+        :title="t('call.hangup')"
+        @click="endCall"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
       </button>
     </div>
   </Transition>
@@ -111,6 +132,23 @@ const returnToCall = () => {
 }
 .return-btn:hover {
   background: rgba(34, 197, 94, 0.35);
+}
+
+/* ── Hangup button ── */
+.hangup-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  transition: background-color 0.15s ease;
+  flex-shrink: 0;
+}
+.hangup-btn:hover {
+  background: rgba(239, 68, 68, 0.4);
 }
 
 /* ── Slide transition ── */

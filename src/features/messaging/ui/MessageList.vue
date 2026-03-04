@@ -139,6 +139,12 @@ const settled = ref(false); // false until messages loaded + scrolled — hides 
 const hasMore = ref(true);
 const newMessageCount = ref(0);
 
+// --- Scroll position memory (per room) ---
+// Only saves position if user scrolled up significantly (> 800px from bottom).
+// Otherwise restores to bottom on re-entry.
+const savedScrollPositions = new Map<string, { distFromBottom: number }>();
+const MIN_DIST_TO_SAVE = 800; // px — don't save if just slightly scrolled
+
 /** Flatten messages + date separators into a single virtual list */
 interface VirtualItem {
   id: string;
@@ -188,11 +194,22 @@ const checkScroll = () => {
   const distFromBottom = scrollHeight - scrollTop - clientHeight;
   isNearBottom.value = distFromBottom < 100;
   showScrollFab.value = distFromBottom > 300;
-  if (isNearBottom.value) newMessageCount.value = 0;
+  if (isNearBottom.value) {
+    newMessageCount.value = 0;
+    // User scrolled back to bottom — clear saved position for this room
+    const roomId = chatStore.activeRoomId;
+    if (roomId) savedScrollPositions.delete(roomId);
+  } else if (distFromBottom > MIN_DIST_TO_SAVE) {
+    // User is significantly scrolled up — save position live
+    const roomId = chatStore.activeRoomId;
+    if (roomId) savedScrollPositions.set(roomId, { distFromBottom });
+  }
 };
 
-const scrollToBottom = (smooth = false) => {
+let scrollBottomTimer: ReturnType<typeof setTimeout> | undefined;
+const scrollToBottom = (smooth = false, onSettled?: () => void) => {
   newMessageCount.value = 0;
+  clearTimeout(scrollBottomTimer);
   const doScroll = () => {
     if (scrollerRef.value) {
       scrollerRef.value.scrollToBottom();
@@ -203,7 +220,17 @@ const scrollToBottom = (smooth = false) => {
       });
     }
   };
-  nextTick(doScroll);
+  nextTick(() => {
+    doScroll();
+    requestAnimationFrame(() => {
+      doScroll();
+      // Final pass after images/avatars settle, then signal done
+      scrollBottomTimer = setTimeout(() => {
+        doScroll();
+        onSettled?.();
+      }, 150);
+    });
+  });
 };
 
 // --- Message entrance animation ---
@@ -217,7 +244,10 @@ let dateHideTimer: ReturnType<typeof setTimeout> | undefined;
 // Load messages when active room changes
 watch(
   () => chatStore.activeRoomId,
-  async (roomId) => {
+  async (roomId, oldRoomId) => {
+    // Scroll position is tracked live in checkScroll().
+    // No need to save here — it's already up to date in savedScrollPositions.
+
     if (roomId) {
       // Suppress length watcher + hide scroller during the whole switch
       switching.value = true;
@@ -239,12 +269,27 @@ watch(
         loading.value = false;
       }
 
-      // Scroll to bottom, then reveal once the DOM has painted
-      scrollToBottom();
+      // Restore saved scroll position, or scroll to bottom
+      const saved = savedScrollPositions.get(roomId);
+      if (saved) {
+        await nextTick();
+        const el = getScrollContainer();
+        if (el) {
+          el.scrollTop = el.scrollHeight - el.clientHeight - saved.distFromBottom;
+        }
+        savedScrollPositions.delete(roomId);
+      } else {
+        scrollToBottom();
+      }
+
       await nextTick();
       requestAnimationFrame(() => {
-        settled.value = true;
-        switching.value = false;
+        // Re-scroll after layout settles; reveal only after final scroll pass
+        scrollToBottom(false, () => {
+          settled.value = true;
+          switching.value = false;
+          checkScroll();
+        });
       });
     }
   },

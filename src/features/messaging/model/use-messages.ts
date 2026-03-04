@@ -614,6 +614,69 @@ export function useMessages() {
     }
   };
 
+  /** Send a PKOIN transfer message.
+   *  Embeds transfer metadata as JSON in the body, then encrypts with Pcrypto
+   *  like any regular message so it goes through the same send/receive pipeline. */
+  const sendTransferMessage = async (
+    txId: string,
+    amount: number,
+    receiverAddress: string,
+    message?: string,
+  ) => {
+    const roomId = chatStore.activeRoomId;
+    if (!roomId) return;
+
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+
+    // Encode transfer data as JSON body — parseSingleEvent will detect the _transfer marker
+    const transferBody = JSON.stringify({
+      _transfer: true,
+      txId,
+      amount,
+      from: authStore.address ?? "",
+      to: receiverAddress,
+      message: message || undefined,
+    });
+
+    // Optimistic local message
+    const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const optimistic: Message = {
+      id: tempId,
+      roomId,
+      senderId: authStore.address ?? "",
+      content: message || `Sent ${amount} PKOIN`,
+      timestamp: Date.now(),
+      status: MessageStatus.sending,
+      type: MessageType.transfer,
+      transferInfo: {
+        txId,
+        amount,
+        from: authStore.address ?? "",
+        to: receiverAddress,
+        message: message || undefined,
+      },
+    };
+    chatStore.addMessage(roomId, optimistic);
+
+    try {
+      // Encrypt with Pcrypto like regular messages
+      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      let serverEventId: string;
+      if (roomCrypto?.canBeEncrypt()) {
+        const encrypted = await roomCrypto.encryptEvent(transferBody);
+        serverEventId = await matrixService.sendEncryptedText(roomId, encrypted);
+      } else {
+        serverEventId = await matrixService.sendText(roomId, transferBody);
+      }
+      if (serverEventId) chatStore.updateMessageId(roomId, tempId, serverEventId);
+      chatStore.updateMessageStatus(roomId, serverEventId || tempId, MessageStatus.sent);
+    } catch (e) {
+      console.error("Failed to send transfer message:", e);
+      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
+    }
+  };
+
   /** Send a poll (MSC3381 org.matrix.msc3381.poll.start) */
   const sendPoll = async (question: string, options: string[]) => {
     const chatStore = useChatStore();
@@ -743,6 +806,7 @@ export function useMessages() {
     sendMessage,
     sendPoll,
     sendReply,
+    sendTransferMessage,
     setTyping,
     toggleReaction,
     votePoll,

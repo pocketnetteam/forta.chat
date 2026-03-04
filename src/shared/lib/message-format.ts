@@ -1,9 +1,11 @@
 export type Segment =
   | { type: "text"; content: string }
   | { type: "link"; content: string; href: string }
-  | { type: "mention"; content: string; userId: string };
+  | { type: "mention"; content: string; userId: string }
+  | { type: "bastyonLink"; content: string; txid: string; isVideo: boolean };
 
 const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
+const BASTYON_RE = /(?:bastyon:\/\/|https?:\/\/(?:bastyon\.com|pocketnet\.app)\/)(?:index|post)\?[vs]=([a-f0-9]{64})(?:[&\w=]*)/gi;
 // Bastyon mention format: @<68-hex-char-address>:<display_name>
 // Match original bastyon-chat regex: /@\w{68}:\w{1,50}/g
 const MENTION_RE = /@(\w{34,68}):(\w{1,50})/g;
@@ -19,6 +21,18 @@ export function stripMentionAddresses(text: string): string {
 }
 
 /**
+ * Replace bastyon:// and bastyon.com post links with a short label for previews.
+ * "Check this bastyon://index?s=abc123...def" → "Check this [Bastyon post]"
+ */
+export function stripBastyonLinks(text: string): string {
+  if (!text) return "";
+  return text.replace(
+    /(?:bastyon:\/\/|https?:\/\/(?:bastyon\.com|pocketnet\.app)\/)(?:index|post)\?[vs]=[a-f0-9]{64}(?:[&\w=]*)/gi,
+    "📝 Bastyon post",
+  );
+}
+
+/**
  * Parse a message string into renderable segments: plain text, links, and mentions.
  * Segments are returned in the order they appear in the input.
  */
@@ -28,12 +42,30 @@ export function parseMessage(text: string): Segment[] {
   // Collect all matches with their positions
   const matches: { start: number; end: number; segment: Segment }[] = [];
 
-  // Links
+  // Bastyon post links (check before generic URLs so they take priority)
+  const bastyonRanges: [number, number][] = [];
+  for (const m of text.matchAll(BASTYON_RE)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    const isVideo = /index\?v=/.test(m[0]) || /[&?]video=1/.test(m[0]);
+    bastyonRanges.push([start, end]);
+    matches.push({
+      start,
+      end,
+      segment: { type: "bastyonLink", content: m[0], txid: m[1], isVideo },
+    });
+  }
+
+  // Links (skip ranges already claimed by bastyonLink)
   for (const m of text.matchAll(URL_RE)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    const overlap = bastyonRanges.some(([bs, be]) => start < be && end > bs);
+    if (overlap) continue;
     const href = m[0].startsWith("www.") ? `https://${m[0]}` : m[0];
     matches.push({
-      start: m.index!,
-      end: m.index! + m[0].length,
+      start,
+      end,
       segment: { type: "link", content: m[0], href },
     });
   }

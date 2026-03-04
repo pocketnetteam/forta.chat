@@ -306,13 +306,19 @@ export class Pcrypto {
     // ---- preparedUsersById — match of original lines 88-110 ----
     function preparedUsersById(ids: string[], v?: number): CryptoUserInfo[] {
       const ui: CryptoUserInfo[] = [];
+      const usersKeys = Object.keys(users);
       for (const u of Object.values(users)) {
         if (ids.indexOf(u.id) > -1) {
           const info = usersinfo[u.id];
           if (info && info.keys && info.keys.length >= m) {
             ui.push(info);
+          } else {
+            console.error("[preparedUsersById] SKIP id=" + u.id.slice(0,10) + " hasInfo=" + !!info + " keysLen=" + (info?.keys?.length ?? 0) + " needM=" + m);
           }
         }
+      }
+      if (ui.length === 0) {
+        console.error("[preparedUsersById] EMPTY result! requestedIds=" + ids.map(i => i.slice(0,10)).join(",") + " usersDict=" + usersKeys.map(k => k.slice(0,10)).join(",") + " usersinfoKeys=" + Object.keys(usersinfo).map(k => k.slice(0,10)).join(","));
       }
       if (v && v > 1) {
         // Original: _.sortBy(ui, u => u.source.id) — sort by Pocketnet numeric user ID
@@ -418,6 +424,7 @@ export class Pcrypto {
       for (const ui of _usersinfo) {
         usersinfo[ui.id] = ui;
       }
+      console.error("[getusersinfo] room=" + roomId.slice(0,15) + " requestedUsers=" + us.length + " loadedUsers=" + _usersinfo.length + " withKeys=" + _usersinfo.filter(u => u.keys?.length >= m).length + " details=" + _usersinfo.map(u => u.id.slice(0,10) + ":" + (u.keys?.length ?? 0) + "keys").join(","));
     }
 
     // ---- eaa object — EXACT match of original lines 405-527 ----
@@ -529,15 +536,17 @@ export class Pcrypto {
 
         for (const [id, s] of Object.entries(us)) {
           if (id != pcrypto.user?.userinfo?.id) {
-            const ecdhPoint = bitcoin.ecc.pointMultiply(s, c, undefined, true);
+            const shared = bitcoin.ecc.pointMultiply(s, c, undefined, true);
+            // pointMultiply may return Uint8Array, not Buffer — use Buffer.from for safe hex
+            const safeHex = Buffer.from(shared).toString("hex");
             su[id] = pbkdf2.pbkdf2Sync(
-              ecdhPoint.toString("hex"),
+              safeHex,
               salt,
               64,
               32,
               "sha512"
             );
-            console.error("[aeskeys] derived key for " + id.slice(0,10) + " ecdhPoint=" + ecdhPoint.toString("hex").slice(0,20) + " aesKey=" + Buffer.from(su[id]).toString("hex").slice(0,16) + " cScalar=" + c.toString("hex").slice(0,16) + " sPoint=" + s.toString("hex").slice(0,20));
+            console.error("[aeskeys] derived key for " + id.slice(0,10) + " ecdhPoint=" + safeHex.slice(0,20) + " aesKey=" + Buffer.from(su[id]).toString("hex").slice(0,16) + " cScalar=" + c.toString("hex").slice(0,16) + " sPoint=" + s.toString("hex").slice(0,20));
           }
         }
 
@@ -700,6 +709,27 @@ export class Pcrypto {
         const time = (event.origin_server_ts as number) || 1;
         const block = content.block as number;
         const eventVersion = content.version as number | undefined;
+        const bodyKeyCount = Object.keys(body).length;
+
+        // Check if prepared users (with valid keys) cover the body users
+        const preparedBefore = preparedUsers(0, eventVersion || version);
+        if (preparedBefore.length < bodyKeyCount) {
+          getusershistory();
+          await getusersinfo();
+
+          // If room state is still incomplete, populate users from body keys + sender
+          const preparedAfter = preparedUsers(0, eventVersion || version);
+          if (preparedAfter.length < bodyKeyCount && pcrypto.getUsersInfoCb) {
+            const bodyUserIds = Object.keys(body);
+            const allUserIds = [...new Set([...bodyUserIds, sender])];
+            for (const uid of allUserIds) {
+              if (!users[uid]) {
+                users[uid] = { id: uid, life: [{ start: 1 }] };
+              }
+            }
+            await getusersinfo();
+          }
+        }
 
         if (sender == me) {
           // Find the other user's key (like _.find on object)
@@ -968,6 +998,26 @@ export class Pcrypto {
         // Build users list from body keys + sender (matches original lines 757-762)
         const bodyUsers = Object.keys(body);
         const usersList = [...new Set([...bodyUsers, sender])];
+
+        // Check if prepared users (with valid 12+ keys) cover the body users
+        const preparedBefore = preparedUsers(0, v || version);
+        if (preparedBefore.length < bodyUsers.length) {
+          // First try normal re-prepare from room state events
+          getusershistory();
+          await getusersinfo();
+
+          // If room state is still incomplete (e.g. member events not fully loaded),
+          // directly populate users dict from the body keys + sender
+          const preparedAfter = preparedUsers(0, v || version);
+          if (preparedAfter.length < bodyUsers.length && pcrypto.getUsersInfoCb) {
+            for (const uid of usersList) {
+              if (!users[uid]) {
+                users[uid] = { id: uid, life: [{ start: 1 }] };
+              }
+            }
+            await getusersinfo();
+          }
+        }
 
         let keyindex: string | undefined;
         let bodyindex: string | undefined;

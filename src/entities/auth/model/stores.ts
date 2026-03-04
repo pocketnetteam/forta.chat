@@ -391,14 +391,23 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     userInfo.value = undefined;
   };
 
+  /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */
+  const loadPost = (txid: string) => appInitializer.loadPost(txid);
+
+  /** Get cached user data by raw address */
+  const getBastyonUserData = (addr: string) => appInitializer.getUserData(addr);
+
   return {
     address,
     editUserData,
     fetchUserInfo,
+    getBastyonUserData,
     initMatrix,
     isAuthenticated,
     isEditingUserData,
     isLoggingIn,
+    loadPost,
+    loadUsersInfo: (addresses: string[]) => appInitializer.loadUsersInfo(addresses),
     login,
     logout,
     matrixError,
