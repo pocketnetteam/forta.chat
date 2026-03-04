@@ -440,6 +440,31 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
 
   /** Internal: actual refresh logic (called by debounced wrapper) */
+  const PRELOAD_COUNT = 15;
+  let preloadDone = false;
+
+  /** Background-preload messages for the top visible rooms so opening them feels instant */
+  const preloadVisibleRooms = async () => {
+    if (preloadDone) return;
+    preloadDone = true;
+
+    const roomsToPreload = sortedRooms.value
+      .slice(0, PRELOAD_COUNT)
+      .filter(r => r.id !== activeRoomId.value && r.membership !== "invite");
+
+    for (const room of roomsToPreload) {
+      try {
+        // Cache first for instant show, then fresh data from Matrix
+        if (!messages.value[room.id]?.length) {
+          await loadCachedMessages(room.id);
+        }
+        await loadRoomMessages(room.id);
+      } catch { /* silent — preloading failures must not break anything */ }
+      // Yield to UI between rooms
+      await new Promise(r => setTimeout(r, 50));
+    }
+  };
+
   const refreshRoomsImmediate = () => {
     const matrixService = getMatrixClientService();
     const kit = matrixKitRef.value;
@@ -568,7 +593,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     cacheRooms(rooms.value).catch(() => {});
 
     // Mark rooms as initialized (first sync-based refresh complete)
-    if (!roomsInitialized.value) roomsInitialized.value = true;
+    if (!roomsInitialized.value) {
+      roomsInitialized.value = true;
+      // Start background preloading after rooms are built
+      // Delay lets the UI render the room list and decrypt previews first
+      setTimeout(() => preloadVisibleRooms(), 500);
+    }
   };
 
   /** Debounced refresh: batches multiple rapid calls into one (150ms window) */
@@ -2397,6 +2427,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     pinnedMessageIndex,
     pinnedMessages,
     pinnedRoomIds,
+    preloadVisibleRooms,
     cyclePinnedMessage,
     refreshRooms,
     refreshRoomsNow,
