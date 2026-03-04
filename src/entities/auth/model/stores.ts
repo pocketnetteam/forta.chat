@@ -240,7 +240,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         onTimeline: (event: unknown, room: unknown) => {
           const roomId = typeof room === "string" ? room : (room as any)?.roomId;
           if (roomId) chatStore.markRoomChanged(roomId);
-          chatStore.handleTimelineEvent(event, room as string);
+          if (roomId) chatStore.handleTimelineEvent(event, roomId);
         },
         onMembership: (_event: unknown, member: unknown) => {
           const roomId = (member as any)?.roomId as string;

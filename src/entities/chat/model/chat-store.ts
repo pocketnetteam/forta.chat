@@ -448,9 +448,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const matrixKitRef = shallowRef<MatrixKit | null>(null);
   const pcryptoRef = shallowRef<Pcrypto | null>(null);
 
-  const activeRoom = computed(() =>
-    activeRoomId.value ? getRoomById(activeRoomId.value) : undefined
-  );
+  const activeRoom = computed(() => {
+    // Access rooms.value to register Vue reactive dependency
+    void rooms.value;
+    return activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
+  });
 
   const activeMessages = computed(() =>
     activeRoomId.value ? (messages.value[activeRoomId.value] ?? []) : []
@@ -514,6 +516,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     kit: MatrixKit,
     myUserId: string,
   ) => {
+    // Retry previously failed decryptions on full refresh
+    decryptFailedRooms.clear();
+
     // Preserve existing room data — addRoom/addMessage/cache may have set data that Matrix can't resolve yet
     const prevNameMap = new Map(rooms.value.map(r => [r.id, r.name]));
     const prevLastMessageMap = new Map(rooms.value.map(r => [r.id, r.lastMessage]));
@@ -547,8 +552,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     myUserId: string,
     changed: Set<string>,
   ) => {
-    const prevNameMap = new Map(rooms.value.map(r => [r.id, r.name]));
-    const prevLastMessageMap = new Map(rooms.value.map(r => [r.id, r.lastMessage]));
     const matrixRoomMap = new Map<string, any>();
     for (const mr of matrixRooms) matrixRoomMap.set(mr.roomId as string, mr);
 
@@ -585,7 +588,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (createContent?.type === "m.space") continue;
       } catch { /* ignore */ }
 
-      const chatRoom = buildChatRoom(matrixRoom, kit, myUserId, prevNameMap, prevLastMessageMap);
+      const chatRoom = buildChatRoom(matrixRoom, kit, myUserId);
       const existing = roomsMap.get(roomId);
       if (existing) {
         // Update in-place to preserve Vue reactivity references
@@ -627,23 +630,28 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     });
   };
 
-  /** Build a single ChatRoom with name/lastMessage resolution */
+  /** Build a single ChatRoom with name/lastMessage resolution.
+   *  When prevNameMap/prevLastMessageMap are provided (full refresh), uses them.
+   *  Otherwise falls back to roomsMap for O(1) lookup (incremental refresh). */
   const buildChatRoom = (
     r: any,
     kit: MatrixKit,
     myUserId: string,
-    prevNameMap: Map<string, string>,
-    prevLastMessageMap: Map<string, Message | undefined>,
+    prevNameMap?: Map<string, string>,
+    prevLastMessageMap?: Map<string, Message | undefined>,
   ): ChatRoom => {
     const chatRoom = matrixRoomToChatRoom(r, kit, myUserId, userDisplayNames.value);
     if (chatRoom.id === activeRoomId.value) chatRoom.unreadCount = 0;
+
+    // Use provided maps (full refresh) or fall back to roomsMap (incremental)
+    const prev = prevNameMap ? undefined : roomsMap.get(chatRoom.id);
 
     if (!chatRoom.isGroup) {
       const addr = chatRoom.avatar?.startsWith("__pocketnet__:")
         ? chatRoom.avatar.slice("__pocketnet__:".length)
         : undefined;
       if (!looksLikeProperName(chatRoom.name, addr)) {
-        const prevName = prevNameMap.get(chatRoom.id);
+        const prevName = prevNameMap ? prevNameMap.get(chatRoom.id) : prev?.name;
         if (prevName && looksLikeProperName(prevName, addr)) {
           chatRoom.name = prevName;
         } else if (chatRoom.name.startsWith("@") && chatRoom.name.includes(":")) {
@@ -656,7 +664,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const candidates: Array<Message | undefined> = [chatRoom.lastMessage];
     const loadedMsgs = messages.value[chatRoom.id];
     if (loadedMsgs?.length) candidates.push(loadedMsgs[loadedMsgs.length - 1]);
-    const prevLast = prevLastMessageMap.get(chatRoom.id);
+    const prevLast = prevLastMessageMap ? prevLastMessageMap.get(chatRoom.id) : prev?.lastMessage;
     if (prevLast) candidates.push(prevLast);
 
     let best: Message | undefined;
@@ -908,6 +916,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Optimistic: remove from UI
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
+    roomsMap.delete(roomId);
     if (activeRoomId.value === roomId) activeRoomId.value = null;
 
     try {
@@ -945,6 +954,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Optimistic: remove from UI immediately
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
+    roomsMap.delete(roomId);
     delete messages.value[roomId];
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
@@ -991,6 +1001,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Optimistic: remove from UI
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
+    roomsMap.delete(roomId);
     delete messages.value[roomId];
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
@@ -2465,6 +2476,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Handle being kicked/banned from a room — remove it from UI immediately */
   const handleKicked = (roomId: string) => {
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
+    roomsMap.delete(roomId);
     delete messages.value[roomId];
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
