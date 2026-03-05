@@ -42,15 +42,9 @@ const roomNameMap = computed(() => {
   const allUsers = userStore.users;
   const myHexId = authStore.address ? hexEncode(authStore.address) : "";
   const map: Record<string, string> = {};
-  let resolved = 0;
-  let unresolved = 0;
   for (const room of chatStore.sortedRooms) {
-    const name = _resolveRoomName(room, allUsers, myHexId);
-    map[room.id] = name;
-    if (!room.isGroup && room.members.length <= 1) unresolved++;
-    else resolved++;
+    map[room.id] = _resolveRoomName(room, allUsers, myHexId);
   }
-  console.log(`[roomNameMap] total=${chatStore.sortedRooms.length}, resolved=${resolved}, noMembers=${unresolved}, usersInStore=${Object.keys(allUsers).length}`);
   return map;
 });
 

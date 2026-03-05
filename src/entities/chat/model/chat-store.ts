@@ -225,10 +225,10 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
 }
 
 export const useChatStore = defineStore(NAMESPACE, () => {
-  const rooms = ref<ChatRoom[]>([]);
+  const rooms = shallowRef<ChatRoom[]>([]);
   const roomsMap = new Map<string, ChatRoom>(); // O(1) lookup index
   const activeRoomId = ref<string | null>(null);
-  const messages = ref<Record<string, Message[]>>({});
+  const messages = shallowRef<Record<string, Message[]>>({});
   const typing = ref<Record<string, string[]>>({});
   const replyingTo = ref<ReplyTo | null>(null);
 
@@ -518,16 +518,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       .slice(0, PRELOAD_COUNT)
       .filter(r => r.id !== activeRoomId.value && r.membership !== "invite");
 
-    for (const room of roomsToPreload) {
-      try {
-        // Cache first for instant show, then fresh data from Matrix
-        if (!messages.value[room.id]?.length) {
-          await loadCachedMessages(room.id);
-        }
-        await loadRoomMessages(room.id);
-      } catch { /* silent — preloading failures must not break anything */ }
-      // Yield to UI between rooms
-      await new Promise(r => setTimeout(r, 50));
+    // Phase 1: Load all cached messages in parallel (fast, IndexedDB)
+    await Promise.all(
+      roomsToPreload.map(room =>
+        messages.value[room.id]?.length ? Promise.resolve() : loadCachedMessages(room.id).catch(() => {})
+      )
+    );
+
+    // Phase 2: Load fresh data from Matrix in small batches
+    const BATCH = 5;
+    for (let i = 0; i < roomsToPreload.length; i += BATCH) {
+      const batch = roomsToPreload.slice(i, i + BATCH);
+      await Promise.all(
+        batch.map(room => loadRoomMessages(room.id).catch(() => {}))
+      );
+      // Yield to UI between batches
+      await new Promise(r => setTimeout(r, 0));
     }
   };
 
@@ -1127,6 +1133,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
     roomsMap.delete(roomId);
     delete messages.value[roomId];
+    triggerRef(messages);
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
     }
@@ -1148,7 +1155,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             if (memberId !== myUserId) {
               try {
                 await matrixService.kick(roomId, memberId);
-                console.log("[chat-store] removeRoom: kicked", memberId);
               } catch (kickErr) {
                 console.warn("[chat-store] removeRoom: kick failed for", memberId, kickErr);
               }
@@ -1166,7 +1172,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const canonicalAlias = matrixRoom?.getCanonicalAlias?.() as string | undefined;
         if (canonicalAlias) {
           await matrixService.deleteAlias(canonicalAlias);
-          console.log("[chat-store] removeRoom: deleted alias", canonicalAlias);
         }
       } catch (aliasErr) {
         console.warn("[chat-store] removeRoom: deleteAlias failed:", aliasErr);
@@ -1188,6 +1193,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
     roomsMap.delete(roomId);
     delete messages.value[roomId];
+    triggerRef(messages);
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
     }
@@ -1404,6 +1410,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const setMessages = (roomId: string, msgs: Message[]) => {
     messages.value[roomId] = msgs;
+    triggerRef(messages);
   };
 
   /** Replace a temporary message ID with the server-assigned event_id */
@@ -2601,20 +2608,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const receiptEvent = event as any;
       const roomObj = room as Record<string, unknown>;
       const roomId = roomObj?.roomId as string;
-      console.log("[chat-store] handleReceiptEvent roomId=%s", roomId);
-      if (!roomId) { console.log("[chat-store] handleReceiptEvent: no roomId"); return; }
+      if (!roomId) return;
 
       const roomMessages = messages.value[roomId];
-      if (!roomMessages) { console.log("[chat-store] handleReceiptEvent: no messages for room"); return; }
+      if (!roomMessages) return;
 
       const matrixService = getMatrixClientService();
       const myUserId = matrixService.getUserId();
-      console.log("[chat-store] handleReceiptEvent myUserId=%s", myUserId);
 
       // Get receipt content: { eventId: { "m.read": { userId: { ts } } } }
       const content = receiptEvent?.getContent?.() ?? receiptEvent?.event?.content;
-      console.log("[chat-store] handleReceiptEvent content=", JSON.stringify(content));
-      if (!content) { console.log("[chat-store] handleReceiptEvent: no content"); return; }
+      if (!content) return;
 
       for (const [eventId, receiptTypes] of Object.entries(content)) {
         const readReceipts = (receiptTypes as Record<string, unknown>)?.["m.read"] as Record<string, unknown> | undefined;
@@ -2622,15 +2626,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
         // Check if someone OTHER than us sent a read receipt for one of OUR messages
         for (const userId of Object.keys(readReceipts)) {
-          console.log("[chat-store] receipt: userId=%s read eventId=%s (me=%s)", userId, eventId, myUserId);
           if (userId === myUserId) continue; // skip our own receipts
 
           // Find this event in our messages and mark it (and all previous) as read
           const msgIdx = roomMessages.findIndex(m => m.id === eventId);
-          console.log("[chat-store] receipt: msgIdx=%d for eventId=%s, total msgs=%d", msgIdx, eventId, roomMessages.length);
           if (msgIdx >= 0) {
             const myAddr = matrixIdToAddress(myUserId ?? "");
-            console.log("[chat-store] receipt: marking read, myAddr=%s, msg.senderId=%s", myAddr, roomMessages[msgIdx].senderId);
             // Mark this message and all earlier own messages as read
             for (let i = msgIdx; i >= 0; i--) {
               const msg = roomMessages[i];
@@ -2638,7 +2639,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               if (msg.status === MessageStatus.read) break; // already read, stop
               if (msg.status === MessageStatus.sent || msg.status === MessageStatus.delivered) {
                 msg.status = MessageStatus.read;
-                console.log("[chat-store] receipt: marked msg %s as read", msg.id);
               }
             }
           }
@@ -2772,6 +2772,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
     roomsMap.delete(roomId);
     delete messages.value[roomId];
+    triggerRef(messages);
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
     }
@@ -2848,6 +2849,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
         }
         messages.value[roomId] = msgs;
+        triggerRef(messages);
       }
     } catch (e) {
       console.warn("[chat-store] loadCachedMessages failed:", e);

@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, triggerRef } from "vue";
+import { shallowRef, triggerRef } from "vue";
 import { createAppInitializer } from "@/app/providers/initializers/app-initializer";
 
 import type { User } from "./types";
@@ -46,7 +46,7 @@ function readCachedUsers(): Record<string, User> {
 export const useUserStore = defineStore(NAMESPACE, () => {
   // Restore from localStorage synchronously on store creation
   const cached = readCachedUsers();
-  const users = ref<Record<string, User>>(cached);
+  const users = shallowRef<Record<string, User>>(cached);
 
   const getUser = (address: string): User | undefined => {
     return users.value[address];

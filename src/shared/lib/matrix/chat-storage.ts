@@ -69,26 +69,7 @@ export function createChatStorage(
         });
       };
 
-      const loadAll = (): Promise<void> => {
-        const tx = openTransaction();
-        const store = tx.objectStore("items");
-        const req = store.getAll();
-        return new Promise((res) => {
-          req.onsuccess = (ev) => {
-            const items = (ev.target as IDBRequest).result;
-            if (items) {
-              for (const item of items) {
-                memoryStorage[item.id] = item.message;
-              }
-            }
-            res();
-          };
-          req.onerror = () => res();
-        });
-      };
-
       clearOldItems()
-        .then(() => loadAll())
         .then(() => {
           resolve({
             get(itemId: string): Promise<unknown> {
