@@ -274,8 +274,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }, 5000);
   };
 
-  // Track rooms that failed decryption to avoid retrying
-  const decryptFailedRooms = new Set<string>();
+  // Track rooms that failed decryption — retry with backoff instead of permanent block
+  const decryptFailedRooms = new Map<string, { count: number; lastAttempt: number }>();
+  const DECRYPT_RETRY_DELAY = 10_000; // 10s before retrying a failed room
+  const DECRYPT_MAX_RETRIES = 3;
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -771,7 +773,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const roomId = matrixRoom.roomId as string;
       if (onlyRoomIds && !onlyRoomIds.has(roomId)) continue;
       if (decryptedPreviewCache.has(roomId)) continue; // already decrypted
-      if (decryptFailedRooms.has(roomId)) continue; // skip known failures
+      const failure = decryptFailedRooms.get(roomId);
+      if (failure) {
+        if (failure.count >= DECRYPT_MAX_RETRIES) continue; // exhausted retries
+        if (Date.now() - failure.lastAttempt < DECRYPT_RETRY_DELAY) continue; // too soon
+      }
       const room = getRoomById(roomId);
       if (!room?.lastMessage || room.lastMessage.content !== "[encrypted]") continue;
       toDecrypt.push({ roomId, matrixRoom });
@@ -779,7 +785,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (toDecrypt.length === 0) return;
 
     // Cap at 20 rooms per cycle to avoid blocking
-    const capped = toDecrypt.slice(0, 20);
+    const capped = toDecrypt.slice(0, 50);
 
     // Decrypt in small batches (5 at a time) with incremental UI updates
     const BATCH = 5;
@@ -819,12 +825,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
                 }
               }
             } catch {
-              decryptFailedRooms.add(roomId);
+              const prev = decryptFailedRooms.get(roomId);
+              decryptFailedRooms.set(roomId, { count: (prev?.count ?? 0) + 1, lastAttempt: Date.now() });
             }
             break;
           }
         } catch {
-          decryptFailedRooms.add(roomId);
+          const prev = decryptFailedRooms.get(roomId);
+          decryptFailedRooms.set(roomId, { count: (prev?.count ?? 0) + 1, lastAttempt: Date.now() });
         }
       }));
 
@@ -1797,18 +1805,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return;
       }
 
-      // Check if the SDK already has timeline events from sync.
-      // If yes, skip scrollback (no extra server request).
-      // If no, request scrollback to populate the timeline.
+      // Always scrollback when timeline has fewer events than threshold.
+      // With sync filter limiting events per room, the SDK may only have a handful
+      // of events after sync — scrollback ensures the user sees enough history.
+      const MIN_EVENTS_THRESHOLD = 15;
       let timelineEvents = getTimelineEvents(matrixRoom);
-      const hasMessagesFromSync = timelineEvents.some((ev) => {
-        const raw = getRawEvent(ev);
-        return raw?.type === "m.room.message";
-      });
 
-      if (!hasMessagesFromSync) {
+      if (timelineEvents.length < MIN_EVENTS_THRESHOLD) {
         try {
-          await matrixService.scrollback(roomId, 25);
+          await matrixService.scrollback(roomId, 30);
         } catch (e) {
           console.warn("[chat-store] scrollback failed:", e);
         }
@@ -1817,7 +1822,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Retry once if timeline is still empty — sync may not have populated it yet
         if (timelineEvents.length === 0) {
           await new Promise(r => setTimeout(r, 1500));
-          try { await matrixService.scrollback(roomId, 25); } catch { /* ignore */ }
+          try { await matrixService.scrollback(roomId, 30); } catch { /* ignore */ }
           timelineEvents = getTimelineEvents(matrixRoom);
         }
       }

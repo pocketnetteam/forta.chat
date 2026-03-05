@@ -203,7 +203,7 @@ export class MatrixClientService {
       {
         room: {
           state: { lazy_load_members: true },
-          timeline: { limit: 1 },
+          timeline: { limit: 10 },
         },
       },
     );
@@ -211,7 +211,7 @@ export class MatrixClientService {
     await userClient.startClient({
       pollTimeout: 60000,
       resolveInvitesToProfiles: false,
-      initialSyncLimit: 1,
+      initialSyncLimit: 10,
       disablePresence: true,
       lazyLoadMembers: true,
       filter: syncFilter,
