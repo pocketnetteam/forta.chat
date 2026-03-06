@@ -618,7 +618,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const loadPost = (txid: string) => appInitializer.loadPost(txid);
 
   const loadPostScores = (txid: string) => appInitializer.loadPostScores(txid);
-  const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid);
+  const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
   const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
   const submitUpvote = (txid: string, value: number) => appInitializer.submitUpvote(txid, value, address.value!);
   const submitComment = (txid: string, message: string, parentId?: string) => appInitializer.submitComment(txid, message, parentId);

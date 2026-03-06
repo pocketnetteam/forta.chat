@@ -332,6 +332,7 @@ export class AppInitializer {
     if (!this.api) return [];
     try {
       const data = await this.api.rpc("getpostscores", [txid]);
+      console.log("[appInit] loadPostScores raw response:", data);
       if (!Array.isArray(data)) return [];
       return data.map((s: any) => ({
         address: s.address ?? "",
@@ -344,13 +345,19 @@ export class AppInitializer {
     }
   }
 
-  async loadPostComments(txid: string): Promise<PostComment[]> {
+  async loadPostComments(txid: string, userAddress?: string): Promise<PostComment[]> {
     if (!this.api) return [];
     try {
-      const data = await this.api.rpc("getcomments", ["", "", "", [txid]]);
-      if (!Array.isArray(data)) return [];
-      return data.map((c: any) => ({
-        id: c.id ?? "",
+      // SDK format: getcomments(['', '', userAddress, [txids]])
+      const addr = userAddress || "";
+      const data = await this.api.rpc("getcomments", ["", "", addr, [txid]]);
+      console.log("[appInit] loadPostComments raw response:", data);
+      if (!data) return [];
+      // Response may be an object with nested data or a flat array
+      const items = Array.isArray(data) ? data : (data as any)?.data ?? [];
+      if (!Array.isArray(items)) return [];
+      return items.map((c: any) => ({
+        id: c.id ?? c.txid ?? "",
         postid: c.postid ?? txid,
         parentid: c.parentid ?? "",
         answerid: c.answerid ?? "",
@@ -402,15 +409,30 @@ export class AppInitializer {
   }
 
   async submitComment(txid: string, message: string, parentId?: string): Promise<boolean> {
-    if (!this.actions) return false;
+    if (!this.actions) {
+      console.error("[appInit] submitComment: actions not available");
+      return false;
+    }
     try {
-      // Comment is a global Pocketnet SDK class (not DOM Comment)
+      // Comment is a global Pocketnet SDK class from kit.js (replaces DOM Comment)
       const PocketComment = (window as any).Comment;
-      if (!PocketComment) return false;
+      console.log("[appInit] submitComment: PocketComment available:", !!PocketComment, "txid:", txid, "msg:", message.slice(0, 50));
+      if (!PocketComment) {
+        console.error("[appInit] submitComment: Comment class not found on window");
+        return false;
+      }
       const comment = new PocketComment(txid);
-      comment.message.set(message);
+      console.log("[appInit] submitComment: comment created:", comment);
+      if (typeof comment.message?.set === "function") {
+        comment.message.set(message);
+      } else {
+        // Fallback: try direct assignment
+        console.warn("[appInit] submitComment: comment.message.set not a function, trying direct");
+        comment.msg = message;
+      }
       if (parentId) comment.parentid = parentId;
-      await (this.actions as any).addActionAndSendIfCan(comment);
+      const result = await (this.actions as any).addActionAndSendIfCan(comment);
+      console.log("[appInit] submitComment: action result:", result);
       return true;
     } catch (e) {
       console.error("[appInit] submitComment error:", e);
