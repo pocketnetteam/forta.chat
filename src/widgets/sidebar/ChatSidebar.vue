@@ -327,8 +327,8 @@ watch(walletAvailable, (v) => { if (v) loadBalance(); }, { immediate: true });
   animation: invite-pulse 2s ease-in-out infinite;
 }
 @keyframes invite-pulse {
-  0%, 100% { box-shadow: 0 4px 16px rgb(var(--color-bg-ac-bright) / 0.4), 0 0 0 0 rgb(var(--color-bg-ac-2) / 0); }
-  50% { box-shadow: 0 6px 28px rgb(var(--color-bg-ac-bright) / 0.6), 0 0 0 6px rgb(var(--color-bg-ac-2) / 0.15); }
+  0%, 100% { box-shadow: 0 4px 16px rgba(var(--color-bg-ac-bright), 0.4), 0 0 0 0 rgba(var(--color-bg-ac-2), 0); }
+  50% { box-shadow: 0 6px 28px rgba(var(--color-bg-ac-bright), 0.6), 0 0 0 6px rgba(var(--color-bg-ac-2), 0.15); }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -806,7 +806,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
 
 <style>
 @keyframes search-flash {
-  0% { background-color: rgb(var(--color-bg-ac-rgb, 59 130 246) / 0.25); }
+  0% { background-color: rgba(var(--color-bg-ac-rgb, 59, 130, 246), 0.25); }
   100% { background-color: transparent; }
 }
 .search-highlight {
@@ -816,7 +816,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
 
 /* Context menu highlight — full-width background */
 .context-highlight {
-  background-color: rgb(var(--color-bg-ac-rgb, 59 130 246) / 0.08);
+  background-color: rgba(var(--color-bg-ac-rgb, 59, 130, 246), 0.08);
   transition: background-color 0.15s ease;
 }
 </style>

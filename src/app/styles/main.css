@@ -28,55 +28,55 @@
 
 /* Light theme (default) */
 :root {
-  --background-hidden-layer: 255 255 255;
-  --background-total-theme: 255 255 255;
-  --background-secondary-theme: 250 250 250;
-  --background-main: 240 242 245;
-  --background-main-contrast: 10 12 23;
+  --background-hidden-layer: 255, 255, 255;
+  --background-total-theme: 255, 255, 255;
+  --background-secondary-theme: 250, 250, 250;
+  --background-main: 240, 242, 245;
+  --background-main-contrast: 10, 12, 23;
 
-  --neutral-grad-0: 235 235 240;
-  --neutral-grad-1: 227 228 235;
-  --neutral-grad-2: 150 155 160;
-  --neutral-grad-3: 100 105 110;
-  --neutral-grad-4: 72 77 82;
+  --neutral-grad-0: 235, 235, 240;
+  --neutral-grad-1: 227, 228, 235;
+  --neutral-grad-2: 150, 155, 160;
+  --neutral-grad-3: 100, 105, 110;
+  --neutral-grad-4: 72, 77, 82;
 
-  --text-color: 0 0 0;
-  --text-on-main-bg-color: 112 117 121;
-  --text-on-bg-ac-color: 255 255 255;
+  --text-color: 0, 0, 0;
+  --text-on-main-bg-color: 112, 117, 121;
+  --text-on-bg-ac-color: 255, 255, 255;
 
-  --voice-message-fillStyle: 81 129 184;
+  --voice-message-fillStyle: 81, 129, 184;
 
-  --color-bg-ac-bright: 0 163 247;
-  --color-bg-ac: 0 164 255;
-  --color-bg-ac-1: 0 142 191;
-  --color-bg-ac-2: 250 110 132;
-  --color-bg-selection: 179 212 252;
+  --color-bg-ac-bright: 0, 163, 247;
+  --color-bg-ac: 0, 164, 255;
+  --color-bg-ac-1: 0, 142, 191;
+  --color-bg-ac-2: 250, 110, 132;
+  --color-bg-selection: 179, 212, 252;
 
-  --color-txt-ac: 0 164 255;
-  --color-txt-ac-1: 0 142 191;
-  --color-txt-ac-2: 250 110 132;
-  --color-txt-gray: 82 88 92;
-  --color-txt-gray-dark: 55 60 65;
+  --color-txt-ac: 0, 164, 255;
+  --color-txt-ac-1: 0, 142, 191;
+  --color-txt-ac-2: 250, 110, 132;
+  --color-txt-gray: 82, 88, 92;
+  --color-txt-gray-dark: 55, 60, 65;
 
-  --color-bg-orange: 255 59 0;
-  --color-txt-orange: 255 72 0;
+  --color-bg-orange: 255, 59, 0;
+  --color-txt-orange: 255, 72, 0;
 
-  --color-star-yellow: 255 174 0;
+  --color-star-yellow: 255, 174, 0;
 
-  --color-shadow-base: 2 18 24;
-  --color-shadow-var: 32 35 42;
-  --text-on-bg-shadow-color: 255 255 255;
+  --color-shadow-base: 2, 18, 24;
+  --color-shadow-var: 32, 35, 42;
+  --text-on-bg-shadow-color: 255, 255, 255;
 
-  --color-bad: 244 26 77;
-  --color-nrml: 0 0 0;
-  --color-good: 7 108 52;
-  --color-yellow: 255 238 0;
+  --color-bad: 244, 26, 77;
+  --color-nrml: 0, 0, 0;
+  --color-good: 7, 108, 52;
+  --color-yellow: 255, 238, 0;
 
   /* Chat-specific */
-  --chat-bubble-own: 0 164 255;
-  --chat-bubble-other: 235 235 240;
-  --chat-sidebar: 250 250 250;
-  --chat-input-bg: 240 242 245;
+  --chat-bubble-own: 0, 164, 255;
+  --chat-bubble-other: 235, 235, 240;
+  --chat-sidebar: 250, 250, 250;
+  --chat-input-bg: 240, 242, 245;
 
   /* Appearance settings (overridden by JS) */
   --font-size-base: 16px;
@@ -87,53 +87,53 @@
 
 /* Dark theme */
 :root[theme="black"] {
-  --background-hidden-layer: 5 7 15;
-  --background-total-theme: 10 14 24;
-  --background-secondary-theme: 15 25 38;
-  --background-main: 8 18 30;
-  --background-main-contrast: 245 247 250;
+  --background-hidden-layer: 5, 7, 15;
+  --background-total-theme: 10, 14, 24;
+  --background-secondary-theme: 15, 25, 38;
+  --background-main: 8, 18, 30;
+  --background-main-contrast: 245, 247, 250;
 
-  --neutral-grad-0: 35 40 48;
-  --neutral-grad-1: 42 47 55;
-  --neutral-grad-2: 75 80 90;
-  --neutral-grad-3: 110 115 125;
-  --neutral-grad-4: 140 145 155;
+  --neutral-grad-0: 35, 40, 48;
+  --neutral-grad-1: 42, 47, 55;
+  --neutral-grad-2: 75, 80, 90;
+  --neutral-grad-3: 110, 115, 125;
+  --neutral-grad-4: 140, 145, 155;
 
-  --text-color: 232 235 237;
-  --text-on-main-bg-color: 170 170 170;
-  --text-on-bg-ac-color: 255 255 255;
+  --text-color: 232, 235, 237;
+  --text-on-main-bg-color: 170, 170, 170;
+  --text-on-bg-ac-color: 255, 255, 255;
 
-  --voice-message-fillStyle: 90 140 200;
+  --voice-message-fillStyle: 90, 140, 200;
 
-  --color-bg-ac-bright: 0 100 220;
-  --color-bg-ac: 0 90 210;
-  --color-bg-ac-1: 0 152 200;
-  --color-bg-ac-2: 255 120 145;
-  --color-bg-selection: 190 225 255;
+  --color-bg-ac-bright: 0, 100, 220;
+  --color-bg-ac: 0, 90, 210;
+  --color-bg-ac-1: 0, 152, 200;
+  --color-bg-ac-2: 255, 120, 145;
+  --color-bg-selection: 190, 225, 255;
 
-  --color-txt-ac: 0 174 255;
-  --color-txt-ac-1: 0 152 200;
-  --color-txt-ac-2: 255 120 145;
-  --color-txt-gray: 140 148 155;
-  --color-txt-gray-dark: 160 168 175;
+  --color-txt-ac: 0, 174, 255;
+  --color-txt-ac-1: 0, 152, 200;
+  --color-txt-ac-2: 255, 120, 145;
+  --color-txt-gray: 140, 148, 155;
+  --color-txt-gray-dark: 160, 168, 175;
 
-  --color-bg-orange: 255 80 0;
-  --color-txt-orange: 255 80 0;
+  --color-bg-orange: 255, 80, 0;
+  --color-txt-orange: 255, 80, 0;
 
-  --color-shadow-base: 6 8 28;
-  --color-shadow-var: 14 16 24;
-  --text-on-bg-shadow-color: 240 242 245;
+  --color-shadow-base: 6, 8, 28;
+  --color-shadow-var: 14, 16, 24;
+  --text-on-bg-shadow-color: 240, 242, 245;
 
-  --color-bad: 250 30 85;
-  --color-nrml: 0 0 0;
-  --color-good: 10 115 60;
-  --color-yellow: 255 248 10;
+  --color-bad: 250, 30, 85;
+  --color-nrml: 0, 0, 0;
+  --color-good: 10, 115, 60;
+  --color-yellow: 255, 248, 10;
 
   /* Chat-specific dark */
-  --chat-bubble-own: 0 90 210;
-  --chat-bubble-other: 30 36 45;
-  --chat-sidebar: 15 25 38;
-  --chat-input-bg: 15 22 34;
+  --chat-bubble-own: 0, 90, 210;
+  --chat-bubble-other: 30, 36, 45;
+  --chat-sidebar: 15, 25, 38;
+  --chat-input-bg: 15, 22, 34;
 
   /* Appearance settings (same defaults, overridden by JS) */
   --font-size-base: 16px;
@@ -183,7 +183,7 @@ a {
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgb(var(--neutral-grad-2) / 0.4) transparent;
+  scrollbar-color: rgba(var(--neutral-grad-2), 0.4) transparent;
 }
 
 /* Webkit / Blink (Chrome, Safari, Electron) */
@@ -195,11 +195,11 @@ a {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgb(var(--neutral-grad-2) / 0.35);
+  background: rgba(var(--neutral-grad-2), 0.35);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(var(--neutral-grad-2) / 0.6);
+  background: rgba(var(--neutral-grad-2), 0.6);
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
