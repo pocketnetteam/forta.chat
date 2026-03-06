@@ -274,7 +274,7 @@ const setSectionRef = (el: any, idx: number) => {
   border-radius: 8px;
 }
 .emoji-btn:hover {
-  background-color: var(--neutral-grad-0, rgba(255,255,255,0.06));
+  background-color: rgb(var(--neutral-grad-0) / 0.5);
   transform: scale(1.15);
 }
 .emoji-btn:active {
