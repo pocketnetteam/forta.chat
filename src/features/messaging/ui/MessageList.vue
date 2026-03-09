@@ -806,11 +806,13 @@ defineExpose({ scrollToMessage, setSearchQuery });
 
 <style>
 @keyframes search-flash {
-  0% { background-color: rgba(var(--color-bg-ac-rgb, 59, 130, 246), 0.25); }
+  0%   { background-color: rgba(var(--color-bg-ac-bright), 0.25); }
+  40%  { background-color: rgba(var(--color-bg-ac-bright), 0.08); }
+  60%  { background-color: rgba(var(--color-bg-ac-bright), 0.2); }
   100% { background-color: transparent; }
 }
 .search-highlight {
-  animation: search-flash 1.5s ease-out;
+  animation: search-flash 2s ease-out;
   border-radius: 8px;
 }
 
