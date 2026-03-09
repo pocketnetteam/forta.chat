@@ -2991,6 +2991,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     markRoomAsRead,
     markRoomChanged,
     messages,
+    messagesMap: messages,
     mutedRoomIds,
     optimisticAddReaction,
     optimisticRemoveReaction,
