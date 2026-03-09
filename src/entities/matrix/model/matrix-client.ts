@@ -18,7 +18,7 @@ import { getmatrixid } from "@/shared/lib/matrix/functions";
 
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
 
-export type SyncCallback = () => void;
+export type SyncCallback = (state: "PREPARED" | "SYNCING") => void;
 export type TimelineCallback = (event: unknown, room: unknown) => void;
 export type MembershipCallback = (event: unknown, member: unknown) => void;
 export type TypingCallback = (event: unknown, member: unknown) => void;
@@ -197,11 +197,16 @@ export class MatrixClientService {
     this.client = userClient;
     this.initEvents();
 
+    // Sync config: lazy loading for speed, members loaded explicitly when needed
+    // initialSyncLimit: 1 keeps sync payload small for accounts with many rooms.
+    // Only the last timeline event per room is included; full history is loaded
+    // on-demand when a room is opened (loadAllMessages).
     await userClient.startClient({
       pollTimeout: 60000,
       resolveInvitesToProfiles: true,
-      initialSyncLimit: 20,
-      disablePresence: true
+      initialSyncLimit: 1,
+      disablePresence: true,
+      lazyLoadMembers: true,
     });
 
     return userClient;
@@ -249,9 +254,9 @@ export class MatrixClientService {
         return;
       }
 
-      if (msg.getSender() !== userId) {
-        this.onTimeline?.(message, msg.event.room_id);
-      }
+      // Pass all messages (including own) so cross-device sync works.
+      // The chat-store's handleTimelineEvent handles dedup for the sending device.
+      this.onTimeline?.(message, msg.event.room_id);
     });
 
     this.client.on("RoomMember.typing", (event: unknown, member: unknown) => {
@@ -318,7 +323,7 @@ export class MatrixClientService {
         if (!this.chatsReady) {
           this.chatsReady = true;
         }
-        this.onSync?.();
+        this.onSync?.(state as "PREPARED" | "SYNCING");
       }
     });
   }

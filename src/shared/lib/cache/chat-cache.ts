@@ -1,5 +1,5 @@
 const DB_NAME = "bastyon-chat-cache";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const ROOMS_STORE = "rooms";
 const MESSAGES_STORE = "messages";
 
@@ -17,6 +17,11 @@ function openDB(): Promise<IDBDatabase> {
         const store = db.createObjectStore(MESSAGES_STORE, { keyPath: "id" });
         store.createIndex("roomId", "roomId", { unique: false });
       }
+    };
+    req.onblocked = () => {
+      console.warn("[chat-cache] DB upgrade blocked by another tab, proceeding without cache");
+      dbPromise = null;
+      reject(new Error("DB upgrade blocked"));
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => {
@@ -107,3 +112,4 @@ export async function getCachedMessages(roomId: string): Promise<unknown[]> {
     return [];
   }
 }
+

@@ -46,14 +46,14 @@ const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
     <!-- Phone / video icon in circle -->
     <div
       class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
-      :class="missed ? 'bg-red-400/20' : (isOwn ? 'bg-white/20' : 'bg-green-500/15')"
+      :class="missed ? 'bg-color-bad/20' : (isOwn ? 'bg-white/20' : 'bg-color-good/15')"
     >
       <!-- Video icon -->
       <svg
         v-if="isVideo"
         width="20" height="20" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-        :class="missed ? 'text-red-400' : 'text-green-500'"
+        :class="missed ? 'text-color-bad' : 'text-color-good'"
       >
         <polygon points="23 7 16 12 23 17 23 7" />
         <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
@@ -63,7 +63,7 @@ const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
         v-else
         width="20" height="20" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-        :class="missed ? 'text-red-400' : 'text-green-500'"
+        :class="missed ? 'text-color-bad' : 'text-color-good'"
       >
         <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
       </svg>
@@ -81,10 +81,10 @@ const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
       <!-- Status + time -->
       <div class="mt-0.5 flex items-center gap-1.5 text-[11px]">
         <!-- Direction arrow -->
-        <span :class="missed ? 'text-red-400' : (isOwn ? 'text-white/60' : 'text-green-500')">
+        <span :class="missed ? 'text-color-bad' : (isOwn ? 'text-white/60' : 'text-color-good')">
           {{ isOwn ? "↗" : "↙" }}
         </span>
-        <span :class="missed ? 'text-red-400' : (isOwn ? 'text-white/60' : 'text-text-on-main-bg-color')">
+        <span :class="missed ? 'text-color-bad' : (isOwn ? 'text-white/60' : 'text-text-on-main-bg-color')">
           {{ statusLabel }}
         </span>
         <span :class="isOwn ? 'text-white/50' : 'text-text-on-main-bg-color'">

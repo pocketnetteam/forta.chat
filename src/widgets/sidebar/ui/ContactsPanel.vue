@@ -21,7 +21,7 @@ const contacts = computed(() => {
       const user = address ? userStore.getUser(address) : undefined;
       return {
         id: room.id,
-        name: room.name,
+        name: user?.name || room.name,
         address,
         image: user?.image,
       };
@@ -134,3 +134,4 @@ const toggleSearch = () => {
     </div>
   </div>
 </template>
+

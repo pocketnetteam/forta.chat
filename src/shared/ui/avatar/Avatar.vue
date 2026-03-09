@@ -68,6 +68,8 @@ const showFallback = computed(() => !props.src || imgError.value);
     :class="sizeClass"
     class="flex shrink-0 items-center justify-center overflow-hidden rounded-full"
     :style="showFallback ? { backgroundColor: avatarColor } : {}"
+    role="img"
+    :aria-label="props.name || 'User avatar'"
   >
     <img
       v-if="!showFallback"

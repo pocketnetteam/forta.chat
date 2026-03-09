@@ -123,3 +123,38 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
 
   return undefined;
 }
+
+/** Replace raw @hexid:server Matrix ID patterns with decoded Bastyon addresses.
+ *  Used to clean up system messages that contain un-decoded Matrix IDs. */
+export function cleanMatrixIds(text: string): string {
+  return text.replace(/@([a-f0-9]{20,}):([^\s]+)/gi, (_match, hexPart: string) => {
+    const addr = hexDecode(hexPart);
+    // Only use decoded if it's a valid alphanumeric Base58 address (not garbage)
+    if (addr !== hexPart && /^[A-Za-z0-9]+$/.test(addr)) return addr;
+    return hexPart.length > 16 ? hexPart.slice(0, 8) + "\u2026" : hexPart;
+  });
+}
+
+/** Resolve a system message template using a name-resolver function.
+ *  Replaces {sender} and {target} placeholders with resolved display names. */
+export function resolveSystemText(
+  template: string,
+  senderAddr: string,
+  targetAddr: string | undefined,
+  resolveName: (addr: string) => string,
+): string {
+  let result = template.replace("{sender}", resolveName(senderAddr));
+  if (targetAddr) {
+    result = result.replace("{target}", resolveName(targetAddr));
+  }
+  return result;
+}
+
+/** Check if a string looks like a proper human-readable name (not a hash, hex ID, or raw address) */
+export function looksLikeProperName(name: string, rawAddress?: string): boolean {
+  if (!name || name.length < 2) return false;
+  if (name.startsWith("#") || name.startsWith("!") || name.startsWith("@")) return false;
+  if (/^[a-f0-9]+$/i.test(name)) return false; // hex string
+  if (rawAddress && name === rawAddress) return false; // same as raw Bastyon address
+  return true;
+}

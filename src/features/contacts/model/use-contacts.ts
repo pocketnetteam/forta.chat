@@ -54,6 +54,19 @@ export function useContacts() {
       for (const user of searchResults.value) {
         userStore.setUser(user.address, user);
       }
+
+      // Supplement with cached users not already in results
+      if (searchResults.value.length === 0) {
+        const resultAddrs = new Set(searchResults.value.map(u => u.address));
+        const cached = Object.values(userStore.users).filter(
+          user =>
+            !resultAddrs.has(user.address) &&
+            user.address !== myAddress &&
+            (user.name.toLowerCase().includes(query.toLowerCase()) ||
+             user.address.toLowerCase().includes(query.toLowerCase()))
+        );
+        searchResults.value = [...searchResults.value, ...cached];
+      }
     } catch {
       // Fallback to cached users
       searchResults.value = Object.values(userStore.users).filter(
@@ -176,7 +189,8 @@ export function useContacts() {
 
       // M_ROOM_IN_USE: room alias exists on server from a previously deleted chat.
       // Strategy: try joinRoom first (works if the other user is still in the room).
-      // If joinRoom fails (room is empty / dead), try versioned aliases.
+      // If joinRoom fails (room is empty / dead), delete the alias and recreate.
+      // If deleteAlias fails (no permission), fall back to versioned aliases.
 
       // Step 1: Try joinRoom via base alias (the other user may still be in the room)
       try {
@@ -188,12 +202,51 @@ export function useContacts() {
           return roomId;
         }
       } catch (joinErr) {
-        console.warn("[useContacts] joinRoom on base alias failed (room dead), trying versions:", joinErr);
+        console.warn("[useContacts] joinRoom on base alias failed (room dead):", joinErr);
       }
 
-      // Step 2: Room is dead (everyone left). Try versioned aliases.
-      // Both users will iterate the same versions in order, so they'll converge.
-      for (let v = 2; v <= 10; v++) {
+      // Step 2: Room is dead (everyone left). Try to delete the old alias and recreate.
+      const deleted = await matrixService.deleteAlias(fullAlias);
+      if (deleted) {
+        console.log("[useContacts] deleted stale alias, recreating:", fullAlias);
+        try {
+          const result = await matrixService.createRoom({
+            room_alias_name: alias,
+            visibility: "private",
+            invite: [targetMatrixId],
+            name: "#" + alias,
+            initial_state: [
+              {
+                type: "m.set.encrypted",
+                state_key: "",
+                content: { encrypted: true },
+              },
+            ],
+          });
+
+          const roomId = result.room_id;
+          console.log("[useContacts] recreated room after alias delete, roomId:", roomId);
+
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const newRoom = matrixService.getRoom(roomId) as any;
+            if (newRoom) {
+              const powerEvent = newRoom.currentState?.getStateEvents?.("m.room.power_levels");
+              if (powerEvent?.length) {
+                await matrixService.setPowerLevel(roomId, targetMatrixId, 100, powerEvent[0]);
+              }
+            }
+          } catch { /* best-effort */ }
+
+          activateRoom(roomId, targetAddress, myHexId, targetHexId);
+          return roomId;
+        } catch (recreateErr) {
+          console.warn("[useContacts] recreate after alias delete failed:", recreateErr);
+        }
+      }
+
+      // Step 3: Fallback — try versioned aliases (deleteAlias may fail if we lack permission)
+      for (let v = 2; v <= 100; v++) {
         const vAlias = tetatetid(myHexId, targetHexId, v);
         if (!vAlias) continue;
         const vFullAlias = `#${vAlias}:${MATRIX_SERVER}`;
@@ -207,9 +260,11 @@ export function useContacts() {
             activateRoom(roomId, targetAddress, myHexId, targetHexId);
             return roomId;
           }
-        } catch { /* version doesn't exist or is dead, try creating */ }
+        } catch { /* version doesn't exist or is dead */ }
 
-        // Try creating with this version
+        // Try deleting stale alias first, then creating
+        await matrixService.deleteAlias(vFullAlias).catch(() => {});
+
         try {
           const result = await matrixService.createRoom({
             room_alias_name: vAlias,
@@ -227,7 +282,6 @@ export function useContacts() {
 
           const roomId = result.room_id;
 
-          // Set equal power levels
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const newRoom = matrixService.getRoom(roomId) as any;
@@ -245,7 +299,7 @@ export function useContacts() {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const vErrcode = (vErr as any)?.errcode ?? (vErr as any)?.data?.errcode;
           if (vErrcode === "M_ROOM_IN_USE") {
-            // This version is also stuck, try next
+            console.log("[useContacts] version %d also in use, trying next", v);
             continue;
           }
           console.error("[useContacts] createRoom v%d failed:", v, vErr);

@@ -21,6 +21,7 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
 const remoteAudioRef = ref<HTMLVideoElement | null>(null);
 
 const show = computed(() => {
+  if (callStore.minimized) return false;
   const s = callStore.activeCall?.status;
   return (
     s === CallStatus.ringing ||
@@ -28,6 +29,10 @@ const show = computed(() => {
     s === CallStatus.connected
   );
 });
+
+const minimize = () => {
+  callStore.minimized = true;
+};
 
 const isVideoCall = computed(
   () => callStore.activeCall?.type === "video",
@@ -408,6 +413,20 @@ const isAnyScreenSharing = computed(
             class="call-header absolute left-0 right-0 top-0 z-20 flex items-center justify-center"
             :class="isMobile ? 'px-3 py-3' : 'px-6 py-4'"
           >
+            <!-- Minimize button (top-left) -->
+            <button
+              class="minimize-btn absolute left-4 top-4 z-30"
+              :title="t('call.minimize')"
+              @click="minimize"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4 14 10 14 10 20" />
+                <polyline points="20 10 14 10 14 4" />
+                <line x1="14" y1="10" x2="21" y2="3" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+            </button>
+
             <div class="flex items-center" :class="isMobile ? 'gap-2' : 'gap-3'">
               <UserAvatar
                 v-if="callStore.activeCall"
@@ -666,6 +685,25 @@ const isAnyScreenSharing = computed(
 /* ── Spotlight main dark bg for screen share ── */
 .spotlight-main {
   background: rgba(0, 0, 0, 0.15);
+}
+
+/* ── Minimize button ── */
+.minimize-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  transition: background-color 0.15s ease, transform 0.12s ease;
+}
+.minimize-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+.minimize-btn:active {
+  transform: scale(0.9);
 }
 
 /* ── PiP container ── */

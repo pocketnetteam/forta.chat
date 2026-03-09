@@ -75,11 +75,9 @@ export const useThemeStore = defineStore(NAMESPACE, () => {
     const r = parseInt(color.slice(1, 3), 16);
     const g = parseInt(color.slice(3, 5), 16);
     const b = parseInt(color.slice(5, 7), 16);
-    const rgb = `${r} ${g} ${b}`;
-    // Fix: set --color-bg-ac to RGB triplet (not hex) so Tailwind's rgb() wrapper works
+    const rgb = `${r}, ${g}, ${b}`;
     document.documentElement.style.setProperty("--color-bg-ac", rgb);
-    document.documentElement.style.setProperty("--color-bg-ac-rgb", `${r} ${g} ${b}`);
-    // Own bubble color follows accent
+    document.documentElement.style.setProperty("--color-bg-ac-rgb", rgb);
     document.documentElement.style.setProperty("--chat-bubble-own", rgb);
   };
 

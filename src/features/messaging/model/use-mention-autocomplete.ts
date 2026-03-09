@@ -1,7 +1,8 @@
-import { ref, computed, type Ref } from "vue";
+import { ref, computed, watch, type Ref } from "vue";
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
-import { hexEncode } from "@/shared/lib/matrix/functions";
+import { useUserStore } from "@/entities/user/model";
+import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 
 /**
  * Tracked mention inserted via autocomplete.
@@ -119,6 +120,27 @@ export function useMentionAutocomplete(
     active.value = false;
   };
 
+  // When autocomplete activates, batch-load profiles for members missing from user store.
+  // This ensures display names are available for filtering and display.
+  let lastLoadedRoomId = "";
+  watch(active, (isActive) => {
+    if (!isActive) return;
+    const room = chatStore.activeRoom;
+    if (!room?.isGroup || room.id === lastLoadedRoomId) return;
+    lastLoadedRoomId = room.id;
+    const uStore = useUserStore();
+    const selfHex = authStore.address ? hexEncode(authStore.address).toLowerCase() : "";
+    const toLoad: string[] = [];
+    for (const hexId of room.members) {
+      if (hexId.toLowerCase() === selfHex) continue;
+      const addr = hexDecode(hexId);
+      if (addr !== hexId && /^[A-Za-z0-9]+$/.test(addr) && !uStore.users[addr]) {
+        toLoad.push(addr);
+      }
+    }
+    if (toLoad.length > 0) uStore.loadUsersBatch(toLoad);
+  });
+
   /** Filtered member hex IDs (excluding self). */
   const filteredMembers = computed(() => {
     if (!active.value) return [];
@@ -127,12 +149,23 @@ export function useMentionAutocomplete(
 
     const selfHex = authStore.address ? hexEncode(authStore.address).toLowerCase() : "";
     const q = query.value.toLowerCase();
+    // Touch user store to make this computed reactive to profile loads
+    const allUsers = useUserStore().users;
 
     return room.members
       .filter((hexId) => {
         if (hexId.toLowerCase() === selfHex) return false;
         if (!q) return true;
-        return chatStore.getDisplayName(hexId).toLowerCase().includes(q);
+        // Check display name from chat store (Matrix SDK + user store)
+        const displayName = chatStore.getDisplayName(hexId);
+        if (displayName.toLowerCase().includes(q)) return true;
+        // Also check Bastyon address directly (user might type address)
+        const addr = hexDecode(hexId);
+        if (addr.toLowerCase().includes(q)) return true;
+        // Check user store name directly (reactive — updates when profiles load)
+        const user = allUsers[addr];
+        if (user?.name?.toLowerCase().includes(q)) return true;
+        return false;
       })
       .slice(0, 50);
   });
@@ -143,7 +176,7 @@ export function useMentionAutocomplete(
     if (!el) return;
 
     const rawName = chatStore.getDisplayName(hexId);
-    const safeName = rawName.replace(/\s+/g, "_").replace(/[^\w]/g, "").slice(0, 50) || hexId.slice(0, 8);
+    const safeName = rawName.replace(/\s+/g, "_").replace(/[^\p{L}\p{N}_]/gu, "").slice(0, 50) || hexId.slice(0, 8);
     const displayMention = `@${safeName}`;
     const insertion = displayMention + " "; // trailing space
 
@@ -211,6 +244,7 @@ export function useMentionAutocomplete(
   const clearMentions = () => {
     mentions.value = [];
     lastText = text.value;
+    lastLoadedRoomId = ""; // allow re-loading members for new room
   };
 
   /**

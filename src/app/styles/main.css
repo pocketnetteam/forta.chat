@@ -144,7 +144,7 @@
 
 html {
   font-size: 1em;
-  line-height: 1.4;
+  line-height: 1.5;
   min-height: 100%;
   position: relative;
   overflow-y: hidden;
@@ -268,4 +268,3 @@ a {
   white-space: nowrap;
   width: 1px;
 }
-

@@ -1,11 +1,35 @@
+<script setup lang="ts">
+import { useLocaleStore } from "@/entities/locale";
+import type { Locale } from "@/entities/locale";
+
+const localeStore = useLocaleStore();
+</script>
+
 <template>
   <div
-    class="flex min-h-screen items-center justify-center bg-background-main p-6"
+    class="flex min-h-screen items-center justify-center bg-background-main px-4 py-8"
   >
-    <div
-      class="w-full max-w-md rounded-xl bg-background-total-theme p-8 shadow-lg"
-    >
-      <slot />
+    <div class="flex w-full max-w-[360px] flex-col items-center gap-4">
+      <div
+        class="w-full rounded-2xl bg-background-total-theme px-6 pb-8 pt-10 shadow-sm"
+      >
+        <slot />
+      </div>
+
+      <!-- Language switcher -->
+      <div class="flex items-center gap-1 text-[13px]">
+        <button
+          v-for="lang in (['en', 'ru'] as const)"
+          :key="lang"
+          class="cursor-pointer rounded-md px-2.5 py-1 transition-colors"
+          :class="localeStore.locale === lang
+            ? 'font-medium text-color-txt-ac'
+            : 'text-text-on-main-bg-color hover:text-text-color'"
+          @click="localeStore.setLocale(lang as Locale)"
+        >
+          {{ lang === 'en' ? 'English' : 'Русский' }}
+        </button>
+      </div>
     </div>
   </div>
 </template>

@@ -1,23 +1,46 @@
 <script setup lang="ts">
 import { useChatStore } from "@/entities/chat";
+import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { matrixIdToAddress } from "@/entities/chat/lib/chat-helpers";
+import { useFileDownload } from "@/features/messaging/model/use-file-download";
+import { useCallService } from "@/features/video-calls/model/call-service";
+import ContextMenu from "@/shared/ui/context-menu/ContextMenu.vue";
+import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
+import Toggle from "@/shared/ui/toggle/Toggle.vue";
+import ChatInfoGallery from "./ChatInfoGallery.vue";
 
 interface Props {
   show: boolean;
 }
 
 const props = defineProps<Props>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{
+  close: [];
+  openSearch: [];
+  goToMessage: [messageId: string];
+}>();
 
+const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const callService = useCallService();
 const room = computed(() => chatStore.activeRoom);
 
+// ── Screen navigation ──
+const screen = ref<"main" | "gallery">("main");
+const galleryInitialTab = ref<"media" | "files" | "links" | "voice">("media");
+
+// Reset screen when panel closes
+watch(() => props.show, (v) => {
+  if (!v) screen.value = "main";
+});
+
+// ── Media / file counts ──
 const mediaCount = computed(() => {
   if (!room.value) return 0;
   return chatStore.activeMessages.filter(m => m.type === "image" || m.type === "video").length;
@@ -28,6 +51,41 @@ const fileCount = computed(() => {
   return chatStore.activeMessages.filter(m => m.type === "file" || m.type === "audio").length;
 });
 
+// ── Invite link (group sharing) ──
+const roomPublic = ref(false);
+const togglingPublic = ref(false);
+const linkCopied = ref(false);
+
+const refreshRoomPublic = () => {
+  if (room.value?.isGroup) {
+    roomPublic.value = chatStore.isRoomPublic(room.value.id);
+  }
+};
+
+watch(room, refreshRoomPublic, { immediate: true });
+
+const inviteLink = computed(() => {
+  if (!room.value) return "";
+  const base = window.location.origin + window.location.pathname;
+  return `${base}#/join?room=${encodeURIComponent(room.value.id)}`;
+});
+
+const togglePublic = async () => {
+  if (!room.value || togglingPublic.value) return;
+  togglingPublic.value = true;
+  const newVal = !roomPublic.value;
+  const ok = await chatStore.setRoomPublic(room.value.id, newVal);
+  if (ok) roomPublic.value = newVal;
+  togglingPublic.value = false;
+};
+
+const copyInviteLink = async () => {
+  await navigator.clipboard.writeText(inviteLink.value);
+  linkCopied.value = true;
+  setTimeout(() => linkCopied.value = false, 2000);
+};
+
+// ── Mute state ──
 const isMuted = computed(() => {
   if (!room.value) return false;
   return chatStore.mutedRoomIds.has(room.value.id);
@@ -37,7 +95,7 @@ const toggleMute = () => {
   if (room.value) chatStore.toggleMuteRoom(room.value.id);
 };
 
-// Power levels
+// ── Power levels ──
 const powerLevels = computed(() => {
   if (!room.value) return { myLevel: 0, levels: {} };
   return chatStore.getRoomPowerLevels(room.value.id);
@@ -97,7 +155,7 @@ const saveEditTopic = async () => {
   editingTopic.value = false;
 };
 
-// Add member overlay
+// ── Add member overlay ──
 const showAddMember = ref(false);
 const { searchQuery: addSearchQuery, searchResults: addSearchResults, isSearching: addIsSearching, debouncedSearch: addDebouncedSearch } = useContacts();
 const addingMember = ref(false);
@@ -120,7 +178,7 @@ const handleAddMember = async (address: string) => {
   }
 };
 
-// Member actions — address here is a hex-encoded ID from room.members
+// ── Member actions — address here is a hex-encoded ID from room.members ──
 const memberAction = ref<{ show: boolean; hexId: string; x: number; y: number }>({
   show: false, hexId: "", x: 0, y: 0,
 });
@@ -175,8 +233,8 @@ const handleToggleMute = async () => {
   if (!room.value || mutingMember.value) return;
   mutingMember.value = true;
   const rawAddr = hexDecode(memberAction.value.hexId);
-  const isMuted = chatStore.isMemberMuted(room.value.id, memberAction.value.hexId);
-  await chatStore.muteMember(room.value.id, rawAddr, !isMuted);
+  const muted = chatStore.isMemberMuted(room.value.id, memberAction.value.hexId);
+  await chatStore.muteMember(room.value.id, rawAddr, !muted);
   mutingMember.value = false;
   memberAction.value.show = false;
 };
@@ -186,7 +244,7 @@ const isActionMemberMuted = computed(() => {
   return chatStore.isMemberMuted(room.value.id, memberAction.value.hexId);
 });
 
-// Banned members
+// ── Banned members ──
 const bannedMembers = computed(() => {
   if (!room.value) return [];
   return chatStore.getBannedMembers(room.value.id);
@@ -207,8 +265,8 @@ const memberMenuStyle = computed(() => {
   return { left: `${x}px`, top: `${y}px` };
 });
 
-// Leave / Delete — track which action was triggered
-const confirmAction = ref<"leave" | "delete" | null>(null);
+// ── Leave / Delete / Clear / Block — track which action was triggered ──
+const confirmAction = ref<"leave" | "delete" | "clear" | "block" | null>(null);
 
 const handleLeaveGroup = () => {
   if (!room.value) return;
@@ -222,6 +280,114 @@ const handleDeleteChat = () => {
   chatStore.removeRoom(room.value.id);
   confirmAction.value = null;
   emit("close");
+};
+
+// ── Call initiation ──
+const startCall = (type: "voice" | "video") => {
+  if (!room.value) return;
+  callService.startCall(room.value.id, type);
+  emit("close");
+};
+
+// ── More context menu ──
+const showMoreMenu = ref(false);
+const moreMenuPos = ref({ x: 0, y: 0 });
+
+const openMoreMenu = (e: MouseEvent) => {
+  moreMenuPos.value = { x: e.clientX, y: e.clientY };
+  showMoreMenu.value = true;
+};
+
+// SVG icon strings for ContextMenu items (v-html)
+const SEARCH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+const BELL_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
+const VIDEO_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+const BROOM_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+const BAN_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>';
+const LOGOUT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>';
+const TRASH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+
+const moreMenuItems = computed<ContextMenuItem[]>(() => {
+  const items: ContextMenuItem[] = [];
+  items.push({ label: t("chatInfo.searchInChat"), icon: SEARCH_ICON, action: "search" });
+  items.push({
+    label: isMuted.value ? t("chatInfo.unmuteNotifications") : t("chatInfo.muteNotifications"),
+    icon: BELL_ICON,
+    action: "toggleMute",
+  });
+  if (!room.value?.isGroup) {
+    items.push({ label: t("chatInfo.videoCall"), icon: VIDEO_ICON, action: "videoCall" });
+  }
+  items.push({ label: t("chatInfo.clearHistory"), icon: BROOM_ICON, action: "clearHistory" });
+  if (!room.value?.isGroup) {
+    items.push({ label: t("chatInfo.blockUser"), icon: BAN_ICON, action: "block", danger: true });
+    items.push({ label: t("chatInfo.deleteChat"), icon: TRASH_ICON, action: "deleteChat", danger: true });
+  } else {
+    items.push({ label: t("chatInfo.leaveGroup"), icon: LOGOUT_ICON, action: "leave", danger: true });
+    if (isAdmin.value) {
+      items.push({ label: t("chatInfo.deleteGroup"), icon: TRASH_ICON, action: "deleteGroup", danger: true });
+    }
+  }
+  return items;
+});
+
+const handleMoreAction = (action: string) => {
+  showMoreMenu.value = false;
+  switch (action) {
+    case "search": emit("close"); emit("openSearch"); break;
+    case "toggleMute": toggleMute(); break;
+    case "videoCall": startCall("video"); break;
+    case "clearHistory": confirmAction.value = "clear"; break;
+    case "block": confirmAction.value = "block"; break;
+    case "deleteChat": confirmAction.value = "delete"; break;
+    case "leave": confirmAction.value = "leave"; break;
+    case "deleteGroup": confirmAction.value = "delete"; break;
+  }
+};
+
+// ── Peer info (1:1 DM) ──
+const peerAddress = computed(() => {
+  if (!room.value || room.value.isGroup) return null;
+  const myHex = myHexId.value;
+  const other = room.value.members.find(m => m !== myHex);
+  return other ? hexDecode(other) : null;
+});
+
+const peerData = ref<{ name: string; about: string; site: string; image: string } | null>(null);
+
+watch(() => peerAddress.value, async (addr) => {
+  if (!addr) { peerData.value = null; return; }
+  await authStore.loadUsersInfo([addr]);
+  peerData.value = authStore.getBastyonUserData(addr) ?? null;
+}, { immediate: true });
+
+// Copy address to clipboard
+const copiedAddress = ref(false);
+const copyAddress = async () => {
+  if (!peerAddress.value) return;
+  await navigator.clipboard.writeText(peerAddress.value);
+  copiedAddress.value = true;
+  setTimeout(() => copiedAddress.value = false, 2000);
+};
+
+// ── Media preview (last 4 thumbnails) ──
+const recentMedia = computed<Message[]>(() =>
+  chatStore.activeMessages
+    .filter(m => m.type === "image" || m.type === "video")
+    .slice(-4)
+    .reverse()
+);
+
+const { getState: getMediaState, download: downloadMedia } = useFileDownload();
+
+const ensureMediaLoaded = (msg: Message) => {
+  const state = getMediaState(msg.id);
+  if (!state.objectUrl && !state.loading) downloadMedia(msg);
+};
+
+const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
+  galleryInitialTab.value = tab;
+  screen.value = "gallery";
 };
 </script>
 
@@ -237,7 +403,7 @@ const handleDeleteChat = () => {
     <transition name="panel-slide">
       <div
         v-if="props.show"
-        class="fixed right-0 top-0 z-50 h-full w-[320px] max-w-full bg-background-total-theme shadow-xl"
+        class="fixed right-0 top-0 z-50 h-full w-full bg-background-total-theme shadow-xl sm:w-[360px] sm:max-w-full"
         @click.stop
       >
         <div v-if="room" class="flex h-full flex-col">
@@ -251,11 +417,11 @@ const handleDeleteChat = () => {
                 <path d="M18 6L6 18" /><path d="M6 6l12 12" />
               </svg>
             </button>
-            <span class="text-base font-semibold text-text-color">Info</span>
+            <span class="text-base font-semibold text-text-color">{{ t("chatInfo.information") }}</span>
           </div>
 
-          <!-- Content -->
-          <div class="flex-1 overflow-y-auto">
+          <!-- Screen: Main -->
+          <div v-if="screen === 'main'" class="flex-1 overflow-y-auto">
             <!-- Avatar + Name -->
             <div class="flex flex-col items-center gap-3 p-6">
               <!-- Avatar with edit overlay for admin groups -->
@@ -292,7 +458,7 @@ const handleDeleteChat = () => {
               <div class="text-center">
                 <h2 class="text-lg font-semibold text-text-color">{{ room.name }}</h2>
                 <p class="text-sm text-text-on-main-bg-color">
-                  {{ room.isGroup ? `${room.members.length} members` : "Direct message" }}
+                  {{ room.isGroup ? t("info.members", { count: room.members.length }) : t("info.directMessage") }}
                 </p>
 
                 <!-- Topic / Description -->
@@ -304,27 +470,27 @@ const handleDeleteChat = () => {
                       class="mt-1 text-xs text-color-bg-ac hover:underline"
                       @click="startEditTopic"
                     >
-                      {{ room.topic ? "Edit description" : "Add description" }}
+                      {{ room.topic ? t("chatInfo.editDescription") : t("chatInfo.addDescription") }}
                     </button>
                   </div>
                   <div v-else class="mt-2 w-full text-left">
                     <textarea
                       v-model="topicDraft"
                       class="w-full rounded-lg bg-chat-input-bg px-3 py-2 text-xs text-text-color outline-none placeholder:text-neutral-grad-2"
-                      placeholder="Room description..."
+                      :placeholder="t('chatInfo.addDescription')"
                       rows="3"
                       maxlength="500"
                     />
                     <div class="mt-1 flex justify-end gap-2">
                       <button class="rounded px-2 py-1 text-xs text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelEditTopic">
-                        Cancel
+                        {{ t("info.cancel") }}
                       </button>
                       <button
                         class="rounded bg-color-bg-ac px-2 py-1 text-xs text-white"
                         :disabled="savingTopic"
                         @click="saveEditTopic"
                       >
-                        {{ savingTopic ? "Saving..." : "Save" }}
+                        {{ savingTopic ? t("profile.saving") : t("profile.saveChanges") }}
                       </button>
                     </div>
                   </div>
@@ -332,49 +498,145 @@ const handleDeleteChat = () => {
               </div>
             </div>
 
+            <!-- Action buttons row -->
+            <div class="flex items-center justify-center gap-6 pb-4">
+              <!-- Chat button -->
+              <button class="flex flex-col items-center gap-1" @click="emit('close')">
+                <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                </div>
+                <span class="text-[11px] text-text-on-main-bg-color">{{ t("chatInfo.chat") }}</span>
+              </button>
+
+              <!-- Call button (1:1 only) -->
+              <button v-if="!room.isGroup" class="flex flex-col items-center gap-1" @click="startCall('voice')">
+                <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                  </svg>
+                </div>
+                <span class="text-[11px] text-text-on-main-bg-color">{{ t("chatInfo.call") }}</span>
+              </button>
+
+              <!-- More button -->
+              <button class="flex flex-col items-center gap-1" @click="openMoreMenu">
+                <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" />
+                  </svg>
+                </div>
+                <span class="text-[11px] text-text-on-main-bg-color">{{ t("chatInfo.more") }}</span>
+              </button>
+            </div>
+
+            <!-- Invite link section (group only, admin or already public) -->
+            <div v-if="room.isGroup && (isAdmin || roomPublic)" class="border-t border-neutral-grad-0 px-4 py-3">
+              <div class="mb-2 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                  </svg>
+                  <span class="text-sm font-medium text-text-color">{{ t("shareGroup.inviteLink") }}</span>
+                </div>
+                <div v-if="isAdmin" class="flex items-center gap-2">
+                  <span class="text-[11px] text-text-on-main-bg-color">{{ t("shareGroup.publicGroup") }}</span>
+                  <Toggle :model-value="roomPublic" size="sm" :disabled="togglingPublic" @update:model-value="togglePublic" />
+                </div>
+              </div>
+
+              <template v-if="roomPublic">
+                <div class="flex items-center gap-2">
+                  <input
+                    :value="inviteLink"
+                    readonly
+                    class="min-w-0 flex-1 rounded-lg bg-chat-input-bg px-3 py-2 text-xs text-text-color outline-none"
+                    @click="($event.target as HTMLInputElement).select()"
+                  />
+                  <button
+                    class="shrink-0 rounded-lg bg-color-bg-ac px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-color-bg-ac/90"
+                    @click="copyInviteLink"
+                  >
+                    {{ linkCopied ? t("shareGroup.copied") : t("shareGroup.copyLink") }}
+                  </button>
+                </div>
+                <p class="mt-1.5 text-[11px] text-text-on-main-bg-color">{{ t("shareGroup.publicGroupHint") }}</p>
+              </template>
+              <template v-else>
+                <p class="text-xs text-text-on-main-bg-color">
+                  {{ isAdmin ? t("shareGroup.enablePublic") : t("shareGroup.publicGroupHint") }}
+                </p>
+              </template>
+            </div>
+
+            <!-- Contact info section (1:1 DM only) -->
+            <div v-if="!room.isGroup && peerData" class="border-t border-neutral-grad-0 px-4 py-3">
+              <!-- About -->
+              <div v-if="peerData.about" class="mb-3">
+                <div class="mb-1 text-xs text-text-on-main-bg-color">{{ t("chatInfo.about") }}</div>
+                <div class="text-sm text-text-color">{{ peerData.about }}</div>
+              </div>
+              <!-- Website -->
+              <div v-if="peerData.site" class="mb-3">
+                <div class="mb-1 text-xs text-text-on-main-bg-color">{{ t("chatInfo.website") }}</div>
+                <a :href="peerData.site" target="_blank" class="text-sm text-color-txt-ac hover:underline">{{ peerData.site }}</a>
+              </div>
+              <!-- Bastyon Address -->
+              <div v-if="peerAddress">
+                <div class="mb-1 text-xs text-text-on-main-bg-color">{{ t("chatInfo.address") }}</div>
+                <button class="group flex items-center gap-2 text-sm text-text-color" @click="copyAddress">
+                  <span class="font-mono text-xs">{{ peerAddress }}</span>
+                  <svg v-if="!copiedAddress" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-color-txt-gray transition-colors group-hover:text-text-on-main-bg-color">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                  <span v-else class="text-xs text-color-good">{{ t("chatInfo.copied") }}</span>
+                </button>
+              </div>
+            </div>
+
             <!-- Notifications toggle -->
             <div class="border-t border-neutral-grad-0 px-4 py-3">
-              <button
-                class="flex w-full items-center justify-between"
-                @click="toggleMute"
-              >
+              <div class="flex w-full items-center justify-between">
                 <div class="flex items-center gap-3">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
                     <path d="M13.73 21a2 2 0 0 1-3.46 0" />
                   </svg>
-                  <span class="text-sm text-text-color">Notifications</span>
+                  <span class="text-sm text-text-color">{{ t("chatInfo.notifications") }}</span>
                 </div>
-                <div
-                  class="h-5 w-9 rounded-full transition-colors"
-                  :class="isMuted ? 'bg-neutral-grad-2' : 'bg-color-bg-ac'"
-                >
-                  <div
-                    class="h-5 w-5 rounded-full bg-white shadow transition-transform"
-                    :class="isMuted ? '' : 'translate-x-4'"
-                  />
-                </div>
-              </button>
+                <Toggle :model-value="!isMuted" size="sm" @update:model-value="toggleMute" />
+              </div>
             </div>
 
-            <!-- Shared media counts -->
+            <!-- Media preview section -->
             <div class="border-t border-neutral-grad-0 px-4 py-3">
-              <div class="mb-2 text-xs font-medium uppercase text-text-on-main-bg-color">Shared</div>
-              <div class="flex gap-4">
-                <div class="flex items-center gap-2">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
-                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                    <circle cx="8.5" cy="8.5" r="1.5" />
-                    <polyline points="21 15 16 10 5 21" />
-                  </svg>
-                  <span class="text-sm text-text-color">{{ mediaCount }} media</span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                  </svg>
-                  <span class="text-sm text-text-color">{{ fileCount }} files</span>
+              <button
+                class="-mx-2 flex w-[calc(100%+16px)] items-center justify-between rounded-lg px-2 py-2 transition-colors hover:bg-neutral-grad-0"
+                @click="openGallery('media')"
+              >
+                <span class="text-sm font-medium text-text-color">{{ t("chatInfo.mediaFilesLinks") }}</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              </button>
+              <!-- Thumbnail preview (last 4) -->
+              <div v-if="recentMedia.length > 0" class="mt-2 grid grid-cols-4 gap-1">
+                <div
+                  v-for="msg in recentMedia"
+                  :key="msg.id"
+                  class="aspect-square cursor-pointer overflow-hidden rounded-md bg-neutral-grad-0"
+                  @click="openGallery('media')"
+                  @vue:mounted="ensureMediaLoaded(msg)"
+                >
+                  <img
+                    v-if="getMediaState(msg.id).objectUrl"
+                    :src="getMediaState(msg.id).objectUrl!"
+                    alt=""
+                    class="h-full w-full object-cover"
+                  />
+                  <div v-else class="h-full w-full animate-pulse" />
                 </div>
               </div>
             </div>
@@ -383,7 +645,7 @@ const handleDeleteChat = () => {
             <div v-if="room.isGroup" class="border-t border-neutral-grad-0 px-4 py-3">
               <div class="mb-2 flex items-center justify-between">
                 <span class="text-xs font-medium uppercase text-text-on-main-bg-color">
-                  Members ({{ room.members.length }})
+                  {{ t("chatInfo.members") }} ({{ room.members.length }})
                 </span>
                 <!-- Add member button (admin only) -->
                 <button
@@ -394,7 +656,7 @@ const handleDeleteChat = () => {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                   </svg>
-                  Add
+                  {{ t("chatInfo.addMember") }}
                 </button>
               </div>
 
@@ -403,7 +665,7 @@ const handleDeleteChat = () => {
                 <input
                   :value="addSearchQuery"
                   type="text"
-                  placeholder="Search users to add..."
+                  :placeholder="t('info.searchToAdd')"
                   class="mb-2 w-full rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
                   @input="handleAddMemberSearch"
                 />
@@ -427,7 +689,7 @@ const handleDeleteChat = () => {
                     </svg>
                   </button>
                   <div v-if="addSearchResults.length === 0 && addSearchQuery && !addIsSearching" class="py-2 text-center text-xs text-text-on-main-bg-color">
-                    No users found
+                    {{ t("info.noUsersFound") }}
                   </div>
                 </div>
               </div>
@@ -449,13 +711,13 @@ const handleDeleteChat = () => {
                     v-if="chatStore.isMemberMuted(room.id, member)"
                     class="shrink-0 rounded bg-neutral-grad-2/30 px-1.5 py-0.5 text-[10px] font-medium text-text-on-main-bg-color"
                   >
-                    muted
+                    {{ t("info.muted") }}
                   </span>
                   <span
                     v-if="isMemberAdmin(member)"
                     class="shrink-0 rounded bg-color-bg-ac/15 px-1.5 py-0.5 text-[10px] font-medium text-color-bg-ac"
                   >
-                    admin
+                    {{ t("info.admin") }}
                   </span>
                 </div>
               </div>
@@ -463,7 +725,7 @@ const handleDeleteChat = () => {
               <!-- Banned members (admin only) -->
               <div v-if="isAdmin && bannedMembers.length > 0" class="mt-3">
                 <div class="mb-2 text-xs font-medium uppercase text-text-on-main-bg-color">
-                  Banned ({{ bannedMembers.length }})
+                  {{ t("info.banned", { count: bannedMembers.length }) }}
                 </div>
                 <div class="flex flex-col gap-1">
                   <div
@@ -480,7 +742,7 @@ const handleDeleteChat = () => {
                       :disabled="unbanningUser === banned.userId"
                       @click="handleUnban(banned.userId)"
                     >
-                      {{ unbanningUser === banned.userId ? "..." : "Unban" }}
+                      {{ unbanningUser === banned.userId ? "..." : t("info.unban") }}
                     </button>
                   </div>
                 </div>
@@ -498,7 +760,7 @@ const handleDeleteChat = () => {
                   <polyline points="16 17 21 12 16 7" />
                   <line x1="21" y1="12" x2="9" y2="12" />
                 </svg>
-                {{ room.isGroup ? "Leave group" : "Delete chat" }}
+                {{ room.isGroup ? t("chatInfo.leaveGroup") : t("chatInfo.deleteChat") }}
               </button>
 
               <!-- Delete group button (admin only) -->
@@ -511,7 +773,7 @@ const handleDeleteChat = () => {
                   <polyline points="3 6 5 6 21 6" />
                   <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                 </svg>
-                Delete group for everyone
+                {{ t("chatInfo.deleteGroup") }}
               </button>
 
               <!-- Confirmation dialog -->
@@ -522,13 +784,19 @@ const handleDeleteChat = () => {
                 >
                   <p class="mb-3 text-sm text-text-color">
                     <template v-if="confirmAction === 'delete'">
-                      This will kick all members and delete the group. Are you sure?
+                      {{ t("chatInfo.confirmDeleteGroup") }}
                     </template>
-                    <template v-else-if="room.isGroup">
-                      Do you really want to leave this group?
+                    <template v-else-if="confirmAction === 'leave'">
+                      {{ t("chatInfo.confirmLeave") }}
+                    </template>
+                    <template v-else-if="confirmAction === 'clear'">
+                      {{ t("chatInfo.confirmClear") }}
+                    </template>
+                    <template v-else-if="confirmAction === 'block'">
+                      {{ t("chatInfo.confirmBlock") }}
                     </template>
                     <template v-else>
-                      Do you really want to delete this chat?
+                      {{ t("chatInfo.confirmDelete") }}
                     </template>
                   </p>
                   <div class="flex gap-2">
@@ -536,22 +804,40 @@ const handleDeleteChat = () => {
                       class="flex-1 rounded-lg bg-neutral-grad-0 px-3 py-2 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
                       @click="confirmAction = null"
                     >
-                      Cancel
+                      {{ t("info.cancel") }}
                     </button>
                     <button
                       class="flex-1 rounded-lg bg-color-bad px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
-                      @click="confirmAction === 'delete' ? handleDeleteChat() : (room?.isGroup ? handleLeaveGroup() : handleDeleteChat())"
+                      @click="confirmAction === 'delete' ? handleDeleteChat() : (confirmAction === 'leave' && room?.isGroup ? handleLeaveGroup() : handleDeleteChat())"
                     >
-                      {{ confirmAction === 'delete' ? "Delete" : (room.isGroup ? "Leave" : "Delete") }}
+                      {{ confirmAction === 'delete' ? t("info.delete") : (confirmAction === 'leave' && room.isGroup ? t("info.leave") : t("info.delete")) }}
                     </button>
                   </div>
                 </div>
               </transition>
             </div>
           </div>
+
+          <!-- Screen: Gallery -->
+          <ChatInfoGallery
+            v-else-if="screen === 'gallery'"
+            :initial-tab="galleryInitialTab"
+            @back="screen = 'main'"
+            @go-to-message="(id) => { emit('goToMessage', id); emit('close'); }"
+          />
         </div>
       </div>
     </transition>
+
+    <!-- More context menu -->
+    <ContextMenu
+      :show="showMoreMenu"
+      :x="moreMenuPos.x"
+      :y="moreMenuPos.y"
+      :items="moreMenuItems"
+      @close="showMoreMenu = false"
+      @select="handleMoreAction"
+    />
 
     <!-- Member action menu (admin) -->
     <transition name="panel-fade">
@@ -576,7 +862,7 @@ const handleDeleteChat = () => {
                 v-if="isMemberAdmin(memberAction.hexId)"
                 class="text-[10px] font-medium text-color-bg-ac"
               >
-                Admin
+                {{ t("info.adminLabel") }}
               </span>
             </div>
           </div>
@@ -590,7 +876,7 @@ const handleDeleteChat = () => {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
               </svg>
-              {{ isMemberAdmin(memberAction.hexId) ? "Remove admin" : "Make admin" }}
+              {{ isMemberAdmin(memberAction.hexId) ? t("info.removeAdmin") : t("info.makeAdmin") }}
             </button>
             <!-- Mute / Unmute -->
             <button
@@ -605,7 +891,7 @@ const handleDeleteChat = () => {
                 <path v-if="!isActionMemberMuted" d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
                 <path v-if="!isActionMemberMuted" d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 .76-.13 1.49-.36 2.18" />
               </svg>
-              {{ isActionMemberMuted ? "Unmute" : "Mute in chat" }}
+              {{ isActionMemberMuted ? t("info.unmute") : t("info.muteInChat") }}
             </button>
             <!-- Kick -->
             <button
@@ -618,7 +904,7 @@ const handleDeleteChat = () => {
                 <circle cx="8.5" cy="7" r="4" />
                 <line x1="18" y1="8" x2="23" y2="13" /><line x1="23" y1="8" x2="18" y2="13" />
               </svg>
-              Remove from group
+              {{ t("info.removeFromGroup") }}
             </button>
             <!-- Ban -->
             <button
@@ -630,7 +916,7 @@ const handleDeleteChat = () => {
                 <circle cx="12" cy="12" r="10" />
                 <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
               </svg>
-              Ban from group
+              {{ t("info.banFromGroup") }}
             </button>
           </div>
         </div>

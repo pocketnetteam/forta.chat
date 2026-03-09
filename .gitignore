@@ -38,3 +38,6 @@ auto-imports.d.ts
 
 # Editor backups
 *.bak
+
+# Auto Claude data directory
+.auto-claude/

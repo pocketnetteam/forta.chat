@@ -4,6 +4,7 @@ import { useChatStore, MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useThemeStore } from "@/entities/theme";
 import { isConsecutiveMessage } from "@/entities/chat/lib/message-utils";
+import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
 import { formatDate } from "@/shared/lib/format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
@@ -22,6 +23,14 @@ const authStore = useAuthStore();
 const themeStore = useThemeStore();
 const { loadMessages, toggleReaction, deleteMessage, votePoll, endPoll } = useMessages();
 const { toast } = useToast();
+
+/** Resolve system message text dynamically using current display names */
+const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: string; senderAddr: string; targetAddr?: string } }): string => {
+  if (msg.systemMeta?.template) {
+    return resolveSystemText(msg.systemMeta.template, msg.systemMeta.senderAddr, msg.systemMeta.targetAddr, (addr) => chatStore.getDisplayName(addr));
+  }
+  return cleanMatrixIds(msg.content);
+};
 
 // Provide search query for MessageContent highlighting
 const searchQuery = ref("");
@@ -46,6 +55,7 @@ const contextMenu = ref<{ show: boolean; x: number; y: number; message: import("
 });
 
 const openContextMenu = (payload: { message: import("@/entities/chat").Message; x: number; y: number }) => {
+  if (payload.message.deleted) return;
   contextMenu.value = {
     show: true,
     x: payload.x,
@@ -139,6 +149,12 @@ const settled = ref(false); // false until messages loaded + scrolled — hides 
 const hasMore = ref(true);
 const newMessageCount = ref(0);
 
+// --- Scroll position memory (per room) ---
+// Only saves position if user scrolled up significantly (> 800px from bottom).
+// Otherwise restores to bottom on re-entry.
+const savedScrollPositions = new Map<string, { distFromBottom: number }>();
+const MIN_DIST_TO_SAVE = 800; // px — don't save if just slightly scrolled
+
 /** Flatten messages + date separators into a single virtual list */
 interface VirtualItem {
   id: string;
@@ -188,11 +204,22 @@ const checkScroll = () => {
   const distFromBottom = scrollHeight - scrollTop - clientHeight;
   isNearBottom.value = distFromBottom < 100;
   showScrollFab.value = distFromBottom > 300;
-  if (isNearBottom.value) newMessageCount.value = 0;
+  if (isNearBottom.value) {
+    newMessageCount.value = 0;
+    // User scrolled back to bottom — clear saved position for this room
+    const roomId = chatStore.activeRoomId;
+    if (roomId) savedScrollPositions.delete(roomId);
+  } else if (distFromBottom > MIN_DIST_TO_SAVE) {
+    // User is significantly scrolled up — save position live
+    const roomId = chatStore.activeRoomId;
+    if (roomId) savedScrollPositions.set(roomId, { distFromBottom });
+  }
 };
 
-const scrollToBottom = (smooth = false) => {
+let scrollBottomTimer: ReturnType<typeof setTimeout> | undefined;
+const scrollToBottom = (smooth = false, onSettled?: () => void) => {
   newMessageCount.value = 0;
+  clearTimeout(scrollBottomTimer);
   const doScroll = () => {
     if (scrollerRef.value) {
       scrollerRef.value.scrollToBottom();
@@ -203,7 +230,17 @@ const scrollToBottom = (smooth = false) => {
       });
     }
   };
-  nextTick(doScroll);
+  nextTick(() => {
+    doScroll();
+    requestAnimationFrame(() => {
+      doScroll();
+      // Final pass after images/avatars settle, then signal done
+      scrollBottomTimer = setTimeout(() => {
+        doScroll();
+        onSettled?.();
+      }, 150);
+    });
+  });
 };
 
 // --- Message entrance animation ---
@@ -217,9 +254,12 @@ let dateHideTimer: ReturnType<typeof setTimeout> | undefined;
 // Load messages when active room changes
 watch(
   () => chatStore.activeRoomId,
-  async (roomId) => {
+  async (roomId, oldRoomId) => {
+    // Scroll position is tracked live in checkScroll().
+    // No need to save here — it's already up to date in savedScrollPositions.
+
     if (roomId) {
-      // Suppress length watcher + hide scroller during the whole switch
+      // Reset state for new room
       switching.value = true;
       settled.value = false;
       newMessageCount.value = 0;
@@ -229,23 +269,73 @@ watch(
       recentMessageIds.value.clear();
       isNearBottom.value = true;
 
-      // Pre-load cached messages so they're ready when skeleton hides
+      // 1. Show cached messages instantly (Telegram-style: no loading screen)
       await chatStore.loadCachedMessages(roomId);
-      loading.value = true;
+      const hasCached = chatStore.activeMessages.length > 0;
 
-      try {
-        await loadMessages(roomId);
-      } finally {
+      if (hasCached) {
+        // Cache hit — keep scroller hidden until scroll position is set
         loading.value = false;
-      }
+        await nextTick();
 
-      // Scroll to bottom, then reveal once the DOM has painted
-      scrollToBottom();
-      await nextTick();
-      requestAnimationFrame(() => {
-        settled.value = true;
-        switching.value = false;
-      });
+        // Restore scroll position or go to bottom
+        const saved = savedScrollPositions.get(roomId);
+        if (saved) {
+          const el = getScrollContainer();
+          if (el) el.scrollTop = el.scrollHeight - el.clientHeight - saved.distFromBottom;
+          savedScrollPositions.delete(roomId);
+          // Reveal after restoring saved position
+          await nextTick();
+          requestAnimationFrame(() => {
+            settled.value = true;
+            switching.value = false;
+            checkScroll();
+          });
+        } else {
+          await nextTick();
+          requestAnimationFrame(() => {
+            scrollToBottom(false, () => {
+              settled.value = true;
+              switching.value = false;
+              checkScroll();
+            });
+          });
+        }
+
+        // 2. Fetch fresh messages from server in background (silent update)
+        loadMessages(roomId).catch(() => {});
+      } else {
+        // No cache — show skeleton, wait for server
+        loading.value = true;
+        try {
+          await loadMessages(roomId);
+        } finally {
+          loading.value = false;
+        }
+
+        const saved = savedScrollPositions.get(roomId);
+        if (saved) {
+          await nextTick();
+          const el = getScrollContainer();
+          if (el) el.scrollTop = el.scrollHeight - el.clientHeight - saved.distFromBottom;
+          savedScrollPositions.delete(roomId);
+          await nextTick();
+          requestAnimationFrame(() => {
+            settled.value = true;
+            switching.value = false;
+            checkScroll();
+          });
+        } else {
+          await nextTick();
+          requestAnimationFrame(() => {
+            scrollToBottom(false, () => {
+              settled.value = true;
+              switching.value = false;
+              checkScroll();
+            });
+          });
+        }
+      }
     }
   },
   { immediate: true },
@@ -327,24 +417,25 @@ const onScroll = () => {
   checkScroll();
   updateFloatingDate();
 
-  // Load more when scrolled near the top
+  // Load more when scrolled near the top (Telegram-style smooth pagination)
   const container = getScrollContainer();
   if (!container) return;
   const { scrollTop } = container;
-  if (scrollTop < 200 && !loadingMore.value && hasMore.value) {
+  if (scrollTop < 400 && !loadingMore.value && hasMore.value) {
     const roomId = chatStore.activeRoomId;
     if (!roomId) return;
     const prevScrollHeight = container.scrollHeight;
     loadingMore.value = true;
     chatStore.loadMoreMessages(roomId).then((more) => {
       hasMore.value = more;
-      loadingMore.value = false;
+      // Preserve scroll position: keep the same content in view after new messages prepend
       nextTick(() => {
         const el = getScrollContainer();
         if (el) {
           const newScrollHeight = el.scrollHeight;
           el.scrollTop += newScrollHeight - prevScrollHeight;
         }
+        loadingMore.value = false;
       });
     });
   }
@@ -473,6 +564,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
     </div>
 
     <!-- Virtualized Messages -->
+    <!-- Loading-more spinner at top (inside scroller's before slot) -->
     <DynamicScroller
       v-else
       ref="scrollerRef"
@@ -480,8 +572,16 @@ defineExpose({ scrollToMessage, setSearchQuery });
       :min-item-size="48"
       key-field="id"
       class="h-full overflow-y-auto px-4 py-3"
-      :style="{ opacity: settled ? 1 : 0 }"
+      :style="{ opacity: settled ? 1 : 0, transition: 'opacity 0.15s ease-out' }"
     >
+      <template #before>
+        <div
+          v-if="loadingMore"
+          class="flex justify-center py-3"
+        >
+          <span class="inline-block h-5 w-5 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+        </div>
+      </template>
       <template #default="{ item, index, active }">
         <DynamicScrollerItem
           :item="item"
@@ -491,6 +591,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
             item.type === 'message' ? item.message?.content : item.label,
             item.message?.fileInfo?.w,
             item.message?.reactions ? Object.keys(item.message.reactions).length : 0,
+            item.message?.deleted,
           ]"
         >
           <!-- Pagination happens silently (Telegram-style, no spinner) -->
@@ -498,7 +599,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
           <!-- Date separator (use padding instead of margin — DynamicScroller ignores margins) -->
           <div
             v-if="item.type === 'date-separator'"
-            class="flex justify-center py-3"
+            class="mx-auto flex max-w-6xl justify-center py-3"
             :data-date-label="item.label"
           >
             <span class="rounded-full bg-neutral-grad-0/80 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">
@@ -509,6 +610,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
           <!-- Call event card (bubble-style, aligned like a message) -->
           <div
             v-else-if="item.type === 'message' && item.message?.callInfo"
+            class="mx-auto max-w-6xl"
             :data-message-id="item.message.id"
             :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
           >
@@ -520,7 +622,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
               <div v-if="item.message.senderId !== authStore.address && themeStore.showAvatarsInChat" class="shrink-0 self-end">
                 <UserAvatar :address="item.message.senderId" size="sm" />
               </div>
-              <div class="min-w-0 max-w-[70%]">
+              <div class="min-w-0 max-w-[80%]">
                 <CallEventCard
                   :message="item.message"
                   :is-own="item.message.senderId === authStore.address"
@@ -533,22 +635,24 @@ defineExpose({ scrollToMessage, setSearchQuery });
           <!-- System message (join/leave/kick/name change) -->
           <div
             v-else-if="item.type === 'message' && item.message && item.message.type === MessageType.system"
-            class="flex justify-center py-2"
+            class="mx-auto flex max-w-6xl justify-center py-2"
             :data-message-id="item.message.id"
           >
             <span class="rounded-full bg-neutral-grad-0/60 px-3 py-1 text-center text-[11px] text-text-on-main-bg-color">
-              {{ item.message.content }}
+              {{ resolveSystemMsg(item.message) }}
             </span>
           </div>
 
           <!-- Message (wrapped with padding — DynamicScroller ignores margins for height calc) -->
           <div
             v-else-if="item.type === 'message' && item.message"
-            :class="getMsgEnterClass(item.message)"
+            :class="[getMsgEnterClass(item.message), { 'context-highlight': contextMenu.show && contextMenu.message?.id === item.message.id }]"
             :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
             :data-message-id="item.message.id"
           >
+            <div class="mx-auto max-w-6xl">
             <MessageBubble
+              :key="item.message.id + (item.message.deleted ? '-del' : '')"
               :message="item.message"
               :is-own="item.message.senderId === authStore.address"
               :is-group="isGroup"
@@ -567,10 +671,11 @@ defineExpose({ scrollToMessage, setSearchQuery });
                 <UserAvatar :address="item.message.senderId" size="sm" />
               </template>
             </MessageBubble>
+            </div>
           </div>
 
           <!-- Typing indicator -->
-          <div v-else-if="item.type === 'typing'" class="flex items-center gap-2 px-10 py-1">
+          <div v-else-if="item.type === 'typing'" class="mx-auto flex max-w-6xl items-center gap-2 px-10 py-1">
             <div class="flex gap-0.5">
               <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-text-on-main-bg-color [animation-delay:-0.3s]" />
               <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-text-on-main-bg-color [animation-delay:-0.15s]" />
@@ -701,11 +806,17 @@ defineExpose({ scrollToMessage, setSearchQuery });
 
 <style>
 @keyframes search-flash {
-  0% { background-color: rgba(var(--color-bg-ac-rgb, 59 130 246), 0.25); }
+  0% { background-color: rgba(var(--color-bg-ac-rgb, 59, 130, 246), 0.25); }
   100% { background-color: transparent; }
 }
 .search-highlight {
   animation: search-flash 1.5s ease-out;
   border-radius: 8px;
+}
+
+/* Context menu highlight — full-width background */
+.context-highlight {
+  background-color: rgba(var(--color-bg-ac-rgb, 59, 130, 246), 0.08);
+  transition: background-color 0.15s ease;
 }
 </style>

@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
+import { useChatStore } from "@/entities/chat";
+import { useContacts } from "@/features/contacts";
 import { useToast } from "@/shared/lib/use-toast";
 import Toast from "@/shared/ui/toast/Toast.vue";
 import TitleBar from "@/widgets/title-bar/TitleBar.vue";
 import IncomingCallModal from "@/features/video-calls/ui/IncomingCallModal.vue";
 import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
+import { useRouter } from "vue-router";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 
@@ -17,6 +20,60 @@ provide(EAppProviders.AppRoutes, AppRoutes);
 provide(EAppProviders.AppPages, AppPages);
 
 const authStore = useAuthStore();
+const chatStore = useChatStore();
+const router = useRouter();
+
+const processJoinRoom = async () => {
+  if (!authStore.isAuthenticated || !authStore.matrixReady) return;
+
+  const roomId = localStorage.getItem("bastyon-chat-join-room");
+  if (!roomId) return;
+
+  localStorage.removeItem("bastyon-chat-join-room");
+
+  try {
+    const ok = await chatStore.joinRoomById(roomId);
+    if (ok) {
+      router.push({ name: "ChatPage" });
+    }
+  } catch (e) {
+    console.error("[App] join room error:", e);
+  }
+};
+
+const processReferral = async () => {
+  if (!authStore.isAuthenticated || !authStore.matrixReady) return;
+
+  const ref = localStorage.getItem("bastyon-chat-referral");
+  if (!ref) return;
+
+  // Remove immediately to prevent duplicate processing
+  localStorage.removeItem("bastyon-chat-referral");
+
+  // Don't create chat with yourself
+  if (ref === authStore.address) return;
+
+  try {
+    const { getOrCreateRoom } = useContacts();
+    const roomId = await getOrCreateRoom(ref);
+    if (roomId) {
+      router.push({ name: "ChatPage" });
+    }
+  } catch (e) {
+    console.error("[App] referral processing error:", e);
+  }
+};
+
+// Watch for Matrix becoming ready (e.g., after registration poll completes)
+watch(
+  () => authStore.matrixReady,
+  (ready) => {
+    if (ready) {
+      if (localStorage.getItem("bastyon-chat-referral")) processReferral();
+      if (localStorage.getItem("bastyon-chat-join-room")) processJoinRoom();
+    }
+  },
+);
 
 const isMobile = ref(window.innerWidth < 768);
 const onResize = () => { isMobile.value = window.innerWidth < 768; };
@@ -49,10 +106,17 @@ onMounted(async () => {
     console.error("[App] fetchUserInfo error:", e);
   }
 
-  // Initialize Matrix on reload if already logged in
-  if (authStore.isAuthenticated && !authStore.matrixReady) {
+  // If registration is still pending from a previous session, resume polling
+  if (authStore.isAuthenticated && authStore.registrationPending) {
+    authStore.resumeRegistrationPoll();
+  } else if (authStore.isAuthenticated && !authStore.matrixReady) {
+    // Initialize Matrix on reload if already logged in
     await authStore.initMatrix();
   }
+
+  // Process referral / join links after Matrix is ready
+  await processReferral();
+  await processJoinRoom();
 });
 
 onUnmounted(() => {

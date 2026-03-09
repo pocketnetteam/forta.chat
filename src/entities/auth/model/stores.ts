@@ -94,6 +94,31 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const privateKey = ref(LSAuthData.privateKey);
   const userInfo = ref<UserData>();
 
+  // Registration state
+  const regMnemonic = ref<string | null>(null);
+  const regAddress = ref<string | null>(null);
+  const regPrivateKeyHex = ref<string | null>(null);
+  const regProxyId = ref<string | null>(null);
+  const regCaptchaId = ref<string | null>(null);
+  const regCaptchaDone = ref(false);
+
+  // Post-registration: account pending blockchain confirmation (persisted in LS)
+  const { setLSValue: setLSRegPending, value: LSRegPending } =
+    useLocalStorage<boolean>("registration_pending", false);
+  const registrationPending = ref(LSRegPending);
+  let registrationPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Pending registration profile: stored until PKOIN arrives and UserInfo is broadcast
+  type PendingRegProfile = { name: string; language: string; about: string; image?: string; encPublicKeys: string[] };
+  const { setLSValue: setLSRegProfile, value: LSRegProfile } =
+    useLocalStorage<PendingRegProfile | null>("registration_profile", null);
+  const pendingRegProfile = ref(LSRegProfile);
+
+  const setPendingRegProfile = (val: PendingRegProfile | null) => {
+    pendingRegProfile.value = val;
+    setLSRegProfile(val);
+  };
+
   // Matrix-related state
   const matrixReady = ref(false);
   const matrixError = ref<string | null>(null);
@@ -225,20 +250,25 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
       matrixService.setHandlers({
-        onSync: () => {
-          chatStore.refreshRooms();
+        onSync: (state) => {
+          chatStore.refreshRooms(state);
         },
         onTimeline: (event: unknown, room: unknown) => {
-          chatStore.handleTimelineEvent(event, room as string);
+          const roomId = typeof room === "string" ? room : (room as any)?.roomId;
+          if (roomId) chatStore.markRoomChanged(roomId);
+          if (roomId) chatStore.handleTimelineEvent(event, roomId);
         },
-        onMembership: () => {
+        onMembership: (_event: unknown, member: unknown) => {
+          const roomId = (member as any)?.roomId as string;
+          if (roomId) chatStore.markRoomChanged(roomId);
           chatStore.refreshRooms();
         },
         onMyMembership: (_room: unknown, membership: string, prevMembership: string | undefined) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const roomId = (_room as any)?.roomId as string;
+          if (roomId) chatStore.markRoomChanged(roomId);
           // When kicked/banned from a room, remove it immediately from the UI
           if (prevMembership === "join" && (membership === "leave" || membership === "ban")) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const roomId = (_room as any)?.roomId as string;
             if (roomId) {
               chatStore.handleKicked(roomId);
             }
@@ -288,9 +318,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           console.warn("[auth] Failed to init call tab lock:", err);
         });
 
-        // Explicitly load rooms immediately — the onSync callback may have
-        // already fired before handlers were wired.
-        chatStore.refreshRoomsNow();
+        // Note: rooms are loaded by the onSync("PREPARED") callback which
+        // fires once the initial sync completes. Handlers are wired before
+        // startClient(), so the event cannot be missed. Calling refreshRoomsNow()
+        // here would run with 0 rooms (sync hasn't finished) and poison the
+        // IndexedDB cache with an empty array.
       } else {
         console.error("[auth] Matrix client NOT ready, error:", matrixService.error);
         matrixError.value = matrixService.error || "Matrix init failed";
@@ -364,16 +396,234 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     setAuthData({ address: null, privateKey: null });
     userInfo.value = undefined;
+    setRegistrationPending(false);
+    setPendingRegProfile(null);
+    stopRegistrationPoll();
   };
+
+  // ── Registration methods ──
+
+  const generateRegistrationKeys = () => {
+    const mnemonic = bitcoin.bip39.generateMnemonic();
+    const keyPair = createKeyPair(mnemonic);
+    const addr = getAddressFromPubKey(keyPair.publicKey);
+    if (!addr) throw new Error("Failed to derive address from generated keys");
+
+    regMnemonic.value = mnemonic;
+    regAddress.value = addr;
+    regPrivateKeyHex.value = convertToHexString(keyPair.privateKey);
+
+    // Set user context so fetchauth can sign requests (required for captcha)
+    PocketnetInstanceConfigurator.setUserAddress(addr);
+    PocketnetInstanceConfigurator.setUserGetKeyPairFc(() => createKeyPair(mnemonic));
+  };
+
+  const findRegistrationProxy = async () => {
+    const proxy = await appInitializer.getRegistrationProxy();
+    if (!proxy) throw new Error("No registration proxy available");
+    regProxyId.value = proxy.id;
+    return proxy;
+  };
+
+  const fetchCaptcha = async () => {
+    if (!regProxyId.value) throw new Error("No proxy selected");
+    const result = await appInitializer.getCaptcha(regProxyId.value, regCaptchaId.value || undefined);
+    if (!result) throw new Error("Failed to fetch captcha");
+    regCaptchaId.value = result.id;
+    regCaptchaDone.value = false;
+    return result;
+  };
+
+  const submitCaptcha = async (text: string) => {
+    if (!regProxyId.value || !regCaptchaId.value) throw new Error("No captcha in progress");
+    const result = await appInitializer.solveCaptcha(regProxyId.value, regCaptchaId.value, text);
+    if (!result || !result.done) {
+      regCaptchaDone.value = false;
+      throw new Error("Incorrect captcha solution");
+    }
+    regCaptchaDone.value = true;
+    return result;
+  };
+
+  const register = async (profile: { name: string; language: string; about: string; image?: string }) => {
+    if (!regAddress.value || !regCaptchaId.value || !regProxyId.value || !regMnemonic.value) {
+      throw new Error("Registration state incomplete");
+    }
+
+    // 1. Request free registration PKOIN
+    await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
+
+    // 2. Generate encryption public keys (12 BIP32 keys) for chat encryption
+    const encKeys = generateEncryptionKeys(regPrivateKeyHex.value!);
+    const encPublicKeys = encKeys.map(k => k.public);
+
+    // 3. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
+    setPendingRegProfile({ ...profile, encPublicKeys });
+
+    // 4. Auto-login with the generated mnemonic (sets up SDK account + Matrix)
+    const mnemonic = regMnemonic.value;
+    clearRegistrationState();
+
+    // Mark as pending — blockchain hasn't confirmed yet
+    setRegistrationPending(true);
+
+    await login(mnemonic);
+
+    // 5. Start polling — will broadcast UserInfo when PKOIN arrives, then wait for confirmation
+    startRegistrationPoll();
+  };
+
+  const setRegistrationPending = (val: boolean) => {
+    registrationPending.value = val;
+    setLSRegPending(val);
+  };
+
+  /** Poll blockchain every 10s. Two phases:
+   *  Phase 1: Wait for PKOIN (unspents) to arrive, then broadcast UserInfo.
+   *  Phase 2: Wait for UserInfo to be confirmed on-chain (getuserstate + Actions status). */
+  const startRegistrationPoll = () => {
+    if (registrationPollTimer) clearInterval(registrationPollTimer);
+    const startTime = Date.now();
+    const MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes fallback
+    console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
+
+    registrationPollTimer = setInterval(async () => {
+      if (!address.value) {
+        stopRegistrationPoll();
+        return;
+      }
+      try {
+        // Phase 1: Broadcast UserInfo once PKOIN arrives
+        if (pendingRegProfile.value) {
+          const hasUnspents = await appInitializer.checkUnspents(address.value);
+          if (hasUnspents) {
+            console.log("[auth] PKOIN received, broadcasting UserInfo...");
+            await appInitializer.syncNodeTime();
+            const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
+
+            // Re-initialize SDK account so it sees the new unspents
+            await appInitializer.initializeAndFetchUserData(address.value);
+
+            await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
+            console.log("[auth] UserInfo broadcast requested, moving to phase 2");
+            setPendingRegProfile(null);
+          } else {
+            console.log("[auth] Waiting for PKOIN...");
+          }
+          return;
+        }
+
+        // Phase 2: Wait for blockchain confirmation of UserInfo
+        // Check 1: Actions system local status (instant)
+        const actionsStatus = appInitializer.getAccountRegistrationStatus();
+        console.log("[auth] Registration poll — actions:", actionsStatus);
+
+        if (actionsStatus === 'registered') {
+          console.log("[auth] Registration confirmed via Actions system!");
+          await onRegistrationConfirmed();
+          return;
+        }
+
+        // Check 2: Direct blockchain RPC (fallback if Actions system can't find account)
+        const confirmed = await appInitializer.checkUserRegistered(address.value);
+        if (confirmed) {
+          console.log("[auth] Registration confirmed on blockchain!");
+          await onRegistrationConfirmed();
+          return;
+        }
+
+        console.log("[auth] Waiting for blockchain confirmation...");
+
+        // Fallback timeout
+        if (Date.now() - startTime > MAX_WAIT_MS) {
+          console.warn("[auth] Registration poll timeout, proceeding anyway");
+          setRegistrationPending(false);
+          stopRegistrationPoll();
+        }
+      } catch (e) {
+        console.warn("[auth] Registration poll error:", e);
+      }
+    }, 10000);
+
+    async function onRegistrationConfirmed() {
+      // Load full user data
+      await appInitializer.initializeAndFetchUserData(
+        address.value!,
+        (data: UserData) => setUserInfo(data)
+      );
+      setRegistrationPending(false);
+      stopRegistrationPoll();
+      // Re-init Matrix if needed (to pick up updated user info)
+      if (!matrixReady.value) {
+        PocketnetInstanceConfigurator.setUserAddress(address.value!);
+        PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
+          createKeyPair(privateKey.value!)
+        );
+        await initMatrix();
+      }
+    }
+  };
+
+  const stopRegistrationPoll = () => {
+    if (registrationPollTimer) {
+      clearInterval(registrationPollTimer);
+      registrationPollTimer = null;
+    }
+  };
+
+  /** Resume polling on page reload if registration was pending */
+  const resumeRegistrationPoll = () => {
+    if (registrationPending.value && !registrationPollTimer) {
+      // Ensure POCKETNETINSTANCE has user address set (might not be if fetchUserInfo failed)
+      if (address.value && privateKey.value) {
+        PocketnetInstanceConfigurator.setUserAddress(address.value);
+        PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
+          createKeyPair(privateKey.value!)
+        );
+      }
+      startRegistrationPoll();
+    }
+  };
+
+  const clearRegistrationState = () => {
+    regMnemonic.value = null;
+    regAddress.value = null;
+    regPrivateKeyHex.value = null;
+    regProxyId.value = null;
+    regCaptchaId.value = null;
+    regCaptchaDone.value = false;
+  };
+
+  /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */
+  const loadPost = (txid: string) => appInitializer.loadPost(txid);
+
+  const loadPostScores = (txid: string) => appInitializer.loadPostScores(txid);
+  const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
+  const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
+  const submitUpvote = (txid: string, value: number) => appInitializer.submitUpvote(txid, value, address.value!);
+  const submitComment = (txid: string, message: string, parentId?: string) => appInitializer.submitComment(txid, message, parentId);
+
+  /** Get cached user data by raw address */
+  const getBastyonUserData = (addr: string) => appInitializer.getUserData(addr);
 
   return {
     address,
+    clearRegistrationState,
     editUserData,
+    fetchCaptcha,
     fetchUserInfo,
+    findRegistrationProxy,
+    generateRegistrationKeys,
+    getBastyonUserData,
     initMatrix,
     isAuthenticated,
     isEditingUserData,
     isLoggingIn,
+    loadMyPostScore,
+    loadPost,
+    loadPostComments,
+    loadPostScores,
+    loadUsersInfo: (addresses: string[]) => appInitializer.loadUsersInfo(addresses),
     login,
     logout,
     matrixError,
@@ -381,6 +631,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     matrixReady,
     pcrypto,
     privateKey,
+    regAddress,
+    regCaptchaDone,
+    regMnemonic,
+    regProxyId,
+    register,
+    registrationPending,
+    resumeRegistrationPoll,
+    submitCaptcha,
+    submitComment,
+    submitUpvote,
     userInfo
   };
 });

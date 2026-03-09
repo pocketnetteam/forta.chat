@@ -5,6 +5,7 @@ interface Props {
   show: boolean;
   height?: string;
   dragDismiss?: boolean;
+  ariaLabel?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -41,6 +42,25 @@ const onDragEnd = () => {
   }
   translateY.value = 0;
 };
+
+const onKeydown = (e: KeyboardEvent) => {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    emit("close");
+  }
+};
+
+watch(() => props.show, (val) => {
+  if (val) {
+    document.addEventListener("keydown", onKeydown);
+  } else {
+    document.removeEventListener("keydown", onKeydown);
+  }
+});
+
+onUnmounted(() => {
+  document.removeEventListener("keydown", onKeydown);
+});
 </script>
 
 <template>
@@ -55,6 +75,9 @@ const onDragEnd = () => {
           <div
             v-if="props.show"
             ref="sheetRef"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="props.ariaLabel"
             class="w-full max-w-lg rounded-t-2xl bg-background-total-theme pb-safe"
             :style="{
               maxHeight: '85vh',

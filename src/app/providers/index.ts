@@ -12,7 +12,10 @@ import { useLocaleStore } from "@/entities/locale";
 
 export const setupProviders = async (app: App) => {
   setupAssets();
-  await setupChatScripts();
+
+  // Start loading chat scripts early — runs in parallel with Pinia/theme/locale.
+  const scriptsReady = setupChatScripts();
+
   app.use(createPinia());
   setupInitialTheme();
   useLocaleStore(); // sets document.documentElement.lang from persisted locale
@@ -23,6 +26,9 @@ export const setupProviders = async (app: App) => {
     useTorStore().init();
   }
 
+  // Scripts must finish before router mounts the app — components
+  // need API globals (sdk, actions, etc.) available in onMounted.
+  await scriptsReady;
   await setupRouter(app);
 };
 

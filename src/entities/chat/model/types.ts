@@ -71,6 +71,16 @@ export interface Message {
   };
   /** Poll metadata — present when type === poll */
   pollInfo?: PollInfo;
+  /** Transfer metadata — present when type === transfer */
+  transferInfo?: TransferInfo;
+  /** Whether this message has been deleted/redacted */
+  deleted?: boolean;
+  /** For system messages: template + addresses for dynamic name resolution at render time */
+  systemMeta?: {
+    template: string;       // e.g. "{sender} joined the chat"
+    senderAddr: string;     // raw Bastyon address of the actor
+    targetAddr?: string;    // raw Bastyon address of the target (for add/remove/invite)
+  };
 }
 
 export enum MessageStatus {
@@ -89,6 +99,7 @@ export enum MessageType {
   audio = "audio",
   system = "system",
   poll = "poll",
+  transfer = "transfer",
 }
 
 export interface PollInfo {
@@ -102,4 +113,14 @@ export interface PollInfo {
   ended?: boolean;
   /** Address of the user who ended the poll */
   endedBy?: string;
+}
+
+export interface TransferInfo {
+  txId: string;
+  amount: number;
+  /** Sender blockchain address */
+  from: string;
+  /** Receiver blockchain address */
+  to: string;
+  message?: string;
 }

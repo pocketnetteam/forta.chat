@@ -9,6 +9,11 @@ import Avatar from "@/shared/ui/avatar/Avatar.vue";
 const { searchQuery, searchResults, isSearching, isCreatingRoom, debouncedSearch, getOrCreateRoom } = useContacts();
 const chatStore = useChatStore();
 const { t } = useI18n();
+const searchInputRef = ref<HTMLInputElement>();
+
+onMounted(() => {
+  nextTick(() => searchInputRef.value?.focus());
+});
 
 const emit = defineEmits<{
   select: [address: string];
@@ -36,17 +41,29 @@ const handleSelectRoom = (room: ChatRoom) => {
   searchResults.value = [];
 };
 
-/** Rooms matching the search query */
+/** Rooms matching the search query — searches by name, resolved name, and member address */
 const matchingRooms = computed(() => {
   const q = searchQuery.value.toLowerCase().trim();
   if (!q) return [];
-  return chatStore.sortedRooms.filter(r => r.name.toLowerCase().includes(q));
+  return chatStore.sortedRooms.filter(r => {
+    // Match by stored room name
+    if (r.name.toLowerCase().includes(q)) return true;
+    // Match by member address (from avatar for 1:1 chats)
+    if (r.avatar?.startsWith("__pocketnet__:")) {
+      const addr = r.avatar.slice("__pocketnet__:".length);
+      if (addr.toLowerCase().includes(q)) return true;
+    }
+    // Match by any member address
+    if (r.members.some(m => m.toLowerCase().includes(q))) return true;
+    return false;
+  });
 });
 </script>
 
 <template>
   <div class="flex flex-col gap-2">
     <input
+      ref="searchInputRef"
       v-model="searchQuery"
       :placeholder="t('contactSearch.placeholder')"
       class="rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"

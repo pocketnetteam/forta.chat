@@ -3,6 +3,40 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 
+export interface BastyonPostData {
+  txid: string;
+  address: string;
+  caption: string;
+  message: string;
+  images: string[];
+  url: string;
+  tags: string[];
+  settings: { v?: string };
+  time: number;
+  scoreSum?: number;
+  scoreCnt?: number;
+  myVal?: number;
+}
+
+export interface PostScore {
+  address: string;
+  value: number;
+  posttxid: string;
+}
+
+export interface PostComment {
+  id: string;
+  postid: string;
+  parentid: string;
+  answerid: string;
+  address: string;
+  message: string;
+  time: number;
+  scoreUp: number;
+  scoreDown: number;
+  myScore?: number;
+}
+
 type OnLoadUserData = (userData: UserData) => void;
 
 export class AppInitializer {
@@ -10,6 +44,7 @@ export class AppInitializer {
   private api: InstanceType<typeof Api> | null = null;
   private psdk: InstanceType<typeof pSDK> | null = null;
   private _available = false;
+  private postCache = new Map<string, BastyonPostData>();
 
   constructor(pocketnetInstance: PocketnetInstanceType) {
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
@@ -29,7 +64,7 @@ export class AppInitializer {
     this._available = true;
   }
 
-  private syncNodeTime() {
+  syncNodeTime() {
     if (!this.api || !this.actions) return Promise.resolve();
     return this.api.rpc("getnodeinfo").then(getnodeinfoResult => {
       const timeDifference =
@@ -37,6 +72,96 @@ export class AppInitializer {
       PocketnetInstanceConfigurator.setTimeDifference(timeDifference);
       this.actions!.prepare();
     });
+  }
+
+  /** Find a proxy node that has a registration wallet.
+   *  Ensures the API is initialized and ready before querying. */
+  async getRegistrationProxy(): Promise<{ id: string } | null> {
+    if (!this.api) return null;
+    try {
+      await this.initApi();
+      await this.waitForApiReady();
+      // Use proxywithwallet() instead of proxywithwalletls() to avoid
+      // globalpreloader() which depends on jQuery ($) not available in chat app
+      const proxy = await this.api.get.proxywithwallet();
+      return proxy ? { id: proxy.id ?? proxy } : null;
+    } catch (e) {
+      console.error("[appInit] getRegistrationProxy error:", e);
+      return null;
+    }
+  }
+
+  /** Fetch a captcha image from the proxy node.
+   *  Response shape: { id, img (SVG string), done } — possibly wrapped in `data`. */
+  async getCaptcha(proxyId: string, currentCaptchaId?: string) {
+    if (!this.api) return null;
+    try {
+      const payload: Record<string, unknown> = { captcha: currentCaptchaId || null };
+      const raw = await this.api.fetchauth("captcha", payload, { proxy: proxyId });
+      // fetchauth may return { data: { id, img, done } } or { id, img, done } directly
+      const result = raw?.data ?? raw;
+      return result;
+    } catch (e) {
+      console.error("[appInit] getCaptcha error:", e);
+      return null;
+    }
+  }
+
+  /** Submit captcha solution to the proxy node.
+   *  Response shape: { id, done: true } on success. */
+  async solveCaptcha(proxyId: string, captchaId: string, text: string) {
+    if (!this.api) return null;
+    try {
+      const raw = await this.api.fetchauth(
+        "makecaptcha",
+        { captcha: captchaId, text, angles: null },
+        { proxy: proxyId }
+      );
+      const result = raw?.data ?? raw;
+      return result;
+    } catch (e) {
+      console.error("[appInit] solveCaptcha error:", e);
+      return null;
+    }
+  }
+
+  /** Request free registration PKOIN from the proxy node.
+   *  Uses the same endpoint as Bastyon: free/balance with key='registration'. */
+  async requestFreeRegistration(address: string, captchaId: string, proxyId: string) {
+    if (!this.api) return null;
+    try {
+      const raw = await this.api.fetchauth(
+        "free/balance",
+        { address, captcha: captchaId, key: "registration" },
+        { proxy: proxyId }
+      );
+      const result = raw?.data ?? raw;
+      return result;
+    } catch (e) {
+      console.error("[appInit] requestFreeRegistration error:", e);
+      throw e;
+    }
+  }
+
+  /** Broadcast a UserInfo transaction for a newly registered account.
+   *  Includes encryption public keys so other users can encrypt messages for this account. */
+  async registerUserProfile(
+    address: string,
+    profile: { name: string; language: string; about: string },
+    encryptionPublicKeys?: string[],
+    image?: string
+  ) {
+    if (!this.actions) return null;
+    const userInfo = new UserInfo();
+    userInfo.name.set(superXSS(profile.name));
+    userInfo.language.set(superXSS(profile.language));
+    userInfo.about.set(superXSS(profile.about));
+    userInfo.image.set(superXSS(image || ""));
+    userInfo.site.set("");
+    userInfo.addresses.set([]);
+    userInfo.ref.set(null);
+    userInfo.keys.set(encryptionPublicKeys ?? null);
+    return this.actions.addActionAndSendIfCan(userInfo, null, address);
   }
 
   async editUserData({
@@ -102,6 +227,13 @@ export class AppInitializer {
     await this.psdk.userInfo.load(addresses, true);
   }
 
+  /** Load user info for multiple addresses into full (non-light) cache.
+   *  After this call, getUserData(address) will return the profile data. */
+  async loadUsersBatch(addresses: string[]): Promise<void> {
+    if (!this.psdk || !addresses.length) return;
+    await this.psdk.userInfo.load(addresses);
+  }
+
   /** Get cached user data by raw address */
   getUserData(address: string): UserData | null {
     if (!this.psdk) return null;
@@ -141,6 +273,220 @@ export class AppInitializer {
     } catch (e) {
       console.error("[appInit] searchUsers error:", e);
       return [];
+    }
+  }
+
+  async loadPost(txid: string): Promise<BastyonPostData | null> {
+    const cached = this.postCache.get(txid);
+    if (cached) return cached;
+    if (!this.api) {
+      console.warn("[appInit] loadPost: api not available");
+      return null;
+    }
+    try {
+      const data = await this.api.rpc("getrawtransactionwithmessagebyid", [[txid]]);
+
+      // Response may be a single object or an array — normalize
+      let raw: Record<string, unknown> | undefined;
+      if (Array.isArray(data)) {
+        raw = data[0] as Record<string, unknown> | undefined;
+      } else if (data && typeof data === "object") {
+        raw = data as Record<string, unknown>;
+      }
+      if (!raw) {
+        console.warn("[appInit] loadPost: empty response for", txid);
+        return null;
+      }
+
+      // Post content fields may be at top level or nested in 'msg'/'p'
+      const content = (raw.msg ?? raw.p ?? raw) as Record<string, unknown>;
+
+      const tryDecode = (val: unknown): string => {
+        if (typeof val !== "string") return "";
+        try { return decodeURIComponent(val); } catch { return val; }
+      };
+
+      const rawImages = content.i ?? content.images;
+      const rawTags = content.t ?? content.tags;
+
+      const post: BastyonPostData = {
+        txid,
+        address: (raw.address as string) ?? (content.address as string) ?? "",
+        caption: tryDecode(content.c ?? content.caption),
+        message: tryDecode(content.m ?? content.message),
+        images: Array.isArray(rawImages) ? (rawImages as string[]) : [],
+        url: tryDecode(content.u ?? content.url),
+        tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
+        settings: (content.s as { v?: string }) ?? (content.settings as { v?: string }) ?? {},
+        time: (raw.time as number) ?? (content.time as number) ?? 0,
+      };
+      this.postCache.set(txid, post);
+      return post;
+    } catch (e) {
+      console.error("[appInit] loadPost error:", e);
+      return null;
+    }
+  }
+
+  async loadPostScores(txid: string): Promise<PostScore[]> {
+    if (!this.api) return [];
+    try {
+      const data = await this.api.rpc("getpostscores", [txid]);
+      console.log("[appInit] loadPostScores raw response:", data);
+      if (!Array.isArray(data)) return [];
+      return data.map((s: any) => ({
+        address: s.address ?? "",
+        value: Number(s.value ?? 0),
+        posttxid: s.posttxid ?? txid,
+      }));
+    } catch (e) {
+      console.error("[appInit] loadPostScores error:", e);
+      return [];
+    }
+  }
+
+  async loadPostComments(txid: string, userAddress?: string): Promise<PostComment[]> {
+    if (!this.api) return [];
+    try {
+      // SDK format: getcomments(['', '', userAddress, [txids]])
+      const addr = userAddress || "";
+      const data = await this.api.rpc("getcomments", ["", "", addr, [txid]]);
+      console.log("[appInit] loadPostComments raw response:", data);
+      if (!data) return [];
+      // Response may be an object with nested data or a flat array
+      const items = Array.isArray(data) ? data : (data as any)?.data ?? [];
+      if (!Array.isArray(items)) return [];
+      return items.map((c: any) => ({
+        id: c.id ?? c.txid ?? "",
+        postid: c.postid ?? txid,
+        parentid: c.parentid ?? "",
+        answerid: c.answerid ?? "",
+        address: c.address ?? "",
+        message: typeof c.msg === "string" ? decodeURIComponent(c.msg) : (c.message ?? ""),
+        time: Number(c.time ?? 0),
+        scoreUp: Number(c.scoreUp ?? 0),
+        scoreDown: Number(c.scoreDown ?? 0),
+        myScore: c.myScore != null ? Number(c.myScore) : undefined,
+      }));
+    } catch (e) {
+      console.error("[appInit] loadPostComments error:", e);
+      return [];
+    }
+  }
+
+  async loadMyPostScore(txid: string, address: string): Promise<number | null> {
+    if (!this.api) return null;
+    try {
+      const data = await this.api.rpc("getposcores", [[txid], address]);
+      if (Array.isArray(data) && data.length > 0) {
+        return Number(data[0]?.value ?? 0);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async submitUpvote(txid: string, value: number, _address: string): Promise<boolean> {
+    if (!this.actions || !this.psdk) return false;
+    try {
+      // psdk exposes node.shares / share via SDK globals — use any to bypass missing types
+      const sdk = this.psdk as any;
+      const shareData = await new Promise<any>((resolve) => {
+        sdk.node.shares.getbyid([txid], () => {
+          resolve(sdk.share.get(txid));
+        });
+      });
+      if (!shareData) return false;
+      const upvoteShare = shareData.upvote(value);
+      if (!upvoteShare) return false;
+      await (this.actions as any).addActionAndSendIfCan(upvoteShare);
+      return true;
+    } catch (e) {
+      console.error("[appInit] submitUpvote error:", e);
+      return false;
+    }
+  }
+
+  async submitComment(txid: string, message: string, parentId?: string): Promise<boolean> {
+    if (!this.actions) {
+      console.error("[appInit] submitComment: actions not available");
+      return false;
+    }
+    try {
+      // Comment is a global Pocketnet SDK class from kit.js (replaces DOM Comment)
+      const PocketComment = (window as any).Comment;
+      console.log("[appInit] submitComment: PocketComment available:", !!PocketComment, "txid:", txid, "msg:", message.slice(0, 50));
+      if (!PocketComment) {
+        console.error("[appInit] submitComment: Comment class not found on window");
+        return false;
+      }
+      const comment = new PocketComment(txid);
+      console.log("[appInit] submitComment: comment created:", comment);
+      if (typeof comment.message?.set === "function") {
+        comment.message.set(message);
+      } else {
+        // Fallback: try direct assignment
+        console.warn("[appInit] submitComment: comment.message.set not a function, trying direct");
+        comment.msg = message;
+      }
+      if (parentId) comment.parentid = parentId;
+      const result = await (this.actions as any).addActionAndSendIfCan(comment);
+      console.log("[appInit] submitComment: action result:", result);
+      return true;
+    } catch (e) {
+      console.error("[appInit] submitComment error:", e);
+      return false;
+    }
+  }
+
+  /** Check if address has unspent outputs (PKOIN balance) via txunspent RPC.
+   *  Used to verify that free registration PKOIN has arrived before broadcasting UserInfo. */
+  async checkUnspents(address: string): Promise<boolean> {
+    if (!this.api) return false;
+    try {
+      await this.initApi();
+      await this.waitForApiReady();
+      const data = await this.api.rpc("txunspent", [[address], 1, 9999999]);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Check the Actions system's account registration status.
+   *  Uses Account.getStatus() — same as pocketnet's user.userRegistrationStatus().
+   *  Returns: 'registered', 'in_progress_transaction', 'in_progress_hasUnspents',
+   *  'in_progress_wait_unspents', 'not_in_progress', 'not_in_progress_no_processing' */
+  getAccountRegistrationStatus(): string {
+    if (!this.actions) return 'not_available';
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const account = (this.actions as any).getCurrentAccount?.();
+      if (account?.getStatus) return account.getStatus();
+      return 'not_available';
+    } catch {
+      return 'not_available';
+    }
+  }
+
+  /** Check if user account exists on the blockchain via getuserstate RPC.
+   *  Fallback check — works regardless of Actions system state.
+   *  Returns true if the account is confirmed, false if still pending. */
+  async checkUserRegistered(address: string): Promise<boolean> {
+    if (!this.api) return false;
+    try {
+      await this.initApi();
+      const result = await this.api.rpc("getuserstate", [address]);
+      if (!result) return false;
+      // getuserstate may return an object {address: ...} or an array [{address: ...}]
+      if (Array.isArray(result)) {
+        return result.length > 0 && !!(result[0] as Record<string, unknown>)?.address;
+      }
+      return !!(result as Record<string, unknown>).address;
+    } catch {
+      // error code -5 means user not found yet
+      return false;
     }
   }
 

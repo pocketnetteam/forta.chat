@@ -149,12 +149,25 @@ export class MatrixKit {
     });
   }
 
-  /** Get room members */
+  /** Get room members — combines currentState.members + summary.members
+   *  (matches original bastyon-chat mtrxkit.js usersFromChats) */
   getRoomMembers(room: Record<string, unknown>): Record<string, unknown>[] {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stateMembers = (room as any).currentState?.members as Record<string, Record<string, unknown>> | undefined;
-    if (!stateMembers) return [];
-    return Object.values(stateMembers);
+    const members = stateMembers ? Object.values(stateMembers) : [];
+    // Also include summary.members (may contain users not in currentState)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const summaryMembers = ((room as any).summary?.members ?? []) as Record<string, unknown>[];
+    if (summaryMembers.length === 0) return members;
+    // Deduplicate by userId
+    const seen = new Set(members.map(m => (m.userId as string)));
+    for (const sm of summaryMembers) {
+      if (sm.userId && !seen.has(sm.userId as string)) {
+        seen.add(sm.userId as string);
+        members.push(sm);
+      }
+    }
+    return members;
   }
 
   /** Extract users from chats for store */

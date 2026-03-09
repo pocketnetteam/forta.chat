@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed, nextTick } from "vue";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { MessageType, MessageStatus } from "@/entities/chat";
 import MessageStatusIcon from "@/features/messaging/ui/MessageStatusIcon.vue";
 import { useAuthStore } from "@/entities/auth";
 import { formatRelativeTime } from "@/shared/lib/format";
-import { stripMentionAddresses } from "@/shared/lib/message-format";
+import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
+import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
+import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
 import { useLongPress } from "@/shared/lib/gestures";
 import { ContextMenu } from "@/shared/ui/context-menu";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
 import { UserAvatar } from "@/entities/user";
+import { useUserStore } from "@/entities/user/model";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
+import { getDraft } from "@/shared/lib/drafts";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites";
@@ -22,6 +26,7 @@ const props = withDefaults(defineProps<Props>(), { filter: "all" });
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const userStore = useUserStore();
 const { t } = useI18n();
 const emit = defineEmits<{ selectRoom: [roomId: string] }>();
 
@@ -31,9 +36,98 @@ const handleSelect = (room: ChatRoom) => {
   emit("selectRoom", room.id);
 };
 
+/** Reactive map of room ID → resolved display name.
+ *  Using a computed ensures RecycleScroller re-renders when userStore.users changes. */
+const roomNameMap = computed(() => {
+  const allUsers = userStore.users;
+  const myHexId = authStore.address ? hexEncode(authStore.address) : "";
+  const map: Record<string, string> = {};
+  for (const room of chatStore.sortedRooms) {
+    map[room.id] = _resolveRoomName(room, allUsers, myHexId);
+  }
+  return map;
+});
+
+/** Resolve room display name — matches original bastyon-chat name.vue exactly:
+ *  1. For 1:1: get other members → hexDecode(hexId) → look up name in userStore → join with ", "
+ *  2. If no names found → "-"
+ *  3. If room name starts with "@" → strip "@"
+ *  4. For groups/public: use room name as-is */
+/** Check if name looks like an unresolved hash/hex (not human-readable) */
+function _isUnresolvedName(name: string): boolean {
+  if (!name || name.length < 2) return true;
+  if (/^#?[a-f0-9]{16,}$/i.test(name)) return true; // hex hash or #hex alias
+  if (/^[a-f0-9]{8}…$/i.test(name)) return true; // truncated hex
+  return false;
+}
+
+// Cache hexDecode results to avoid repeated computation
+const hexDecodeCache = new Map<string, string>();
+function cachedHexDecode(hex: string): string {
+  let result = hexDecodeCache.get(hex);
+  if (result === undefined) {
+    result = hexDecode(hex);
+    hexDecodeCache.set(hex, result);
+  }
+  return result;
+}
+
+/** Resolve member names from userStore — shared between 1:1 and group resolution */
+function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string[] {
+  const otherMembers = room.members.filter(m => m !== myHexId);
+
+  const names: string[] = [];
+  for (const hexId of otherMembers) {
+    const addr = cachedHexDecode(hexId);
+    if (/^[A-Za-z0-9]+$/.test(addr)) {
+      const user = allUsers[addr];
+      if (user?.name) { names.push(user.name); continue; }
+    }
+  }
+
+  // Fallback: try avatar address
+  if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
+    const avatarAddr = room.avatar.slice("__pocketnet__:".length);
+    const user = allUsers[avatarAddr];
+    if (user?.name && user.name !== avatarAddr) names.push(user.name);
+  }
+
+  return names;
+}
+
+function _resolveRoomName(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string {
+  if (!room.isGroup) {
+    const names = _resolveMemberNames(room, allUsers, myHexId);
+    if (names.length > 0) return names.join(", ");
+    // Fallback: show address from avatar or decoded member hex
+    if (room.avatar?.startsWith("__pocketnet__:")) {
+      return room.avatar.slice("__pocketnet__:".length);
+    }
+    const otherMembers = room.members.filter(m => m !== myHexId);
+    if (otherMembers.length > 0) {
+      const addr = cachedHexDecode(otherMembers[0]);
+      if (/^[A-Za-z0-9]+$/.test(addr)) return addr;
+    }
+    return cleanMatrixIds(room.name);
+  }
+  if (room.name?.startsWith("@")) return room.name.slice(1);
+  if (!_isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
+  const names = _resolveMemberNames(room, allUsers, myHexId);
+  if (names.length > 0) return names.join(", ");
+  return cleanMatrixIds(room.name);
+}
+
+const resolveRoomName = (room: ChatRoom): string => {
+  return roomNameMap.value[room.id] ?? cleanMatrixIds(room.name);
+};
+
+
 /** Format last message preview with type-aware icons */
 const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
   if (!msg) return t("contactList.noMessages");
+  if (msg.deleted || (!msg.content && msg.type === MessageType.text && !msg.fileInfo)) {
+    return `🚫 ${t("message.deleted")}`;
+  }
   let preview: string;
   switch (msg.type) {
     case MessageType.image:
@@ -48,18 +142,34 @@ const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
     case MessageType.file:
       preview = `📎 ${msg.content || t("message.file")}`;
       break;
-    case MessageType.system:
+    case MessageType.system: {
+      // Dynamically resolve names from systemMeta template (avoids stale truncated addresses)
+      let sysText: string;
+      if (msg.systemMeta?.template) {
+        sysText = resolveSystemText(
+          msg.systemMeta.template,
+          msg.systemMeta.senderAddr,
+          msg.systemMeta.targetAddr,
+          (addr) => chatStore.getDisplayName(addr),
+        );
+      } else {
+        sysText = cleanMatrixIds(msg.content);
+      }
       if (msg.callInfo) {
         const icon = msg.callInfo.callType === "video" ? "📹" : "📞";
-        return `${icon} ${msg.content}`;
+        return `${icon} ${sysText}`;
       }
-      // System messages already contain the actor name, no sender prefix needed
-      return msg.content;
+      return sysText;
+    }
     default:
       preview = msg.content || "";
   }
   // Strip mention hex addresses for preview (e.g. @hexid:Name → @Name)
   preview = stripMentionAddresses(preview);
+  // Replace bastyon post links with short label
+  preview = stripBastyonLinks(preview);
+  // Clean any remaining raw Matrix IDs (@hexid:server → decoded address)
+  preview = cleanMatrixIds(preview);
 
   // Add sender prefix for group chats
   if (room.isGroup && msg.senderId) {
@@ -80,11 +190,26 @@ const getTypingText = (roomId: string): string => {
   return `${others.length} typing...`;
 };
 
+// --- Drafts: reactive map of roomId → draft text ---
+// Bump version when user switches rooms (draft may have changed)
+const draftsVersion = ref(0);
+watch(() => chatStore.activeRoomId, () => { draftsVersion.value++; });
+
+/** Get draft text for a room (reactive via draftsVersion) */
+const getRoomDraft = (roomId: string): string => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  draftsVersion.value; // reactive dependency
+  return getDraft(roomId);
+};
+
 const PAGE_SIZE = 30;
 const displayLimit = ref(PAGE_SIZE);
 
 const allFilteredRooms = computed(() => {
   const rooms = chatStore.sortedRooms;
+  // Touch roomNameMap to keep reactive dependency (names resolve async)
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  roomNameMap.value;
   if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite");
   if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite");
   if (props.filter === "invites") return rooms.filter(r => r.membership === "invite");
@@ -94,8 +219,11 @@ const allFilteredRooms = computed(() => {
 const filteredRooms = computed(() => allFilteredRooms.value.slice(0, displayLimit.value));
 const hasMoreRooms = computed(() => displayLimit.value < allFilteredRooms.value.length);
 
-// Reset page when filter changes
-watch(() => props.filter, () => { displayLimit.value = PAGE_SIZE; });
+// Reset page when filter changes and reload visible profiles
+watch(() => props.filter, () => {
+  displayLimit.value = PAGE_SIZE;
+  nextTick(loadVisibleProfiles);
+});
 
 const loadMoreRooms = () => {
   if (hasMoreRooms.value) {
@@ -104,15 +232,37 @@ const loadMoreRooms = () => {
 };
 
 const scrollerRef = ref<InstanceType<typeof RecycleScroller>>();
+const ITEM_HEIGHT = 68;
+const PREFETCH_BUFFER = 10; // extra rooms to prefetch ahead of viewport
 
-const onScrollerScroll = () => {
-  if (!hasMoreRooms.value) return;
+/** Calculate which rooms are visible + buffer, then load their profiles */
+const loadVisibleProfiles = () => {
   const el = scrollerRef.value?.$el as HTMLElement | undefined;
   if (!el) return;
-  const { scrollTop, scrollHeight, clientHeight } = el;
-  if (scrollHeight - scrollTop - clientHeight < 200) {
-    loadMoreRooms();
+  const { scrollTop, clientHeight } = el;
+  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 2);
+  const lastIdx = Math.min(
+    filteredRooms.value.length - 1,
+    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + PREFETCH_BUFFER,
+  );
+  const visibleIds: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    visibleIds.push(filteredRooms.value[i].id);
   }
+  if (visibleIds.length > 0) chatStore.loadProfilesForRoomIds(visibleIds);
+};
+
+const onScrollerScroll = () => {
+  // Load more rooms (infinite scroll)
+  const el = scrollerRef.value?.$el as HTMLElement | undefined;
+  if (el && hasMoreRooms.value) {
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    if (scrollHeight - scrollTop - clientHeight < 200) {
+      loadMoreRooms();
+    }
+  }
+  // Lazy-load profiles for newly visible rooms
+  loadVisibleProfiles();
 };
 
 // Attach native scroll listener to RecycleScroller's root element
@@ -123,7 +273,11 @@ const attachScrollListener = () => {
   scrollEl?.addEventListener("scroll", onScrollerScroll, { passive: true });
 };
 
-onMounted(attachScrollListener);
+onMounted(() => {
+  attachScrollListener();
+  // Initial viewport profile load
+  nextTick(loadVisibleProfiles);
+});
 watch(scrollerRef, attachScrollListener);
 onUnmounted(() => { scrollEl?.removeEventListener("scroll", onScrollerScroll); });
 
@@ -203,9 +357,14 @@ const getRoomLongPress = (room: ChatRoom) => {
   <div class="flex flex-col">
     <div
       v-if="filteredRooms.length === 0"
-      class="p-6 text-center text-sm text-text-on-main-bg-color"
+      class="flex flex-col items-center gap-3 px-6 py-12 text-center"
     >
-      No conversations yet
+      <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-text-on-main-bg-color">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      </div>
+      <p class="text-sm text-text-on-main-bg-color">{{ t("contactList.noConversations") }}</p>
     </div>
 
     <RecycleScroller
@@ -218,7 +377,7 @@ const getRoomLongPress = (room: ChatRoom) => {
     >
       <template #default="{ item: room }">
         <button
-          class="flex h-[68px] w-full items-center gap-3 px-3 py-2.5 transition-all hover:bg-neutral-grad-0 active:scale-[0.98] active:bg-neutral-grad-0"
+          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
           :class="room.id === chatStore.activeRoomId ? 'bg-color-bg-ac/10' : ''"
           @click="handleSelect(room)"
           @contextmenu.prevent="(e: MouseEvent) => { ctxMenu = { show: true, x: e.clientX, y: e.clientY, roomId: room.id }; }"
@@ -234,7 +393,7 @@ const getRoomLongPress = (room: ChatRoom) => {
               :address="room.avatar.replace('__pocketnet__:', '')"
               size="md"
             />
-            <Avatar v-else :src="room.avatar" :name="room.name" size="md" />
+            <Avatar v-else :src="room.avatar" :name="resolveRoomName(room)" size="md" />
             <!-- Group indicator -->
             <div
               v-if="room.isGroup"
@@ -250,7 +409,7 @@ const getRoomLongPress = (room: ChatRoom) => {
             <!-- Name row: name + timestamp + pin/mute icons -->
             <div class="flex items-center justify-between gap-2">
               <span class="flex items-center gap-1 truncate text-[15px] font-medium text-text-color">
-                {{ room.name }}
+                {{ resolveRoomName(room) }}
                 <svg v-if="chatStore.pinnedRoomIds.has(room.id)" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-text-on-main-bg-color">
                   <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
                 </svg>
@@ -271,7 +430,7 @@ const getRoomLongPress = (room: ChatRoom) => {
               </span>
             </div>
 
-            <!-- Preview row: last message + unread badge -->
+            <!-- Preview row: draft / typing / last message + unread badge -->
             <div class="mt-0.5 flex items-center justify-between gap-2">
               <span
                 v-if="getTypingText(room.id)"
@@ -284,13 +443,17 @@ const getRoomLongPress = (room: ChatRoom) => {
                 </span>
                 {{ getTypingText(room.id) }}
               </span>
+              <span
+                v-else-if="getRoomDraft(room.id) && room.id !== chatStore.activeRoomId"
+                class="truncate text-sm"
+              ><span class="font-medium text-color-bad">{{ t("contactList.draft") }}:</span> <span class="text-text-on-main-bg-color">{{ getRoomDraft(room.id) }}</span></span>
               <span v-else-if="room.membership === 'invite'" class="truncate text-sm italic text-color-bg-ac">
                 Invitation to chat
               </span>
               <span
                 v-else-if="room.lastMessage?.callInfo"
                 class="truncate text-sm"
-                :class="room.lastMessage.callInfo.missed ? 'text-red-400' : 'italic text-text-on-main-bg-color'"
+                :class="room.lastMessage.callInfo.missed ? 'text-color-bad' : 'italic text-text-on-main-bg-color'"
               >
                 {{ formatPreview(room.lastMessage, room) }}
               </span>

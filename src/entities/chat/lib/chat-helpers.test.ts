@@ -11,7 +11,7 @@
  *   A bug here breaks: encrypted file decryption, image/video rendering.
  */
 import { describe, it, expect } from "vitest";
-import { matrixIdToAddress, messageTypeFromMime, parseFileInfo } from "./chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, looksLikeProperName } from "./chat-helpers";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MessageType } from "../model/types";
 
@@ -231,5 +231,111 @@ describe("parseFileInfo", () => {
 
     const info = parseFileInfo(content, "m.file");
     expect(info!.secrets!.v).toBe(3);
+  });
+
+  // ─── m.audio ────────────────────────────────────────────────────
+
+  it("parses m.audio with duration (ms → sec conversion)", () => {
+    const content = {
+      body: "voice.ogg",
+      info: {
+        mimetype: "audio/ogg",
+        size: 8000,
+        url: "https://matrix.server/audio/1",
+        duration: 45000, // 45 seconds in ms
+        waveform: [100, 200, 300, 400],
+        secrets: { block: 10, keys: "audiokeys", v: 1 },
+      },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info).toBeDefined();
+    expect(info!.duration).toBe(45);
+    expect(info!.waveform).toEqual([100, 200, 300, 400]);
+    expect(info!.secrets).toEqual({ block: 10, keys: "audiokeys", v: 1 });
+  });
+
+  it("parses m.audio without duration gracefully", () => {
+    const content = {
+      body: "clip.mp3",
+      info: { mimetype: "audio/mpeg", size: 3000, url: "https://url" },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info).toBeDefined();
+    expect(info!.duration).toBeUndefined();
+    expect(info!.waveform).toBeUndefined();
+  });
+
+  // ─── m.video ────────────────────────────────────────────────────
+
+  it("parses m.video with dimensions and duration", () => {
+    const content = {
+      body: "clip.mp4",
+      info: {
+        mimetype: "video/mp4",
+        size: 500000,
+        url: "https://matrix.server/video/1",
+        w: 1280,
+        h: 720,
+        duration: 120000, // 120 seconds in ms
+        secrets: { block: 50, keys: "vidkeys", v: 2 },
+      },
+    };
+    const info = parseFileInfo(content, "m.video");
+    expect(info).toBeDefined();
+    expect(info!.w).toBe(1280);
+    expect(info!.h).toBe(720);
+    expect(info!.duration).toBe(120);
+    expect(info!.secrets).toEqual({ block: 50, keys: "vidkeys", v: 2 });
+  });
+
+  it("parses m.video with url in content (not info)", () => {
+    const content = {
+      body: "movie.webm",
+      url: "https://matrix.server/video/fallback",
+    };
+    const info = parseFileInfo(content, "m.video");
+    expect(info).toBeDefined();
+    expect(info!.url).toBe("https://matrix.server/video/fallback");
+  });
+});
+
+// ─── looksLikeProperName ──────────────────────────────────────────
+
+describe("looksLikeProperName", () => {
+  it("accepts normal human-readable names", () => {
+    expect(looksLikeProperName("Alice")).toBe(true);
+    expect(looksLikeProperName("Боб")).toBe(true);
+    expect(looksLikeProperName("John_Doe")).toBe(true);
+  });
+
+  it("rejects hex strings", () => {
+    expect(looksLikeProperName("5050624e714377")).toBe(false);
+    expect(looksLikeProperName("abcdef1234")).toBe(false);
+  });
+
+  it("rejects Matrix IDs (starting with @)", () => {
+    expect(looksLikeProperName("@user:server")).toBe(false);
+  });
+
+  it("rejects room IDs (starting with !)", () => {
+    expect(looksLikeProperName("!room:server")).toBe(false);
+  });
+
+  it("rejects room aliases (starting with #)", () => {
+    expect(looksLikeProperName("#general:server")).toBe(false);
+  });
+
+  it("rejects short strings (< 2 chars)", () => {
+    expect(looksLikeProperName("A")).toBe(false);
+    expect(looksLikeProperName("")).toBe(false);
+  });
+
+  it("rejects name matching raw Bastyon address", () => {
+    const addr = "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu";
+    expect(looksLikeProperName(addr, addr)).toBe(false);
+  });
+
+  it("accepts name that differs from raw address", () => {
+    expect(looksLikeProperName("Alice", "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu")).toBe(true);
   });
 });

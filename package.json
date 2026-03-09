@@ -27,6 +27,7 @@
     "buffer": "^6.0.3",
     "class-variance-authority": "^0.7.0",
     "create-hash": "^1.2.0",
+    "dexie": "^4.3.0",
     "file-saver": "^2.0.5",
     "matrix-js-sdk-bastyon": "23.2.2",
     "miscreant": "^0.3.2",
@@ -45,6 +46,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@pinia/testing": "^1.0.3",
     "@types/node": "^20.14.12",
     "@vitejs/plugin-vue": "^5.0.5",
     "@vue/test-utils": "^2.4.6",

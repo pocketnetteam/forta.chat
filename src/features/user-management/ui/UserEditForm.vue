@@ -4,6 +4,7 @@ import { useUserStore } from "@/entities/user/model";
 import { useLocaleStore } from "@/entities/locale";
 import type { Locale } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
+import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
 
 const authStore = useAuthStore();
 const userStore = useUserStore();
@@ -17,6 +18,10 @@ const form = ref({
   language: authStore.userInfo?.language ?? "",
 });
 
+const avatarUrl = ref(authStore.userInfo?.image ?? "");
+const avatarUploading = ref(false);
+const avatarError = ref("");
+
 const aboutMaxLength = 140;
 const aboutCount = computed(() => form.value.about.length);
 
@@ -27,7 +32,8 @@ const hasChanges = computed(() => {
     form.value.name !== (info.name ?? "") ||
     form.value.about !== (info.about ?? "") ||
     form.value.site !== (info.site ?? "") ||
-    form.value.language !== (info.language ?? "")
+    form.value.language !== (info.language ?? "") ||
+    avatarUrl.value !== (info.image ?? "")
   );
 });
 
@@ -40,6 +46,7 @@ const handleSave = async () => {
     about: form.value.about,
     site: form.value.site,
     language: form.value.language,
+    image: avatarUrl.value,
   });
   // Update the user store cache so avatar/name reflect immediately
   if (authStore.address) {
@@ -47,7 +54,7 @@ const handleSave = async () => {
       address: authStore.address,
       name: form.value.name,
       about: form.value.about,
-      image: authStore.userInfo?.image ?? "",
+      image: avatarUrl.value,
       site: form.value.site,
       language: form.value.language,
     });
@@ -59,10 +66,23 @@ const handleSave = async () => {
 // Avatar upload
 const fileInput = ref<HTMLInputElement>();
 const handleAvatarClick = () => fileInput.value?.click();
-const handleAvatarChange = (e: Event) => {
+const handleAvatarChange = async (e: Event) => {
   const file = (e.target as HTMLInputElement).files?.[0];
-  if (file) {
-    // TODO: Upload avatar via SDK imageServer
+  if (!file) return;
+  avatarError.value = "";
+  try {
+    const base64 = await fileToBase64(file);
+    avatarUrl.value = base64; // local preview
+    avatarUploading.value = true;
+    const url = await uploadImage(base64);
+    avatarUrl.value = url;
+  } catch (err) {
+    avatarError.value = err instanceof Error ? err.message : t("profile.avatarError");
+    avatarUrl.value = authStore.userInfo?.image ?? "";
+  } finally {
+    avatarUploading.value = false;
+    // Reset file input so re-selecting same file triggers change
+    if (fileInput.value) fileInput.value.value = "";
   }
 };
 
@@ -84,19 +104,22 @@ watch(
     <div class="flex flex-col items-center pb-6 pt-2">
       <div class="group relative cursor-pointer" @click="handleAvatarClick">
         <Avatar
-          :src="currentUser?.image"
+          :src="avatarUrl || currentUser?.image"
           :name="currentUser?.name || authStore.address || 'User'"
           size="xl"
         />
         <div
-          class="absolute inset-0 flex items-center justify-center rounded-full bg-black/40 opacity-0 transition-opacity group-hover:opacity-100"
+          class="absolute inset-0 flex items-center justify-center rounded-full bg-black/40 transition-opacity"
+          :class="avatarUploading ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'"
         >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+          <svg v-if="!avatarUploading" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
             <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
             <circle cx="12" cy="13" r="4" />
           </svg>
+          <Spinner v-else size="sm" class="text-white" />
         </div>
       </div>
+      <p v-if="avatarError" class="mt-1 text-xs text-color-bad">{{ avatarError }}</p>
       <input
         ref="fileInput"
         type="file"
@@ -202,7 +225,7 @@ watch(
         :disabled="authStore.isEditingUserData || !hasChanges"
         class="mx-auto flex h-11 w-full max-w-xs items-center justify-center rounded-xl text-sm font-semibold transition-all disabled:opacity-40"
         :class="saveSuccess
-          ? 'bg-green-500 text-white'
+          ? 'bg-color-good text-white'
           : 'bg-color-bg-ac text-text-on-bg-ac-color hover:opacity-90'"
       >
         <template v-if="saveSuccess">

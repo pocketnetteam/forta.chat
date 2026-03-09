@@ -4,9 +4,13 @@ import ChatWindow from "@/widgets/chat-window/ChatWindow.vue";
 import SettingsContentPanel from "@/widgets/sidebar/ui/SettingsContentPanel.vue";
 import { GroupCreationPanel } from "@/features/group-creation";
 import { useChatStore } from "@/entities/chat";
+import { useAuthStore } from "@/entities/auth";
+import { useI18n } from "@/shared/lib/i18n";
 import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 
 const chatStore = useChatStore();
+const authStore = useAuthStore();
+const { t } = useI18n();
 const { settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
 
 const showSidebar = ref(true);
@@ -61,7 +65,26 @@ const onCloseGroupCreation = () => {
 </script>
 
 <template>
-  <div class="flex h-full bg-background-total-theme" :class="{ 'relative overflow-hidden': isMobile }">
+  <div class="relative flex h-full bg-background-total-theme" :class="{ 'overflow-hidden': isMobile }">
+    <!-- Registration pending overlay — blocks chat while blockchain confirms -->
+    <transition name="fade">
+      <div
+        v-if="authStore.registrationPending"
+        class="absolute inset-0 z-[998] flex items-center justify-center bg-background-total-theme"
+      >
+        <div class="flex flex-col items-center gap-4 p-8 text-center">
+          <Spinner size="lg" />
+          <h2 class="text-xl font-bold text-text-color">{{ t("register.accountPending") }}</h2>
+          <p class="max-w-sm text-sm text-text-on-main-bg-color">
+            {{ t("register.accountPendingDescription") }}
+          </p>
+          <p class="text-xs text-text-on-main-bg-color">
+            {{ t("register.accountPendingHint") }}
+          </p>
+        </div>
+      </div>
+    </transition>
+
     <!-- Desktop: show both side by side -->
     <template v-if="!isMobile">
       <ChatSidebar

@@ -46,6 +46,7 @@ const handleSelect = (action: string) => {
     <transition name="ctx-menu">
       <div v-if="props.show" class="fixed inset-0 z-50" @click.self="emit('close')" @contextmenu.prevent="emit('close')">
         <div
+          role="menu"
           class="absolute min-w-[200px] overflow-hidden rounded-xl border border-neutral-grad-0 bg-background-total-theme py-1 shadow-xl"
           :style="style"
         >
@@ -53,6 +54,7 @@ const handleSelect = (action: string) => {
           <button
             v-for="item in props.items"
             :key="item.action"
+            role="menuitem"
             class="flex h-[44px] w-full items-center gap-3 px-4 text-sm transition-colors hover:bg-neutral-grad-0"
             :class="item.danger ? 'text-color-bad' : 'text-text-color'"
             @click="handleSelect(item.action)"

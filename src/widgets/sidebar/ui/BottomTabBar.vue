@@ -27,6 +27,7 @@ const currentUser = computed(() =>
 
 <template>
   <nav
+    aria-label="Main navigation"
     class="flex h-14 shrink-0 border-t border-neutral-grad-0 bg-chat-sidebar"
     style="padding-bottom: env(safe-area-inset-bottom, 0px)"
   >
@@ -34,6 +35,8 @@ const currentUser = computed(() =>
     <button
       class="btn-press relative flex flex-1 flex-col items-center justify-center gap-0.5"
       :class="modelValue === 'contacts' ? 'text-color-bg-ac' : 'text-text-on-main-bg-color'"
+      :aria-label="t('nav.contacts')"
+      :aria-current="modelValue === 'contacts' ? 'page' : undefined"
       @click="emit('update:modelValue', 'contacts')"
     >
       <svg
@@ -56,6 +59,8 @@ const currentUser = computed(() =>
     <button
       class="btn-press relative flex flex-1 flex-col items-center justify-center gap-0.5"
       :class="modelValue === 'chats' ? 'text-color-bg-ac' : 'text-text-on-main-bg-color'"
+      :aria-label="t('nav.chats') + (chatStore.totalUnread > 0 ? ` (${chatStore.totalUnread})` : '')"
+      :aria-current="modelValue === 'chats' ? 'page' : undefined"
       @click="emit('update:modelValue', 'chats')"
     >
       <div class="relative">
@@ -86,6 +91,8 @@ const currentUser = computed(() =>
     <button
       class="btn-press relative flex flex-1 flex-col items-center justify-center gap-0.5"
       :class="modelValue === 'settings' ? 'text-color-bg-ac' : 'text-text-on-main-bg-color'"
+      :aria-label="t('nav.settings')"
+      :aria-current="modelValue === 'settings' ? 'page' : undefined"
       @click="emit('update:modelValue', 'settings')"
     >
       <div

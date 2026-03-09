@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
+import { useI18n } from "@/shared/lib/i18n";
 import PrivateKeyInput from "./PrivateKeyInput.vue";
 
 const router = useRouter();
 const authStore = useAuthStore();
+const { t } = useI18n();
 
 const cryptoCredential = ref("");
 const errorMessage = ref("");
@@ -12,7 +14,7 @@ const handleLogin = async () => {
   errorMessage.value = "";
 
   if (!cryptoCredential.value.trim()) {
-    errorMessage.value = "Please enter a private key or mnemonic";
+    errorMessage.value = t("auth.enterKeyError");
     return;
   }
 
@@ -26,33 +28,57 @@ const handleLogin = async () => {
 </script>
 
 <template>
-  <div class="flex flex-col gap-6">
-    <div class="text-center">
-      <h1 class="text-2xl font-bold text-text-color">Sign In</h1>
-      <p class="mt-2 text-sm text-text-on-main-bg-color">
-        Enter your Bastyon private key or mnemonic phrase
-      </p>
+  <div class="flex flex-col items-center">
+    <!-- Icon -->
+    <div
+      class="mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-color-bg-ac/10"
+    >
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" class="text-color-txt-ac">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" stroke="currentColor" stroke-width="2" />
+        <path d="M7 11V7a5 5 0 0 1 10 0v4" stroke="currentColor" stroke-width="2" />
+      </svg>
     </div>
 
-    <form class="flex flex-col gap-4" @submit.prevent="handleLogin">
+    <!-- Heading -->
+    <h1 class="mb-1 text-xl font-semibold text-text-color">
+      {{ t("auth.signIn") }}
+    </h1>
+    <p class="mb-6 text-center text-[13px] leading-relaxed text-text-on-main-bg-color">
+      {{ t("auth.enterKey") }}
+    </p>
+
+    <!-- Form -->
+    <form class="flex w-full flex-col gap-4" @submit.prevent="handleLogin">
       <PrivateKeyInput
         v-model="cryptoCredential"
         :error="errorMessage"
       />
 
-      <Button
+      <button
         type="submit"
-        size="lg"
         :disabled="authStore.isLoggingIn"
-        class="w-full"
+        class="flex h-11 w-full cursor-pointer items-center justify-center rounded-xl bg-color-bg-ac text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1 disabled:cursor-default disabled:opacity-50"
       >
         <Spinner v-if="authStore.isLoggingIn" size="sm" class="mr-2" />
-        {{ authStore.isLoggingIn ? "Signing in..." : "Sign In" }}
-      </Button>
+        {{ authStore.isLoggingIn ? t("auth.signingIn") : t("auth.signIn") }}
+      </button>
     </form>
 
-    <p class="text-center text-xs text-text-on-main-bg-color">
-      Your private key never leaves your device
+    <!-- Security hint -->
+    <p class="mt-4 text-center text-[11px] text-text-on-main-bg-color/70">
+      {{ t("auth.keyNeverLeaves") }}
+    </p>
+
+    <!-- Register link -->
+    <p class="mt-6 text-center text-[13px] text-text-on-main-bg-color">
+      {{ t("register.noAccount") }}
+      {{ " " }}
+      <router-link
+        :to="{ name: 'RegisterPage' }"
+        class="font-medium text-color-txt-ac hover:underline"
+      >
+        {{ t("register.createAccount") }}
+      </router-link>
     </p>
   </div>
 </template>

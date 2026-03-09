@@ -2,7 +2,7 @@
 import { ref, nextTick, watch, computed } from "vue";
 import { useChatStore, MessageType } from "@/entities/chat";
 import { useThemeStore } from "@/entities/theme";
-import { stripMentionAddresses } from "@/shared/lib/message-format";
+import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getDraft, saveDraft, clearDraft } from "@/shared/lib/drafts";
 import { useMessages } from "../model/use-messages";
 import { useMediaUpload } from "../model/use-media-upload";
@@ -14,6 +14,13 @@ import VoiceRecorder from "./VoiceRecorder.vue";
 import { useVoiceRecorder } from "../model/use-voice-recorder";
 import { useMentionAutocomplete } from "../model/use-mention-autocomplete";
 import MentionAutocomplete from "./MentionAutocomplete.vue";
+
+const props = defineProps<{
+  /** Show "Send PKOIN" in attachment menu (1:1 + wallet available) */
+  showDonate?: boolean;
+}>();
+
+const emit = defineEmits<{ donate: [] }>();
 
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
@@ -59,6 +66,13 @@ watch(() => chatStore.editingMessage, (editing) => {
     });
   }
 }, { immediate: true });
+
+// Auto-focus textarea when replying
+watch(() => chatStore.replyingTo, (reply) => {
+  if (reply) {
+    nextTick(() => textareaRef.value?.focus());
+  }
+});
 
 const isEditing = computed(() => !!chatStore.editingMessage);
 
@@ -206,7 +220,7 @@ const replyInputPreviewText = computed(() => {
   if (reply.type === MessageType.video) return "Video";
   if (reply.type === MessageType.audio) return "Voice message";
   if (reply.type === MessageType.file) return reply.content || "File";
-  const text = stripMentionAddresses(reply.content);
+  const text = stripBastyonLinks(stripMentionAddresses(reply.content));
   return (text.length > 100 ? text.slice(0, 100) + "\u2026" : text) || "...";
 });
 
@@ -253,7 +267,7 @@ const insertEmoji = (emoji: string) => {
     <transition name="input-bar">
       <div
         v-if="isEditing"
-        class="flex items-center gap-2 border-b border-neutral-grad-0 px-3 py-2"
+        class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2"
       >
         <div class="flex h-8 w-8 items-center justify-center text-color-bg-ac">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -267,6 +281,7 @@ const insertEmoji = (emoji: string) => {
         </div>
         <button
           class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0"
+          aria-label="Cancel editing"
           @click="cancelEdit"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -280,7 +295,7 @@ const insertEmoji = (emoji: string) => {
     <transition name="input-bar">
       <div
         v-if="!isEditing && chatStore.replyingTo"
-        class="flex items-center gap-2 border-b border-neutral-grad-0 px-3 py-2"
+        class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2"
       >
         <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
         <div class="min-w-0 flex-1">
@@ -293,6 +308,7 @@ const insertEmoji = (emoji: string) => {
         </div>
         <button
           class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0"
+          aria-label="Cancel reply"
           @click="cancelReply"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -318,7 +334,7 @@ const insertEmoji = (emoji: string) => {
     />
 
     <!-- Input row -->
-    <div v-else class="relative flex items-end gap-1 px-2 py-2">
+    <div v-else class="relative mx-auto flex max-w-6xl items-end gap-1.5 px-2 py-2">
       <!-- Mention autocomplete dropdown -->
       <MentionAutocomplete
         v-if="mention.active.value && mention.filteredMembers.value.length > 0 && chatStore.activeRoom?.isGroup"
@@ -348,6 +364,7 @@ const insertEmoji = (emoji: string) => {
       <button
         class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
         title="Emoji"
+        aria-label="Open emoji picker"
         @click="(e: MouseEvent) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); emojiPickerPos = { x: rect.left, y: rect.top }; showEmojiPicker = !showEmojiPicker; }"
       >
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -360,8 +377,9 @@ const insertEmoji = (emoji: string) => {
         ref="textareaRef"
         v-model="text"
         placeholder="Message"
+        aria-label="Type a message"
         rows="1"
-        class="flex-1 resize-none rounded-2xl bg-chat-input-bg px-4 py-2.5 text-base leading-[24px] text-text-color outline-none placeholder:text-neutral-grad-2"
+        class="flex-1 resize-none rounded-2xl bg-chat-input-bg px-4 py-2.5 text-base leading-[24px] text-text-color outline-none transition-shadow duration-200 placeholder:text-neutral-grad-2 focus:ring-2 focus:ring-color-bg-ac/30"
         :disabled="sending"
         @keydown="handleKeydown"
         @input="handleInput"
@@ -369,12 +387,27 @@ const insertEmoji = (emoji: string) => {
         @keyup="mention.onCursorChange()"
       />
 
+      <!-- PKOIN send button (right of textarea, before attach) -->
+      <button
+        v-if="props.showDonate"
+        class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-color-txt-ac/60 transition-colors hover:text-color-txt-ac"
+        :disabled="sending"
+        title="Send PKOIN"
+        aria-label="Send PKOIN"
+        @click="emit('donate')"
+      >
+        <svg width="20" height="20" viewBox="0 0 18 18" fill="currentColor">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M17.2584 1.97869L15.182 0L12.7245 2.57886C11.5308 1.85218 10.1288 1.43362 8.62907 1.43362C7.32722 1.43362 6.09904 1.74902 5.01676 2.30756L2.81787 6.45386e-05L0.741455 1.97875L2.73903 4.07498C1.49651 5.46899 0.741455 7.30694 0.741455 9.32124C0.741455 11.1753 1.38114 12.8799 2.45184 14.2264L0.741455 16.0213L2.81787 18L4.61598 16.1131C5.79166 16.8092 7.1637 17.2088 8.62907 17.2088C10.2903 17.2088 11.8317 16.6953 13.1029 15.8182L15.182 18L17.2584 16.0213L15.1306 13.7884C16.0049 12.5184 16.5167 10.9796 16.5167 9.32124C16.5167 7.50123 15.9003 5.8252 14.8648 4.49052L17.2584 1.97869ZM3.5551 9.32124C3.5551 12.1235 5.82679 14.3952 8.62907 14.3952C11.4313 14.3952 13.703 12.1235 13.703 9.32124C13.703 6.51896 11.4313 4.24727 8.62907 4.24727C5.82679 4.24727 3.5551 6.51896 3.5551 9.32124Z" />
+        </svg>
+      </button>
+
       <!-- Attachment button (right of textarea) -->
       <button
         ref="attachBtnRef"
         class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
         :disabled="sending"
         title="Attach"
+        aria-label="Attach file"
         @click="toggleAttachmentPanel"
       >
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -383,12 +416,17 @@ const insertEmoji = (emoji: string) => {
       </button>
 
       <!-- Send / Confirm edit button (morphs with mic) -->
+      <!-- Note: VoiceRecorder has multiple root elements (v-if/v-else chain) which
+           breaks <transition mode="out-in"> — the leave callback never fires so the
+           entering element never mounts. Fix: inline the idle mic button as a plain
+           <button> so both transition children are single-root native elements. -->
       <transition name="btn-morph" mode="out-in">
         <button
           v-if="text.trim() || sending"
           key="send"
           class="send-btn flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
           :disabled="!text.trim() || sending"
+          :aria-label="isEditing ? 'Confirm edit' : 'Send message'"
           @click="handleSend"
         >
           <svg v-if="sending" class="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
@@ -414,22 +452,24 @@ const insertEmoji = (emoji: string) => {
           </svg>
         </button>
 
-        <!-- Mic button (shown when input is empty) -->
-        <VoiceRecorder
-          v-else
-          key="mic"
-          :state="voiceRecorder.state.value"
-          :duration="voiceRecorder.duration.value"
-          :waveform-data="voiceRecorder.waveformData.value"
-          :recorded-blob="voiceRecorder.recordedBlob.value"
-          @start="voiceRecorder.startRecording()"
-          @start-locked="voiceRecorder.startAndLock()"
-          @stop-and-send="handleVoiceSend"
-          @stop-and-preview="voiceRecorder.stopAndPreview()"
-          @send-preview="handleVoicePreviewSend"
-          @lock="voiceRecorder.lock()"
-          @cancel="voiceRecorder.cancel()"
-        />
+        <!-- Mic button (shown when input is empty) — wrapped in a single-root <div>
+             so transition can properly attach leave/enter hooks. VoiceRecorder has
+             multiple root elements (v-if/v-else chain) which breaks out-in mode. -->
+        <div v-else key="mic" class="inline-flex">
+          <VoiceRecorder
+            :state="voiceRecorder.state.value"
+            :duration="voiceRecorder.duration.value"
+            :waveform-data="voiceRecorder.waveformData.value"
+            :recorded-blob="voiceRecorder.recordedBlob.value"
+            @start="voiceRecorder.startRecording()"
+            @start-locked="voiceRecorder.startAndLock()"
+            @stop-and-send="handleVoiceSend"
+            @stop-and-preview="voiceRecorder.stopAndPreview()"
+            @send-preview="handleVoicePreviewSend"
+            @lock="voiceRecorder.lock()"
+            @cancel="voiceRecorder.cancel()"
+          />
+        </div>
       </transition>
     </div>
 
@@ -446,10 +486,12 @@ const insertEmoji = (emoji: string) => {
       :show="showAttachmentPanel"
       :x="attachmentPanelPos.x"
       :y="attachmentPanelPos.y"
+      :show-donate="props.showDonate"
       @close="showAttachmentPanel = false"
       @select-photo="openPhotoPicker"
       @select-file="openFilePicker"
       @select-poll="showPollCreator = true"
+      @select-donate="emit('donate')"
     />
 
     <!-- Poll creator -->

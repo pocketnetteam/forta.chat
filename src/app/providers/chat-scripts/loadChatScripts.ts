@@ -32,7 +32,16 @@ const scriptsToLoad = {
   ]
 };
 
-export const loadChatScripts = async (): Promise<void> => {
+/** Shared promise — allows starting early and awaiting later */
+let _loadPromise: Promise<void> | null = null;
+
+export const loadChatScripts = (): Promise<void> => {
+  if (_loadPromise) return _loadPromise;
+  _loadPromise = _loadChatScriptsImpl();
+  return _loadPromise;
+};
+
+async function _loadChatScriptsImpl(): Promise<void> {
   try {
     const isElectron = !!(window as any).electronAPI?.isElectron;
 
@@ -46,14 +55,16 @@ export const loadChatScripts = async (): Promise<void> => {
       return name;
     };
 
+    // Fire-and-forget scripts (no dependency chain)
     for (const script of scriptsToLoad.async) {
       loadScript(normalizeScriptName(script));
     }
 
+    // Sequential dependency chain
     for (const script of scriptsToLoad.await) {
       await loadScript(normalizeScriptName(script));
     }
   } catch (error) {
     console.error("Failed to load chat scripts", error);
   }
-};
+}

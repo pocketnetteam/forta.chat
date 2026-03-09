@@ -6,15 +6,20 @@ import SelectionBar from "@/features/messaging/ui/SelectionBar.vue";
 import ForwardPicker from "@/features/messaging/ui/ForwardPicker.vue";
 import ChatSearch from "@/features/messaging/ui/ChatSearch.vue";
 import { useToast } from "@/shared/lib/use-toast";
-import { ChatInfoPanel } from "@/features/chat-info";
+import { ChatInfoPanel, UserProfilePanel } from "@/features/chat-info";
 import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
+import { useUserStore } from "@/entities/user/model";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { useCallService } from "@/features/video-calls/model/call-service";
 import type { CallType } from "@/entities/call";
+import { useWallet } from "@/features/wallet";
+import DonateModal from "@/features/wallet/ui/DonateModal.vue";
+import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const userStore = useUserStore();
 const emit = defineEmits<{ back: [] }>();
 const { toast } = useToast();
 const { isOnline, isSlow } = useConnectivity();
@@ -25,12 +30,80 @@ const isAdmin = computed(() => {
   return chatStore.getRoomPowerLevels(chatStore.activeRoom.id).myLevel >= 50;
 });
 
+/** Resolve active room name — uses userStore (same source as avatar) as fallback */
+/** Resolve active room name — same as original bastyon-chat name.vue:
+ *  hexDecode(memberHexId) → address → userStore.users[address].name */
+/** Resolve member names from userStore for the active room */
+function _resolveActiveMembers(room: NonNullable<typeof chatStore.activeRoom>): string[] {
+  const myHex = authStore.address ? hexEncode(authStore.address) : "";
+  const otherMembers = room.members.filter(m => m !== myHex);
+  const names: string[] = [];
+  for (const hexId of otherMembers) {
+    const addr = hexDecode(hexId);
+    if (/^[A-Za-z0-9]+$/.test(addr)) {
+      const user = userStore.getUser(addr);
+      if (user?.name) { names.push(user.name); continue; }
+      userStore.loadUserIfMissing(addr);
+    }
+  }
+  if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
+    const addr = room.avatar.slice("__pocketnet__:".length);
+    const user = userStore.getUser(addr);
+    if (user?.name && user.name !== addr) names.push(user.name);
+    else userStore.loadUserIfMissing(addr);
+  }
+  return names;
+}
+
+const activeRoomName = computed(() => {
+  const room = chatStore.activeRoom;
+  if (!room) return "";
+  if (!room.isGroup) {
+    const names = _resolveActiveMembers(room);
+    return names.length > 0 ? names.join(", ") : "-";
+  }
+  if (room.name?.startsWith("@")) return room.name.slice(1);
+  // If group name looks like unresolved hash/hex, try member names
+  if (/^#?[a-f0-9]{16,}$/i.test(room.name) || /^[a-f0-9]{8}…$/i.test(room.name)) {
+    const names = _resolveActiveMembers(room);
+    if (names.length > 0) return names.join(", ");
+    return "-";
+  }
+  return room.name;
+});
+
 const showForwardPicker = ref(false);
 const showSearch = ref(false);
 const showInfoPanel = ref(false);
 const messageListRef = ref<InstanceType<typeof MessageList>>();
 
 const callService = useCallService();
+const { isAvailable: walletAvailable } = useWallet();
+const showDonateModal = ref(false);
+
+const profileAddress = ref("");
+const showUserProfile = ref(false);
+
+const openUserProfile = (address: string) => {
+  profileAddress.value = address;
+  showUserProfile.value = true;
+};
+
+provide("openUserProfile", openUserProfile);
+
+/** Get the other member's Pocketnet address in a 1:1 chat.
+ *  room.members stores hex-encoded addresses; we compare in hex then decode to Base58. */
+const otherMemberAddress = computed(() => {
+  const room = chatStore.activeRoom;
+  if (!room || room.isGroup) return "";
+  const myHex = authStore.address ? hexEncode(authStore.address) : "";
+  const hexAddr = room.members.find((m) => m !== myHex) ?? "";
+  return hexAddr ? hexDecode(hexAddr) : "";
+});
+
+const otherMemberName = computed(() =>
+  otherMemberAddress.value ? chatStore.getDisplayName(otherMemberAddress.value) : "",
+);
 
 const startCallFromHeader = (type: CallType) => {
   const roomId = chatStore.activeRoomId;
@@ -153,6 +226,7 @@ onUnmounted(() => {
       <!-- Back button (mobile) -->
       <button
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0 md:hidden"
+        :aria-label="t('nav.back')"
         @click="emit('back')"
       >
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -162,7 +236,8 @@ onUnmounted(() => {
 
       <!-- Room avatar + info (clickable to open info panel) -->
       <button
-        class="flex min-w-0 flex-1 items-center gap-3 text-left"
+        class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
+        :aria-label="activeRoomName + ' — ' + t('info.title')"
         @click="showInfoPanel = true"
       >
         <UserAvatar
@@ -170,10 +245,10 @@ onUnmounted(() => {
           :address="chatStore.activeRoom.avatar.replace('__pocketnet__:', '')"
           size="sm"
         />
-        <Avatar v-else :src="chatStore.activeRoom.avatar" :name="chatStore.activeRoom.name" size="sm" />
+        <Avatar v-else :src="chatStore.activeRoom.avatar" :name="activeRoomName" size="sm" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-[15px] font-medium text-text-color">
-            {{ chatStore.activeRoom.name }}
+            {{ activeRoomName }}
           </div>
           <div
             class="text-xs"
@@ -188,6 +263,7 @@ onUnmounted(() => {
       <button
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
         :title="t('chat.search')"
+        :aria-label="t('chat.search')"
         @click="showSearch = !showSearch"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -200,6 +276,7 @@ onUnmounted(() => {
         v-if="!chatStore.activeRoom.isGroup"
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
         :title="t('call.voiceCall')"
+        :aria-label="t('call.voiceCall')"
         @click="startCallFromHeader('voice')"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -207,23 +284,12 @@ onUnmounted(() => {
         </svg>
       </button>
 
-      <!-- Video call button (1:1 only) -->
-      <button
-        v-if="!chatStore.activeRoom.isGroup"
-        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        :title="t('call.videoCall')"
-        @click="startCallFromHeader('video')"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="23 7 16 12 23 17 23 7" />
-          <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-        </svg>
-      </button>
-
-      <!-- More menu -->
+      <!-- Info panel button -->
       <button
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        :title="t('chat.more')"
+        :title="t('info.title')"
+        :aria-label="t('info.title')"
+        @click="showInfoPanel = !showInfoPanel"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
           <circle cx="12" cy="5" r="2" />
@@ -236,12 +302,16 @@ onUnmounted(() => {
     <!-- No room selected -->
     <div
       v-if="!chatStore.activeRoom"
-      class="flex flex-1 flex-col items-center justify-center gap-3 text-text-on-main-bg-color"
+      class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center text-text-on-main-bg-color"
     >
-      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="opacity-30">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-      </svg>
-      <span class="text-sm">{{ t("chat.selectToStart") }}</span>
+      <div class="flex h-20 w-20 items-center justify-center rounded-full bg-color-bg-ac/8">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" class="text-color-bg-ac/50">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      </div>
+      <div>
+        <p class="text-base font-medium text-text-color/60">{{ t("chat.selectToStart") }}</p>
+      </div>
     </div>
 
     <!-- Active room content -->
@@ -259,7 +329,7 @@ onUnmounted(() => {
         </div>
         <div
           v-else-if="isSlow"
-          class="flex items-center justify-center gap-2 bg-yellow-500 px-3 py-1.5 text-xs font-medium text-white"
+          class="flex items-center justify-center gap-2 bg-color-star-yellow px-3 py-1.5 text-xs font-medium text-white"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
@@ -284,12 +354,12 @@ onUnmounted(() => {
           </h3>
           <p class="mt-1 text-sm text-text-on-main-bg-color">
             <template v-if="chatStore.activeRoom?.isGroup">
-              {{ t("chat.inviteGroup", { name: chatStore.activeRoom.name }) }}
+              {{ t("chat.inviteGroup", { name: activeRoomName }) }}
               <br />
               <span class="text-xs">{{ t("chat.members", { count: chatStore.activeRoom.members.length }) }}</span>
             </template>
             <template v-else>
-              {{ t("chat.invitePersonal", { name: chatStore.activeRoom?.name ?? '' }) }}
+              {{ t("chat.invitePersonal", { name: activeRoomName }) }}
             </template>
           </p>
         </div>
@@ -324,16 +394,17 @@ onUnmounted(() => {
         </transition>
         <PinnedBar :is-admin="isAdmin" @scroll-to="handleScrollToMessage" />
         <MessageList ref="messageListRef" />
-        <transition name="bar-slide-up" mode="out-in">
-          <SelectionBar
-            v-if="chatStore.selectionMode"
-            key="selection"
-            @forward="handleSelectionForward"
-            @copy="handleSelectionCopy"
-            @delete="handleSelectionDelete"
-          />
-          <MessageInput v-else key="input" />
-        </transition>
+        <SelectionBar
+          v-if="chatStore.selectionMode"
+          @forward="handleSelectionForward"
+          @copy="handleSelectionCopy"
+          @delete="handleSelectionDelete"
+        />
+        <MessageInput
+          v-else
+          :show-donate="!chatStore.activeRoom?.isGroup && walletAvailable"
+          @donate="showDonateModal = true"
+        />
         <ForwardPicker
           :show="showForwardPicker"
           @close="showForwardPicker = false; chatStore.exitSelectionMode()"
@@ -341,7 +412,18 @@ onUnmounted(() => {
       </template>
     </template>
 
-    <ChatInfoPanel :show="showInfoPanel" @close="showInfoPanel = false" />
+    <ChatInfoPanel :show="showInfoPanel" @close="showInfoPanel = false" @open-search="showSearch = true" @go-to-message="(id) => { showInfoPanel = false; messageListRef?.scrollToMessage(id); }" />
+    <UserProfilePanel
+      :show="showUserProfile"
+      :address="profileAddress"
+      @close="showUserProfile = false"
+    />
+    <DonateModal
+      :show="showDonateModal"
+      :receiver-address="otherMemberAddress"
+      :receiver-name="otherMemberName"
+      @close="showDonateModal = false"
+    />
   </div>
 </template>
 

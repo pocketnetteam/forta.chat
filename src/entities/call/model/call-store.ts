@@ -18,6 +18,7 @@ export const useCallStore = defineStore(NAMESPACE, () => {
   const remoteScreenStream = shallowRef<MediaStream | null>(null);
   const remoteScreenSharing = ref(false);
   const pinnedTile = ref<string | null>(null);
+  const minimized = ref(false);
   const callTimer = ref(0);
   const history = ref<CallHistoryEntry[]>([]);
   const audioOutputId = ref(localStorage.getItem("bastyon_call_output_device") ?? "");
@@ -70,6 +71,7 @@ export const useCallStore = defineStore(NAMESPACE, () => {
     remoteScreenStream.value = null;
     remoteScreenSharing.value = false;
     pinnedTile.value = null;
+    minimized.value = false;
     callTimer.value = 0;
     // Note: audioOutputId is NOT reset — it's a user preference across calls
   }
@@ -152,6 +154,7 @@ export const useCallStore = defineStore(NAMESPACE, () => {
     remoteScreenStream,
     remoteScreenSharing,
     pinnedTile,
+    minimized,
     callTimer,
     history,
     audioOutputId,
