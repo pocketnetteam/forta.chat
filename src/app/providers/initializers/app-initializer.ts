@@ -377,7 +377,7 @@ export class AppInitializer {
   async loadMyPostScore(txid: string, address: string): Promise<number | null> {
     if (!this.api) return null;
     try {
-      const data = await this.api.rpc("getposcores", [[txid], address]);
+      const data = await this.api.rpc("getpagescores", [[txid], address, []]);
       if (Array.isArray(data) && data.length > 0) {
         return Number(data[0]?.value ?? 0);
       }
