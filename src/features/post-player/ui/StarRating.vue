@@ -59,7 +59,7 @@ const onClick = (star: number) => {
         :class="[
           star <= displayValue
             ? 'fill-color-star-yellow text-color-star-yellow'
-            : 'fill-none opacity-40',
+            : 'fill-none text-text-on-main-bg-color opacity-40',
           isInteractive ? 'hover:scale-110' : '',
           submitting ? 'animate-pulse' : '',
         ]"
