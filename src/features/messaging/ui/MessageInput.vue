@@ -6,6 +6,7 @@ import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-f
 import { getDraft, saveDraft, clearDraft } from "@/shared/lib/drafts";
 import { useMessages } from "../model/use-messages";
 import { useLinkPreview } from "../model/use-link-preview";
+import { useI18n } from "@/shared/lib/i18n";
 import { useMediaUpload } from "../model/use-media-upload";
 import EmojiPicker from "./EmojiPicker.vue";
 import AttachmentPanel from "./AttachmentPanel.vue";
@@ -25,6 +26,7 @@ const emit = defineEmits<{ donate: [] }>();
 
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
+const { t } = useI18n();
 const { sendMessage, sendFile, sendImage, sendAudio, sendReply, editMessage, setTyping, sendPoll } = useMessages();
 const mediaUpload = useMediaUpload();
 const voiceRecorder = useVoiceRecorder();
@@ -335,7 +337,7 @@ const insertEmoji = (emoji: string) => {
         <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
         <div class="min-w-0 flex-1">
           <template v-if="linkPreview.loading.value">
-            <div class="text-xs font-medium text-text-on-main-bg-color/60">{{ $t('linkPreview.loading') }}</div>
+            <div class="text-xs font-medium text-text-on-main-bg-color/60">{{ t('linkPreview.loading') }}</div>
             <div class="truncate text-xs text-text-on-main-bg-color/40">{{ linkPreview.lastUrl.value }}</div>
           </template>
           <template v-else-if="linkPreview.activePreview.value">
@@ -349,7 +351,7 @@ const insertEmoji = (emoji: string) => {
         </div>
         <button
           class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0"
-          :aria-label="$t('linkPreview.linkPreview')"
+          :aria-label="t('linkPreview.linkPreview')"
           @click="linkPreview.dismiss()"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
