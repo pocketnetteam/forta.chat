@@ -490,6 +490,10 @@ export const ru: Record<TranslationKey, string> = {
   "quickSearch.chats": "Чаты",
   "quickSearch.noResults": "Чаты не найдены",
 
+  // ── Link preview ──
+  "linkPreview.loading": "Загрузка...",
+  "linkPreview.linkPreview": "Превью ссылки",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",

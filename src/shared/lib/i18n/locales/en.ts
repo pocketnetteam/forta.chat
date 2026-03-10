@@ -488,6 +488,10 @@ export const en = {
   "quickSearch.chats": "Chats",
   "quickSearch.noResults": "No chats found",
 
+  // ── Link preview ──
+  "linkPreview.loading": "Loading...",
+  "linkPreview.linkPreview": "Link preview",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",
