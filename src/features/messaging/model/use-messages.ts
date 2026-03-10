@@ -484,8 +484,9 @@ export function useMessages() {
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
-        // Merge reply relation into encrypted content
-        const encContent = { ...encrypted, "m.relates_to": msgContent["m.relates_to"] };
+        // Merge reply relation and url_preview into encrypted content
+        const encContent: Record<string, unknown> = { ...encrypted, "m.relates_to": msgContent["m.relates_to"] };
+        if (msgContent.url_preview) encContent.url_preview = msgContent.url_preview;
         serverEventId = await matrixService.sendEncryptedText(roomId, encContent);
       } else {
         serverEventId = await matrixService.sendEncryptedText(roomId, msgContent);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { LinkPreview } from "@/entities/chat";
 
 const props = defineProps<{
@@ -8,7 +8,10 @@ const props = defineProps<{
 }>();
 
 const openUrl = () => {
-  window.open(props.preview.url, "_blank", "noopener,noreferrer");
+  // Only allow http/https URLs to prevent javascript: XSS
+  if (/^https?:\/\//i.test(props.preview.url)) {
+    window.open(props.preview.url, "_blank", "noopener,noreferrer");
+  }
 };
 
 const siteName = computed(() => {
@@ -19,6 +22,8 @@ const siteName = computed(() => {
     return props.preview.url;
   }
 });
+
+const imageError = ref(false);
 </script>
 
 <template>
@@ -41,12 +46,12 @@ const siteName = computed(() => {
       </div>
     </div>
     <img
-      v-if="preview.imageUrl"
+      v-if="preview.imageUrl && !imageError"
       :src="preview.imageUrl"
       :alt="preview.title || ''"
       class="block max-h-[200px] w-full object-cover"
       loading="lazy"
-      @error="($event.target as HTMLImageElement).style.display = 'none'"
+      @error="imageError = true"
     />
   </div>
 </template>

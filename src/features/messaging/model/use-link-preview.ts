@@ -1,4 +1,4 @@
-import { ref, computed, watch, type Ref } from "vue";
+import { ref, computed, watch, onScopeDispose, type Ref } from "vue";
 import { getMatrixClientService } from "@/entities/matrix";
 import type { LinkPreview } from "@/entities/chat";
 
@@ -115,6 +115,8 @@ export function useLinkPreview(text: Ref<string>) {
       }
     }, 500);
   });
+
+  onScopeDispose(() => clearTimeout(debounceTimer));
 
   const dismiss = () => {
     dismissed.value = true;
