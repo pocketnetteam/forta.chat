@@ -611,7 +611,7 @@ const replyPreviewText = computed(() => {
 
         <!-- Message content with parsed links/mentions -->
         <div class="text-chat-base">
-          <MessageContent :text="props.message.content" :is-own="props.isOwn" @mention-click="(userId) => openUserProfile?.(userId)" />
+          <MessageContent :text="props.message.content" :is-own="props.isOwn" :link-preview="props.message.linkPreview" @mention-click="(userId) => openUserProfile?.(userId)" />
           <!-- Inline timestamp (Telegram-style float) -->
           <span
             v-if="themeStore.showTimestamps"
