@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useChatStore } from "@/entities/chat";
+import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 
 interface Props {
   isAdmin?: boolean;
@@ -7,12 +8,21 @@ interface Props {
 
 const props = defineProps<Props>();
 const chatStore = useChatStore();
+const { formatPreview } = useFormatPreview();
+const { t } = useI18n();
 const emit = defineEmits<{ scrollTo: [messageId: string] }>();
 
 const currentPinned = computed(() => {
   const pins = chatStore.pinnedMessages;
   if (pins.length === 0) return null;
   return pins[chatStore.pinnedMessageIndex] ?? pins[0];
+});
+
+const pinnedPreview = computed(() => {
+  const msg = currentPinned.value;
+  const room = chatStore.activeRoom;
+  if (!msg || !room) return "";
+  return formatPreview(msg, room).replace(/\n/g, " ");
 });
 
 const handleClick = () => {
@@ -40,7 +50,7 @@ const handleUnpin = () => {
     <!-- Pin icon + cycle -->
     <button
       class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-color-bg-ac transition-colors hover:bg-neutral-grad-0"
-      title="Next pinned"
+      :title="t('pinned.next')"
       @click="handleCycle"
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -50,19 +60,19 @@ const handleUnpin = () => {
 
     <!-- Pinned content (clickable to scroll) -->
     <button
-      class="min-w-0 flex-1 text-left"
+      class="min-w-0 flex-1 overflow-hidden text-left"
       @click="handleClick"
     >
       <div class="flex items-center gap-1">
         <span class="text-xs font-medium text-color-bg-ac">
-          Pinned Message
+          {{ t("pinned.message") }}
           <template v-if="chatStore.pinnedMessages.length > 1">
             ({{ chatStore.pinnedMessageIndex + 1 }}/{{ chatStore.pinnedMessages.length }})
           </template>
         </span>
       </div>
       <div class="truncate text-xs text-text-on-main-bg-color">
-        {{ currentPinned.content }}
+        {{ pinnedPreview }}
       </div>
     </button>
 
@@ -70,7 +80,7 @@ const handleUnpin = () => {
     <button
       v-if="props.isAdmin"
       class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-      title="Unpin"
+      :title="t('pinned.unpin')"
       @click="handleUnpin"
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

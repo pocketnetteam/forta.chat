@@ -22,6 +22,9 @@ export const en = {
   "contactList.you": "You",
   "contactList.typing": "typing...",
   "contactList.typingCount": "{count} typing...",
+  "contactList.typingNamed": "{name} is typing...",
+  "contactList.typingTwo": "{name1} and {name2} are typing...",
+  "contactList.typingMany": "{name} and {count} more are typing...",
   "contactList.pin": "Pin",
   "contactList.unpin": "Unpin",
   "contactList.mute": "Mute",
@@ -50,6 +53,17 @@ export const en = {
   "tabs.personal": "Personal",
   "tabs.groups": "Groups",
   "tabs.invites": "Invites",
+  "tabs.channels": "Channels",
+
+  // ── Channels ──
+  "channels.noChannels": "No channel subscriptions",
+  "channels.noChannelsHint": "Subscribe to channels on Bastyon to see them here",
+  "channels.noPosts": "No posts in this channel yet",
+  "channels.loadError": "Failed to load channels",
+  "channels.postsError": "Failed to load posts",
+  "channels.retry": "Retry",
+  "channels.openInApp": "Open",
+  "channels.address": "Channel address",
 
   // ── Settings panel ──
   "settings.title": "Settings",
@@ -115,6 +129,9 @@ export const en = {
   "chat.more": "More",
   "chat.typing": "typing...",
   "chat.typingCount": "{count} typing...",
+  "chat.typingNamed": "{name} is typing...",
+  "chat.typingTwo": "{name1} and {name2} are typing...",
+  "chat.typingMany": "{name} and {count} more are typing...",
   "chat.members": "{count} members",
   "chat.copiedToClipboard": "Copied to clipboard",
 
@@ -153,6 +170,7 @@ export const en = {
   "contextMenu.reply": "Reply",
   "contextMenu.copy": "Copy",
   "contextMenu.forward": "Forward",
+  "contextMenu.copyLink": "Copy link",
   "contextMenu.edit": "Edit",
   "contextMenu.select": "Select",
   "contextMenu.pin": "Pin",
@@ -164,6 +182,8 @@ export const en = {
   "messageList.noMessages": "No messages yet. Start a conversation!",
   "messageList.isTyping": "{name} is typing",
   "messageList.peopleTyping": "{count} people are typing",
+  "messageList.typingTwo": "{name1} and {name2} are typing",
+  "messageList.typingMany": "{name} and {count} more are typing",
   "messageList.deleteMessage": "Delete message?",
   "messageList.deleteForEveryone": "Delete for everyone",
   "messageList.deleteForMe": "Delete for me",
@@ -173,6 +193,9 @@ export const en = {
   "attachment.photoOrVideo": "Photo or Video",
   "attachment.file": "File",
   "attachment.poll": "Poll",
+
+  // ── Message bubble ──
+  "message.forwardedFrom": "Forwarded from {name}",
 
   // ── Voice recorder ──
   "voice.slideToCancel": "< Slide to cancel",
@@ -427,6 +450,7 @@ export const en = {
   "postPlayer.rated": "You rated this post",
   "postPlayer.ratingRestricted": "Rating restricted",
   "postPlayer.openPost": "Open full post",
+  "postPlayer.searchChats": "Search chats...",
 
   // ── Registration ──
   "register.title": "Create Account",

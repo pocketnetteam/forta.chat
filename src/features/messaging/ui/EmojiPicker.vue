@@ -22,6 +22,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{ close: []; select: [emoji: string] }>();
 
 const themeStore = useThemeStore();
+const { t } = useI18n();
 
 const search = ref("");
 const activeCategoryIndex = ref(0);
@@ -158,7 +159,7 @@ const setSectionRef = (el: any, idx: number) => {
                 ref="searchInputRef"
                 v-model="search"
                 type="text"
-                placeholder="Search emoji..."
+                :placeholder="t('emoji.searchPlaceholder')"
                 class="w-full rounded-xl bg-chat-input-bg py-2 pl-9 pr-3 text-sm text-text-color outline-none placeholder:text-neutral-grad-2 focus:ring-2 focus:ring-color-bg-ac/20"
               />
               <button

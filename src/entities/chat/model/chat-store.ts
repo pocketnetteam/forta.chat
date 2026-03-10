@@ -1514,6 +1514,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (msg) {
         msg.id = serverId;
         triggerRef(messages);
+
+        // Sync sidebar: update room.lastMessage if this was the last message
+        const room = getRoomById(roomId);
+        if (room?.lastMessage && room.lastMessage.id === tempId) {
+          room.lastMessage = { ...msg };
+          triggerRef(rooms);
+        }
       }
     }
   };
@@ -1529,6 +1536,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (msg) {
         msg.status = status;
         triggerRef(messages);
+
+        // Sync sidebar: update room.lastMessage if this message is the last one
+        const room = getRoomById(roomId);
+        if (room?.lastMessage && room.lastMessage.id === messageId) {
+          room.lastMessage = { ...msg };
+          triggerRef(rooms);
+        }
       }
     }
   };
@@ -1542,6 +1556,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         msg.content = newContent;
         msg.edited = true;
         triggerRef(messages);
+
+        // Sync sidebar: update room.lastMessage if this was the last message
+        const room = getRoomById(roomId);
+        if (room?.lastMessage && room.lastMessage.id === messageId) {
+          room.lastMessage = { ...msg };
+          triggerRef(rooms);
+        }
       }
     }
   };
@@ -2729,6 +2750,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const content = receiptEvent?.getContent?.() ?? receiptEvent?.event?.content;
       if (!content) return;
 
+      let statusChanged = false;
       for (const [eventId, receiptTypes] of Object.entries(content)) {
         const readReceipts = (receiptTypes as Record<string, unknown>)?.["m.read"] as Record<string, unknown> | undefined;
         if (!readReceipts) continue;
@@ -2748,12 +2770,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               if (msg.status === MessageStatus.read) break; // already read, stop
               if (msg.status === MessageStatus.sent || msg.status === MessageStatus.delivered) {
                 msg.status = MessageStatus.read;
+                statusChanged = true;
               }
             }
           }
         }
       }
       triggerRef(messages);
+
+      // Sync sidebar: if any status changed, update room.lastMessage
+      if (statusChanged) {
+        const room = getRoomById(roomId);
+        if (room?.lastMessage && roomMessages.length) {
+          const lastMsg = roomMessages[roomMessages.length - 1];
+          if (room.lastMessage.id === lastMsg.id && room.lastMessage.status !== lastMsg.status) {
+            room.lastMessage = { ...lastMsg };
+          }
+          triggerRef(rooms);
+        }
+      }
     } catch (e) {
       console.warn("[chat-store] handleReceiptEvent error:", e);
     }

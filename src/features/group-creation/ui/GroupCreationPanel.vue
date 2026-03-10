@@ -4,6 +4,8 @@ import { UserAvatar } from "@/entities/user";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { useGroupCreation } from "../model/use-group-creation";
 
+const { t } = useI18n();
+
 const emit = defineEmits<{ created: [roomId: string]; close: [] }>();
 
 const {
@@ -128,7 +130,7 @@ const handleAvatarChange = (e: Event) => {
         <input
           :value="searchQuery"
           type="text"
-          placeholder="Search users..."
+          :placeholder="t('group.searchUsers')"
           class="w-full rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
           @input="handleSearch"
         />
@@ -235,7 +237,7 @@ const handleAvatarChange = (e: Event) => {
             ref="nameInput"
             v-model="groupName"
             type="text"
-            placeholder="Group name"
+            :placeholder="t('group.groupName')"
             class="flex-1 border-b border-neutral-grad-0 bg-transparent py-2 text-base text-text-color outline-none placeholder:text-neutral-grad-2 focus:border-color-bg-ac"
           />
         </div>

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { useChatStore } from "@/entities/chat";
+import { useChannelStore } from "@/entities/channel";
 
-type FilterValue = "all" | "personal" | "groups" | "invites";
+type FilterValue = "all" | "personal" | "groups" | "invites" | "channels";
 
 interface Props {
   modelValue: FilterValue;
@@ -11,6 +12,7 @@ interface Props {
 const props = defineProps<Props>();
 const emit = defineEmits<{ "update:modelValue": [value: FilterValue] }>();
 const chatStore = useChatStore();
+const channelStore = useChannelStore();
 const { t } = useI18n();
 
 const tabs = computed(() => [
@@ -18,10 +20,15 @@ const tabs = computed(() => [
   { value: "personal" as const, label: t("tabs.personal") },
   { value: "groups" as const, label: t("tabs.groups") },
   { value: "invites" as const, label: t("tabs.invites") },
+  { value: "channels" as const, label: t("tabs.channels") },
 ]);
 
 const visibleTabs = computed(() =>
-  tabs.value.filter(t => t.value !== "invites" || chatStore.inviteCount > 0)
+  tabs.value.filter(t => {
+    if (t.value === "invites") return chatStore.inviteCount > 0;
+    if (t.value === "channels") return channelStore.channels.length > 0;
+    return true;
+  })
 );
 
 const tabRefs = ref<HTMLElement[]>([]);

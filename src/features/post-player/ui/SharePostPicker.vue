@@ -86,7 +86,7 @@ const handleClose = () => {
     <input
       v-model="search"
       type="text"
-      placeholder="Search chats..."
+      :placeholder="t('postPlayer.searchChats')"
       class="mb-3 w-full rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
     />
 
@@ -124,7 +124,7 @@ const handleClose = () => {
       </button>
 
       <div v-if="filteredRooms.length === 0" class="p-4 text-center text-sm text-text-on-main-bg-color">
-        No chats found
+        {{ t("forward.noChats") }}
       </div>
     </div>
 
@@ -133,7 +133,7 @@ const handleClose = () => {
       :disabled="selectedRoomIds.size === 0 || sending"
       @click="handleSend"
     >
-      {{ sending ? "..." : `${t("postPlayer.send")} (${selectedRoomIds.size})` }}
+      {{ sending ? t("forward.sending") : `${t("postPlayer.send")} (${selectedRoomIds.size})` }}
     </button>
   </BottomSheet>
 </template>

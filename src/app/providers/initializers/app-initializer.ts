@@ -328,6 +328,37 @@ export class AppInitializer {
     }
   }
 
+  /** Synchronous cache lookup — returns immediately or null */
+  getCachedPost(txid: string): BastyonPostData | null {
+    return this.postCache.get(txid) ?? null;
+  }
+
+  /** Cache a post from external source (e.g. channel feed) so PostCard finds it */
+  cachePost(raw: Record<string, unknown>): void {
+    const tryDecode = (val: unknown): string => {
+      if (typeof val !== "string") return "";
+      try { return decodeURIComponent(val); } catch { return val; }
+    };
+    const txid = (raw.txid as string) ?? "";
+    if (!txid || this.postCache.has(txid)) return;
+
+    const rawImages = raw.i ?? raw.images;
+    const rawTags = raw.t ?? raw.tags;
+
+    const post: BastyonPostData = {
+      txid,
+      address: (raw.address as string) ?? "",
+      caption: tryDecode(raw.c ?? raw.caption),
+      message: tryDecode(raw.m ?? raw.message),
+      images: Array.isArray(rawImages) ? (rawImages as string[]) : [],
+      url: tryDecode(raw.u ?? raw.url),
+      tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
+      settings: (raw.s as { v?: string }) ?? (raw.settings as { v?: string }) ?? {},
+      time: Number(raw.time ?? 0),
+    };
+    this.postCache.set(txid, post);
+  }
+
   async loadPostScores(txid: string): Promise<PostScore[]> {
     if (!this.api) return [];
     try {
@@ -487,6 +518,91 @@ export class AppInitializer {
     } catch {
       // error code -5 means user not found yet
       return false;
+    }
+  }
+
+  /** Fetch channels the user is subscribed to.
+   *  Uses direct HTTP POST to Bastyon node — getsubscribeschannels is not available via proxy API. */
+  private static readonly BASTYON_NODE_URL = "/bastyon-node";
+
+  async getSubscribesChannels(
+    address: string,
+    blockNumber = 0,
+    page = 0,
+    pageSize = 20
+  ): Promise<{ channels: any[]; height: number } | undefined> {
+    try {
+      const response = await fetch(AppInitializer.BASTYON_NODE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "getsubscribeschannels",
+          params: [address, blockNumber, page, pageSize, 1],
+        }),
+      });
+      if (!response.ok) {
+        console.error("[appInit] getSubscribesChannels HTTP error:", response.status);
+        return undefined;
+      }
+      const json = await response.json();
+      if (json.error) {
+        console.error("[appInit] getSubscribesChannels RPC error:", json.error);
+        return undefined;
+      }
+      // Response: { result: { height, channels: [...] }, error, id }
+      const result = json.result ?? json;
+      return {
+        height: result.height ?? 0,
+        channels: result.channels ?? [],
+      };
+    } catch (e) {
+      console.error("[appInit] getSubscribesChannels error:", e);
+      return undefined;
+    }
+  }
+
+  /** Fetch posts for a specific channel/user profile.
+   *  Uses direct HTTP POST to Bastyon node — same endpoint as getsubscribeschannels. */
+  async getProfileFeed(
+    authorAddress: string,
+    options?: { height?: number; startTxid?: string; count?: number }
+  ): Promise<any[]> {
+    try {
+      const opts = options ?? {};
+      const response = await fetch(AppInitializer.BASTYON_NODE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "getprofilefeed",
+          params: [
+            Number(opts.height ?? 0),
+            opts.startTxid ?? "",
+            opts.count ?? 10,
+            "",   // lang
+            [],   // tagsfilter
+            [],   // type
+            [],   // reserved
+            [],   // reserved
+            [],   // tagsexcluded
+            "",   // keyword
+            authorAddress,
+          ],
+        }),
+      });
+      if (!response.ok) {
+        console.error("[appInit] getProfileFeed HTTP error:", response.status);
+        return [];
+      }
+      const json = await response.json();
+      if (json.error) {
+        console.error("[appInit] getProfileFeed RPC error:", json.error);
+        return [];
+      }
+      const result = json.result ?? json;
+      return Array.isArray(result) ? result : result?.contents ?? [];
+    } catch (e) {
+      console.error("[appInit] getProfileFeed error:", e);
+      return [];
     }
   }
 

@@ -626,6 +626,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Get cached user data by raw address */
   const getBastyonUserData = (addr: string) => appInitializer.getUserData(addr);
 
+  const getSubscribesChannels = (addr: string, blockNumber?: number, page?: number, pageSize?: number) =>
+    appInitializer.getSubscribesChannels(addr, blockNumber, page, pageSize);
+
+  const getCachedPost = (txid: string) => appInitializer.getCachedPost(txid);
+  const cachePost = (raw: Record<string, unknown>) => appInitializer.cachePost(raw);
+
+  const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }) =>
+    appInitializer.getProfileFeed(authorAddress, options);
+
   return {
     address,
     clearRegistrationState,
@@ -634,7 +643,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     fetchUserInfo,
     findRegistrationProxy,
     generateRegistrationKeys,
+    cachePost,
+    getCachedPost,
     getBastyonUserData,
+    getProfileFeed,
+    getSubscribesChannels,
     initMatrix,
     isAuthenticated,
     isEditingUserData,

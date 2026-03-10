@@ -51,6 +51,12 @@ const handleAddReaction = () => {
   emit("addReaction", props.message);
 };
 
+/** Get display name for forwarded message */
+const forwardedFromName = computed(() => {
+  if (!props.message.forwardedFrom) return "";
+  return props.message.forwardedFrom.senderName || chatStore.getDisplayName(props.message.forwardedFrom.senderId);
+});
+
 const longPressTriggered = ref(false);
 const { onPointerdown: lpPointerdown, onPointermove, onPointerup: lpPointerup, onPointerleave: lpPointerleave } = useLongPress({
   onTrigger: (e) => {
@@ -257,7 +263,7 @@ const replyPreviewText = computed(() => {
       <button
         class="absolute top-1/2 hidden h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-text-on-main-bg-color opacity-0 transition-opacity hover:bg-neutral-grad-0 group-hover:flex group-hover:opacity-100"
         :class="props.isOwn ? '-left-8' : '-right-8'"
-        title="Reply"
+        :title="t('contextMenu.reply')"
         @click="handleReply"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -289,7 +295,7 @@ const replyPreviewText = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="truncate px-3 pt-1.5 text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t("message.forwardedFrom", { name: forwardedFromName }) }}
         </div>
         <!-- Reply preview -->
         <div
@@ -367,7 +373,7 @@ const replyPreviewText = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="truncate px-3 pt-1.5 text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t("message.forwardedFrom", { name: forwardedFromName }) }}
         </div>
         <!-- Reply preview -->
         <div

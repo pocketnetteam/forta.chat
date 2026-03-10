@@ -5,6 +5,8 @@ import { ContextMenu } from "@/shared/ui/context-menu";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
 import ReactionPicker from "./ReactionPicker.vue";
 
+const { t } = useI18n();
+
 interface Props {
   show: boolean;
   x: number;
@@ -39,23 +41,23 @@ const ICONS = {
 
 const menuItems = computed<ContextMenuItem[]>(() => {
   const items: ContextMenuItem[] = [
-    { label: "Reply", icon: ICONS.reply, action: "reply" },
-    { label: "Copy", icon: ICONS.copy, action: "copy" },
-    { label: "Forward", icon: ICONS.forward, action: "forward" },
+    { label: t("contextMenu.reply"), icon: ICONS.reply, action: "reply" },
+    { label: t("contextMenu.copy"), icon: ICONS.copy, action: "copy" },
+    { label: t("contextMenu.forward"), icon: ICONS.forward, action: "forward" },
   ];
   if (props.isOwn) {
-    items.push({ label: "Edit", icon: ICONS.edit, action: "edit" });
+    items.push({ label: t("contextMenu.edit"), icon: ICONS.edit, action: "edit" });
   }
-  items.push({ label: "Select", icon: ICONS.select, action: "select" });
+  items.push({ label: t("contextMenu.select"), icon: ICONS.select, action: "select" });
   if (props.isAdmin) {
     items.push({
-      label: props.isPinned ? "Unpin" : "Pin",
+      label: props.isPinned ? t("contextMenu.unpin") : t("contextMenu.pin"),
       icon: ICONS.pin,
       action: props.isPinned ? "unpin" : "pin",
     });
   }
   if (props.isOwn) {
-    items.push({ label: "Delete", icon: ICONS.delete, action: "delete", danger: true });
+    items.push({ label: t("contextMenu.delete"), icon: ICONS.delete, action: "delete", danger: true });
   }
   return items;
 });
@@ -95,7 +97,7 @@ const handleOpenEmojiPicker = () => {
         <ReactionPicker @select="handleReaction" />
         <button
           class="flex h-8 w-8 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-          title="More reactions"
+          :title="t('contextMenu.moreReactions')"
           @click="handleOpenEmojiPicker"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

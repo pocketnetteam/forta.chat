@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ContactList, ContactSearch, FolderTabs } from "@/features/contacts";
+import { ChannelList } from "@/features/channels";
+import { useChannelStore } from "@/entities/channel";
 import { InviteModal } from "@/features/invite";
 import { useWallet } from "@/features/wallet/model/use-wallet";
 import { useChatStore } from "@/entities/chat";
@@ -12,9 +14,11 @@ import type { SidebarTab } from "./model/use-sidebar-tab";
 
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
+const channelStore = useChannelStore();
 
 onMounted(() => {
   chatStore.loadCachedRooms();
+  channelStore.fetchChannels(true);
 });
 
 const { t } = useI18n();
@@ -29,8 +33,8 @@ const searchPlaceholder = computed(() => {
   const shortcut = isMac ? "⌘K" : "Ctrl+K";
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
-const activeFilter = ref<"all" | "personal" | "groups" | "invites">("all");
-const tabOrder = ["all", "personal", "groups", "invites"] as const;
+const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels">("all");
+const tabOrder = ["all", "personal", "groups", "invites", "channels"] as const;
 const slideDirection = ref<"left" | "right">("left");
 
 watch(activeFilter, (newVal, oldVal) => {
@@ -74,6 +78,16 @@ watch(
   () => chatStore.inviteCount,
   (count) => {
     if (count === 0 && activeFilter.value === "invites") {
+      activeFilter.value = "all";
+    }
+  },
+);
+
+// Auto-switch away from "channels" tab when no channels remain
+watch(
+  () => channelStore.channels.length,
+  (count) => {
+    if (count === 0 && activeFilter.value === "channels") {
       activeFilter.value = "all";
     }
   },
@@ -221,13 +235,21 @@ watch(walletAvailable, (v) => { if (v) loadBalance(); }, { immediate: true });
         <template v-else>
           <FolderTabs v-model="activeFilter" />
           <div class="relative flex-1 overflow-hidden">
-            <RoomListSkeleton v-if="roomsLoading" :first-load="true" />
+            <RoomListSkeleton v-if="roomsLoading && activeFilter !== 'channels'" :first-load="true" />
             <transition v-else :name="'tab-slide-' + slideDirection">
+              <ChannelList
+                v-if="activeFilter === 'channels'"
+                key="channels"
+                class="absolute inset-0 overflow-y-auto"
+                @select-channel="handleSelectRoom"
+              />
               <ContactList
+                v-else
                 :key="activeFilter"
                 :filter="activeFilter"
                 class="absolute inset-0 overflow-y-auto"
                 @select-room="handleSelectRoom"
+                @select-channel="handleSelectRoom"
               />
             </transition>
           </div>

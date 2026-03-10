@@ -2,6 +2,8 @@
 import { ref, computed } from "vue";
 import type { MediaFile } from "../model/use-media-upload";
 
+const { t } = useI18n();
+
 interface Props {
   show: boolean;
   files: MediaFile[];
@@ -101,7 +103,7 @@ const toggleCaptionPosition = () => {
             <input
               :value="props.caption"
               type="text"
-              placeholder="Add a caption..."
+              :placeholder="t('media.addCaption')"
               maxlength="1024"
               class="flex-1 rounded-xl bg-white/10 px-4 py-2.5 text-sm text-white outline-none placeholder:text-white/40"
               @input="emit('update:caption', ($event.target as HTMLInputElement).value)"

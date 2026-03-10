@@ -41,6 +41,15 @@ export default defineConfig({
       dts: true
     })
   ],
+  server: {
+    proxy: {
+      "/bastyon-node": {
+        target: "http://test.2.pocketnet.app:39091",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/bastyon-node/, ""),
+      },
+    },
+  },
   define: {
     global: "globalThis",
     "process.env": {},

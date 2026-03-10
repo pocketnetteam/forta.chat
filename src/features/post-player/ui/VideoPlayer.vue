@@ -28,7 +28,7 @@ const onIframeError = () => {
   <div
     v-if="videoInfo"
     class="relative overflow-hidden rounded-lg bg-black"
-    :class="inline ? 'aspect-video max-h-48' : 'aspect-video w-full'"
+    :class="inline ? 'aspect-video w-full max-h-48' : 'aspect-video w-full'"
   >
     <iframe
       v-if="playing && !error"

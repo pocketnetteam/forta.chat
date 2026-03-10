@@ -24,6 +24,9 @@ export const ru: Record<TranslationKey, string> = {
   "contactList.you": "Вы",
   "contactList.typing": "печатает...",
   "contactList.typingCount": "{count} печатают...",
+  "contactList.typingNamed": "{name} печатает...",
+  "contactList.typingTwo": "{name1} и {name2} печатают...",
+  "contactList.typingMany": "{name} и ещё {count} печатают...",
   "contactList.pin": "Закрепить",
   "contactList.unpin": "Открепить",
   "contactList.mute": "Отключить уведомления",
@@ -52,6 +55,17 @@ export const ru: Record<TranslationKey, string> = {
   "tabs.personal": "Личные",
   "tabs.groups": "Группы",
   "tabs.invites": "Заявки",
+  "tabs.channels": "Каналы",
+
+  // ── Каналы ──
+  "channels.noChannels": "Нет подписок на каналы",
+  "channels.noChannelsHint": "Подпишитесь на каналы в Bastyon, чтобы видеть их здесь",
+  "channels.noPosts": "В этом канале пока нет постов",
+  "channels.loadError": "Не удалось загрузить каналы",
+  "channels.postsError": "Не удалось загрузить посты",
+  "channels.retry": "Повторить",
+  "channels.openInApp": "Открыть",
+  "channels.address": "Адрес канала",
 
   // ── Settings panel ──
   "settings.title": "Настройки",
@@ -117,6 +131,9 @@ export const ru: Record<TranslationKey, string> = {
   "chat.more": "Ещё",
   "chat.typing": "печатает...",
   "chat.typingCount": "{count} печатают...",
+  "chat.typingNamed": "{name} печатает...",
+  "chat.typingTwo": "{name1} и {name2} печатают...",
+  "chat.typingMany": "{name} и ещё {count} печатают...",
   "chat.members": "{count} участн.",
   "chat.copiedToClipboard": "Скопировано в буфер обмена",
 
@@ -155,6 +172,7 @@ export const ru: Record<TranslationKey, string> = {
   "contextMenu.reply": "Ответить",
   "contextMenu.copy": "Копировать",
   "contextMenu.forward": "Переслать",
+  "contextMenu.copyLink": "Скопировать ссылку",
   "contextMenu.edit": "Редактировать",
   "contextMenu.select": "Выбрать",
   "contextMenu.pin": "Закрепить",
@@ -166,6 +184,8 @@ export const ru: Record<TranslationKey, string> = {
   "messageList.noMessages": "Сообщений пока нет. Начните беседу!",
   "messageList.isTyping": "{name} печатает",
   "messageList.peopleTyping": "{count} чел. печатают",
+  "messageList.typingTwo": "{name1} и {name2} печатают",
+  "messageList.typingMany": "{name} и ещё {count} печатают",
   "messageList.deleteMessage": "Удалить сообщение?",
   "messageList.deleteForEveryone": "Удалить у всех",
   "messageList.deleteForMe": "Удалить у меня",
@@ -175,6 +195,9 @@ export const ru: Record<TranslationKey, string> = {
   "attachment.photoOrVideo": "Фото или видео",
   "attachment.file": "Файл",
   "attachment.poll": "Опрос",
+
+  // ── Message bubble ──
+  "message.forwardedFrom": "Переслано от {name}",
 
   // ── Voice recorder ──
   "voice.slideToCancel": "< Сдвиньте для отмены",
@@ -429,6 +452,7 @@ export const ru: Record<TranslationKey, string> = {
   "postPlayer.rated": "Вы оценили этот пост",
   "postPlayer.ratingRestricted": "Оценка ограничена",
   "postPlayer.openPost": "Открыть пост",
+  "postPlayer.searchChats": "Поиск чатов...",
 
   // ── Registration ──
   "register.title": "Создать аккаунт",

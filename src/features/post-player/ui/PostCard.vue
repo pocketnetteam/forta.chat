@@ -15,8 +15,10 @@ const props = defineProps<Props>();
 const { t } = useI18n();
 const authStore = useAuthStore();
 
-const post = ref<BastyonPostData | null>(null);
-const loading = ref(true);
+// Try sync cache first — avoids skeleton flash for prefetched posts
+const cached = authStore.getCachedPost(props.txid);
+const post = ref<BastyonPostData | null>(cached);
+const loading = ref(!cached);
 const error = ref(false);
 const authorName = ref("");
 const authorImage = ref("");
@@ -47,29 +49,37 @@ const authorAvatarUrl = computed(() => {
 
 const scores = ref<{ average: number; total: number }>({ average: 0, total: 0 });
 
+async function loadAuthor(data: BastyonPostData) {
+  if (!data.address) return;
+  await authStore.loadUsersInfo([data.address]);
+  const user = authStore.getBastyonUserData(data.address);
+  if (user) {
+    authorName.value = user.name || data.address.slice(0, 10);
+    authorImage.value = user.image || "";
+  } else {
+    authorName.value = data.address.slice(0, 10);
+  }
+}
+
+function loadScores() {
+  authStore.loadPostScores(props.txid).then((s) => {
+    if (s.length) {
+      const sum = s.reduce((a, x) => a + x.value, 0);
+      scores.value = { average: sum / s.length, total: s.length };
+    }
+  });
+}
+
 onMounted(async () => {
   try {
-    const data = await authStore.loadPost(props.txid);
-    if (!data) { error.value = true; return; }
-    post.value = data;
-
-    if (data.address) {
-      await authStore.loadUsersInfo([data.address]);
-      const user = authStore.getBastyonUserData(data.address);
-      if (user) {
-        authorName.value = user.name || data.address.slice(0, 10);
-        authorImage.value = user.image || "";
-      } else {
-        authorName.value = data.address.slice(0, 10);
-      }
+    let data = post.value;
+    if (!data) {
+      data = await authStore.loadPost(props.txid);
+      if (!data) { error.value = true; return; }
+      post.value = data;
     }
-
-    authStore.loadPostScores(props.txid).then((s) => {
-      if (s.length) {
-        const sum = s.reduce((a, x) => a + x.value, 0);
-        scores.value = { average: sum / s.length, total: s.length };
-      }
-    });
+    await loadAuthor(data);
+    loadScores();
   } catch {
     error.value = true;
   } finally {
@@ -79,14 +89,21 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- Loading -->
+  <!-- Loading skeleton -->
   <div
     v-if="loading"
-    class="post-card my-1 flex w-full max-w-md items-center gap-3 rounded-xl p-3"
+    class="post-card my-1 w-full max-w-md overflow-hidden rounded-xl"
     :class="isOwn ? 'bg-white/10' : 'bg-neutral-grad-0/60'"
   >
-    <div class="h-4 w-4 animate-pulse rounded-full bg-current opacity-20" />
-    <span class="text-xs opacity-50">{{ t("post.loading") }}</span>
+    <div class="h-36 w-full animate-pulse bg-neutral-grad-2" />
+    <div class="flex flex-col gap-2 p-3">
+      <div class="flex items-center gap-2">
+        <div class="h-5 w-5 animate-pulse rounded-full bg-neutral-grad-2" />
+        <div class="h-3 w-20 animate-pulse rounded bg-neutral-grad-2" />
+      </div>
+      <div class="h-4 w-3/4 animate-pulse rounded bg-neutral-grad-2" />
+      <div class="h-3 w-1/2 animate-pulse rounded bg-neutral-grad-2" />
+    </div>
   </div>
 
   <!-- Error -->

@@ -406,7 +406,7 @@ const insertEmoji = (emoji: string) => {
       <!-- Emoji button (left of textarea) -->
       <button
         class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
-        title="Emoji"
+        :title="t('message.emoji')"
         aria-label="Open emoji picker"
         @click="(e: MouseEvent) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); emojiPickerPos = { x: rect.left, y: rect.top }; showEmojiPicker = !showEmojiPicker; }"
       >
@@ -419,7 +419,7 @@ const insertEmoji = (emoji: string) => {
       <textarea
         ref="textareaRef"
         v-model="text"
-        placeholder="Message"
+        :placeholder="t('message.placeholder')"
         aria-label="Type a message"
         rows="1"
         class="flex-1 resize-none rounded-2xl bg-chat-input-bg px-4 py-2.5 text-base leading-[24px] text-text-color outline-none transition-shadow duration-200 placeholder:text-neutral-grad-2 focus:ring-2 focus:ring-color-bg-ac/30"
@@ -435,7 +435,7 @@ const insertEmoji = (emoji: string) => {
         v-if="props.showDonate"
         class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-color-txt-ac/60 transition-colors hover:text-color-txt-ac"
         :disabled="sending"
-        title="Send PKOIN"
+        :title="t('wallet.sendPkoin')"
         aria-label="Send PKOIN"
         @click="emit('donate')"
       >
@@ -449,7 +449,7 @@ const insertEmoji = (emoji: string) => {
         ref="attachBtnRef"
         class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
         :disabled="sending"
-        title="Attach"
+        :title="t('message.attach')"
         aria-label="Attach file"
         @click="toggleAttachmentPanel"
       >

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
+import { ChannelView } from "@/features/channels";
+import { useChannelStore } from "@/entities/channel";
 import { MessageList, MessageInput } from "@/features/messaging";
 import SelectionBar from "@/features/messaging/ui/SelectionBar.vue";
 import ForwardPicker from "@/features/messaging/ui/ForwardPicker.vue";
@@ -20,7 +22,14 @@ import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const userStore = useUserStore();
+const channelStore = useChannelStore();
 const emit = defineEmits<{ back: [] }>();
+
+const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
+
+watch(() => chatStore.activeRoomId, (roomId) => {
+  if (roomId) channelStore.clearActiveChannel();
+});
 const { toast } = useToast();
 const { isOnline, isSlow } = useConnectivity();
 const { t } = useI18n();
@@ -146,8 +155,20 @@ const typingText = computed(() => {
   const myAddr = authStore.address ?? "";
   const others = typingUsers.filter(id => id !== myAddr);
   if (others.length === 0) return "";
-  if (others.length === 1) return t("chat.typing");
-  return t("chat.typingCount", { count: others.length });
+
+  const room = chatStore.activeRoom;
+  if (!room?.isGroup) {
+    return t("chat.typing");
+  }
+
+  const names = others.map(id => chatStore.getDisplayName(id));
+  if (names.length === 1) {
+    return t("chat.typingNamed", { name: names[0] });
+  }
+  if (names.length === 2) {
+    return t("chat.typingTwo", { name1: names[0], name2: names[1] });
+  }
+  return t("chat.typingMany", { name: names[0], count: names.length - 1 });
 });
 
 /** Subtitle: typing indicator or member count */
@@ -220,7 +241,7 @@ onUnmounted(() => {
   <div class="flex h-full flex-col bg-background-total-theme" style="padding-bottom: max(var(--keyboardheight, 0px), env(safe-area-inset-bottom, 0px))">
     <!-- Chat header -->
     <div
-      v-if="chatStore.activeRoom"
+      v-if="chatStore.activeRoom && !isChannelView"
       class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-3"
     >
       <!-- Back button (mobile) -->
@@ -299,9 +320,15 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <!-- No room selected -->
+    <!-- Active channel view -->
+    <ChannelView
+      v-if="isChannelView"
+      @back="() => { channelStore.clearActiveChannel(); emit('back'); }"
+    />
+
+    <!-- No room selected (only when no channel either) -->
     <div
-      v-if="!chatStore.activeRoom"
+      v-else-if="!chatStore.activeRoom"
       class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center text-text-on-main-bg-color"
     >
       <div class="flex h-20 w-20 items-center justify-center rounded-full bg-color-bg-ac/8">
@@ -315,7 +342,7 @@ onUnmounted(() => {
     </div>
 
     <!-- Active room content -->
-    <template v-if="chatStore.activeRoom">
+    <template v-else-if="chatStore.activeRoom">
       <!-- Connectivity banner -->
       <transition name="banner-slide">
         <div

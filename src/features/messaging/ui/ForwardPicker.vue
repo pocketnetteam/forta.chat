@@ -16,6 +16,7 @@ const emit = defineEmits<{ close: [] }>();
 const chatStore = useChatStore();
 const { forwardMessage } = useMessages();
 const { toast } = useToast();
+const { t } = useI18n();
 
 const search = ref("");
 const selectedRoomIds = ref<Set<string>>(new Set());
@@ -51,11 +52,11 @@ const handleSend = async () => {
 
     const msgCount = msgs.length;
     const roomCount = selectedRoomIds.value.size;
-    toast(`Forwarded ${msgCount} message${msgCount > 1 ? "s" : ""} to ${roomCount} chat${roomCount > 1 ? "s" : ""}`);
+    toast(t("forward.success", { msgCount, roomCount }));
     chatStore.exitSelectionMode();
   } catch (e) {
     console.error("Forward error:", e);
-    toast("Failed to forward");
+    toast(t("forward.failed"));
   } finally {
     sending.value = false;
     selectedRoomIds.value = new Set();
@@ -74,16 +75,16 @@ const handleClose = () => {
 <template>
   <BottomSheet :show="props.show" @close="handleClose">
     <div class="mb-3 flex items-center justify-between">
-      <span class="text-base font-semibold text-text-color">Forward to...</span>
+      <span class="text-base font-semibold text-text-color">{{ t("forward.title") }}</span>
       <span v-if="selectedRoomIds.size > 0" class="text-sm text-color-bg-ac">
-        {{ selectedRoomIds.size }} selected
+        {{ t("forward.selected", { count: selectedRoomIds.size }) }}
       </span>
     </div>
 
     <input
       v-model="search"
       type="text"
-      placeholder="Search chats..."
+      :placeholder="t('forward.searchPlaceholder')"
       class="mb-3 w-full rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
     />
 
@@ -122,13 +123,13 @@ const handleClose = () => {
       </button>
 
       <div v-if="filteredRooms.length === 0" class="p-4 text-center text-sm text-text-on-main-bg-color">
-        No chats found
+        {{ t("forward.noChats") }}
       </div>
     </div>
 
     <label class="mt-3 flex items-center gap-2 text-sm text-text-on-main-bg-color">
       <input v-model="withSenderInfo" type="checkbox" class="accent-color-bg-ac" />
-      Include sender info
+      {{ t("forward.includeSender") }}
     </label>
 
     <button
@@ -136,7 +137,7 @@ const handleClose = () => {
       :disabled="selectedRoomIds.size === 0 || sending"
       @click="handleSend"
     >
-      {{ sending ? "Sending..." : `Forward (${selectedRoomIds.size})` }}
+      {{ sending ? t("forward.sending") : t("forward.button", { count: selectedRoomIds.size }) }}
     </button>
   </BottomSheet>
 </template>

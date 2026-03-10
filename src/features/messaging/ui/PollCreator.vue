@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref } from "vue";
 
+const { t } = useI18n();
+
 const emit = defineEmits<{
   create: [question: string, options: string[]];
   close: [];
@@ -56,7 +58,7 @@ const handleCreate = () => {
       <input
         v-model="question"
         type="text"
-        placeholder="Ask a question..."
+        :placeholder="t('poll.askQuestion')"
         class="mb-3 w-full rounded-lg bg-chat-input-bg px-3 py-2.5 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
         maxlength="200"
       />
@@ -67,7 +69,7 @@ const handleCreate = () => {
           <input
             v-model="options[index]"
             type="text"
-            :placeholder="`Option ${index + 1}`"
+            :placeholder="t('poll.option', { n: index + 1 })"
             class="flex-1 rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
             maxlength="100"
           />

@@ -23,6 +23,7 @@ const authStore = useAuthStore();
 const themeStore = useThemeStore();
 const { loadMessages, toggleReaction, deleteMessage, votePoll, endPoll } = useMessages();
 const { toast } = useToast();
+const { t } = useI18n();
 
 /** Resolve system message text dynamically using current display names */
 const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: string; senderAddr: string; targetAddr?: string } }): string => {
@@ -75,7 +76,7 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
       chatStore.replyingTo = { id: message.id, senderId: message.senderId, content: message.content.slice(0, 150), type: message.type };
       break;
     case "copy":
-      navigator.clipboard.writeText(message.content).then(() => toast("Copied to clipboard"));
+      navigator.clipboard.writeText(message.content).then(() => toast(t("chat.copiedToClipboard")));
       break;
     case "edit":
       chatStore.editingMessage = { id: message.id, content: message.content };
@@ -261,7 +262,6 @@ watch(
     if (roomId) {
       // Reset state for new room
       switching.value = true;
-      settled.value = false;
       newMessageCount.value = 0;
       hasMore.value = true;
       showScrollFab.value = false;
@@ -274,8 +274,9 @@ watch(
       const hasCached = chatStore.activeMessages.length > 0;
 
       if (hasCached) {
-        // Cache hit — keep scroller hidden until scroll position is set
+        // Cache hit — show immediately, no hiding (avoids blank-screen flicker)
         loading.value = false;
+        settled.value = true;
         await nextTick();
 
         // Restore scroll position or go to bottom
@@ -284,28 +285,20 @@ watch(
           const el = getScrollContainer();
           if (el) el.scrollTop = el.scrollHeight - el.clientHeight - saved.distFromBottom;
           savedScrollPositions.delete(roomId);
-          // Reveal after restoring saved position
-          await nextTick();
-          requestAnimationFrame(() => {
-            settled.value = true;
+          switching.value = false;
+          checkScroll();
+        } else {
+          scrollToBottom(false, () => {
             switching.value = false;
             checkScroll();
-          });
-        } else {
-          await nextTick();
-          requestAnimationFrame(() => {
-            scrollToBottom(false, () => {
-              settled.value = true;
-              switching.value = false;
-              checkScroll();
-            });
           });
         }
 
         // 2. Fetch fresh messages from server in background (silent update)
         loadMessages(roomId).catch(() => {});
       } else {
-        // No cache — show skeleton, wait for server
+        // No cache — hide scroller, show skeleton, wait for server
+        settled.value = false;
         loading.value = true;
         try {
           await loadMessages(roomId);
@@ -505,8 +498,15 @@ const typingText = computed(() => {
   const myAddr = authStore.address ?? "";
   const others = typingUsers.filter(id => id !== myAddr);
   if (others.length === 0) return "";
-  if (others.length === 1) return `${chatStore.getDisplayName(others[0])} is typing`;
-  return `${others.length} people are typing`;
+
+  const names = others.map(id => chatStore.getDisplayName(id));
+  if (names.length === 1) {
+    return t("messageList.isTyping", { name: names[0] });
+  }
+  if (names.length === 2) {
+    return t("messageList.typingTwo", { name1: names[0], name2: names[1] });
+  }
+  return t("messageList.typingMany", { name: names[0], count: names.length - 1 });
 });
 
 /** Scroll to a specific message and flash highlight */
@@ -572,7 +572,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
       :min-item-size="48"
       key-field="id"
       class="h-full overflow-y-auto px-4 py-3"
-      :style="{ opacity: settled ? 1 : 0, transition: 'opacity 0.15s ease-out' }"
+      :style="{ opacity: settled ? 1 : 0 }"
     >
       <template #before>
         <div

@@ -2,6 +2,8 @@
 import { ref, computed, watch } from "vue";
 import type { RecorderState } from "../model/use-voice-recorder";
 
+const { t } = useI18n();
+
 interface Props {
   state: RecorderState;
   duration: number;
@@ -139,7 +141,7 @@ const waveformBars = computed(() => {
   <div v-else-if="state === 'locked'" class="flex items-center gap-2 px-2 py-2">
     <button
       class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-neutral-grad-0"
-      title="Cancel"
+      :title="t('voice.cancel')"
       @click="emit('cancel')"
     >
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -160,7 +162,7 @@ const waveformBars = computed(() => {
     </div>
     <button
       class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-grad-0 text-text-color transition-all hover:bg-neutral-grad-1"
-      title="Stop and preview"
+      :title="t('voice.stopAndPreview')"
       @click="emit('stopAndPreview')"
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
