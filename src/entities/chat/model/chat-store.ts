@@ -9,7 +9,7 @@ import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef, triggerRef } from "vue";
 
-import type { ChatRoom, FileInfo, Message, PollInfo, ReplyTo, TransferInfo } from "./types";
+import type { ChatRoom, FileInfo, LinkPreview, Message, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
 
 const NAMESPACE = "chat";
@@ -1882,6 +1882,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       };
     }
 
+    // Extract link preview from event content
+    let linkPreview: LinkPreview | undefined;
+    const urlPreview = content.url_preview as Record<string, unknown> | undefined;
+    if (urlPreview?.url) {
+      linkPreview = {
+        url: urlPreview.url as string,
+        siteName: urlPreview.site_name as string | undefined,
+        title: urlPreview.title as string | undefined,
+        description: urlPreview.description as string | undefined,
+        imageUrl: urlPreview.image_url as string | undefined,
+        imageWidth: urlPreview.image_width as number | undefined,
+        imageHeight: urlPreview.image_height as number | undefined,
+      };
+    }
+
     return {
       id: raw.event_id as string,
       roomId,
@@ -1893,6 +1908,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       fileInfo,
       replyTo,
       forwardedFrom,
+      linkPreview,
     };
   };
 
