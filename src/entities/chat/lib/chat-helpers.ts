@@ -150,6 +150,17 @@ export function resolveSystemText(
   return result;
 }
 
+/** Check if a name looks like an unresolved hash/hex ID — not human-readable.
+ *  Used to decide when to show a skeleton placeholder instead of a raw ID. */
+export function isUnresolvedName(name: string): boolean {
+  if (!name || name.length < 2) return true;
+  if (/^#?[a-f0-9]{16,}$/i.test(name)) return true; // hex hash or #hex alias
+  if (/^[a-f0-9]{8}\u2026/i.test(name)) return true; // truncated hex (8chars…)
+  if (/^@[a-f0-9]{20,}:/i.test(name)) return true; // raw Matrix ID @hexid:server
+  if (/^![a-zA-Z0-9]+:/i.test(name)) return true; // Matrix room ID !abc:server
+  return false;
+}
+
 /** Check if a string looks like a proper human-readable name (not a hash, hex ID, or raw address) */
 export function looksLikeProperName(name: string, rawAddress?: string): boolean {
   if (!name || name.length < 2) return false;

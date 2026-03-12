@@ -10,7 +10,7 @@ import type { Channel } from "@/entities/channel";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
-import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
+import { cleanMatrixIds, resolveSystemText, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 import { useLongPress } from "@/shared/lib/gestures";
 import { ContextMenu } from "@/shared/ui/context-menu";
@@ -79,13 +79,6 @@ const roomNameMap = computed(() => {
  *  2. If no names found → "-"
  *  3. If room name starts with "@" → strip "@"
  *  4. For groups/public: use room name as-is */
-/** Check if name looks like an unresolved hash/hex (not human-readable) */
-function _isUnresolvedName(name: string): boolean {
-  if (!name || name.length < 2) return true;
-  if (/^#?[a-f0-9]{16,}$/i.test(name)) return true; // hex hash or #hex alias
-  if (/^[a-f0-9]{8}…$/i.test(name)) return true; // truncated hex
-  return false;
-}
 
 // Cache hexDecode results to avoid repeated computation
 const hexDecodeCache = new Map<string, string>();
@@ -137,7 +130,7 @@ function _resolveRoomName(room: ChatRoom, allUsers: Record<string, any>, myHexId
     return cleanMatrixIds(room.name);
   }
   if (room.name?.startsWith("@")) return room.name.slice(1);
-  if (!_isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
+  if (!isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
   const names = _resolveMemberNames(room, allUsers, myHexId);
   if (names.length > 0) return names.join(", ");
   return cleanMatrixIds(room.name);
@@ -446,7 +439,8 @@ const getRoomLongPress = (room: ChatRoom) => {
           <div class="min-w-0 flex-1">
             <!-- Name row: name + timestamp + pin/mute icons -->
             <div class="flex items-center justify-between gap-2">
-              <span class="flex items-center gap-1 truncate text-[15px] font-medium text-text-color">
+              <span v-if="isUnresolvedName(resolveRoomName(item as ChatRoom))" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+              <span v-else class="flex items-center gap-1 truncate text-[15px] font-medium text-text-color">
                 {{ resolveRoomName(item as ChatRoom) }}
                 <svg v-if="chatStore.pinnedRoomIds.has((item as ChatRoom).id)" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-text-on-main-bg-color">
                   <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />

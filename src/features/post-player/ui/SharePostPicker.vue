@@ -4,6 +4,8 @@ import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
 import { BottomSheet } from "@/shared/ui/bottom-sheet";
 import { UserAvatar } from "@/entities/user";
+import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
+import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 
 interface Props {
   show: boolean;
@@ -17,6 +19,7 @@ const { t } = useI18n();
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const { resolve: resolveRoomName } = useResolvedRoomName();
 
 const search = ref("");
 const selectedRoomIds = ref<Set<string>>(new Set());
@@ -25,7 +28,10 @@ const sending = ref(false);
 const filteredRooms = computed(() => {
   const q = search.value.toLowerCase();
   if (!q) return chatStore.sortedRooms;
-  return chatStore.sortedRooms.filter(r => r.name.toLowerCase().includes(q));
+  return chatStore.sortedRooms.filter(r => {
+    const name = resolveRoomName(r);
+    return name.toLowerCase().includes(q);
+  });
 });
 
 const toggleRoom = (roomId: string) => {
@@ -115,11 +121,12 @@ const handleClose = () => {
           v-else
           class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-xs font-medium text-white"
         >
-          {{ (room.name || '?')[0].toUpperCase() }}
+          {{ (resolveRoomName(room) || '?')[0].toUpperCase() }}
         </div>
 
         <div class="min-w-0 flex-1 text-left">
-          <span class="truncate text-sm text-text-color">{{ room.name }}</span>
+          <span v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+          <span v-else class="truncate text-sm text-text-color">{{ resolveRoomName(room) }}</span>
         </div>
       </button>
 
