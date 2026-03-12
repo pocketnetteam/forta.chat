@@ -33,17 +33,26 @@ export function usePostScores(txid: string) {
 
   const submitVote = async (value: number) => {
     if (hasVoted.value || submitting.value) return false;
-    submitting.value = true;
-    try {
-      const ok = await authStore.submitUpvote(txid, value);
-      if (ok) {
-        myScore.value = value;
-        scores.value = [...scores.value, { address: authStore.address!, value, posttxid: txid }];
+
+    // Optimistic update — show rating immediately, don't wait for blockchain
+    const prevMyScore = myScore.value;
+    const prevScores = scores.value;
+    myScore.value = value;
+    scores.value = [...scores.value, { address: authStore.address!, value, posttxid: txid }];
+
+    // Fire API call in background
+    authStore.submitUpvote(txid, value).then((ok) => {
+      if (!ok) {
+        // Revert on failure
+        myScore.value = prevMyScore;
+        scores.value = prevScores;
       }
-      return ok;
-    } finally {
-      submitting.value = false;
-    }
+    }).catch(() => {
+      myScore.value = prevMyScore;
+      scores.value = prevScores;
+    });
+
+    return true;
   };
 
   return { scores, myScore, averageScore, totalVotes, hasVoted, loading, submitting, load, submitVote };

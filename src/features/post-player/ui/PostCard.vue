@@ -99,13 +99,9 @@ async function loadAuthor(data: BastyonPostData) {
   }
 }
 
-async function onVote(value: number) {
-  const ok = await submitVote(value);
-  if (ok) {
-    toast(t("postPlayer.rated"), "success");
-  } else {
-    toast(t("postPlayer.ratingRestricted"), "error");
-  }
+function onVote(value: number) {
+  submitVote(value);
+  toast(t("postPlayer.rated"), "success");
 }
 
 function onShare() {
