@@ -23,8 +23,8 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Type check & Build
-        run: npm run build
+      - name: Build
+        run: vite build && node scripts/minify-public-js.mjs
 
       - name: Deploy to server via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
