@@ -58,7 +58,7 @@ const formattedReputation = computed(() => {
 const postDate = computed(() => {
   if (!post.value?.time) return "";
   const date = new Date(post.value.time * 1000);
-  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 });
 
 const visibleTags = computed(() => {
@@ -87,14 +87,10 @@ function loadScores() {
       const sum = s.reduce((a, x) => a + x.value, 0);
       scores.value = { average: sum / s.length, total: s.length };
     }
-  });
+  }).catch(() => { /* scores unavailable, non-fatal */ });
 }
 
 const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
-
-function openInApp() {
-  window.open(postUrl.value, "_blank");
-}
 
 onMounted(async () => {
   try {
@@ -164,7 +160,10 @@ onMounted(async () => {
         v-else
         class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold"
         :class="isOwn ? 'bg-white/20 text-white' : 'bg-color-bg-ac/20 text-color-bg-ac'"
-      >{{ authorName.charAt(0).toUpperCase() }}</div>
+      >
+        <template v-if="authorName">{{ authorName.charAt(0).toUpperCase() }}</template>
+        <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+      </div>
 
       <div class="flex min-w-0 flex-col">
         <div class="flex items-baseline gap-1">
@@ -231,27 +230,13 @@ onMounted(async () => {
       >#{{ tag }}</span>
     </div>
 
-    <!-- Rating + actions footer -->
-    <div class="flex items-center justify-between px-4 py-3">
+    <!-- Rating footer -->
+    <div class="px-4 py-3">
       <StarRating
         :average="scores.average"
         :total-votes="scores.total"
         readonly
       />
-      <div class="flex items-center gap-2">
-        <!-- Share -->
-        <button
-          class="flex h-7 w-7 items-center justify-center rounded-full transition-colors"
-          :class="isOwn ? 'text-white/50 hover:bg-white/10 hover:text-white/80' : 'text-text-on-main-bg-color hover:bg-neutral-grad-0 hover:text-text-color'"
-          @click.stop="showModal = true"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
-            <polyline points="16 6 12 2 8 6" />
-            <line x1="12" y1="2" x2="12" y2="15" />
-          </svg>
-        </button>
-      </div>
     </div>
 
     <!-- Open button -->
