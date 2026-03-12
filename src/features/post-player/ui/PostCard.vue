@@ -237,7 +237,7 @@ onMounted(async () => {
       v-else-if="firstImage"
       :src="firstImage"
       alt=""
-      class="w-full object-cover"
+      class="max-h-64 w-full object-cover"
       loading="lazy"
     />
 
