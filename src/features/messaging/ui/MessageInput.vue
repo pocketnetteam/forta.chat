@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, computed } from "vue";
+import { ref, nextTick, watch, computed, onBeforeUnmount } from "vue";
 import { useChatStore, MessageType } from "@/entities/chat";
 import { useThemeStore } from "@/entities/theme";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
@@ -62,16 +62,33 @@ watch(text, (val) => {
   }, 500);
 });
 
-// Save draft before switching rooms, restore draft for new room
-watch(() => chatStore.activeRoomId, (newId, oldId) => {
-  if (oldId) saveDraft(oldId, text.value);
-  text.value = newId ? getDraft(newId) : "";
-  mention.clearMentions();
-  chatStore.editingMessage = null;
-  chatStore.replyingTo = null;
-  nextTick(() => {
-    if (textareaRef.value) textareaRef.value.style.height = "auto";
-  });
+// Save draft before switching rooms, restore draft for new room.
+// immediate: true so when opening a chat we restore draft into the input (watch runs on mount).
+watch(
+  () => chatStore.activeRoomId,
+  (newId, oldId) => {
+    if (oldId) saveDraft(oldId, text.value);
+    text.value = newId ? getDraft(newId) : "";
+    mention.clearMentions();
+    chatStore.editingMessage = null;
+    chatStore.replyingTo = null;
+    nextTick(() => {
+      if (textareaRef.value) textareaRef.value.style.height = "auto";
+    });
+  },
+  { immediate: true }
+);
+
+/** Save draft on blur so Esc / click outside doesn't lose text before debounce */
+const saveDraftOnBlur = () => {
+  const roomId = chatStore.activeRoomId;
+  if (roomId) saveDraft(roomId, text.value);
+};
+
+/** Save draft when component unmounts (e.g. Esc closed chat before watch ran) */
+onBeforeUnmount(() => {
+  const roomId = chatStore.activeRoomId;
+  if (roomId) saveDraft(roomId, text.value);
 });
 
 // Watch for edit mode
@@ -96,7 +113,8 @@ const isEditing = computed(() => !!chatStore.editingMessage);
 
 const cancelEdit = () => {
   chatStore.editingMessage = null;
-  text.value = "";
+  const roomId = chatStore.activeRoomId;
+  text.value = roomId ? getDraft(roomId) : "";
   nextTick(() => {
     if (textareaRef.value) textareaRef.value.style.height = "auto";
   });
@@ -455,6 +473,7 @@ const insertEmoji = (emoji: string) => {
         :disabled="sending"
         @keydown="handleKeydown"
         @input="handleInput"
+        @blur="saveDraftOnBlur"
         @paste="pasteDrop.handlePaste"
         @click="mention.onCursorChange()"
         @keyup="mention.onCursorChange()"
