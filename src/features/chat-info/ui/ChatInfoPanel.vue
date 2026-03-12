@@ -6,13 +6,14 @@ import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
 import { useContacts } from "@/features/contacts/model/use-contacts";
-import { matrixIdToAddress } from "@/entities/chat/lib/chat-helpers";
+import { matrixIdToAddress, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
 import { useCallService } from "@/features/video-calls/model/call-service";
 import ContextMenu from "@/shared/ui/context-menu/ContextMenu.vue";
 import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
 import Toggle from "@/shared/ui/toggle/Toggle.vue";
 import ChatInfoGallery from "./ChatInfoGallery.vue";
+import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 
 interface Props {
   show: boolean;
@@ -30,6 +31,8 @@ const chatStore = useChatStore();
 const authStore = useAuthStore();
 const callService = useCallService();
 const room = computed(() => chatStore.activeRoom);
+const { resolve: resolveRoomName } = useResolvedRoomName();
+const roomDisplayName = computed(() => resolveRoomName(room.value));
 
 // ── Screen navigation ──
 const screen = ref<"main" | "gallery">("main");
@@ -456,7 +459,8 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 />
               </div>
               <div class="text-center">
-                <h2 class="text-lg font-semibold text-text-color">{{ room.name }}</h2>
+                <h2 v-if="isUnresolvedName(roomDisplayName)" class="mx-auto h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
+                <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
                 <p class="text-sm text-text-on-main-bg-color">
                   {{ room.isGroup ? t("info.members", { count: room.members.length }) : t("info.directMessage") }}
                 </p>

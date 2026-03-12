@@ -2,10 +2,13 @@
 import { useChatStore } from "@/entities/chat";
 import { useUserStore } from "@/entities/user/model";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
+import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
+import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 
 const chatStore = useChatStore();
 const userStore = useUserStore();
 const emit = defineEmits<{ selectRoom: [] }>();
+const { resolve: resolveRoomName } = useResolvedRoomName();
 
 const { t } = useI18n();
 const searchQuery = ref("");
@@ -19,9 +22,10 @@ const contacts = computed(() => {
         ? room.avatar.replace("__pocketnet__:", "")
         : undefined;
       const user = address ? userStore.getUser(address) : undefined;
+      const resolved = resolveRoomName(room);
       return {
         id: room.id,
-        name: user?.name || room.name,
+        name: user?.name || (isUnresolvedName(resolved) ? "" : resolved),
         address,
         image: user?.image,
       };
@@ -127,7 +131,8 @@ const toggleSearch = () => {
           :name="contact.name || contact.address || '?'"
           size="md"
         />
-        <span class="truncate text-[15px] font-medium text-text-color">
+        <span v-if="!contact.name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+        <span v-else class="truncate text-[15px] font-medium text-text-color">
           {{ contact.name }}
         </span>
       </button>

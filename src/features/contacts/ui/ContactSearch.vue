@@ -8,6 +8,8 @@ import { splitByQuery } from "@/shared/lib/utils/highlight";
 import { useSearch, type MessageSearchResult } from "@/features/search";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
+import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
+import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 
 const props = defineProps<{ query: string }>();
 
@@ -21,6 +23,7 @@ const { searchResults, isSearching, isCreatingRoom, debouncedSearch, getOrCreate
 const chatStore = useChatStore();
 const { t } = useI18n();
 const { formatPreview } = useFormatPreview();
+const { resolve: resolveRoomName } = useResolvedRoomName();
 
 // Use the shared search composable for chat and message results
 const search = useSearch();
@@ -106,10 +109,11 @@ const handleSelectMessage = (result: MessageSearchResult) => {
           :address="room.avatar.replace('__pocketnet__:', '')"
           size="sm"
         />
-        <Avatar v-else :src="room.avatar" :name="room.name" size="sm" />
+        <Avatar v-else :src="room.avatar" :name="resolveRoomName(room)" size="sm" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-[15px] font-medium text-text-color">
-            <template v-for="(part, j) in splitByQuery(room.name, query.trim())" :key="j">
+            <span v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <template v-else v-for="(part, j) in splitByQuery(resolveRoomName(room), query.trim())" :key="j">
               <mark v-if="part.highlight" class="rounded-sm bg-color-txt-ac/20 font-semibold text-color-txt-ac">{{ part.text }}</mark>
               <span v-else>{{ part.text }}</span>
             </template>
@@ -179,9 +183,10 @@ const handleSelectMessage = (result: MessageSearchResult) => {
           :address="result.room.avatar.replace('__pocketnet__:', '')"
           size="sm"
         />
-        <Avatar v-else :src="result.room.avatar" :name="result.room.name" size="sm" />
+        <Avatar v-else :src="result.room.avatar" :name="resolveRoomName(result.room)" size="sm" />
         <div class="min-w-0 flex-1">
-          <div class="truncate text-xs font-medium text-text-on-main-bg-color">{{ result.room.name }}</div>
+          <div v-if="isUnresolvedName(resolveRoomName(result.room))" class="h-3 w-20 animate-pulse rounded bg-neutral-grad-2" />
+          <div v-else class="truncate text-xs font-medium text-text-on-main-bg-color">{{ resolveRoomName(result.room) }}</div>
           <div class="truncate text-sm text-text-color">
             <template v-for="(part, j) in splitByQuery(result.message.content, query.trim())" :key="j">
               <mark v-if="part.highlight" class="rounded-sm bg-color-txt-ac/20 font-semibold text-color-txt-ac">{{ part.text }}</mark>

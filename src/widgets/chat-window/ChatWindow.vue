@@ -20,6 +20,8 @@ import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import DropOverlay from "@/features/messaging/ui/DropOverlay.vue";
 import { usePasteDrop } from "@/features/messaging/model/use-paste-drop";
+import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
+import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -41,47 +43,28 @@ const isAdmin = computed(() => {
   return chatStore.getRoomPowerLevels(chatStore.activeRoom.id).myLevel >= 50;
 });
 
-/** Resolve active room name — uses userStore (same source as avatar) as fallback */
-/** Resolve active room name — same as original bastyon-chat name.vue:
- *  hexDecode(memberHexId) → address → userStore.users[address].name */
-/** Resolve member names from userStore for the active room */
-function _resolveActiveMembers(room: NonNullable<typeof chatStore.activeRoom>): string[] {
+const { resolve: resolveRoomName } = useResolvedRoomName();
+
+/** Trigger lazy-loading of missing user profiles for active room members */
+function _ensureActiveMembers(room: NonNullable<typeof chatStore.activeRoom>): void {
   const myHex = authStore.address ? hexEncode(authStore.address) : "";
   const otherMembers = room.members.filter(m => m !== myHex);
-  const names: string[] = [];
   for (const hexId of otherMembers) {
     const addr = hexDecode(hexId);
-    if (/^[A-Za-z0-9]+$/.test(addr)) {
-      const user = userStore.getUser(addr);
-      if (user?.name) { names.push(user.name); continue; }
-      userStore.loadUserIfMissing(addr);
-    }
+    if (/^[A-Za-z0-9]+$/.test(addr)) userStore.loadUserIfMissing(addr);
   }
-  if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
-    const addr = room.avatar.slice("__pocketnet__:".length);
-    const user = userStore.getUser(addr);
-    if (user?.name && user.name !== addr) names.push(user.name);
-    else userStore.loadUserIfMissing(addr);
+  if (room.avatar?.startsWith("__pocketnet__:")) {
+    userStore.loadUserIfMissing(room.avatar.slice("__pocketnet__:".length));
   }
-  return names;
 }
 
 const activeRoomName = computed(() => {
   const room = chatStore.activeRoom;
   if (!room) return "";
-  if (!room.isGroup) {
-    const names = _resolveActiveMembers(room);
-    return names.length > 0 ? names.join(", ") : "-";
-  }
-  if (room.name?.startsWith("@")) return room.name.slice(1);
-  // If group name looks like unresolved hash/hex, try member names
-  if (/^#?[a-f0-9]{16,}$/i.test(room.name) || /^[a-f0-9]{8}…$/i.test(room.name)) {
-    const names = _resolveActiveMembers(room);
-    if (names.length > 0) return names.join(", ");
-    return "-";
-  }
-  return room.name;
+  _ensureActiveMembers(room);
+  return resolveRoomName(room);
 });
+const activeRoomNameLoading = computed(() => isUnresolvedName(activeRoomName.value));
 
 const showForwardPicker = ref(false);
 const showSearch = ref(false);
@@ -286,7 +269,8 @@ onUnmounted(() => {
         />
         <Avatar v-else :src="chatStore.activeRoom.avatar" :name="activeRoomName" size="sm" />
         <div class="min-w-0 flex-1">
-          <div class="truncate text-[15px] font-medium text-text-color">
+          <div v-if="activeRoomNameLoading" class="h-4 w-28 animate-pulse rounded bg-neutral-grad-2" />
+          <div v-else class="truncate text-[15px] font-medium text-text-color">
             {{ activeRoomName }}
           </div>
           <div
