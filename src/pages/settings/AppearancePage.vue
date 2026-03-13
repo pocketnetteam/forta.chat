@@ -492,6 +492,19 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                   @update:model-value="themeStore.setAnimationsEnabled"
                 />
               </div>
+              <!-- Animated reactions -->
+              <div class="flex items-center justify-between rounded-lg p-3">
+                <div class="flex items-center gap-3">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
+                    <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />
+                  </svg>
+                  <span class="text-sm text-text-color">Animated Reactions</span>
+                </div>
+                <Toggle
+                  :model-value="themeStore.animatedReactions"
+                  @update:model-value="themeStore.setAnimatedReactions"
+                />
+              </div>
             </div>
           </SettingsSection>
 

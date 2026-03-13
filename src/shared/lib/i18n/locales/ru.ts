@@ -107,6 +107,7 @@ export const ru: Record<TranslationKey, string> = {
   "appearance.showTimestamps": "Время сообщений",
   "appearance.groupMessages": "Группировать сообщения",
   "appearance.enableAnimations": "Анимации",
+  "appearance.animatedReactions": "Анимированные реакции",
   "appearance.quickReactions": "Быстрые реакции",
   "appearance.quickReactionsDesc": "Настройте эмодзи в контекстном меню",
   "appearance.edit": "Изменить",

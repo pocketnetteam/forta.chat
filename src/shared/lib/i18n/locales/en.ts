@@ -105,6 +105,7 @@ export const en = {
   "appearance.showTimestamps": "Show timestamps",
   "appearance.groupMessages": "Group consecutive messages",
   "appearance.enableAnimations": "Enable animations",
+  "appearance.animatedReactions": "Animated Reactions",
   "appearance.quickReactions": "Quick Reactions",
   "appearance.quickReactionsDesc": "Customize the emoji shortcuts shown in the context menu",
   "appearance.edit": "Edit",
