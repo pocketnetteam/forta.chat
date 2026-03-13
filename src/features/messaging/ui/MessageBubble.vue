@@ -11,10 +11,17 @@ import TransferCard from "./TransferCard.vue";
 import ReactionRow from "./ReactionRow.vue";
 import VoiceMessage from "./VoiceMessage.vue";
 import VideoCirclePlayer from "./VideoCirclePlayer.vue";
-import { ref, inject, onMounted } from "vue";
+import { ref, inject, onMounted, onBeforeUnmount } from "vue";
 import { useLongPress, useSwipeGesture } from "@/shared/lib/gestures";
 import { useThemeStore } from "@/entities/theme";
 import { hexDecode } from "@/shared/lib/matrix/functions";
+
+// Responsive max image width: clamp to ~78% of viewport on small screens
+const viewportW = ref(typeof window !== "undefined" ? window.innerWidth : 800);
+const onResizeBubble = () => { viewportW.value = window.innerWidth; };
+onMounted(() => window.addEventListener("resize", onResizeBubble));
+onBeforeUnmount(() => window.removeEventListener("resize", onResizeBubble));
+const imageMaxW = computed(() => Math.min(420, Math.round(viewportW.value * 0.78)));
 
 const { t } = useI18n();
 const openUserProfile = inject<((address: string) => void) | null>("openUserProfile", null);
@@ -104,12 +111,12 @@ const imagePlaceholderStyle = computed(() => {
   const w = fi?.w;
   const h = fi?.h;
   if (w && h) {
-    const maxW = 420;
+    const maxW = imageMaxW.value;
     const maxH = 460;
     const scale = Math.min(maxW / w, maxH / h, 1);
     return { width: `${Math.round(w * scale)}px`, height: `${Math.round(h * scale)}px` };
   }
-  return { width: "256px", height: "192px" };
+  return { width: `${Math.min(256, imageMaxW.value)}px`, height: "192px" };
 });
 
 const imageStyle = computed(() => {
@@ -117,7 +124,7 @@ const imageStyle = computed(() => {
   const w = fi?.w;
   const h = fi?.h;
   if (w && h) {
-    const maxW = 420;
+    const maxW = imageMaxW.value;
     const maxH = 460;
     const scale = Math.min(maxW / w, maxH / h, 1);
     return { width: `${Math.round(w * scale)}px`, height: `${Math.round(h * scale)}px` };
@@ -131,12 +138,12 @@ const imageBubbleStyle = computed(() => {
   const w = fi?.w;
   const h = fi?.h;
   if (w && h) {
-    const maxW = 420;
+    const maxW = imageMaxW.value;
     const maxH = 460;
     const scale = Math.min(maxW / w, maxH / h, 1);
     return { width: `${Math.round(w * scale)}px` };
   }
-  return { width: '256px' };
+  return { width: `${Math.min(256, imageMaxW.value)}px` };
 });
 
 const handleBubbleClick = () => {

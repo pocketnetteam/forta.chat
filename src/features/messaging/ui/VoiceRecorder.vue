@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import type { RecorderState } from "../model/use-voice-recorder";
 
 const { t } = useI18n();
+
+// Responsive: track viewport width for adaptive waveform bar count
+const viewportWidth = ref(typeof window !== "undefined" ? window.innerWidth : 400);
+const onResize = () => { viewportWidth.value = window.innerWidth; };
+onMounted(() => window.addEventListener("resize", onResize));
+onBeforeUnmount(() => window.removeEventListener("resize", onResize));
+const barCount = computed(() => viewportWidth.value < 380 ? 12 : viewportWidth.value < 480 ? 20 : 30);
 
 interface Props {
   state: RecorderState;
@@ -102,12 +109,13 @@ const togglePreviewPlay = () => {
   }
 };
 
-// Waveform bars for display
+// Waveform bars for display (responsive count)
 const waveformBars = computed(() => {
+  const count = barCount.value;
   const data = props.waveformData;
-  if (data.length === 0) return Array(30).fill(0.05);
-  const last = data.slice(-30);
-  while (last.length < 30) last.unshift(0.05);
+  if (data.length === 0) return Array(count).fill(0.05);
+  const last = data.slice(-count);
+  while (last.length < count) last.unshift(0.05);
   return last;
 });
 </script>
@@ -117,72 +125,72 @@ const waveformBars = computed(() => {
   <div v-if="state === 'recording'" />
 
   <!-- Locked state (hands-free) -->
-  <div v-else-if="state === 'locked'" class="mx-auto flex max-w-6xl items-center gap-2 px-2 py-2">
+  <div v-else-if="state === 'locked'" class="mx-auto flex min-w-0 max-w-6xl items-center gap-1.5 px-2 py-2 sm:gap-2">
     <button
-      class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-neutral-grad-0"
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-neutral-grad-0 sm:h-10 sm:w-10"
       :title="t('voice.cancel')"
       @click="emit('cancel')"
     >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
       </svg>
     </button>
-    <div class="flex flex-1 items-center gap-2">
-      <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-color-bad" />
-      <span class="text-sm tabular-nums font-medium text-text-color">{{ formatDuration(duration) }}</span>
+    <div class="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+      <span class="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-color-bad" />
+      <span class="shrink-0 text-sm tabular-nums font-medium text-text-color">{{ formatDuration(duration) }}</span>
     </div>
-    <div class="flex h-8 items-end gap-px">
+    <div class="flex h-8 min-w-0 shrink items-end gap-px overflow-hidden">
       <div
         v-for="(v, i) in waveformBars"
         :key="i"
-        class="w-1 rounded-full bg-color-bg-ac transition-all"
+        class="w-1 shrink-0 rounded-full bg-color-bg-ac transition-all"
         :style="{ height: `${Math.max(3, v * 32)}px` }"
       />
     </div>
     <button
-      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-grad-0 text-text-color transition-all hover:bg-neutral-grad-1"
+      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-neutral-grad-0 text-text-color transition-all hover:bg-neutral-grad-1 sm:h-9 sm:w-9"
       :title="t('voice.stopAndPreview')"
       @click="emit('stopAndPreview')"
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
     </button>
     <button
-      class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:brightness-110"
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:brightness-110 sm:h-10 sm:w-10"
       title="Send"
       @click="emit('stopAndSend')"
     >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
       </svg>
     </button>
   </div>
 
   <!-- Preview state -->
-  <div v-else-if="state === 'preview'" class="mx-auto flex max-w-6xl items-center gap-2 px-2 py-2">
+  <div v-else-if="state === 'preview'" class="mx-auto flex min-w-0 max-w-6xl items-center gap-1.5 px-2 py-2 sm:gap-2">
     <button
-      class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-neutral-grad-0"
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-neutral-grad-0 sm:h-10 sm:w-10"
       title="Discard"
       @click="emit('cancel')"
     >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
       </svg>
     </button>
     <button
-      class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20"
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20 sm:h-10 sm:w-10"
       @click="togglePreviewPlay"
     >
-      <svg v-if="!isPlaying" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-      <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
+      <svg v-if="!isPlaying" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+      <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
     </button>
-    <span class="text-sm tabular-nums text-text-color">{{ formatDuration(duration) }}</span>
+    <span class="shrink-0 text-sm tabular-nums text-text-color">{{ formatDuration(duration) }}</span>
     <div class="flex-1" />
     <button
-      class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:brightness-110"
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:brightness-110 sm:h-10 sm:w-10"
       title="Send"
       @click="emit('sendPreview')"
     >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
       </svg>
     </button>
