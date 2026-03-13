@@ -752,16 +752,20 @@ export class Pcrypto {
           throw new Error("emptyforme");
         }
 
-        // Build explicit users list from body keys + sender (same as decryptKey does)
-        // This avoids the time-based filter in preparedUsers which may exclude
-        // users whose membership timestamps don't cover the event time
         const bodyUserIds = Object.keys(body);
         const usersList = [...new Set([...bodyUserIds, sender])];
 
         console.error("[decryptEvent] sender=" + sender.slice(0,10) + " me=" + me.slice(0,10) + " keyindex=" + (keyindex?.slice(0,10) ?? "?") + " bodyindex=" + (bodyindex?.slice(0,10) ?? "?") + " block=" + block + " version=" + eventVersion + " bodyKeys=" + bodyUserIds.map(k => k.slice(0,10)).join(",") + " usersList=" + usersList.map(u => u.slice(0,10)).join(","));
 
-        // Pass usersList so _decrypt uses preparedUsersById instead of time-filtered preparedUsers
-        const decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, usersList, eventVersion);
+        // Try legacy approach first (null usersIds → preparedUsers), matching encrypt path.
+        // If that fails, fall back to explicit usersList (preparedUsersById) for cases
+        // where time-based filtering excludes valid users.
+        let decrypted: string;
+        try {
+          decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, null, eventVersion);
+        } catch {
+          decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, usersList, eventVersion);
+        }
 
         const data = {
           body: decrypted,
@@ -792,8 +796,15 @@ export class Pcrypto {
           }
         } catch { /* not cached */ }
 
-        // Find the common key state event
-        const commonKeyEvt = getCommonKey(sender, hash);
+        // Find the common key state event.
+        // If not found, re-prepare room state (member events may not have been
+        // loaded yet due to lazyLoadMembers / initialSyncLimit).
+        let commonKeyEvt = getCommonKey(sender, hash);
+        if (!commonKeyEvt) {
+          getusershistory();
+          await getusersinfo();
+          commonKeyEvt = getCommonKey(sender, hash);
+        }
         if (!commonKeyEvt) {
           throw new Error("No common key event found for hash=" + hash);
         }
@@ -1054,8 +1065,12 @@ export class Pcrypto {
 
         console.error("[decryptKey] sender=" + sender.slice(0,10) + " me=" + me.slice(0,10) + " keyindex=" + (keyindex?.slice(0,10) ?? "?") + " bodyindex=" + (bodyindex?.slice(0,10) ?? "?") + " block=" + block + " v=" + v + " usersList=" + usersList.map(u => u.slice(0,10)).join(",") + " bodyUsers=" + bodyUsers.map(u => u.slice(0,10)).join(","));
 
-        // Pass usersList to _decrypt (matches original which passes users array)
-        return room._decrypt(keyindex!, body[bodyindex], time, block, usersList, v);
+        // Try legacy approach first (null usersIds), fall back to explicit usersList
+        try {
+          return await room._decrypt(keyindex!, body[bodyindex], time, block, null, v);
+        } catch {
+          return room._decrypt(keyindex!, body[bodyindex], time, block, usersList, v);
+        }
       },
 
       clear() {

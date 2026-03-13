@@ -74,6 +74,18 @@ export class AppInitializer {
     });
   }
 
+  /** Fetch current blockchain block height via getnodeinfo RPC */
+  async getBlockHeight(): Promise<number> {
+    if (!this.api) return 0;
+    try {
+      const info = await this.api.rpc("getnodeinfo");
+      return info?.height ?? 0;
+    } catch (e) {
+      console.error("[appInit] getBlockHeight error:", e);
+      return 0;
+    }
+  }
+
   /** Find a proxy node that has a registration wallet.
    *  Ensures the API is initialized and ready before querying. */
   async getRegistrationProxy(): Promise<{ id: string } | null> {
