@@ -226,9 +226,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 }
               }
 
-              console.error("[getUsersInfo] id=" + hexId.slice(0,10) + " sdkPath=" + sdkPath + " sdkKeys=" + ((sdkUser as any)?.keys?.length ?? 0) + " finalKeys=" + keys.length + " k0=" + (keys[0]?.slice(0,10) ?? "none") + " sdkUser=" + (sdkUser ? "yes" : "no"));
+              // Ensure source always has an id field for deterministic sort order.
+              // Fallback to SDK user data if rawProfile is missing.
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const source: Record<string, unknown> = rawProfile
+                ? rawProfile
+                : (sdkUser ? { ...(sdkUser as any), address: rawAddr } : { address: rawAddr });
 
-              return { id: hexId, keys, source: rawProfile };
+              console.error("[getUsersInfo] id=" + hexId.slice(0,10) + " sdkPath=" + sdkPath + " sdkKeys=" + ((sdkUser as any)?.keys?.length ?? 0) + " finalKeys=" + keys.length + " k0=" + (keys[0]?.slice(0,10) ?? "none") + " sdkUser=" + (sdkUser ? "yes" : "no") + " sourceId=" + ((source as any)?.id ?? "none"));
+
+              return { id: hexId, keys, source };
             });
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
@@ -311,6 +318,23 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (matrixService.isReady()) {
         matrixReady.value = true;
         matrixError.value = null;
+
+        // Fetch blockchain block height and update Pcrypto (critical for encryption key derivation).
+        // In legacy code this was provided by the parent app via pcrypto.set.block().
+        appInitializer.getBlockHeight().then((height) => {
+          if (height > 0 && cryptoInstance) {
+            cryptoInstance.setBlock({ height });
+            console.log("[auth] Pcrypto block height set to", height);
+          }
+        }).catch((e) => console.warn("[auth] Failed to fetch block height:", e));
+
+        // Periodically update block height (every 60s)
+        const blockHeightInterval = setInterval(() => {
+          if (!pcrypto.value) { clearInterval(blockHeightInterval); return; }
+          appInitializer.getBlockHeight().then((height) => {
+            if (height > 0) pcrypto.value!.setBlock({ height });
+          }).catch(() => {});
+        }, 60_000);
 
         import("@/features/video-calls/model/call-tab-lock").then(({ initCallTabLock }) => {
           initCallTabLock();
