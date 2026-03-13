@@ -137,6 +137,16 @@ export const useThemeStore = defineStore(NAMESPACE, () => {
     document.documentElement.setAttribute("data-animations", String(v));
   };
 
+  // --- Animated reactions ---
+  const { setLSValue: setLSAnimatedReactions, value: lsAnimatedReactions } =
+    useLocalStorage<boolean>("animatedReactions");
+  const animatedReactions = ref(lsAnimatedReactions ?? true);
+
+  const setAnimatedReactions = (v: boolean) => {
+    animatedReactions.value = v;
+    setLSAnimatedReactions(v);
+  };
+
   // --- Chat wallpaper ---
   const { setLSValue: setLSWallpaper, value: lsWallpaper } =
     useLocalStorage<string>("chat_wallpaper");
@@ -211,6 +221,7 @@ export const useThemeStore = defineStore(NAMESPACE, () => {
     setBubbleCorners("default");
     setShowAvatarsInChat(true);
     setAnimationsEnabled(true);
+    setAnimatedReactions(true);
     setChatWallpaper("");
     setShowTimestamps(true);
     setMessageGrouping(true);
@@ -247,6 +258,8 @@ export const useThemeStore = defineStore(NAMESPACE, () => {
     setShowAvatarsInChat,
     animationsEnabled,
     setAnimationsEnabled,
+    animatedReactions,
+    setAnimatedReactions,
     chatWallpaper,
     setChatWallpaper,
     showTimestamps,
