@@ -43,36 +43,39 @@ watch(() => props.show, (v) => {
   }
 });
 
-// Fixed-size panel, pure computed position
+// Responsive panel: clamp to viewport on small screens
 const panelStyle = computed(() => {
   const vw = typeof window !== "undefined" ? window.innerWidth : 800;
   const vh = typeof window !== "undefined" ? window.innerHeight : 600;
 
-  let left = Math.max(PAD, Math.min(props.x, vw - PANEL_W - PAD));
+  const panelW = Math.min(PANEL_W, vw - PAD * 2);
+  const panelH = Math.min(PANEL_H, vh - PAD * 2);
+
+  let left = Math.max(PAD, Math.min(props.x, vw - panelW - PAD));
 
   const spaceAbove = props.y - PAD;
   const spaceBelow = vh - props.y - PAD;
 
   let top: number;
-  if (spaceAbove >= PANEL_H) {
-    top = props.y - PANEL_H;
-  } else if (spaceBelow >= PANEL_H) {
+  if (spaceAbove >= panelH) {
+    top = props.y - panelH;
+  } else if (spaceBelow >= panelH) {
     top = props.y;
   } else {
     if (spaceAbove >= spaceBelow) {
       top = PAD;
     } else {
-      top = vh - PANEL_H - PAD;
+      top = vh - panelH - PAD;
     }
   }
 
-  top = Math.max(PAD, Math.min(top, vh - PANEL_H - PAD));
+  top = Math.max(PAD, Math.min(top, vh - panelH - PAD));
 
   return {
     left: `${left}px`,
     top: `${top}px`,
-    width: `${PANEL_W}px`,
-    height: `${PANEL_H}px`,
+    width: `${panelW}px`,
+    height: `${panelH}px`,
   };
 });
 

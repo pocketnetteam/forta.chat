@@ -19,10 +19,10 @@ const props = defineProps<Props>();
 const emit = defineEmits<{ close: []; select: [action: string] }>();
 
 const style = computed(() => {
-  const menuWidth = 280; // wide enough for reaction row + more button
-  const menuHeight = props.items.length * 44 + 60; // +60 for header
   const vw = window.innerWidth;
   const vh = window.innerHeight;
+  const menuWidth = Math.min(280, vw - 16); // clamp to viewport on small screens
+  const menuHeight = props.items.length * 44 + 60; // +60 for header
   const left = Math.min(props.x, vw - menuWidth - 8);
   const top = props.y + menuHeight > vh ? Math.max(8, props.y - menuHeight) : props.y;
   const finalLeft = Math.max(8, left);
@@ -31,6 +31,7 @@ const style = computed(() => {
   return {
     left: `${finalLeft}px`,
     top: `${top}px`,
+    width: `${menuWidth}px`,
     transformOrigin: `${originX}px ${originY}px`,
   };
 });
