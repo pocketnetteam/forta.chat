@@ -173,14 +173,14 @@ const fileIcon = computed(() => {
 
 // Download image immediately — virtual scroller already handles lazy rendering
 onMounted(() => {
-  if (props.message.type === MessageType.image && props.message.fileInfo) {
+  if ((props.message.type === MessageType.image || props.message.type === MessageType.sticker) && props.message.fileInfo) {
     download(props.message);
   }
 });
 
 // Re-download if message changes (virtual scroller recycling)
 watch(() => props.message.id, () => {
-  if (props.message.type === MessageType.image && props.message.fileInfo) {
+  if ((props.message.type === MessageType.image || props.message.type === MessageType.sticker) && props.message.fileInfo) {
     download(props.message);
   }
 });
@@ -378,6 +378,33 @@ const replyPreviewText = computed(() => {
           <ReactionRow :reactions="message.reactions" :is-own="props.isOwn" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
         </div>
 
+      </div>
+
+      <!-- Sticker message (borderless, enlarged) -->
+      <div
+        v-else-if="message.type === MessageType.sticker"
+        class="relative"
+      >
+        <div v-if="fileState.loading" class="flex h-32 w-32 items-center justify-center">
+          <div class="h-6 w-6 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+        </div>
+        <img
+          v-else-if="fileState.objectUrl"
+          :src="fileState.objectUrl"
+          alt="Sticker"
+          class="max-h-40 max-w-40 object-contain drop-shadow-sm"
+        />
+        <img
+          v-else-if="message.fileInfo?.url"
+          :src="message.fileInfo.url"
+          alt="Sticker"
+          class="max-h-40 max-w-40 object-contain drop-shadow-sm"
+        />
+        <div v-if="themeStore.showTimestamps" class="mt-0.5 flex items-center gap-1" :class="props.isOwn ? 'justify-end text-text-on-main-bg-color' : 'text-text-on-main-bg-color'">
+          <span class="text-[10px]">{{ time }}</span>
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+        </div>
+        <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
       </div>
 
       <!-- Video message -->
