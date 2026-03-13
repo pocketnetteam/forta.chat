@@ -141,22 +141,22 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- Loading skeleton -->
+  <!-- Loading skeleton — matches loaded card dimensions to prevent layout shift -->
   <div
     v-if="loading"
-    class="post-card my-1.5 w-full max-w-md overflow-hidden rounded-2xl border"
+    class="post-card my-1.5 w-[20rem] max-w-full overflow-hidden rounded-2xl border sm:w-[28rem]"
     :class="isOwn ? 'border-white/10 bg-white/10' : 'border-neutral-grad-1/50 bg-background-total-theme'"
   >
     <!-- Author skeleton -->
     <div class="flex items-center gap-2 p-3 pb-2 sm:gap-3 sm:p-4 sm:pb-3">
       <div class="h-10 w-10 shrink-0 animate-pulse rounded-full bg-neutral-grad-2 sm:h-12 sm:w-12" />
-      <div class="flex flex-col gap-1.5">
+      <div class="flex min-w-0 flex-col gap-1.5">
         <div class="h-4 w-24 animate-pulse rounded bg-neutral-grad-2 sm:w-28" />
         <div class="h-3 w-16 animate-pulse rounded bg-neutral-grad-2 sm:w-20" />
       </div>
     </div>
-    <!-- Media skeleton -->
-    <div class="aspect-video w-full animate-pulse bg-neutral-grad-2" />
+    <!-- Media skeleton — h-64 matches max-h-64 on loaded images -->
+    <div class="h-64 w-full animate-pulse bg-neutral-grad-2" />
     <!-- Content skeleton -->
     <div class="flex flex-col gap-1.5 px-3 pt-2 sm:gap-2 sm:px-4 sm:pt-3">
       <div class="h-4 w-3/4 animate-pulse rounded bg-neutral-grad-2 sm:h-5" />
@@ -189,7 +189,7 @@ onMounted(async () => {
   <!-- Post card -->
   <div
     v-else-if="post"
-    class="post-card my-1.5 w-full max-w-md overflow-hidden rounded-2xl border"
+    class="post-card my-1.5 w-[20rem] max-w-full overflow-hidden rounded-2xl border sm:w-[28rem]"
     :class="isOwn ? 'border-white/10 bg-white/[0.08]' : 'border-neutral-grad-1/50 bg-background-total-theme'"
   >
     <!-- Author header — clickable to open profile -->
