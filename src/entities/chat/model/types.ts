@@ -113,6 +113,7 @@ export enum MessageType {
   system = "system",
   poll = "poll",
   transfer = "transfer",
+  sticker = "sticker",
 }
 
 export interface PollInfo {
