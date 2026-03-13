@@ -895,89 +895,6 @@ export function useMessages() {
     }
   };
 
-  /** Send a sticker message (fetches image from URL, uploads to Matrix) */
-  const sendSticker = async (imageUrl: string, info?: { w?: number; h?: number }) => {
-    const roomId = chatStore.activeRoomId;
-    if (!roomId || !imageUrl) return;
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
-
-    const w = info?.w ?? 200;
-    const h = info?.h ?? 200;
-
-    // Fetch the sticker image as blob
-    const response = await fetch(imageUrl);
-    if (!response.ok) {
-      console.error("Failed to fetch sticker image:", response.status);
-      return;
-    }
-    const blob = await response.blob();
-    const mimeType = blob.type || "image/webp";
-    const file = new File([blob], "sticker.webp", { type: mimeType });
-
-    // Optimistic message
-    const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const localBlobUrl = URL.createObjectURL(file);
-    const message: Message = {
-      id: tempId,
-      roomId,
-      senderId: authStore.address ?? "",
-      content: "Sticker",
-      timestamp: Date.now(),
-      status: MessageStatus.sending,
-      type: MessageType.sticker,
-      fileInfo: {
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        url: localBlobUrl,
-        w,
-        h,
-      },
-    };
-    chatStore.addMessage(roomId, message);
-
-    try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-
-      let fileToUpload: Blob = file;
-      let secrets: Record<string, unknown> | undefined;
-
-      if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await roomCrypto.encryptFile(file);
-        secrets = encrypted.secrets;
-        fileToUpload = encrypted.file;
-      }
-
-      const url = await matrixService.uploadContent(fileToUpload);
-
-      const content: Record<string, unknown> = {
-        body: "Sticker",
-        msgtype: "m.image",
-        url,
-        info: {
-          w,
-          h,
-          mimetype: file.type,
-          size: file.size,
-          ...(secrets ? { secrets } : {}),
-          sticker: true,
-        },
-      };
-
-      const serverEventId = await matrixService.sendEncryptedText(roomId, content);
-      if (serverEventId) {
-        chatStore.updateMessageIdAndStatus(roomId, tempId, serverEventId, MessageStatus.sent);
-      } else {
-        chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
-      }
-    } catch (e) {
-      console.error("Failed to send sticker:", e);
-      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
-    }
-  };
-
   /** Send a GIF message (fetches GIF from URL, uploads to Matrix as image) */
   const sendGif = async (gifUrl: string, info?: { w?: number; h?: number; title?: string }) => {
     const roomId = chatStore.activeRoomId;
@@ -1073,7 +990,6 @@ export function useMessages() {
     sendMessage,
     sendPoll,
     sendReply,
-    sendSticker,
     sendTransferMessage,
     setTyping,
     toggleReaction,

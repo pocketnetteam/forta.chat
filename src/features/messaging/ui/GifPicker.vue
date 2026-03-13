@@ -201,7 +201,7 @@ function selectGif(gif: TenorGif) {
 
     <!-- Tenor attribution -->
     <div class="shrink-0 border-t border-neutral-grad-0/50 px-3 py-1.5 text-center">
-      <span class="text-[10px] text-text-on-main-bg-color/40">Powered by Tenor</span>
+      <span class="text-[10px] text-text-on-main-bg-color/40">Powered by KLIPY</span>
     </div>
   </div>
 </template>

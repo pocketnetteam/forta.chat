@@ -4,9 +4,7 @@ import { useThemeStore } from "@/entities/theme";
 import { EMOJI_CATEGORIES, searchEmojis } from "@/shared/lib/emoji-data";
 import EmojiKitchenBar from "./EmojiKitchenBar.vue";
 import GifPicker from "./GifPicker.vue";
-import StickerPicker from "./StickerPicker.vue";
 import type { TenorGif } from "@/shared/lib/tenor";
-import type { Sticker } from "@/shared/lib/sticker-packs";
 
 const PANEL_W = 370;
 const PANEL_H = 420;
@@ -27,12 +25,11 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   close: [];
   select: [emoji: string];
-  selectSticker: [sticker: Sticker];
   selectGif: [gif: TenorGif];
   selectKitchen: [imageUrl: string];
 }>();
 
-type PickerTab = "emoji" | "stickers" | "gif";
+type PickerTab = "emoji" | "gif";
 const activeTab = ref<PickerTab>("emoji");
 const lastSelectedEmoji = ref<string | null>(null);
 
@@ -164,10 +161,10 @@ const setSectionRef = (el: any, idx: number) => {
           class="emoji-panel absolute flex flex-col overflow-hidden rounded-2xl border border-neutral-grad-0 bg-background-total-theme shadow-2xl"
           :style="panelStyle"
         >
-          <!-- Main tabs: Emoji | Stickers | GIF -->
+          <!-- Main tabs: Emoji | GIF -->
           <div class="flex shrink-0 border-b border-neutral-grad-0/50 px-2">
             <button
-              v-for="tab in (['emoji', 'stickers', 'gif'] as const)"
+              v-for="tab in (['emoji', 'gif'] as const)"
               :key="tab"
               class="flex-1 py-1.5 text-center text-xs font-medium transition-colors"
               :class="activeTab === tab
@@ -175,7 +172,7 @@ const setSectionRef = (el: any, idx: number) => {
                 : 'text-text-on-main-bg-color/60 hover:text-text-on-main-bg-color'"
               @click="activeTab = tab"
             >
-              {{ tab === 'emoji' ? '😀' : tab === 'stickers' ? '🎨' : 'GIF' }}
+              {{ tab === 'emoji' ? '😀' : 'GIF' }}
             </button>
           </div>
 
@@ -285,13 +282,6 @@ const setSectionRef = (el: any, idx: number) => {
             v-if="activeTab === 'emoji' && props.mode === 'input'"
             :selected-emoji="lastSelectedEmoji"
             @select="(url: string) => emit('selectKitchen', url)"
-          />
-
-          <!-- Stickers tab -->
-          <StickerPicker
-            v-if="activeTab === 'stickers'"
-            class="min-h-0 flex-1"
-            @select="(s: Sticker) => { emit('selectSticker', s); if (props.mode === 'reaction') emit('close'); }"
           />
 
           <!-- GIF tab -->

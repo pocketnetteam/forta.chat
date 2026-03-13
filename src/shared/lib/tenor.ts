@@ -1,7 +1,14 @@
-const TENOR_API_KEY =
-  import.meta.env.VITE_TENOR_API_KEY ||
-  "AIzaSyBqRGYRPBaPP3gwBPkaOY0eHFEPxqjgd9c";
-const TENOR_BASE = "https://tenor.googleapis.com/v2";
+/**
+ * GIF search client (KLIPY API v1).
+ *
+ * Kept as tenor.ts to avoid renaming imports across the codebase.
+ * The exported interface names (TenorGif, etc.) are kept for compatibility.
+ *
+ * Free, no rate limits.
+ */
+
+const KLIPY_API_KEY = import.meta.env.VITE_KLIPY_API_KEY || "";
+const KLIPY_BASE = `https://api.klipy.com/api/v1/${KLIPY_API_KEY}/gifs`;
 
 export interface TenorGif {
   id: string;
@@ -12,89 +19,104 @@ export interface TenorGif {
   height: number;
 }
 
-interface TenorMediaFormat {
+interface KlipyMediaFile {
   url: string;
-  dims: [number, number];
+  width: number;
+  height: number;
   size: number;
 }
 
-interface TenorResult {
-  id: string;
+interface KlipyMediaSet {
+  gif?: KlipyMediaFile;
+  webp?: KlipyMediaFile;
+  jpg?: KlipyMediaFile;
+  mp4?: KlipyMediaFile;
+}
+
+interface KlipyResult {
+  id: number;
+  slug: string;
   title: string;
-  media_formats: {
-    tinygif?: TenorMediaFormat;
-    mediumgif?: TenorMediaFormat;
-    gif?: TenorMediaFormat;
+  file: {
+    hd?: KlipyMediaSet;
+    md?: KlipyMediaSet;
+    sm?: KlipyMediaSet;
+    xs?: KlipyMediaSet;
   };
 }
 
-interface TenorResponse {
-  results: TenorResult[];
-  next: string;
+interface KlipyResponse {
+  result: boolean;
+  data: {
+    data: KlipyResult[];
+    current_page: number;
+    per_page: number;
+    has_next: boolean;
+  };
 }
 
-function mapResult(r: TenorResult): TenorGif {
-  const preview = r.media_formats.tinygif ?? r.media_formats.mediumgif ?? r.media_formats.gif;
-  const full = r.media_formats.mediumgif ?? r.media_formats.gif ?? r.media_formats.tinygif;
+function mapResult(r: KlipyResult): TenorGif {
+  const preview = r.file.sm?.gif ?? r.file.xs?.gif ?? r.file.md?.gif;
+  const full = r.file.md?.gif ?? r.file.hd?.gif ?? r.file.sm?.gif;
 
   return {
-    id: r.id,
+    id: String(r.id),
     title: r.title,
     previewUrl: preview?.url ?? "",
     gifUrl: full?.url ?? "",
-    width: full?.dims[0] ?? 220,
-    height: full?.dims[1] ?? 220,
+    width: full?.width ?? 220,
+    height: full?.height ?? 220,
   };
 }
 
-async function tenorFetch(endpoint: string, params: Record<string, string>): Promise<TenorResponse> {
-  const url = new URL(`${TENOR_BASE}/${endpoint}`);
-  url.searchParams.set("key", TENOR_API_KEY);
-  url.searchParams.set("client_key", "bastyon_chat");
-  url.searchParams.set("media_filter", "tinygif,mediumgif,gif");
-  url.searchParams.set("contentfilter", "medium");
+async function klipyFetch(
+  endpoint: string,
+  params: Record<string, string>,
+): Promise<KlipyResponse> {
+  const url = new URL(`${KLIPY_BASE}/${endpoint}`);
   for (const [k, v] of Object.entries(params)) {
     url.searchParams.set(k, v);
   }
 
   const res = await fetch(url.toString());
   if (!res.ok) {
-    throw new Error(`Tenor API error: ${res.status} ${res.statusText}`);
+    throw new Error(`KLIPY API error: ${res.status} ${res.statusText}`);
   }
   return res.json();
 }
 
 export async function searchGifs(
   query: string,
-  limit = 20,
+  limit = 24,
   next?: string,
 ): Promise<{ gifs: TenorGif[]; next: string }> {
-  const params: Record<string, string> = {
+  const page = next ? parseInt(next, 10) : 1;
+  const data = await klipyFetch("search", {
     q: query,
-    limit: String(limit),
-  };
-  if (next) params.pos = next;
+    per_page: String(limit),
+    page: String(page),
+    rating: "pg-13",
+  });
 
-  const data = await tenorFetch("search", params);
   return {
-    gifs: data.results.map(mapResult),
-    next: data.next,
+    gifs: data.data.data.map(mapResult),
+    next: data.data.has_next ? String(page + 1) : "",
   };
 }
 
 export async function getTrending(
-  limit = 20,
+  limit = 24,
   next?: string,
 ): Promise<{ gifs: TenorGif[]; next: string }> {
-  const params: Record<string, string> = {
-    limit: String(limit),
-  };
-  if (next) params.pos = next;
+  const page = next ? parseInt(next, 10) : 1;
+  const data = await klipyFetch("trending", {
+    per_page: String(limit),
+    page: String(page),
+  });
 
-  const data = await tenorFetch("featured", params);
   return {
-    gifs: data.results.map(mapResult),
-    next: data.next,
+    gifs: data.data.data.map(mapResult),
+    next: data.data.has_next ? String(page + 1) : "",
   };
 }
 

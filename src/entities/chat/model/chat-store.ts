@@ -64,17 +64,6 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
       lastTs = raw.origin_server_ts as number;
     }
     // Find last actual message
-    if (!lastMessage && raw.type === "m.sticker" && raw.content) {
-      lastMessage = {
-        id: raw.event_id as string,
-        roomId,
-        senderId: matrixIdToAddress(raw.sender as string),
-        content: "[sticker]",
-        timestamp: (raw.origin_server_ts as number) ?? 0,
-        status: MessageStatus.sent,
-        type: MessageType.sticker,
-      };
-    }
     if (!lastMessage && raw.type === "m.room.message" && raw.content) {
       const content = raw.content as Record<string, unknown>;
       const msgtype = content.msgtype as string;
@@ -94,11 +83,14 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
         previewBody = "[voice message]";
         previewType = MessageType.audio;
       } else if (msgtype === "m.video") {
-        previewBody = "[video]";
-        previewType = MessageType.video;
-      } else if (msgtype === "m.sticker") {
-        previewBody = "[sticker]";
-        previewType = MessageType.sticker;
+        const vinfo = content.info as Record<string, unknown> | undefined;
+        if (vinfo?.videoNote) {
+          previewBody = "[video message]";
+          previewType = MessageType.videoCircle;
+        } else {
+          previewBody = "[video]";
+          previewType = MessageType.video;
+        }
       } else {
         previewBody = (content?.body as string) ?? "";
       }
@@ -1936,31 +1928,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       };
     }
 
-    // Handle sticker events
-    if (raw.type === "m.sticker" && raw.content) {
-      const stickerContent = raw.content as Record<string, unknown>;
-      const stickerUrl = (stickerContent.url as string) ?? "";
-      const stickerBody = (stickerContent.body as string) ?? "[sticker]";
-      const info = stickerContent.info as Record<string, unknown> | undefined;
-      return {
-        id: raw.event_id as string,
-        roomId,
-        senderId: matrixIdToAddress(raw.sender as string),
-        content: stickerBody,
-        timestamp: (raw.origin_server_ts as number) ?? 0,
-        status: MessageStatus.sent,
-        type: MessageType.sticker,
-        fileInfo: stickerUrl ? {
-          name: stickerBody,
-          type: (info?.mimetype as string) ?? "image/png",
-          size: (info?.size as number) ?? 0,
-          url: stickerUrl,
-          w: info?.w as number | undefined,
-          h: info?.h as number | undefined,
-        } : undefined,
-      };
-    }
-
     if (raw.type !== "m.room.message") return null;
 
     const content = raw.content as Record<string, unknown>;
@@ -2057,7 +2024,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (fileInfo) {
         if (mtype === "m.image") msgType = MessageType.image;
         else if (mtype === "m.audio") msgType = MessageType.audio;
-        else if (mtype === "m.video") msgType = MessageType.video;
+        else if (mtype === "m.video") msgType = fileInfo.videoNote ? MessageType.videoCircle : MessageType.video;
         else msgType = messageTypeFromMime(fileInfo.type);
         body = fileInfo.name;
       } else {
@@ -2154,8 +2121,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         pollResponseEvents.push(raw);
       } else if (raw.type === "org.matrix.msc3381.poll.end" && raw.content) {
         pollEndEvents.push(raw);
-      } else if (raw.type === "m.sticker" && raw.content) {
-        messageEvents.push(event);
       } else if (raw.type === "m.room.message" && raw.content) {
         // Check if this message has been redacted (content cleared by server)
         const contentKeys = Object.keys(raw.content as Record<string, unknown>);
