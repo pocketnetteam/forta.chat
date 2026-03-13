@@ -134,6 +134,7 @@ export const en = {
   "chat.typingMany": "{name} and {count} more are typing...",
   "chat.members": "{count} members",
   "chat.copiedToClipboard": "Copied to clipboard",
+  "chat.updatingMessages": "Updating messages…",
 
   // ── Title bar ──
   "titleBar.appName": "Forta Chat",

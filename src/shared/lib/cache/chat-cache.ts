@@ -67,7 +67,15 @@ export async function getCachedRooms(): Promise<unknown[]> {
   }
 }
 
+const CACHE_TS_PREFIX = "bastyon-cache-ts:";
+
+export function getCacheTimestamp(roomId: string): number {
+  const raw = localStorage.getItem(CACHE_TS_PREFIX + roomId);
+  return raw ? parseInt(raw, 10) : 0;
+}
+
 export async function cacheMessages(roomId: string, messages: unknown[]): Promise<void> {
+  localStorage.setItem(CACHE_TS_PREFIX + roomId, String(Date.now()));
   try {
     const db = await openDB();
     const tx = db.transaction(MESSAGES_STORE, "readwrite");

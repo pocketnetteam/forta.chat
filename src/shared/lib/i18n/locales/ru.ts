@@ -136,6 +136,7 @@ export const ru: Record<TranslationKey, string> = {
   "chat.typingMany": "{name} и ещё {count} печатают...",
   "chat.members": "{count} участн.",
   "chat.copiedToClipboard": "Скопировано в буфер обмена",
+  "chat.updatingMessages": "Обновление сообщений…",
 
   // ── Title bar ──
   "titleBar.appName": "Forta Chat",

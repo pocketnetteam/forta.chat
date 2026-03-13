@@ -147,6 +147,7 @@ const loading = ref(false);
 const loadingMore = ref(false);
 const switching = ref(false); // true during room switch — suppresses watchers
 const settled = ref(false); // false until messages loaded + scrolled — hides scroller to prevent flicker
+const refreshingStaleCache = ref(false); // true when showing stale cached messages while fresh data loads
 const hasMore = ref(true);
 const newMessageCount = ref(0);
 
@@ -290,6 +291,7 @@ watch(
     switching.value = true;
     settled.value = false; // hide scroller immediately to prevent stale content flash
     loading.value = false;
+    refreshingStaleCache.value = false;
     newMessageCount.value = 0;
     prevScrollHeight = 0;
     hasMore.value = true;
@@ -308,10 +310,11 @@ watch(
     }
 
     // 1. Show cached messages instantly (Telegram-style: no loading screen)
-    await chatStore.loadCachedMessages(roomId);
+    const cacheAge = await chatStore.loadCachedMessages(roomId);
     if (isStale()) return;
 
     const hasCached = chatStore.activeMessages.length > 0;
+    const STALE_THRESHOLD = 60_000; // 60 seconds
 
     if (hasCached) {
       // Cache hit — render invisibly (settled=false keeps opacity:0),
@@ -332,9 +335,16 @@ watch(
       prevScrollHeight = el?.scrollHeight ?? 0;
       checkScroll();
 
+      // Show "updating" indicator if cache is stale
+      if (cacheAge > STALE_THRESHOLD) {
+        refreshingStaleCache.value = true;
+      }
+
       // 2. Fetch fresh messages from server in background (silent update).
       // watch(activeMessages.length) + ResizeObserver handle scrolling.
-      loadMessages(roomId).catch(() => {});
+      loadMessages(roomId).catch(() => {}).finally(() => {
+        refreshingStaleCache.value = false;
+      });
     } else {
       // No cache — show skeleton, wait for server
       loading.value = true;
@@ -776,6 +786,19 @@ defineExpose({ scrollToMessage, setSearchQuery });
       </span>
     </div>
 
+    <!-- Stale cache refresh indicator -->
+    <transition name="fade-refresh">
+      <div
+        v-if="refreshingStaleCache"
+        class="absolute inset-x-0 top-0 z-30 flex justify-center pt-2"
+      >
+        <span class="flex items-center gap-1.5 rounded-full bg-neutral-grad-0/90 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">
+          <span class="inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-text-on-main-bg-color border-t-transparent" />
+          {{ t("chat.updatingMessages") }}
+        </span>
+      </div>
+    </transition>
+
     <!-- Loading state -->
     <MessageSkeleton v-if="loading" />
 
@@ -1019,6 +1042,15 @@ defineExpose({ scrollToMessage, setSearchQuery });
 }
 .modal-fade-enter-from,
 .modal-fade-leave-to {
+  opacity: 0;
+}
+
+.fade-refresh-enter-active,
+.fade-refresh-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-refresh-enter-from,
+.fade-refresh-leave-to {
   opacity: 0;
 }
 

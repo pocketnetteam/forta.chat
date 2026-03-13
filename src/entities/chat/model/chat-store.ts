@@ -4,7 +4,7 @@ import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matri
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
-import { cacheRooms, getCachedRooms, cacheMessages, getCachedMessages } from "@/shared/lib/cache/chat-cache";
+import { cacheRooms, getCachedRooms, cacheMessages, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
 import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
@@ -3152,25 +3152,33 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  const loadCachedMessages = async (roomId: string) => {
-    if (messages.value[roomId]?.length) return; // already have messages
+  /** Load cached messages. Returns cache age in ms (0 if no cache). */
+  const loadCachedMessages = async (roomId: string): Promise<number> => {
+    if (messages.value[roomId]?.length) return 0; // already have messages
     try {
       const cached = await getCachedMessages(roomId);
       if (cached.length > 0 && !messages.value[roomId]?.length) {
         const msgs = cached as Message[];
-        backfillCallInfo(msgs);
+        // Drop stale optimistic messages from previous sessions
+        const cleaned = msgs.filter(
+          m => m.status !== MessageStatus.sending && m.status !== MessageStatus.failed,
+        );
+        backfillCallInfo(cleaned);
         // Sanitize cached messages that may contain raw Matrix IDs
-        for (const m of msgs) {
+        for (const m of cleaned) {
           if (m.content.includes("@") && /@[a-f0-9]{20,}:/i.test(m.content)) {
             m.content = cleanMatrixIds(m.content);
           }
         }
-        messages.value[roomId] = msgs;
+        messages.value[roomId] = cleaned;
         triggerRef(messages);
+        const cachedAt = getCacheTimestamp(roomId);
+        return cachedAt ? Date.now() - cachedAt : Infinity;
       }
     } catch (e) {
       console.warn("[chat-store] loadCachedMessages failed:", e);
     }
+    return 0;
   };
 
   return {
