@@ -4,7 +4,7 @@ import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matri
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
-import { cacheRooms, getCachedRooms, cacheMessages, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
+import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
 import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
@@ -284,18 +284,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  // Debounced room caching — max once per 5 seconds
-  let cacheTimer: ReturnType<typeof setTimeout> | null = null;
-  const debouncedCacheRooms = () => {
-    if (cacheTimer) clearTimeout(cacheTimer);
-    cacheTimer = setTimeout(() => {
-      // Never cache empty rooms — protects against premature calls before sync completes
-      if (rooms.value.length > 0) {
-        cacheRooms(rooms.value).catch(() => {});
-      }
-      cacheTimer = null;
-    }, 5000);
-  };
+  // Debounced room caching — no-op: Dexie is now the persistent store
+  const debouncedCacheRooms = () => {};
 
   // Track rooms that failed decryption — retry with backoff instead of permanent block
   const decryptFailedRooms = new Map<string, { count: number; lastAttempt: number }>();
@@ -2569,8 +2559,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         await loadPinnedMessages(roomId);
       }
 
-      // Fire-and-forget: cache messages to IndexedDB
-      cacheMessages(roomId, msgs).catch(() => {});
     } catch (e) {
       console.error("[chat-store] loadRoomMessages fatal error for room %s:", roomId, e);
       // Set empty messages so UI doesn't hang
@@ -2602,9 +2590,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const msgs = await parseTimelineEvents(timelineEvents, roomId);
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
       setMessages(roomId, msgs);
-
-      // Fire-and-forget: cache messages to IndexedDB
-      cacheMessages(roomId, msgs).catch(() => {});
 
       return true;
     } catch (e) {
@@ -2642,7 +2627,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const msgs = await parseTimelineEvents(timelineEvents, roomId);
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
       setMessages(roomId, msgs);
-      cacheMessages(roomId, msgs).catch(() => {});
     } catch (e) {
       console.error("[chat-store] loadAllMessages error:", e);
     }
