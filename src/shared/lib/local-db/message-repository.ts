@@ -123,23 +123,11 @@ export class MessageRepository {
 
   /** Bulk insert messages (e.g., initial room load / pagination) */
   async bulkInsert(messages: LocalMessage[]): Promise<void> {
-    // Filter out messages we already have by eventId
     const eventIds = messages
       .map((m) => m.eventId)
       .filter((id): id is string => id !== null);
 
-    const existing = eventIds.length > 0
-      ? await this.db.messages.where("eventId").anyOf(eventIds).primaryKeys()
-      : [];
-    const existingSet = new Set(existing);
-
-    const toInsert = messages.filter((m) => {
-      if (!m.eventId) return true;
-      // Check if any existing record has this eventId
-      return !existingSet.size; // Simplified: if no existing, insert all
-    });
-
-    // For proper dedup, fetch existing eventIds
+    // Dedup: skip messages whose eventId already exists in DB
     if (eventIds.length > 0) {
       const existingEvents = await this.db.messages
         .where("eventId")
