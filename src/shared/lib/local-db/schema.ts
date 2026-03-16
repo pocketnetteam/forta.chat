@@ -5,6 +5,7 @@ import type {
   ReplyTo,
   PollInfo,
   TransferInfo,
+  LinkPreview,
 } from "@/entities/chat/model/types";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,13 @@ export interface LocalMessage {
   callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number };
   pollInfo?: PollInfo;
   transferInfo?: TransferInfo;
+  linkPreview?: LinkPreview;
+  deleted?: boolean;
+  systemMeta?: {
+    template: string;
+    senderAddr: string;
+    targetAddr?: string;
+  };
 
   // Sync metadata
   encryptedBody?: string;        // Raw encrypted body for retry/re-send
