@@ -2675,6 +2675,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     }
     triggerRef(messages);
+
+    // Dual-write: persist reaction to Dexie
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.eventWriter.writeReaction({
+        eventId: raw.event_id as string,
+        targetEventId,
+        emoji,
+        senderAddress: matrixIdToAddress(raw.sender as string),
+        isMine: raw.sender === getMatrixClientService().getUserId(),
+      }).catch(() => {});
+    }
   };
 
   /** Set the server-confirmed event ID for an own reaction */
@@ -3147,6 +3158,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       triggerRef(messages);
 
+      // Dual-write: persist receipts to Dexie
+      if (chatDbKitRef.value) {
+        for (const [eventId, receiptTypes] of Object.entries(content)) {
+          const readReceipts = (receiptTypes as Record<string, unknown>)?.["m.read"] as Record<string, unknown> | undefined;
+          if (!readReceipts) continue;
+          for (const userId of Object.keys(readReceipts)) {
+            if (userId === myUserId) continue;
+            chatDbKitRef.value.eventWriter.writeReceipt({
+              eventId,
+              readerAddress: matrixIdToAddress(userId),
+              roomId,
+            }).catch(() => {});
+          }
+        }
+      }
+
       // Sync sidebar: if any status changed, update room.lastMessage.
       // Find the sidebar's lastMessage by ID in the messages array (not just the last element)
       // to handle cases where lastMessage isn't the most recent message.
@@ -3196,6 +3223,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             return;
           }
         }
+      }
+
+      // Dual-write: persist redaction to Dexie
+      if (chatDbKitRef.value && redactedEventId) {
+        chatDbKitRef.value.eventWriter.writeRedaction({
+          redactedEventId,
+          roomId,
+        }).catch(() => {});
       }
 
       // Check if the redacted event is a message — mark as deleted
