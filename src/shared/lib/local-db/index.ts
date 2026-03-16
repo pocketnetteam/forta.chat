@@ -13,7 +13,9 @@ export type {
   OperationType,
   SyncStateEntry,
   LocalAttachment,
+  DecryptionJob,
 } from "./schema";
+export { DecryptionWorker } from "./decryption-worker";
 
 export { localToMessage, localToMessages, messageStatusToLocal } from "./mappers";
 export { MessageRepository } from "./message-repository";
@@ -39,6 +41,7 @@ import { RoomRepository } from "./room-repository";
 import { UserRepository } from "./user-repository";
 import { SyncEngine } from "./sync-engine";
 import { EventWriter } from "./event-writer";
+import { DecryptionWorker } from "./decryption-worker";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 
 export interface ChatDbKit {
@@ -48,6 +51,7 @@ export interface ChatDbKit {
   users: UserRepository;
   syncEngine: SyncEngine;
   eventWriter: EventWriter;
+  decryptionWorker: DecryptionWorker;
 }
 
 let currentKit: ChatDbKit | null = null;
@@ -86,8 +90,16 @@ export function initChatDb(
   const users = new UserRepository(db);
   const syncEngine = new SyncEngine(db, messages, rooms, getRoomCrypto, onChange);
   const eventWriter = new EventWriter(db, messages, rooms, users, onChange);
+  const decryptionWorker = new DecryptionWorker(db, async (roomId: string) => {
+    const crypto = await getRoomCrypto(roomId);
+    if (!crypto) return undefined;
+    return { decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>) };
+  });
 
-  currentKit = { db, messages, rooms, users, syncEngine, eventWriter };
+  // Start processing any pending decryption jobs from previous session
+  decryptionWorker.tick().catch(() => {});
+
+  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker };
   currentUserId = userId;
 
   return currentKit;
@@ -118,6 +130,7 @@ export function isChatDbReady(): boolean {
  */
 export function closeChatDb(): void {
   if (currentKit) {
+    currentKit.decryptionWorker.dispose();
     currentKit.db.close();
     currentKit = null;
     currentUserId = null;

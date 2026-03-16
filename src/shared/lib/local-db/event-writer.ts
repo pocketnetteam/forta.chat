@@ -33,6 +33,8 @@ export interface ParsedMessage {
   linkPreview?: import("@/entities/chat/model/types").LinkPreview;
   deleted?: boolean;
   systemMeta?: { template: string; senderAddr: string; targetAddr?: string };
+  /** Raw encrypted event JSON — stored for decryption retry when content is "[encrypted]" */
+  encryptedRaw?: Record<string, unknown>;
 }
 
 /** A parsed reaction event */
@@ -287,6 +289,7 @@ export class EventWriter {
 
   /** Convert a ParsedMessage to a LocalMessage for DB insertion */
   private toLocalMessage(parsed: ParsedMessage): LocalMessage {
+    const isEncrypted = parsed.content === "[encrypted]" && parsed.encryptedRaw;
     return {
       eventId: parsed.eventId,
       clientId: parsed.clientId ?? crypto.randomUUID(),
@@ -308,6 +311,9 @@ export class EventWriter {
       linkPreview: parsed.linkPreview,
       deleted: parsed.deleted,
       systemMeta: parsed.systemMeta,
+      // Decryption retry metadata
+      encryptedBody: isEncrypted ? JSON.stringify(parsed.encryptedRaw) : undefined,
+      decryptionStatus: isEncrypted ? "pending" : "ok",
     };
   }
 

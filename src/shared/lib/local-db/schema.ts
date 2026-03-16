@@ -94,8 +94,10 @@ export interface LocalMessage {
     targetAddr?: string;
   };
 
-  // Sync metadata
-  encryptedBody?: string;        // Raw encrypted body for retry/re-send
+  // Sync & decryption metadata
+  encryptedBody?: string;        // Raw encrypted event JSON for decryption retry
+  decryptionStatus?: "ok" | "pending" | "failed"; // Decryption outcome
+  decryptionAttempts?: number;   // Number of decrypt attempts
   serverTs?: number;             // Original server timestamp
   version: number;               // Incremented on each local edit
   softDeleted: boolean;          // true = marked for deletion, pending sync
@@ -147,6 +149,19 @@ export interface LocalAttachment {
   uploadProgress?: number;       // 0-100
 }
 
+/** Queued decryption retry job */
+export interface DecryptionJob {
+  id?: number;                   // Auto PK
+  eventId: string;               // Matrix event ID → LocalMessage.eventId
+  roomId: string;
+  encryptedBody: string;         // JSON-serialized raw Matrix event content
+  status: "pending" | "processing" | "failed" | "dead";
+  attempts: number;
+  nextAttemptAt: number;         // Timestamp for backoff scheduling
+  lastError?: string;
+  createdAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
@@ -159,6 +174,7 @@ export class ChatDatabase extends Dexie {
   pendingOps!: Table<PendingOperation>;
   syncState!: Table<SyncStateEntry>;
   attachments!: Table<LocalAttachment>;
+  decryptionQueue!: Table<DecryptionJob>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -188,6 +204,19 @@ export class ChatDatabase extends Dexie {
 
       // PK: auto-incremented. Index: messageLocalId (FK lookup)
       attachments: "++id, messageLocalId, status",
+    });
+
+    // Version 2: add decryption retry queue
+    this.version(2).stores({
+      // Existing tables — repeat schema (Dexie requires all stores in each version)
+      rooms: "id, updatedAt, membership",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      // New table: decryption retry queue
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
     });
   }
 }

@@ -2748,6 +2748,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Dual-write: persist a parsed message to Dexie alongside the in-memory store */
   const dexieWriteMessage = (msg: Message, roomId: string, raw: Record<string, unknown>) => {
     if (!chatDbKitRef.value) return;
+    const isEncrypted = msg.content === "[encrypted]";
     const parsed: ParsedMessage = {
       eventId: raw.event_id as string,
       roomId,
@@ -2765,9 +2766,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       linkPreview: msg.linkPreview,
       deleted: msg.deleted,
       systemMeta: msg.systemMeta,
+      // Preserve raw event for decryption retry
+      encryptedRaw: isEncrypted ? raw : undefined,
     };
     const myAddr = useAuthStore().address ?? "";
-    chatDbKitRef.value.eventWriter.writeMessage(parsed, myAddr, activeRoomId.value).catch(e => {
+    chatDbKitRef.value.eventWriter.writeMessage(parsed, myAddr, activeRoomId.value).then(result => {
+      // Enqueue decryption retry if message couldn't be decrypted
+      if (isEncrypted && result !== "duplicate" && chatDbKitRef.value?.decryptionWorker) {
+        chatDbKitRef.value.decryptionWorker.enqueue(
+          raw.event_id as string,
+          roomId,
+          JSON.stringify(raw),
+        ).catch(() => {});
+      }
+    }).catch(e => {
       console.warn("[chat-store] EventWriter.writeMessage failed:", e);
     });
   };
