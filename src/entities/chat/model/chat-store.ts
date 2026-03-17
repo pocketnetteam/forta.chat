@@ -2580,14 +2580,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Apply existing read receipts from the Matrix room to set correct message statuses.
    *  Walks the timeline backwards, finds the latest event that has a read receipt
-   *  from a non-self user, and marks all own messages up to that point as "read". */
+   *  from a non-self user, and seeds the outbound watermark in Dexie.
+   *  Also updates in-memory message statuses for the fallback path. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const applyExistingReceipts = (matrixRoom: any, timelineEvents: unknown[], msgs: Message[], myUserId: string | null) => {
     if (!myUserId || msgs.length === 0) return;
     try {
       const myAddr = matrixIdToAddress(myUserId);
+      const roomId = (matrixRoom.roomId ?? matrixRoom.room_id) as string;
+
       // Find the latest event that has a read receipt from a non-self user
       let readUpToEventId: string | null = null;
+      let readUpToTimestamp = 0;
       for (let i = timelineEvents.length - 1; i >= 0; i--) {
         const ev = timelineEvents[i];
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2598,12 +2602,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (hasOtherRead) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           readUpToEventId = (ev as any)?.getId?.() ?? (ev as any)?.event?.event_id ?? null;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          readUpToTimestamp = (ev as any)?.getTs?.() ?? (ev as any)?.event?.origin_server_ts ?? 0;
           break;
         }
       }
       if (!readUpToEventId) return;
 
-      // Find the index of this event in our messages and mark all own messages up to it
+      // Seed outbound watermark in Dexie — this is the key fix for initial load
+      if (chatDbKitRef.value && roomId && readUpToTimestamp > 0) {
+        chatDbKitRef.value.rooms.updateOutboundWatermark(roomId, readUpToTimestamp).catch(() => {});
+      }
+
+      // Also update in-memory message statuses (for non-Dexie fallback path)
       const readUpToIdx = msgs.findIndex(m => m.id === readUpToEventId);
       if (readUpToIdx < 0) {
         // Event not in our parsed messages — mark all as read (receipt is beyond our range)
