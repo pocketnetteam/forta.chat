@@ -102,6 +102,16 @@ export function useGroupCreation() {
         visibility: "private",
         invite: inviteIds,
         initial_state: initialState,
+        power_level_content_override: {
+          users: { [matrixService.getUserId() ?? ""]: 100 },
+          users_default: 0,
+          events_default: 0,
+          state_default: 50,
+          kick: 50,
+          ban: 50,
+          invite: 0,
+          redact: 50,
+        },
       });
 
       const roomId = result.room_id;

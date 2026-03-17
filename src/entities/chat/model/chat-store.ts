@@ -3,6 +3,7 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
 import { useAuthStore } from "@/entities/auth/model/stores";
@@ -1324,6 +1325,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const acceptInvite = async (roomId: string) => {
     try {
       const matrixService = getMatrixClientService();
+      // Security (best-effort): block join if local state shows user is banned.
+      // Authoritative enforcement is server-side; this avoids a wasted network call.
+      const myUserId = matrixService.getUserId() ?? "";
+      if (isUserBanned(roomId, myUserId)) {
+        console.warn("[chat-store] acceptInvite blocked: user is banned from room", roomId);
+        return;
+      }
       await matrixService.joinRoom(roomId);
 
       // Update local membership to "join"
@@ -1417,6 +1425,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             const memberId = (member as any).userId as string;
             if (memberId !== myUserId) {
               try {
+                // Security: reset power level before kick
+                await resetPowerLevel(roomId, memberId);
                 await matrixService.kick(roomId, memberId);
               } catch (kickErr) {
                 console.warn("[chat-store] removeRoom: kick failed for", memberId, kickErr);
@@ -1477,6 +1487,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const matrixService = getMatrixClientService();
       const hexId = hexEncode(address).toLowerCase();
       const targetMatrixId = matrixService.matrixId(hexId);
+      // Security: reset power level before kick to prevent resurrection with elevated PL
+      await resetPowerLevel(roomId, targetMatrixId);
       await matrixService.kick(roomId, targetMatrixId);
 
       // Optimistic: remove member from local room data immediately
@@ -1546,6 +1558,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const matrixService = getMatrixClientService();
       const hexId = hexEncode(address).toLowerCase();
       const targetMatrixId = matrixService.matrixId(hexId);
+      // Security: reset power level before ban
+      await resetPowerLevel(roomId, targetMatrixId);
       await matrixService.ban(roomId, targetMatrixId);
       // Optimistic: remove from members
       const room = getRoomById(roomId);
@@ -1609,6 +1623,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const matrixService = getMatrixClientService();
       const hexId = hexEncode(address).toLowerCase();
       const targetMatrixId = matrixService.matrixId(hexId);
+      // Security: don't invite banned users
+      if (isUserBanned(roomId, targetMatrixId)) {
+        console.warn("[chat-store] inviteMember blocked: target is banned from room", roomId);
+        return false;
+      }
       await matrixService.invite(roomId, targetMatrixId);
 
       // Optimistic: add member to local room data immediately
@@ -1676,6 +1695,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const joinRoomById = async (roomId: string): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      // Security (best-effort): block join if local state shows user is banned.
+      // Authoritative enforcement is server-side; this avoids a wasted network call.
+      const myUserId = matrixService.getUserId() ?? "";
+      if (isUserBanned(roomId, myUserId)) {
+        console.warn("[chat-store] joinRoomById blocked: user is banned from room", roomId);
+        return false;
+      }
       await matrixService.joinRoom(roomId);
       await refreshRoomsNow();
       setActiveRoom(roomId);
