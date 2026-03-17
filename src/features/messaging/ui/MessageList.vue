@@ -113,23 +113,33 @@ const handlePollEnd = (messageId: string) => {
 };
 
 /** After a reaction toggle, keep the bottom edge anchored (Telegram-style).
- *  Polls until scrollHeight actually changes (Dexie write → liveQuery → render),
- *  then pins scroll to bottom. */
+ *  Uses a one-shot watch on activeMessages to detect when Dexie liveQuery
+ *  pushes the reaction update, then waits for VList layout via rAF chain. */
 const keepBottomAnchored = () => {
   if (!isNearBottom.value) return;
   const el = getScrollContainer();
   if (!el) return;
-  const startHeight = el.scrollHeight;
-  let frames = 0;
-  const poll = () => {
-    if (frames++ > 30) return; // ~500ms safety cap
-    if (el.scrollHeight !== startHeight) {
-      el.scrollTop = el.scrollHeight + 9999;
-      return;
-    }
-    requestAnimationFrame(poll);
-  };
-  requestAnimationFrame(poll);
+
+  // Strategy: watch activeMessages for next change, then wait for VList to
+  // measure new heights (ResizeObserver → layout), then pin to bottom.
+  const unwatch = watch(
+    () => chatStore.activeMessages,
+    () => {
+      unwatch();
+      // nextTick: Vue DOM updated. Then rAF×3: VList ResizeObserver + layout.
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (el) el.scrollTop = el.scrollHeight + 9999;
+            });
+          });
+        });
+      });
+    },
+  );
+  // Safety: clean up if no activeMessages change within 3s
+  setTimeout(() => unwatch(), 3000);
 };
 
 const handleToggleReactionWithEffect = (messageId: string, emoji: string) => {
