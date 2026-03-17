@@ -22,6 +22,43 @@ import TypingBubble from "./TypingBubble.vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
+/**
+ * Monkey-patch DynamicScrollerItem to fix stale height on item recycling.
+ *
+ * vue-virtual-scroller v2 beta has a bug in the `id` watcher: when a DOM node
+ * is recycled for a different item, if the new item has no cached size yet,
+ * the OLD item's cached size is applied (line ~1185 in source). This causes
+ * the scroller to position items based on wrong heights → visible gaps.
+ *
+ * Fix: delete the stale cache entry for the old id when the item is recycled,
+ * so the scroller falls back to minItemSize and then gets the correct size
+ * from ResizeObserver.
+ */
+if (DynamicScrollerItem.watch?.id) {
+  const originalIdWatcher = DynamicScrollerItem.watch.id;
+  DynamicScrollerItem.watch.id = function (value: string, oldValue: string) {
+    // Delete old cache entry so stale height doesn't poison new item's position
+    if (oldValue && this.vscrollData?.sizes?.[oldValue] != null) {
+      // Only delete if the old item is no longer in the visible set
+      // (the scroller will remeasure via ResizeObserver)
+      const items = this.vscrollParent?.items;
+      const keyField = this.vscrollData?.keyField;
+      if (items && keyField) {
+        const oldStillPresent = items.some((i: Record<string, unknown>) => i[keyField] === oldValue);
+        if (!oldStillPresent) {
+          delete this.vscrollData.sizes[oldValue];
+        }
+      }
+    }
+    // Call original watcher
+    if (typeof originalIdWatcher === "function") {
+      originalIdWatcher.call(this, value, oldValue);
+    } else if (originalIdWatcher?.handler) {
+      originalIdWatcher.handler.call(this, value, oldValue);
+    }
+  };
+}
+
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
@@ -235,6 +272,31 @@ const virtualItems = computed<VirtualItem[]>(() => {
   }
 
   return items;
+});
+
+/**
+ * Evict stale height entries from DynamicScroller's size cache.
+ *
+ * vue-virtual-scroller v2 beta caches measured heights keyed by item id.
+ * When items leave the list (e.g. room switch) the cache retains their heights.
+ * If a recycled DOM node is assigned a new id that happens to have a stale
+ * cache entry, the scroller positions subsequent items based on the WRONG
+ * height, creating visible gaps.
+ *
+ * This watcher runs on every virtualItems change and deletes cache entries
+ * for ids no longer present, so positions are always calculated from fresh
+ * ResizeObserver measurements.
+ */
+watch(virtualItems, (items) => {
+  const scroller = scrollerRef.value as any;
+  const sizes = scroller?.$refs?.scroller?.vscrollData?.sizes ?? scroller?.vscrollData?.sizes;
+  if (!sizes) return;
+  const currentIds = new Set(items.map(i => i.id));
+  for (const cachedId of Object.keys(sizes)) {
+    if (!currentIds.has(cachedId)) {
+      delete sizes[cachedId];
+    }
+  }
 });
 
 /** Get the actual scroll container.
