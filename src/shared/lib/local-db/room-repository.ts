@@ -65,14 +65,18 @@ export class RoomRepository {
     timestamp: number,
     senderId: string,
     type?: MessageType,
+    eventId?: string,
   ): Promise<void> {
-    const changes = {
+    const changes: Partial<import("./schema").LocalRoom> = {
       lastMessagePreview: preview.slice(0, 200),
       lastMessageTimestamp: timestamp,
       lastMessageSenderId: senderId,
       lastMessageType: type,
       updatedAt: timestamp,
     };
+    if (eventId !== undefined) {
+      changes.lastMessageEventId = eventId;
+    }
     console.log("[DELETE-DEBUG] updateLastMessage:", { roomId, preview: preview.slice(0, 30), timestamp });
     const updated = await this.db.rooms.update(roomId, changes);
     console.log("[DELETE-DEBUG] db.rooms.update result:", { updated, roomId });
@@ -85,6 +89,14 @@ export class RoomRepository {
         console.log("[DELETE-DEBUG] retry update result:", updated2);
       }
     }
+  }
+
+  /** Update reaction on the last message (does NOT touch updatedAt) */
+  async updateLastMessageReaction(
+    roomId: string,
+    reaction: import("./schema").LocalRoom["lastMessageReaction"],
+  ): Promise<void> {
+    await this.db.rooms.update(roomId, { lastMessageReaction: reaction });
   }
 
   /** Set unread count */

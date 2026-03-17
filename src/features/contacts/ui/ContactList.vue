@@ -533,7 +533,7 @@ const getRoomLongPress = (room: ChatRoom) => {
                 {{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
               </span>
               <span v-else class="truncate text-sm text-text-on-main-bg-color">
-                {{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
+                <span v-if="(item as ChatRoom).lastMessageReaction" class="mr-0.5">{{ (item as ChatRoom).lastMessageReaction!.emoji }}</span>{{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
               </span>
               <transition name="badge-pop">
                 <span

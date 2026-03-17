@@ -11,6 +11,12 @@ export interface ChatRoom {
   membership?: "join" | "invite";
   /** Room topic / description (from m.room.topic state event) */
   topic?: string;
+  /** Last reaction on the last message (for chat list preview) */
+  lastMessageReaction?: {
+    emoji: string;
+    senderAddress: string;
+    timestamp: number;
+  };
 }
 
 /** Metadata for file/image/video/audio messages */
