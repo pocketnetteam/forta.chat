@@ -343,18 +343,28 @@ export class EventWriter {
     };
   }
 
+  /** Generate preview text from message type and content */
+  private getPreviewText(
+    type: MessageType,
+    content: string,
+    transferAmount?: number,
+  ): string {
+    if (type === MessageType.image) return "📷 Photo";
+    if (type === MessageType.video) return "🎬 Video";
+    if (type === MessageType.audio) return "🎵 Audio";
+    if (type === MessageType.file) return "📎 File";
+    if (type === MessageType.poll) return "📊 Poll";
+    if (type === MessageType.transfer) return `💰 ${transferAmount ?? 0} PKOIN`;
+    return content;
+  }
+
   /** Update room metadata after a new message */
   private async updateRoomPreview(parsed: ParsedMessage): Promise<void> {
-    let preview = parsed.content;
-    if (parsed.type === MessageType.image) preview = "📷 Photo";
-    else if (parsed.type === MessageType.video) preview = "🎬 Video";
-    else if (parsed.type === MessageType.audio) preview = "🎵 Audio";
-    else if (parsed.type === MessageType.file) preview = "📎 File";
-    else if (parsed.type === MessageType.poll) preview = "📊 Poll";
-    else if (parsed.type === MessageType.transfer) {
-      preview = `💰 ${parsed.transferInfo?.amount ?? 0} PKOIN`;
-    }
-
+    const preview = this.getPreviewText(
+      parsed.type,
+      parsed.content,
+      parsed.transferInfo?.amount,
+    );
     await this.roomRepo.updateLastMessage(
       parsed.roomId,
       preview,
@@ -366,16 +376,11 @@ export class EventWriter {
 
   /** Update room preview from an existing LocalMessage (used after deletion) */
   private async updateRoomPreviewFromLocal(msg: LocalMessage): Promise<void> {
-    let preview = msg.content;
-    if (msg.type === MessageType.image) preview = "📷 Photo";
-    else if (msg.type === MessageType.video) preview = "🎬 Video";
-    else if (msg.type === MessageType.audio) preview = "🎵 Audio";
-    else if (msg.type === MessageType.file) preview = "📎 File";
-    else if (msg.type === MessageType.poll) preview = "📊 Poll";
-    else if (msg.type === MessageType.transfer) {
-      preview = `💰 ${msg.transferInfo?.amount ?? 0} PKOIN`;
-    }
-
+    const preview = this.getPreviewText(
+      msg.type,
+      msg.content,
+      msg.transferInfo?.amount,
+    );
     await this.roomRepo.updateLastMessage(
       msg.roomId,
       preview,
