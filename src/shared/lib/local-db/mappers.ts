@@ -6,10 +6,13 @@ import { MessageStatus } from "@/entities/chat/model/types";
  * Convert a LocalMessage (Dexie row) to a Message (UI type).
  * Used by liveQuery consumers so components don't know about LocalMessage.
  */
-export function localToMessage(local: LocalMessage): Message {
+export function localToMessage(local: LocalMessage): Message & { _key?: string } {
   const isDeleted = local.deleted || local.softDeleted;
   return {
     id: local.eventId ?? local.clientId,
+    // Stable key for Vue :key binding — clientId never changes,
+    // unlike id which flips from clientId to eventId after confirmSent.
+    _key: local.clientId,
     roomId: local.roomId,
     senderId: local.senderId,
     content: isDeleted ? "" : local.content,
