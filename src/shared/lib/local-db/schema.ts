@@ -218,5 +218,53 @@ export class ChatDatabase extends Dexie {
       // New table: decryption retry queue
       decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
     });
+
+    // Version 3: deduplicate messages created by clientId/txnId mismatch
+    this.version(3).stores({
+      rooms: "id, updatedAt, membership",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+    }).upgrade(async (tx) => {
+      const messages = tx.table("messages");
+      const allMsgs = await messages.toArray();
+
+      // Group by eventId to find duplicates
+      const byEventId = new Map<string, Array<{ localId: number; status: string }>>();
+      for (const msg of allMsgs) {
+        if (!msg.eventId) continue;
+        const group = byEventId.get(msg.eventId);
+        if (group) group.push({ localId: msg.localId, status: msg.status });
+        else byEventId.set(msg.eventId, [{ localId: msg.localId, status: msg.status }]);
+      }
+
+      const toDelete: number[] = [];
+      for (const [, group] of byEventId) {
+        if (group.length <= 1) continue;
+        // Keep the synced one, or first if none synced
+        const keeper = group.find((m) => m.status === "synced") ?? group[0];
+        for (const msg of group) {
+          if (msg.localId !== keeper.localId) {
+            toDelete.push(msg.localId);
+          }
+        }
+      }
+
+      // Remove orphaned pending messages older than 24h with no eventId
+      const dayAgo = Date.now() - 86_400_000;
+      for (const msg of allMsgs) {
+        if (!msg.eventId && msg.status === "pending" && msg.timestamp < dayAgo) {
+          toDelete.push(msg.localId);
+        }
+      }
+
+      if (toDelete.length > 0) {
+        await messages.bulkDelete(toDelete);
+        console.log(`[ChatDB] Dedup migration: removed ${toDelete.length} duplicate/orphaned messages`);
+      }
+    });
   }
 }
