@@ -13,6 +13,8 @@ import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
 import { useConnectivity } from "@/shared/lib/connectivity";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { BottomSheet } from "@/shared/ui/bottom-sheet";
 import { useCallService } from "@/features/video-calls/model/call-service";
 import type { CallType } from "@/entities/call";
 import { useWallet } from "@/features/wallet";
@@ -80,6 +82,9 @@ const pasteDrop = usePasteDrop({
 });
 
 pasteDrop.setupDragListeners(chatWindowRef);
+
+const isMobile = useMobile();
+const showMoreMenu = ref(false);
 
 const callService = useCallService();
 const { isAvailable: walletAvailable } = useWallet();
@@ -294,9 +299,9 @@ onUnmounted(() => {
         </svg>
       </button>
 
-      <!-- Voice call button (1:1 only) -->
+      <!-- Voice call button (1:1 only, desktop) -->
       <button
-        v-if="!chatStore.activeRoom.isGroup"
+        v-if="!chatStore.activeRoom.isGroup && !isMobile"
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
         :title="t('call.voiceCall')"
         :aria-label="t('call.voiceCall')"
@@ -307,12 +312,27 @@ onUnmounted(() => {
         </svg>
       </button>
 
-      <!-- Info panel button -->
+      <!-- Info panel button (desktop) -->
       <button
+        v-if="!isMobile"
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
         :title="t('info.title')"
         :aria-label="t('info.title')"
         @click="showInfoPanel = !showInfoPanel"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="12" cy="5" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="12" cy="19" r="2" />
+        </svg>
+      </button>
+
+      <!-- More menu button (mobile) -->
+      <button
+        v-if="isMobile"
+        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+        aria-label="More actions"
+        @click="showMoreMenu = true"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
           <circle cx="12" cy="5" r="2" />
@@ -456,6 +476,31 @@ onUnmounted(() => {
     />
 
     <DropOverlay :visible="pasteDrop.isDragging.value" />
+
+    <!-- Mobile more menu -->
+    <BottomSheet :show="showMoreMenu" @close="showMoreMenu = false" aria-label="More actions">
+      <div class="flex flex-col">
+        <button
+          v-if="chatStore.activeRoom && !chatStore.activeRoom.isGroup"
+          class="flex items-center gap-3 px-2 py-3 text-left hover:bg-neutral-grad-0/50 rounded-lg"
+          @click="startCallFromHeader('voice'); showMoreMenu = false"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
+            <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
+          </svg>
+          <span class="text-sm text-text-color">{{ t('call.voiceCall') }}</span>
+        </button>
+        <button
+          class="flex items-center gap-3 px-2 py-3 text-left hover:bg-neutral-grad-0/50 rounded-lg"
+          @click="showInfoPanel = !showInfoPanel; showMoreMenu = false"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+          <span class="text-sm text-text-color">{{ t('info.title') }}</span>
+        </button>
+      </div>
+    </BottomSheet>
   </div>
 </template>
 

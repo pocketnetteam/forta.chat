@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Message } from "@/entities/chat";
+import { useThemeStore } from "@/entities/theme";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { BottomSheet } from "@/shared/ui/bottom-sheet";
 import { ContextMenu } from "@/shared/ui/context-menu";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
 import ReactionPicker from "./ReactionPicker.vue";
 
 const { t } = useI18n();
+const isMobile = useMobile();
+const themeStore = useThemeStore();
 
 interface Props {
   show: boolean;
@@ -81,10 +86,60 @@ const handleOpenEmojiPicker = () => {
   }
   emit("close");
 };
+
+/** Bottom-sheet variant: select action and close in one step */
+const onBottomSheetAction = (action: string) => {
+  handleAction(action);
+  emit("close");
+};
 </script>
 
 <template>
+  <!-- Mobile: BottomSheet -->
+  <BottomSheet
+    v-if="isMobile"
+    :show="props.show"
+    aria-label="Message actions"
+    @close="emit('close')"
+  >
+    <!-- Quick reactions row -->
+    <div class="flex items-center gap-1 px-2 pb-3 border-b border-neutral-grad-1/30 mb-2">
+      <button
+        v-for="emoji in themeStore.quickReactions"
+        :key="emoji"
+        class="text-2xl p-2 rounded-full hover:bg-neutral-grad-0/50 active:scale-90 transition-transform"
+        @click="handleReaction(emoji)"
+      >
+        {{ emoji }}
+      </button>
+      <button
+        class="p-2 rounded-full hover:bg-neutral-grad-0/50"
+        :title="t('contextMenu.moreReactions')"
+        @click="handleOpenEmojiPicker"
+      >
+        <svg class="size-6 text-text-on-main-bg-color" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />
+          <line x1="12" y1="17" x2="12" y2="20" /><line x1="10.5" y1="18.5" x2="13.5" y2="18.5" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Action items -->
+    <button
+      v-for="item in menuItems"
+      :key="item.action"
+      class="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left"
+      :class="item.danger ? 'text-color-bad' : 'text-text-color'"
+      @click="onBottomSheetAction(item.action)"
+    >
+      <span v-if="item.icon" v-html="item.icon" class="size-5 [&>svg]:size-5" />
+      <span class="text-sm">{{ item.label }}</span>
+    </button>
+  </BottomSheet>
+
+  <!-- Desktop: ContextMenu (unchanged) -->
   <ContextMenu
+    v-else
     :show="props.show"
     :x="props.x"
     :y="props.y"

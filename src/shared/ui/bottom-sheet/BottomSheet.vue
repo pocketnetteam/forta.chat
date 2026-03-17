@@ -39,8 +39,10 @@ const onDragEnd = () => {
   const sheetHeight = sheetRef.value?.offsetHeight ?? 300;
   if (translateY.value > sheetHeight * 0.3) {
     emit("close");
+    // Don't reset — let the leave transition handle slide-out
+  } else {
+    translateY.value = 0;
   }
-  translateY.value = 0;
 };
 
 const onKeydown = (e: KeyboardEvent) => {

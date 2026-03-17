@@ -2,9 +2,12 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { useThemeStore } from "@/entities/theme";
 import { EMOJI_CATEGORIES, searchEmojis } from "@/shared/lib/emoji-data";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
 import EmojiKitchenBar from "./EmojiKitchenBar.vue";
 import GifPicker from "./GifPicker.vue";
 import type { TenorGif } from "@/shared/lib/tenor";
+
+const isMobile = useMobile();
 
 const PANEL_W = 370;
 const PANEL_H = 420;
@@ -61,6 +64,18 @@ watch(() => props.show, (v) => {
 const panelStyle = computed(() => {
   const vw = typeof window !== "undefined" ? window.innerWidth : 800;
   const vh = typeof window !== "undefined" ? window.innerHeight : 600;
+
+  // Mobile: full-width bottom panel (use CSS units for resize/rotation reactivity)
+  if (isMobile.value) {
+    return {
+      left: "0px",
+      top: "auto",
+      bottom: "0px",
+      width: "100%",
+      height: "min(55dvh, 420px)",
+      borderRadius: "16px 16px 0 0",
+    };
+  }
 
   const panelW = Math.min(PANEL_W, vw - PAD * 2);
   const panelH = Math.min(PANEL_H, vh - PAD * 2);
@@ -161,7 +176,8 @@ const setSectionRef = (el: any, idx: number) => {
     <transition name="emoji-popup">
       <div v-if="props.show" class="fixed inset-0 z-50" @click.self="emit('close')">
         <div
-          class="emoji-panel absolute flex flex-col overflow-hidden rounded-2xl border border-neutral-grad-0 bg-background-total-theme shadow-2xl"
+          class="emoji-panel flex flex-col overflow-hidden border border-neutral-grad-0 bg-background-total-theme shadow-2xl"
+          :class="isMobile ? 'fixed' : 'absolute rounded-2xl'"
           :style="panelStyle"
         >
           <!-- Main tabs: Emoji | GIF (hidden in reaction mode) -->

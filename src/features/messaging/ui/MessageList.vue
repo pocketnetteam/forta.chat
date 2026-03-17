@@ -921,7 +921,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
       :items="virtualItems"
       :min-item-size="48"
       key-field="id"
-      class="h-full overflow-y-auto px-4 py-3"
+      class="h-full overflow-y-auto overscroll-contain px-4 py-3"
       :style="{ opacity: settled ? 1 : 0, transition: settled ? 'opacity 0.1s ease-out' : 'none' }"
     >
       <template #before>

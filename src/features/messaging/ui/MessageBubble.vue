@@ -51,6 +51,8 @@ const emit = defineEmits<{
   addReaction: [message: Message];
   pollVote: [messageId: string, optionId: string];
   pollEnd: [messageId: string];
+  delete: [message: Message];
+  forward: [message: Message];
 }>();
 
 const handleToggleReaction = (emoji: string) => {
@@ -86,21 +88,29 @@ const handleRightClick = (e: MouseEvent) => {
   emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
 };
 
-const { offsetX: swipeOffsetX, isSwiping, onTouchstart, onTouchmove, onTouchend } = useSwipeGesture({
-  direction: "left",
+// Use direction "both" always — callbacks read live props to handle virtual scroller recycling
+const { offsetX: swipeOffsetX, isSwiping, swipeDirection, onTouchstart, onTouchmove, onTouchend } = useSwipeGesture({
+  direction: "both",
   threshold: 60,
   maxOffset: 100,
-  onTrigger: () => {
-    emit("reply", props.message);
-  },
+  onTriggerLeft: () => { emit("reply", props.message); },
+  onTriggerRight: () => { /* reveal actions — handled via swipeDirection ref */ },
+  haptic: true,
 });
 
-const swipeStyle = computed(() => ({
-  transform: swipeOffsetX.value > 0 ? `translateX(${-swipeOffsetX.value}px)` : undefined,
-  transition: isSwiping.value ? "none" : "transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94)",
-}));
+const swipeStyle = computed(() => {
+  if (swipeOffsetX.value <= 0) return { transition: isSwiping.value ? "none" : "transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94)" };
+  const sign = swipeDirection.value === "right" ? 1 : -1;
+  return {
+    transform: `translateX(${sign * swipeOffsetX.value}px)`,
+    transition: isSwiping.value ? "none" : "transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+  };
+});
 
 const swipeArrowOpacity = computed(() => Math.min(swipeOffsetX.value / 60, 1));
+
+const onDeleteAction = () => { emit("delete", props.message); };
+const onForwardAction = () => { emit("forward", props.message); };
 
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
@@ -248,9 +258,9 @@ const replyPreviewText = computed(() => {
     @touchmove="onTouchmove"
     @touchend="onTouchend"
   >
-    <!-- Swipe reply arrow (behind message) -->
+    <!-- Swipe reply arrow (behind message, shown on left swipe) -->
     <div
-      v-if="swipeOffsetX > 0"
+      v-if="swipeOffsetX > 0 && swipeDirection === 'left'"
       class="absolute right-0 top-1/2 flex h-8 w-8 translate-x-10 -translate-y-1/2 items-center justify-center rounded-full bg-color-bg-ac text-white"
       :style="{ opacity: swipeArrowOpacity }"
     >
@@ -258,6 +268,24 @@ const replyPreviewText = computed(() => {
         <polyline points="9 17 4 12 9 7" />
         <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
       </svg>
+    </div>
+
+    <!-- Reveal actions (behind message, for own messages on right swipe) -->
+    <div
+      v-if="isOwn && swipeDirection === 'right' && swipeOffsetX > 0"
+      class="absolute left-0 top-0 bottom-0 flex items-center gap-1 pl-2"
+      :class="{ 'pointer-events-none': isSwiping }"
+    >
+      <button @click="onDeleteAction" class="flex size-10 items-center justify-center rounded-full bg-color-bad/20 text-color-bad">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        </svg>
+      </button>
+      <button @click="onForwardAction" class="flex size-10 items-center justify-center rounded-full bg-color-bg-ac/20 text-color-bg-ac">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+        </svg>
+      </button>
     </div>
 
     <!-- Selection checkbox -->
@@ -283,7 +311,7 @@ const replyPreviewText = computed(() => {
     <div v-else-if="!chatStore.selectionMode && !props.isOwn && themeStore.showAvatarsInChat" class="w-8 shrink-0" />
 
     <!-- Bubble container -->
-    <div class="relative min-w-0 max-w-[80%] overflow-hidden">
+    <div class="relative min-w-0 max-w-[85%] md:max-w-[80%] lg:max-w-[65%] overflow-hidden">
       <!-- Reply action (on hover) -->
       <button
         class="absolute top-1/2 hidden h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-text-on-main-bg-color opacity-0 transition-opacity hover:bg-neutral-grad-0 group-hover:flex group-hover:opacity-100"

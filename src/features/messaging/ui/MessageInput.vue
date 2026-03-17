@@ -17,6 +17,9 @@ import { useVoiceRecorder } from "../model/use-voice-recorder";
 import { useVideoCircleRecorder } from "../model/use-video-circle-recorder";
 import { useMentionAutocomplete } from "../model/use-mention-autocomplete";
 import MentionAutocomplete from "./MentionAutocomplete.vue";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+
+const isMobile = useMobile();
 
 const props = defineProps<{
   showDonate?: boolean;
@@ -103,13 +106,19 @@ const cancelEdit = () => {
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
 };
 
-const autoResize = () => {
+const maxTextareaHeight = computed(() => isMobile.value ? 120 : 200);
+
+const autoGrow = () => {
   const el = textareaRef.value;
   if (!el) return;
   el.style.height = "auto";
-  const maxHeight = 24 * 6;
-  el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+  el.style.height = Math.min(el.scrollHeight, maxTextareaHeight.value) + "px";
 };
+
+// Keep old name as alias so existing callsites work
+const autoResize = autoGrow;
+
+const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
 
 const handleSend = () => {
   if (!text.value.trim()) return;
@@ -513,7 +522,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
       <template v-if="recState === 'idle'">
         <!-- Emoji button -->
         <button
-          class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
+          class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
           :title="t('message.emoji')"
           @click="(e: MouseEvent) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); emojiPickerPos = { x: rect.left, y: rect.top }; showEmojiPicker = !showEmojiPicker; }"
         >
@@ -526,33 +535,38 @@ const handleKitchenSelect = async (imageUrl: string) => {
         <textarea
           ref="textareaRef" v-model="text" :placeholder="t('message.placeholder')" rows="1"
           class="flex-1 resize-none rounded-2xl bg-chat-input-bg px-4 py-2.5 text-base leading-[24px] text-text-color outline-none transition-shadow duration-200 placeholder:text-neutral-grad-2 focus:ring-2 focus:ring-color-bg-ac/30"
+          :style="{ maxHeight: maxTextareaHeight + 'px', fontSize: '16px' }"
           :disabled="sending"
           @keydown="handleKeydown" @input="handleInput" @blur="saveDraftOnBlur"
           @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()" @keyup="mention.onCursorChange()"
         />
 
         <!-- PKOIN button -->
-        <button v-if="props.showDonate"
-          class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-color-txt-ac/60 transition-colors hover:text-color-txt-ac"
-          :disabled="sending" :title="t('wallet.sendPkoin')" @click="emit('donate')">
-          <svg width="20" height="20" viewBox="0 0 18 18" fill="currentColor">
-            <path fill-rule="evenodd" clip-rule="evenodd" d="M17.2584 1.97869L15.182 0L12.7245 2.57886C11.5308 1.85218 10.1288 1.43362 8.62907 1.43362C7.32722 1.43362 6.09904 1.74902 5.01676 2.30756L2.81787 6.45386e-05L0.741455 1.97875L2.73903 4.07498C1.49651 5.46899 0.741455 7.30694 0.741455 9.32124C0.741455 11.1753 1.38114 12.8799 2.45184 14.2264L0.741455 16.0213L2.81787 18L4.61598 16.1131C5.79166 16.8092 7.1637 17.2088 8.62907 17.2088C10.2903 17.2088 11.8317 16.6953 13.1029 15.8182L15.182 18L17.2584 16.0213L15.1306 13.7884C16.0049 12.5184 16.5167 10.9796 16.5167 9.32124C16.5167 7.50123 15.9003 5.8252 14.8648 4.49052L17.2584 1.97869ZM3.5551 9.32124C3.5551 12.1235 5.82679 14.3952 8.62907 14.3952C11.4313 14.3952 13.703 12.1235 13.703 9.32124C13.703 6.51896 11.4313 4.24727 8.62907 4.24727C5.82679 4.24727 3.5551 6.51896 3.5551 9.32124Z" />
-          </svg>
-        </button>
+        <transition name="btn-morph">
+          <button v-if="props.showDonate && showSecondaryActions"
+            class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-color-txt-ac/60 transition-colors hover:text-color-txt-ac"
+            :disabled="sending" :title="t('wallet.sendPkoin')" @click="emit('donate')">
+            <svg width="20" height="20" viewBox="0 0 18 18" fill="currentColor">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M17.2584 1.97869L15.182 0L12.7245 2.57886C11.5308 1.85218 10.1288 1.43362 8.62907 1.43362C7.32722 1.43362 6.09904 1.74902 5.01676 2.30756L2.81787 6.45386e-05L0.741455 1.97875L2.73903 4.07498C1.49651 5.46899 0.741455 7.30694 0.741455 9.32124C0.741455 11.1753 1.38114 12.8799 2.45184 14.2264L0.741455 16.0213L2.81787 18L4.61598 16.1131C5.79166 16.8092 7.1637 17.2088 8.62907 17.2088C10.2903 17.2088 11.8317 16.6953 13.1029 15.8182L15.182 18L17.2584 16.0213L15.1306 13.7884C16.0049 12.5184 16.5167 10.9796 16.5167 9.32124C16.5167 7.50123 15.9003 5.8252 14.8648 4.49052L17.2584 1.97869ZM3.5551 9.32124C3.5551 12.1235 5.82679 14.3952 8.62907 14.3952C11.4313 14.3952 13.703 12.1235 13.703 9.32124C13.703 6.51896 11.4313 4.24727 8.62907 4.24727C5.82679 4.24727 3.5551 6.51896 3.5551 9.32124Z" />
+            </svg>
+          </button>
+        </transition>
 
         <!-- Attach button -->
-        <button ref="attachBtnRef"
-          class="btn-press flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
-          :disabled="sending" :title="t('message.attach')" @click="toggleAttachmentPanel">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-          </svg>
-        </button>
+        <transition name="btn-morph">
+          <button v-if="showSecondaryActions" ref="attachBtnRef"
+            class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
+            :disabled="sending" :title="t('message.attach')" @click="toggleAttachmentPanel">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+        </transition>
 
         <!-- Send OR record button -->
         <transition name="btn-morph" mode="out-in">
           <button v-if="text.trim() || sending" key="send"
-            class="send-btn flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
+            class="send-btn flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
             :disabled="!text.trim() || sending" @click="handleSend">
             <svg v-if="sending" class="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
             <svg v-else-if="isEditing" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
@@ -569,7 +583,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
               </div>
             </transition>
             <button
-              class="rec-btn flex h-10 w-10 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
+              class="rec-btn flex h-10 w-10 min-h-tap min-w-tap items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
               @touchstart.prevent="handleRecordTouchStart" @touchmove="handleRecordTouchMove" @touchend="handleRecordTouchEnd"
               @mousedown.prevent="handleRecordMouseDown">
               <transition name="mode-icon" mode="out-in">

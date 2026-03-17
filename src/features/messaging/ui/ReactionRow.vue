@@ -83,7 +83,7 @@ const chipClass = (isMine: boolean) => {
       v-for="[emoji, data] in visibleReactions"
       :key="emoji"
       type="button"
-      class="reaction-chip inline-flex cursor-pointer items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs transition-colors"
+      class="reaction-chip inline-flex cursor-pointer items-center gap-0.5 rounded-full px-2 py-1 text-xs transition-colors"
       :class="[chipClass(!!data.myEventId || (myAddress ? data.users.includes(myAddress) : false)), themeStore.animationsEnabled ? 'animate-reaction' : '']"
       @click.stop="onToggle(emoji)"
     >
@@ -104,7 +104,7 @@ const chipClass = (isMine: boolean) => {
     <button
       v-if="!hasMyReaction"
       type="button"
-      class="inline-flex h-[22px] w-[22px] items-center justify-center rounded-full text-xs transition-colors"
+      class="inline-flex h-7 w-7 min-h-tap min-w-tap items-center justify-center rounded-full text-xs transition-colors"
       :class="isOwn ? 'text-white/50 hover:bg-white/10 hover:text-white/80' : 'text-text-on-main-bg-color hover:bg-neutral-grad-0'"
       @click.stop="emit('addReaction')"
     >

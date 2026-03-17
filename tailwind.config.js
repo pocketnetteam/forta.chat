@@ -77,6 +77,12 @@ export default {
         "safe-area-inset-left": "var(--safe-area-inset-left)",
         "safe-area-inset-right": "var(--safe-area-inset-right)",
         "safe-area-inset-top": "var(--safe-area-inset-top)"
+      },
+      minHeight: {
+        tap: "44px",
+      },
+      minWidth: {
+        tap: "44px",
       }
     }
   }
