@@ -104,7 +104,7 @@ const chipClass = (isMine: boolean) => {
     <button
       v-if="!hasMyReaction"
       type="button"
-      class="inline-flex h-7 w-7 min-h-tap min-w-tap items-center justify-center rounded-full text-xs transition-colors"
+      class="inline-flex h-6 w-6 items-center justify-center rounded-full text-xs transition-colors"
       :class="isOwn ? 'text-white/50 hover:bg-white/10 hover:text-white/80' : 'text-text-on-main-bg-color hover:bg-neutral-grad-0'"
       @click.stop="emit('addReaction')"
     >

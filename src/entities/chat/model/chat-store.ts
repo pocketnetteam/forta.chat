@@ -515,13 +515,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   // Convert Dexie LocalMessage[] → Message[] for UI, fallback to old shallowRef during migration
   const activeMessages = computed<Message[]>(() => {
+    let msgs: Message[];
     if (chatDbKitRef.value) {
       // Single source of truth: always use Dexie when initialized
       // (returns [] while liveQuery hasn't responded — UI uses dexieMessagesReady to show skeleton)
-      return localToMessages(dexieMessages.value);
+      msgs = localToMessages(dexieMessages.value);
+    } else {
+      // Fallback: use old in-memory store only when Dexie not yet initialized
+      msgs = activeRoomId.value ? (messages.value[activeRoomId.value] ?? []) : [];
     }
-    // Fallback: use old in-memory store only when Dexie not yet initialized
-    return activeRoomId.value ? (messages.value[activeRoomId.value] ?? []) : [];
+
+    // Deduplicate: a pending message (clientId) and its server echo (eventId)
+    // can coexist briefly. Keep the one with a server eventId when both exist.
+    if (msgs.length > 0) {
+      const seen = new Set<string>();
+      const deduped: Message[] = [];
+      for (const m of msgs) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        deduped.push(m);
+      }
+      if (deduped.length !== msgs.length) msgs = deduped;
+    }
+
+    return msgs;
   });
 
   const activeMediaMessages = computed(() =>
