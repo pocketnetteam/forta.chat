@@ -226,4 +226,52 @@ export class MessageRepository {
       .between([roomId, Dexie.minKey], [roomId, Dexie.maxKey])
       .count();
   }
+
+  // ---------------------------------------------------------------------------
+  // Context & forward pagination (jump-to-message)
+  // ---------------------------------------------------------------------------
+
+  /** Find a message by eventId and return it with surrounding context.
+   *  Returns `contextSize` messages before and after the target. */
+  async getMessageContext(
+    roomId: string,
+    targetEventId: string,
+    contextSize = 25,
+  ): Promise<{ messages: LocalMessage[]; targetIndex: number } | null> {
+    const target = await this.getByEventId(targetEventId);
+    if (!target || target.softDeleted || target.roomId !== roomId) return null;
+
+    const [before, after] = await Promise.all([
+      this.db.messages
+        .where("[roomId+timestamp]")
+        .between([roomId, Dexie.minKey], [roomId, target.timestamp], true, false)
+        .reverse()
+        .limit(contextSize)
+        .toArray(),
+      this.db.messages
+        .where("[roomId+timestamp]")
+        .between([roomId, target.timestamp], [roomId, Dexie.maxKey], false, true)
+        .limit(contextSize)
+        .toArray(),
+    ]);
+
+    const all = [...before.reverse(), target, ...after].filter(m => !m.softDeleted);
+    const targetIndex = all.findIndex(m => m.eventId === targetEventId);
+
+    return { messages: all, targetIndex };
+  }
+
+  /** Load messages after a given timestamp (forward pagination for detached mode). */
+  async getMessagesAfter(
+    roomId: string,
+    afterTimestamp: number,
+    limit = 50,
+  ): Promise<LocalMessage[]> {
+    const msgs = await this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, afterTimestamp], [roomId, Dexie.maxKey], false, true)
+      .limit(limit)
+      .toArray();
+    return msgs.filter(m => !m.softDeleted);
+  }
 }

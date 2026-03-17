@@ -138,6 +138,7 @@ export const ru: Record<TranslationKey, string> = {
   "chat.members": "{count} участн.",
   "chat.copiedToClipboard": "Скопировано в буфер обмена",
   "chat.updatingMessages": "Обновление сообщений…",
+  "chat.returnToLatest": "К последним",
 
   // ── Title bar ──
   "titleBar.appName": "Forta Chat",

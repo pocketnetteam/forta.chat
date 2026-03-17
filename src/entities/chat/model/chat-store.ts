@@ -242,6 +242,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const messages = shallowRef<Record<string, Message[]>>({});
   const typing = ref<Record<string, string[]>>({});
   const replyingTo = ref<ReplyTo | null>(null);
+  const isDetachedFromLatest = ref(false);
 
   /** True after the first refreshRoomsImmediate completes (rooms list is authoritative) */
   const roomsInitialized = ref(false);
@@ -1766,6 +1767,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       }
     }
+  };
+
+  /** Enter detached mode: replace active messages with a context window around a target message. */
+  const enterDetachedMode = (roomId: string, msgs: Message[]) => {
+    messages.value[roomId] = msgs;
+    triggerRef(messages);
+    isDetachedFromLatest.value = true;
+  };
+
+  /** Exit detached mode: reload the room's latest messages and scroll to bottom. */
+  const exitDetachedMode = async (roomId: string) => {
+    isDetachedFromLatest.value = false;
+    await loadRoomMessages(roomId);
   };
 
   /** Replace a temporary message ID with the server-assigned event_id */
@@ -3465,6 +3479,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     clearDeletedRoom,
     deletingMessage,
     editingMessage,
+    enterDetachedMode,
     enterSelectionMode,
     exitSelectionMode,
     forwardingMessages,
@@ -3475,7 +3490,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     handleReceiptEvent,
     handleRedactionEvent,
     handleTimelineEvent,
+    exitDetachedMode,
     inviteMember,
+    isDetachedFromLatest,
     isRoomPublic,
     joinRoomById,
     banMember,

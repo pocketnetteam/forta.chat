@@ -136,6 +136,7 @@ export const en = {
   "chat.members": "{count} members",
   "chat.copiedToClipboard": "Copied to clipboard",
   "chat.updatingMessages": "Updating messages…",
+  "chat.returnToLatest": "Return to latest",
 
   // ── Title bar ──
   "titleBar.appName": "Forta Chat",

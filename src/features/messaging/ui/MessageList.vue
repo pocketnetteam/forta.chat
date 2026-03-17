@@ -8,6 +8,8 @@ import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-help
 import { formatDate } from "@/shared/lib/format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
+import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
+import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { useToast } from "@/shared/lib/use-toast";
 import MessageBubble from "./MessageBubble.vue";
 import CallEventCard from "./CallEventCard.vue";
@@ -226,6 +228,20 @@ const getScrollContainer = (): HTMLElement | null => {
   return listRef.value ?? null;
 };
 
+const { scrollToMessage, scrollTarget } = useScrollToMessage(
+  virtualItems,
+  scrollerRef,
+  getScrollContainer,
+);
+
+const handleReturnToLatest = async () => {
+  const roomId = chatStore.activeRoomId;
+  if (!roomId) return;
+  await chatStore.exitDetachedMode(roomId);
+  await nextTick();
+  scrollToBottom();
+};
+
 /** Check if user is scrolled near the bottom */
 const checkScroll = () => {
   const el = getScrollContainer();
@@ -319,6 +335,9 @@ watch(
     lastScrollTop = 0;
     lastScrollTime = 0;
     scrollVelocity = 0;
+    if (chatStore.isDetachedFromLatest) {
+      chatStore.isDetachedFromLatest = false;
+    }
     // Cancel pending rAF from old room to prevent it firing against new room
     if (scrollThrottleRaf !== null) {
       cancelAnimationFrame(scrollThrottleRaf);
@@ -572,6 +591,32 @@ const doPrefetch = (roomId: string, container: HTMLElement) => {
   });
 };
 
+/** Load newer messages (forward pagination in detached mode) */
+const doLoadNewer = async (roomId: string) => {
+  if (!isChatDbReady() || loadingMore.value) return;
+  loadingMore.value = true;
+  try {
+    const msgs = chatStore.activeMessages;
+    if (msgs.length === 0) return;
+
+    const lastTimestamp = msgs[msgs.length - 1].timestamp;
+    const { messages: msgRepo } = getChatDb();
+    const newer = await msgRepo.getMessagesAfter(roomId, lastTimestamp, 50);
+
+    if (newer.length === 0) {
+      await chatStore.exitDetachedMode(roomId);
+      await nextTick();
+      scrollToBottom();
+      return;
+    }
+
+    const mapped = newer.map(toMessage);
+    chatStore.enterDetachedMode(roomId, [...chatStore.activeMessages, ...mapped]);
+  } finally {
+    loadingMore.value = false;
+  }
+};
+
 let scrollThrottleRaf: number | null = null;
 
 const onScroll = () => {
@@ -591,7 +636,7 @@ const onScrollThrottled = () => {
   updateFloatingDate();
 
   const container = getScrollContainer();
-  if (!container || !hasMore.value) return;
+  if (!container) return;
   const { scrollTop } = container;
 
   // Calculate scroll velocity (positive means scrolling up)
@@ -607,6 +652,16 @@ const onScrollThrottled = () => {
 
   const roomId = chatStore.activeRoomId;
   if (!roomId) return;
+
+  // Forward pagination in detached mode
+  if (chatStore.isDetachedFromLatest) {
+    const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distFromBottom < LOAD_THRESHOLD && !loadingMore.value) {
+      doLoadNewer(roomId);
+    }
+  }
+
+  if (!hasMore.value) return;
 
   // Determine effective threshold — fast scroll means load earlier
   const effectiveLoadThreshold = scrollVelocity > VELOCITY_BOOST_THRESHOLD
@@ -807,25 +862,6 @@ const typingNames = computed(() => {
     .filter((id: string) => id !== myAddr)
     .map((id: string) => chatStore.getDisplayName(id));
 });
-
-/** Scroll to a specific message and flash highlight */
-const scrollToMessage = (messageId: string) => {
-  const idx = virtualItems.value.findIndex(item => item.id === messageId);
-  if (idx >= 0 && scrollerRef.value) {
-    scrollerRef.value.scrollToItem(idx);
-    // Flash highlight after scroll completes
-    nextTick(() => {
-      setTimeout(() => {
-        const container = getScrollContainer();
-        const el = container?.querySelector(`[data-message-id="${messageId}"]`) as HTMLElement | null;
-        if (el) {
-          el.classList.add("search-highlight");
-          setTimeout(() => el.classList.remove("search-highlight"), 1500);
-        }
-      }, 100);
-    });
-  }
-};
 
 /** Expose setSearchQuery for ChatSearch integration */
 const setSearchQuery = (q: string) => {
@@ -1048,6 +1084,20 @@ defineExpose({ scrollToMessage, setSearchQuery });
         >
           {{ newMessageCount > 99 ? "99+" : newMessageCount }}
         </span>
+      </button>
+    </transition>
+
+    <!-- Return to latest (detached mode) -->
+    <transition name="fab">
+      <button
+        v-if="chatStore.isDetachedFromLatest"
+        class="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-color-bg-ac px-4 py-2 text-sm font-medium text-white shadow-lg transition-all hover:bg-color-bg-ac/90"
+        @click="handleReturnToLatest"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+        {{ t("chat.returnToLatest") }}
       </button>
     </transition>
 

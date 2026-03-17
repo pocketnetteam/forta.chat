@@ -510,6 +510,32 @@ export class MatrixClientService {
     }
   }
 
+  /** Fetch a specific event and its surrounding context from the server.
+   *  Uses the Matrix SDK timeline API. Returns raw timeline events. */
+  async fetchEventContext(roomId: string, eventId: string, limit = 50): Promise<unknown[]> {
+    if (!this.client) return [];
+    try {
+      const room = this.client.getRoom(roomId);
+      if (!room) return [];
+
+      const timelineSet = room.getUnfilteredTimelineSet();
+      const timeline = await this.client.getEventTimeline(timelineSet, eventId);
+      if (!timeline) return [];
+
+      try {
+        await this.client.paginateEventTimeline(timeline, { backwards: true, limit: Math.floor(limit / 2) });
+      } catch { /* may already be at start */ }
+      try {
+        await this.client.paginateEventTimeline(timeline, { backwards: false, limit: Math.floor(limit / 2) });
+      } catch { /* may already be at end */ }
+
+      return timeline.getEvents() ?? [];
+    } catch (e) {
+      console.warn("[matrix-client] fetchEventContext error:", e);
+      return [];
+    }
+  }
+
   /** Send a reaction to an event. Returns the server-assigned event ID. */
   async sendReaction(roomId: string, eventId: string, emoji: string): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
