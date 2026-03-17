@@ -112,17 +112,24 @@ const handlePollEnd = (messageId: string) => {
   endPoll(messageId);
 };
 
-/** After a reaction toggle, keep the bottom edge anchored (Telegram-style). */
+/** After a reaction toggle, keep the bottom edge anchored (Telegram-style).
+ *  Polls until scrollHeight actually changes (Dexie write → liveQuery → render),
+ *  then pins scroll to bottom. */
 const keepBottomAnchored = () => {
   if (!isNearBottom.value) return;
   const el = getScrollContainer();
   if (!el) return;
-  // Wait for DOM update (reaction row appears/disappears), then pin to bottom
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
+  const startHeight = el.scrollHeight;
+  let frames = 0;
+  const poll = () => {
+    if (frames++ > 30) return; // ~500ms safety cap
+    if (el.scrollHeight !== startHeight) {
       el.scrollTop = el.scrollHeight + 9999;
-    });
-  });
+      return;
+    }
+    requestAnimationFrame(poll);
+  };
+  requestAnimationFrame(poll);
 };
 
 const handleToggleReactionWithEffect = (messageId: string, emoji: string) => {
