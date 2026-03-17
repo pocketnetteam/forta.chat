@@ -498,9 +498,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   // Dexie-backed room list (auto-updates on any room table write)
   const { data: dexieRooms, isReady: dexieRoomsReady } = useLiveQuery(
-    () => {
+    async () => {
       if (!chatDbKitRef.value) return [] as import("@/shared/lib/local-db").LocalRoom[];
-      return chatDbKitRef.value.rooms.getAllRooms();
+      const result = await chatDbKitRef.value.rooms.getAllRooms();
+      console.log("[DELETE-DEBUG] dexieRooms liveQuery fired, rooms:", result.length, result.map(r => ({ id: r.id.slice(-8), preview: r.lastMessagePreview?.slice(0, 20) })));
+      return result;
     },
     () => chatDbKitRef.value,
     [] as import("@/shared/lib/local-db").LocalRoom[],
