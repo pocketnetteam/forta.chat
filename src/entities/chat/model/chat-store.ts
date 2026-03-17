@@ -3335,18 +3335,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         redactedMsg.pollInfo = undefined;
         redactedMsg.transferInfo = undefined;
         redactedMsg.forwardedFrom = undefined;
-        // Update room lastMessage preview — find previous non-deleted message
+        // Update room lastMessage preview — show deleted placeholder
         const chatRoom = getRoomById(roomId);
         if (chatRoom && chatRoom.lastMessage?.id === redactedEventId) {
-          // Find the last non-deleted message in room (reverse scan)
-          const prevMsg = [...roomMessages].reverse().find(m => !m.deleted && m.id !== redactedEventId);
-          if (prevMsg) {
-            chatRoom.lastMessage = { ...prevMsg };
-          } else {
-            // All messages deleted — keep the deleted message as lastMessage
-            // so the dual-write sync can detect deleted state
-            chatRoom.lastMessage = { ...redactedMsg };
-          }
+          chatRoom.lastMessage = { ...redactedMsg };
           triggerRef(rooms);
         }
         triggerRef(messages);
