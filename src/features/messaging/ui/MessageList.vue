@@ -112,39 +112,8 @@ const handlePollEnd = (messageId: string) => {
   endPoll(messageId);
 };
 
-/** After a reaction toggle, keep the bottom edge anchored (Telegram-style).
- *  Uses a one-shot watch on activeMessages to detect when Dexie liveQuery
- *  pushes the reaction update, then waits for VList layout via rAF chain. */
-const keepBottomAnchored = () => {
-  if (!isNearBottom.value) return;
-  const el = getScrollContainer();
-  if (!el) return;
-
-  // Strategy: watch activeMessages for next change, then wait for VList to
-  // measure new heights (ResizeObserver → layout), then pin to bottom.
-  const unwatch = watch(
-    () => chatStore.activeMessages,
-    () => {
-      unwatch();
-      // nextTick: Vue DOM updated. Then rAF×3: VList ResizeObserver + layout.
-      nextTick(() => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              if (el) el.scrollTop = el.scrollHeight + 9999;
-            });
-          });
-        });
-      });
-    },
-  );
-  // Safety: clean up if no activeMessages change within 3s
-  setTimeout(() => unwatch(), 3000);
-};
-
 const handleToggleReactionWithEffect = (messageId: string, emoji: string) => {
   toggleReaction(messageId, emoji);
-  keepBottomAnchored();
   if (themeStore.animatedReactions) {
     lastReactionEmoji.value = emoji;
     setTimeout(() => { lastReactionEmoji.value = null; }, 100);
@@ -153,7 +122,6 @@ const handleToggleReactionWithEffect = (messageId: string, emoji: string) => {
 
 const handleContextReaction = (emoji: string, message: import("@/entities/chat").Message) => {
   toggleReaction(message.id, emoji);
-  keepBottomAnchored();
   themeStore.addRecentEmoji(emoji);
   if (themeStore.animatedReactions) {
     lastReactionEmoji.value = emoji;
@@ -772,17 +740,19 @@ const attachScrollListener = () => {
         }
         const newHeight = el.scrollHeight;
         if (newHeight !== prevScrollHeight) {
-          const heightDelta = newHeight - prevScrollHeight;
           prevScrollHeight = newHeight;
           // If we were near bottom, keep us at bottom (compensate for image loads, reactions etc.)
-          // Handles both height increase (reaction added) and decrease (reaction removed).
-          if (isNearBottom.value && heightDelta !== 0) {
+          if (isNearBottom.value) {
             el.scrollTop = el.scrollHeight + 9999;
           }
         }
       });
-      // Observe the scroll container for content height changes
-      contentResizeObserver.observe(scrollListenEl);
+      // Observe the INNER content wrapper of VList (not the scroll container itself).
+      // ResizeObserver on the scroll container only fires when the container's own
+      // dimensions change. The inner div changes height when items resize (reactions,
+      // images loading), which is what we actually need to track.
+      const contentEl = scrollListenEl.firstElementChild as HTMLElement | null;
+      contentResizeObserver.observe(contentEl ?? scrollListenEl);
     }
 
     // Watch for container height changes (reply bar, edit bar, link preview, etc.)
