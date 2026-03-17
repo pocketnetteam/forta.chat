@@ -222,30 +222,26 @@ export class EventWriter {
 
   /** Mark a message as soft-deleted and update room preview if needed */
   async writeRedaction(redaction: ParsedRedaction): Promise<void> {
-    // Get the message before soft-deleting to check if it affects room preview
-    const deletedMsg = await this.messageRepo.getByEventId(redaction.redactedEventId);
     await this.messageRepo.softDelete(redaction.redactedEventId);
 
-    // Update room preview if the deleted message might have been the latest
-    if (deletedMsg) {
+    // Always update room preview after deletion — the deleted message
+    // may have been the last one, and timestamp guards are unreliable
+    // due to clock drift between local and server timestamps.
+    const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId);
+    if (prevMsg) {
+      await this.updateRoomPreviewFromLocal(prevMsg);
+    } else {
+      // All messages in room are deleted — show tombstone preview.
+      // Use db.rooms.put-style update to handle rooms not yet in Dexie.
       const room = await this.roomRepo.getRoom(redaction.roomId);
-      const wasLastMessage = room?.lastMessageTimestamp != null
-        && deletedMsg.timestamp >= room.lastMessageTimestamp;
-
-      if (wasLastMessage || !room?.lastMessageTimestamp) {
-        const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId);
-        if (prevMsg) {
-          await this.updateRoomPreviewFromLocal(prevMsg);
-        } else {
-          // All messages deleted — show tombstone preview
-          await this.roomRepo.updateLastMessage(
-            redaction.roomId,
-            "🚫 Message deleted",
-            deletedMsg.timestamp,
-            deletedMsg.senderId,
-            deletedMsg.type,
-          );
-        }
+      if (room) {
+        await this.roomRepo.updateLastMessage(
+          redaction.roomId,
+          "🚫 Message deleted",
+          room.updatedAt,
+          room.lastMessageSenderId ?? "",
+          room.lastMessageType,
+        );
       }
     }
 
@@ -318,7 +314,7 @@ export class EventWriter {
     const isEncrypted = parsed.content === "[encrypted]" && parsed.encryptedRaw;
     return {
       eventId: parsed.eventId,
-      clientId: parsed.clientId ?? crypto.randomUUID(),
+      clientId: parsed.clientId ?? `srv_${parsed.eventId}`,
       roomId: parsed.roomId,
       senderId: parsed.senderId,
       content: parsed.content,

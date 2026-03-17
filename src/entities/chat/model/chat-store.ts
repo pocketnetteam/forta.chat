@@ -2975,19 +2975,39 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return;
       }
 
-      // Cross-device sync: only skip own echo on the SENDING device.
-      // If there's a pending optimistic message (status=sending) in this room,
-      // this is the sending device's echo — skip it (updateMessageId handles it).
-      // Otherwise, this is from another device — process it normally.
+      // Own-echo dedup: when Dexie is active, our echo is handled entirely
+      // by upsertFromServer (clientId match via transaction_id). Skip the
+      // in-memory addMessage path to avoid creating a visual duplicate.
+      // The dexieWriteMessage call below still runs to ensure the echo
+      // is reconciled in Dexie.
       const matrixService = getMatrixClientService();
       const myUserId = matrixService.getUserId();
+      const isOwnEcho = myUserId && raw.sender === myUserId
+        && (raw.unsigned as any)?.transaction_id;
+      if (isOwnEcho && chatDbKitRef.value) {
+        // Dexie path: let upsertFromServer handle dedup via clientId
+        dexieWriteMessage(
+          {
+            id: raw.event_id as string,
+            roomId,
+            senderId: matrixIdToAddress(raw.sender as string),
+            content: "",
+            timestamp: (raw.origin_server_ts as number) ?? Date.now(),
+            status: MessageStatus.sent,
+            type: MessageType.text,
+          },
+          roomId,
+          raw,
+        );
+        return;
+      }
+      // Legacy path: check in-memory pending messages
       if (myUserId && raw.sender === myUserId) {
         const roomMsgs = messages.value[roomId];
         const hasPending = roomMsgs?.some(
           (m) => m.senderId === matrixIdToAddress(myUserId) && m.status === MessageStatus.sending
         );
         if (hasPending) return;
-        // No pending optimistic → message is from another device, continue processing
       }
 
       // Handle donation/transfer messages (m.notice with txId)
