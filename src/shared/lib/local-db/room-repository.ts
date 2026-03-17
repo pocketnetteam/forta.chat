@@ -101,6 +101,26 @@ export class RoomRepository {
     await this.db.rooms.update(roomId, { unreadCount: count });
   }
 
+  /** Update outbound read watermark (other party read our messages up to this timestamp) */
+  async updateOutboundWatermark(roomId: string, timestamp: number): Promise<void> {
+    const room = await this.getRoom(roomId);
+    if (!room) return;
+    // Watermark only moves forward (monotonic)
+    if (timestamp <= (room.lastReadOutboundTs ?? 0)) return;
+    await this.db.rooms.update(roomId, { lastReadOutboundTs: timestamp });
+  }
+
+  /** Update inbound read watermark + clear unread (we read messages up to this timestamp) */
+  async markAsRead(roomId: string, timestamp: number): Promise<void> {
+    const room = await this.getRoom(roomId);
+    if (!room) return;
+    if (timestamp <= (room.lastReadInboundTs ?? 0)) return;
+    await this.db.rooms.update(roomId, {
+      lastReadInboundTs: timestamp,
+      unreadCount: 0,
+    });
+  }
+
   /** Update pagination token for a room */
   async setPaginationToken(
     roomId: string,
