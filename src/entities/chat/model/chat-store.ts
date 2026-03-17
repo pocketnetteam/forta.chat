@@ -543,7 +543,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         unreadCount: lr.unreadCount,
         topic: lr.topic,
         updatedAt: lr.updatedAt,
-        lastMessage: lr.lastMessagePreview ? {
+        lastMessage: lr.lastMessagePreview != null ? {
           id: "",
           roomId: lr.id,
           senderId: lr.lastMessageSenderId ?? "",
