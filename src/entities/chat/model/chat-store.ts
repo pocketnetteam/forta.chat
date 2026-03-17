@@ -498,11 +498,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   // Dexie-backed room list (auto-updates on any room table write)
   const { data: dexieRooms, isReady: dexieRoomsReady } = useLiveQuery(
-    async () => {
+    () => {
       if (!chatDbKitRef.value) return [] as import("@/shared/lib/local-db").LocalRoom[];
-      const result = await chatDbKitRef.value.rooms.getAllRooms();
-      console.log("[DELETE-DEBUG] dexieRooms liveQuery fired, rooms:", result.length, result.map(r => ({ id: r.id.slice(-8), preview: r.lastMessagePreview?.slice(0, 20) })));
-      return result;
+      return chatDbKitRef.value.rooms.getAllRooms();
     },
     () => chatDbKitRef.value,
     [] as import("@/shared/lib/local-db").LocalRoom[],
@@ -3291,10 +3289,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const roomId = (roomObj?.roomId as string) ?? "";
       if (!roomId) return;
 
-      console.log("[DELETE-DEBUG] handleRedactionEvent:", { redactedEventId, roomId, hasDexie: !!chatDbKitRef.value });
       const roomMessages = messages.value[roomId];
       if (!roomMessages) {
-        console.log("[DELETE-DEBUG] no in-memory roomMessages, but calling dexie writeRedaction");
         // Still write to Dexie even if in-memory store is empty
         if (chatDbKitRef.value && redactedEventId) {
           chatDbKitRef.value.eventWriter.writeRedaction({

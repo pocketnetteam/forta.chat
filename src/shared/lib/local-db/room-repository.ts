@@ -73,20 +73,17 @@ export class RoomRepository {
       lastMessageSenderId: senderId,
       lastMessageType: type,
       updatedAt: timestamp,
+      // New last message = clear old reaction (no double DB write)
+      lastMessageReaction: null,
     };
     if (eventId !== undefined) {
       changes.lastMessageEventId = eventId;
     }
-    console.log("[DELETE-DEBUG] updateLastMessage:", { roomId, preview: preview.slice(0, 30), timestamp });
     const updated = await this.db.rooms.update(roomId, changes);
-    console.log("[DELETE-DEBUG] db.rooms.update result:", { updated, roomId });
     if (updated === 0) {
-      // Room not yet in Dexie — check if it exists
       const existing = await this.db.rooms.get(roomId);
-      console.log("[DELETE-DEBUG] room exists check:", { roomId, exists: !!existing, existingId: existing?.id });
       if (existing) {
-        const updated2 = await this.db.rooms.update(roomId, changes);
-        console.log("[DELETE-DEBUG] retry update result:", updated2);
+        await this.db.rooms.update(roomId, changes);
       }
     }
   }

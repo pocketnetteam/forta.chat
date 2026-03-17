@@ -108,16 +108,9 @@ export class MessageRepository {
   /** Insert or update a message from the server (incoming sync).
    *  Returns "inserted" | "updated" | "duplicate". */
   async upsertFromServer(msg: LocalMessage): Promise<"inserted" | "updated" | "duplicate"> {
-    console.log("[DEDUP-DEBUG] upsertFromServer:", {
-      eventId: msg.eventId,
-      clientId: msg.clientId,
-      status: msg.status,
-      roomId: msg.roomId,
-    });
     // 1. Check if this is our own message echo (match by clientId)
     if (msg.clientId) {
       const existing = await this.getByClientId(msg.clientId);
-      console.log("[DEDUP-DEBUG] clientId lookup:", { clientId: msg.clientId, found: !!existing, existingLocalId: existing?.localId, existingEventId: existing?.eventId });
       if (existing) {
         await this.db.messages.update(existing.localId!, {
           eventId: msg.eventId,
