@@ -2982,8 +2982,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // is reconciled in Dexie.
       const matrixService = getMatrixClientService();
       const myUserId = matrixService.getUserId();
-      const isOwnEcho = myUserId && raw.sender === myUserId
-        && (raw.unsigned as any)?.transaction_id;
+      const txnId = (raw.unsigned as any)?.transaction_id;
+      const isOwnMessage = myUserId && raw.sender === myUserId;
+      // DEBUG: trace echo dedup decision
+      if (isOwnMessage) {
+        console.log("[DEDUP-DEBUG] Own message echo:", {
+          eventId: raw.event_id,
+          txnId,
+          unsigned: raw.unsigned,
+          hasDexie: !!chatDbKitRef.value,
+          sender: raw.sender,
+          myUserId,
+        });
+      }
+      const isOwnEcho = isOwnMessage && txnId;
       if (isOwnEcho && chatDbKitRef.value) {
         // Dexie path: let upsertFromServer handle dedup via clientId
         dexieWriteMessage(
@@ -3260,8 +3272,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const roomId = (roomObj?.roomId as string) ?? "";
       if (!roomId) return;
 
+      console.log("[DELETE-DEBUG] handleRedactionEvent:", { redactedEventId, roomId, hasDexie: !!chatDbKitRef.value });
       const roomMessages = messages.value[roomId];
-      if (!roomMessages) return;
+      if (!roomMessages) {
+        console.log("[DELETE-DEBUG] no in-memory roomMessages, but calling dexie writeRedaction");
+        // Still write to Dexie even if in-memory store is empty
+        if (chatDbKitRef.value && redactedEventId) {
+          chatDbKitRef.value.eventWriter.writeRedaction({
+            redactedEventId,
+            roomId,
+          }).catch((e) => {
+            console.warn("[chat-store] writeRedaction failed:", e);
+          });
+        }
+        return;
+      }
 
       // Check if the redacted event was a reaction — find and remove it
       for (const msg of roomMessages) {

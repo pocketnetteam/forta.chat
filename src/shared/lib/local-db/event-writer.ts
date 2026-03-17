@@ -222,14 +222,15 @@ export class EventWriter {
 
   /** Mark a message as soft-deleted and update room preview if needed */
   async writeRedaction(redaction: ParsedRedaction): Promise<void> {
+    console.log("[DELETE-DEBUG] writeRedaction called:", redaction);
     await this.messageRepo.softDelete(redaction.redactedEventId);
 
-    // Always update room preview after deletion — the deleted message
-    // may have been the last one, and timestamp guards are unreliable
-    // due to clock drift between local and server timestamps.
+    // Always update room preview after deletion
     const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId);
+    console.log("[DELETE-DEBUG] getLastNonDeleted result:", { roomId: redaction.roomId, prevMsgEventId: prevMsg?.eventId, prevMsgContent: prevMsg?.content?.slice(0, 30) });
     if (prevMsg) {
       await this.updateRoomPreviewFromLocal(prevMsg);
+      console.log("[DELETE-DEBUG] updated room preview to previous message");
     } else {
       // All messages in room are deleted — show tombstone preview.
       // Use db.rooms.put-style update to handle rooms not yet in Dexie.
