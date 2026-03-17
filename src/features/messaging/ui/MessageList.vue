@@ -1027,7 +1027,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
           </div>
 
           <!-- Typing bubble -->
-          <div v-else-if="item.type === 'typing'" class="mx-auto max-w-6xl px-4 py-1">
+          <div v-else-if="item.type === 'typing'" class="mx-auto max-w-6xl py-1">
             <div class="flex gap-2">
               <div v-if="themeStore.showAvatarsInChat" class="w-8 shrink-0" />
               <TypingBubble :names="typingNames" />
