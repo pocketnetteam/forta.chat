@@ -123,6 +123,9 @@ export class EventWriter {
     }
 
     if (result === "inserted") {
+      // New message = reset reaction preview (new lastMessage has no reactions yet)
+      await this.roomRepo.updateLastMessageReaction(parsed.roomId, null);
+
       // Only increment unread for OTHER people's messages in NON-ACTIVE rooms
       if (parsed.senderId !== myAddress && parsed.roomId !== activeRoomId) {
         await this.incrementUnread(parsed.roomId);
@@ -178,12 +181,12 @@ export class EventWriter {
 
     await this.messageRepo.updateReactions(reaction.targetEventId, reactions);
 
-    // Cascade: update room preview if this is the last message (non-blocking)
-    this.cascadeReactionToRoom(msg.roomId, reaction.targetEventId, {
+    // Cascade: update room preview if this is the last message
+    await this.cascadeReactionToRoom(msg.roomId, reaction.targetEventId, {
       emoji: reaction.emoji,
       senderAddress: reaction.senderAddress,
       timestamp: Date.now(),
-    }).catch(() => {});
+    });
 
     this.onChange?.(msg.roomId);
   }
@@ -212,9 +215,9 @@ export class EventWriter {
 
     await this.messageRepo.updateReactions(targetEventId, msg.reactions);
 
-    // Cascade: recalculate room reaction from remaining (non-blocking)
+    // Cascade: recalculate room reaction from remaining
     const lastReaction = this.pickLastReaction(msg.reactions);
-    this.cascadeReactionToRoom(msg.roomId, targetEventId, lastReaction).catch(() => {});
+    await this.cascadeReactionToRoom(msg.roomId, targetEventId, lastReaction);
 
     this.onChange?.(msg.roomId);
   }
@@ -235,12 +238,15 @@ export class EventWriter {
 
   /** Mark a message as soft-deleted and update room preview if needed */
   async writeRedaction(redaction: ParsedRedaction): Promise<void> {
+    console.log("[DELETE-DEBUG] writeRedaction called:", redaction);
     await this.messageRepo.softDelete(redaction.redactedEventId);
 
     // Always update room preview after deletion
     const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId);
+    console.log("[DELETE-DEBUG] getLastNonDeleted result:", { roomId: redaction.roomId, prevMsgEventId: prevMsg?.eventId, prevMsgContent: prevMsg?.content?.slice(0, 30) });
     if (prevMsg) {
       await this.updateRoomPreviewFromLocal(prevMsg);
+      console.log("[DELETE-DEBUG] updated room preview to previous message");
     } else {
       // All messages in room are deleted — show tombstone preview.
       // Use db.rooms.put-style update to handle rooms not yet in Dexie.
