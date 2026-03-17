@@ -554,7 +554,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             : MessageStatus.sent,
           type: lr.lastMessageType ?? MessageType.text,
         } as Message : undefined,
-        lastMessageReaction: lr.lastMessageReaction ?? undefined,
       } as ChatRoom));
     } else {
       source = rooms.value;
@@ -724,7 +723,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         lastMessageStatus: r.lastMessage?.status
           ? messageStatusToLocal(r.lastMessage.status)
           : undefined,
-        lastMessageEventId: r.lastMessage?.id || undefined,
       }));
       chatDbKitRef.value.rooms.bulkUpsertRooms(localRooms).catch(e => {
         console.warn("[chat-store] Dexie room sync failed:", e);
@@ -937,7 +935,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           lastMessageStatus: r.lastMessage?.status
             ? messageStatusToLocal(r.lastMessage.status)
             : undefined,
-          lastMessageEventId: r.lastMessage?.id || undefined,
         });
       }
       if (changedLocalRooms.length > 0) {

@@ -123,9 +123,6 @@ export class EventWriter {
     }
 
     if (result === "inserted") {
-      // New message = reset reaction preview (new lastMessage has no reactions yet)
-      await this.roomRepo.updateLastMessageReaction(parsed.roomId, null);
-
       // Only increment unread for OTHER people's messages in NON-ACTIVE rooms
       if (parsed.senderId !== myAddress && parsed.roomId !== activeRoomId) {
         await this.incrementUnread(parsed.roomId);
@@ -180,14 +177,6 @@ export class EventWriter {
     }
 
     await this.messageRepo.updateReactions(reaction.targetEventId, reactions);
-
-    // Cascade: update room preview if this is the last message
-    await this.cascadeReactionToRoom(msg.roomId, reaction.targetEventId, {
-      emoji: reaction.emoji,
-      senderAddress: reaction.senderAddress,
-      timestamp: Date.now(),
-    });
-
     this.onChange?.(msg.roomId);
   }
 
@@ -214,11 +203,6 @@ export class EventWriter {
     }
 
     await this.messageRepo.updateReactions(targetEventId, msg.reactions);
-
-    // Cascade: recalculate room reaction from remaining
-    const lastReaction = this.pickLastReaction(msg.reactions);
-    await this.cascadeReactionToRoom(msg.roomId, targetEventId, lastReaction);
-
     this.onChange?.(msg.roomId);
   }
 
@@ -384,7 +368,6 @@ export class EventWriter {
       parsed.timestamp,
       parsed.senderId,
       parsed.type,
-      parsed.eventId,
     );
   }
 
@@ -401,35 +384,6 @@ export class EventWriter {
       msg.serverTs ?? msg.timestamp,
       msg.senderId,
       msg.type,
-      msg.eventId ?? undefined,
     );
-  }
-
-  /** Cascade reaction change to room preview if target is the last message */
-  private async cascadeReactionToRoom(
-    roomId: string,
-    targetEventId: string,
-    reaction: import("./schema").LocalRoom["lastMessageReaction"],
-  ): Promise<void> {
-    const room = await this.roomRepo.getRoom(roomId);
-    if (!room || room.lastMessageEventId !== targetEventId) return;
-    await this.roomRepo.updateLastMessageReaction(roomId, reaction);
-  }
-
-  /** Pick the most recent reaction from remaining reactions map */
-  private pickLastReaction(
-    reactions: LocalMessage["reactions"],
-  ): import("./schema").LocalRoom["lastMessageReaction"] {
-    if (!reactions) return null;
-    for (const [emoji, data] of Object.entries(reactions)) {
-      if (data.users.length > 0) {
-        return {
-          emoji,
-          senderAddress: data.users[data.users.length - 1],
-          timestamp: Date.now(),
-        };
-      }
-    }
-    return null;
   }
 }
