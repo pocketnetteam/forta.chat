@@ -3256,53 +3256,63 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return;
       }
 
-      // Own-echo dedup: the bastyon Matrix SDK does NOT set
-      // unsigned.transaction_id on echoes. Instead it emits local events
-      // with ~!roomId:uuid format before the server assigns a real $eventId.
-      // When Dexie is active, pending messages are in Dexie (not in-memory).
-      // Skip ALL own echoes — confirmSent() handles the reconciliation.
+      // Own-echo dedup: suppress echoes of messages sent from THIS device,
+      // but allow cross-device messages (same user, different device) through
+      // the normal processing pipeline so they get fully decrypted and stored.
       const matrixService = getMatrixClientService();
       const myUserId = matrixService.getUserId();
       if (myUserId && raw.sender === myUserId) {
-        if (chatDbKitRef.value) {
-          // Dexie path: check if there are any pending/syncing messages in this room.
-          // If yes, this echo is for one of them — skip it entirely.
-          // confirmSent() will update the pending row with the real eventId.
-          // If the echo has a real $eventId and confirmSent already ran,
-          // upsertFromServer will catch it as "duplicate" by eventId.
-          const pendingMsgs = await chatDbKitRef.value.messages.getPendingMessages(roomId);
-          if (pendingMsgs.length > 0) {
-            return;
-          }
-          // No pending messages — could be from another device or confirmSent
-          // already ran. Let upsertFromServer handle dedup by eventId.
-          // Only write to Dexie, skip in-memory addMessage to avoid duplicates.
-          const eventId = raw.event_id as string;
-          // Skip local SDK event IDs (~! prefix) — the real $ event will follow
-          if (eventId.startsWith("~")) {
-            return;
-          }
-          dexieWriteMessage(
-            {
-              id: eventId,
-              roomId,
-              senderId: matrixIdToAddress(raw.sender as string),
-              content: "",
-              timestamp: (raw.origin_server_ts as number) ?? Date.now(),
-              status: MessageStatus.sent,
-              type: MessageType.text,
-            },
-            roomId,
-            raw,
-          );
+        const eventId = raw.event_id as string;
+
+        // Always skip local SDK event IDs (~! prefix) — the real $ event will follow
+        if (eventId.startsWith("~")) {
           return;
         }
-        // Legacy path: check in-memory pending messages
-        const roomMsgs = messages.value[roomId];
-        const hasPending = roomMsgs?.some(
-          (m) => m.senderId === matrixIdToAddress(myUserId) && m.status === MessageStatus.sending
-        );
-        if (hasPending) return;
+
+        if (chatDbKitRef.value) {
+          // Check if this is an echo of a message sent from THIS device.
+          // Match by clientId (unsigned.transaction_id) against pending messages.
+          const transactionId = (raw.unsigned as any)?.transaction_id;
+          if (transactionId) {
+            const pending = await chatDbKitRef.value.messages.getByClientId(transactionId);
+            if (pending) {
+              // This device sent it — confirmSent() already handled or will handle
+              return;
+            }
+          }
+
+          // Also check: if the eventId already exists in Dexie, skip (duplicate sync)
+          const existing = await chatDbKitRef.value.messages.getByEventId(eventId);
+          if (existing) return;
+
+          // Bastyon SDK doesn't set transaction_id — fall back to matching pending
+          // messages by checking if any ACTIVELY SENDING message in this room could be
+          // this echo. Only consider "pending"/"syncing" (not "failed") and only if
+          // created very recently (within 10s) to minimize false suppression of
+          // cross-device messages.
+          const pendingMsgs = await chatDbKitRef.value.messages.getPendingMessages(roomId);
+          const now = Date.now();
+          const eventTs = (raw.origin_server_ts as number) ?? now;
+          const recentSending = pendingMsgs.filter(m =>
+            m.senderId === matrixIdToAddress(myUserId) &&
+            (m.status === "pending" || m.status === "syncing") &&
+            Math.abs(eventTs - m.timestamp) < 10_000
+          );
+          if (recentSending.length > 0) {
+            // Likely an echo from this device — confirmSent() will reconcile
+            return;
+          }
+
+          // This is a cross-device message — fall through to normal processing.
+          // Do NOT return here — let the standard decrypt-and-write pipeline handle it.
+        } else {
+          // Legacy path (no Dexie): check in-memory pending messages
+          const roomMsgs = messages.value[roomId];
+          const hasPending = roomMsgs?.some(
+            (m) => m.senderId === matrixIdToAddress(myUserId) && m.status === MessageStatus.sending
+          );
+          if (hasPending) return;
+        }
       }
 
       // Handle donation/transfer messages (m.notice with txId)

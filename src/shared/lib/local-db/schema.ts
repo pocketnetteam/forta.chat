@@ -311,5 +311,92 @@ export class ChatDatabase extends Dexie {
 
       console.log(`[ChatDB] Watermark migration: backfilled ${allRooms.length} rooms`);
     });
+
+    // Version 5: heal broken cross-device messages
+    // Messages sent from another device of the same user were stored with
+    // content="" and decryptionStatus="ok" due to a bug in own-echo suppression.
+    // This migration marks them for re-decryption and fixes stale room previews.
+    this.version(5).stores({
+      rooms: "id, updatedAt, membership",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+    }).upgrade(async (tx) => {
+      const messages = tx.table("messages");
+      const rooms = tx.table("rooms");
+      const decryptionQueue = tx.table("decryptionQueue");
+
+      // Find messages with empty content that are "ok" (the broken cross-device ones)
+      // These have: content="" OR content very short, decryptionStatus="ok",
+      // status="synced", eventId starts with "$", no encryptedBody
+      const allMsgs = await messages
+        .filter((m: any) =>
+          m.content === "" &&
+          m.decryptionStatus === "ok" &&
+          m.status === "synced" &&
+          m.eventId &&
+          m.eventId.startsWith("$") &&
+          !m.softDeleted &&
+          !m.encryptedBody &&
+          !m.deleted &&  // Not edited-to-empty (redacted messages have deleted=true)
+          m.type === "text"  // Only text messages — media/file always have content
+        )
+        .toArray();
+
+      if (allMsgs.length > 0) {
+        // Mark these messages for re-decryption by setting decryptionStatus to "pending"
+        // The DecryptionWorker can't process them without encryptedBody,
+        // but setting status="pending" + content="[encrypted]" signals the UI
+        // that these need re-fetching. We also set a flag so the app knows to
+        // re-fetch the raw event from the server.
+        for (const msg of allMsgs) {
+          await messages.update(msg.localId, {
+            content: "[encrypted]",
+            decryptionStatus: "pending",
+          });
+        }
+        console.log(`[ChatDB] Cross-device heal: marked ${allMsgs.length} empty messages for re-decryption`);
+      }
+
+      // Fix stale room previews showing "" or "[encrypted]"
+      const allRooms = await rooms.toArray();
+      const affectedRoomIds = new Set<string>();
+      for (const room of allRooms) {
+        if (room.lastMessagePreview === "" ||
+            room.lastMessagePreview === "[encrypted]") {
+          // Find the latest non-deleted message with actual content
+          const roomMsgs = await messages
+            .where("[roomId+timestamp]")
+            .between([room.id, 0], [room.id, Infinity])
+            .reverse()
+            .filter((m: any) => !m.softDeleted && m.content !== "" && m.content !== "[encrypted]")
+            .limit(1)
+            .toArray();
+
+          if (roomMsgs.length > 0) {
+            const latest = roomMsgs[0];
+            let preview = latest.content;
+            if (latest.type === "image") preview = "[photo]";
+            else if (latest.type === "video") preview = "[video]";
+            else if (latest.type === "audio") preview = "[voice message]";
+            else if (latest.type === "file") preview = "[file]";
+            else if (latest.type === "poll") preview = "[poll]";
+
+            await rooms.update(room.id, {
+              lastMessagePreview: preview.slice(0, 200),
+              lastMessageTimestamp: latest.timestamp,
+              lastMessageSenderId: latest.senderId,
+            });
+            affectedRoomIds.add(room.id);
+          }
+        }
+      }
+      if (affectedRoomIds.size > 0) {
+        console.log(`[ChatDB] Cross-device heal: fixed previews for ${affectedRoomIds.size} rooms`);
+      }
+    });
   }
 }

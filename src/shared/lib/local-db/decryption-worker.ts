@@ -1,4 +1,6 @@
 import type { ChatDatabase, DecryptionJob } from "./schema";
+import type { RoomRepository } from "./room-repository";
+import { MessageType } from "@/entities/chat/model/types";
 
 type GetRoomCrypto = (roomId: string) => Promise<{ decryptEvent(raw: unknown): Promise<{ body: string }> } | undefined>;
 
@@ -18,6 +20,7 @@ export class DecryptionWorker {
   constructor(
     private db: ChatDatabase,
     private getRoomCrypto: GetRoomCrypto,
+    private roomRepo?: RoomRepository,
   ) {}
 
   /** Enqueue a failed decryption for retry. Idempotent — skips if eventId already queued. */
@@ -114,6 +117,11 @@ export class DecryptionWorker {
           decryptionStatus: "ok",
           encryptedBody: undefined,
         });
+
+        // Update room preview if this is the latest message in the room
+        if (this.roomRepo) {
+          await this.updateRoomPreviewIfLatest(msg.roomId, msg.eventId!, result.body, msg.senderId, msg.type, msg.timestamp);
+        }
       }
 
       // Remove completed job
@@ -142,6 +150,36 @@ export class DecryptionWorker {
           });
         }
       }
+    }
+  }
+
+  /** Update room preview if the decrypted message is the latest in the room */
+  private async updateRoomPreviewIfLatest(
+    roomId: string,
+    eventId: string,
+    decryptedBody: string,
+    senderId: string,
+    type: MessageType,
+    timestamp: number,
+  ): Promise<void> {
+    if (!this.roomRepo) return;
+    try {
+      const room = await this.roomRepo.getRoom(roomId);
+      if (!room) return;
+      // Only update if this event is the room's last message or preview is stale
+      if (room.lastMessageEventId === eventId ||
+          ((room.lastMessagePreview === "[encrypted]" || room.lastMessagePreview === "") &&
+           timestamp >= (room.lastMessageTimestamp ?? 0))) {
+        let preview = decryptedBody;
+        if (type === MessageType.image) preview = "[photo]";
+        else if (type === MessageType.video) preview = "[video]";
+        else if (type === MessageType.audio) preview = "[voice message]";
+        else if (type === MessageType.file) preview = "[file]";
+        else if (type === MessageType.poll) preview = "[poll]";
+        await this.roomRepo.updateLastMessage(roomId, preview, timestamp, senderId, type, eventId);
+      }
+    } catch {
+      // Non-critical — preview will be stale but messages still visible
     }
   }
 
