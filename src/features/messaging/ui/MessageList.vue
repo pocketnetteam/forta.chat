@@ -20,6 +20,9 @@ import MediaViewer from "./MediaViewer.vue";
 import ReactionEffect from "./ReactionEffect.vue";
 import TypingBubble from "./TypingBubble.vue";
 import { VList } from "virtua/vue";
+import { useUnreadBanner } from "../model/use-unread-banner";
+import { useReadTracker } from "../model/use-read-tracker";
+import UnreadBanner from "./UnreadBanner.vue";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -27,6 +30,8 @@ const themeStore = useThemeStore();
 const { loadMessages, toggleReaction, deleteMessage, votePoll, endPoll } = useMessages();
 const { toast } = useToast();
 const { t } = useI18n();
+
+const { bannerState, freezeBanner, dismissBanner, hasBanner } = useUnreadBanner();
 
 /** Resolve system message text dynamically using current display names */
 const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: string; senderAddr: string; targetAddr?: string } }): string => {
@@ -168,6 +173,11 @@ const refreshingStaleCache = ref(false); // true when showing stale cached messa
 const hasMore = ref(true);
 const newMessageCount = ref(0);
 
+const fabBadgeCount = computed(() => {
+  const c = hasBanner() ? bannerState.value.frozenUnreadCount : newMessageCount.value;
+  return c > 99 ? '99+' : c;
+});
+
 // --- Predictive prefetch state ---
 const LOAD_THRESHOLD = 1200; // px from top — start loading (was 400)
 const PREFETCH_THRESHOLD = 2500; // px from top — background prefetch zone
@@ -177,24 +187,20 @@ let lastScrollTop = 0;
 let lastScrollTime = 0;
 let scrollVelocity = 0; // px per second (positive = scrolling up)
 
-// --- Scroll position memory (per room) ---
-// Only saves position if user scrolled up significantly (> 800px from bottom).
-// Otherwise restores to bottom on re-entry.
-const savedScrollPositions = new Map<string, { distFromBottom: number }>();
-const MIN_DIST_TO_SAVE = 800; // px — don't save if just slightly scrolled
-
 /** Flatten messages + date separators into a single virtual list */
 interface VirtualItem {
   id: string;
-  type: "message" | "date-separator" | "typing";
+  type: "message" | "date-separator" | "typing" | "unread-banner";
   message?: import("@/entities/chat").Message;
   label?: string;
   index?: number;
+  unreadCount?: number;
 }
 
 const virtualItems = computed<VirtualItem[]>(() => {
   const msgs = chatStore.activeMessages;
   const items: VirtualItem[] = [];
+  const { frozenLastReadId, frozenUnreadCount } = bannerState.value;
 
   for (let i = 0; i < msgs.length; i++) {
     const msg = msgs[i];
@@ -225,6 +231,11 @@ const virtualItems = computed<VirtualItem[]>(() => {
 
     // Use _key (stable across tempId→serverId rename) for consistent item identity.
     items.push({ id: (msg as any)._key || msg.id, type: "message", message: msg, index: i });
+
+    // Insert unread banner AFTER the last read message
+    if (frozenLastReadId && msg.id === frozenLastReadId && frozenUnreadCount > 0) {
+      items.push({ id: "unread-banner", type: "unread-banner", unreadCount: frozenUnreadCount });
+    }
   }
 
   // Typing indicator
@@ -240,6 +251,35 @@ const getScrollContainer = (): HTMLElement | null => {
   const el = scrollerRef.value?.$el as HTMLElement | undefined;
   if (el) return el;
   return listRef.value ?? null;
+};
+
+const readTracker = useReadTracker({
+  containerRef: computed(() => getScrollContainer()),
+  getMessageTs: (el: HTMLElement) => {
+    const ts = el.dataset.messageTs;
+    if (!ts) return null;
+    return parseInt(ts, 10);
+  },
+  onBatchReady: (highestTs: number) => {
+    const roomId = chatStore.activeRoomId;
+    if (roomId) {
+      chatStore.advanceInboundWatermark(roomId, highestTs);
+    }
+  },
+});
+
+/** Custom directive: auto-observe inbound message elements for read tracking */
+const vTrackRead = {
+  mounted(el: HTMLElement) {
+    if (el.dataset.messageTs) {
+      readTracker.observeElement(el);
+    }
+  },
+  unmounted(el: HTMLElement) {
+    if (el.dataset.messageTs) {
+      readTracker.unobserveElement(el);
+    }
+  },
 };
 
 const { scrollToMessage, scrollTarget } = useScrollToMessage(
@@ -266,13 +306,7 @@ const checkScroll = () => {
   showScrollFab.value = distFromBottom > 300;
   if (isNearBottom.value) {
     newMessageCount.value = 0;
-    // User scrolled back to bottom — clear saved position for this room
-    const roomId = chatStore.activeRoomId;
-    if (roomId) savedScrollPositions.delete(roomId);
-  } else if (distFromBottom > MIN_DIST_TO_SAVE) {
-    // User is significantly scrolled up — save position live
-    const roomId = chatStore.activeRoomId;
-    if (roomId) savedScrollPositions.set(roomId, { distFromBottom });
+    if (hasBanner()) dismissBanner();
   }
 };
 
@@ -308,6 +342,22 @@ const scrollToBottom = (smooth = false, onSettled?: () => void) => {
   });
 };
 
+/** Two-step FAB: first press → first unread, second press → bottom */
+const handleFabClick = () => {
+  if (hasBanner()) {
+    const bannerIdx = virtualItems.value.findIndex(item => item.type === "unread-banner");
+    if (bannerIdx >= 0) {
+      scrollerRef.value?.scrollToIndex(bannerIdx, { align: "start" });
+      return;
+    }
+  }
+  if (chatStore.isDetachedFromLatest) {
+    handleReturnToLatest();
+  } else {
+    scrollToBottom(true);
+  }
+};
+
 // --- Message entrance animation ---
 const recentMessageIds = ref(new Set<string>());
 
@@ -331,10 +381,9 @@ watch(
 
     if (!roomId) return;
 
-    // Reset state for new room
+    // ═══ PHASE 1: FREEZE STATE ═══
     switching.value = true;
-    settled.value = false; // hide scroller immediately to prevent stale content flash
-
+    settled.value = false;
     loading.value = false;
     refreshingStaleCache.value = false;
     newMessageCount.value = 0;
@@ -351,107 +400,129 @@ watch(
     if (chatStore.isDetachedFromLatest) {
       chatStore.isDetachedFromLatest = false;
     }
-    // Cancel pending rAF from old room to prevent it firing against new room
     if (scrollThrottleRaf !== null) {
       cancelAnimationFrame(scrollThrottleRaf);
       scrollThrottleRaf = null;
     }
+    dismissBanner();
+    readTracker.stopTracking();
 
-    // 1. Show cached messages instantly (Telegram-style: no loading screen)
-    const t0 = Date.now();
-    const cacheAge = await chatStore.loadCachedMessages(roomId);
+    // ═══ PHASE 2: DETERMINE ANCHOR ═══
+    let anchorItemIndex = -1;
+
+    if (isChatDbReady()) {
+      const dbKit = getChatDb();
+      const room = await dbKit.rooms.getRoom(roomId);
+      if (isStale()) return;
+
+      const watermarkTs = room?.lastReadInboundTs ?? 0;
+      const myAddr = authStore.address ?? "";
+
+      if (watermarkTs > 0) {
+        const unreadCount = await dbKit.messages.countInboundAfter(roomId, watermarkTs, myAddr);
+        if (isStale()) return;
+
+        if (unreadCount > 0) {
+          const lastReadMsg = await dbKit.messages.getLastMessageAtOrBefore(roomId, watermarkTs);
+          if (isStale()) return;
+
+          const lastReadId = lastReadMsg?.eventId ?? lastReadMsg?.clientId ?? null;
+          freezeBanner(lastReadId, unreadCount);
+
+          const { messages: localMsgs, anchorIndex } = await dbKit.messages.getMessagesAroundTimestamp(
+            roomId, watermarkTs, 15, 35
+          );
+          if (isStale()) return;
+
+          if (localMsgs.length > 0) {
+            const mapped = localMsgs.map(toMessage);
+            chatStore.enterDetachedMode(roomId, mapped);
+            anchorItemIndex = anchorIndex;
+          }
+        }
+      }
+    }
+
+    // If no anchor was set, do normal load
+    if (anchorItemIndex === -1 && chatStore.activeMessages.length === 0) {
+      const cacheAge = await chatStore.loadCachedMessages(roomId);
+      if (isStale()) return;
+
+      if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
+        const readyDeadline = Date.now() + 200;
+        while (!chatStore.dexieMessagesReady && Date.now() < readyDeadline) {
+          await new Promise(r => setTimeout(r, 10));
+          if (isStale()) return;
+        }
+      }
+
+      const hasCached = chatStore.activeMessages.length > 0;
+      const STALE_THRESHOLD = 60_000;
+
+      if (!hasCached) {
+        loading.value = true;
+        try {
+          await loadMessages(roomId);
+        } catch { /* ignore */ }
+        if (isStale()) return;
+
+        if (chatStore.activeMessages.length === 0) {
+          const SYNC_WAIT_MS = 8_000;
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, SYNC_WAIT_MS);
+            const stopWatch = watch(
+              () => chatStore.activeMessages.length,
+              (len) => { if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); } },
+            );
+            setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
+          });
+          if (isStale()) return;
+        }
+        loading.value = false;
+      } else if (cacheAge > STALE_THRESHOLD) {
+        refreshingStaleCache.value = true;
+        loadMessages(roomId).catch(() => {}).finally(() => { refreshingStaleCache.value = false; });
+      } else {
+        loadMessages(roomId).catch(() => {});
+      }
+    }
+
     if (isStale()) return;
 
-    // Wait for Dexie liveQuery to deliver first response (usually <10ms)
-    if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
-      const readyDeadline = Date.now() + 200; // max 200ms wait
-      while (!chatStore.dexieMessagesReady && Date.now() < readyDeadline) {
-        await new Promise(r => setTimeout(r, 10));
-        if (isStale()) return;
-      }
-    }
+    // ═══ PHASE 3: RENDER + SCROLL ═══
+    await nextTick();
+    if (isStale()) return;
+    await nextTick();
+    if (isStale()) return;
 
-    const hasCached = chatStore.activeMessages.length > 0;
-    console.debug(`[msg-list] room=${roomId.slice(1, 8)} v=${myVersion} hasCached=${hasCached} msgs=${chatStore.activeMessages.length} dexieReady=${chatStore.dexieMessagesReady} hydrationMs=${Date.now() - t0}`);
-    const STALE_THRESHOLD = 60_000; // 60 seconds
-
-    if (hasCached) {
-      // Cache hit — render invisibly (settled=false keeps opacity:0),
-      // set scroll position, THEN reveal. User never sees the jump.
-      await nextTick();
+    requestAnimationFrame(() => {
       if (isStale()) return;
 
-      const saved = savedScrollPositions.get(roomId);
       const el = getScrollContainer();
-      if (saved && el) {
-        el.scrollTop = el.scrollHeight - el.clientHeight - saved.distFromBottom;
-        savedScrollPositions.delete(roomId);
+      if (anchorItemIndex >= 0 && hasBanner()) {
+        const bannerIdx = virtualItems.value.findIndex(item => item.type === "unread-banner");
+        if (bannerIdx >= 0) {
+          scrollerRef.value?.scrollToIndex(bannerIdx, { align: "start" });
+        } else {
+          scrollerRef.value?.scrollToIndex(anchorItemIndex, { align: "start" });
+        }
       } else if (el) {
         el.scrollTop = el.scrollHeight + 9999;
       }
+
+      // ═══ PHASE 4: REVEAL ═══
       settled.value = true;
       switching.value = false;
       prevScrollHeight = el?.scrollHeight ?? 0;
       checkScroll();
-      console.debug(`[msg-list] settled room=${roomId.slice(1, 8)} v=${myVersion} by=cache msgs=${chatStore.activeMessages.length} totalMs=${Date.now() - t0}`);
 
-      // Show "updating" indicator if cache is stale
-      if (cacheAge > STALE_THRESHOLD) {
-        refreshingStaleCache.value = true;
-      }
-
-      // 2. Fetch fresh messages from server in background (silent update).
-      // watch(activeMessages.length) + ResizeObserver handle scrolling.
-      loadMessages(roomId).catch(() => {}).finally(() => {
-        refreshingStaleCache.value = false;
-      });
-    } else {
-      // No cache — show skeleton, wait for server
-      loading.value = true;
-      try {
-        await loadMessages(roomId);
-      } catch { /* ignore */ }
-      if (isStale()) return;
-
-      // If still no messages, Matrix may not have synced yet.
-      // Keep skeleton visible and wait reactively for messages to arrive (up to 8s).
-      if (chatStore.activeMessages.length === 0) {
-        const SYNC_WAIT_MS = 8_000;
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, SYNC_WAIT_MS);
-          const stopWatch = watch(
-            () => chatStore.activeMessages.length,
-            (len) => {
-              if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); }
-            },
-          );
-          // Also clean up watcher on timeout
-          setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
-        });
-        if (isStale()) return;
-      }
-
-      loading.value = false;
-      if (isStale()) return;
-
-      await nextTick();
-      if (isStale()) return;
-
-      const saved = savedScrollPositions.get(roomId);
-      const el = getScrollContainer();
-      if (saved && el) {
-        el.scrollTop = el.scrollHeight - el.clientHeight - saved.distFromBottom;
-        savedScrollPositions.delete(roomId);
-      } else if (el) {
-        el.scrollTop = el.scrollHeight + 9999;
-      }
-      settled.value = true;
-      switching.value = false;
-      prevScrollHeight = el?.scrollHeight ?? 0;
-      checkScroll();
-      const settledBy = chatStore.activeMessages.length > 0 ? "server" : "timeout";
-      console.debug(`[msg-list] settled room=${roomId.slice(1, 8)} v=${myVersion} by=${settledBy} msgs=${chatStore.activeMessages.length} totalMs=${Date.now() - t0}`);
-    }
+      // Start read tracking after a delay (prevent instant-read)
+      setTimeout(() => {
+        if (chatStore.activeRoomId === roomId) {
+          readTracker.startTracking(getScrollContainer());
+        }
+      }, 1000);
+    });
   },
   { immediate: true },
 );
@@ -474,6 +545,7 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
   // Messages appeared for the first time (e.g. Dexie async load after room open)
   // — always scroll to bottom so the user sees the latest messages.
   if (!oldVal) {
+    if (!settled.value) return; // Don't fight the room-switch watcher
     scrollToBottom();
     return;
   }
@@ -812,6 +884,7 @@ watch(
 );
 
 onUnmounted(() => {
+  readTracker.stopTracking();
   if (scrollListenEl) {
     scrollListenEl.removeEventListener("scroll", onScroll);
   }
@@ -956,6 +1029,14 @@ defineExpose({ scrollToMessage, setSearchQuery });
           </span>
         </div>
 
+        <!-- Unread messages banner -->
+        <div
+          v-else-if="item.type === 'unread-banner'"
+          data-unread-banner
+        >
+          <UnreadBanner :count="item.unreadCount ?? 0" />
+        </div>
+
         <!-- Call event card (bubble-style, aligned like a message) -->
         <div
           v-else-if="item.type === 'message' && item.message?.callInfo"
@@ -980,7 +1061,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
           </div>
         </div>
 
-        <!-- System message (join/leave/kick/name change) -->
+        <!-- System message (join/leave/kick/name change) — not tracked for read watermark -->
         <div
           v-else-if="item.type === 'message' && item.message && item.message.type === MessageType.system"
           class="mx-auto flex max-w-6xl justify-center py-2"
@@ -994,9 +1075,11 @@ defineExpose({ scrollToMessage, setSearchQuery });
         <!-- Message -->
         <div
           v-else-if="item.type === 'message' && item.message"
+          v-track-read
           :class="[getMsgEnterClass(item.message), { 'context-highlight': contextMenu.show && contextMenu.message?.id === item.message.id }]"
           :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
           :data-message-id="item.message.id"
+          :data-message-ts="item.message.senderId !== authStore.address ? item.message.timestamp : undefined"
           @animationend="onMsgAnimationEnd(item.message)"
         >
           <div class="mx-auto max-w-6xl">
@@ -1073,17 +1156,17 @@ defineExpose({ scrollToMessage, setSearchQuery });
       <button
         v-if="showScrollFab"
         class="absolute bottom-4 right-4 flex h-11 w-11 items-center justify-center rounded-full bg-background-total-theme shadow-lg transition-all hover:bg-neutral-grad-0"
-        @click="scrollToBottom(true)"
+        @click="handleFabClick"
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
           <polyline points="6 9 12 15 18 9" />
         </svg>
         <!-- New message count badge -->
         <span
-          v-if="newMessageCount > 0"
+          v-if="newMessageCount > 0 || hasBanner()"
           class="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-color-bg-ac px-1 text-[10px] font-medium text-text-on-bg-ac-color"
         >
-          {{ newMessageCount > 99 ? "99+" : newMessageCount }}
+          {{ fabBadgeCount }}
         </span>
       </button>
     </transition>

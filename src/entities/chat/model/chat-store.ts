@@ -1377,47 +1377,48 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
     if (roomId) {
-      const room = getRoomById(roomId);
-      if (room) room.unreadCount = 0;
-
-      // Write inbound watermark + clear unread in Dexie
-      if (chatDbKitRef.value) {
-        // Find latest inbound message timestamp for watermark
-        const roomMsgs = messages.value[roomId];
-        const myAddr = useAuthStore().address;
-        const lastInboundTs = roomMsgs
-          ?.filter(m => m.senderId !== myAddr)
-          .reduce((max, m) => (m.timestamp > max ? m.timestamp : max), 0) ?? 0;
-
-        if (lastInboundTs > 0) {
-          chatDbKitRef.value.rooms.markAsRead(roomId, lastInboundTs).catch(() => {});
-        } else {
-          chatDbKitRef.value.eventWriter.clearUnread(roomId).catch(() => {});
-        }
-      }
-
       // Ensure member profiles are loaded for the active room
       profilesRequestedForRooms.delete(roomId);
       loadProfilesForRoomIds([roomId]);
 
       // Don't auto-join invited rooms — let the user preview first
+      const room = getRoomById(roomId);
       if (room?.membership === "invite") return;
 
-      // Send read receipt for last event in the room (only if tab is visible)
-      try {
-        const matrixService = getMatrixClientService();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const matrixRoom = matrixService.getRoom(roomId) as any;
-        if (matrixRoom) {
-          const events = matrixRoom.timeline ?? matrixRoom.getLiveTimeline?.()?.getEvents?.() ?? [];
-          if (events.length > 0) {
-            const lastEvent = events[events.length - 1];
-            sendReadReceiptIfVisible(roomId, lastEvent);
+      // NOTE: Do NOT mark as read here. Reading happens incrementally
+      // via IntersectionObserver in MessageList as user scrolls.
+    }
+  };
+
+  /** Advance the inbound read watermark (called by read tracker on batch flush).
+   *  Also sends a Matrix read receipt for the corresponding event. */
+  const advanceInboundWatermark = async (roomId: string, timestamp: number) => {
+    // 1. Update Dexie watermark (monotonic — only moves forward)
+    if (chatDbKitRef.value) {
+      await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
+    }
+
+    // 2. Send Matrix read receipt for the event at this timestamp
+    try {
+      const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+      if (matrixRoom) {
+        const events = matrixRoom.timeline ?? matrixRoom.getLiveTimeline?.()?.getEvents?.() ?? [];
+        // Find the event closest to this timestamp
+        let bestEvent = null;
+        for (let i = events.length - 1; i >= 0; i--) {
+          const ts = events[i].getTs?.() ?? events[i].event?.origin_server_ts ?? 0;
+          if (ts <= timestamp) {
+            bestEvent = events[i];
+            break;
           }
         }
-      } catch (e) {
-        console.warn("[chat-store] sendReadReceipt error:", e);
+        if (bestEvent) {
+          sendReadReceiptIfVisible(roomId, bestEvent);
+        }
       }
+    } catch (e) {
+      console.warn("[chat-store] advanceInboundWatermark sendReceipt error:", e);
     }
   };
 
@@ -3831,6 +3832,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     activeRoomId,
     addMessage,
     addRoom,
+    advanceInboundWatermark,
     clearDeletedRoom,
     deletingMessage,
     editingMessage,

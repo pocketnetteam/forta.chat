@@ -291,6 +291,64 @@ export class MessageRepository {
   }
 
   // ---------------------------------------------------------------------------
+  // Unread UX helpers
+  // ---------------------------------------------------------------------------
+
+  /** Load messages around a timestamp for jump-to-unread.
+   *  Returns `beforeCount` messages before ts + messages after ts up to `afterCount`. */
+  async getMessagesAroundTimestamp(
+    roomId: string,
+    timestamp: number,
+    beforeCount = 15,
+    afterCount = 35,
+  ): Promise<{ messages: LocalMessage[]; anchorIndex: number }> {
+    const [before, after] = await Promise.all([
+      this.db.messages
+        .where("[roomId+timestamp]")
+        .between([roomId, Dexie.minKey], [roomId, timestamp], true, true)
+        .reverse()
+        .limit(beforeCount)
+        .toArray(),
+      this.db.messages
+        .where("[roomId+timestamp]")
+        .between([roomId, timestamp], [roomId, Dexie.maxKey], false, true)
+        .limit(afterCount)
+        .toArray(),
+    ]);
+
+    const messages = [...before.reverse(), ...after];
+    const anchorIndex = before.length;
+    return { messages, anchorIndex };
+  }
+
+  /** Count inbound messages after a timestamp (for unread count on banner). */
+  async countInboundAfter(
+    roomId: string,
+    afterTimestamp: number,
+    excludeSenderId: string,
+  ): Promise<number> {
+    return this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, afterTimestamp], [roomId, Dexie.maxKey], false, true)
+      .filter(m => m.senderId !== excludeSenderId && !m.softDeleted)
+      .count();
+  }
+
+  /** Get the last message at or before a timestamp. */
+  async getLastMessageAtOrBefore(
+    roomId: string,
+    timestamp: number,
+  ): Promise<LocalMessage | undefined> {
+    const msgs = await this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, Dexie.minKey], [roomId, timestamp], true, true)
+      .reverse()
+      .limit(1)
+      .toArray();
+    return msgs[0];
+  }
+
+  // ---------------------------------------------------------------------------
   // Context & forward pagination (jump-to-message)
   // ---------------------------------------------------------------------------
 
