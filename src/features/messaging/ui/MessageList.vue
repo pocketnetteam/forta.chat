@@ -440,6 +440,14 @@ watch(
             anchorItemIndex = anchorIndex;
           }
         }
+      } else {
+        // Bootstrap watermark for legacy rooms (first visit after feature was added).
+        // Set the watermark to the latest message so future visits can detect unread.
+        const latestMsg = await dbKit.messages.getLastNonDeleted(roomId);
+        if (isStale()) return;
+        if (latestMsg && latestMsg.timestamp > 0) {
+          await dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
+        }
       }
     }
 
@@ -516,12 +524,14 @@ watch(
       prevScrollHeight = el?.scrollHeight ?? 0;
       checkScroll();
 
-      // Start read tracking after a delay (prevent instant-read)
+      // Start read tracking shortly after render.
+      // Elements are already queued via observeElement(); startTracking()
+      // bulk-observes them so IntersectionObserver fires initial callbacks.
       setTimeout(() => {
         if (chatStore.activeRoomId === roomId) {
           readTracker.startTracking(getScrollContainer());
         }
-      }, 1000);
+      }, 300);
     });
   },
   { immediate: true },
@@ -1040,8 +1050,10 @@ defineExpose({ scrollToMessage, setSearchQuery });
         <!-- Call event card (bubble-style, aligned like a message) -->
         <div
           v-else-if="item.type === 'message' && item.message?.callInfo"
+          v-track-read
           class="mx-auto max-w-6xl"
           :data-message-id="item.message.id"
+          :data-message-ts="item.message.senderId !== authStore.address ? item.message.timestamp : undefined"
           :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
         >
           <div
