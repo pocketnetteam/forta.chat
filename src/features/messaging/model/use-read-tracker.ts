@@ -1,7 +1,6 @@
 import { type Ref } from "vue";
 
 const VISIBILITY_THRESHOLD = 0.5;   // 50% of element visible
-const DWELL_TIME_MS = 500;          // must stay visible for 500ms
 const BATCH_INTERVAL_MS = 2000;     // flush batch every 2 seconds
 
 export interface ReadTrackerOptions {
@@ -17,11 +16,19 @@ export interface ReadTrackerOptions {
 export function useReadTracker(options: ReadTrackerOptions) {
   const { containerRef, getMessageTs, onBatchReady } = options;
 
-  // messageId → timestamp when it became visible
-  const visibleSince = new Map<string, number>();
+  /** High-water mark: the highest timestamp seen so far (not yet flushed) */
   let pendingHighestTs = 0;
+  /** High-water mark already sent to the store (avoid duplicate flushes) */
+  let flushedHighestTs = 0;
   let batchTimer: ReturnType<typeof setInterval> | null = null;
   let observer: IntersectionObserver | null = null;
+
+  /**
+   * Elements registered via observeElement() before startTracking() was called.
+   * Once the observer is created, these are bulk-observed so IntersectionObserver
+   * fires initial callbacks for elements already in the viewport.
+   */
+  const pendingElements = new Set<HTMLElement>();
 
   function promoteToRead(el: HTMLElement) {
     const ts = getMessageTs(el);
@@ -31,9 +38,9 @@ export function useReadTracker(options: ReadTrackerOptions) {
   }
 
   function flushBatch() {
-    if (pendingHighestTs > 0) {
+    if (pendingHighestTs > flushedHighestTs) {
       const ts = pendingHighestTs;
-      pendingHighestTs = 0;
+      flushedHighestTs = ts;
       onBatchReady(ts);
     }
   }
@@ -49,25 +56,12 @@ export function useReadTracker(options: ReadTrackerOptions) {
 
     observer = new IntersectionObserver(
       (entries) => {
-        const now = Date.now();
-
         for (const entry of entries) {
           const el = entry.target as HTMLElement;
-          const msgId = el.dataset.messageId;
-          if (!msgId) continue;
-
+          // HWM: any message entering viewport immediately contributes its timestamp.
+          // No dwell time needed — seeing a newer message marks all older ones as read.
           if (entry.isIntersecting && entry.intersectionRatio >= VISIBILITY_THRESHOLD) {
-            // Entered viewport — start dwell timer
-            if (!visibleSince.has(msgId)) {
-              visibleSince.set(msgId, now);
-            }
-          } else {
-            // Left viewport — check if dwelled long enough
-            const since = visibleSince.get(msgId);
-            if (since !== undefined && (now - since) >= DWELL_TIME_MS) {
-              promoteToRead(el);
-            }
-            visibleSince.delete(msgId);
+            promoteToRead(el);
           }
         }
       },
@@ -77,30 +71,35 @@ export function useReadTracker(options: ReadTrackerOptions) {
       },
     );
 
-    // Batch timer: check dwelling messages + flush
-    batchTimer = setInterval(() => {
-      const now = Date.now();
+    // Observe all elements that were registered before tracking started.
+    // IntersectionObserver fires an initial callback for each observed element,
+    // so elements already in viewport will be detected immediately.
+    for (const el of pendingElements) {
+      observer.observe(el);
+    }
+    pendingElements.clear();
 
-      for (const [msgId, since] of visibleSince) {
-        if (now - since >= DWELL_TIME_MS) {
-          const el = root.querySelector(`[data-message-id="${CSS.escape(msgId)}"]`) as HTMLElement | null;
-          if (el) promoteToRead(el);
-          visibleSince.delete(msgId);
-        }
-      }
+    // Periodic flush of the high-water mark
+    batchTimer = setInterval(flushBatch, BATCH_INTERVAL_MS);
 
-      flushBatch();
-    }, BATCH_INTERVAL_MS);
+    // First flush shortly after start to capture initial viewport
+    setTimeout(flushBatch, 800);
   }
 
   function observeElement(el: HTMLElement) {
-    observer?.observe(el);
+    if (observer) {
+      observer.observe(el);
+    } else {
+      // Observer not ready yet — queue for later
+      pendingElements.add(el);
+    }
   }
 
   function unobserveElement(el: HTMLElement) {
-    observer?.unobserve(el);
-    const msgId = el.dataset.messageId;
-    if (msgId) visibleSince.delete(msgId);
+    if (observer) {
+      observer.unobserve(el);
+    }
+    pendingElements.delete(el);
   }
 
   function stopTracking() {
@@ -111,7 +110,9 @@ export function useReadTracker(options: ReadTrackerOptions) {
       batchTimer = null;
     }
     flushBatch(); // send remaining reads
-    visibleSince.clear();
+    pendingElements.clear();
+    pendingHighestTs = 0;
+    flushedHighestTs = 0;
   }
 
   return { startTracking, stopTracking, observeElement, unobserveElement };

@@ -296,6 +296,11 @@ const handleReturnToLatest = async () => {
   scrollToBottom();
 };
 
+/** Grace period: don't auto-dismiss banner right after room open.
+ *  The banner may be near the bottom of a short message list, and the
+ *  initial checkScroll() would immediately dismiss it before the user sees it. */
+let bannerDismissAllowed = false;
+
 /** Check if user is scrolled near the bottom */
 const checkScroll = () => {
   const el = getScrollContainer();
@@ -306,7 +311,7 @@ const checkScroll = () => {
   showScrollFab.value = distFromBottom > 300;
   if (isNearBottom.value) {
     newMessageCount.value = 0;
-    if (hasBanner()) dismissBanner();
+    if (hasBanner() && bannerDismissAllowed) dismissBanner();
   }
 };
 
@@ -394,6 +399,7 @@ watch(
     recentMessageIds.value.clear();
     isNearBottom.value = true;
     prefetching.value = false;
+    bannerDismissAllowed = false;
     lastScrollTop = 0;
     lastScrollTime = 0;
     scrollVelocity = 0;
@@ -409,6 +415,7 @@ watch(
 
     // ═══ PHASE 2: DETERMINE ANCHOR ═══
     let anchorItemIndex = -1;
+    let scrollToBanner = false;
 
     if (isChatDbReady()) {
       const dbKit = getChatDb();
@@ -418,27 +425,46 @@ watch(
       const watermarkTs = room?.lastReadInboundTs ?? 0;
       const myAddr = authStore.address ?? "";
 
+      if (import.meta.env.DEV) {
+        console.log("[unread-banner] roomId=%s watermarkTs=%d myAddr=%s", roomId, watermarkTs, myAddr);
+      }
+
       if (watermarkTs > 0) {
         const unreadCount = await dbKit.messages.countInboundAfter(roomId, watermarkTs, myAddr);
         if (isStale()) return;
+
+        if (import.meta.env.DEV) {
+          console.log("[unread-banner] unreadCount=%d", unreadCount);
+        }
 
         if (unreadCount > 0) {
           const lastReadMsg = await dbKit.messages.getLastMessageAtOrBefore(roomId, watermarkTs);
           if (isStale()) return;
 
           const lastReadId = lastReadMsg?.eventId ?? lastReadMsg?.clientId ?? null;
+
+          if (import.meta.env.DEV) {
+            console.log("[unread-banner] lastReadId=%s lastReadMsg.ts=%d", lastReadId, lastReadMsg?.timestamp);
+          }
+
           freezeBanner(lastReadId, unreadCount);
 
-          const { messages: localMsgs, anchorIndex } = await dbKit.messages.getMessagesAroundTimestamp(
-            roomId, watermarkTs, 15, 35
-          );
-          if (isStale()) return;
-
-          if (localMsgs.length > 0) {
-            const mapped = localMsgs.map(toMessage);
-            chatStore.enterDetachedMode(roomId, mapped);
-            anchorItemIndex = anchorIndex;
+          // Ensure the Dexie liveQuery window is large enough to include the
+          // last-read message so the banner can match it in virtualItems.
+          const neededWindow = unreadCount + 20;
+          if (neededWindow > chatStore.messageWindowSize) {
+            chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
           }
+
+          scrollToBanner = true;
+        }
+      } else {
+        // Bootstrap watermark for legacy rooms (first visit after feature was added).
+        // Set the watermark to the latest message so future visits can detect unread.
+        const latestMsg = await dbKit.messages.getLastNonDeleted(roomId);
+        if (isStale()) return;
+        if (latestMsg && latestMsg.timestamp > 0) {
+          await dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
         }
       }
     }
@@ -499,12 +525,15 @@ watch(
       if (isStale()) return;
 
       const el = getScrollContainer();
-      if (anchorItemIndex >= 0 && hasBanner()) {
+      if (scrollToBanner && hasBanner()) {
         const bannerIdx = virtualItems.value.findIndex(item => item.type === "unread-banner");
+        if (import.meta.env.DEV) {
+          console.log("[unread-banner] PHASE3 bannerIdx=%d items=%d", bannerIdx, virtualItems.value.length);
+        }
         if (bannerIdx >= 0) {
           scrollerRef.value?.scrollToIndex(bannerIdx, { align: "start" });
-        } else {
-          scrollerRef.value?.scrollToIndex(anchorItemIndex, { align: "start" });
+        } else if (el) {
+          el.scrollTop = el.scrollHeight + 9999;
         }
       } else if (el) {
         el.scrollTop = el.scrollHeight + 9999;
@@ -516,12 +545,17 @@ watch(
       prevScrollHeight = el?.scrollHeight ?? 0;
       checkScroll();
 
-      // Start read tracking after a delay (prevent instant-read)
+      // Allow banner dismissal after user has had time to see it
+      setTimeout(() => { bannerDismissAllowed = true; }, 2000);
+
+      // Start read tracking shortly after render.
+      // Elements are already queued via observeElement(); startTracking()
+      // bulk-observes them so IntersectionObserver fires initial callbacks.
       setTimeout(() => {
         if (chatStore.activeRoomId === roomId) {
           readTracker.startTracking(getScrollContainer());
         }
-      }, 1000);
+      }, 300);
     });
   },
   { immediate: true },
@@ -1032,7 +1066,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
         <!-- Unread messages banner -->
         <div
           v-else-if="item.type === 'unread-banner'"
-          data-unread-banner
+          data-new-messages-divider
         >
           <UnreadBanner :count="item.unreadCount ?? 0" />
         </div>
@@ -1040,8 +1074,10 @@ defineExpose({ scrollToMessage, setSearchQuery });
         <!-- Call event card (bubble-style, aligned like a message) -->
         <div
           v-else-if="item.type === 'message' && item.message?.callInfo"
+          v-track-read
           class="mx-auto max-w-6xl"
           :data-message-id="item.message.id"
+          :data-message-ts="item.message.senderId !== authStore.address ? item.message.timestamp : undefined"
           :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
         >
           <div
