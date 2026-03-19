@@ -113,6 +113,9 @@ export class EventWriter {
    * Write a single incoming message to local DB.
    * Handles dedup (own echo via clientId, duplicate eventId).
    * Only increments unread for messages from OTHER users in NON-ACTIVE rooms.
+   *
+   * All writes (message upsert + room preview + unread increment) are wrapped
+   * in a single Dexie transaction to prevent races with refreshRoomsImmediate.
    */
   async writeMessage(
     parsed: ParsedMessage,
@@ -120,21 +123,32 @@ export class EventWriter {
     activeRoomId: string | null,
   ): Promise<"inserted" | "updated" | "duplicate"> {
     const localMsg = this.toLocalMessage(parsed);
-    const result = await this.messageRepo.upsertFromServer(localMsg);
+    const out = { result: "duplicate" as "inserted" | "updated" | "duplicate" };
 
-    if (result === "inserted" || result === "updated") {
-      await this.updateRoomPreview(parsed);
-    }
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      out.result = await this.messageRepo.upsertFromServer(localMsg);
 
-    if (result === "inserted") {
-      // Only increment unread for OTHER people's messages in NON-ACTIVE rooms
-      if (parsed.senderId !== myAddress && parsed.roomId !== activeRoomId) {
-        await this.incrementUnread(parsed.roomId);
+      if (out.result === "inserted" || out.result === "updated") {
+        // Ensure room exists in Dexie before updating preview
+        await this.ensureRoomExists(parsed.roomId);
+        await this.updateRoomPreview(parsed);
       }
+
+      if (out.result === "inserted") {
+        // Only increment unread for OTHER people's messages in NON-ACTIVE rooms
+        if (parsed.senderId !== myAddress && parsed.roomId !== activeRoomId) {
+          // Atomic increment via modify() — no read-modify-write race
+          await this.db.rooms.where("id").equals(parsed.roomId)
+            .modify((room: import("./schema").LocalRoom) => { room.unreadCount++; });
+        }
+      }
+    });
+
+    if (out.result === "inserted") {
       this.onChange?.(parsed.roomId);
     }
 
-    return result;
+    return out.result;
   }
 
   /**
@@ -410,6 +424,32 @@ export class EventWriter {
     const room = await this.roomRepo.getRoom(roomId);
     if (!room || room.lastMessageEventId !== targetEventId) return;
     await this.roomRepo.updateLastMessageReaction(roomId, reaction);
+  }
+
+  /** Ensure a minimal room row exists in Dexie.
+   *  When a message arrives before fullRoomRefresh has upserted the room,
+   *  updateLastMessage / setUnreadCount would silently no-op. This creates
+   *  a placeholder row so those writes succeed. refreshRoomsImmediate will
+   *  later fill in metadata (name, avatar, members) via updateRoom. */
+  private async ensureRoomExists(roomId: string): Promise<void> {
+    const existing = await this.db.rooms.get(roomId);
+    if (existing) return;
+    await this.db.rooms.put({
+      id: roomId,
+      name: roomId,
+      avatar: "",
+      isGroup: false,
+      members: [],
+      membership: "join",
+      unreadCount: 0,
+      topic: "",
+      updatedAt: Date.now(),
+      syncedAt: 0,
+      hasMoreHistory: true,
+      lastReadInboundTs: 0,
+      lastReadOutboundTs: 0,
+      lastMessageReaction: null,
+    });
   }
 
   /** Pick the most recent reaction from remaining reactions map */

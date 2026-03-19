@@ -73,7 +73,8 @@ export class MessageRepository {
   // Writes (local-first)
   // ---------------------------------------------------------------------------
 
-  /** Create a new message locally (pending sync) */
+  /** Create a new message locally (pending sync).
+   *  Atomically updates room preview so sidebar reflects the sent message instantly. */
   async createLocal(params: {
     roomId: string;
     senderId: string;
@@ -87,6 +88,7 @@ export class MessageRepository {
   }): Promise<LocalMessage> {
     const clientId = crypto.randomUUID();
     const now = Date.now();
+    const msgType = params.type ?? MessageType.text;
 
     const message: LocalMessage = {
       eventId: null,
@@ -95,7 +97,7 @@ export class MessageRepository {
       senderId: params.senderId,
       content: params.content,
       timestamp: now,
-      type: params.type ?? MessageType.text,
+      type: msgType,
       status: "pending",
       version: 1,
       softDeleted: false,
@@ -106,9 +108,35 @@ export class MessageRepository {
       fileInfo: params.fileInfo,
     };
 
-    const localId = await this.db.messages.add(message);
-    message.localId = localId as number;
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      const localId = await this.db.messages.add(message);
+      message.localId = localId as number;
+
+      // Atomically update room preview so sidebar reflects sent message instantly
+      const preview = this.getPreviewText(msgType, params.content, params.transferInfo?.amount);
+      await this.db.rooms.update(params.roomId, {
+        lastMessagePreview: preview.slice(0, 200),
+        lastMessageTimestamp: now,
+        lastMessageSenderId: params.senderId,
+        lastMessageType: msgType,
+        lastMessageLocalStatus: "pending" as import("./schema").LocalMessageStatus,
+        lastMessageReaction: null,
+        updatedAt: now,
+      });
+    });
+
     return message;
+  }
+
+  /** Generate preview text for sidebar display */
+  private getPreviewText(type: MessageType, content: string, transferAmount?: number): string {
+    if (type === MessageType.image) return "[photo]";
+    if (type === MessageType.video) return "[video]";
+    if (type === MessageType.audio) return "[voice message]";
+    if (type === MessageType.file) return "[file]";
+    if (type === MessageType.poll) return "[poll]";
+    if (type === MessageType.transfer) return `[transfer] ${transferAmount ?? 0} PKOIN`;
+    return content;
   }
 
   /** Insert or update a message from the server (incoming sync).

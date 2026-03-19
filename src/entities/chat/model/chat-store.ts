@@ -742,49 +742,56 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     rooms.value = newRooms;
     rebuildRoomsMap();
 
-    // Dual-write: persist rooms to Dexie
+    // Dual-write: sync room metadata to Dexie.
+    // IMPORTANT: Only update metadata fields (name, avatar, members, etc.).
+    // Preview/unread/watermark fields are managed exclusively by EventWriter
+    // and MessageRepository — touching them here causes race conditions.
     if (chatDbKitRef.value) {
       const dbKit = chatDbKitRef.value;
-      const localRooms: LocalRoom[] = newRooms.map(r => ({
-        id: r.id,
-        name: r.name,
-        avatar: r.avatar,
-        isGroup: r.isGroup,
-        members: r.members,
-        membership: (r.membership ?? "join") as "join" | "invite" | "leave",
-        unreadCount: r.unreadCount,
-        topic: r.topic || "",
-        updatedAt: r.updatedAt,
-        syncedAt: Date.now(),
-        hasMoreHistory: true,
-        lastReadInboundTs: 0,
-        lastReadOutboundTs: 0,
-        lastMessagePreview: r.lastMessage?.deleted
-          ? "🚫 Message deleted"
-          : r.lastMessage?.content?.slice(0, 200),
-        lastMessageTimestamp: r.lastMessage?.timestamp,
-        lastMessageSenderId: r.lastMessage?.senderId,
-        lastMessageType: r.lastMessage?.type,
-        lastMessageEventId: r.lastMessage?.id || undefined,
-        lastMessageLocalStatus: r.lastMessage?.status === MessageStatus.sending ? "pending"
-          : r.lastMessage?.status === MessageStatus.failed ? "failed"
-          : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
-      }));
-
-      // Preserve existing watermarks (bulkPut overwrites entire rows)
       (async () => {
         try {
           const existingRooms = await dbKit.rooms.getAllRooms();
-          const existingMap = new Map(existingRooms.map(r => [r.id, r]));
-          for (const lr of localRooms) {
-            const existing = existingMap.get(lr.id);
-            if (existing) {
-              lr.lastReadInboundTs = existing.lastReadInboundTs ?? 0;
-              lr.lastReadOutboundTs = existing.lastReadOutboundTs ?? 0;
-              lr.unreadCount = existing.unreadCount;
+          const existingIds = new Set(existingRooms.map(r => r.id));
+          const now = Date.now();
+
+          for (const r of newRooms) {
+            const metadataFields = {
+              name: r.name,
+              avatar: r.avatar,
+              isGroup: r.isGroup,
+              members: r.members,
+              membership: (r.membership ?? "join") as "join" | "invite" | "leave",
+              topic: r.topic || "",
+              syncedAt: now,
+            };
+
+            if (existingIds.has(r.id)) {
+              // Existing room: update metadata only, preserve preview/unread/watermarks
+              await dbKit.rooms.updateRoom(r.id, metadataFields);
+            } else {
+              // New room: insert with full initial state including preview from Matrix SDK
+              await dbKit.rooms.upsertRoom({
+                id: r.id,
+                ...metadataFields,
+                unreadCount: r.unreadCount,
+                updatedAt: r.updatedAt,
+                hasMoreHistory: true,
+                lastReadInboundTs: 0,
+                lastReadOutboundTs: 0,
+                lastMessagePreview: r.lastMessage?.deleted
+                  ? "🚫 Message deleted"
+                  : r.lastMessage?.content?.slice(0, 200),
+                lastMessageTimestamp: r.lastMessage?.timestamp,
+                lastMessageSenderId: r.lastMessage?.senderId,
+                lastMessageType: r.lastMessage?.type,
+                lastMessageEventId: r.lastMessage?.id || undefined,
+                lastMessageLocalStatus: r.lastMessage?.status === MessageStatus.sending ? "pending"
+                  : r.lastMessage?.status === MessageStatus.failed ? "failed"
+                  : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
+                lastMessageReaction: null,
+              });
             }
           }
-          await dbKit.rooms.bulkUpsertRooms(localRooms);
         } catch (e) {
           console.warn("[chat-store] Dexie room sync failed:", e);
         }
@@ -970,59 +977,61 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       triggerRef(rooms);
     }
 
-    // Dual-write: persist changed rooms to Dexie
+    // Dual-write: sync changed room metadata to Dexie.
+    // IMPORTANT: Only update metadata fields — preview/unread/watermarks
+    // are managed exclusively by EventWriter/MessageRepository.
     if (chatDbKitRef.value && changed.size > 0) {
       const dbKit = chatDbKitRef.value;
-      const changedLocalRooms: LocalRoom[] = [];
-      for (const roomId of changed) {
-        const r = roomsMap.get(roomId);
-        if (!r) continue;
-        changedLocalRooms.push({
-          id: r.id,
-          name: r.name,
-          avatar: r.avatar,
-          isGroup: r.isGroup,
-          members: r.members,
-          membership: (r.membership ?? "join") as "join" | "invite" | "leave",
-          unreadCount: r.unreadCount,
-          topic: r.topic || "",
-          updatedAt: r.updatedAt,
-          syncedAt: Date.now(),
-          hasMoreHistory: true,
-          lastReadInboundTs: 0,
-          lastReadOutboundTs: 0,
-          lastMessagePreview: r.lastMessage?.deleted
-            ? "🚫 Message deleted"
-            : r.lastMessage?.content?.slice(0, 200),
-          lastMessageTimestamp: r.lastMessage?.timestamp,
-          lastMessageSenderId: r.lastMessage?.senderId,
-          lastMessageType: r.lastMessage?.type,
-          lastMessageEventId: r.lastMessage?.id || undefined,
-          lastMessageLocalStatus: r.lastMessage?.status === MessageStatus.sending ? "pending"
-            : r.lastMessage?.status === MessageStatus.failed ? "failed"
-            : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
-        });
-      }
-      if (changedLocalRooms.length > 0) {
-        // Preserve existing watermarks (bulkPut overwrites entire rows)
-        (async () => {
-          try {
-            const existingRooms = await dbKit.rooms.getAllRooms();
-            const existingMap = new Map(existingRooms.map(r => [r.id, r]));
-            for (const lr of changedLocalRooms) {
-              const existing = existingMap.get(lr.id);
-              if (existing) {
-                lr.lastReadInboundTs = existing.lastReadInboundTs ?? 0;
-                lr.lastReadOutboundTs = existing.lastReadOutboundTs ?? 0;
-                lr.unreadCount = existing.unreadCount;
-              }
+      (async () => {
+        try {
+          const existingRooms = await dbKit.rooms.getAllRooms();
+          const existingIds = new Set(existingRooms.map(r => r.id));
+          const now = Date.now();
+
+          for (const roomId of changed) {
+            const r = roomsMap.get(roomId);
+            if (!r) continue;
+
+            const metadataFields = {
+              name: r.name,
+              avatar: r.avatar,
+              isGroup: r.isGroup,
+              members: r.members,
+              membership: (r.membership ?? "join") as "join" | "invite" | "leave",
+              topic: r.topic || "",
+              syncedAt: now,
+            };
+
+            if (existingIds.has(roomId)) {
+              await dbKit.rooms.updateRoom(roomId, metadataFields);
+            } else {
+              // New room discovered during incremental refresh
+              await dbKit.rooms.upsertRoom({
+                id: r.id,
+                ...metadataFields,
+                unreadCount: r.unreadCount,
+                updatedAt: r.updatedAt,
+                hasMoreHistory: true,
+                lastReadInboundTs: 0,
+                lastReadOutboundTs: 0,
+                lastMessagePreview: r.lastMessage?.deleted
+                  ? "🚫 Message deleted"
+                  : r.lastMessage?.content?.slice(0, 200),
+                lastMessageTimestamp: r.lastMessage?.timestamp,
+                lastMessageSenderId: r.lastMessage?.senderId,
+                lastMessageType: r.lastMessage?.type,
+                lastMessageEventId: r.lastMessage?.id || undefined,
+                lastMessageLocalStatus: r.lastMessage?.status === MessageStatus.sending ? "pending"
+                  : r.lastMessage?.status === MessageStatus.failed ? "failed"
+                  : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
+                lastMessageReaction: null,
+              });
             }
-            await dbKit.rooms.bulkUpsertRooms(changedLocalRooms);
-          } catch (e) {
-            console.warn("[chat-store] Dexie incremental room sync failed:", e);
           }
-        })();
-      }
+        } catch (e) {
+          console.warn("[chat-store] Dexie incremental room sync failed:", e);
+        }
+      })();
     }
 
     // Update display names only for changed rooms
