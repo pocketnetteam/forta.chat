@@ -1,6 +1,8 @@
 package com.bastyon.chat.plugins.webrtc
 
 import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjection
 import android.util.Log
 import org.webrtc.*
 
@@ -36,6 +38,13 @@ class NativeWebRTCManager(private val context: Context) {
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var localAudioSource: AudioSource? = null
     private var localVideoSource: VideoSource? = null
+
+    // Screen capture
+    private var screenCapturer: ScreenCapturerAndroid? = null
+    private var screenVideoSource: VideoSource? = null
+    private var screenVideoTrack: VideoTrack? = null
+    private var screenSurfaceHelper: SurfaceTextureHelper? = null
+    private var isScreenSharing = false
 
     // Renderers
     private var localRenderer: SurfaceViewRenderer? = null
@@ -287,6 +296,74 @@ class NativeWebRTCManager(private val context: Context) {
             }
         })
     }
+
+    // -----------------------------------------------------------------------
+    // Screen Sharing (MediaProjection)
+    // -----------------------------------------------------------------------
+
+    fun startScreenCapture(resultCode: Int, data: Intent) {
+        if (isScreenSharing) return
+
+        // Pause camera
+        videoCapturer?.stopCapture()
+        localVideoTrack?.setEnabled(false)
+
+        screenSurfaceHelper = SurfaceTextureHelper.create("ScreenCaptureThread", eglBase!!.eglBaseContext)
+        screenVideoSource = factory?.createVideoSource(true) // isScreencast = true
+        screenCapturer = ScreenCapturerAndroid(data, object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.d(TAG, "MediaProjection stopped")
+                stopScreenCapture()
+            }
+        })
+        screenCapturer?.initialize(screenSurfaceHelper, context, screenVideoSource?.capturerObserver)
+        screenCapturer?.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+
+        screenVideoTrack = factory?.createVideoTrack("screen0", screenVideoSource)
+        screenVideoTrack?.setEnabled(true)
+
+        // Replace camera track with screen track on the peer connection
+        val videoSender = peerConnection?.senders?.firstOrNull { it.track()?.kind() == "video" }
+        if (videoSender != null) {
+            videoSender.setTrack(screenVideoTrack, false)
+        } else {
+            peerConnection?.addTrack(screenVideoTrack, listOf("screen_stream"))
+        }
+
+        isScreenSharing = true
+        Log.d(TAG, "Screen capture started")
+    }
+
+    fun stopScreenCapture() {
+        if (!isScreenSharing) return
+
+        try {
+            screenCapturer?.stopCapture()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping screen capture", e)
+        }
+        screenCapturer?.dispose()
+        screenCapturer = null
+        screenSurfaceHelper?.dispose()
+        screenSurfaceHelper = null
+        screenVideoTrack?.dispose()
+        screenVideoTrack = null
+        screenVideoSource?.dispose()
+        screenVideoSource = null
+
+        // Restore camera track
+        val videoSender = peerConnection?.senders?.firstOrNull { it.track()?.kind() == "video" || it.track() == null }
+        if (videoSender != null && localVideoTrack != null) {
+            videoSender.setTrack(localVideoTrack, false)
+        }
+        localVideoTrack?.setEnabled(true)
+        videoCapturer?.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+
+        isScreenSharing = false
+        Log.d(TAG, "Screen capture stopped, camera restored")
+    }
+
+    fun isScreenSharing(): Boolean = isScreenSharing
 
     // -----------------------------------------------------------------------
     // Remote Media

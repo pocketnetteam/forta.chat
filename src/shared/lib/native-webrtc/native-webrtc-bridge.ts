@@ -38,6 +38,9 @@ export interface NativeWebRTCPlugin {
   setVideoEnabled(options: { enabled: boolean }): Promise<void>;
   switchCamera(): Promise<void>;
 
+  startScreenShare(): Promise<{ sharing: boolean }>;
+  stopScreenShare(): Promise<{ sharing: boolean }>;
+
   closePeerConnection(): Promise<void>;
   getConnectionState(): Promise<{ state: string }>;
 

@@ -1,6 +1,10 @@
 package com.bastyon.chat.plugins.webrtc
 
+import android.app.Activity
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.util.Log
+import androidx.activity.result.ActivityResult
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -252,6 +256,51 @@ class WebRTCPlugin : Plugin() {
     fun switchCamera(call: PluginCall) {
         manager?.switchCamera()
         call.resolve()
+    }
+
+    // -----------------------------------------------------------------------
+    // Screen Sharing
+    // -----------------------------------------------------------------------
+
+    private var screenShareCall: PluginCall? = null
+    private val SCREEN_CAPTURE_REQUEST = 1001
+
+    @PluginMethod
+    fun startScreenShare(call: PluginCall) {
+        val mgr = manager ?: run {
+            call.reject("Manager not initialized")
+            return
+        }
+
+        if (mgr.isScreenSharing()) {
+            call.resolve(JSObject().apply { put("sharing", true) })
+            return
+        }
+
+        screenShareCall = call
+        val projectionManager = context.getSystemService(
+            android.content.Context.MEDIA_PROJECTION_SERVICE
+        ) as MediaProjectionManager
+
+        val intent = projectionManager.createScreenCaptureIntent()
+        startActivityForResult(call, intent, "handleScreenShareResult")
+    }
+
+    @com.getcapacitor.annotation.ActivityCallback
+    fun handleScreenShareResult(call: PluginCall, result: ActivityResult) {
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            manager?.startScreenCapture(result.resultCode, result.data!!)
+            call.resolve(JSObject().apply { put("sharing", true) })
+        } else {
+            call.resolve(JSObject().apply { put("sharing", false) })
+        }
+        screenShareCall = null
+    }
+
+    @PluginMethod
+    fun stopScreenShare(call: PluginCall) {
+        manager?.stopScreenCapture()
+        call.resolve(JSObject().apply { put("sharing", false) })
     }
 
     // -----------------------------------------------------------------------
