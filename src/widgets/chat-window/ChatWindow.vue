@@ -24,8 +24,12 @@ import DropOverlay from "@/features/messaging/ui/DropOverlay.vue";
 import { usePasteDrop } from "@/features/messaging/model/use-paste-drop";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import { useChatSyncStatus } from "@/features/sync-status";
 
 const chatStore = useChatStore();
+const { syncSubtitle } = useChatSyncStatus(
+  computed(() => chatStore.activeRoomId),
+);
 const authStore = useAuthStore();
 const userStore = useUserStore();
 const channelStore = useChannelStore();
@@ -174,6 +178,7 @@ const typingText = computed(() => {
 /** Subtitle: typing indicator or member count */
 const subtitle = computed(() => {
   if (typingText.value) return typingText.value;
+  if (syncSubtitle.value) return syncSubtitle.value;
   const room = chatStore.activeRoom;
   if (!room) return "";
   if (room.isGroup) return t("chat.members", { count: room.members.length });
@@ -280,7 +285,13 @@ onUnmounted(() => {
           </div>
           <div
             class="text-xs"
-            :class="typingText ? 'text-color-bg-ac' : 'text-text-on-main-bg-color'"
+            :class="
+              typingText
+                ? 'text-color-bg-ac'
+                : syncSubtitle
+                  ? 'text-muted-foreground'
+                  : 'text-text-on-main-bg-color'
+            "
           >
             {{ subtitle }}
           </div>
