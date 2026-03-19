@@ -9,6 +9,14 @@ import type { CallFeed } from "matrix-js-sdk-bastyon/lib/webrtc/callFeed";
 import { playRingtone, playDialtone, playEndTone, stopAllSounds } from "./call-sounds";
 import { checkOtherTabHasCall } from "./call-tab-lock";
 import { isNative } from "@/shared/lib/platform";
+import { installNativeWebRTCProxy } from "@/shared/lib/native-webrtc";
+
+// Install native WebRTC proxy on mobile — must run before any call is placed.
+// This replaces window.RTCPeerConnection so that the Matrix SDK transparently
+// uses the native Android/iOS WebRTC engine instead of the browser's.
+if (isNative) {
+  installNativeWebRTCProxy();
+}
 
 // ---------------------------------------------------------------------------
 // SDK state → store status mapping
