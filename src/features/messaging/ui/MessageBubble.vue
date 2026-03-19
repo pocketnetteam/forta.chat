@@ -455,7 +455,7 @@ const replyPreviewSender = computed(() => {
       <!-- Video Circle (video note) message -->
       <div
         v-else-if="message.type === MessageType.videoCircle && hasFileInfo"
-        class="inline-block"
+        class="relative inline-block"
       >
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-1 truncate text-[11px] italic"
@@ -463,6 +463,27 @@ const replyPreviewSender = computed(() => {
           {{ t("message.forwardedFrom", { name: forwardedFromName }) }}
         </div>
         <VideoCirclePlayer :message="message" :is-own="props.isOwn" />
+        <!-- Upload progress overlay for video circle -->
+        <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center rounded-full bg-black/30">
+          <svg class="h-14 w-14" viewBox="0 0 36 36">
+            <circle cx="18" cy="18" r="15" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2.5" />
+            <circle cx="18" cy="18" r="15" fill="none" stroke="white" stroke-width="2.5"
+              :stroke-dasharray="94.25" :stroke-dashoffset="94.25 - (94.25 * (message.uploadProgress ?? 0) / 100)"
+              stroke-linecap="round" transform="rotate(-90 18 18)" class="transition-[stroke-dashoffset] duration-300" />
+          </svg>
+          <span class="absolute text-sm font-medium text-white">{{ message.uploadProgress }}%</span>
+        </div>
+        <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center rounded-full bg-black/30">
+          <div class="h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
+        </div>
+        <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center rounded-full bg-black/40">
+          <button class="flex flex-col items-center gap-1 text-white" @click.stop="emit('retryMedia', message)">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            <span class="text-xs font-medium">{{ t('message.retry') }}</span>
+          </button>
+        </div>
         <!-- Timestamp below the circle -->
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center gap-1" :class="props.isOwn ? 'justify-end text-text-on-main-bg-color' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
@@ -509,6 +530,27 @@ const replyPreviewSender = computed(() => {
           <button v-else class="flex h-48 w-64 items-center justify-center bg-neutral-grad-0 transition-colors hover:bg-neutral-grad-2" @click="handleVideoAudioLoad">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" class="text-color-bg-ac"><polygon points="5 3 19 12 5 21 5 3" /></svg>
           </button>
+          <!-- Upload progress overlay for video -->
+          <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
+            <svg class="h-14 w-14" viewBox="0 0 36 36">
+              <circle cx="18" cy="18" r="15" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2.5" />
+              <circle cx="18" cy="18" r="15" fill="none" stroke="white" stroke-width="2.5"
+                :stroke-dasharray="94.25" :stroke-dashoffset="94.25 - (94.25 * (message.uploadProgress ?? 0) / 100)"
+                stroke-linecap="round" transform="rotate(-90 18 18)" class="transition-[stroke-dashoffset] duration-300" />
+            </svg>
+            <span class="absolute text-sm font-medium text-white">{{ message.uploadProgress }}%</span>
+          </div>
+          <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center bg-black/30">
+            <div class="h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
+          </div>
+          <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center bg-black/40">
+            <button class="flex flex-col items-center gap-1 text-white" @click.stop="emit('retryMedia', message)">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              <span class="text-xs font-medium">{{ t('message.retry') }}</span>
+            </button>
+          </div>
         </div>
         <div v-if="!message.fileInfo?.caption" class="flex items-center justify-between px-3 py-1.5">
           <span class="truncate text-xs" :class="props.isOwn ? 'text-white/70' : 'text-text-on-main-bg-color'">{{ message.fileInfo?.name }}</span>
