@@ -28,7 +28,9 @@ export const setupProviders = async (app: App) => {
   }
 
   if (isNative) {
-    // Capacitor-specific initialization (Tor, Push, etc.) — wired in Task 16
+    // Start Tor daemon and reverse proxy before Matrix client connects
+    const { torService } = await import('@/shared/lib/tor');
+    await torService.init('always');
   }
 
   // Scripts must finish before router mounts the app — components

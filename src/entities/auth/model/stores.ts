@@ -13,6 +13,7 @@ import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto"
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { initChatDb } from "@/shared/lib/local-db";
+import { isNative } from "@/shared/lib/platform";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
 import { mergeObjects } from "@/shared/lib/merge-objects";
@@ -332,6 +333,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }
         },
       });
+      // Route Matrix traffic through Tor reverse proxy on native platforms
+      if (isNative) {
+        const { torService } = await import('@/shared/lib/tor');
+        if (torService.matrixBaseUrl) {
+          matrixService.setTorProxyUrl(torService.matrixBaseUrl);
+        }
+      }
+
       matrixError.value = "Connecting to Matrix server...";
       await matrixService.init();
 
@@ -361,6 +370,40 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         }).catch((err) => {
           console.warn("[auth] Failed to init call tab lock:", err);
         });
+
+        // Wire native push notifications and call bridge on Capacitor
+        if (isNative) {
+          const { pushService } = await import('@/shared/lib/push');
+          const { nativeCallBridge } = await import('@/shared/lib/native-calls');
+
+          // Wire native call bridge to existing call service
+          const callService = useCallService();
+          await nativeCallBridge.wire(callService);
+
+          // Wire push — call handler routes to native call UI
+          pushService.setCallHandler((data) => {
+            nativeCallBridge.reportIncomingCall(data);
+          });
+
+          // Wire push — decrypt handler fetches and decrypts events locally
+          pushService.setDecryptHandler(async (roomId, eventId) => {
+            try {
+              if (!matrixService.client) return null;
+              const event = await matrixService.client.fetchRoomEvent(roomId, eventId);
+              return {
+                senderName: event.sender || 'Unknown',
+                body: event.content?.body || 'New message',
+              };
+            } catch {
+              return null;
+            }
+          });
+
+          // Init push with matrix client
+          if (matrixService.client) {
+            await pushService.init(matrixService.client);
+          }
+        }
 
         // Note: rooms are loaded by the onSync("PREPARED") callback which
         // fires once the initial sync completes. Handlers are wired before
