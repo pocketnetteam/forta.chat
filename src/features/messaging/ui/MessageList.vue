@@ -317,8 +317,8 @@ const checkScroll = () => {
 
 let scrollBottomTimer: ReturnType<typeof setTimeout> | undefined;
 let scrollRafId1: number | undefined;
-let scrollRafId2: number | undefined;
 let pendingScrollToBottom = false;
+let pendingOnSettled: (() => void) | undefined;
 let scrollStableTimer: ReturnType<typeof setTimeout> | undefined;
 let scrollStableRaf: number | undefined;
 const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
@@ -328,7 +328,6 @@ const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
   clearTimeout(scrollBottomTimer);
   clearTimeout(scrollStableTimer);
   if (scrollRafId1 != null) cancelAnimationFrame(scrollRafId1);
-  if (scrollRafId2 != null) cancelAnimationFrame(scrollRafId2);
   if (scrollStableRaf != null) cancelAnimationFrame(scrollStableRaf);
 
   const doScroll = () => {
@@ -341,6 +340,7 @@ const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
   // Activate event-driven mode: contentResizeObserver will keep
   // scrolling to bottom on every resize until content stabilises.
   pendingScrollToBottom = true;
+  pendingOnSettled = onSettled;
 
   // Immediate scroll on next tick (handles fast/static content)
   nextTick(() => {
@@ -359,10 +359,12 @@ const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
  *  pendingScrollToBottom is true. When 300ms pass without a resize,
  *  we consider the content stable and stop auto-scrolling. */
 const resetStableTimer = (onSettled?: () => void) => {
+  if (onSettled) pendingOnSettled = onSettled;
   clearTimeout(scrollStableTimer);
   scrollStableTimer = setTimeout(() => {
     pendingScrollToBottom = false;
-    onSettled?.();
+    pendingOnSettled?.();
+    pendingOnSettled = undefined;
   }, 300);
 };
 
@@ -374,9 +376,10 @@ const nudgeVirtua = () => {
   const el = getScrollContainer();
   if (!el) return;
   // A 0.5px scroll jitter is invisible but forces layout recalc.
-  el.scrollTop += 0.5;
+  const before = el.scrollTop;
+  el.scrollTop = before + 0.5;
   requestAnimationFrame(() => {
-    if (el) el.scrollTop -= 0.5;
+    if (el) el.scrollTop = before;
   });
 };
 
@@ -977,9 +980,12 @@ onUnmounted(() => {
     cancelAnimationFrame(scrollThrottleRaf);
   }
   clearTimeout(dateHideTimer);
+  clearTimeout(scrollBottomTimer);
   clearTimeout(scrollStableTimer);
+  if (scrollRafId1 != null) cancelAnimationFrame(scrollRafId1);
   if (scrollStableRaf != null) cancelAnimationFrame(scrollStableRaf);
   pendingScrollToBottom = false;
+  pendingOnSettled = undefined;
 });
 
 const getDateLabel = (
