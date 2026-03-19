@@ -468,19 +468,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const room = getRoomById(roomId);
     if (room) room.unreadCount = 0;
 
-    // Persist to Dexie + advance inbound watermark
-    if (chatDbKitRef.value) {
-      const roomMsgs = messages.value[roomId];
-      const myAddr = useAuthStore().address;
-      const lastInboundTs = roomMsgs
-        ?.filter(m => m.senderId !== myAddr)
-        .reduce((max, m) => (m.timestamp > max ? m.timestamp : max), 0) ?? 0;
+    // Persist to Dexie + send Matrix receipt via commitReadWatermark
+    const roomMsgs = messages.value[roomId];
+    const myAddr = useAuthStore().address;
+    const lastInboundTs = roomMsgs
+      ?.filter(m => m.senderId !== myAddr)
+      .reduce((max, m) => (m.timestamp > max ? m.timestamp : max), 0) ?? 0;
 
-      if (lastInboundTs > 0) {
-        chatDbKitRef.value.rooms.markAsRead(roomId, lastInboundTs).catch(() => {});
-      } else {
-        chatDbKitRef.value.eventWriter.clearUnread(roomId).catch(() => {});
-      }
+    if (lastInboundTs > 0) {
+      commitReadWatermark(roomId, lastInboundTs).catch(() => {});
+    } else if (chatDbKitRef.value) {
+      chatDbKitRef.value.eventWriter.clearUnread(roomId).catch(() => {});
     }
   };
 
@@ -1277,6 +1275,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     refreshDebounceTimer = setTimeout(() => {
       refreshDebounceTimer = null;
       refreshRoomsImmediate();
+      // Retry pending read watermarks — timeline may now have the events we need
+      flushPendingReadWatermarks();
     }, 150);
   };
 
@@ -1371,6 +1371,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // Pending read receipt: sent when tab becomes visible
   let pendingReadReceipt: { roomId: string; event: unknown } | null = null;
 
+  // Pending read watermarks: rooms where Dexie was updated but Matrix receipt
+  // could not be sent (event not found in timeline, network error, etc.).
+  // Retried on every sync cycle so the server eventually learns about reads.
+  const pendingReadWatermarks = new Map<string, number>();
+
   const sendReadReceiptIfVisible = (roomId: string, event: unknown) => {
     if (document.visibilityState === "visible") {
       try {
@@ -1399,6 +1404,69 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     });
   }
+
+  /** Find a Matrix event in the room timeline closest to (<=) the given timestamp.
+   *  Falls back to the latest event if no exact match found. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const findMatrixEventForTimestamp = (roomId: string, timestamp: number): any | null => {
+    try {
+      const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+      if (!matrixRoom) return null;
+
+      const events = matrixRoom.getLiveTimeline?.()?.getEvents?.()
+                     ?? matrixRoom.timeline
+                     ?? [];
+      if (events.length === 0) return null;
+
+      // Strategy 1: find event with ts <= timestamp (closest from below)
+      for (let i = events.length - 1; i >= 0; i--) {
+        const ts = events[i].getTs?.() ?? events[i].event?.origin_server_ts ?? 0;
+        if (ts <= timestamp) {
+          return events[i];
+        }
+      }
+
+      // Strategy 2: if all events are newer (rare), use the latest event
+      // as fallback — better to send a slightly wrong receipt than none
+      return events[events.length - 1];
+    } catch {
+      return null;
+    }
+  };
+
+  /** Atomically commit a read watermark: update Dexie (instant UI) + send
+   *  Matrix receipt (server sync). If the Matrix send fails, the watermark
+   *  is queued in pendingReadWatermarks for retry on next sync. */
+  const commitReadWatermark = async (roomId: string, timestamp: number) => {
+    // 1. LOCAL COMMIT — instant, UI reacts via liveQuery
+    if (chatDbKitRef.value) {
+      await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
+    }
+
+    // 2. SERVER SYNC — find event and send receipt
+    const event = findMatrixEventForTimestamp(roomId, timestamp);
+    if (event) {
+      sendReadReceiptIfVisible(roomId, event);
+      pendingReadWatermarks.delete(roomId);
+    } else {
+      // Event not found in timeline — queue for retry on next sync
+      pendingReadWatermarks.set(roomId, timestamp);
+    }
+  };
+
+  /** Retry pending read watermarks — called on each sync cycle */
+  const flushPendingReadWatermarks = () => {
+    if (pendingReadWatermarks.size === 0) return;
+    for (const [roomId, timestamp] of pendingReadWatermarks) {
+      const event = findMatrixEventForTimestamp(roomId, timestamp);
+      if (event) {
+        sendReadReceiptIfVisible(roomId, event);
+        pendingReadWatermarks.delete(roomId);
+      }
+    }
+  };
 
   const setActiveRoom = (roomId: string | null) => {
     activeRoomId.value = roomId;
@@ -1461,35 +1529,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Advance the inbound read watermark (called by read tracker on batch flush).
-   *  Also sends a Matrix read receipt for the corresponding event. */
+   *  Delegates to commitReadWatermark for atomic Dexie + Matrix sync. */
   const advanceInboundWatermark = async (roomId: string, timestamp: number) => {
-    // 1. Update Dexie watermark (monotonic — only moves forward)
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
-    }
-
-    // 2. Send Matrix read receipt for the event at this timestamp
-    try {
-      const matrixService = getMatrixClientService();
-      const matrixRoom = matrixService.getRoom(roomId) as any;
-      if (matrixRoom) {
-        const events = matrixRoom.timeline ?? matrixRoom.getLiveTimeline?.()?.getEvents?.() ?? [];
-        // Find the event closest to this timestamp
-        let bestEvent = null;
-        for (let i = events.length - 1; i >= 0; i--) {
-          const ts = events[i].getTs?.() ?? events[i].event?.origin_server_ts ?? 0;
-          if (ts <= timestamp) {
-            bestEvent = events[i];
-            break;
-          }
-        }
-        if (bestEvent) {
-          sendReadReceiptIfVisible(roomId, bestEvent);
-        }
-      }
-    } catch (e) {
-      console.warn("[chat-store] advanceInboundWatermark sendReceipt error:", e);
-    }
+    await commitReadWatermark(roomId, timestamp);
   };
 
   /** Expand the message window for scroll-up pagination */
