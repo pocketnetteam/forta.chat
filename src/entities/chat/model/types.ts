@@ -98,6 +98,8 @@ export interface Message {
   transferInfo?: TransferInfo;
   /** URL link preview metadata (Open Graph) */
   linkPreview?: LinkPreview;
+  /** Upload progress 0-100 (only during media upload, undefined when not uploading) */
+  uploadProgress?: number;
   /** Whether this message has been deleted/redacted */
   deleted?: boolean;
   /** For system messages: template + addresses for dynamic name resolution at render time */
