@@ -8,25 +8,29 @@ export class RoomRepository {
   // Reads
   // ---------------------------------------------------------------------------
 
-  /** Get all joined rooms sorted by last activity (newest first) */
+  /** Get all joined rooms sorted by last activity (newest first), excluding tombstones */
   async getJoinedRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
       .where("membership")
       .equals("join")
+      .and(r => !r.isDeleted)
       .toArray();
     return rooms.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  /** Get invited rooms */
+  /** Get invited rooms, excluding tombstones */
   async getInvitedRooms(): Promise<LocalRoom[]> {
-    return this.db.rooms.where("membership").equals("invite").toArray();
+    return this.db.rooms.where("membership").equals("invite")
+      .and(r => !r.isDeleted)
+      .toArray();
   }
 
-  /** Get all rooms (joined + invited), sorted by updatedAt desc */
+  /** Get all active rooms (joined + invited, non-tombstoned), sorted by updatedAt desc */
   async getAllRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
       .where("membership")
       .anyOf(["join", "invite"])
+      .and(r => !r.isDeleted)
       .toArray();
     return rooms.sort((a, b) => b.updatedAt - a.updatedAt);
   }
@@ -138,7 +142,7 @@ export class RoomRepository {
     await this.db.rooms.update(roomId, { syncedAt: Date.now() });
   }
 
-  /** Remove a room (leave/kick) */
+  /** Remove a room (leave/kick) — physical delete */
   async removeRoom(roomId: string): Promise<void> {
     await this.db.transaction("rw", [this.db.rooms, this.db.messages], async () => {
       await this.db.rooms.delete(roomId);
@@ -146,5 +150,68 @@ export class RoomRepository {
         .between([roomId, -Infinity], [roomId, Infinity])
         .delete();
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tombstone (soft-delete for cross-device sync)
+  // ---------------------------------------------------------------------------
+
+  /** Soft-delete a room: mark as tombstone so it's hidden from UI but remains
+   *  in Dexie for sync purposes. Cross-device sync relies on this — when Device B
+   *  receives a membership=leave event, it tombstones the room instead of hard-deleting. */
+  async tombstoneRoom(
+    roomId: string,
+    reason: "left" | "kicked" | "banned" | "removed",
+  ): Promise<void> {
+    const updated = await this.db.rooms.update(roomId, {
+      isDeleted: true,
+      deletedAt: Date.now(),
+      deleteReason: reason,
+      membership: "leave" as const,
+    });
+    // Room may not exist in Dexie yet (e.g. never synced to this device)
+    if (updated === 0) {
+      console.warn(`[RoomRepo] tombstoneRoom: room ${roomId} not found in Dexie`);
+    }
+  }
+
+  /** Revive a tombstoned room (e.g. user re-joined the room) */
+  async reviveRoom(roomId: string): Promise<void> {
+    await this.db.rooms.update(roomId, {
+      isDeleted: false,
+      deletedAt: null,
+      deleteReason: null,
+    });
+  }
+
+  /** Check if a room is tombstoned */
+  async isTombstoned(roomId: string): Promise<boolean> {
+    const room = await this.db.rooms.get(roomId);
+    return room?.isDeleted === true;
+  }
+
+  /** Garbage-collect tombstoned rooms older than ttlMs (default 30 days).
+   *  Physically removes the room and all its messages from Dexie. */
+  async garbageCollectTombstones(ttlMs: number = 30 * 24 * 60 * 60 * 1000): Promise<number> {
+    const cutoff = Date.now() - ttlMs;
+    const staleRooms = await this.db.rooms
+      .where("isDeleted")
+      .equals(1) // Dexie stores booleans as 0/1 in indexes
+      .and(r => r.deletedAt !== null && r.deletedAt < cutoff)
+      .toArray();
+
+    if (staleRooms.length === 0) return 0;
+
+    await this.db.transaction("rw", [this.db.rooms, this.db.messages], async () => {
+      for (const room of staleRooms) {
+        await this.db.messages.where("[roomId+timestamp]")
+          .between([room.id, -Infinity], [room.id, Infinity])
+          .delete();
+        await this.db.rooms.delete(room.id);
+      }
+    });
+
+    console.log(`[RoomRepo] GC: cleaned ${staleRooms.length} tombstoned rooms`);
+    return staleRooms.length;
   }
 }

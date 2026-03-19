@@ -602,7 +602,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     return [...source]
-      .filter(r => !deletedRoomIds.value.has(r.id))
       .sort((a, b) => {
         const aPinned = pinnedRoomIds.value.has(a.id) ? 1 : 0;
         const bPinned = pinnedRoomIds.value.has(b.id) ? 1 : 0;
@@ -613,8 +612,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const totalUnread = computed(() => {
     if (chatDbKitRef.value) {
+      // dexieRooms already excludes tombstoned rooms (getAllRooms filters isDeleted)
       return dexieRooms.value
-        .filter(r => !deletedRoomIds.value.has(r.id))
         .reduce((sum, r) => sum + r.unreadCount, 0);
     }
     return rooms.value.reduce((sum, r) => sum + r.unreadCount, 0);
@@ -789,6 +788,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
                   : r.lastMessage?.status === MessageStatus.failed ? "failed"
                   : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
                 lastMessageReaction: null,
+                isDeleted: false,
+                deletedAt: null,
+                deleteReason: null,
               });
             }
           }
@@ -932,7 +934,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const matrixRoomIds = new Set(matrixRooms.map((r: any) => r.roomId as string));
     let removed = false;
     rooms.value = rooms.value.filter(r => {
-      if (!matrixRoomIds.has(r.id) || deletedRoomIds.value.has(r.id)) {
+      if (!matrixRoomIds.has(r.id)) {
         roomsMap.delete(r.id);
         removed = true;
         return false;
@@ -947,7 +949,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (!matrixRoom) continue;
 
       // Check this room is still interactive
-      if (deletedRoomIds.value.has(roomId)) continue;
       const membership = matrixRoom.selfMembership ?? matrixRoom.getMyMembership?.();
       if (membership !== "join" && membership !== "invite") continue;
       try {
@@ -1025,6 +1026,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
                   : r.lastMessage?.status === MessageStatus.failed ? "failed"
                   : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
                 lastMessageReaction: null,
+                isDeleted: false,
+                deletedAt: null,
+                deleteReason: null,
               });
             }
           }
@@ -1050,10 +1054,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     debouncedCacheRooms();
   };
 
-  /** Filter Matrix rooms to interactive ones (joined/invited, non-spaces) */
+  /** Filter Matrix rooms to interactive ones (joined/invited, non-spaces).
+   *  Tombstone check is done in Dexie queries, not here — this only filters Matrix SDK rooms. */
   const filterInteractiveRooms = (matrixRooms: any[]): any[] => {
     return matrixRooms.filter((r) => {
-      if (deletedRoomIds.value.has(r.roomId as string)) return false;
       const membership = r.selfMembership ?? r.getMyMembership?.();
       if (membership !== "join" && membership !== "invite") return false;
       try {
@@ -1394,9 +1398,52 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const room = getRoomById(roomId);
       if (room?.membership === "invite") return;
 
+      // Self-healing: check if we still have access to this room via Matrix SDK.
+      // If the room was left/forgotten on another device but our local Dexie
+      // cache still has it, tombstone it and clear the active room.
+      selfHealZombieRoom(roomId);
+
       // NOTE: Do NOT mark as read here. Reading happens incrementally
       // via IntersectionObserver in MessageList as user scrolls.
     }
+  };
+
+  /** Self-healing: detect zombie rooms (left on another device but still in local cache)
+   *  and tombstone them. Called when user tries to open a room. */
+  const selfHealZombieRoom = (roomId: string) => {
+    try {
+      const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+
+      // Room doesn't exist in Matrix SDK at all — definitely a zombie
+      if (!matrixRoom) {
+        console.warn("[chat-store] selfHeal: room not found in Matrix SDK, tombstoning", roomId);
+        tombstoneAndRedirect(roomId, "removed");
+        return;
+      }
+
+      // Room exists but membership is not "join" or "invite" — zombie
+      const membership = matrixRoom.selfMembership ?? matrixRoom.getMyMembership?.();
+      if (membership !== "join" && membership !== "invite") {
+        console.warn("[chat-store] selfHeal: membership is", membership, "— tombstoning", roomId);
+        const reason = membership === "ban" ? "banned" as const : "left" as const;
+        tombstoneAndRedirect(roomId, reason);
+        return;
+      }
+    } catch {
+      // Matrix service not ready — skip self-healing, will catch on next interaction
+    }
+  };
+
+  /** Tombstone a zombie room in Dexie, clear active room, and remove from UI */
+  const tombstoneAndRedirect = (roomId: string, reason: "left" | "kicked" | "banned" | "removed") => {
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.rooms.tombstoneRoom(roomId, reason).catch((e: unknown) => {
+        console.warn("[chat-store] tombstoneAndRedirect failed:", e);
+      });
+    }
+    optimisticRemoveRoom(roomId);
   };
 
   /** Advance the inbound read watermark (called by read tracker on batch flush).
@@ -1462,9 +1509,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Decline an invite: leave the room and remove from list */
   const declineInvite = async (roomId: string) => {
-    // Mark as deleted so refreshRooms won't re-add (persisted to localStorage)
-    deletedRoomIds.value = new Set([...deletedRoomIds.value, roomId]);
-    saveDeletedRooms(deletedRoomIds.value);
+    // Tombstone in Dexie (cross-device visible)
+    if (chatDbKitRef.value) {
+      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "left");
+    }
 
     // Optimistic: remove from UI
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
@@ -1494,28 +1542,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomsMap.set(room.id, existing ?? room);
   };
 
-  // Client-side deleted rooms set (matches bastyon-chat's deletedrooms map).
-  // Persisted to localStorage so deletions survive page reload.
-  const DELETED_ROOMS_KEY = "bastyon-chat-deleted-rooms";
-  const loadDeletedRooms = (): Set<string> => {
-    try {
-      const stored = localStorage.getItem(DELETED_ROOMS_KEY);
-      return stored ? new Set(JSON.parse(stored)) : new Set();
-    } catch { return new Set(); }
-  };
-  const saveDeletedRooms = (ids: Set<string>) => {
-    try { localStorage.setItem(DELETED_ROOMS_KEY, JSON.stringify([...ids])); } catch { /* ignore */ }
-  };
-  const deletedRoomIds = ref<Set<string>>(loadDeletedRooms());
-
-  /** Remove a room: kick other members → leave → forget → remove from local state.
-   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups). */
-  const removeRoom = async (roomId: string) => {
-    // Mark as deleted so refreshRooms won't re-add it (persisted to localStorage)
-    deletedRoomIds.value = new Set([...deletedRoomIds.value, roomId]);
-    saveDeletedRooms(deletedRoomIds.value);
-
-    // Optimistic: remove from UI immediately
+  /** Helper: optimistically remove a room from runtime UI state */
+  const optimisticRemoveRoom = (roomId: string) => {
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
     roomsMap.delete(roomId);
     delete messages.value[roomId];
@@ -1523,6 +1551,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (activeRoomId.value === roomId) {
       activeRoomId.value = null;
     }
+  };
+
+  /** Remove a room: kick other members → leave → forget → remove from local state.
+   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups). */
+  const removeRoom = async (roomId: string) => {
+    // Tombstone in Dexie — cross-device visible, survives reload
+    if (chatDbKitRef.value) {
+      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "removed");
+    }
+
+    // Optimistic: remove from UI immediately
+    optimisticRemoveRoom(roomId);
 
     // Server: kick all other members → leave → forget
     try {
@@ -1574,17 +1614,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Leave a group chat without kicking other members. */
   const leaveGroup = async (roomId: string) => {
-    deletedRoomIds.value = new Set([...deletedRoomIds.value, roomId]);
-    saveDeletedRooms(deletedRoomIds.value);
+    // Tombstone in Dexie — cross-device visible
+    if (chatDbKitRef.value) {
+      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "left");
+    }
 
     // Optimistic: remove from UI
-    rooms.value = rooms.value.filter((r) => r.id !== roomId);
-    roomsMap.delete(roomId);
-    delete messages.value[roomId];
-    triggerRef(messages);
-    if (activeRoomId.value === roomId) {
-      activeRoomId.value = null;
-    }
+    optimisticRemoveRoom(roomId);
 
     try {
       const matrixService = getMatrixClientService();
@@ -3728,23 +3764,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Handle being kicked/banned from a room — remove it from UI immediately */
-  const handleKicked = (roomId: string) => {
-    rooms.value = rooms.value.filter((r) => r.id !== roomId);
-    roomsMap.delete(roomId);
-    delete messages.value[roomId];
-    triggerRef(messages);
-    if (activeRoomId.value === roomId) {
-      activeRoomId.value = null;
+  /** Handle being kicked/banned from a room — tombstone in Dexie + remove from UI */
+  const handleKicked = (roomId: string, reason: "kicked" | "banned" = "kicked") => {
+    // Tombstone in Dexie (async, non-blocking for UI)
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.rooms.tombstoneRoom(roomId, reason).catch((e: unknown) => {
+        console.warn("[chat-store] handleKicked: tombstone failed", e);
+      });
     }
+    optimisticRemoveRoom(roomId);
   };
 
-  /** Remove a room from the deletedRoomIds set (used when rejoining a previously-deleted room) */
+  /** Revive a tombstoned room (used when rejoining a previously-deleted room) */
   const clearDeletedRoom = (roomId: string) => {
-    if (deletedRoomIds.value.has(roomId)) {
-      const next = new Set(deletedRoomIds.value);
-      next.delete(roomId);
-      deletedRoomIds.value = next;
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.rooms.reviveRoom(roomId).catch((e: unknown) => {
+        console.warn("[chat-store] clearDeletedRoom: revive failed", e);
+      });
     }
   };
 
