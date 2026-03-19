@@ -272,7 +272,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       matrixService.setHandlers({
         onSync: (state) => {
-          chatStore.refreshRooms(state);
+          if (state === "PREPARED" || state === "SYNCING") {
+            chatStore.refreshRooms(state);
+          }
         },
         onTimeline: (event: unknown, room: unknown) => {
           const roomId = typeof room === "string" ? room : (room as any)?.roomId;

@@ -18,7 +18,7 @@ import { getmatrixid } from "@/shared/lib/matrix/functions";
 
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
 
-export type SyncCallback = (state: "PREPARED" | "SYNCING") => void;
+export type SyncCallback = (state: "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING") => void;
 export type TimelineCallback = (event: unknown, room: unknown) => void;
 export type MembershipCallback = (event: unknown, member: unknown) => void;
 export type TypingCallback = (event: unknown, member: unknown) => void;
@@ -323,8 +323,8 @@ export class MatrixClientService {
         if (!this.chatsReady) {
           this.chatsReady = true;
         }
-        this.onSync?.(state as "PREPARED" | "SYNCING");
       }
+      this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING");
     });
   }
 
