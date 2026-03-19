@@ -44,7 +44,7 @@ dependencies {
     implementation project(':capacitor-android')
 
     // Native WebRTC — hardware-accelerated video/audio for calls
-    implementation 'org.webrtc:google-webrtc:1.0.32006'
+    implementation 'io.github.webrtc-sdk:android:144.7559.01'
 
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
