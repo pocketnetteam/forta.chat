@@ -11,7 +11,7 @@ export function useChatSyncStatus(roomId: Ref<string | null>): ChatSyncReturn {
   const isFresh = ref(false);
 
   watch(roomId, () => {
-    isFresh.value = rawStatus.value === "up_to_date" || rawStatus.value === "syncing";
+    isFresh.value = rawStatus.value === "up_to_date";
   });
 
   watch(rawStatus, (next) => {

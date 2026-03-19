@@ -24,6 +24,15 @@ const rawStatus = ref<SyncPhase>("connecting");
 let lastUpToDateAt = 0;
 let initialized = false;
 
+let _debouncedResult: { visibleStatus: Ref<DisplayPhase> } | null = null;
+
+function getDebounced() {
+  if (!_debouncedResult) {
+    _debouncedResult = useDebouncedStatus(rawStatus);
+  }
+  return _debouncedResult;
+}
+
 export function handleSdkSync(sdkState: string): void {
   if (typeof navigator !== "undefined" && !navigator.onLine) {
     rawStatus.value = "offline";
@@ -51,6 +60,11 @@ export function handleSdkSync(sdkState: string): void {
   }
 }
 
+export function resetSyncStatus(): void {
+  rawStatus.value = "connecting";
+  lastUpToDateAt = 0;
+}
+
 export function useSyncStatus(): SyncStatusReturn {
   if (!initialized) {
     initialized = true;
@@ -65,7 +79,7 @@ export function useSyncStatus(): SyncStatusReturn {
     });
   }
 
-  const { visibleStatus } = useDebouncedStatus(rawStatus);
+  const { visibleStatus } = getDebounced();
 
   const showBanner = computed(() => {
     const s = visibleStatus.value;

@@ -16,7 +16,7 @@ import { initChatDb } from "@/shared/lib/local-db";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
 import { mergeObjects } from "@/shared/lib/merge-objects";
-import { handleSdkSync } from "@/features/sync-status";
+
 import { useAsyncOperation } from "@/shared/use";
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef } from "vue";
@@ -85,6 +85,8 @@ function generateEncryptionKeys(privateKeyHex: string) {
   }
   return keys;
 }
+
+let _onSyncStatusCallback: ((state: string) => void) | null = null;
 
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSAuthData, value: LSAuthData } =
@@ -276,7 +278,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           if (state === "PREPARED" || state === "SYNCING") {
             chatStore.refreshRooms(state);
           }
-          handleSdkSync(state);
+          _onSyncStatusCallback?.(state);
         },
         onTimeline: (event: unknown, room: unknown) => {
           const roomId = typeof room === "string" ? room : (room as any)?.roomId;
@@ -657,6 +659,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }) =>
     appInitializer.getProfileFeed(authorAddress, options);
 
+  function setSyncStatusCallback(cb: (state: string) => void) {
+    _onSyncStatusCallback = cb;
+  }
+
   return {
     address,
     clearRegistrationState,
@@ -693,6 +699,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     register,
     registrationPending,
     resumeRegistrationPoll,
+    setSyncStatusCallback,
     submitCaptcha,
     submitComment,
     submitUpvote,

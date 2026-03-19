@@ -12,7 +12,7 @@ import { ChatInfoPanel, UserProfilePanel } from "@/features/chat-info";
 import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
-import { useConnectivity } from "@/shared/lib/connectivity";
+
 import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { BottomSheet } from "@/shared/ui/bottom-sheet";
 import { useCallService } from "@/features/video-calls/model/call-service";
@@ -41,7 +41,7 @@ watch(() => chatStore.activeRoomId, (roomId) => {
   if (roomId) channelStore.clearActiveChannel();
 });
 const { toast } = useToast();
-const { isOnline, isSlow } = useConnectivity();
+
 const { t } = useI18n();
 
 const isAdmin = computed(() => {
@@ -376,27 +376,6 @@ onUnmounted(() => {
 
     <!-- Active room content -->
     <template v-else-if="chatStore.activeRoom">
-      <!-- Connectivity banner -->
-      <transition name="banner-slide">
-        <div
-          v-if="!isOnline"
-          class="flex items-center justify-center gap-2 bg-color-bad px-3 py-1.5 text-xs font-medium text-white"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="1" y1="1" x2="23" y2="23" /><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" /><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" /><path d="M10.71 5.05A16 16 0 0 1 22.56 9" /><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" /><path d="M8.53 16.11a6 6 0 0 1 6.95 0" /><line x1="12" y1="20" x2="12.01" y2="20" />
-          </svg>
-          {{ t("chat.offline") }}
-        </div>
-        <div
-          v-else-if="isSlow"
-          class="flex items-center justify-center gap-2 bg-color-star-yellow px-3 py-1.5 text-xs font-medium text-white"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          {{ t("chat.slowConnection") }}
-        </div>
-      </transition>
 
       <!-- Invite preview (not yet joined) -->
       <div
@@ -532,21 +511,6 @@ onUnmounted(() => {
   transform: translateY(-100%);
 }
 
-/* Connectivity banner slides down */
-.banner-slide-enter-active {
-  transition: transform 0.25s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.25s ease-out;
-}
-.banner-slide-leave-active {
-  transition: transform 0.2s ease-in, opacity 0.2s ease-in;
-}
-.banner-slide-enter-from {
-  opacity: 0;
-  transform: translateY(-100%);
-}
-.banner-slide-leave-to {
-  opacity: 0;
-  transform: translateY(-100%);
-}
 
 /* SelectionBar slides up from bottom */
 .bar-slide-up-enter-active {

@@ -9,7 +9,7 @@ import IncomingCallModal from "@/features/video-calls/ui/IncomingCallModal.vue";
 import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
-import { SyncBanner } from "@/features/sync-status";
+import { SyncBanner, handleSdkSync } from "@/features/sync-status";
 import { useRouter } from "vue-router";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
@@ -22,6 +22,7 @@ provide(EAppProviders.AppRoutes, AppRoutes);
 provide(EAppProviders.AppPages, AppPages);
 
 const authStore = useAuthStore();
+authStore.setSyncStatusCallback(handleSdkSync);
 const chatStore = useChatStore();
 const router = useRouter();
 
