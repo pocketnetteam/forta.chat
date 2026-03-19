@@ -129,16 +129,17 @@ export class EventWriter {
       out.result = await this.messageRepo.upsertFromServer(localMsg);
 
       if (out.result === "inserted" || out.result === "updated") {
+        // Ensure room exists in Dexie before updating preview
+        await this.ensureRoomExists(parsed.roomId);
         await this.updateRoomPreview(parsed);
       }
 
       if (out.result === "inserted") {
         // Only increment unread for OTHER people's messages in NON-ACTIVE rooms
         if (parsed.senderId !== myAddress && parsed.roomId !== activeRoomId) {
-          const room = await this.roomRepo.getRoom(parsed.roomId);
-          if (room) {
-            await this.roomRepo.setUnreadCount(parsed.roomId, room.unreadCount + 1);
-          }
+          // Atomic increment via modify() — no read-modify-write race
+          await this.db.rooms.where("id").equals(parsed.roomId)
+            .modify((room: import("./schema").LocalRoom) => { room.unreadCount++; });
         }
       }
     });
@@ -423,6 +424,32 @@ export class EventWriter {
     const room = await this.roomRepo.getRoom(roomId);
     if (!room || room.lastMessageEventId !== targetEventId) return;
     await this.roomRepo.updateLastMessageReaction(roomId, reaction);
+  }
+
+  /** Ensure a minimal room row exists in Dexie.
+   *  When a message arrives before fullRoomRefresh has upserted the room,
+   *  updateLastMessage / setUnreadCount would silently no-op. This creates
+   *  a placeholder row so those writes succeed. refreshRoomsImmediate will
+   *  later fill in metadata (name, avatar, members) via updateRoom. */
+  private async ensureRoomExists(roomId: string): Promise<void> {
+    const existing = await this.db.rooms.get(roomId);
+    if (existing) return;
+    await this.db.rooms.put({
+      id: roomId,
+      name: roomId,
+      avatar: "",
+      isGroup: false,
+      members: [],
+      membership: "join",
+      unreadCount: 0,
+      topic: "",
+      updatedAt: Date.now(),
+      syncedAt: 0,
+      hasMoreHistory: true,
+      lastReadInboundTs: 0,
+      lastReadOutboundTs: 0,
+      lastMessageReaction: null,
+    });
   }
 
   /** Pick the most recent reaction from remaining reactions map */
