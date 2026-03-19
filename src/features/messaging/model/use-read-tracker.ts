@@ -82,8 +82,27 @@ export function useReadTracker(options: ReadTrackerOptions) {
     // Periodic flush of the high-water mark
     batchTimer = setInterval(flushBatch, BATCH_INTERVAL_MS);
 
-    // First flush shortly after start to capture initial viewport
-    setTimeout(flushBatch, 800);
+    // Imperative initial scan: IntersectionObserver callbacks may not fire
+    // reliably on mount (virtua virtualisation, root mismatch, or elements
+    // already fully visible before observe()). We perform a synchronous
+    // getBoundingClientRect check for all tracked elements and flush
+    // immediately so entering a chat with visible unreads marks them read.
+    requestAnimationFrame(() => {
+      if (!observer) return; // stopped before rAF fired
+      const rootRect = root.getBoundingClientRect();
+      const tracked = root.querySelectorAll<HTMLElement>("[data-message-ts]");
+      for (const el of tracked) {
+        const elRect = el.getBoundingClientRect();
+        const visibleTop = Math.max(elRect.top, rootRect.top);
+        const visibleBottom = Math.min(elRect.bottom, rootRect.bottom);
+        const visibleHeight = visibleBottom - visibleTop;
+        const ratio = elRect.height > 0 ? visibleHeight / elRect.height : 0;
+        if (ratio >= VISIBILITY_THRESHOLD) {
+          promoteToRead(el);
+        }
+      }
+      flushBatch();
+    });
   }
 
   function observeElement(el: HTMLElement) {
