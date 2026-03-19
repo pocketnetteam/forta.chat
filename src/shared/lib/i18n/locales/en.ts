@@ -425,6 +425,12 @@ export const en = {
   "tor.connecting": "Connecting...",
   "tor.error": "Error",
   "tor.off": "Off",
+  "tor.verify": "Verify",
+  "tor.verifying": "Verifying...",
+  "tor.verified": "Verified — Tor IP: {ip}",
+  "tor.notUsingTor": "Not using Tor",
+  "tor.verifyFailed": "Verification failed",
+  "tor.disableWarning": "Disabling Tor will expose your real IP address. Your traffic will no longer be anonymous. Continue?",
 
   // ── Wallet / PKOIN transfer ──
   "wallet.sendPkoin": "Send PKOIN",

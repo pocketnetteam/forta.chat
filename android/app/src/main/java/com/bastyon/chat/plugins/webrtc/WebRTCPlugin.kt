@@ -15,12 +15,8 @@ import org.webrtc.*
 /**
  * Capacitor plugin bridging JavaScript WebRTC signaling to native WebRTC engine.
  *
- * The JS side (RTCPeerConnection proxy) calls these methods instead of using
- * the browser's WebRTC implementation. This gives us:
- * - Hardware-accelerated video encoding/decoding
- * - Native camera control (Camera2 API)
- * - Native audio with echo cancellation
- * - Background call support
+ * All methods accept a peerId to route to the correct native PeerConnection.
+ * The SDK creates multiple PCs during call setup (glare, renegotiation).
  */
 @CapacitorPlugin(name = "NativeWebRTC")
 class WebRTCPlugin : Plugin() {
@@ -32,11 +28,18 @@ class WebRTCPlugin : Plugin() {
         @Volatile
         var manager: NativeWebRTCManager? = null
             private set
+
     }
 
     override fun load() {
         manager = NativeWebRTCManager(context)
         manager?.initialize()
+
+        // Wire CallActivity native hangup → JS event
+        com.bastyon.chat.plugins.calls.CallActivity.onNativeHangup = {
+            notifyListeners("onNativeHangup", JSObject())
+        }
+
         Log.d(TAG, "WebRTCPlugin loaded, manager initialized")
     }
 
@@ -48,6 +51,11 @@ class WebRTCPlugin : Plugin() {
     fun createPeerConnection(call: PluginCall) {
         val mgr = manager ?: run {
             call.reject("Manager not initialized")
+            return
+        }
+
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
             return
         }
 
@@ -85,9 +93,10 @@ class WebRTCPlugin : Plugin() {
                 }
             }
 
-            mgr.createPeerConnection(iceServers, object : NativeWebRTCManager.Listener {
-                override fun onIceCandidate(candidate: IceCandidate) {
+            mgr.createPeerConnection(peerId, iceServers, object : NativeWebRTCManager.Listener {
+                override fun onIceCandidate(peerId: String, candidate: IceCandidate) {
                     val data = JSObject().apply {
+                        put("peerId", peerId)
                         put("candidate", candidate.sdp)
                         put("sdpMid", candidate.sdpMid)
                         put("sdpMLineIndex", candidate.sdpMLineIndex)
@@ -95,18 +104,28 @@ class WebRTCPlugin : Plugin() {
                     notifyListeners("onIceCandidate", data)
                 }
 
-                override fun onIceConnectionStateChange(state: PeerConnection.IceConnectionState) {
+                override fun onIceConnectionStateChange(peerId: String, state: PeerConnection.IceConnectionState) {
                     val data = JSObject().apply {
+                        put("peerId", peerId)
                         put("state", state.name.lowercase())
                     }
                     notifyListeners("onIceConnectionStateChange", data)
+
+                    // Notify CallActivity when connected
+                    if (state == PeerConnection.IceConnectionState.CONNECTED ||
+                        state == PeerConnection.IceConnectionState.COMPLETED) {
+                        com.bastyon.chat.plugins.calls.CallActivity.onCallConnected?.invoke()
+                    }
                 }
 
-                override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
+                override fun onAddTrack(peerId: String, receiver: RtpReceiver, streams: Array<out MediaStream>) {
                     val track = receiver.track()
+                    val streamId = streams.firstOrNull()?.id ?: ""
                     val data = JSObject().apply {
+                        put("peerId", peerId)
                         put("kind", track?.kind() ?: "unknown")
                         put("trackId", track?.id() ?: "")
+                        put("streamId", streamId)
                     }
                     notifyListeners("onTrack", data)
 
@@ -116,12 +135,18 @@ class WebRTCPlugin : Plugin() {
                     }
                 }
 
-                override fun onRemoveTrack(receiver: RtpReceiver) {
-                    notifyListeners("onRemoveTrack", JSObject())
+                override fun onRemoveTrack(peerId: String, receiver: RtpReceiver) {
+                    val data = JSObject().apply {
+                        put("peerId", peerId)
+                    }
+                    notifyListeners("onRemoveTrack", data)
                 }
 
-                override fun onRenegotiationNeeded() {
-                    notifyListeners("onRenegotiationNeeded", JSObject())
+                override fun onRenegotiationNeeded(peerId: String) {
+                    val data = JSObject().apply {
+                        put("peerId", peerId)
+                    }
+                    notifyListeners("onRenegotiationNeeded", data)
                 }
             })
 
@@ -138,7 +163,11 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun createOffer(call: PluginCall) {
-        manager?.createOffer { sdp ->
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
+        manager?.createOffer(peerId) { sdp ->
             if (sdp != null) {
                 call.resolve(JSObject().apply {
                     put("sdp", sdp.description)
@@ -152,7 +181,11 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun createAnswer(call: PluginCall) {
-        manager?.createAnswer { sdp ->
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
+        manager?.createAnswer(peerId) { sdp ->
             if (sdp != null) {
                 call.resolve(JSObject().apply {
                     put("sdp", sdp.description)
@@ -166,6 +199,10 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun setLocalDescription(call: PluginCall) {
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
         val sdpStr = call.getString("sdp") ?: run {
             call.reject("Missing sdp")
             return
@@ -179,13 +216,17 @@ class WebRTCPlugin : Plugin() {
         }
         val sdp = SessionDescription(type, sdpStr)
 
-        manager?.setLocalDescription(sdp) { success ->
+        manager?.setLocalDescription(peerId, sdp) { success ->
             if (success) call.resolve() else call.reject("setLocalDescription failed")
         } ?: call.reject("Manager not initialized")
     }
 
     @PluginMethod
     fun setRemoteDescription(call: PluginCall) {
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
         val sdpStr = call.getString("sdp") ?: run {
             call.reject("Missing sdp")
             return
@@ -199,13 +240,17 @@ class WebRTCPlugin : Plugin() {
         }
         val sdp = SessionDescription(type, sdpStr)
 
-        manager?.setRemoteDescription(sdp) { success ->
+        manager?.setRemoteDescription(peerId, sdp) { success ->
             if (success) call.resolve() else call.reject("setRemoteDescription failed")
         } ?: call.reject("Manager not initialized")
     }
 
     @PluginMethod
     fun addIceCandidate(call: PluginCall) {
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
         val candidateStr = call.getString("candidate") ?: run {
             call.reject("Missing candidate")
             return
@@ -214,7 +259,7 @@ class WebRTCPlugin : Plugin() {
         val sdpMLineIndex = call.getInt("sdpMLineIndex") ?: 0
 
         val candidate = IceCandidate(sdpMid, sdpMLineIndex, candidateStr)
-        val added = manager?.addIceCandidate(candidate) ?: false
+        val added = manager?.addIceCandidate(peerId, candidate) ?: false
 
         if (added) call.resolve() else call.reject("addIceCandidate failed")
     }
@@ -229,11 +274,12 @@ class WebRTCPlugin : Plugin() {
             call.reject("Manager not initialized")
             return
         }
+        val peerId = call.getString("peerId") ?: ""
         val hasVideo = call.getBoolean("hasVideo", true) ?: true
 
-        mgr.startLocalAudio()
+        mgr.startLocalAudio(peerId)
         if (hasVideo) {
-            mgr.startLocalVideo()
+            mgr.startLocalVideo(peerId)
         }
         call.resolve()
     }
@@ -348,13 +394,18 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun closePeerConnection(call: PluginCall) {
-        manager?.closePeerConnection()
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
+        manager?.closePeerConnection(peerId)
         call.resolve()
     }
 
     @PluginMethod
     fun getConnectionState(call: PluginCall) {
-        val state = manager?.getConnectionState() ?: "UNKNOWN"
+        val peerId = call.getString("peerId") ?: ""
+        val state = manager?.getConnectionState(peerId) ?: "UNKNOWN"
         call.resolve(JSObject().apply {
             put("state", state)
         })

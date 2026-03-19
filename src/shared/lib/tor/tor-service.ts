@@ -15,6 +15,7 @@ interface TorNativePlugin {
     bridgeType?: string;
     bridges?: string[];
   }): Promise<void>;
+  verifyTor(): Promise<{ isTor: boolean; ip: string; error?: string }>;
   addListener(
     event: 'bootstrapProgress',
     cb: (data: { progress: number }) => void,
@@ -83,6 +84,19 @@ class TorService {
   }): Promise<void> {
     if (!isNative) return;
     await TorNative.configure(options);
+  }
+
+  async verify(): Promise<{ isTor: boolean; ip: string }> {
+    if (!isNative || !this._ready.value) {
+      return { isTor: false, ip: '' };
+    }
+
+    try {
+      const result = await TorNative.verifyTor();
+      return { isTor: result.isTor, ip: result.ip || '' };
+    } catch {
+      return { isTor: false, ip: '' };
+    }
   }
 }
 

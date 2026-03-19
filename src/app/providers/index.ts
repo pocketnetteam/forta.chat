@@ -1,4 +1,5 @@
 import type { App } from "vue";
+import { watch } from "vue";
 
 import { createPinia } from "pinia";
 
@@ -28,9 +29,34 @@ export const setupProviders = async (app: App) => {
   }
 
   if (isNative) {
+    // Configure status bar for proper safe area insets
+    const { StatusBar, Style } = await import('@capacitor/status-bar');
+    const { useThemeStore } = await import('@/entities/theme');
+    await StatusBar.setOverlaysWebView({ overlay: true });
+
+    // Sync status bar color with app theme
+    const themeStore = useThemeStore();
+    const syncStatusBar = () => {
+      const isDark = themeStore.isDarkMode;
+      StatusBar.setStyle({ style: isDark ? Style.Dark : Style.Light });
+      // Read --background-total-theme CSS variable (RGB triplet)
+      const rgb = getComputedStyle(document.documentElement)
+        .getPropertyValue('--background-total-theme').trim();
+      if (rgb) {
+        const parts = rgb.split(',').map((s: string) => parseInt(s.trim()));
+        const hex = '#' + parts.map((v: number) => v.toString(16).padStart(2, '0')).join('');
+        StatusBar.setBackgroundColor({ color: hex });
+      }
+    };
+    // Run once now and watch for changes
+    syncStatusBar();
+    watch(() => themeStore.isDarkMode, syncStatusBar);
+
     // Start Tor daemon and reverse proxy before Matrix client connects
     const { torService } = await import('@/shared/lib/tor');
     await torService.init('always');
+    // Wire store to native torService reactive state
+    useTorStore().init();
   }
 
   // Scripts must finish before router mounts the app — components

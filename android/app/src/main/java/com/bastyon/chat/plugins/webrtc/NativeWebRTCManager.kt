@@ -8,8 +8,12 @@ import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
- * Manages native WebRTC peer connection lifecycle with hardware-accelerated
+ * Manages multiple native WebRTC peer connections with hardware-accelerated
  * video encoding/decoding via Google's libwebrtc.
+ *
+ * Each peer connection is identified by a peerId string from the JS side.
+ * The SDK creates multiple PeerConnections during call setup (glare detection,
+ * renegotiation), so we must support concurrent instances.
  */
 class NativeWebRTCManager(private val context: Context) {
 
@@ -21,18 +25,20 @@ class NativeWebRTCManager(private val context: Context) {
     }
 
     interface Listener {
-        fun onIceCandidate(candidate: IceCandidate)
-        fun onIceConnectionStateChange(state: PeerConnection.IceConnectionState)
-        fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>)
-        fun onRemoveTrack(receiver: RtpReceiver)
-        fun onRenegotiationNeeded()
+        fun onIceCandidate(peerId: String, candidate: IceCandidate)
+        fun onIceConnectionStateChange(peerId: String, state: PeerConnection.IceConnectionState)
+        fun onAddTrack(peerId: String, receiver: RtpReceiver, streams: Array<out MediaStream>)
+        fun onRemoveTrack(peerId: String, receiver: RtpReceiver)
+        fun onRenegotiationNeeded(peerId: String)
     }
 
     private var factory: PeerConnectionFactory? = null
-    private var peerConnection: PeerConnection? = null
     private var eglBase: EglBase? = null
 
-    // Local media
+    // Multiple peer connections keyed by peerId
+    private val peerConnections = mutableMapOf<String, PeerConnection>()
+
+    // Local media (shared across PCs — one camera/mic for the device)
     private var localAudioTrack: AudioTrack? = null
     private var localVideoTrack: VideoTrack? = null
     private var videoCapturer: CameraVideoCapturer? = null
@@ -96,25 +102,32 @@ class NativeWebRTCManager(private val context: Context) {
     // Peer Connection
     // -----------------------------------------------------------------------
 
-    fun createPeerConnection(iceServers: List<PeerConnection.IceServer>, listener: Listener) {
+    fun createPeerConnection(peerId: String, iceServers: List<PeerConnection.IceServer>, listener: Listener) {
         this.listener = listener
+
+        // Close existing PC with same ID if any
+        peerConnections[peerId]?.let {
+            try { it.close() } catch (_: Exception) {}
+            peerConnections.remove(peerId)
+        }
+
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             iceCandidatePoolSize = 10
         }
 
-        peerConnection = factory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
+        val pc = factory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
             override fun onIceCandidate(candidate: IceCandidate) {
-                Log.d(TAG, "onIceCandidate: ${candidate.sdpMid}")
-                listener.onIceCandidate(candidate)
+                Log.d(TAG, "[$peerId] onIceCandidate: ${candidate.sdpMid}")
+                listener.onIceCandidate(peerId, candidate)
             }
 
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
 
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-                Log.d(TAG, "ICE connection state: $state")
-                listener.onIceConnectionStateChange(state)
+                Log.d(TAG, "[$peerId] ICE connection state: $state")
+                listener.onIceConnectionStateChange(peerId, state)
             }
 
             override fun onIceConnectionReceivingChange(receiving: Boolean) {}
@@ -124,48 +137,73 @@ class NativeWebRTCManager(private val context: Context) {
             override fun onRemoveStream(stream: MediaStream) {}
 
             override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
-                Log.d(TAG, "onAddTrack: ${receiver.track()?.kind()}")
-                listener.onAddTrack(receiver, streams)
+                Log.d(TAG, "[$peerId] onAddTrack: ${receiver.track()?.kind()}")
+                listener.onAddTrack(peerId, receiver, streams)
             }
 
             override fun onTrack(transceiver: RtpTransceiver) {
-                Log.d(TAG, "onTrack: ${transceiver.receiver.track()?.kind()}")
+                Log.d(TAG, "[$peerId] onTrack: ${transceiver.receiver.track()?.kind()}")
             }
 
             override fun onRemoveTrack(receiver: RtpReceiver) {
-                listener.onRemoveTrack(receiver)
+                listener.onRemoveTrack(peerId, receiver)
             }
 
             override fun onDataChannel(dc: DataChannel) {}
             override fun onSignalingChange(state: PeerConnection.SignalingState) {}
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
-                Log.d(TAG, "Connection state: $state")
+                Log.d(TAG, "[$peerId] Connection state: $state")
             }
             override fun onRenegotiationNeeded() {
-                listener.onRenegotiationNeeded()
+                // Do NOT forward to JS — the proxy fires synthetic
+                // negotiationneeded from addTrack when needed.  Native
+                // renegotiation events caused by our own track management
+                // (startLocalAudio/Video) would trigger premature offers.
+                Log.d(TAG, "[$peerId] onRenegotiationNeeded (suppressed)")
             }
             override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent?) {}
         })
 
-        Log.d(TAG, "PeerConnection created")
+        if (pc != null) {
+            peerConnections[peerId] = pc
+
+            // Auto-attach existing local tracks (getUserMedia runs before createPC)
+            localAudioTrack?.let {
+                pc.addTrack(it, listOf("stream0"))
+                Log.d(TAG, "[$peerId] Auto-attached audio track")
+            }
+            localVideoTrack?.let {
+                pc.addTrack(it, listOf("stream0"))
+                Log.d(TAG, "[$peerId] Auto-attached video track")
+            }
+
+            Log.d(TAG, "[$peerId] PeerConnection created (total: ${peerConnections.size})")
+        } else {
+            Log.e(TAG, "[$peerId] Failed to create PeerConnection")
+        }
     }
 
     // -----------------------------------------------------------------------
     // SDP
     // -----------------------------------------------------------------------
 
-    fun createOffer(callback: (SessionDescription?) -> Unit) {
-        val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
+    fun createOffer(peerId: String, callback: (SessionDescription?) -> Unit) {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] createOffer: no PeerConnection")
+            callback(null)
+            return
         }
-        peerConnection?.createOffer(object : SdpObserver {
+        // Let Unified Plan determine m-lines from attached tracks.
+        // No OfferToReceiveVideo — avoids sending video m-line for voice calls.
+        val constraints = MediaConstraints()
+        pc.createOffer(object : SdpObserver {
             override fun onCreateSuccess(sdp: SessionDescription) {
-                Log.d(TAG, "createOffer success")
+                Log.d(TAG, "[$peerId] createOffer success")
                 callback(sdp)
             }
             override fun onCreateFailure(error: String) {
-                Log.e(TAG, "createOffer failed: $error")
+                Log.e(TAG, "[$peerId] createOffer failed: $error")
                 callback(null)
             }
             override fun onSetSuccess() {}
@@ -173,18 +211,21 @@ class NativeWebRTCManager(private val context: Context) {
         }, constraints)
     }
 
-    fun createAnswer(callback: (SessionDescription?) -> Unit) {
-        val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
+    fun createAnswer(peerId: String, callback: (SessionDescription?) -> Unit) {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] createAnswer: no PeerConnection")
+            callback(null)
+            return
         }
-        peerConnection?.createAnswer(object : SdpObserver {
+        val constraints = MediaConstraints()
+        pc.createAnswer(object : SdpObserver {
             override fun onCreateSuccess(sdp: SessionDescription) {
-                Log.d(TAG, "createAnswer success")
+                Log.d(TAG, "[$peerId] createAnswer success")
                 callback(sdp)
             }
             override fun onCreateFailure(error: String) {
-                Log.e(TAG, "createAnswer failed: $error")
+                Log.e(TAG, "[$peerId] createAnswer failed: $error")
                 callback(null)
             }
             override fun onSetSuccess() {}
@@ -192,14 +233,20 @@ class NativeWebRTCManager(private val context: Context) {
         }, constraints)
     }
 
-    fun setLocalDescription(sdp: SessionDescription, callback: (Boolean) -> Unit) {
-        peerConnection?.setLocalDescription(object : SdpObserver {
+    fun setLocalDescription(peerId: String, sdp: SessionDescription, callback: (Boolean) -> Unit) {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] setLocalDescription: no PeerConnection")
+            callback(false)
+            return
+        }
+        pc.setLocalDescription(object : SdpObserver {
             override fun onSetSuccess() {
-                Log.d(TAG, "setLocalDescription success")
+                Log.d(TAG, "[$peerId] setLocalDescription success")
                 callback(true)
             }
             override fun onSetFailure(error: String) {
-                Log.e(TAG, "setLocalDescription failed: $error")
+                Log.e(TAG, "[$peerId] setLocalDescription failed: $error")
                 callback(false)
             }
             override fun onCreateSuccess(sdp: SessionDescription?) {}
@@ -207,14 +254,20 @@ class NativeWebRTCManager(private val context: Context) {
         }, sdp)
     }
 
-    fun setRemoteDescription(sdp: SessionDescription, callback: (Boolean) -> Unit) {
-        peerConnection?.setRemoteDescription(object : SdpObserver {
+    fun setRemoteDescription(peerId: String, sdp: SessionDescription, callback: (Boolean) -> Unit) {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] setRemoteDescription: no PeerConnection")
+            callback(false)
+            return
+        }
+        pc.setRemoteDescription(object : SdpObserver {
             override fun onSetSuccess() {
-                Log.d(TAG, "setRemoteDescription success")
+                Log.d(TAG, "[$peerId] setRemoteDescription success")
                 callback(true)
             }
             override fun onSetFailure(error: String) {
-                Log.e(TAG, "setRemoteDescription failed: $error")
+                Log.e(TAG, "[$peerId] setRemoteDescription failed: $error")
                 callback(false)
             }
             override fun onCreateSuccess(sdp: SessionDescription?) {}
@@ -222,16 +275,27 @@ class NativeWebRTCManager(private val context: Context) {
         }, sdp)
     }
 
-    fun addIceCandidate(candidate: IceCandidate): Boolean {
-        return peerConnection?.addIceCandidate(candidate) ?: false
+    fun addIceCandidate(peerId: String, candidate: IceCandidate): Boolean {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] addIceCandidate: no PeerConnection")
+            return false
+        }
+        return pc.addIceCandidate(candidate)
     }
 
     // -----------------------------------------------------------------------
     // Local Media
     // -----------------------------------------------------------------------
 
-    fun startLocalAudio() {
-        if (localAudioTrack != null) return
+    fun startLocalAudio(peerId: String) {
+        if (localAudioTrack != null) {
+            // Already started — add to specific PC if provided
+            if (peerId.isNotEmpty()) {
+                peerConnections[peerId]?.addTrack(localAudioTrack, listOf("stream0"))
+            }
+            return
+        }
 
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
@@ -243,12 +307,25 @@ class NativeWebRTCManager(private val context: Context) {
         localAudioTrack = factory?.createAudioTrack("audio0", localAudioSource)
         localAudioTrack?.setEnabled(true)
 
-        peerConnection?.addTrack(localAudioTrack, listOf("stream0"))
-        Log.d(TAG, "Local audio started")
+        // Add to specific PC or all active PCs
+        if (peerId.isNotEmpty()) {
+            peerConnections[peerId]?.addTrack(localAudioTrack, listOf("stream0"))
+        } else {
+            for ((_, pc) in peerConnections) {
+                pc.addTrack(localAudioTrack, listOf("stream0"))
+            }
+        }
+        Log.d(TAG, "Local audio started (peerId=$peerId, pcs=${peerConnections.size})")
     }
 
-    fun startLocalVideo(renderer: SurfaceViewRenderer? = null) {
-        if (localVideoTrack != null) return
+    fun startLocalVideo(peerId: String, renderer: SurfaceViewRenderer? = null) {
+        if (localVideoTrack != null) {
+            // Already started — add to specific PC if provided
+            if (peerId.isNotEmpty()) {
+                peerConnections[peerId]?.addTrack(localVideoTrack, listOf("stream0"))
+            }
+            return
+        }
 
         val enumerator = Camera2Enumerator(context)
         val cameraName = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
@@ -272,14 +349,21 @@ class NativeWebRTCManager(private val context: Context) {
             localVideoTrack?.addSink(renderer)
         }
 
-        peerConnection?.addTrack(localVideoTrack, listOf("stream0"))
-        Log.d(TAG, "Local video started with camera: $cameraName")
+        // Add to specific PC or all active PCs
+        if (peerId.isNotEmpty()) {
+            peerConnections[peerId]?.addTrack(localVideoTrack, listOf("stream0"))
+        } else {
+            for ((_, pc) in peerConnections) {
+                pc.addTrack(localVideoTrack, listOf("stream0"))
+            }
+        }
+        Log.d(TAG, "Local video started with camera: $cameraName (peerId=$peerId, pcs=${peerConnections.size})")
     }
 
     fun setVideoEnabled(enabled: Boolean) {
         localVideoTrack?.setEnabled(enabled)
         if (enabled && videoCapturer == null) {
-            startLocalVideo(localRenderer)
+            startLocalVideo("", localRenderer)
         }
     }
 
@@ -323,12 +407,14 @@ class NativeWebRTCManager(private val context: Context) {
         screenVideoTrack = factory?.createVideoTrack("screen0", screenVideoSource)
         screenVideoTrack?.setEnabled(true)
 
-        // Replace camera track with screen track on the peer connection
-        val videoSender = peerConnection?.senders?.firstOrNull { it.track()?.kind() == "video" }
-        if (videoSender != null) {
-            videoSender.setTrack(screenVideoTrack, false)
-        } else {
-            peerConnection?.addTrack(screenVideoTrack, listOf("screen_stream"))
+        // Replace camera track with screen track on all active peer connections
+        for ((_, pc) in peerConnections) {
+            val videoSender = pc.senders?.firstOrNull { it.track()?.kind() == "video" }
+            if (videoSender != null) {
+                videoSender.setTrack(screenVideoTrack, false)
+            } else {
+                pc.addTrack(screenVideoTrack, listOf("screen_stream"))
+            }
         }
 
         isScreenSharing = true
@@ -352,10 +438,12 @@ class NativeWebRTCManager(private val context: Context) {
         screenVideoSource?.dispose()
         screenVideoSource = null
 
-        // Restore camera track
-        val videoSender = peerConnection?.senders?.firstOrNull { it.track()?.kind() == "video" || it.track() == null }
-        if (videoSender != null && localVideoTrack != null) {
-            videoSender.setTrack(localVideoTrack, false)
+        // Restore camera track on all active peer connections
+        for ((_, pc) in peerConnections) {
+            val videoSender = pc.senders?.firstOrNull { it.track()?.kind() == "video" || it.track() == null }
+            if (videoSender != null && localVideoTrack != null) {
+                videoSender.setTrack(localVideoTrack, false)
+            }
         }
         localVideoTrack?.setEnabled(true)
         videoCapturer?.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
@@ -372,7 +460,6 @@ class NativeWebRTCManager(private val context: Context) {
 
     fun attachRemoteRenderer(renderer: SurfaceViewRenderer) {
         remoteRenderer = renderer
-        // Will be used when remote track arrives via onAddTrack
     }
 
     fun addRemoteTrackSink(track: VideoTrack) {
@@ -383,24 +470,30 @@ class NativeWebRTCManager(private val context: Context) {
     // Stats & Info
     // -----------------------------------------------------------------------
 
-    fun getConnectionState(): String {
-        return peerConnection?.connectionState()?.name ?: "UNKNOWN"
+    fun getConnectionState(peerId: String): String {
+        return peerConnections[peerId]?.connectionState()?.name ?: "UNKNOWN"
     }
 
     // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
 
-    fun closePeerConnection() {
-        try {
-            peerConnection?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing peer connection", e)
+    fun closePeerConnection(peerId: String) {
+        val pc = peerConnections.remove(peerId)
+        if (pc != null) {
+            try {
+                pc.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "[$peerId] Error closing peer connection", e)
+            }
+            Log.d(TAG, "[$peerId] PeerConnection closed (remaining: ${peerConnections.size})")
         }
-        peerConnection = null
-        stopLocalMedia()
-        listener = null
-        Log.d(TAG, "PeerConnection closed")
+
+        // Only stop local media if no more active PCs
+        if (peerConnections.isEmpty()) {
+            stopLocalMedia()
+            listener = null
+        }
     }
 
     private fun stopLocalMedia() {
@@ -424,8 +517,20 @@ class NativeWebRTCManager(private val context: Context) {
         localAudioSource = null
     }
 
+    fun closeAllPeerConnections() {
+        for ((peerId, pc) in peerConnections.toMap()) {
+            try { pc.close() } catch (_: Exception) {}
+            Log.d(TAG, "[$peerId] Closed")
+        }
+        peerConnections.clear()
+        stopLocalMedia()
+        listener = null
+        Log.d(TAG, "All PeerConnections closed")
+    }
+
     fun dispose() {
-        closePeerConnection()
+        closeAllPeerConnections()
+
         factory?.dispose()
         factory = null
         eglBase?.release()

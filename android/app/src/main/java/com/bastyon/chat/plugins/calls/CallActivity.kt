@@ -53,6 +53,12 @@ class CallActivity : Activity(), SensorEventListener {
         // Static callback for hangup from JS side
         var onCallEnded: (() -> Unit)? = null
 
+        // Static callback for ICE connected state
+        var onCallConnected: (() -> Unit)? = null
+
+        // Static callback for native hangup button
+        var onNativeHangup: (() -> Unit)? = null
+
         fun launch(context: Context, callerName: String, callType: String, callId: String, direction: String) {
             val intent = Intent(context, CallActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -170,6 +176,8 @@ class CallActivity : Activity(), SensorEventListener {
 
         // Register for call end
         onCallEnded = { runOnUiThread { finish() } }
+        // Register for call connected
+        onCallConnected = { runOnUiThread { onCallConnected() } }
 
         Log.d(TAG, "CallActivity created: $callerName, type=$callType")
     }
@@ -198,6 +206,8 @@ class CallActivity : Activity(), SensorEventListener {
         handler.removeCallbacks(timerRunnable)
         handler.removeCallbacks(hideControlsRunnable)
         onCallEnded = null
+        onCallConnected = null
+        // Note: onNativeHangup is wired by WebRTCPlugin.load() and stays alive
 
         try {
             localVideoView.release()
@@ -256,13 +266,11 @@ class CallActivity : Activity(), SensorEventListener {
         localVideoView.setMirror(true)
         localVideoView.setZOrderMediaOverlay(true)
 
-        // Attach local video
-        mgr.startLocalVideo(localVideoView)
-
-        // Make local video draggable
-        setupLocalVideoDrag()
-
-        if (!isVideoEnabled) {
+        // Attach local video only for video calls
+        if (isVideoEnabled) {
+            mgr.startLocalVideo("", localVideoView)
+            setupLocalVideoDrag()
+        } else {
             localVideoView.visibility = View.GONE
         }
     }
@@ -334,8 +342,8 @@ class CallActivity : Activity(), SensorEventListener {
     }
 
     private fun hangup() {
-        // Notify JS side to hang up
-        WebRTCPlugin.manager?.closePeerConnection()
+        // Signal JS side to hang up the call properly (sends m.call.hangup)
+        onNativeHangup?.invoke()
         finish()
     }
 

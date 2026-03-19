@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.bastyon.chat',
-  appName: 'Bastyon Chat',
+  appName: 'Forta Chat',
   webDir: 'dist',
   server: {
     androidScheme: 'https',

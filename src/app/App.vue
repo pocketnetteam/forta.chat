@@ -142,7 +142,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh; padding-top: env(safe-area-inset-top, 0px)">
+  <div class="relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh; padding-top: var(--safe-area-inset-top, 0px)">
     <TitleBar v-if="isElectron" />
     <SyncBanner />
     <div class="relative min-h-0 flex-1 overflow-hidden">

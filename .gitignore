@@ -9,6 +9,14 @@ release/
 *.app/
 Bastyon Chat.app/
 
+# Android build output
+android/app/build/
+android/build/
+android/.gradle/
+android/capacitor-cordova-android-plugins/build/
+android/capacitor-filesystem/build/
+*.apk
+
 # Vite
 *.local
 

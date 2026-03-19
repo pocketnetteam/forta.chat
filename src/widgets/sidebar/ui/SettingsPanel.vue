@@ -6,6 +6,7 @@ import { useUserStore } from "@/entities/user/model";
 import { useWallet } from "@/features/wallet/model/use-wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
+import { isNative } from "@/shared/lib/platform";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
 const authStore = useAuthStore();
@@ -15,6 +16,10 @@ const userStore = useUserStore();
 const router = useRouter();
 const { openSettingsContent } = useSidebarTab();
 const { isAvailable: walletAvailable, getBalance } = useWallet();
+
+const isElectron = !!(window as any).electronAPI?.isElectron;
+const showTor = isElectron || isNative;
+const showDisableWarning = ref(false);
 
 // --- Wallet balance ---
 const pkoinBalance = ref<number | null>(null);
@@ -38,17 +43,20 @@ watch(walletAvailable, (v) => { if (v) loadBalance(); }, { immediate: true });
 
 const { t } = useI18n();
 
-const torStatusText = computed(() => {
-  switch (torStore.status) {
-    case "started": return t("tor.connected");
-    case "running":
-    case "install": return t("tor.connecting");
-    case "failed": return t("tor.error");
-    default: return t("tor.off");
-  }
+// Tor inline status — shows as a compact badge next to the label
+const torStatusInfo = computed(() => {
+  if (!torStore.isEnabled) return null;
+  const r = torStore.verifyResult;
+  if (torStore.isVerifying) return { text: t("tor.verifying"), color: "text-text-on-main-bg-color", pulse: true, showRefresh: false };
+  if (torStore.isConnecting && torStore.info) return { text: torStore.info, color: "text-color-star-yellow", pulse: true, showRefresh: false };
+  if (torStore.isConnecting) return { text: t("tor.connecting"), color: "text-color-star-yellow", pulse: true, showRefresh: false };
+  if (torStore.status === "failed") return { text: t("tor.error"), color: "text-color-bad", pulse: false, showRefresh: false };
+  if (torStore.isConnected && r?.isTor) return { text: r.ip, color: "text-color-good", pulse: false, showRefresh: true };
+  if (torStore.isConnected && r && !r.isTor) return { text: t("tor.notUsingTor"), color: "text-color-bad", pulse: false, showRefresh: true };
+  // No verify result yet — auto-verify will kick in, show "Verifying..." instead of "Connected"
+  if (torStore.isConnected && !r) return { text: t("tor.verifying"), color: "text-text-on-main-bg-color", pulse: true, showRefresh: false };
+  return null;
 });
-
-const isElectron = !!(window as any).electronAPI?.isElectron;
 
 // Eagerly load current user's profile for the settings header
 watch(
@@ -61,25 +69,19 @@ const currentUser = computed(() =>
   authStore.address ? userStore.getUser(authStore.address) : undefined,
 );
 
-const torStatusColor = computed(() => {
-  switch (torStore.status) {
-    case "started": return "text-color-good";
-    case "running":
-    case "install": return "text-color-star-yellow";
-    case "failed": return "text-color-bad";
-    default: return "text-text-on-main-bg-color";
-  }
-});
 
-const torDotClass = computed(() => {
-  switch (torStore.status) {
-    case "started": return "bg-color-good";
-    case "running":
-    case "install": return "bg-color-star-yellow animate-pulse";
-    case "failed": return "bg-color-bad";
-    default: return "bg-neutral-400";
+const handleTorToggle = () => {
+  if (torStore.isEnabled) {
+    showDisableWarning.value = true;
+  } else {
+    torStore.toggle();
   }
-});
+};
+
+const confirmDisableTor = () => {
+  showDisableWarning.value = false;
+  torStore.toggle();
+};
 
 const handleLogout = () => {
   authStore.logout();
@@ -209,47 +211,47 @@ const handleLogout = () => {
           />
         </div>
 
-        <!-- Tor Proxy (Electron only) -->
+        <!-- Tor Proxy -->
         <div
-          v-if="isElectron"
-          class="rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          v-if="showTor"
+          class="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
         >
-          <div class="flex items-center gap-3">
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              class="shrink-0 text-text-on-main-bg-color"
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+          <span class="text-sm text-text-color">{{ t("settings.torProxy") }}</span>
+          <!-- Inline status badge -->
+          <span
+            v-if="torStatusInfo"
+            class="flex items-center gap-1 text-xs"
+            :class="[torStatusInfo.color, torStatusInfo.pulse ? 'animate-pulse' : '']"
+          >
+            <span>{{ torStatusInfo.text }}</span>
+            <!-- Small refresh icon right after text -->
+            <button
+              v-if="torStatusInfo.showRefresh"
+              class="inline-flex p-0.5 opacity-50 transition-opacity hover:opacity-100"
+              @click.stop="torStore.verify()"
             >
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            <span class="flex-1 text-sm text-text-color">{{ t("settings.torProxy") }}</span>
-            <div class="flex items-center gap-3">
-              <div class="flex items-center gap-1.5">
-                <span class="inline-block h-2 w-2 rounded-full" :class="torDotClass" />
-                <span class="text-xs font-medium" :class="torStatusColor">{{ torStatusText }}</span>
-              </div>
-              <Toggle
-                :model-value="torStore.isEnabled"
-                @update:model-value="torStore.toggle()"
-              />
-            </div>
-          </div>
-          <p
-            v-if="torStore.isConnecting && torStore.info"
-            class="mt-2 pl-8 text-xs text-color-star-yellow"
-          >
-            {{ torStore.info }}
-          </p>
-          <p
-            v-else-if="torStore.status === 'failed'"
-            class="mt-2 pl-8 text-xs text-color-bad"
-          >
-            {{ t("settings.torFailed") }}
-          </p>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
+          </span>
+          <span class="flex-1" />
+          <Toggle
+            :model-value="torStore.isEnabled"
+            @update:model-value="handleTorToggle()"
+          />
         </div>
 
         <!-- PKOIN Wallet Balance -->
@@ -307,5 +309,34 @@ const handleLogout = () => {
         </button>
       </div>
     </div>
+
+    <!-- Tor disable warning dialog -->
+    <Teleport to="body">
+      <div
+        v-if="showDisableWarning"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+        @click.self="showDisableWarning = false"
+      >
+        <div class="mx-4 max-w-sm rounded-xl bg-background-secondary-theme p-6 shadow-xl">
+          <p class="mb-4 text-sm text-text-color">
+            {{ t('tor.disableWarning') }}
+          </p>
+          <div class="flex justify-end gap-3">
+            <button
+              class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+              @click="showDisableWarning = false"
+            >
+              {{ t('common.cancel') }}
+            </button>
+            <button
+              class="rounded-lg bg-color-bad px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-80"
+              @click="confirmDisableTor()"
+            >
+              {{ t('settings.torProxy') }} Off
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

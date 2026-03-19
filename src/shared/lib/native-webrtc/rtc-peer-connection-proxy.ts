@@ -2,11 +2,15 @@
  * RTCPeerConnection proxy for native WebRTC.
  *
  * Replaces `window.RTCPeerConnection` so that matrix-js-sdk-bastyon
- * transparently uses the native WebRTC engine instead of the browser's.
+ * transparently uses the native Android/iOS WebRTC engine instead of the
+ * browser's.
  *
- * The proxy implements the subset of the RTCPeerConnection API that the
- * Matrix SDK actually uses. All SDP/ICE operations are forwarded to the
- * native Capacitor plugin.
+ * Key design:
+ * 1. Each instance gets a unique peerId so multiple PeerConnections
+ *    can coexist (SDK creates several during call setup / glare).
+ * 2. The native peer connection is created asynchronously via the
+ *    Capacitor bridge — all async methods await `_ready` first.
+ * 3. Native events include peerId — each proxy filters for its own.
  */
 
 import { NativeWebRTC } from "./native-webrtc-bridge";
@@ -14,6 +18,8 @@ import type { PluginListenerHandle } from "@capacitor/core";
 
 // Save original for fallback / non-call usage
 const OriginalRTCPeerConnection = window.RTCPeerConnection;
+
+let peerIdCounter = 0;
 
 // ICE connection state mapping: native string → RTCIceConnectionState
 const ICE_STATE_MAP: Record<string, RTCIceConnectionState> = {
@@ -26,12 +32,53 @@ const ICE_STATE_MAP: Record<string, RTCIceConnectionState> = {
   closed: "closed",
 };
 
-/**
- * A proxy RTCPeerConnection that routes all WebRTC operations to the
- * native Android layer via Capacitor bridge.
- */
 class NativeRTCPeerConnection extends EventTarget {
+  // Manual event listener tracking — EventTarget.dispatchEvent may not
+  // work correctly in Capacitor WebView for custom classes
+  private _eventHandlers: Map<string, Set<EventListenerOrEventListenerObject>> = new Map();
+
+  addEventListener(type: string, callback: EventListenerOrEventListenerObject | null, _options?: boolean | AddEventListenerOptions): void {
+    if (!callback) return;
+    if (!this._eventHandlers.has(type)) {
+      this._eventHandlers.set(type, new Set());
+    }
+    this._eventHandlers.get(type)!.add(callback);
+    super.addEventListener(type, callback, _options);
+  }
+
+  removeEventListener(type: string, callback: EventListenerOrEventListenerObject | null, _options?: boolean | EventListenerOptions): void {
+    if (!callback) return;
+    this._eventHandlers.get(type)?.delete(callback);
+    super.removeEventListener(type, callback, _options);
+  }
+
+  private _fireEvent(event: Event): void {
+    const handlers = this._eventHandlers.get(event.type);
+    if (handlers) {
+      for (const handler of handlers) {
+        try {
+          if (typeof handler === "function") {
+            handler(event);
+          } else {
+            handler.handleEvent(event);
+          }
+        } catch (e) {
+          console.error("[NativeRTCProxy] event handler error:", e);
+        }
+      }
+    }
+  }
+
+  // Unique ID for this peer connection instance
+  private _peerId: string;
+
+  // Readiness gate — all async methods await this before calling native
+  private _ready: Promise<void>;
+  private _resolveReady!: () => void;
+  private _initError: Error | null = null;
+
   // State
+  private _iceGatheringState: RTCIceGatheringState = "new";
   private _iceConnectionState: RTCIceConnectionState = "new";
   private _connectionState: RTCPeerConnectionState = "new";
   private _signalingState: RTCSignalingState = "stable";
@@ -50,26 +97,43 @@ class NativeRTCPeerConnection extends EventTarget {
 
   private listeners: PluginListenerHandle[] = [];
   private _closed = false;
+  private _iceGatheringTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config?: RTCConfiguration) {
     super();
+    this._peerId = `pc_${++peerIdCounter}_${Date.now()}`;
+    this._ready = new Promise<void>((resolve) => {
+      this._resolveReady = resolve;
+    });
     this._initNative(config);
   }
 
   private async _initNative(config?: RTCConfiguration) {
     try {
-      // Convert RTCConfiguration ice servers to plugin format
       const iceServers = (config?.iceServers ?? []).map((s) => ({
         urls: s.urls as string | string[],
         username: s.username,
         credential: s.credential as string | undefined,
       }));
 
-      await NativeWebRTC.createPeerConnection({ iceServers });
+      await NativeWebRTC.createPeerConnection({
+        peerId: this._peerId,
+        iceServers,
+      });
 
-      // Wire native events
+      // Wire native events BEFORE resolving ready
+      // Each handler filters by peerId so events from other PCs are ignored
       this.listeners.push(
         await NativeWebRTC.addListener("onIceCandidate", (data) => {
+          if (this._closed || data.peerId !== this._peerId) return;
+
+          // Track ICE gathering state
+          if (this._iceGatheringState !== "gathering") {
+            this._iceGatheringState = "gathering";
+            this.onicegatheringstatechange?.(new Event("icegatheringstatechange"));
+            this._fireEvent(new Event("icegatheringstatechange"));
+          }
+
           const candidate = new RTCIceCandidate({
             candidate: data.candidate,
             sdpMid: data.sdpMid,
@@ -79,7 +143,20 @@ class NativeRTCPeerConnection extends EventTarget {
             candidate,
           });
           this.onicecandidate?.(event);
-          this.dispatchEvent(event);
+          this._fireEvent(event);
+
+          // Schedule end-of-candidates after last candidate (reset on each new one)
+          if (this._iceGatheringTimer) clearTimeout(this._iceGatheringTimer);
+          this._iceGatheringTimer = setTimeout(() => {
+            if (this._closed) return;
+            this._iceGatheringState = "complete";
+            // null candidate signals end-of-candidates
+            const endEvent = new RTCPeerConnectionIceEvent("icecandidate", { candidate: null });
+            this.onicecandidate?.(endEvent);
+            this._fireEvent(endEvent);
+            this.onicegatheringstatechange?.(new Event("icegatheringstatechange"));
+            this._fireEvent(new Event("icegatheringstatechange"));
+          }, 500);
         })
       );
 
@@ -87,38 +164,121 @@ class NativeRTCPeerConnection extends EventTarget {
         await NativeWebRTC.addListener(
           "onIceConnectionStateChange",
           (data) => {
+            if (this._closed || data.peerId !== this._peerId) return;
             this._iceConnectionState =
               ICE_STATE_MAP[data.state] ?? "new";
+            // Map to connection state too
+            if (data.state === "connected" || data.state === "completed") {
+              this._connectionState = "connected";
+            } else if (data.state === "failed") {
+              this._connectionState = "failed";
+            } else if (data.state === "disconnected") {
+              this._connectionState = "disconnected";
+            } else if (data.state === "closed") {
+              this._connectionState = "closed";
+            }
             const event = new Event("iceconnectionstatechange");
             this.oniceconnectionstatechange?.(event);
-            this.dispatchEvent(event);
+            this._fireEvent(event);
+            const connEvent = new Event("connectionstatechange");
+            this.onconnectionstatechange?.(connEvent);
+            this._fireEvent(connEvent);
           }
         )
       );
 
       this.listeners.push(
         await NativeWebRTC.addListener("onTrack", (data) => {
-          // Create a minimal RTCTrackEvent-like object
-          // The SDK primarily checks event.track.kind
+          if (this._closed || data.peerId !== this._peerId) return;
+          console.log("[NativeRTCProxy] onTrack received:", data.kind,
+            "streamId:", data.streamId, "trackId:", data.trackId);
+
+          // Create a MediaStream with the correct stream ID from the SDP.
+          // The SDK looks up remoteSDPStreamMetadata[stream.id] so the
+          // id MUST match the msid from the remote SDP.
+          let stream: MediaStream;
+          let track: MediaStreamTrack | undefined;
+
+          try {
+            // Create dummy track first
+            if (data.kind === "video") {
+              const canvas = document.createElement("canvas");
+              canvas.width = 1;
+              canvas.height = 1;
+              const cs = canvas.captureStream(0);
+              track = cs.getVideoTracks()[0];
+            } else {
+              try {
+                const ctx = new AudioContext();
+                const osc = ctx.createOscillator();
+                const dest = ctx.createMediaStreamDestination();
+                osc.connect(dest);
+                osc.start();
+                track = dest.stream.getAudioTracks()[0];
+                if (track) track.enabled = false;
+              } catch {
+                const canvas = document.createElement("canvas");
+                canvas.width = 1;
+                canvas.height = 1;
+                const cs = canvas.captureStream(0);
+                track = cs.getVideoTracks()[0];
+              }
+            }
+
+            // Create stream with the remote SDP's stream ID
+            // MediaStream constructor with existing tracks
+            stream = new MediaStream(track ? [track] : []);
+
+            // Override the stream id to match remote SDP's msid
+            // The SDK does: this.remoteSDPStreamMetadata![stream.id].purpose
+            if (data.streamId) {
+              Object.defineProperty(stream, "id", {
+                value: data.streamId,
+                writable: false,
+              });
+            }
+          } catch (err) {
+            console.error("[NativeRTCProxy] onTrack: failed to create track:", err);
+            stream = new MediaStream();
+          }
+
+          console.log("[NativeRTCProxy] onTrack: stream.id:", stream.id,
+            "tracks:", stream.getTracks().length);
+
+          const trackObj = track ?? ({ kind: data.kind, id: data.trackId } as any);
           const trackEvent = new Event("track") as any;
-          trackEvent.track = { kind: data.kind, id: data.trackId };
-          trackEvent.streams = [];
+          trackEvent.track = trackObj;
+          trackEvent.streams = [stream];
+          trackEvent.receiver = { track: trackObj };
+          trackEvent.transceiver = { receiver: trackEvent.receiver };
           this.ontrack?.(trackEvent);
-          this.dispatchEvent(trackEvent);
+          this._fireEvent(trackEvent);
         })
       );
 
       this.listeners.push(
-        await NativeWebRTC.addListener("onRenegotiationNeeded", () => {
+        await NativeWebRTC.addListener("onRenegotiationNeeded", (data) => {
+          if (this._closed || data.peerId !== this._peerId) return;
           const event = new Event("negotiationneeded");
           this.onnegotiationneeded?.(event);
-          this.dispatchEvent(event);
+          this._fireEvent(event);
         })
       );
 
-      console.log("[NativeRTCProxy] Initialized with native WebRTC");
+      console.log("[NativeRTCProxy] Native PeerConnection ready, peerId:", this._peerId);
+      this._resolveReady();
     } catch (e) {
       console.error("[NativeRTCProxy] Failed to initialize:", e);
+      this._initError = e as Error;
+      this._resolveReady(); // resolve anyway so methods don't hang forever
+    }
+  }
+
+  /** Wait for native PC to be ready. Throws if init failed. */
+  private async _waitReady(): Promise<void> {
+    await this._ready;
+    if (this._initError) {
+      throw this._initError;
     }
   }
 
@@ -126,6 +286,9 @@ class NativeRTCPeerConnection extends EventTarget {
   // Properties
   // -----------------------------------------------------------------------
 
+  get iceGatheringState(): RTCIceGatheringState {
+    return this._iceGatheringState;
+  }
   get iceConnectionState(): RTCIceConnectionState {
     return this._iceConnectionState;
   }
@@ -149,27 +312,41 @@ class NativeRTCPeerConnection extends EventTarget {
   }
 
   // -----------------------------------------------------------------------
-  // SDP
+  // SDP — all await _waitReady() before calling native
   // -----------------------------------------------------------------------
 
   async createOffer(
     _options?: RTCOfferOptions
   ): Promise<RTCSessionDescriptionInit> {
-    const result = await NativeWebRTC.createOffer();
+    await this._waitReady();
+    console.log("[NativeRTCProxy] createOffer, peerId:", this._peerId);
+    const result = await NativeWebRTC.createOffer({ peerId: this._peerId });
+    // Sync local dummy stream IDs to match native SDP msid so that
+    // the SDK's sdp_stream_metadata keys match the SDP. We do NOT
+    // rewrite the SDP — native must receive its own unmodified SDP.
+    this._syncLocalStreamIds(result.sdp);
+    console.log("[NativeRTCProxy] createOffer result:", result.type, result.sdp?.substring(0, 80));
     return { sdp: result.sdp, type: result.type as RTCSdpType };
   }
 
   async createAnswer(
     _options?: RTCAnswerOptions
   ): Promise<RTCSessionDescriptionInit> {
-    const result = await NativeWebRTC.createAnswer();
+    await this._waitReady();
+    console.log("[NativeRTCProxy] createAnswer, peerId:", this._peerId);
+    const result = await NativeWebRTC.createAnswer({ peerId: this._peerId });
+    this._syncLocalStreamIds(result.sdp);
+    console.log("[NativeRTCProxy] createAnswer result:", result.type, result.sdp?.substring(0, 80));
     return { sdp: result.sdp, type: result.type as RTCSdpType };
   }
 
   async setLocalDescription(
     desc: RTCSessionDescriptionInit
   ): Promise<void> {
+    await this._waitReady();
+    console.log("[NativeRTCProxy] setLocalDescription:", desc.type, "peerId:", this._peerId);
     await NativeWebRTC.setLocalDescription({
+      peerId: this._peerId,
       sdp: desc.sdp ?? "",
       type: desc.type ?? "offer",
     });
@@ -180,7 +357,10 @@ class NativeRTCPeerConnection extends EventTarget {
   async setRemoteDescription(
     desc: RTCSessionDescriptionInit
   ): Promise<void> {
+    await this._waitReady();
+    console.log("[NativeRTCProxy] setRemoteDescription:", desc.type, "peerId:", this._peerId);
     await NativeWebRTC.setRemoteDescription({
+      peerId: this._peerId,
       sdp: desc.sdp ?? "",
       type: desc.type ?? "answer",
     });
@@ -192,7 +372,9 @@ class NativeRTCPeerConnection extends EventTarget {
     candidate?: RTCIceCandidateInit | RTCIceCandidate
   ): Promise<void> {
     if (!candidate || !candidate.candidate) return;
+    await this._waitReady();
     await NativeWebRTC.addIceCandidate({
+      peerId: this._peerId,
       candidate: candidate.candidate,
       sdpMid: candidate.sdpMid ?? "",
       sdpMLineIndex: candidate.sdpMLineIndex ?? 0,
@@ -200,14 +382,21 @@ class NativeRTCPeerConnection extends EventTarget {
   }
 
   // -----------------------------------------------------------------------
-  // Tracks — Matrix SDK calls addTrack, but native handles media directly.
-  // We return a stub sender so the SDK doesn't crash.
+  // Tracks — return stub senders so the SDK doesn't crash.
+  // Native side manages real media tracks independently.
   // -----------------------------------------------------------------------
 
   private _senders: RTCRtpSender[] = [];
+  private _localStreams: MediaStream[] = [];
 
-  addTrack(track: MediaStreamTrack, ...streams: MediaStream[]): RTCRtpSender {
-    // Native side manages its own tracks; return stub sender
+  addTrack(track: MediaStreamTrack, ..._streams: MediaStream[]): RTCRtpSender {
+    // Save reference to local streams for SDP msid rewriting
+    for (const s of _streams) {
+      if (!this._localStreams.find((ls) => ls.id === s.id)) {
+        this._localStreams.push(s);
+      }
+    }
+
     const sender = {
       track,
       dtmf: null,
@@ -226,6 +415,22 @@ class NativeRTCPeerConnection extends EventTarget {
       setStreams: () => {},
     } as unknown as RTCRtpSender;
     this._senders.push(sender);
+
+    // Fire negotiationneeded ONLY for outgoing calls (no remote description yet).
+    // For incoming calls, the SDK creates the answer itself after
+    // setRemoteDescription — firing negotiationneeded would trigger an
+    // unwanted immediate renegotiation that breaks the ICE connection.
+    queueMicrotask(() => {
+      if (this._closed) return;
+      if (this._remoteDescription) {
+        console.log("[NativeRTCProxy] addTrack: skipping negotiationneeded (answering)");
+        return;
+      }
+      const event = new Event("negotiationneeded");
+      this.onnegotiationneeded?.(event);
+      this._fireEvent(event);
+    });
+
     return sender;
   }
 
@@ -249,12 +454,16 @@ class NativeRTCPeerConnection extends EventTarget {
     return {} as RTCRtpTransceiver;
   }
 
+  restartIce(): void {
+    console.log("[NativeRTCProxy] restartIce (no-op — native handles ICE)");
+  }
+
   // -----------------------------------------------------------------------
-  // Data channels (SDK may probe for this)
+  // Data channels
   // -----------------------------------------------------------------------
 
   createDataChannel(
-    label: string,
+    _label: string,
     _options?: RTCDataChannelInit
   ): RTCDataChannel {
     return {} as RTCDataChannel;
@@ -278,10 +487,11 @@ class NativeRTCPeerConnection extends EventTarget {
     this._iceConnectionState = "closed";
     this._connectionState = "closed";
     this._signalingState = "closed";
+    if (this._iceGatheringTimer) clearTimeout(this._iceGatheringTimer);
 
-    NativeWebRTC.closePeerConnection().catch(() => {});
+    console.log("[NativeRTCProxy] close, peerId:", this._peerId);
+    NativeWebRTC.closePeerConnection({ peerId: this._peerId }).catch(() => {});
 
-    // Remove all native listeners
     for (const handle of this.listeners) {
       handle.remove();
     }
@@ -291,6 +501,43 @@ class NativeRTCPeerConnection extends EventTarget {
   // -----------------------------------------------------------------------
   // Internals
   // -----------------------------------------------------------------------
+
+  /**
+   * Override local dummy MediaStream IDs to match the native SDP's msid.
+   * Instead of rewriting the SDP (which breaks native setLocalDescription),
+   * we change the dummy stream IDs so the SDK's sdp_stream_metadata keys
+   * match what's in the SDP. The remote peer's browser will create streams
+   * with IDs from the SDP msid, and the metadata keys will match.
+   */
+  private _syncLocalStreamIds(sdp: string): void {
+    if (!sdp || this._localStreams.length === 0) return;
+
+    // Extract native stream IDs from a=msid:<streamId> <trackId>
+    const msidLineRegex = /a=msid:(\S+)\s+\S+/g;
+    const nativeStreamIds: string[] = [];
+    let match;
+    while ((match = msidLineRegex.exec(sdp)) !== null) {
+      if (!nativeStreamIds.includes(match[1])) {
+        nativeStreamIds.push(match[1]);
+      }
+    }
+
+    if (nativeStreamIds.length === 0) return;
+
+    // Override each dummy stream's ID to match the native stream ID
+    for (let i = 0; i < nativeStreamIds.length && i < this._localStreams.length; i++) {
+      const dummyStream = this._localStreams[i];
+      const nativeId = nativeStreamIds[i];
+      if (dummyStream.id !== nativeId) {
+        console.log(`[NativeRTCProxy] syncing local stream ID: ${dummyStream.id} → ${nativeId}`);
+        Object.defineProperty(dummyStream, "id", {
+          value: nativeId,
+          writable: false,
+          configurable: true,
+        });
+      }
+    }
+  }
 
   private _updateSignalingState() {
     const hadLocal = this._localDescription !== null;
@@ -316,13 +563,50 @@ const originalGetUserMedia =
 async function nativeGetUserMedia(
   constraints?: MediaStreamConstraints
 ): Promise<MediaStream> {
-  // Start native media capture
   const hasVideo = !!constraints?.video;
+  console.log("[NativeRTCProxy] getUserMedia, video:", hasVideo);
+
   await NativeWebRTC.startLocalMedia({ hasVideo });
 
-  // Return an empty MediaStream — the SDK needs a stream object
-  // but actual media flows through native renderers, not <video> tags
+  // Return a MediaStream with dummy tracks so the SDK sees non-empty streams.
+  // The SDK checks track count to determine if media is available.
   const stream = new MediaStream();
+
+  // Create a dummy audio track via AudioContext
+  try {
+    const ctx = new AudioContext();
+    const oscillator = ctx.createOscillator();
+    const dest = ctx.createMediaStreamDestination();
+    oscillator.connect(dest);
+    oscillator.start();
+    const audioTrack = dest.stream.getAudioTracks()[0];
+    if (audioTrack) {
+      // Mute it — real audio goes through native
+      audioTrack.enabled = false;
+      stream.addTrack(audioTrack);
+    }
+  } catch {
+    // Fallback — SDK may still work without tracks
+  }
+
+  // Create a dummy video track via canvas if video requested
+  if (hasVideo) {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const canvasStream = canvas.captureStream(1);
+      const videoTrack = canvasStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = false;
+        stream.addTrack(videoTrack);
+      }
+    } catch {
+      // Fallback
+    }
+  }
+
+  console.log("[NativeRTCProxy] getUserMedia returning stream with", stream.getTracks().length, "tracks");
   return stream;
 }
 
@@ -332,10 +616,6 @@ async function nativeGetUserMedia(
 
 let installed = false;
 
-/**
- * Install the native WebRTC proxy.
- * After calling this, any new RTCPeerConnection will use the native engine.
- */
 export function installNativeWebRTCProxy(): void {
   if (installed) return;
 
@@ -350,9 +630,6 @@ export function installNativeWebRTCProxy(): void {
   console.log("[NativeRTCProxy] Installed — WebRTC routed to native");
 }
 
-/**
- * Uninstall the proxy and restore browser WebRTC.
- */
 export function uninstallNativeWebRTCProxy(): void {
   if (!installed) return;
 

@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Bastyon Chat</string>
-    <string name="title_activity_main">Bastyon Chat</string>
+    <string name="app_name">Forta Chat</string>
+    <string name="title_activity_main">Forta Chat</string>
     <string name="package_name">com.bastyon.chat</string>
     <string name="custom_url_scheme">com.bastyon.chat</string>
 </resources>

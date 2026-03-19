@@ -29,7 +29,7 @@ const currentUser = computed(() =>
   <nav
     aria-label="Main navigation"
     class="flex h-14 shrink-0 border-t border-neutral-grad-0 bg-chat-sidebar"
-    style="padding-bottom: env(safe-area-inset-bottom, 0px)"
+    style="padding-bottom: var(--safe-area-inset-bottom, 0px)"
   >
     <!-- Contacts -->
     <button

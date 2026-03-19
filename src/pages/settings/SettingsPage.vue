@@ -3,22 +3,15 @@ import MainLayout from "@/widgets/layouts/MainLayout.vue";
 import { useThemeStore } from "@/entities/theme";
 import { useTorStore } from "@/entities/tor";
 import { Toggle } from "@/shared/ui/toggle";
+import { isNative } from "@/shared/lib/platform";
 
 const themeStore = useThemeStore();
 const torStore = useTorStore();
 const router = useRouter();
 
 const isElectron = !!(window as any).electronAPI?.isElectron;
-
-const torStatusColor = computed(() => {
-  switch (torStore.status) {
-    case "started": return "text-color-good";
-    case "running":
-    case "install": return "text-color-star-yellow";
-    case "failed": return "text-color-bad";
-    default: return "text-text-on-main-bg-color";
-  }
-});
+const showTor = isElectron || isNative;
+const showDisableWarning = ref(false);
 
 const torDotClass = computed(() => {
   switch (torStore.status) {
@@ -29,6 +22,32 @@ const torDotClass = computed(() => {
     default: return "bg-neutral-400";
   }
 });
+
+const torSubtitle = computed(() => {
+  if (!torStore.isEnabled) return null;
+  const r = torStore.verifyResult;
+  if (torStore.isVerifying) return { text: "Verifying...", color: "text-text-on-main-bg-color", spin: true };
+  if (torStore.isConnecting && torStore.info) return { text: torStore.info, color: "text-color-star-yellow", spin: false };
+  if (torStore.isConnecting) return { text: "Connecting...", color: "text-color-star-yellow", spin: false };
+  if (torStore.status === "failed") return { text: "Tor failed to start. Try toggling off and on.", color: "text-color-bad", spin: false };
+  if (torStore.isConnected && r?.isTor) return { text: r.ip, color: "text-color-good", spin: false };
+  if (torStore.isConnected && r && !r.isTor) return { text: "Not using Tor", color: "text-color-bad", spin: false };
+  if (torStore.isConnected && !r) return { text: "Verifying...", color: "text-text-on-main-bg-color", spin: true };
+  return null;
+});
+
+const handleTorToggle = () => {
+  if (torStore.isEnabled) {
+    showDisableWarning.value = true;
+  } else {
+    torStore.toggle();
+  }
+};
+
+const confirmDisableTor = () => {
+  showDisableWarning.value = false;
+  torStore.toggle();
+};
 </script>
 
 <template>
@@ -71,9 +90,9 @@ const torDotClass = computed(() => {
           />
         </div>
 
-        <!-- Tor Proxy (Electron only) -->
+        <!-- Tor Proxy -->
         <div
-          v-if="isElectron"
+          v-if="showTor"
           class="rounded-lg bg-background-secondary-theme p-4"
         >
           <div class="flex items-center justify-between">
@@ -83,31 +102,66 @@ const torDotClass = computed(() => {
               </svg>
               <span class="text-text-color">Tor Proxy</span>
             </div>
-            <div class="flex items-center gap-3">
-              <div class="flex items-center gap-1.5">
-                <span class="inline-block h-2 w-2 rounded-full" :class="torDotClass" />
-                <span class="text-xs font-medium" :class="torStatusColor">{{ torStore.statusLabel }}</span>
+            <Toggle
+              :model-value="torStore.isEnabled"
+              @update:model-value="handleTorToggle()"
+            />
+          </div>
+          <div
+            v-if="torSubtitle"
+            class="mt-1.5 flex items-center gap-2 pl-8"
+          >
+            <span class="inline-block h-1.5 w-1.5 shrink-0 rounded-full" :class="torDotClass" />
+            <span class="text-xs" :class="torSubtitle.color">{{ torSubtitle.text }}</span>
+            <button
+              v-if="torStore.isConnected && !torStore.isVerifying"
+              class="ml-auto shrink-0 p-0.5 text-text-on-main-bg-color transition-colors hover:text-text-color"
+              @click="torStore.verify()"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
+            <svg
+              v-if="torSubtitle.spin"
+              class="ml-auto h-3.5 w-3.5 shrink-0 animate-spin text-text-on-main-bg-color"
+              viewBox="0 0 24 24" fill="none"
+            >
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25" />
+              <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+            </svg>
+          </div>
+        </div>
+
+        <!-- Tor disable warning dialog -->
+        <Teleport to="body">
+          <div
+            v-if="showDisableWarning"
+            class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+            @click.self="showDisableWarning = false"
+          >
+            <div class="mx-4 max-w-sm rounded-xl bg-background-secondary-theme p-6 shadow-xl">
+              <p class="mb-4 text-sm text-text-color">
+                Disabling Tor will expose your real IP address. Your traffic will no longer be anonymous. Continue?
+              </p>
+              <div class="flex justify-end gap-3">
+                <button
+                  class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+                  @click="showDisableWarning = false"
+                >
+                  Cancel
+                </button>
+                <button
+                  class="rounded-lg bg-color-bad px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-80"
+                  @click="confirmDisableTor()"
+                >
+                  Disable Tor
+                </button>
               </div>
-              <Toggle
-                :model-value="torStore.isEnabled"
-                @update:model-value="torStore.toggle()"
-              />
             </div>
           </div>
-          <!-- Bootstrap progress line -->
-          <p
-            v-if="torStore.isConnecting && torStore.info"
-            class="mt-2 pl-8 text-xs text-color-star-yellow"
-          >
-            {{ torStore.info }}
-          </p>
-          <p
-            v-else-if="torStore.status === 'failed'"
-            class="mt-2 pl-8 text-xs text-color-bad"
-          >
-            Tor failed to start. Try toggling off and on again.
-          </p>
-        </div>
+        </Teleport>
 
         <!-- Notifications (placeholder) -->
         <div class="flex items-center justify-between rounded-lg bg-background-secondary-theme p-4">

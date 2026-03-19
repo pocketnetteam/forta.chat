@@ -1,5 +1,6 @@
 import { registerPlugin } from '@capacitor/core';
 import { isNative } from '@/shared/lib/platform';
+import { NativeWebRTC } from '@/shared/lib/native-webrtc/native-webrtc-bridge';
 
 interface NativeCallNativePlugin {
   reportIncomingCall(options: {
@@ -49,6 +50,12 @@ class NativeCallBridge {
 
     await NativeCall.addListener('callEnded', ({ callId }) => {
       console.log('[NativeCallBridge] Call ended natively:', callId);
+      this.callService?.hangup();
+    });
+
+    // Native CallActivity hangup button → proper SDK hangup
+    await NativeWebRTC.addListener('onNativeHangup', () => {
+      console.log('[NativeCallBridge] Native UI hangup');
       this.callService?.hangup();
     });
   }
