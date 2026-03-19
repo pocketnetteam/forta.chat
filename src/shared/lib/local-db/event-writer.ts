@@ -449,6 +449,9 @@ export class EventWriter {
       lastReadInboundTs: 0,
       lastReadOutboundTs: 0,
       lastMessageReaction: null,
+      isDeleted: false,
+      deletedAt: null,
+      deleteReason: null,
     });
   }
 

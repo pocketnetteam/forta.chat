@@ -69,6 +69,11 @@ export interface LocalRoom {
   /** Transport status of last message (pending/syncing/synced/failed — NOT read/delivered) */
   lastMessageLocalStatus?: LocalMessageStatus;
 
+  // Tombstone (soft-delete for cross-device sync)
+  isDeleted: boolean;            // true = user left/was kicked — hidden from UI
+  deletedAt: number | null;      // when the deletion happened (ms)
+  deleteReason: "left" | "kicked" | "banned" | "removed" | null;
+
   // Sync metadata
   syncedAt: number;              // last sync from server
   paginationToken?: string;      // Matrix backwards pagination token
@@ -397,6 +402,57 @@ export class ChatDatabase extends Dexie {
       if (affectedRoomIds.size > 0) {
         console.log(`[ChatDB] Cross-device heal: fixed previews for ${affectedRoomIds.size} rooms`);
       }
+    });
+
+    // Version 6: add tombstone fields for cross-device delete sync
+    // Adds isDeleted index so room queries can efficiently filter out tombstoned rooms.
+    // Migrates deletedRoomIds from localStorage into Dexie tombstones.
+    this.version(6).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+    }).upgrade(async (tx) => {
+      const rooms = tx.table("rooms");
+
+      // 1. Backfill all existing rooms with isDeleted = false
+      await rooms.toCollection().modify((room: any) => {
+        if (room.isDeleted === undefined) {
+          room.isDeleted = false;
+          room.deletedAt = null;
+          room.deleteReason = null;
+        }
+      });
+
+      // 2. Migrate deletedRoomIds from localStorage → Dexie tombstones
+      try {
+        const DELETED_ROOMS_KEY = "bastyon-chat-deleted-rooms";
+        const stored = localStorage.getItem(DELETED_ROOMS_KEY);
+        if (stored) {
+          const ids: string[] = JSON.parse(stored);
+          for (const roomId of ids) {
+            const existing = await rooms.get(roomId);
+            if (existing) {
+              await rooms.update(roomId, {
+                isDeleted: true,
+                deletedAt: Date.now(),
+                deleteReason: "removed" as const,
+                membership: "leave" as const,
+              });
+            }
+          }
+          // Clean up localStorage — Dexie is now the source of truth
+          localStorage.removeItem(DELETED_ROOMS_KEY);
+          console.log(`[ChatDB] Tombstone migration: migrated ${ids.length} deleted rooms from localStorage`);
+        }
+      } catch (e) {
+        console.warn("[ChatDB] Tombstone migration: failed to migrate localStorage", e);
+      }
+
+      console.log("[ChatDB] Tombstone migration v6 complete");
     });
   }
 }

@@ -106,6 +106,11 @@ export function initChatDb(
     console.warn("[local-db] Cross-device heal sweep failed:", e);
   });
 
+  // Garbage-collect tombstoned rooms older than 30 days (non-blocking)
+  rooms.garbageCollectTombstones().catch((e) => {
+    console.warn("[local-db] Tombstone GC failed:", e);
+  });
+
   currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker };
   currentUserId = userId;
 

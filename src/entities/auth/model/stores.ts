@@ -288,10 +288,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const roomId = (_room as any)?.roomId as string;
           if (roomId) chatStore.markRoomChanged(roomId);
-          // When kicked/banned from a room, remove it immediately from the UI
+          // When kicked/banned from a room, tombstone in Dexie + remove from UI
           if (prevMembership === "join" && (membership === "leave" || membership === "ban")) {
             if (roomId) {
-              chatStore.handleKicked(roomId);
+              chatStore.handleKicked(roomId, membership === "ban" ? "banned" : "kicked");
             }
           }
           chatStore.refreshRooms();
