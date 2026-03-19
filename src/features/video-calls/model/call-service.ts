@@ -168,6 +168,7 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
         import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
           nativeCallBridge.reportCallConnected(call.callId);
         }).catch(() => {});
+        NativeWebRTC.updateCallStatus({ status: "Connected", duration: "" }).catch(() => {});
       }
     }
 

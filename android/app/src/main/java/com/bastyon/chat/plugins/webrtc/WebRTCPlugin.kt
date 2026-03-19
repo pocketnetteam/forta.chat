@@ -265,6 +265,11 @@ class WebRTCPlugin : Plugin() {
         val callId = call.getString("callId") ?: ""
         val direction = call.getString("direction") ?: "outgoing"
 
+        // Start foreground service to keep call alive in background
+        com.bastyon.chat.plugins.calls.CallForegroundService.start(
+            context, callerName, callType
+        )
+
         com.bastyon.chat.plugins.calls.CallActivity.launch(
             context, callerName, callType, callId, direction
         )
@@ -274,6 +279,17 @@ class WebRTCPlugin : Plugin() {
     @PluginMethod
     fun dismissCallUI(call: PluginCall) {
         com.bastyon.chat.plugins.calls.CallActivity.onCallEnded?.invoke()
+        com.bastyon.chat.plugins.calls.CallForegroundService.stop(context)
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun updateCallStatus(call: PluginCall) {
+        val status = call.getString("status") ?: ""
+        val duration = call.getString("duration") ?: ""
+        com.bastyon.chat.plugins.calls.CallForegroundService.updateStatus(
+            context, status, duration
+        )
         call.resolve()
     }
 

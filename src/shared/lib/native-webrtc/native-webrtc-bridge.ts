@@ -49,6 +49,10 @@ export interface NativeWebRTCPlugin {
     direction: string;
   }): Promise<void>;
   dismissCallUI(): Promise<void>;
+  updateCallStatus(options: {
+    status: string;
+    duration: string;
+  }): Promise<void>;
 
   // Events from native → JS
   addListener(
