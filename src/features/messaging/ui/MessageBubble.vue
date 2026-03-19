@@ -54,6 +54,7 @@ const emit = defineEmits<{
   delete: [message: Message];
   forward: [message: Message];
   resize: [];
+  retryMedia: [message: Message];
 }>();
 
 const handleToggleReaction = (emoji: string) => {
@@ -179,6 +180,11 @@ const senderColor = computed(() => SENDER_COLORS[hashStr(props.message.senderId)
 const msgStatus = computed(() => props.message.status);
 const isRead = computed(() => props.message.status === MessageStatus.read);
 const isSending = computed(() => props.message.status === MessageStatus.sending);
+const isUploading = computed(() =>
+  props.message.status === MessageStatus.sending &&
+  props.message.uploadProgress !== undefined
+);
+const isFailed = computed(() => props.message.status === MessageStatus.failed);
 
 const fileIcon = computed(() => {
   const type = props.message.fileInfo?.type ?? "";
@@ -393,9 +399,28 @@ const replyPreviewSender = computed(() => {
             Failed to load image
           </div>
           <img v-else-if="fileState.objectUrl" :src="fileState.objectUrl" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" />
-          <!-- Sending overlay -->
-          <div v-if="isSending" class="absolute inset-0 flex items-center justify-center bg-black/30">
+          <!-- Upload progress overlay -->
+          <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
+            <svg class="h-14 w-14" viewBox="0 0 36 36">
+              <circle cx="18" cy="18" r="15" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2.5" />
+              <circle cx="18" cy="18" r="15" fill="none" stroke="white" stroke-width="2.5"
+                :stroke-dasharray="94.25" :stroke-dashoffset="94.25 - (94.25 * (message.uploadProgress ?? 0) / 100)"
+                stroke-linecap="round" transform="rotate(-90 18 18)" class="transition-[stroke-dashoffset] duration-300" />
+            </svg>
+            <span class="absolute text-sm font-medium text-white">{{ message.uploadProgress }}%</span>
+          </div>
+          <!-- Sending spinner (no progress info, legacy fallback) -->
+          <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <div class="h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
+          </div>
+          <!-- Failed overlay with retry -->
+          <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center bg-black/40">
+            <button class="flex flex-col items-center gap-1 text-white" @click.stop="emit('retryMedia', message)">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              <span class="text-xs font-medium">{{ t('message.retry') }}</span>
+            </button>
           </div>
           <div v-if="themeStore.showTimestamps && !message.fileInfo?.caption" class="absolute bottom-1 right-2 flex items-center gap-1 rounded-full bg-black/40 px-2 py-0.5">
             <span class="text-[10px] text-white/90">{{ time }}</span>
