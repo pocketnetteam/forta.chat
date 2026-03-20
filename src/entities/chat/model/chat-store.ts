@@ -785,10 +785,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
             const existing = existingMap.get(r.id);
             if (existing) {
-              // Existing room: update metadata + monotonically advance updatedAt
-              const updates: typeof metadataFields & { updatedAt?: number } = { ...metadataFields };
+              // Existing room: update metadata + monotonically advance timestamps
+              const updates: typeof metadataFields & { updatedAt?: number; lastMessageTimestamp?: number } = { ...metadataFields };
               if (r.updatedAt > (existing.updatedAt ?? 0)) {
                 updates.updatedAt = r.updatedAt;
+              }
+              // Keep lastMessageTimestamp in sync for correct sort order.
+              // Matrix SDK timeline has the freshest data; advance monotonically
+              // so EventWriter writes are never rolled back.
+              const matrixTs = r.lastMessage?.timestamp;
+              if (matrixTs && matrixTs > (existing.lastMessageTimestamp ?? 0)) {
+                updates.lastMessageTimestamp = matrixTs;
               }
               await dbKit.rooms.updateRoom(r.id, updates);
             } else {
