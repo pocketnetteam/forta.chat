@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.tor
+package com.forta.chat.plugins.tor
 
 import android.util.Log
 import com.getcapacitor.JSObject

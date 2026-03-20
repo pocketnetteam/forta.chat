@@ -36,7 +36,7 @@
         </provider>
 
         <service
-            android:name="com.bastyon.chat.plugins.calls.CallConnectionService"
+            android:name="com.forta.chat.plugins.calls.CallConnectionService"
             android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
             android:exported="true">
             <intent-filter>
@@ -45,7 +45,7 @@
         </service>
 
         <activity
-            android:name="com.bastyon.chat.plugins.calls.IncomingCallActivity"
+            android:name="com.forta.chat.plugins.calls.IncomingCallActivity"
             android:showOnLockScreen="true"
             android:turnScreenOn="true"
             android:exported="false"
@@ -53,7 +53,7 @@
             android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
 
         <activity
-            android:name="com.bastyon.chat.plugins.calls.CallActivity"
+            android:name="com.forta.chat.plugins.calls.CallActivity"
             android:showOnLockScreen="true"
             android:turnScreenOn="true"
             android:exported="false"
@@ -63,7 +63,7 @@
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
         <service
-            android:name="com.bastyon.chat.plugins.calls.CallForegroundService"
+            android:name="com.forta.chat.plugins.calls.CallForegroundService"
             android:foregroundServiceType="phoneCall"
             android:exported="false" />
     </application>

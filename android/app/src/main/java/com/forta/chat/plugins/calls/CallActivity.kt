@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.calls
+package com.forta.chat.plugins.calls
 
 import android.app.Activity
 import android.app.PictureInPictureParams
@@ -22,9 +22,9 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.ImageButton
 import android.widget.TextView
-import com.bastyon.chat.R
-import com.bastyon.chat.plugins.webrtc.NativeWebRTCManager
-import com.bastyon.chat.plugins.webrtc.WebRTCPlugin
+import com.forta.chat.R
+import com.forta.chat.plugins.webrtc.NativeWebRTCManager
+import com.forta.chat.plugins.webrtc.WebRTCPlugin
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoTrack

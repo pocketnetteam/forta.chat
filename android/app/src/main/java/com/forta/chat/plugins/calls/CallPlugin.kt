@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.calls
+package com.forta.chat.plugins.calls
 
 import android.content.Intent
 import android.os.Bundle

@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.calls
+package com.forta.chat.plugins.calls
 
 import android.app.NotificationChannel
 import android.app.NotificationManager

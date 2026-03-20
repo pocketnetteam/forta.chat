@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.filetransfer
+package com.forta.chat.plugins.filetransfer
 
 import android.net.Uri
 import android.util.Log

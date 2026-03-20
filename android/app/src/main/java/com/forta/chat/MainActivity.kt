@@ -1,14 +1,14 @@
-package com.bastyon.chat
+package com.forta.chat
 
 import android.os.Bundle
 import android.view.View
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.getcapacitor.BridgeActivity
-import com.bastyon.chat.plugins.tor.TorPlugin
-import com.bastyon.chat.plugins.calls.CallPlugin
-import com.bastyon.chat.plugins.filetransfer.TorFilePlugin
-import com.bastyon.chat.plugins.webrtc.WebRTCPlugin
+import com.forta.chat.plugins.tor.TorPlugin
+import com.forta.chat.plugins.calls.CallPlugin
+import com.forta.chat.plugins.filetransfer.TorFilePlugin
+import com.forta.chat.plugins.webrtc.WebRTCPlugin
 
 class MainActivity : BridgeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {

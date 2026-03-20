@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.webrtc
+package com.forta.chat.plugins.webrtc
 
 import android.app.Activity
 import android.content.Intent
@@ -36,7 +36,7 @@ class WebRTCPlugin : Plugin() {
         manager?.initialize()
 
         // Wire CallActivity native hangup → JS event
-        com.bastyon.chat.plugins.calls.CallActivity.onNativeHangup = {
+        com.forta.chat.plugins.calls.CallActivity.onNativeHangup = {
             notifyListeners("onNativeHangup", JSObject())
         }
 
@@ -114,7 +114,7 @@ class WebRTCPlugin : Plugin() {
                     // Notify CallActivity when connected
                     if (state == PeerConnection.IceConnectionState.CONNECTED ||
                         state == PeerConnection.IceConnectionState.COMPLETED) {
-                        com.bastyon.chat.plugins.calls.CallActivity.onCallConnected?.invoke()
+                        com.forta.chat.plugins.calls.CallActivity.onCallConnected?.invoke()
                     }
                 }
 
@@ -361,11 +361,11 @@ class WebRTCPlugin : Plugin() {
         val direction = call.getString("direction") ?: "outgoing"
 
         // Start foreground service to keep call alive in background
-        com.bastyon.chat.plugins.calls.CallForegroundService.start(
+        com.forta.chat.plugins.calls.CallForegroundService.start(
             context, callerName, callType
         )
 
-        com.bastyon.chat.plugins.calls.CallActivity.launch(
+        com.forta.chat.plugins.calls.CallActivity.launch(
             context, callerName, callType, callId, direction
         )
         call.resolve()
@@ -373,8 +373,8 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun dismissCallUI(call: PluginCall) {
-        com.bastyon.chat.plugins.calls.CallActivity.onCallEnded?.invoke()
-        com.bastyon.chat.plugins.calls.CallForegroundService.stop(context)
+        com.forta.chat.plugins.calls.CallActivity.onCallEnded?.invoke()
+        com.forta.chat.plugins.calls.CallForegroundService.stop(context)
         call.resolve()
     }
 
@@ -382,7 +382,7 @@ class WebRTCPlugin : Plugin() {
     fun updateCallStatus(call: PluginCall) {
         val status = call.getString("status") ?: ""
         val duration = call.getString("duration") ?: ""
-        com.bastyon.chat.plugins.calls.CallForegroundService.updateStatus(
+        com.forta.chat.plugins.calls.CallForegroundService.updateStatus(
             context, status, duration
         )
         call.resolve()

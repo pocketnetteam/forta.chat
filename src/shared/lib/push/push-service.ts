@@ -54,8 +54,8 @@ class PushService {
         await matrixClient.setPusher({
           pushkey: token,
           kind: 'http',
-          app_id: 'com.bastyon.chat',
-          app_display_name: 'Bastyon Chat',
+          app_id: 'com.forta.chat',
+          app_display_name: 'Forta Chat',
           device_display_name: 'Android',
           lang: 'en',
           data: {

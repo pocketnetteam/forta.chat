@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.webrtc
+package com.forta.chat.plugins.webrtc
 
 import android.content.Context
 import android.content.Intent

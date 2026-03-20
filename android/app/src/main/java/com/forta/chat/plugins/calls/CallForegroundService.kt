@@ -1,4 +1,4 @@
-package com.bastyon.chat.plugins.calls
+package com.forta.chat.plugins.calls
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -33,10 +33,10 @@ class CallForegroundService : Service() {
         private const val NOTIFICATION_ID = 10001
         private const val WAKELOCK_TAG = "bastyon:call_wakelock"
 
-        const val ACTION_START = "com.bastyon.chat.CALL_START"
-        const val ACTION_STOP = "com.bastyon.chat.CALL_STOP"
-        const val ACTION_UPDATE = "com.bastyon.chat.CALL_UPDATE"
-        const val ACTION_HANGUP = "com.bastyon.chat.CALL_HANGUP"
+        const val ACTION_START = "com.forta.chat.CALL_START"
+        const val ACTION_STOP = "com.forta.chat.CALL_STOP"
+        const val ACTION_UPDATE = "com.forta.chat.CALL_UPDATE"
+        const val ACTION_HANGUP = "com.forta.chat.CALL_HANGUP"
 
         const val EXTRA_CALLER_NAME = "callerName"
         const val EXTRA_CALL_TYPE = "callType"
