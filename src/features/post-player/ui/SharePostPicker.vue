@@ -6,7 +6,6 @@ import { BottomSheet } from "@/shared/ui/bottom-sheet";
 import { UserAvatar } from "@/entities/user";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
-import { useNativeShare } from "@/shared/lib/composables/use-native-share";
 
 interface Props {
   show: boolean;
@@ -21,15 +20,6 @@ const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const { resolve: resolveRoomName } = useResolvedRoomName();
-const { share: nativeShare } = useNativeShare();
-
-const handleNativeShare = async () => {
-  await nativeShare({
-    title: props.postTitle || "Forta Chat",
-    text: props.postTitle,
-    url: props.postLink,
-  });
-};
 
 const search = ref("");
 const selectedRoomIds = ref<Set<string>>(new Set());
@@ -98,18 +88,6 @@ const handleClose = () => {
         {{ selectedRoomIds.size }}
       </span>
     </div>
-
-    <button
-      class="mb-3 flex w-full items-center gap-3 rounded-lg bg-chat-input-bg px-3 py-2.5 text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
-      @click="handleNativeShare"
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
-        <polyline points="16 6 12 2 8 6" />
-        <line x1="12" y1="2" x2="12" y2="15" />
-      </svg>
-      {{ t("share.nativeShare") }}
-    </button>
 
     <input
       v-model="search"

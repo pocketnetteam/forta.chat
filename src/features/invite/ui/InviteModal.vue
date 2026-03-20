@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { useAuthStore } from "@/entities/auth";
+import { useNativeShare } from "@/shared/lib/composables/use-native-share";
+import { isNative } from "@/shared/lib/platform";
 
 const props = defineProps<{ show: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
 const { t } = useI18n();
 const authStore = useAuthStore();
+const { share } = useNativeShare();
 
 const copied = ref(false);
 
@@ -23,6 +26,14 @@ const copyLink = async () => {
   } catch {
     // Fallback: input field has @focus select
   }
+};
+
+const handleNativeShare = async () => {
+  await share({
+    title: t("invite.title"),
+    text: "Join me on Forta Chat!",
+    url: inviteLink.value,
+  });
 };
 
 const shareUrl = (platform: string) => {
@@ -77,8 +88,22 @@ const shareUrl = (platform: string) => {
         </button>
       </div>
 
-      <!-- Share buttons -->
-      <div class="flex w-full flex-col gap-2">
+      <!-- Native share (Android/iOS) -->
+      <button
+        v-if="isNative"
+        class="btn-press flex w-full items-center justify-center gap-2 rounded-lg bg-color-bg-ac py-3 text-sm font-medium text-white transition-colors hover:bg-color-bg-ac-1"
+        @click="handleNativeShare"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+          <polyline points="16 6 12 2 8 6" />
+          <line x1="12" y1="2" x2="12" y2="15" />
+        </svg>
+        {{ t("share.nativeShare") }}
+      </button>
+
+      <!-- Web share buttons (browser only) -->
+      <div v-else class="flex w-full flex-col gap-2">
         <span class="text-xs font-medium uppercase tracking-wider text-text-on-main-bg-color">
           {{ t("invite.shareOn") }}
         </span>
