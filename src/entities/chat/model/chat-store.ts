@@ -243,7 +243,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
           const createTs = createEvent?.event?.origin_server_ts;
           if (createTs && typeof createTs === "number") return createTs;
         } catch { /* ignore */ }
-        return Date.now(); // last resort fallback
+        return 1; // last resort: use minimal timestamp (never Date.now() — inflates sort)
       }
       return 0;
     })(),
@@ -622,8 +622,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const aPinned = pinnedRoomIds.value.has(a.id) ? 1 : 0;
         const bPinned = pinnedRoomIds.value.has(b.id) ? 1 : 0;
         if (aPinned !== bPinned) return bPinned - aPinned;
-        // Sort by last message time ONLY — updatedAt gets polluted by Matrix
-        // state events (member joins etc.) which inflate it to ~Date.now()
+        // Tier 1: joined rooms ALWAYS above invites
+        const aInvite = a.membership === "invite" ? 1 : 0;
+        const bInvite = b.membership === "invite" ? 1 : 0;
+        if (aInvite !== bInvite) return aInvite - bInvite;
+        // Tier 2: sort by last message time (within same membership tier)
         const aTime = a.lastMessage?.timestamp ?? 0;
         const bTime = b.lastMessage?.timestamp ?? 0;
         return bTime - aTime;
@@ -1046,10 +1049,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
             const existingRoom = existingMap.get(roomId);
             if (existingRoom) {
-              // Monotonically advance updatedAt
-              const updates: typeof metadataFields & { updatedAt?: number } = { ...metadataFields };
+              // Monotonically advance updatedAt and lastMessageTimestamp
+              const updates: typeof metadataFields & { updatedAt?: number; lastMessageTimestamp?: number } = { ...metadataFields };
               if (r.updatedAt > (existingRoom.updatedAt ?? 0)) {
                 updates.updatedAt = r.updatedAt;
+              }
+              const matrixTs = r.lastMessage?.timestamp;
+              if (matrixTs && matrixTs > (existingRoom.lastMessageTimestamp ?? 0)) {
+                updates.lastMessageTimestamp = matrixTs;
               }
               await dbKit.rooms.updateRoom(roomId, updates);
             } else {

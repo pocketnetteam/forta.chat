@@ -20,12 +20,14 @@ export class RoomRepository {
     return rooms;
   }
 
-  /** Sort key: ONLY use lastMessageTimestamp (actual message time).
-   *  Do NOT fall back to updatedAt — it gets polluted by Matrix state events
-   *  (member joins, room creation) which set it to ~Date.now(), pushing
-   *  rooms without messages above rooms with real messages. */
+  /** Sort key: two-tier — joined rooms always above invites, then by lastMessageTimestamp.
+   *  Invites are penalized with a large negative offset so they NEVER float above
+   *  active chats, regardless of any timestamp pollution from sync. */
   private sortKey(r: LocalRoom): number {
-    return r.lastMessageTimestamp || 0;
+    const ts = r.lastMessageTimestamp || 0;
+    // Invites get a massive penalty: pushed below all joined rooms with messages.
+    // Using -1e15 (~31,000 years offset) guarantees invites sort below any real timestamp.
+    return r.membership === "invite" ? ts - 1e15 : ts;
   }
 
   /** Get all joined rooms sorted by last activity (newest first), excluding tombstones */
