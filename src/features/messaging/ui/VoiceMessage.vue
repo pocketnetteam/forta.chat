@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import type { Message } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
+import { useAudioPlayback } from "../model/use-audio-playback";
+import { getChatDb } from "@/shared/lib/local-db";
 
 interface Props {
   message: Message;
@@ -13,11 +15,30 @@ const props = defineProps<Props>();
 const { getState, download } = useFileDownload();
 const fileState = computed(() => getState(props.message.id));
 
-const audio = ref<HTMLAudioElement | null>(null);
-const isPlaying = ref(false);
-const currentTime = ref(0);
-const playbackRate = ref(1);
+const playback = useAudioPlayback();
+
+const active = playback.isActive(props.message.id);
+const playing = playback.isPlaying(props.message.id);
+
 const hasListened = ref(false);
+
+// Check persistent listened state on mount
+onMounted(async () => {
+  if (props.message.fileInfo?.url) {
+    download(props.message);
+  }
+  try {
+    hasListened.value = await getChatDb().listened.isListened(props.message.id);
+  } catch { /* DB not ready — treat as not listened */ }
+});
+
+// Mark as listened when playback starts for this message
+watch(playing, (isPlaying) => {
+  if (isPlaying && !hasListened.value) {
+    hasListened.value = true;
+    getChatDb().listened.markListened(props.message.id).catch(() => {});
+  }
+});
 
 const totalDuration = computed(() => props.message.fileInfo?.duration ?? 0);
 
@@ -28,36 +49,33 @@ const formatTime = (seconds: number) => {
 };
 
 const displayTime = computed(() => {
-  if (isPlaying.value || currentTime.value > 0) {
-    return formatTime(currentTime.value);
-  }
-  return formatTime(totalDuration.value);
+  if (!active.value) return formatTime(totalDuration.value);
+  return `${formatTime(playback.currentTime.value)} / ${formatTime(totalDuration.value)}`;
 });
 
-// Waveform: use stored data or generate from audio buffer
+// Waveform
 const waveform = ref<number[]>(props.message.fileInfo?.waveform ?? []);
 const BARS = 40;
 
 const normalizedWaveform = computed(() => {
   if (waveform.value.length === 0) return Array(BARS).fill(0.15);
-  // Resample to BARS bars
   const src = waveform.value;
   const result: number[] = [];
   for (let i = 0; i < BARS; i++) {
     const idx = Math.floor((i / BARS) * src.length);
     result.push(src[idx] ?? 0.15);
   }
-  // Normalize
   const max = Math.max(...result, 0.01);
   return result.map(v => Math.max(0.08, v / max));
 });
 
-const progress = computed(() => {
+const currentProgress = computed(() => {
+  if (!active.value) return 0;
   if (totalDuration.value === 0) return 0;
-  return currentTime.value / totalDuration.value;
+  return playback.currentTime.value / totalDuration.value;
 });
 
-const playedBars = computed(() => Math.floor(progress.value * BARS));
+const playedBars = computed(() => Math.floor(currentProgress.value * BARS));
 
 // Generate waveform from audio buffer when no stored data
 const generateWaveform = async (url: string) => {
@@ -83,7 +101,8 @@ const generateWaveform = async (url: string) => {
   } catch { /* ignore */ }
 };
 
-const initAudio = async () => {
+// Ensure file is downloaded, then toggle playback via global singleton
+const handleTogglePlay = async () => {
   if (!fileState.value.objectUrl) {
     await download(props.message);
   }
@@ -92,60 +111,79 @@ const initAudio = async () => {
 
   generateWaveform(url);
 
-  audio.value = new Audio(url);
-  audio.value.playbackRate = playbackRate.value;
-
-  audio.value.ontimeupdate = () => {
-    currentTime.value = audio.value?.currentTime ?? 0;
-  };
-  audio.value.onended = () => {
-    isPlaying.value = false;
-    currentTime.value = 0;
-  };
+  playback.togglePlay({
+    messageId: props.message.id,
+    roomId: props.message.roomId,
+    objectUrl: url,
+    duration: totalDuration.value,
+  });
 };
 
-const togglePlay = async () => {
-  if (!audio.value) await initAudio();
-  if (!audio.value) return;
+// Drag-seek via pointer events
+const isDragging = ref(false);
+const waveformEl = ref<HTMLElement | null>(null);
 
-  if (isPlaying.value) {
-    audio.value.pause();
-    isPlaying.value = false;
+const getRatioFromPointer = (e: PointerEvent): number => {
+  if (!waveformEl.value) return 0;
+  const rect = waveformEl.value.getBoundingClientRect();
+  return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+};
+
+const onPointerDown = (e: PointerEvent) => {
+  if (!active.value) return;
+  isDragging.value = true;
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  playback.seekByRatio(getRatioFromPointer(e));
+};
+
+const onPointerMove = (e: PointerEvent) => {
+  if (!isDragging.value) return;
+  playback.seekByRatio(getRatioFromPointer(e));
+};
+
+const onPointerUp = () => {
+  isDragging.value = false;
+};
+
+// Double-tap skip +/-5s
+const skipIndicator = ref<"fwd" | "bwd" | null>(null);
+let skipTimeout: ReturnType<typeof setTimeout> | null = null;
+let lastTapTime = 0;
+let lastTapX = 0;
+
+const onDoubleTap = (e: PointerEvent) => {
+  if (!active.value) return;
+  const now = Date.now();
+  if (now - lastTapTime < 350) {
+    // Double tap detected
+    if (!waveformEl.value) return;
+    const rect = waveformEl.value.getBoundingClientRect();
+    const mid = rect.left + rect.width / 2;
+    if (lastTapX < mid && e.clientX < mid) {
+      playback.skipBackward(5);
+      showSkipIndicator("bwd");
+    } else if (lastTapX >= mid && e.clientX >= mid) {
+      playback.skipForward(5);
+      showSkipIndicator("fwd");
+    }
+    lastTapTime = 0;
   } else {
-    await audio.value.play();
-    isPlaying.value = true;
-    hasListened.value = true;
+    lastTapTime = now;
+    lastTapX = e.clientX;
   }
 };
 
-const seek = (e: MouseEvent) => {
-  if (!audio.value || totalDuration.value === 0) return;
-  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  audio.value.currentTime = ratio * totalDuration.value;
-  currentTime.value = audio.value.currentTime;
+const showSkipIndicator = (dir: "fwd" | "bwd") => {
+  if (skipTimeout) clearTimeout(skipTimeout);
+  skipIndicator.value = dir;
+  skipTimeout = setTimeout(() => {
+    skipIndicator.value = null;
+  }, 600);
 };
 
-const cycleSpeed = () => {
-  const speeds = [1, 1.5, 2];
-  const idx = speeds.indexOf(playbackRate.value);
-  playbackRate.value = speeds[(idx + 1) % speeds.length];
-  if (audio.value) audio.value.playbackRate = playbackRate.value;
+const handleCycleSpeed = () => {
+  playback.cycleSpeed();
 };
-
-onMounted(() => {
-  // Auto-download for voice messages
-  if (props.message.fileInfo?.url) {
-    download(props.message);
-  }
-});
-
-onUnmounted(() => {
-  if (audio.value) {
-    audio.value.pause();
-    audio.value = null;
-  }
-});
 </script>
 
 <template>
@@ -154,15 +192,23 @@ onUnmounted(() => {
     <button
       class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors"
       :class="props.isOwn ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-color-bg-ac/10 text-color-bg-ac hover:bg-color-bg-ac/20'"
-      @click="togglePlay"
+      @click="handleTogglePlay"
     >
       <div v-if="fileState.loading" class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-      <svg v-else-if="!isPlaying" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+      <svg v-else-if="!playing" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
       <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
     </button>
 
     <!-- Waveform + progress -->
-    <div class="flex min-w-0 flex-1 cursor-pointer flex-col gap-1" @click="seek">
+    <div
+      ref="waveformEl"
+      class="relative flex min-w-0 flex-1 cursor-pointer touch-none select-none flex-col gap-1"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+      @click="onDoubleTap"
+    >
       <div class="flex h-6 items-end gap-[2px]">
         <div
           v-for="(v, i) in normalizedWaveform"
@@ -174,6 +220,22 @@ onUnmounted(() => {
           :style="{ height: `${Math.max(3, v * 24)}px` }"
         />
       </div>
+
+      <!-- Skip indicator -->
+      <Transition name="fade">
+        <div
+          v-if="skipIndicator"
+          class="pointer-events-none absolute inset-0 flex items-center justify-center"
+        >
+          <span
+            class="rounded-full px-2 py-0.5 text-[10px] font-bold"
+            :class="props.isOwn ? 'bg-white/30 text-white' : 'bg-color-bg-ac/20 text-color-bg-ac'"
+          >
+            {{ skipIndicator === 'fwd' ? '+5s' : '-5s' }}
+          </span>
+        </div>
+      </Transition>
+
       <div class="flex items-center justify-between">
         <span class="text-[11px] tabular-nums" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           {{ displayTime }}
@@ -183,13 +245,25 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Speed button -->
+    <!-- Speed button — only shown when active -->
     <button
+      v-if="active"
       class="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums transition-colors"
       :class="props.isOwn ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-color-bg-ac/10 text-color-bg-ac hover:bg-color-bg-ac/20'"
-      @click="cycleSpeed"
+      @click="handleCycleSpeed"
     >
-      {{ playbackRate }}x
+      {{ playback.playbackRate.value }}x
     </button>
   </div>
 </template>
+
+<style scoped>
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+</style>
