@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { useChatStore } from "@/entities/chat";
+import { useChatStore, MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
+import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
+import { useFileDownload } from "@/features/messaging/model/use-file-download";
+import { getChatDb } from "@/shared/lib/local-db";
 import { ChannelView } from "@/features/channels";
 import { useChannelStore } from "@/entities/channel";
 import { MessageList, MessageInput } from "@/features/messaging";
@@ -31,6 +34,42 @@ const channelStore = useChannelStore();
 const emit = defineEmits<{ back: [] }>();
 
 const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
+
+// --- Auto-chain playback for voice messages ---
+const playback = useAudioPlayback();
+const fileDownload = useFileDownload();
+
+playback.setOnEnded(async (endedMessageId: string, roomId: string) => {
+  const messages = chatStore.activeMessages;
+  const voiceMessages = messages.filter((m) => m.type === MessageType.audio);
+  const endedIdx = voiceMessages.findIndex((m) => m.id === endedMessageId);
+  if (endedIdx === -1) return;
+
+  const db = getChatDb();
+  // Look for the next unlistened voice message after the one that just ended
+  for (let i = endedIdx + 1; i < voiceMessages.length; i++) {
+    const next = voiceMessages[i];
+    if (next.roomId !== roomId) continue;
+    const listened = await db.listened.isListened(next.id);
+    if (listened) continue;
+
+    // Found next unlistened voice message — download if needed and play
+    if (!next.fileInfo) break;
+    let objectUrl = fileDownload.getState(next.id).objectUrl;
+    if (!objectUrl) {
+      objectUrl = (await fileDownload.download(next)) ?? null;
+    }
+    if (!objectUrl) break;
+
+    playback.play({
+      messageId: next.id,
+      roomId: next.roomId,
+      objectUrl,
+      duration: next.fileInfo.duration ?? 0,
+    });
+    return;
+  }
+});
 
 watch(() => chatStore.activeRoomId, (roomId) => {
   if (roomId) channelStore.clearActiveChannel();

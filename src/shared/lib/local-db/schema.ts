@@ -170,6 +170,11 @@ export interface LocalAttachment {
   uploadProgress?: number;       // 0-100
 }
 
+/** Listened voice message marker (persisted locally) */
+export interface ListenedMessage {
+  messageId: string;               // PK: Matrix event ID or clientId
+}
+
 /** Queued decryption retry job */
 export interface DecryptionJob {
   id?: number;                   // Auto PK
@@ -196,6 +201,7 @@ export class ChatDatabase extends Dexie {
   syncState!: Table<SyncStateEntry>;
   attachments!: Table<LocalAttachment>;
   decryptionQueue!: Table<DecryptionJob>;
+  listenedMessages!: Table<ListenedMessage>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -469,6 +475,18 @@ export class ChatDatabase extends Dexie {
       syncState: "key",
       attachments: "++id, messageLocalId, status",
       decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+    });
+
+    // Version 8: add listenedMessages table for persisting voice message listened state
+    this.version(8).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
     });
   }
 }

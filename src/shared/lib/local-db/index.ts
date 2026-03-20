@@ -14,8 +14,10 @@ export type {
   SyncStateEntry,
   LocalAttachment,
   DecryptionJob,
+  ListenedMessage,
 } from "./schema";
 export { DecryptionWorker } from "./decryption-worker";
+export { ListenedRepository } from "./listened-repository";
 
 export { localToMessage, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "./mappers";
 export { MessageRepository } from "./message-repository";
@@ -42,6 +44,7 @@ import { UserRepository } from "./user-repository";
 import { SyncEngine } from "./sync-engine";
 import { EventWriter } from "./event-writer";
 import { DecryptionWorker } from "./decryption-worker";
+import { ListenedRepository } from "./listened-repository";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 
 export interface ChatDbKit {
@@ -52,6 +55,7 @@ export interface ChatDbKit {
   syncEngine: SyncEngine;
   eventWriter: EventWriter;
   decryptionWorker: DecryptionWorker;
+  listened: ListenedRepository;
 }
 
 let currentKit: ChatDbKit | null = null;
@@ -88,6 +92,7 @@ export function initChatDb(
   const messages = new MessageRepository(db);
   const rooms = new RoomRepository(db);
   const users = new UserRepository(db);
+  const listened = new ListenedRepository(db);
   const syncEngine = new SyncEngine(db, messages, rooms, getRoomCrypto, onChange);
   const eventWriter = new EventWriter(db, messages, rooms, users, onChange);
   const decryptionWorker = new DecryptionWorker(db, async (roomId: string) => {
@@ -111,7 +116,7 @@ export function initChatDb(
     console.warn("[local-db] Tombstone GC failed:", e);
   });
 
-  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker };
+  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened };
   currentUserId = userId;
 
   return currentKit;
