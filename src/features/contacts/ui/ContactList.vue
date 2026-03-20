@@ -216,7 +216,7 @@ const getChannelPreview = (channel: Channel): string => {
   return text.length > 80 ? text.slice(0, 80) + "..." : text;
 };
 
-const PAGE_SIZE = 30;
+const PAGE_SIZE = 50;
 const displayLimit = ref(PAGE_SIZE);
 
 /** Unified list item with a stable `_key` for RecycleScroller */
@@ -231,11 +231,22 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
   if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite").map(r => ({ ...r, _key: r.id }));
   if (props.filter === "invites") return rooms.filter(r => r.membership === "invite").map(r => ({ ...r, _key: r.id }));
 
-  // "all": mix rooms + channels, sorted by time
+  // "all": mix rooms + channels, sorted by time.
+  // Joined rooms sort above invites at the same timestamp to prevent
+  // invite spam from pushing personal chats out of the visible area.
   const roomItems: UnifiedItem[] = rooms.map(r => ({ ...r, _key: r.id }));
   const channelItems: UnifiedItem[] = channelStore.channels.map(c => ({ ...c, _key: `ch:${c.address}` }));
   const merged = [...roomItems, ...channelItems];
-  merged.sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
+  merged.sort((a, b) => {
+    const tsDiff = getItemTimestamp(b) - getItemTimestamp(a);
+    if (tsDiff !== 0) return tsDiff;
+    // Secondary sort: joined > invite > channel (joined rooms first)
+    const membershipRank = (item: ChatRoom | Channel): number => {
+      if (isChannel(item)) return 2;
+      return item.membership === "invite" ? 1 : 0;
+    };
+    return membershipRank(a) - membershipRank(b);
+  });
   return merged;
 });
 

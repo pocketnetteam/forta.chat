@@ -295,9 +295,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const roomId = (_room as any)?.roomId as string;
           if (roomId) chatStore.markRoomChanged(roomId);
-          // When kicked/banned from a room, tombstone in Dexie + remove from UI
+          // Guard: skip tombstoning during initial sync — the SDK may emit
+          // spurious join→leave transitions while loading rooms from its IndexedDB store.
+          // Once roomsInitialized is true, we know the first fullRoomRefresh has completed.
           if (prevMembership === "join" && (membership === "leave" || membership === "ban")) {
-            if (roomId) {
+            if (roomId && chatStore.roomsInitialized) {
               chatStore.handleKicked(roomId, membership === "ban" ? "banned" : "kicked");
             }
           }

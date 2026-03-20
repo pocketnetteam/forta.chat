@@ -228,7 +228,25 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     unreadCount,
     members: memberIds,
     isGroup,
-    updatedAt: lastTs || (membership === "invite" ? Date.now() : 0),
+    updatedAt: lastTs || (() => {
+      // For invites, try to extract origin_server_ts from the invite event itself
+      // instead of using Date.now() which inflates sort position
+      if (membership === "invite") {
+        try {
+          const memberEvent = room.currentState?.getMember?.(myUserId);
+          const inviteTs = memberEvent?.event?.origin_server_ts;
+          if (inviteTs && typeof inviteTs === "number") return inviteTs;
+        } catch { /* ignore */ }
+        // Fallback: try room creation event
+        try {
+          const createEvent = room.currentState?.getStateEvents?.("m.room.create", "");
+          const createTs = createEvent?.event?.origin_server_ts;
+          if (createTs && typeof createTs === "number") return createTs;
+        } catch { /* ignore */ }
+        return Date.now(); // last resort fallback
+      }
+      return 0;
+    })(),
     membership: membership === "invite" ? "invite" : "join",
     topic,
   };
@@ -748,7 +766,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       (async () => {
         try {
           const existingRooms = await dbKit.rooms.getAllRooms();
-          const existingIds = new Set(existingRooms.map(r => r.id));
+          const existingMap = new Map(existingRooms.map(r => [r.id, r]));
           const now = Date.now();
 
           for (const r of newRooms) {
@@ -762,9 +780,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               syncedAt: now,
             };
 
-            if (existingIds.has(r.id)) {
-              // Existing room: update metadata only, preserve preview/unread/watermarks
-              await dbKit.rooms.updateRoom(r.id, metadataFields);
+            const existing = existingMap.get(r.id);
+            if (existing) {
+              // Existing room: update metadata + monotonically advance updatedAt
+              const updates: typeof metadataFields & { updatedAt?: number } = { ...metadataFields };
+              if (r.updatedAt > (existing.updatedAt ?? 0)) {
+                updates.updatedAt = r.updatedAt;
+              }
+              await dbKit.rooms.updateRoom(r.id, updates);
             } else {
               // Room not in active set — may be tombstoned. Revive if so.
               const maybeTombstoned = await dbKit.rooms.getRoom(r.id);
@@ -991,7 +1014,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       (async () => {
         try {
           const existingRooms = await dbKit.rooms.getAllRooms();
-          const existingIds = new Set(existingRooms.map(r => r.id));
+          const existingMap = new Map(existingRooms.map(r => [r.id, r]));
           const now = Date.now();
 
           for (const roomId of changed) {
@@ -1008,8 +1031,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               syncedAt: now,
             };
 
-            if (existingIds.has(roomId)) {
-              await dbKit.rooms.updateRoom(roomId, metadataFields);
+            const existingRoom = existingMap.get(roomId);
+            if (existingRoom) {
+              // Monotonically advance updatedAt
+              const updates: typeof metadataFields & { updatedAt?: number } = { ...metadataFields };
+              if (r.updatedAt > (existingRoom.updatedAt ?? 0)) {
+                updates.updatedAt = r.updatedAt;
+              }
+              await dbKit.rooms.updateRoom(roomId, updates);
             } else {
               // Room not in active set — may be tombstoned. Revive if so.
               const maybeTombstoned = await dbKit.rooms.getRoom(roomId);

@@ -8,6 +8,16 @@ export class RoomRepository {
   // Reads
   // ---------------------------------------------------------------------------
 
+  /** Self-heal rooms with updatedAt=0 — use best available fallback timestamp */
+  private healUpdatedAt(rooms: LocalRoom[]): LocalRoom[] {
+    for (const r of rooms) {
+      if (!r.updatedAt) {
+        r.updatedAt = r.lastMessageTimestamp || r.syncedAt || 1;
+      }
+    }
+    return rooms;
+  }
+
   /** Get all joined rooms sorted by last activity (newest first), excluding tombstones */
   async getJoinedRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
@@ -15,7 +25,7 @@ export class RoomRepository {
       .equals("join")
       .and(r => !r.isDeleted)
       .toArray();
-    return rooms.sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.healUpdatedAt(rooms).sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   /** Get invited rooms, excluding tombstones */
@@ -32,7 +42,7 @@ export class RoomRepository {
       .anyOf(["join", "invite"])
       .and(r => !r.isDeleted)
       .toArray();
-    return rooms.sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.healUpdatedAt(rooms).sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   /** Get a single room by ID */
