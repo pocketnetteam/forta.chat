@@ -622,7 +622,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const aPinned = pinnedRoomIds.value.has(a.id) ? 1 : 0;
         const bPinned = pinnedRoomIds.value.has(b.id) ? 1 : 0;
         if (aPinned !== bPinned) return bPinned - aPinned;
-        return b.updatedAt - a.updatedAt;
+        // Sort by last message time (not updatedAt which gets polluted by metadata syncs)
+        const aTime = a.lastMessage?.timestamp ?? a.updatedAt;
+        const bTime = b.lastMessage?.timestamp ?? b.updatedAt;
+        return bTime - aTime;
       });
   });
 

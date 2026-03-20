@@ -18,6 +18,12 @@ export class RoomRepository {
     return rooms;
   }
 
+  /** Sort key: prefer lastMessageTimestamp (actual message time),
+   *  fall back to updatedAt for rooms with no messages yet */
+  private sortKey(r: LocalRoom): number {
+    return r.lastMessageTimestamp || r.updatedAt || 0;
+  }
+
   /** Get all joined rooms sorted by last activity (newest first), excluding tombstones */
   async getJoinedRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
@@ -25,7 +31,7 @@ export class RoomRepository {
       .equals("join")
       .and(r => !r.isDeleted)
       .toArray();
-    return this.healUpdatedAt(rooms).sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.healUpdatedAt(rooms).sort((a, b) => this.sortKey(b) - this.sortKey(a));
   }
 
   /** Get invited rooms, excluding tombstones */
@@ -35,14 +41,14 @@ export class RoomRepository {
       .toArray();
   }
 
-  /** Get all active rooms (joined + invited, non-tombstoned), sorted by updatedAt desc */
+  /** Get all active rooms (joined + invited, non-tombstoned), sorted by last message time desc */
   async getAllRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
       .where("membership")
       .anyOf(["join", "invite"])
       .and(r => !r.isDeleted)
       .toArray();
-    return this.healUpdatedAt(rooms).sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.healUpdatedAt(rooms).sort((a, b) => this.sortKey(b) - this.sortKey(a));
   }
 
   /** Get a single room by ID */
