@@ -1,6 +1,5 @@
 import { isNative } from '@/shared/lib/platform';
 import { useToast } from '@/shared/lib/use-toast';
-import { useI18n } from 'vue-i18n';
 
 export interface SharePayload {
   title?: string;
@@ -15,9 +14,15 @@ export interface ShareResult {
   fallback: boolean;
 }
 
-export function useNativeShare() {
+export interface UseNativeShareOptions {
+  /** Toast text shown after clipboard copy (fallback). */
+  copiedMessage?: string;
+  /** Toast text shown when clipboard copy fails. */
+  copyFailedMessage?: string;
+}
+
+export function useNativeShare(options: UseNativeShareOptions = {}) {
   const { toast } = useToast();
-  const { t } = useI18n();
 
   async function share(payload: SharePayload): Promise<ShareResult> {
     if (isNative) {
@@ -72,9 +77,9 @@ export function useNativeShare() {
     }
     try {
       await navigator.clipboard.writeText(content);
-      toast(t('share.linkCopied'), 'success');
+      toast(options.copiedMessage ?? 'Link copied', 'success');
     } catch {
-      toast(t('share.copyFailed'), 'error');
+      toast(options.copyFailedMessage ?? 'Failed to copy', 'error');
     }
     return { shared: false, fallback: true };
   }

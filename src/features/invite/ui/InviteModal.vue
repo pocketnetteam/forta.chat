@@ -9,7 +9,10 @@ const emit = defineEmits<{ close: [] }>();
 
 const { t } = useI18n();
 const authStore = useAuthStore();
-const { share } = useNativeShare();
+const { share } = useNativeShare({
+  copiedMessage: t('share.linkCopied'),
+  copyFailedMessage: t('share.copyFailed'),
+});
 
 const copied = ref(false);
 
