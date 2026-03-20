@@ -2,6 +2,7 @@
 import type { Message } from "@/entities/chat/model/types";
 import { useAuthStore } from "@/entities/auth";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
+import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
 import { formatDate } from "@/shared/lib/format";
 
 const props = defineProps<{
@@ -48,49 +49,22 @@ function getSenderName(address: string): string {
   return authStore.getBastyonUserData(address)?.name || address.slice(0, 10);
 }
 
-// ── Audio playback state per message ──
-const playingId = ref<string | null>(null);
-const audioEl = ref<HTMLAudioElement | null>(null);
+const playback = useAudioPlayback();
 
 const togglePlay = async (msg: Message) => {
-  // If clicking same message that's playing — pause
-  if (playingId.value === msg.id && audioEl.value) {
-    audioEl.value.pause();
-    playingId.value = null;
-    return;
-  }
-
-  // Stop previous
-  if (audioEl.value) {
-    audioEl.value.pause();
-    audioEl.value = null;
-    playingId.value = null;
-  }
-
-  // Ensure downloaded
   let url = getState(msg.id).objectUrl;
   if (!url) {
     const result = await download(msg);
     url = result ?? null;
   }
   if (!url) return;
-
-  const audio = new Audio(url);
-  audio.onended = () => {
-    playingId.value = null;
-    audioEl.value = null;
-  };
-  audioEl.value = audio;
-  playingId.value = msg.id;
-  await audio.play();
+  playback.togglePlay({
+    messageId: msg.id,
+    roomId: msg.roomId,
+    objectUrl: url,
+    duration: msg.fileInfo?.duration ?? 0,
+  });
 };
-
-onUnmounted(() => {
-  if (audioEl.value) {
-    audioEl.value.pause();
-    audioEl.value = null;
-  }
-});
 </script>
 
 <template>
@@ -124,7 +98,7 @@ onUnmounted(() => {
             class="h-5 w-5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent"
           />
           <!-- Pause icon -->
-          <svg v-else-if="playingId === msg.id" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <svg v-else-if="playback.isPlaying(msg.id).value" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
             <rect x="6" y="4" width="4" height="16" rx="1" />
             <rect x="14" y="4" width="4" height="16" rx="1" />
           </svg>
