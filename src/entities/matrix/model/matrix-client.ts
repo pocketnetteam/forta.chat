@@ -697,6 +697,7 @@ export class MatrixClientService {
   /** Destroy the client */
   destroy() {
     if (this.client) {
+      this.client.removeAllListeners();
       this.client.stopClient();
     }
     // Clear typing timers

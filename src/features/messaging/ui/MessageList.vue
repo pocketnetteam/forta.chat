@@ -919,6 +919,7 @@ let contentResizeObserver: ResizeObserver | null = null;
 let containerResizeObserver: ResizeObserver | null = null;
 let prevContainerHeight = 0;
 let prevScrollHeight = 0;
+let isMounted = true;
 
 const attachScrollListener = () => {
   // Detach from old element if any
@@ -943,6 +944,7 @@ const attachScrollListener = () => {
     if (scrollListenEl) {
       prevScrollHeight = scrollListenEl.scrollHeight;
       contentResizeObserver = new ResizeObserver(() => {
+        if (!isMounted) return;
         const el = scrollListenEl;
         if (!el || switching.value) return;
 
@@ -986,6 +988,7 @@ const attachScrollListener = () => {
     if (listRef.value) {
       prevContainerHeight = listRef.value.clientHeight;
       containerResizeObserver = new ResizeObserver(() => {
+        if (!isMounted) return;
         const container = listRef.value;
         const scrollEl = getScrollContainer();
         if (!container || !scrollEl || switching.value) return;
@@ -1037,6 +1040,7 @@ watch(
 );
 
 onUnmounted(() => {
+  isMounted = false;
   readTracker.stopTracking();
   if (scrollListenEl) {
     scrollListenEl.removeEventListener("scroll", onScroll);
