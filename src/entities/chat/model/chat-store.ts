@@ -2791,34 +2791,67 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    * Called after initial load and loadMore to handle cross-batch references.
    */
   const enrichUnresolvedReplies = async (roomId: string): Promise<void> => {
-    const roomMsgs = messages.value[roomId];
-    if (!roomMsgs || !chatDbKitRef.value) return;
+    if (!chatDbKitRef.value) return;
+    const db = chatDbKitRef.value;
 
+    // Step 1: Find unresolved replies in Dexie (source of truth for UI)
+    const roomMsgs = await db.messages.getMessages(roomId, 200);
     const unresolved = roomMsgs.filter(
       m => m.replyTo && !m.replyTo.deleted && !m.replyTo.senderId && !m.replyTo.content,
     );
     if (unresolved.length === 0) return;
 
+    // Step 2: Look up referenced messages from Dexie
     const ids = unresolved.map(m => m.replyTo!.id);
-    const stored = await chatDbKitRef.value.messages.getByEventIds(ids);
+    const stored = await db.messages.getByEventIds(ids);
     const storedMap = new Map(stored.map(m => [m.eventId!, m]));
 
-    let changed = false;
+    // Step 3: Build patches for resolved replies
+    const patches: { eventId: string; replyTo: import("./types").ReplyTo }[] = [];
     for (const msg of unresolved) {
       const replyTo = msg.replyTo!;
       const original = storedMap.get(replyTo.id);
-      if (original) {
+      if (original && msg.eventId) {
         if (original.deleted || original.softDeleted) {
-          replyTo.deleted = true;
+          patches.push({
+            eventId: msg.eventId,
+            replyTo: { id: replyTo.id, senderId: "", content: "", deleted: true },
+          });
         } else {
-          replyTo.senderId = original.senderId;
-          replyTo.content = stripBastyonLinks(stripMentionAddresses(original.content)).slice(0, 100);
-          replyTo.type = original.type;
+          patches.push({
+            eventId: msg.eventId,
+            replyTo: {
+              id: replyTo.id,
+              senderId: original.senderId,
+              content: stripBastyonLinks(stripMentionAddresses(original.content)).slice(0, 100),
+              type: original.type,
+            },
+          });
         }
-        changed = true;
       }
     }
-    if (changed) triggerRef(messages);
+
+    // Step 4: Patch Dexie — liveQuery auto-propagates to UI
+    if (patches.length > 0) {
+      await db.messages.patchUnresolvedReplies(patches);
+    }
+
+    // Step 5: Also update in-memory store for non-Dexie consumers
+    const inMemMsgs = messages.value[roomId];
+    if (inMemMsgs) {
+      let changed = false;
+      for (const patch of patches) {
+        const msg = inMemMsgs.find(m => m.id === patch.eventId);
+        if (msg && msg.replyTo) {
+          msg.replyTo.senderId = patch.replyTo.senderId;
+          msg.replyTo.content = patch.replyTo.content;
+          msg.replyTo.type = patch.replyTo.type;
+          if (patch.replyTo.deleted) msg.replyTo.deleted = true;
+          changed = true;
+        }
+      }
+      if (changed) triggerRef(messages);
+    }
   };
 
   /** Load timeline events for a room and convert to Messages */
@@ -2906,6 +2939,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }));
         try {
           await chatDbKitRef.value.eventWriter.writeMessages(parsedMessages);
+
+          // Patch Dexie records where parseTimelineEvents resolved a reply
+          // but bulkInsert skipped the message (already existed with empty replyTo).
+          const resolvedReplies = parsedMessages
+            .filter(m => m.replyTo?.senderId && m.eventId)
+            .map(m => ({ eventId: m.eventId!, replyTo: m.replyTo! }));
+          if (resolvedReplies.length > 0) {
+            await chatDbKitRef.value.messages.patchUnresolvedReplies(resolvedReplies);
+          }
+
+          // Also try to resolve any remaining unresolved replies from Dexie
           await enrichUnresolvedReplies(roomId);
         } catch (e) {
           console.warn("[chat-store] EventWriter.writeMessages failed:", e);
