@@ -2801,7 +2801,65 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const stored = await db.messages.getByEventIds(ids);
     const storedMap = new Map(stored.map(m => [m.eventId!, m]));
 
-    // Step 3: Build patches for resolved replies
+    // Step 3: For IDs not found in Dexie, fetch from Matrix server
+    const missingIds = ids.filter(id => !storedMap.has(id));
+    if (missingIds.length > 0) {
+      try {
+        const matrixService = getMatrixClientService();
+        if (matrixService.client) {
+          const roomCrypto = await ensureRoomCrypto(roomId);
+          // Fetch missing events in parallel (capped at 10 to avoid flooding)
+          const fetches = missingIds.slice(0, 10).map(async (eventId) => {
+            try {
+              const raw = await matrixService.client!.fetchRoomEvent(roomId, eventId);
+              if (!raw) return;
+
+              let body = "";
+              let senderId = "";
+              let msgType = MessageType.text;
+              const content = raw.content as Record<string, unknown> | undefined;
+
+              senderId = matrixIdToAddress((raw.sender as string) ?? "");
+
+              // Decrypt if needed
+              if (content?.msgtype === "m.encrypted" && roomCrypto) {
+                try {
+                  const decrypted = await roomCrypto.decryptEvent(raw as Record<string, unknown>);
+                  body = decrypted.body ?? "";
+                } catch {
+                  body = "";
+                }
+              } else {
+                body = (content?.body as string) ?? "";
+              }
+
+              // Detect message type
+              const mtype = content?.msgtype as string;
+              if (mtype === "m.image") msgType = MessageType.image;
+              else if (mtype === "m.audio") msgType = MessageType.audio;
+              else if (mtype === "m.video") msgType = MessageType.video;
+              else if (mtype === "m.file") msgType = MessageType.file;
+
+              if (senderId) {
+                storedMap.set(eventId, {
+                  eventId,
+                  senderId,
+                  content: body,
+                  type: msgType,
+                } as import("@/shared/lib/local-db/schema").LocalMessage);
+              }
+            } catch {
+              // Server fetch failed for this event — skip
+            }
+          });
+          await Promise.all(fetches);
+        }
+      } catch {
+        // Matrix service not available — continue with what we have
+      }
+    }
+
+    // Step 4: Build patches for resolved replies
     const patches: { eventId: string; replyTo: import("./types").ReplyTo }[] = [];
     for (const msg of unresolved) {
       const replyTo = msg.replyTo!;
@@ -2826,12 +2884,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     }
 
-    // Step 4: Patch Dexie — liveQuery auto-propagates to UI
+    // Step 5: Patch Dexie — liveQuery auto-propagates to UI
     if (patches.length > 0) {
       await db.messages.patchUnresolvedReplies(patches);
     }
 
-    // Step 5: Also update in-memory store for non-Dexie consumers
+    // Step 6: Also update in-memory store for non-Dexie consumers
     const inMemMsgs = messages.value[roomId];
     if (inMemMsgs) {
       let changed = false;
