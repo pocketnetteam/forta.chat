@@ -183,6 +183,14 @@ const LOAD_THRESHOLD = 1200; // px from top — start loading (was 400)
 const PREFETCH_THRESHOLD = 2500; // px from top — background prefetch zone
 const VELOCITY_BOOST_THRESHOLD = 1500; // px/s — fast scroll triggers early prefetch
 const prefetching = ref(false); // true while background prefetch is in progress
+
+/** shift=true ONLY during pagination (prepending older messages at the top).
+ *  MUST be false when appending new messages or toggling the typing indicator,
+ *  because Virtua's shift assumes length changes come from the START of the list.
+ *  With shift=true on appends, the internal height cache shifts by 1 position,
+ *  assigning every visible item the cached height of its neighbour — causing
+ *  1-2 frames of incorrect positioning (the overlap / z-fighting glitch). */
+const shiftMode = computed(() => loadingMore.value || prefetching.value);
 let lastScrollTop = 0;
 let lastScrollTime = 0;
 let scrollVelocity = 0; // px per second (positive = scrolling up)
@@ -344,10 +352,18 @@ const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
 
   // Immediate scroll on next tick (handles fast/static content)
   nextTick(() => {
-    doScroll();
+    // First pass: ask Virtua to position the last item at the viewport end.
+    // This forces it to recalculate offsets from its (possibly stale) cache,
+    // which is still better than raw scrollTop that ignores Virtua entirely.
+    const items = virtualItems.value;
+    if (items.length > 0 && scrollerRef.value) {
+      scrollerRef.value.scrollToIndex(items.length - 1, { align: "end" });
+    } else {
+      doScroll();
+    }
     // One rAF pass for layout that settles within a single frame
     scrollRafId1 = requestAnimationFrame(() => {
-      doScroll();
+      doScroll(); // overshoot fallback — catches any measurement lag
       // Start the stability window — if no resize fires within 300ms,
       // content has stabilised and we can stop.
       resetStableTimer(onSettled);
@@ -772,10 +788,13 @@ const doPrefetch = (roomId: string, container: HTMLElement) => {
   });
 };
 
-/** Load newer messages (forward pagination in detached mode) */
+/** Load newer messages (forward pagination in detached mode).
+ *  Uses its own flag (loadingNewer) instead of loadingMore because newer
+ *  messages are APPENDED — shiftMode must stay false during this operation. */
+const loadingNewer = ref(false);
 const doLoadNewer = async (roomId: string) => {
-  if (!isChatDbReady() || loadingMore.value) return;
-  loadingMore.value = true;
+  if (!isChatDbReady() || loadingNewer.value || loadingMore.value) return;
+  loadingNewer.value = true;
   try {
     const msgs = chatStore.activeMessages;
     if (msgs.length === 0) return;
@@ -794,7 +813,7 @@ const doLoadNewer = async (roomId: string) => {
     const mapped = newer.map(toMessage);
     chatStore.enterDetachedMode(roomId, [...chatStore.activeMessages, ...mapped]);
   } finally {
-    loadingMore.value = false;
+    loadingNewer.value = false;
   }
 };
 
@@ -842,7 +861,7 @@ const onScrollThrottled = () => {
   // Forward pagination in detached mode
   if (chatStore.isDetachedFromLatest) {
     const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distFromBottom < LOAD_THRESHOLD && !loadingMore.value) {
+    if (distFromBottom < LOAD_THRESHOLD && !loadingNewer.value) {
       doLoadNewer(roomId);
     }
   }
@@ -1064,6 +1083,19 @@ const typingNames = computed(() => {
     .map((id: string) => chatStore.getDisplayName(id));
 });
 
+/** When typing indicator toggles and the total virtualItems length stays the
+ *  same (typing removed + message added in the same reactive flush), the item
+ *  at the last index swaps from TypingBubble (~48px) to MessageBubble (~100-200px)
+ *  but Virtua keeps the old cached height for that index.  Nudge forces a
+ *  remeasure so the layout doesn't show a brief overlap. */
+watch(typingText, (cur, prev) => {
+  const appeared = !prev && !!cur;
+  const disappeared = !!prev && !cur;
+  if ((appeared || disappeared) && !pendingScrollToBottom) {
+    nextTick(() => nudgeVirtua());
+  }
+});
+
 /** Expose setSearchQuery for ChatSearch integration */
 const setSearchQuery = (q: string) => {
   searchQuery.value = q;
@@ -1117,8 +1149,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
       v-if="!loading"
       ref="scrollerRef"
       :data="virtualItems"
-      :item-size="100"
-      shift
+      :shift="shiftMode"
       class="h-full overscroll-contain px-4 py-3"
       :style="{ opacity: settled ? 1 : 0, transition: settled ? 'opacity 0.1s ease-out' : 'none' }"
       @scroll="onVListScroll"
