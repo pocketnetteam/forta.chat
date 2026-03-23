@@ -1301,11 +1301,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Cap at 20 rooms per cycle to avoid blocking
     const capped = toDecrypt.slice(0, 20);
 
-    // Decrypt in small batches (5 at a time) with incremental UI updates
+    // Decrypt in small batches (5 at a time), collect results, apply once
     const BATCH = 5;
+    const decryptedResults: Array<{ roomId: string; body: string }> = [];
+
     for (let i = 0; i < capped.length; i += BATCH) {
       const batch = capped.slice(i, i + BATCH);
-      let batchUpdated = false;
 
       await Promise.all(batch.map(async ({ roomId, matrixRoom }) => {
         try {
@@ -1331,12 +1332,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             try {
               const decrypted = await roomCrypto.decryptEvent(raw);
               if (decrypted.body) {
-                decryptedPreviewCache.set(roomId, decrypted.body);
-                const room = getRoomById(roomId);
-                if (room?.lastMessage) {
-                  room.lastMessage = { ...room.lastMessage, content: decrypted.body };
-                  batchUpdated = true;
-                }
+                decryptedResults.push({ roomId, body: decrypted.body });
               }
             } catch {
               decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
@@ -1347,9 +1343,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
         }
       }));
+    }
 
-      // Trigger reactivity after each batch so UI updates incrementally
-      if (batchUpdated) triggerRef(rooms);
+    // Apply ALL decrypted results in one pass with a single triggerRef
+    if (decryptedResults.length > 0) {
+      for (const { roomId, body } of decryptedResults) {
+        decryptedPreviewCache.set(roomId, body);
+        const room = getRoomById(roomId);
+        if (room?.lastMessage) {
+          room.lastMessage = { ...room.lastMessage, content: body };
+        }
+      }
+      triggerRef(rooms);
     }
   };
 
