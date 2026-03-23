@@ -10,6 +10,7 @@ import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef, triggerRef } from "vue";
+import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import { useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
@@ -590,6 +591,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let _prevSorted: ChatRoom[] | null = null;
 
   const sortedRooms = computed(() => {
+    perfCount("sortedRooms:recompute");
     // Use Dexie rooms when initialized (single source of truth), fallback to old shallowRef otherwise
     let source: ChatRoom[];
     const dexie = chatDbKitRef.value ? dexieRooms.value : null;
@@ -748,6 +750,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     kit: MatrixKit,
     myUserId: string,
   ) => {
+    perfMark("fullRoomRefresh-start");
     // Retry previously failed decryptions on full refresh
     decryptFailedRooms.clear();
 
@@ -848,6 +851,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
     decryptRoomPreviews(interactiveRooms).then(() => debouncedCacheRooms());
+    perfMark("fullRoomRefresh-end");
+    perfMeasure("fullRoomRefresh", "fullRoomRefresh-start", "fullRoomRefresh-end");
     debouncedCacheRooms();
   };
 
@@ -1459,6 +1464,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   const setActiveRoom = (roomId: string | null) => {
+    perfMark("setActiveRoom-start");
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
     if (roomId) {
@@ -1478,6 +1484,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // NOTE: Do NOT mark as read here. Reading happens incrementally
       // via IntersectionObserver in MessageList as user scrolls.
     }
+    perfMark("setActiveRoom-end");
+    perfMeasure("setActiveRoom", "setActiveRoom-start", "setActiveRoom-end");
   };
 
   /** Self-healing: detect zombie rooms (left on another device but still in local cache)
