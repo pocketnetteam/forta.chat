@@ -555,16 +555,42 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
   });
 
-  // Convert Dexie LocalMessage[] → Message[] for UI, fallback to old shallowRef during migration
+  // Convert Dexie LocalMessage[] → Message[] for UI, fallback to old shallowRef during migration.
+  // Memoization: reuse previous Message objects for items that haven't changed (same eventId+timestamp).
+  // This prevents VList from re-rendering unchanged items when the array grows during pagination.
+  let _prevDexieInput: import("@/shared/lib/local-db").LocalMessage[] = [];
+  let _prevActiveOutput: Message[] = [];
   const activeMessages = computed<Message[]>(() => {
     let msgs: Message[];
     if (chatDbKitRef.value) {
-      // Single source of truth: always use Dexie when initialized
-      // (returns [] while liveQuery hasn't responded — UI uses dexieMessagesReady to show skeleton)
+      const raw = dexieMessages.value;
       const myAddr = useAuthStore().address ?? undefined;
-      msgs = localToMessages(dexieMessages.value, activeRoomOutboundWatermark.value, myAddr);
+      const watermark = activeRoomOutboundWatermark.value;
+
+      // Fast path: if Dexie returned the exact same array reference, reuse output
+      if (raw === _prevDexieInput && _prevActiveOutput.length > 0) {
+        return _prevActiveOutput;
+      }
+
+      // Incremental conversion: reuse Message objects for unchanged LocalMessages.
+      // Build a lookup from the previous output by eventId for O(1) reuse.
+      const prevById = new Map<string, Message>();
+      for (const m of _prevActiveOutput) {
+        prevById.set(m.id, m);
+      }
+
+      msgs = raw.map(local => {
+        const id = local.eventId ?? local.clientId;
+        const prev = prevById.get(id);
+        // Reuse if same timestamp (content hasn't changed)
+        if (prev && prev.timestamp === local.timestamp) {
+          return prev;
+        }
+        return localToMessages([local], watermark, myAddr)[0];
+      });
+
+      _prevDexieInput = raw;
     } else {
-      // Fallback: use old in-memory store only when Dexie not yet initialized
       msgs = activeRoomId.value ? (messages.value[activeRoomId.value] ?? []) : [];
     }
 
@@ -581,6 +607,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (deduped.length !== msgs.length) msgs = deduped;
     }
 
+    _prevActiveOutput = msgs;
     return msgs;
   });
 
@@ -1642,8 +1669,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     await commitReadWatermark(roomId, timestamp);
   };
 
-  /** Expand the message window for scroll-up pagination */
-  const expandMessageWindow = (amount = 50) => {
+  /** Expand the message window for scroll-up pagination.
+   *  Default 25 matches prefetchNextBatch size — smaller batches = less re-render work. */
+  const expandMessageWindow = (amount = 25) => {
     messageWindowSize.value += amount;
   };
 
@@ -3189,33 +3217,37 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Background prefetch: fetch older messages from Matrix and persist to Dexie
-   *  WITHOUT touching any reactive UI state (messages.value, loadingMore, etc.).
-   *  This fills the local cache so that expandMessageWindow() can serve history
-   *  instantly from Dexie on the next scroll-up, achieving Telegram-like UX.
-   *  Returns false when no more history is available. */
-  const prefetchOlderToCache = async (roomId: string): Promise<boolean> => {
+  /** Prefetch one batch of older messages into Dexie (background, no UI).
+   *  Calls Matrix scrollback once (25 messages), writes to IndexedDB only.
+   *  Does NOT touch any reactive UI state — data sits silently in Dexie
+   *  until expandMessageWindow() reads it on scroll-up.
+   *  Returns true if there are more messages to fetch. */
+  let prefetchInFlight = false;
+  const prefetchNextBatch = async (roomId: string): Promise<boolean> => {
+    if (prefetchInFlight) return true;
+    prefetchInFlight = true;
     try {
       const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) return false;
+      if (activeRoomId.value !== roomId) return false;
 
       const prevCount = getTimelineEvents(matrixRoom).length;
-
       try {
-        await matrixService.scrollback(roomId, 50);
-      } catch (e) {
-        console.warn("[chat-store] prefetchOlderToCache scrollback failed:", e);
+        await matrixService.scrollback(roomId, 25);
+      } catch {
         return false;
       }
 
-      const timelineEvents = getTimelineEvents(matrixRoom);
-      if (timelineEvents.length <= prevCount) return false;
+      const newCount = getTimelineEvents(matrixRoom).length;
+      if (newCount <= prevCount) return false; // no more history
 
-      // Write ONLY to Dexie — no setMessages, no UI reactivity triggered
-      if (chatDbKitRef.value) {
-        const msgs = await parseTimelineEvents(timelineEvents, roomId);
+      // Write ONLY to Dexie — no reactive state changes
+      const events = getTimelineEvents(matrixRoom);
+      const msgs = await parseTimelineEvents(events, roomId);
+
+      if (chatDbKitRef.value && msgs.length > 0) {
         const parsedMessages: ParsedMessage[] = msgs
           .filter(m => m.id && !m.id.startsWith("msg_"))
           .map(m => ({
@@ -3241,8 +3273,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       return true;
     } catch (e) {
-      console.warn("[chat-store] prefetchOlderToCache error:", e);
+      console.warn("[chat-store] prefetchNextBatch error:", e);
       return false;
+    } finally {
+      prefetchInFlight = false;
     }
   };
 
@@ -4288,7 +4322,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     loadPinnedMessages,
     loadMoreMessages,
     loadRoomMessages,
-    prefetchOlderToCache,
+    prefetchNextBatch,
     markRoomAsRead,
     markRoomChanged,
     messages,

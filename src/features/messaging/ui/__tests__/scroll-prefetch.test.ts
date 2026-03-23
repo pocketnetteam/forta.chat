@@ -1,238 +1,165 @@
 import { describe, it, expect } from "vitest";
 
 /**
- * Tests for the scroll-up prefetch and expand logic from MessageList.vue.
+ * Tests for the Telegram-like scroll architecture in MessageList.vue.
  *
- * The Telegram-like scroll architecture has three tiers:
+ * Pipeline:
  * 1. Display: activeMessages from Dexie liveQuery (limited by messageWindowSize)
- * 2. Cache: all messages in Dexie (filled by prefetchOlderToCache)
- * 3. Network: Matrix scrollback (only when cache exhausted)
+ * 2. Cache: messages in Dexie (filled by prefetchNextBatch — one batch ahead)
+ * 3. Network: Matrix scrollback (safety net if prefetch hasn't arrived yet)
  *
- * These tests verify the threshold logic and state machine behavior
- * without requiring a running browser or Dexie.
+ * On room enter: prefetch first batch of 25 into Dexie.
+ * On scroll-up: expandMessageWindow() reads from Dexie, then prefetch next batch.
  */
 
 // Constants matching MessageList.vue
 const LOAD_THRESHOLD = 1200;
-const PREFETCH_THRESHOLD = 2500;
 const VELOCITY_BOOST_THRESHOLD = 1500;
 
-/** Replicates the velocity-adaptive threshold calculation */
-function getEffectiveThresholds(scrollVelocity: number) {
+/** Replicates the velocity-adaptive load threshold calculation */
+function getEffectiveLoadThreshold(scrollVelocity: number) {
   const speed = Math.abs(scrollVelocity);
-  const effectiveLoadThreshold = speed > 3000 ? 3000
+  return speed > 3000 ? 3000
     : speed > VELOCITY_BOOST_THRESHOLD ? 2000
     : LOAD_THRESHOLD;
-  const effectivePrefetchThreshold = speed > 3000 ? 6000
-    : speed > VELOCITY_BOOST_THRESHOLD ? 4000
-    : PREFETCH_THRESHOLD;
-  return { load: effectiveLoadThreshold, prefetch: effectivePrefetchThreshold };
 }
 
-/** Simulates the scroll handler decision logic */
-function getScrollActions(opts: {
+/** Simulates the scroll handler expand decision */
+function shouldExpand(opts: {
   scrollTop: number;
   scrollVelocity: number;
   loadingMore: boolean;
-  prefetchInFlight: boolean;
   hasMore: boolean;
-}) {
-  const { load, prefetch } = getEffectiveThresholds(opts.scrollVelocity);
-  const actions: string[] = [];
-
-  // Background prefetch zone
-  if (opts.scrollTop < prefetch && opts.scrollVelocity > 0 && !opts.prefetchInFlight && opts.hasMore) {
-    actions.push("prefetch");
-  }
-
-  // Primary expand zone
-  if (opts.scrollTop < load && !opts.loadingMore && opts.hasMore) {
-    actions.push("expand");
-  }
-
-  return actions;
+}): boolean {
+  const threshold = getEffectiveLoadThreshold(opts.scrollVelocity);
+  return opts.scrollTop < threshold && !opts.loadingMore && opts.hasMore;
 }
 
-describe("velocity-adaptive thresholds", () => {
-  it("uses base thresholds at low speed", () => {
-    const t = getEffectiveThresholds(500);
-    expect(t.load).toBe(LOAD_THRESHOLD);
-    expect(t.prefetch).toBe(PREFETCH_THRESHOLD);
+describe("velocity-adaptive load threshold", () => {
+  it("uses base threshold at low speed", () => {
+    expect(getEffectiveLoadThreshold(500)).toBe(LOAD_THRESHOLD);
   });
 
-  it("uses medium thresholds at medium speed", () => {
-    const t = getEffectiveThresholds(2000);
-    expect(t.load).toBe(2000);
-    expect(t.prefetch).toBe(4000);
+  it("uses medium threshold at medium speed", () => {
+    expect(getEffectiveLoadThreshold(2000)).toBe(2000);
   });
 
-  it("uses aggressive thresholds at high speed", () => {
-    const t = getEffectiveThresholds(4000);
-    expect(t.load).toBe(3000);
-    expect(t.prefetch).toBe(6000);
+  it("uses aggressive threshold at high speed", () => {
+    expect(getEffectiveLoadThreshold(4000)).toBe(3000);
   });
 
   it("handles negative velocity (scrolling down)", () => {
-    const t = getEffectiveThresholds(-3000);
-    // Uses abs(velocity), so still gets boosted thresholds
-    expect(t.load).toBe(2000);
+    expect(getEffectiveLoadThreshold(-3000)).toBe(2000);
   });
 
   it("handles zero velocity", () => {
-    const t = getEffectiveThresholds(0);
-    expect(t.load).toBe(LOAD_THRESHOLD);
-    expect(t.prefetch).toBe(PREFETCH_THRESHOLD);
+    expect(getEffectiveLoadThreshold(0)).toBe(LOAD_THRESHOLD);
   });
 });
 
-describe("scroll action decisions", () => {
-  it("triggers both prefetch and expand when near top and scrolling up", () => {
-    const actions = getScrollActions({
+describe("scroll expand decisions", () => {
+  it("triggers expand when near top", () => {
+    expect(shouldExpand({
       scrollTop: 800,
       scrollVelocity: 500,
       loadingMore: false,
-      prefetchInFlight: false,
       hasMore: true,
-    });
-    expect(actions).toContain("prefetch");
-    expect(actions).toContain("expand");
+    })).toBe(true);
   });
 
-  it("triggers only prefetch in prefetch zone", () => {
-    const actions = getScrollActions({
-      scrollTop: 2000,
-      scrollVelocity: 500,
-      loadingMore: false,
-      prefetchInFlight: false,
-      hasMore: true,
-    });
-    expect(actions).toContain("prefetch");
-    expect(actions).not.toContain("expand");
-  });
-
-  it("does not trigger prefetch when scrolling down", () => {
-    const actions = getScrollActions({
-      scrollTop: 2000,
-      scrollVelocity: -500,
-      loadingMore: false,
-      prefetchInFlight: false,
-      hasMore: true,
-    });
-    expect(actions).not.toContain("prefetch");
-  });
-
-  it("does not trigger expand when loadingMore is true", () => {
-    const actions = getScrollActions({
+  it("does not expand when loadingMore", () => {
+    expect(shouldExpand({
       scrollTop: 800,
       scrollVelocity: 500,
       loadingMore: true,
-      prefetchInFlight: false,
       hasMore: true,
-    });
-    expect(actions).not.toContain("expand");
+    })).toBe(false);
   });
 
-  it("does not trigger prefetch when already in flight", () => {
-    const actions = getScrollActions({
-      scrollTop: 800,
-      scrollVelocity: 500,
-      loadingMore: false,
-      prefetchInFlight: true,
-      hasMore: true,
-    });
-    expect(actions).not.toContain("prefetch");
-  });
-
-  it("triggers nothing when hasMore is false", () => {
-    const actions = getScrollActions({
+  it("does not expand when no more messages", () => {
+    expect(shouldExpand({
       scrollTop: 100,
       scrollVelocity: 2000,
       loadingMore: false,
-      prefetchInFlight: false,
       hasMore: false,
-    });
-    expect(actions).toHaveLength(0);
+    })).toBe(false);
   });
 
-  it("triggers nothing when far from top", () => {
-    const actions = getScrollActions({
+  it("does not expand when far from top", () => {
+    expect(shouldExpand({
       scrollTop: 5000,
       scrollVelocity: 500,
       loadingMore: false,
-      prefetchInFlight: false,
       hasMore: true,
-    });
-    expect(actions).toHaveLength(0);
+    })).toBe(false);
   });
 
-  it("fast scroll expands threshold to catch more", () => {
-    // At normal speed, 2500px would only trigger prefetch
-    const normalActions = getScrollActions({
-      scrollTop: 2500,
-      scrollVelocity: 500,
-      loadingMore: false,
-      prefetchInFlight: false,
-      hasMore: true,
-    });
-    expect(normalActions).not.toContain("expand");
+  it("fast scroll widens threshold", () => {
+    // Normal speed: 2500px does NOT trigger (threshold=1200)
+    expect(shouldExpand({
+      scrollTop: 2500, scrollVelocity: 500,
+      loadingMore: false, hasMore: true,
+    })).toBe(false);
 
-    // At fast speed, 2500px triggers expand too (threshold boosted to 3000)
-    const fastActions = getScrollActions({
-      scrollTop: 2500,
-      scrollVelocity: 4000,
-      loadingMore: false,
-      prefetchInFlight: false,
-      hasMore: true,
-    });
-    expect(fastActions).toContain("expand");
+    // Fast speed: 2500px DOES trigger (threshold boosted to 3000)
+    expect(shouldExpand({
+      scrollTop: 2500, scrollVelocity: 4000,
+      loadingMore: false, hasMore: true,
+    })).toBe(true);
   });
 });
 
-describe("expand-first pattern", () => {
-  /** Simulates the doLoadMore decision flow */
-  function simulateExpandFirst(opts: {
+describe("doLoadMore with incremental prefetch", () => {
+  /** Simulates the doLoadMore + prefetch pipeline */
+  function simulateDoLoadMore(opts: {
     prevMessageCount: number;
     afterExpandCount: number;
     hasMore: boolean;
   }) {
     const steps: string[] = [];
 
-    steps.push("expand_window"); // Always start with Dexie expand
+    steps.push("expand_window");
 
     if (opts.afterExpandCount <= opts.prevMessageCount && opts.hasMore) {
-      steps.push("network_fetch"); // Cache exhausted
-      steps.push("expand_window_retry"); // Re-expand after network writes to Dexie
+      // Prefetch hadn't arrived yet — fall back to network
+      steps.push("network_fetch");
+    }
+
+    // After expand, prefetch next batch for future scroll-up
+    if (opts.hasMore) {
+      steps.push("prefetch_next");
     }
 
     return steps;
   }
 
-  it("only expands when Dexie has cached data", () => {
-    const steps = simulateExpandFirst({
+  it("expand + prefetch when cache has data", () => {
+    const steps = simulateDoLoadMore({
       prevMessageCount: 50,
-      afterExpandCount: 100, // Got 50 more from cache
+      afterExpandCount: 75, // 25 from prefetch
       hasMore: true,
     });
-    expect(steps).toEqual(["expand_window"]);
+    expect(steps).toEqual(["expand_window", "prefetch_next"]);
     expect(steps).not.toContain("network_fetch");
   });
 
-  it("falls back to network when cache exhausted", () => {
-    const steps = simulateExpandFirst({
+  it("falls back to network when cache is empty, then prefetches next", () => {
+    const steps = simulateDoLoadMore({
       prevMessageCount: 50,
-      afterExpandCount: 50, // No new messages from cache
+      afterExpandCount: 50, // nothing new
       hasMore: true,
     });
     expect(steps).toContain("network_fetch");
-    expect(steps).toContain("expand_window_retry");
+    expect(steps).toContain("prefetch_next");
   });
 
-  it("does not fetch network when at beginning of history", () => {
-    const steps = simulateExpandFirst({
+  it("no prefetch when at beginning of history", () => {
+    const steps = simulateDoLoadMore({
       prevMessageCount: 50,
-      afterExpandCount: 50,
+      afterExpandCount: 55,
       hasMore: false,
     });
+    expect(steps).not.toContain("prefetch_next");
     expect(steps).not.toContain("network_fetch");
   });
 });
