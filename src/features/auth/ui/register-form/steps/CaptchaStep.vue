@@ -6,6 +6,17 @@ const emit = defineEmits<{ done: [] }>();
 const { t } = useI18n();
 const authStore = useAuthStore();
 
+const sanitizeSvg = (svg: string): string => {
+  return svg
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/on\w+\s*=\s*"[^"]*"/gi, "")
+    .replace(/on\w+\s*=\s*'[^']*'/gi, "")
+    .replace(/javascript:/gi, "")
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<object[\s\S]*?<\/object>/gi, "")
+    .replace(/<embed[\s\S]*?>/gi, "");
+};
+
 const captchaSvg = ref("");
 const captchaText = ref("");
 const loading = ref(true);
@@ -19,7 +30,7 @@ const loadCaptcha = async (clearError = true) => {
   try {
     const result = await authStore.fetchCaptcha();
     // The API returns { id, img (SVG markup), done }
-    captchaSvg.value = result?.img || "";
+    captchaSvg.value = sanitizeSvg(result?.img || "");
     loading.value = false;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load captcha";
