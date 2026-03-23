@@ -584,11 +584,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     activeMessages.value.filter(m => m.type === MessageType.image || m.type === MessageType.video)
   );
 
+  // Structural sharing: skip full recompute when dexieRooms reference hasn't changed
+  let _prevDexieRef: LocalRoom[] | null = null;
+  let _prevPinnedRef: ReadonlySet<string> | null = null;
+  let _prevSorted: ChatRoom[] | null = null;
+
   const sortedRooms = computed(() => {
     // Use Dexie rooms when initialized (single source of truth), fallback to old shallowRef otherwise
     let source: ChatRoom[];
-    if (chatDbKitRef.value) {
-      source = dexieRooms.value.map(lr => ({
+    const dexie = chatDbKitRef.value ? dexieRooms.value : null;
+
+    if (dexie) {
+      // Structural sharing: if dexieRooms reference AND pinnedRoomIds haven't changed, reuse result
+      if (dexie === _prevDexieRef && pinnedRoomIds.value === _prevPinnedRef && _prevSorted) {
+        return _prevSorted;
+      }
+      source = dexie.map(lr => ({
         id: lr.id,
         name: lr.name,
         avatar: lr.avatar,
@@ -617,7 +628,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       source = rooms.value;
     }
 
-    return [...source]
+    const result = [...source]
       .sort((a, b) => {
         const aPinned = pinnedRoomIds.value.has(a.id) ? 1 : 0;
         const bPinned = pinnedRoomIds.value.has(b.id) ? 1 : 0;
@@ -631,6 +642,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const bTime = b.lastMessage?.timestamp ?? 0;
         return bTime - aTime;
       });
+
+    // Cache for structural sharing on next call
+    _prevDexieRef = dexie;
+    _prevPinnedRef = pinnedRoomIds.value;
+    _prevSorted = result;
+    return result;
   });
 
   const totalUnread = computed(() => {
