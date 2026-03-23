@@ -33,22 +33,6 @@ const DANGEROUS_SCHEME_RE = /^(?:javascript|data|vbscript|blob):/i;
 export function isSafeUrl(url: string): boolean {
   if (!url) return false;
   if (DANGEROUS_SCHEME_RE.test(url)) return false;
-  if (PRIVATE_IP_RE.test(url)) return false;
-  // Only allow http(s) schemes
-  if (!/^https?:\/\//i.test(url)) return false;
-  return true;
-}
-
-export type Segment =
-  | { type: "text"; content: string }
-  | { type: "link"; content: string; href: string }
-  | { type: "mention"; content: string; userId: string }
-  | { type: "bastyonLink"; content: string; txid: string; isVideo: boolean };
-
-const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
-
-/** Reject dangerous or private-network URLs */
-function isSafeUrl(url: string): boolean {
   try {
     const parsed = new URL(url.startsWith("www.") ? `https://${url}` : url);
     const protocol = parsed.protocol;
@@ -69,6 +53,15 @@ function isSafeUrl(url: string): boolean {
     return false;
   }
 }
+
+export type Segment =
+  | { type: "text"; content: string }
+  | { type: "link"; content: string; href: string }
+  | { type: "mention"; content: string; userId: string }
+  | { type: "bastyonLink"; content: string; txid: string; isVideo: boolean };
+
+const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
+
 const BASTYON_RE = /(?:bastyon:\/\/|https?:\/\/(?:bastyon\.com|pocketnet\.app)\/)(?:index|post)\?[vs]=([a-f0-9]{64})(?:[&\w=]*)/gi;
 // Bastyon mention format: @<34-68 hex-char address>:<display_name>
 // Display name may contain unicode (Cyrillic etc.), underscores, digits
