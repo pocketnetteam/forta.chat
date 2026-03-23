@@ -284,7 +284,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         onTimeline: (event: unknown, room: unknown) => {
           const roomId = typeof room === "string" ? room : (room as any)?.roomId;
           if (roomId) chatStore.markRoomChanged(roomId);
-          if (roomId) chatStore.handleTimelineEvent(event, roomId);
+          // Skip event processing before initial sync completes — events will be
+          // picked up by fullRoomRefresh reconciliation. Processing them early causes
+          // Dexie writes → liveQuery notifications against an incomplete room list.
+          if (roomId && chatStore.roomsInitialized) {
+            chatStore.handleTimelineEvent(event, roomId);
+          }
         },
         onMembership: (_event: unknown, member: unknown) => {
           const roomId = (member as any)?.roomId as string;
