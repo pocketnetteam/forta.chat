@@ -276,6 +276,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const FULL_REFRESH_INTERVAL = 60_000; // Reconciliation fallback
   let membersLoadedOnce = false; // One-time member loading for stale lazy-load cache
 
+  /** Schedule a callback during browser idle time, with setTimeout fallback */
+  const scheduleIdle = (cb: () => void, fallbackMs = 200) => {
+    if (typeof requestIdleCallback !== "undefined") {
+      requestIdleCallback(cb);
+    } else {
+      setTimeout(cb, fallbackMs);
+    }
+  };
+
   /** Mark a room as changed so the next incremental refresh processes it */
   const markRoomChanged = (roomId: string) => {
     changedRoomIds.add(roomId);
@@ -664,6 +673,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Internal: actual refresh logic (called by debounced wrapper) */
   const PRELOAD_COUNT = 15;
+  const NEIGHBOR_PRELOAD_COUNT = 1; // rooms above/below active to network-preload
   let preloadDone = false;
 
   /** Track which rooms have already been preloaded (cache + network) to avoid double work */
@@ -681,12 +691,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const sorted = sortedRooms.value;
     const activeId = activeRoomId.value;
 
-    // Priority: active room + 2 neighbors (immediate network preload)
+    // Priority: active room + N neighbors (immediate network preload)
     const activeIdx = activeId ? sorted.findIndex(r => r.id === activeId) : -1;
     const priorityRooms: typeof sorted = [];
     if (activeIdx >= 0) {
-      if (activeIdx > 0) priorityRooms.push(sorted[activeIdx - 1]);
-      if (activeIdx < sorted.length - 1) priorityRooms.push(sorted[activeIdx + 1]);
+      for (let d = 1; d <= NEIGHBOR_PRELOAD_COUNT; d++) {
+        if (activeIdx - d >= 0) priorityRooms.push(sorted[activeIdx - d]);
+        if (activeIdx + d < sorted.length) priorityRooms.push(sorted[activeIdx + d]);
+      }
     }
     const priorityFiltered = priorityRooms.filter(
       r => r.id !== activeId && r.membership !== "invite",
@@ -716,19 +728,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           return messages.value[room.id]?.length ? Promise.resolve() : loadCachedMessages(room.id).catch(() => {});
         })).then(() => {
           if (offset + 3 < remaining.length) {
-            if (typeof requestIdleCallback !== "undefined") {
-              requestIdleCallback(() => loadNextBatch(offset + 3));
-            } else {
-              setTimeout(() => loadNextBatch(offset + 3), 100);
-            }
+            scheduleIdle(() => loadNextBatch(offset + 3), 100);
           }
         });
       };
-      if (typeof requestIdleCallback !== "undefined") {
-        requestIdleCallback(() => loadNextBatch(0));
-      } else {
-        setTimeout(() => loadNextBatch(0), 100);
-      }
+      scheduleIdle(() => loadNextBatch(0), 100);
     }
   };
 
@@ -864,18 +868,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (batch.length === 0) return;
         loadProfilesForRoomIds(batch);
         if (offset + BG_BATCH < remainingIds.length) {
-          if (typeof requestIdleCallback !== "undefined") {
-            requestIdleCallback(() => loadNextBatch(offset + BG_BATCH));
-          } else {
-            setTimeout(() => loadNextBatch(offset + BG_BATCH), 200);
-          }
+          scheduleIdle(() => loadNextBatch(offset + BG_BATCH));
         }
       };
-      if (typeof requestIdleCallback !== "undefined") {
-        requestIdleCallback(() => loadNextBatch(0));
-      } else {
-        setTimeout(() => loadNextBatch(0), 500);
-      }
+      scheduleIdle(() => loadNextBatch(0), 500);
     }
 
     // One-time: load members for viewport rooms only (lazy — others load on demand).
@@ -1529,7 +1525,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (pendingReadWatermarks.size === 0) return;
     lastWatermarkFlush = now;
 
-    for (const [roomId, timestamp] of pendingReadWatermarks) {
+    // Snapshot entries to avoid mutation-during-iteration
+    const entries = [...pendingReadWatermarks];
+    for (const [roomId, timestamp] of entries) {
       const event = findMatrixEventForTimestamp(roomId, timestamp);
       if (event) {
         receiptCooldowns.set(roomId, now);
@@ -1537,6 +1535,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (success) pendingReadWatermarks.delete(roomId);
         }).catch(() => {});
       }
+    }
+
+    // Evict stale cooldown entries to prevent unbounded growth
+    const COOLDOWN_EVICT_AGE = 30_000;
+    for (const [rid, ts] of receiptCooldowns) {
+      if (now - ts > COOLDOWN_EVICT_AGE) receiptCooldowns.delete(rid);
     }
   };
 
