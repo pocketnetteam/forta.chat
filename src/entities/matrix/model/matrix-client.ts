@@ -92,7 +92,7 @@ export class MatrixClientService {
       url: opts.uri,
       params: opts.qs,
       data: JSON.parse(opts.body || "{}"),
-      timeout: opts.timeout,
+      timeout: opts.timeout ?? 30000,
       headers: opts.headers,
       method: opts.method,
       withCredentials: opts.withCredentials,

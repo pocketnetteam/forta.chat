@@ -29,6 +29,12 @@ export function useMessages() {
   };
 
   const sendMessage = async (content: string, linkPreview?: LinkPreview) => {
+    const MAX_MESSAGE_LENGTH = 65536;
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      console.warn('[sendMessage] Message exceeds max length, truncating');
+      content = content.slice(0, MAX_MESSAGE_LENGTH);
+    }
+
     const roomId = chatStore.activeRoomId;
     if (!roomId || !content.trim()) return;
 
