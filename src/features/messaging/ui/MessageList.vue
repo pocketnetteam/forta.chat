@@ -266,10 +266,17 @@ const reversedItems = computed(() => {
   return reversed;
 });
 
-/** Get the actual scroll container (scroller's root element). */
+/** Get the actual scroll container (scroller's root element).
+ *  Vue 3 with <script setup> may return $el as a Ref or HTMLElement —
+ *  unwrap defensively. */
 const getScrollContainer = (): HTMLElement | null => {
-  const el = scrollerRef.value?.$el as HTMLElement | undefined;
-  if (el) return el;
+  const raw = scrollerRef.value?.$el;
+  if (raw instanceof HTMLElement) return raw;
+  // $el exposed as Ref<HTMLElement> — unwrap
+  if (raw && typeof raw === "object" && "value" in raw) {
+    const inner = (raw as { value: unknown }).value;
+    if (inner instanceof HTMLElement) return inner;
+  }
   return listRef.value ?? null;
 };
 
@@ -845,6 +852,11 @@ const onScrollThrottled = () => {
   const maxScroll = container.scrollHeight - container.clientHeight;
   const distFromTop = maxScroll - scrollTop;
 
+  if (import.meta.env.DEV) {
+    console.log("[scroll] scrollTop=%d maxScroll=%d distFromTop=%d hasMore=%s loadingMore=%s",
+      scrollTop, maxScroll, distFromTop, hasMore.value, loadingMore.value);
+  }
+
   // Velocity-adaptive threshold — fast scroll triggers expand earlier
   const speed = Math.abs(scrollVelocity);
   const effectiveLoadThreshold = speed > 3000 ? 3000
@@ -853,6 +865,9 @@ const onScrollThrottled = () => {
 
   // Load more when near the top (oldest end) in column-reverse
   if (distFromTop < effectiveLoadThreshold && !loadingMore.value) {
+    if (import.meta.env.DEV) {
+      console.log("[scroll] TRIGGERING doLoadMore distFromTop=%d threshold=%d", distFromTop, effectiveLoadThreshold);
+    }
     doLoadMore(roomId);
   }
 };

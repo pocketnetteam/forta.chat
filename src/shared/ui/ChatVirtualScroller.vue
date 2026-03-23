@@ -88,7 +88,7 @@ const scrollToIndex = (index: number, opts?: { align?: "start" | "center" | "end
   }
 };
 
-defineExpose({ scrollToBottom, scrollToIndex, $el: containerRef });
+defineExpose({ scrollToBottom, scrollToIndex });
 
 // ───────────────── New-message scroll anchoring ─────────────────
 // When a new message arrives at index 0 (visual bottom) while the user
