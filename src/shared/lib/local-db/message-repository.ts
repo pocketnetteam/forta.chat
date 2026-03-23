@@ -496,4 +496,46 @@ export class MessageRepository {
       .toArray();
     return msgs;
   }
+
+  // ---------------------------------------------------------------------------
+  // Reply preview persistence
+  // ---------------------------------------------------------------------------
+
+  /** Patch messages whose replyTo preview is unresolved (empty senderId/content).
+   *  Skips messages that are already resolved or marked as deleted.
+   *  Called after room open to persist reply previews fetched from the server. */
+  async patchUnresolvedReplies(
+    patches: Array<{
+      eventId: string;
+      replyTo: Partial<ReplyTo> & { id: string };
+    }>,
+  ): Promise<void> {
+    if (patches.length === 0) return;
+
+    const eventIds = patches.map((p) => p.eventId);
+    const existing = await this.getByEventIds(eventIds);
+    const existingMap = new Map(existing.map((m) => [m.eventId!, m]));
+
+    await this.db.transaction("rw", this.db.messages, async () => {
+      for (const patch of patches) {
+        const msg = existingMap.get(patch.eventId);
+        if (!msg?.replyTo || !msg.localId) continue;
+
+        // Skip already-resolved replies (have senderId and content)
+        if (msg.replyTo.senderId && msg.replyTo.content) continue;
+
+        // Skip deleted reply targets
+        if (msg.replyTo.deleted) continue;
+
+        await this.db.messages.update(msg.localId, {
+          replyTo: {
+            ...msg.replyTo,
+            senderId: patch.replyTo.senderId ?? msg.replyTo.senderId,
+            content: patch.replyTo.content ?? msg.replyTo.content,
+            type: patch.replyTo.type ?? msg.replyTo.type,
+          },
+        });
+      }
+    });
+  }
 }
