@@ -575,9 +575,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return msgs;
   });
 
-  const activeMediaMessages = computed(() =>
-    activeMessages.value.filter(m => m.type === MessageType.image || m.type === MessageType.video)
-  );
+  // Memoized: only recompute when activeMessages reference changes
+  let _prevActiveMessagesRef: typeof activeMessages.value | null = null;
+  let _cachedMediaMessages: typeof activeMessages.value = [];
+  const activeMediaMessages = computed(() => {
+    if (activeMessages.value !== _prevActiveMessagesRef) {
+      _prevActiveMessagesRef = activeMessages.value;
+      _cachedMediaMessages = activeMessages.value.filter(m => m.type === MessageType.image || m.type === MessageType.video);
+    }
+    return _cachedMediaMessages;
+  });
 
   // Structural sharing: skip full recompute when dexieRooms reference hasn't changed
   let _prevDexieRef: LocalRoom[] | null = null;
