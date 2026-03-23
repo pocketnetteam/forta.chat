@@ -187,12 +187,10 @@ const fabBadgeCount = computed(() => {
   return c > 99 ? '99+' : c;
 });
 
-// --- Predictive prefetch state ---
+// --- Scroll threshold state ---
 const LOAD_THRESHOLD = 1200; // px from top — expand Dexie window
-const PREFETCH_THRESHOLD = 2500; // px from top — background cache fill
 const VELOCITY_BOOST_THRESHOLD = 1500; // px/s — fast scroll triggers early thresholds
 const networkWaiting = ref(false); // true when Dexie cache exhausted, waiting for network
-let prefetchInFlight = false; // background prefetch lock (non-reactive — no UI effect)
 
 /** Shift mode is ALWAYS false. Virtua's shift assumes synchronous prepend,
  *  but our data arrives asynchronously via Dexie liveQuery, causing the internal
@@ -458,7 +456,6 @@ watch(
     showDateHeader.value = false;
     recentMessageIds.value.clear();
     isNearBottom.value = true;
-    prefetchInFlight = false;
     networkWaiting.value = false;
     bannerDismissAllowed = false;
     lastScrollTop = 0;
@@ -605,6 +602,10 @@ watch(
       switching.value = false;
       prevScrollHeight = el?.scrollHeight ?? 0;
       checkScroll();
+
+      // Preload full chat history into Dexie in background.
+      // All subsequent scroll-up reads come from local cache — zero network latency.
+      startHistoryPreload(roomId);
 
       // Allow banner dismissal after user has had time to see it
       setTimeout(() => { bannerDismissAllowed = true; }, 2000);
@@ -789,7 +790,7 @@ const waitForStableHeight = (el: HTMLElement, maxWait = 500): Promise<void> =>
     requestAnimationFrame(check);
   });
 
-/** Expand-first load: try Dexie cache first, fall back to network.
+/** Expand Dexie window — with full history preloaded, data is always local.
  *  Scroll correction is handled by contentResizeObserver in real-time:
  *  when loadingMore=true, the observer adjusts scrollTop on EVERY height
  *  change (before paint), so the user never sees an uncorrected frame. */
@@ -800,30 +801,31 @@ const doLoadMore = async (roomId: string): Promise<void> => {
   try {
     const prevLen = chatStore.activeMessages.length;
 
-    // Step 1: Expand Dexie query window — instant if cache has data
+    // Expand Dexie query window — instant read from local cache
     chatStore.expandMessageWindow();
-
-    // Wait for liveQuery to actually deliver new data
     await waitForDataChange(prevLen);
 
     if (chatStore.activeRoomId !== roomId) return;
     const newLen = chatStore.activeMessages.length;
 
-    // Step 2: If Dexie had no more messages, fetch from network
-    if (newLen <= prevLen && hasMore.value) {
+    // Safety net: if preload hasn't finished yet and cache is exhausted,
+    // do a single network fetch so the user isn't stuck
+    if (newLen <= prevLen && hasMore.value && !chatStore.historyPreloadActive) {
       networkWaiting.value = true;
       const more = await chatStore.loadMoreMessages(roomId);
       hasMore.value = more;
-
       if (more && chatStore.activeRoomId === roomId) {
-        const lenBeforeRetry = chatStore.activeMessages.length;
         chatStore.expandMessageWindow();
-        await waitForDataChange(lenBeforeRetry);
+        await waitForDataChange(chatStore.activeMessages.length);
       }
       networkWaiting.value = false;
     }
 
-    // Step 3: Wait for Virtua to finish measuring (ResizeObserver handles correction)
+    // If preload is still running and cache ran out, just wait — it'll arrive soon
+    if (newLen <= prevLen && chatStore.historyPreloadActive) {
+      hasMore.value = true; // keep trying on next scroll
+    }
+
     const el = getScrollContainer();
     if (el) await waitForStableHeight(el);
   } catch {
@@ -833,17 +835,12 @@ const doLoadMore = async (roomId: string): Promise<void> => {
   }
 };
 
-/** True background prefetch: fills Dexie cache silently with NO UI side effects.
- *  Does not touch loadingMore, shiftMode, scrollTop, or any reactive state
- *  that would cause visible changes. When the user scrolls further up,
- *  expandMessageWindow() will find the data already in Dexie. */
-const triggerPrefetch = (roomId: string) => {
-  if (prefetchInFlight || loadingMore.value || !hasMore.value) return;
-  prefetchInFlight = true;
-  chatStore.prefetchOlderToCache(roomId)
-    .then(more => { hasMore.value = more; })
-    .catch(() => {})
-    .finally(() => { prefetchInFlight = false; });
+/** Kick off full history preload into Dexie (fire-and-forget).
+ *  Called once after room load completes. All scroll-up reads then come
+ *  purely from local Dexie cache — zero network latency on scroll path. */
+const startHistoryPreload = (roomId: string) => {
+  if (chatStore.historyPreloadActive) return;
+  chatStore.preloadFullHistory(roomId).catch(() => {});
 };
 
 /** Load newer messages (forward pagination in detached mode).
@@ -931,21 +928,13 @@ const onScrollThrottled = () => {
 
   if (!hasMore.value) return;
 
-  // Velocity-adaptive thresholds — fast scroll triggers earlier
+  // Velocity-adaptive threshold — fast scroll triggers expand earlier
   const speed = Math.abs(scrollVelocity);
   const effectiveLoadThreshold = speed > 3000 ? 3000
     : speed > VELOCITY_BOOST_THRESHOLD ? 2000
     : LOAD_THRESHOLD;
-  const effectivePrefetchThreshold = speed > 3000 ? 6000
-    : speed > VELOCITY_BOOST_THRESHOLD ? 4000
-    : PREFETCH_THRESHOLD;
 
-  // Background prefetch zone — silently fill Dexie cache, no UI effect
-  if (scrollTop < effectivePrefetchThreshold && scrollVelocity > 0) {
-    triggerPrefetch(roomId);
-  }
-
-  // Primary expand zone — expand Dexie window (instant from cache)
+  // Expand Dexie window — data is already local (preloaded on room enter)
   if (scrollTop < effectiveLoadThreshold && !loadingMore.value) {
     doLoadMore(roomId);
   }
