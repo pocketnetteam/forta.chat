@@ -59,7 +59,7 @@ const MAX_ATTEMPTS = 3;
 
 export function useScrollToMessage(
   virtualItems: Ref<Array<VirtualItem>>,
-  scrollerRef: Ref<{ scrollToIndex: (idx: number) => void; $el?: HTMLElement } | undefined>,
+  scrollerRef: Ref<{ scrollToIndex: (idx: number, opts?: { align?: "start" | "center" | "end" }) => void; getContainerEl?: () => HTMLElement | null } | undefined>,
   getScrollContainer: () => HTMLElement | null,
 ) {
   const scrollTarget = ref<ScrollTarget | null>(null);
