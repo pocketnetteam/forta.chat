@@ -1,4 +1,4 @@
-import type { ChatDatabase, LocalRoom } from "./schema";
+import type { ChatDatabase, LocalRoom, LocalMessageStatus } from "./schema";
 import type { MessageType } from "@/entities/chat/model/types";
 
 export class RoomRepository {
@@ -74,6 +74,135 @@ export class RoomRepository {
   /** Bulk upsert rooms (after full sync) */
   async bulkUpsertRooms(rooms: LocalRoom[]): Promise<void> {
     await this.db.rooms.bulkPut(rooms);
+  }
+
+  /** Bulk-sync room metadata in a SINGLE Dexie transaction.
+   *  - Existing rooms: update metadata only (preserve preview/unread/watermark fields)
+   *  - Tombstoned rooms: revive + update metadata
+   *  - New rooms: full insert with initial state
+   *  One transaction = one liveQuery notification (instead of N). */
+  async bulkSyncRooms(
+    roomUpdates: Array<{
+      id: string;
+      name?: string;
+      avatar?: string;
+      isGroup?: boolean;
+      members?: string[];
+      membership?: "join" | "invite" | "leave";
+      topic?: string;
+      syncedAt?: number;
+      updatedAt?: number;
+      lastMessageTimestamp?: number;
+      // Cross-device unread reconciliation: server-reported unread count.
+      // If serverUnreadCount is 0 but local Dexie has >0, another device read them.
+      serverUnreadCount?: number;
+      // Full insert fields (only for genuinely new rooms)
+      unreadCount?: number;
+      hasMoreHistory?: boolean;
+      lastReadInboundTs?: number;
+      lastReadOutboundTs?: number;
+      lastMessagePreview?: string;
+      lastMessageSenderId?: string;
+      lastMessageType?: MessageType;
+      lastMessageEventId?: string;
+      lastMessageLocalStatus?: LocalMessageStatus;
+      lastMessageReaction?: LocalRoom["lastMessageReaction"];
+      isDeleted?: boolean;
+      deletedAt?: number | null;
+      deleteReason?: "left" | "kicked" | "banned" | "removed" | null;
+    }>,
+  ): Promise<void> {
+    if (roomUpdates.length === 0) return;
+
+    await this.db.transaction("rw", this.db.rooms, async () => {
+      const ids = roomUpdates.map((u) => u.id);
+      const existing = await this.db.rooms.bulkGet(ids);
+      const existingMap = new Map<string, LocalRoom>();
+      for (const room of existing) {
+        if (room) existingMap.set(room.id, room);
+      }
+
+      const toPut: LocalRoom[] = [];
+
+      for (const update of roomUpdates) {
+        const prev = existingMap.get(update.id);
+
+        if (prev) {
+          // ── Existing room: update metadata only ──
+          const patched: LocalRoom = { ...prev };
+
+          if (update.name !== undefined) patched.name = update.name;
+          if (update.avatar !== undefined) patched.avatar = update.avatar;
+          if (update.isGroup !== undefined) patched.isGroup = update.isGroup;
+          if (update.members !== undefined) patched.members = update.members;
+          if (update.membership !== undefined) patched.membership = update.membership;
+          if (update.topic !== undefined) patched.topic = update.topic;
+          if (update.syncedAt !== undefined) patched.syncedAt = update.syncedAt;
+
+          // Monotonically advance timestamps
+          if (update.updatedAt !== undefined) {
+            patched.updatedAt = Math.max(prev.updatedAt ?? 0, update.updatedAt);
+          }
+          if (update.lastMessageTimestamp !== undefined) {
+            patched.lastMessageTimestamp = Math.max(
+              prev.lastMessageTimestamp ?? 0,
+              update.lastMessageTimestamp,
+            );
+          }
+
+          // Revive tombstoned rooms
+          if (prev.isDeleted) {
+            patched.isDeleted = false;
+            patched.deletedAt = null;
+            patched.deleteReason = null;
+          }
+
+          // Cross-device unread reconciliation: if server says 0 unread
+          // but local Dexie still has >0, another device read them.
+          if (update.serverUnreadCount === 0 && (prev.unreadCount ?? 0) > 0) {
+            patched.unreadCount = 0;
+            // Advance inbound watermark so future counts are correct
+            const latestTs = prev.lastMessageTimestamp ?? prev.updatedAt ?? 0;
+            if (latestTs > (prev.lastReadInboundTs ?? 0)) {
+              patched.lastReadInboundTs = latestTs;
+            }
+          }
+
+          toPut.push(patched);
+        } else {
+          // ── New room: full insert with defaults ──
+          const newRoom: LocalRoom = {
+            id: update.id,
+            name: update.name ?? "",
+            avatar: update.avatar,
+            isGroup: update.isGroup ?? false,
+            members: update.members ?? [],
+            membership: update.membership ?? "join",
+            unreadCount: update.unreadCount ?? 0,
+            updatedAt: update.updatedAt ?? Date.now(),
+            hasMoreHistory: update.hasMoreHistory ?? true,
+            lastReadInboundTs: update.lastReadInboundTs ?? 0,
+            lastReadOutboundTs: update.lastReadOutboundTs ?? 0,
+            topic: update.topic,
+            syncedAt: update.syncedAt ?? Date.now(),
+            isDeleted: update.isDeleted ?? false,
+            deletedAt: update.deletedAt ?? null,
+            deleteReason: update.deleteReason ?? null,
+            // Preview fields — only set for new rooms
+            lastMessagePreview: update.lastMessagePreview,
+            lastMessageTimestamp: update.lastMessageTimestamp,
+            lastMessageSenderId: update.lastMessageSenderId,
+            lastMessageType: update.lastMessageType,
+            lastMessageEventId: update.lastMessageEventId,
+            lastMessageLocalStatus: update.lastMessageLocalStatus,
+            lastMessageReaction: update.lastMessageReaction ?? null,
+          };
+          toPut.push(newRoom);
+        }
+      }
+
+      await this.db.rooms.bulkPut(toPut);
+    });
   }
 
   /** Update specific fields on a room */

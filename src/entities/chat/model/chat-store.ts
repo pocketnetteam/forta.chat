@@ -10,6 +10,7 @@ import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef, triggerRef } from "vue";
+import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import { useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
@@ -584,11 +585,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     activeMessages.value.filter(m => m.type === MessageType.image || m.type === MessageType.video)
   );
 
+  // Structural sharing: skip full recompute when dexieRooms reference hasn't changed
+  let _prevDexieRef: LocalRoom[] | null = null;
+  let _prevPinnedRef: ReadonlySet<string> | null = null;
+  let _prevSorted: ChatRoom[] | null = null;
+
   const sortedRooms = computed(() => {
+    perfCount("sortedRooms:recompute");
     // Use Dexie rooms when initialized (single source of truth), fallback to old shallowRef otherwise
     let source: ChatRoom[];
-    if (chatDbKitRef.value) {
-      source = dexieRooms.value.map(lr => ({
+    const dexie = chatDbKitRef.value ? dexieRooms.value : null;
+
+    if (dexie) {
+      // Structural sharing: if dexieRooms reference AND pinnedRoomIds haven't changed, reuse result
+      if (dexie === _prevDexieRef && pinnedRoomIds.value === _prevPinnedRef && _prevSorted) {
+        return _prevSorted;
+      }
+      source = dexie.map(lr => ({
         id: lr.id,
         name: lr.name,
         avatar: lr.avatar,
@@ -617,7 +630,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       source = rooms.value;
     }
 
-    return [...source]
+    const result = [...source]
       .sort((a, b) => {
         const aPinned = pinnedRoomIds.value.has(a.id) ? 1 : 0;
         const bPinned = pinnedRoomIds.value.has(b.id) ? 1 : 0;
@@ -631,6 +644,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const bTime = b.lastMessage?.timestamp ?? 0;
         return bTime - aTime;
       });
+
+    // Cache for structural sharing on next call
+    _prevDexieRef = dexie;
+    _prevPinnedRef = pinnedRoomIds.value;
+    _prevSorted = result;
+    return result;
   });
 
   const totalUnread = computed(() => {
@@ -731,6 +750,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     kit: MatrixKit,
     myUserId: string,
   ) => {
+    perfMark("fullRoomRefresh-start");
     // Retry previously failed decryptions on full refresh
     decryptFailedRooms.clear();
 
@@ -764,94 +784,42 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     rooms.value = newRooms;
     rebuildRoomsMap();
 
-    // Dual-write: sync room metadata to Dexie.
-    // Metadata fields (name, avatar, members, etc.) are always updated.
-    // Unread/watermark: only reconcile when server says 0 but local says >0
-    // (cross-device read sync). Other unread changes are handled by EventWriter.
+    // Dual-write: sync room metadata to Dexie in a single transaction.
+    // Single transaction = single liveQuery notification (instead of N).
+    // Metadata fields are always updated. Unread/watermark: reconcile via
+    // serverUnreadCount when server says 0 but local >0 (cross-device read sync).
     if (chatDbKitRef.value) {
       const dbKit = chatDbKitRef.value;
-      (async () => {
-        try {
-          const existingRooms = await dbKit.rooms.getAllRooms();
-          const existingMap = new Map(existingRooms.map(r => [r.id, r]));
-          const now = Date.now();
-
-          for (const r of newRooms) {
-            const metadataFields = {
-              name: r.name,
-              avatar: r.avatar,
-              isGroup: r.isGroup,
-              members: r.members,
-              membership: (r.membership ?? "join") as "join" | "invite" | "leave",
-              topic: r.topic || "",
-              syncedAt: now,
-            };
-
-            const existing = existingMap.get(r.id);
-            if (existing) {
-              // Existing room: update metadata + monotonically advance timestamps
-              const updates: typeof metadataFields & { updatedAt?: number; lastMessageTimestamp?: number; unreadCount?: number; lastReadInboundTs?: number } = { ...metadataFields };
-              if (r.updatedAt > (existing.updatedAt ?? 0)) {
-                updates.updatedAt = r.updatedAt;
-              }
-              // Keep lastMessageTimestamp in sync for correct sort order.
-              // Matrix SDK timeline has the freshest data; advance monotonically
-              // so EventWriter writes are never rolled back.
-              const matrixTs = r.lastMessage?.timestamp;
-              if (matrixTs && matrixTs > (existing.lastMessageTimestamp ?? 0)) {
-                updates.lastMessageTimestamp = matrixTs;
-              }
-              // Reconcile unread count from server for cross-device sync.
-              // Matrix SDK's getUnreadNotificationCount reflects reads from all devices.
-              // If server says 0 but local Dexie still has unread, another device read them.
-              const serverUnread = r.unreadCount;
-              if (serverUnread === 0 && (existing.unreadCount ?? 0) > 0) {
-                updates.unreadCount = 0;
-                // Advance inbound watermark to latest message so future counts are correct
-                const latestTs = existing.lastMessageTimestamp ?? existing.updatedAt ?? 0;
-                if (latestTs > (existing.lastReadInboundTs ?? 0)) {
-                  updates.lastReadInboundTs = latestTs;
-                }
-              }
-              await dbKit.rooms.updateRoom(r.id, updates);
-            } else {
-              // Room not in active set — may be tombstoned. Revive if so.
-              const maybeTombstoned = await dbKit.rooms.getRoom(r.id);
-              if (maybeTombstoned?.isDeleted) {
-                await dbKit.rooms.reviveRoom(r.id);
-                await dbKit.rooms.updateRoom(r.id, { ...metadataFields, updatedAt: r.updatedAt });
-              } else {
-                // Genuinely new room: insert with full initial state
-                await dbKit.rooms.upsertRoom({
-                  id: r.id,
-                  ...metadataFields,
-                  unreadCount: r.unreadCount,
-                  updatedAt: r.updatedAt,
-                  hasMoreHistory: true,
-                  lastReadInboundTs: 0,
-                  lastReadOutboundTs: 0,
-                  lastMessagePreview: r.lastMessage?.deleted
-                    ? "🚫 Message deleted"
-                    : r.lastMessage?.content?.slice(0, 200),
-                  lastMessageTimestamp: r.lastMessage?.timestamp,
-                  lastMessageSenderId: r.lastMessage?.senderId,
-                  lastMessageType: r.lastMessage?.type,
-                  lastMessageEventId: r.lastMessage?.id || undefined,
-                  lastMessageLocalStatus: r.lastMessage?.status === MessageStatus.sending ? "pending"
-                    : r.lastMessage?.status === MessageStatus.failed ? "failed"
-                    : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
-                  lastMessageReaction: null,
-                  isDeleted: false,
-                  deletedAt: null,
-                  deleteReason: null,
-                });
-              }
-            }
-          }
-        } catch (e) {
-          console.warn("[chat-store] Dexie room sync failed:", e);
-        }
-      })();
+      const now = Date.now();
+      const updates = newRooms.map(r => ({
+        id: r.id,
+        name: r.name,
+        avatar: r.avatar,
+        isGroup: r.isGroup,
+        members: r.members,
+        membership: (r.membership ?? "join") as "join" | "invite" | "leave",
+        topic: r.topic || "",
+        syncedAt: now,
+        updatedAt: r.updatedAt,
+        lastMessageTimestamp: r.lastMessage?.timestamp,
+        serverUnreadCount: r.unreadCount, // cross-device unread reconciliation
+        // Full insert fields for genuinely new rooms
+        unreadCount: r.unreadCount,
+        lastMessagePreview: r.lastMessage?.deleted
+          ? "🚫 Message deleted"
+          : r.lastMessage?.content?.slice(0, 200),
+        lastMessageSenderId: r.lastMessage?.senderId,
+        lastMessageType: r.lastMessage?.type,
+        lastMessageEventId: r.lastMessage?.id || undefined,
+        lastMessageLocalStatus: (
+          r.lastMessage?.status === MessageStatus.sending ? "pending"
+          : r.lastMessage?.status === MessageStatus.failed ? "failed"
+          : "synced"
+        ) as import("@/shared/lib/local-db").LocalMessageStatus,
+      }));
+      dbKit.rooms.bulkSyncRooms(updates).catch(e =>
+        console.warn("[chat-store] Dexie room sync failed:", e)
+      );
     }
 
     // Build user display name cache from room members (sync — no API calls)
@@ -884,6 +852,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
     decryptRoomPreviews(interactiveRooms).then(() => debouncedCacheRooms());
+    perfMark("fullRoomRefresh-end");
+    perfMeasure("fullRoomRefresh", "fullRoomRefresh-start", "fullRoomRefresh-end");
     debouncedCacheRooms();
   };
 
@@ -1034,90 +1004,44 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       triggerRef(rooms);
     }
 
-    // Dual-write: sync changed room metadata to Dexie.
-    // Metadata fields are always updated. Unread/watermark: only reconcile
-    // when server says 0 but local says >0 (cross-device read sync).
+    // Dual-write changed rooms to Dexie in a single transaction.
+    // Includes cross-device unread reconciliation via serverUnreadCount.
     if (chatDbKitRef.value && changed.size > 0) {
       const dbKit = chatDbKitRef.value;
-      (async () => {
-        try {
-          const existingRooms = await dbKit.rooms.getAllRooms();
-          const existingMap = new Map(existingRooms.map(r => [r.id, r]));
-          const now = Date.now();
-
-          for (const roomId of changed) {
-            const r = roomsMap.get(roomId);
-            if (!r) continue;
-
-            const metadataFields = {
-              name: r.name,
-              avatar: r.avatar,
-              isGroup: r.isGroup,
-              members: r.members,
-              membership: (r.membership ?? "join") as "join" | "invite" | "leave",
-              topic: r.topic || "",
-              syncedAt: now,
-            };
-
-            const existingRoom = existingMap.get(roomId);
-            if (existingRoom) {
-              // Monotonically advance updatedAt and lastMessageTimestamp
-              const updates: typeof metadataFields & { updatedAt?: number; lastMessageTimestamp?: number; unreadCount?: number; lastReadInboundTs?: number } = { ...metadataFields };
-              if (r.updatedAt > (existingRoom.updatedAt ?? 0)) {
-                updates.updatedAt = r.updatedAt;
-              }
-              const matrixTs = r.lastMessage?.timestamp;
-              if (matrixTs && matrixTs > (existingRoom.lastMessageTimestamp ?? 0)) {
-                updates.lastMessageTimestamp = matrixTs;
-              }
-              // Reconcile unread count from server for cross-device sync.
-              const serverUnread = r.unreadCount;
-              if (serverUnread === 0 && (existingRoom.unreadCount ?? 0) > 0) {
-                updates.unreadCount = 0;
-                const latestTs = existingRoom.lastMessageTimestamp ?? existingRoom.updatedAt ?? 0;
-                if (latestTs > (existingRoom.lastReadInboundTs ?? 0)) {
-                  updates.lastReadInboundTs = latestTs;
-                }
-              }
-              await dbKit.rooms.updateRoom(roomId, updates);
-            } else {
-              // Room not in active set — may be tombstoned. Revive if so.
-              const maybeTombstoned = await dbKit.rooms.getRoom(roomId);
-              if (maybeTombstoned?.isDeleted) {
-                await dbKit.rooms.reviveRoom(roomId);
-                await dbKit.rooms.updateRoom(roomId, { ...metadataFields, updatedAt: r.updatedAt });
-              } else {
-                // Genuinely new room discovered during incremental refresh
-                await dbKit.rooms.upsertRoom({
-                  id: r.id,
-                  ...metadataFields,
-                  unreadCount: r.unreadCount,
-                  updatedAt: r.updatedAt,
-                  hasMoreHistory: true,
-                  lastReadInboundTs: 0,
-                  lastReadOutboundTs: 0,
-                  lastMessagePreview: r.lastMessage?.deleted
-                    ? "🚫 Message deleted"
-                    : r.lastMessage?.content?.slice(0, 200),
-                  lastMessageTimestamp: r.lastMessage?.timestamp,
-                  lastMessageSenderId: r.lastMessage?.senderId,
-                  lastMessageType: r.lastMessage?.type,
-                  lastMessageEventId: r.lastMessage?.id || undefined,
-                  lastMessageLocalStatus: r.lastMessage?.status === MessageStatus.sending ? "pending"
-                    : r.lastMessage?.status === MessageStatus.failed ? "failed"
-                    : "synced" as import("@/shared/lib/local-db").LocalMessageStatus,
-                  lastMessageReaction: null,
-                  isDeleted: false,
-                  deletedAt: null,
-                  deleteReason: null,
-                });
-              }
-            }
-          }
-        } catch (e) {
-          console.warn("[chat-store] Dexie incremental room sync failed:", e);
-        }
-      })();
+      const now = Date.now();
+      const updates = [...changed]
+        .map(roomId => roomsMap.get(roomId))
+        .filter((r): r is ChatRoom => !!r)
+        .map(r => ({
+          id: r.id,
+          name: r.name,
+          avatar: r.avatar,
+          isGroup: r.isGroup,
+          members: r.members,
+          membership: (r.membership ?? "join") as "join" | "invite" | "leave",
+          topic: r.topic || "",
+          syncedAt: now,
+          updatedAt: r.updatedAt,
+          lastMessageTimestamp: r.lastMessage?.timestamp,
+          serverUnreadCount: r.unreadCount, // cross-device unread reconciliation
+          unreadCount: r.unreadCount,
+          lastMessagePreview: r.lastMessage?.deleted
+            ? "🚫 Message deleted"
+            : r.lastMessage?.content?.slice(0, 200),
+          lastMessageSenderId: r.lastMessage?.senderId,
+          lastMessageType: r.lastMessage?.type,
+          lastMessageEventId: r.lastMessage?.id || undefined,
+          lastMessageLocalStatus: (
+            r.lastMessage?.status === MessageStatus.sending ? "pending"
+            : r.lastMessage?.status === MessageStatus.failed ? "failed"
+            : "synced"
+          ) as import("@/shared/lib/local-db").LocalMessageStatus,
+        }));
+      if (updates.length > 0) {
+        dbKit.rooms.bulkSyncRooms(updates).catch(e =>
+          console.warn("[chat-store] Dexie incremental room sync failed:", e)
+        );
+      }
     }
 
     // Update display names only for changed rooms
@@ -1385,11 +1309,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Cap at 20 rooms per cycle to avoid blocking
     const capped = toDecrypt.slice(0, 20);
 
-    // Decrypt in small batches (5 at a time) with incremental UI updates
+    // Decrypt in small batches (5 at a time), collect results, apply once
     const BATCH = 5;
+    const decryptedResults: Array<{ roomId: string; body: string }> = [];
+
     for (let i = 0; i < capped.length; i += BATCH) {
       const batch = capped.slice(i, i + BATCH);
-      let batchUpdated = false;
 
       await Promise.all(batch.map(async ({ roomId, matrixRoom }) => {
         try {
@@ -1415,12 +1340,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             try {
               const decrypted = await roomCrypto.decryptEvent(raw);
               if (decrypted.body) {
-                decryptedPreviewCache.set(roomId, decrypted.body);
-                const room = getRoomById(roomId);
-                if (room?.lastMessage) {
-                  room.lastMessage = { ...room.lastMessage, content: decrypted.body };
-                  batchUpdated = true;
-                }
+                decryptedResults.push({ roomId, body: decrypted.body });
               }
             } catch {
               decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
@@ -1431,9 +1351,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
         }
       }));
+    }
 
-      // Trigger reactivity after each batch so UI updates incrementally
-      if (batchUpdated) triggerRef(rooms);
+    // Apply ALL decrypted results in one pass with a single triggerRef
+    if (decryptedResults.length > 0) {
+      for (const { roomId, body } of decryptedResults) {
+        decryptedPreviewCache.set(roomId, body);
+        const room = getRoomById(roomId);
+        if (room?.lastMessage) {
+          room.lastMessage = { ...room.lastMessage, content: body };
+        }
+      }
+      triggerRef(rooms);
     }
   };
 
@@ -1556,6 +1485,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   const setActiveRoom = (roomId: string | null) => {
+    perfMark("setActiveRoom-start");
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
     if (roomId) {
@@ -1575,6 +1505,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // NOTE: Do NOT mark as read here. Reading happens incrementally
       // via IntersectionObserver in MessageList as user scrolls.
     }
+    perfMark("setActiveRoom-end");
+    perfMeasure("setActiveRoom", "setActiveRoom-start", "setActiveRoom-end");
   };
 
   /** Self-healing: detect zombie rooms (left on another device but still in local cache)
