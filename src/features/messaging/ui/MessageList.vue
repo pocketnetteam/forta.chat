@@ -1200,6 +1200,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
       ref="scrollerRef"
       :data="virtualItems"
       :shift="shiftMode"
+      aria-live="polite"
       class="h-full overscroll-contain px-4 py-3"
       :style="{ opacity: settled ? 1 : 0, transition: settled ? 'opacity 0.1s ease-out' : 'none' }"
       @scroll="onVListScroll"

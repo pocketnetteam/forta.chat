@@ -480,6 +480,7 @@ const getRoomLongPress = (room: ChatRoom) => {
           v-else
           class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
           :class="(item as ChatRoom).id === chatStore.activeRoomId ? 'bg-color-bg-ac/10' : ''"
+          :aria-label="`${resolveRoomName(item as ChatRoom)}${(item as ChatRoom).unreadCount ? `, ${(item as ChatRoom).unreadCount} unread` : ''}`"
           @click="handleSelect(item as ChatRoom)"
           @contextmenu.prevent="(e: MouseEvent) => { ctxMenu = { show: true, x: e.clientX, y: e.clientY, roomId: (item as ChatRoom).id }; }"
           @pointerdown="(e: PointerEvent) => getRoomLongPress(item as ChatRoom).onPointerdown(e)"
@@ -587,6 +588,7 @@ const getRoomLongPress = (room: ChatRoom) => {
                   v-if="(item as ChatRoom).unreadCount > 0"
                   class="flex h-[20px] min-w-[20px] shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium text-white"
                   :class="chatStore.mutedRoomIds.has((item as ChatRoom).id) ? 'bg-neutral-grad-2' : 'bg-color-bg-ac'"
+                  :aria-label="`${(item as ChatRoom).unreadCount} unread messages`"
                 >
                   {{ (item as ChatRoom).unreadCount > 99 ? "99+" : (item as ChatRoom).unreadCount }}
                 </span>
