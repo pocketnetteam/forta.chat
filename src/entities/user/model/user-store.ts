@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { shallowRef, triggerRef } from "vue";
 import { createAppInitializer } from "@/app/providers/initializers/app-initializer";
 import { ProfileLoader } from "@/shared/lib/profile-loader";
+import { PromisePool } from "@/shared/lib/promise-pool";
 
 import type { User } from "./types";
 
@@ -18,8 +19,13 @@ function getAppInit() {
   return _appInit;
 }
 
-/** In-flight requests to avoid duplicate loads */
-const pendingLoads = new Map<string, Promise<void>>();
+/**
+ * Unified in-flight request deduplication.
+ * Replaces the old `pendingLoads` Map — all profile loading paths
+ * (loadUserIfMissing, loadUsersBatch, enqueueProfiles) now share
+ * a single pool, eliminating race conditions between them.
+ */
+const profilePool = new PromisePool<void>();
 
 /** Debounced persistence to localStorage */
 let _cacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -67,12 +73,13 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     debouncedCacheUsers(users.value);
   };
 
-  /** Load a user profile if not already cached. Deduplicates in-flight requests. */
+  /** Load a single user profile. Deduplicated via PromisePool — 140 concurrent
+   *  calls for the same address produce exactly 1 network request. */
   const loadUserIfMissing = (address: string): void => {
     if (!address || users.value[address]) return;
-    if (pendingLoads.has(address)) return;
+    if (profilePool.has(address)) return;
 
-    const promise = (async () => {
+    profilePool.dedupe(address, async () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
@@ -92,29 +99,24 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         }
       } catch {
         // Silently fail — user will see address as fallback
-      } finally {
-        pendingLoads.delete(address);
       }
-    })();
-
-    pendingLoads.set(address, promise);
+    }).catch(() => {});
   };
 
-  /** Batch-load user profiles for multiple addresses at once (like original bastyon-chat).
-   *  Filters out already-cached addresses, loads remaining in one API call. */
+  /** Batch-load user profiles. Uses PromisePool.dedupeBatch to register
+   *  all addresses SYNCHRONOUSLY before any await — closing the race window
+   *  that existed between filter() and pendingLoads.set() in the old code. */
   const loadUsersBatch = async (addresses: string[]): Promise<void> => {
-    const toLoad = addresses.filter(a => a && !users.value[a] && !pendingLoads.has(a));
+    const toLoad = addresses.filter(a => a && !users.value[a]);
     if (toLoad.length === 0) return;
 
-    // Mark all as pending to avoid duplicate loads
-    const batchPromise = (async () => {
+    await profilePool.dedupeBatch(toLoad, async (uncached) => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        await appInit.loadUsersBatch(toLoad);
-        // Retrieve cached results
+        await appInit.loadUsersBatch(uncached);
         let updated = false;
-        for (const addr of toLoad) {
+        for (const addr of uncached) {
           const userData = appInit.getUserData(addr);
           if (userData) {
             users.value[addr] = {
@@ -135,13 +137,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         }
       } catch {
         // Silently fail
-      } finally {
-        for (const addr of toLoad) pendingLoads.delete(addr);
       }
-    })();
-
-    for (const addr of toLoad) pendingLoads.set(addr, batchPromise);
-    await batchPromise;
+    });
   };
 
   /** DataLoader-style profile loading: collects all requests within a microtick

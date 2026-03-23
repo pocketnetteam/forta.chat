@@ -276,6 +276,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const FULL_REFRESH_INTERVAL = 60_000; // Reconciliation fallback
   let membersLoadedOnce = false; // One-time member loading for stale lazy-load cache
 
+  /** Schedule a callback during browser idle time, with setTimeout fallback */
+  const scheduleIdle = (cb: () => void, fallbackMs = 200) => {
+    if (typeof requestIdleCallback !== "undefined") {
+      requestIdleCallback(cb);
+    } else {
+      setTimeout(cb, fallbackMs);
+    }
+  };
+
   /** Mark a room as changed so the next incremental refresh processes it */
   const markRoomChanged = (roomId: string) => {
     changedRoomIds.add(roomId);
@@ -602,24 +611,34 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return msgs;
   });
 
-  const activeMediaMessages = computed(() =>
-    activeMessages.value.filter(m => m.type === MessageType.image || m.type === MessageType.video)
-  );
+  // Memoized: only recompute when activeMessages reference changes
+  let _prevActiveMessagesRef: typeof activeMessages.value | null = null;
+  let _cachedMediaMessages: typeof activeMessages.value = [];
+  const activeMediaMessages = computed(() => {
+    if (activeMessages.value !== _prevActiveMessagesRef) {
+      _prevActiveMessagesRef = activeMessages.value;
+      _cachedMediaMessages = activeMessages.value.filter(m => m.type === MessageType.image || m.type === MessageType.video);
+    }
+    return _cachedMediaMessages;
+  });
 
   // Structural sharing: skip full recompute when dexieRooms reference hasn't changed
   let _prevDexieRef: LocalRoom[] | null = null;
-  let _prevPinnedRef: ReadonlySet<string> | null = null;
+  let _prevPinnedKey: string | null = null;
   let _prevSorted: ChatRoom[] | null = null;
+
+  const _pinnedKey = (s: ReadonlySet<string>) => [...s].sort().join(",");
 
   const sortedRooms = computed(() => {
     perfCount("sortedRooms:recompute");
     // Use Dexie rooms when initialized (single source of truth), fallback to old shallowRef otherwise
     let source: ChatRoom[];
     const dexie = chatDbKitRef.value ? dexieRooms.value : null;
+    const curPinnedKey = _pinnedKey(pinnedRoomIds.value);
 
     if (dexie) {
-      // Structural sharing: if dexieRooms reference AND pinnedRoomIds haven't changed, reuse result
-      if (dexie === _prevDexieRef && pinnedRoomIds.value === _prevPinnedRef && _prevSorted) {
+      // Structural sharing: if dexieRooms reference AND pinnedRoomIds contents haven't changed, reuse result
+      if (dexie === _prevDexieRef && curPinnedKey === _prevPinnedKey && _prevSorted) {
         return _prevSorted;
       }
       source = dexie.map(lr => ({
@@ -668,7 +687,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Cache for structural sharing on next call
     _prevDexieRef = dexie;
-    _prevPinnedRef = pinnedRoomIds.value;
+    _prevPinnedKey = curPinnedKey;
     _prevSorted = result;
     return result;
   });
@@ -691,6 +710,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Internal: actual refresh logic (called by debounced wrapper) */
   const PRELOAD_COUNT = 15;
+  const NEIGHBOR_PRELOAD_COUNT = 1; // rooms above/below active to network-preload
   let preloadDone = false;
 
   /** Track which rooms have already been preloaded (cache + network) to avoid double work */
@@ -698,35 +718,76 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Track rooms where cache phase started (but network may still be pending) */
   const cachePreloadedRoomIds = new Set<string>();
 
-  /** Background-preload messages for the top visible rooms so opening them feels instant */
+  /** Background-preload messages for rooms near the active room.
+   *  Phase 1: active room + 2 neighbors get immediate network preload.
+   *  Phase 2: remaining viewport rooms get cache-only preload via requestIdleCallback. */
   const preloadVisibleRooms = async () => {
     if (preloadDone) return;
     preloadDone = true;
 
-    const roomsToPreload = sortedRooms.value
-      .slice(0, PRELOAD_COUNT)
-      .filter(r => r.id !== activeRoomId.value && r.membership !== "invite");
+    const sorted = sortedRooms.value;
+    const activeId = activeRoomId.value;
 
-    // Phase 1: Load all cached messages in parallel (fast, IndexedDB)
-    await Promise.all(
-      roomsToPreload.map(room => {
-        cachePreloadedRoomIds.add(room.id);
-        return messages.value[room.id]?.length ? Promise.resolve() : loadCachedMessages(room.id).catch(() => {});
-      })
+    // Check if Matrix SDK has rooms — if not, defer preload
+    try {
+      const matrixService = getMatrixClientService();
+      const sdkRooms = matrixService.getRooms() as unknown[];
+      if ((!sdkRooms || sdkRooms.length === 0) && sorted.length > 0) {
+        // SDK hasn't populated rooms yet — retry in 2s
+        preloadDone = false;
+        setTimeout(() => preloadVisibleRooms(), 2000);
+        return;
+      }
+    } catch {
+      // Matrix service not ready — retry later
+      preloadDone = false;
+      setTimeout(() => preloadVisibleRooms(), 2000);
+      return;
+    }
+
+    // Priority: active room + N neighbors (immediate network preload)
+    const activeIdx = activeId ? sorted.findIndex(r => r.id === activeId) : -1;
+    const priorityRooms: typeof sorted = [];
+    if (activeIdx >= 0) {
+      for (let d = 1; d <= NEIGHBOR_PRELOAD_COUNT; d++) {
+        if (activeIdx - d >= 0) priorityRooms.push(sorted[activeIdx - d]);
+        if (activeIdx + d < sorted.length) priorityRooms.push(sorted[activeIdx + d]);
+      }
+    }
+    const priorityFiltered = priorityRooms.filter(
+      r => r.id !== activeId && r.membership !== "invite",
     );
 
-    // Phase 2: Load fresh data from Matrix in small batches
-    const BATCH = 5;
-    for (let i = 0; i < roomsToPreload.length; i += BATCH) {
-      const batch = roomsToPreload.slice(i, i + BATCH);
-      await Promise.all(
-        batch.map(room => {
-          preloadedRoomIds.add(room.id);
-          return loadRoomMessages(room.id).catch(() => {});
-        })
-      );
-      // Yield to UI between batches
-      await new Promise(r => setTimeout(r, 0));
+    // Phase 1: cache + network for priority rooms
+    for (const room of priorityFiltered) {
+      cachePreloadedRoomIds.add(room.id);
+      preloadedRoomIds.add(room.id);
+      if (!messages.value[room.id]?.length) {
+        await loadCachedMessages(room.id).catch(() => {});
+      }
+      await loadRoomMessages(room.id).catch(() => {});
+    }
+
+    // Phase 2: cache-only preload for remaining viewport rooms via idle callback
+    const remaining = sorted
+      .slice(0, PRELOAD_COUNT)
+      .filter(r => r.id !== activeId && r.membership !== "invite" && !cachePreloadedRoomIds.has(r.id));
+
+    if (remaining.length > 0) {
+      const loadNextBatch = (offset: number) => {
+        const batch = remaining.slice(offset, offset + 3);
+        if (batch.length === 0) return;
+        Promise.all(batch.map(room => {
+          cachePreloadedRoomIds.add(room.id);
+          preloadedRoomIds.add(room.id); // Prevent preloadRoomsByIds from triggering network load
+          return messages.value[room.id]?.length ? Promise.resolve() : loadCachedMessages(room.id).catch(() => {});
+        })).then(() => {
+          if (offset + 3 < remaining.length) {
+            scheduleIdle(() => loadNextBatch(offset + 3), 100);
+          }
+        });
+      };
+      scheduleIdle(() => loadNextBatch(0), 100);
     }
   };
 
@@ -852,23 +913,31 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const viewportIds = sortedRooms.value.slice(0, 15).map(r => r.id);
     if (viewportIds.length > 0) loadProfilesForRoomIds(viewportIds);
 
-    // Background: load profiles for remaining rooms in batches (after viewport)
+    // Background: load profiles for remaining rooms via idle callbacks
+    // (previously used setTimeout(500) which blocked startup)
     const remainingIds = sortedRooms.value.slice(15).map(r => r.id);
     if (remainingIds.length > 0) {
-      const BG_BATCH = 10;
-      const BG_DELAY = 500;
-      (async () => {
-        for (let i = 0; i < remainingIds.length; i += BG_BATCH) {
-          await new Promise(r => setTimeout(r, BG_DELAY));
-          loadProfilesForRoomIds(remainingIds.slice(i, i + BG_BATCH));
+      const BG_BATCH = 5;
+      const loadNextBatch = (offset: number) => {
+        const batch = remainingIds.slice(offset, offset + BG_BATCH);
+        if (batch.length === 0) return;
+        loadProfilesForRoomIds(batch);
+        if (offset + BG_BATCH < remainingIds.length) {
+          scheduleIdle(() => loadNextBatch(offset + BG_BATCH));
         }
-      })();
+      };
+      scheduleIdle(() => loadNextBatch(0), 500);
     }
 
-    // One-time: load members for rooms with stale lazy-load cache (only 1 member = self)
+    // One-time: load members for viewport rooms only (lazy — others load on demand).
+    // Previously loaded ALL rooms here, causing N×GET /members requests on startup.
     if (willLoadMembers) {
       membersLoadedOnce = true;
-      loadMissingMembers(interactiveRooms, kit, myUserId);
+      const viewportRoomIds = new Set(viewportIds);
+      const viewportMatrixRooms = interactiveRooms.filter(
+        (mr: any) => viewportRoomIds.has(mr.roomId as string),
+      );
+      loadMissingMembers(viewportMatrixRooms, kit, myUserId);
     }
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
@@ -1468,40 +1537,65 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Per-room cooldown for network receipt sends (local Dexie commit is always instant) */
+  const RECEIPT_COOLDOWN_MS = 3000;
+  const receiptCooldowns = new Map<string, number>();
+
   /** Atomically commit a read watermark: update Dexie (instant UI) + send
-   *  Matrix receipt (server sync). If the Matrix send fails, the watermark
-   *  is queued in pendingReadWatermarks for retry on next sync. */
+   *  Matrix receipt (server sync) with per-room throttling.
+   *  Local commit is always immediate; network send is throttled to max 1/3s per room. */
   const commitReadWatermark = async (roomId: string, timestamp: number) => {
     // 1. LOCAL COMMIT — instant, UI reacts via liveQuery
     if (chatDbKitRef.value) {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
     }
 
-    // 2. SERVER SYNC — find event and send receipt
+    // 2. SERVER SYNC — throttled per room
+    const now = Date.now();
+    const lastSent = receiptCooldowns.get(roomId) ?? 0;
+    if (now - lastSent < RECEIPT_COOLDOWN_MS) {
+      // Queue for next flush — don't spam the server
+      pendingReadWatermarks.set(roomId, timestamp);
+      return;
+    }
+
     const event = findMatrixEventForTimestamp(roomId, timestamp);
     if (event) {
+      receiptCooldowns.set(roomId, now);
       const success = await sendReadReceiptIfVisible(roomId, event);
-      // Only remove from retry queue if server accepted the receipt
       if (success) {
         pendingReadWatermarks.delete(roomId);
       }
-      // If !success, sendReadReceiptIfVisible already queued it in pendingReadWatermarks
     } else {
-      // Event not found in timeline — queue for retry on next sync
       pendingReadWatermarks.set(roomId, timestamp);
     }
   };
 
-  /** Retry pending read watermarks — called on each sync cycle */
+  /** Retry pending read watermarks — called on sync cycles, throttled globally */
+  const WATERMARK_FLUSH_INTERVAL = 5000;
+  let lastWatermarkFlush = 0;
   const flushPendingReadWatermarks = () => {
+    const now = Date.now();
+    if (now - lastWatermarkFlush < WATERMARK_FLUSH_INTERVAL) return;
     if (pendingReadWatermarks.size === 0) return;
-    for (const [roomId, timestamp] of pendingReadWatermarks) {
+    lastWatermarkFlush = now;
+
+    // Snapshot entries to avoid mutation-during-iteration
+    const entries = [...pendingReadWatermarks];
+    for (const [roomId, timestamp] of entries) {
       const event = findMatrixEventForTimestamp(roomId, timestamp);
       if (event) {
+        receiptCooldowns.set(roomId, now);
         sendReadReceiptIfVisible(roomId, event).then((success) => {
           if (success) pendingReadWatermarks.delete(roomId);
         }).catch(() => {});
       }
+    }
+
+    // Evict stale cooldown entries to prevent unbounded growth
+    const COOLDOWN_EVICT_AGE = 30_000;
+    for (const [rid, ts] of receiptCooldowns) {
+      if (now - ts > COOLDOWN_EVICT_AGE) receiptCooldowns.delete(rid);
     }
   };
 
@@ -1510,13 +1604,32 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
     if (roomId) {
-      // Ensure member profiles are loaded for the active room
-      profilesRequestedForRooms.delete(roomId);
-      loadProfilesForRoomIds([roomId]);
+      // Load profiles only if not already loaded (removed unconditional delete
+      // that caused re-fetching already-cached profiles on every room open)
+      if (!profilesRequestedForRooms.has(roomId)) {
+        loadProfilesForRoomIds([roomId]);
+      }
 
       // Don't auto-join invited rooms — let the user preview first
       const room = getRoomById(roomId);
       if (room?.membership === "invite") return;
+
+      // Lazy load members on demand — rooms outside viewport didn't load
+      // members at startup, so load them now when user actually opens the room
+      try {
+        const matrixService = getMatrixClientService();
+        const matrixRoom = matrixService.getRoom(roomId);
+        if (matrixRoom && typeof (matrixRoom as any).loadMembersIfNeeded === "function") {
+          (matrixRoom as any).loadMembersIfNeeded().then(() => {
+            // After members load, ensure profiles are fetched for new members
+            if (!profilesRequestedForRooms.has(roomId)) {
+              loadProfilesForRoomIds([roomId]);
+            }
+          }).catch(() => {});
+        }
+      } catch {
+        // Matrix service not ready yet — members will load on next sync
+      }
 
       // Self-healing: check if we still have access to this room via Matrix SDK.
       // If the room was left/forgotten on another device but our local Dexie
@@ -2054,7 +2167,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Exit detached mode: reload the room's latest messages and scroll to bottom. */
   const exitDetachedMode = async (roomId: string) => {
     isDetachedFromLatest.value = false;
-    await loadRoomMessages(roomId);
+    await loadRoomMessages(roomId, { waitForSdk: true });
   };
 
   /** Replace a temporary message ID with the server-assigned event_id */
@@ -2936,11 +3049,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Load timeline events for a room and convert to Messages */
-  const loadRoomMessages = async (roomId: string) => {
+  const loadRoomMessages = async (roomId: string, { waitForSdk = false } = {}) => {
     try {
       const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
+      let matrixRoom = matrixService.getRoom(roomId) as any;
+
+      // When called from MessageList (user opened a room), SDK may still be
+      // processing the sync — wait briefly. Background preloads should NOT wait.
+      if (!matrixRoom && waitForSdk) {
+        for (let attempt = 0; attempt < 5 && !matrixRoom; attempt++) {
+          await new Promise(r => setTimeout(r, 600));
+          matrixRoom = matrixService.getRoom(roomId) as any;
+        }
+      }
       if (!matrixRoom) {
         console.warn("[chat-store] loadRoomMessages: room not found:", roomId);
         return;
@@ -3677,7 +3799,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         addMessage(roomId, transferMsg);
         dexieWriteMessage(transferMsg, roomId, raw);
         if (roomId === activeRoomId.value) {
-          sendReadReceiptIfVisible(roomId, event).catch(() => {});
+          // Local Dexie + throttled network receipt (no per-message spam)
+          advanceInboundWatermark(roomId, transferMsg.timestamp);
         }
         return;
       }
@@ -3725,7 +3848,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           addMessage(roomId, encTransferMsg);
           dexieWriteMessage(encTransferMsg, roomId, raw);
           if (roomId === activeRoomId.value) {
-            sendReadReceiptIfVisible(roomId, event).catch(() => {});
+            advanceInboundWatermark(roomId, encTransferMsg.timestamp);
           }
           return;
         } catch { /* not valid transfer JSON, continue as text */ }
@@ -3826,9 +3949,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       addMessage(roomId, message);
       dexieWriteMessage(message, roomId, raw);
 
-      // Auto-send read receipt if this room is currently active (visibility-aware)
+      // Mark as read locally + throttled network receipt (max 1/3s per room).
+      // The useReadTracker batch path handles viewport-based reads every 2s.
       if (roomId === activeRoomId.value) {
-        sendReadReceiptIfVisible(roomId, event).catch(() => {});
+        advanceInboundWatermark(roomId, message.timestamp);
       }
     } catch (e) {
       console.error("[chat-store] handleTimelineEvent error:", e);

@@ -723,6 +723,7 @@ export function useCallService() {
       });
       const newTrack = newStream.getAudioTracks()[0];
       if (!newTrack) {
+        newStream.getTracks().forEach(t => t.stop());
         console.error("[call-service] setAudioDevice: no audio track obtained");
         return;
       }
@@ -780,6 +781,7 @@ export function useCallService() {
       });
       const newTrack = newStream.getVideoTracks()[0];
       if (!newTrack) {
+        newStream.getTracks().forEach(t => t.stop());
         console.error("[call-service] setVideoDevice: no video track obtained");
         return;
       }

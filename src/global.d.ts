@@ -78,6 +78,7 @@ interface PocketnetInstanceType {
     sdk: {
       syncStorage: {
         eventListeners: Record<string, Record<string, (e: StorageEvent) => void>>;
+        _storageHandler: ((e: StorageEvent) => void) | null;
         init(): void;
         off(eventType: string, lStorageProp: string): void;
         on(eventType: string, lStorageProp: string, callback: (e: StorageEvent) => void): void;

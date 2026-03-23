@@ -89,6 +89,11 @@ function generateEncryptionKeys(privateKeyHex: string) {
 
 let _onSyncStatusCallback: ((state: string) => void) | null = null;
 
+// Store-level references for cleanup on logout
+let _onlineHandler: (() => void) | null = null;
+let _offlineHandler: (() => void) | null = null;
+let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
+
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSAuthData, value: LSAuthData } =
     useLocalStorage<AuthData>(NAMESPACE, { address: null, privateKey: null });
@@ -199,7 +204,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             // Load SDK profiles and raw profiles in PARALLEL
             const [, rawProfiles] = await Promise.all([
-              appInitializer.loadUsersInfo(rawAddresses),
+              appInitializer.loadUsersInfo(rawAddresses).catch((e) => { console.warn("[pcrypto] loadUsersInfo failed:", e); }),
               appInitializer.loadUsersInfoRaw(rawAddresses).catch(() => [] as Record<string, unknown>[]),
             ]);
 
@@ -267,10 +272,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       );
       chatStore.setChatDbKit(chatDbKit);
 
-      // Wire SyncEngine connectivity
+      // Wire SyncEngine connectivity (store refs for cleanup on logout)
       if (typeof window !== "undefined") {
-        window.addEventListener("online", () => chatDbKit.syncEngine.setOnline(true));
-        window.addEventListener("offline", () => chatDbKit.syncEngine.setOnline(false));
+        // Remove previous listeners if any (re-login without full page reload)
+        if (_onlineHandler) window.removeEventListener("online", _onlineHandler);
+        if (_offlineHandler) window.removeEventListener("offline", _offlineHandler);
+        _onlineHandler = () => chatDbKit.syncEngine.setOnline(true);
+        _offlineHandler = () => chatDbKit.syncEngine.setOnline(false);
+        window.addEventListener("online", _onlineHandler);
+        window.addEventListener("offline", _offlineHandler);
       }
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
@@ -364,9 +374,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }
         }).catch((e) => console.warn("[auth] Failed to fetch block height:", e));
 
-        // Periodically update block height (every 60s)
-        const blockHeightInterval = setInterval(() => {
-          if (!pcrypto.value) { clearInterval(blockHeightInterval); return; }
+        // Periodically update block height (every 60s) — store ref for cleanup on logout
+        if (_blockHeightInterval) clearInterval(_blockHeightInterval);
+        _blockHeightInterval = setInterval(() => {
+          if (!pcrypto.value) { clearInterval(_blockHeightInterval!); _blockHeightInterval = null; return; }
           appInitializer.getBlockHeight().then((height) => {
             if (height > 0) pcrypto.value!.setBlock({ height });
           }).catch(() => {});
@@ -473,6 +484,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     import("@/features/video-calls/model/call-tab-lock").then(({ destroyCallTabLock }) => {
       destroyCallTabLock();
     }).catch(() => { /* ignore */ });
+
+    // Revoke cached blob URLs from file downloads
+    import("@/features/messaging/model/use-file-download").then(({ revokeAllFileUrls }) => {
+      revokeAllFileUrls();
+    }).catch(() => { /* ignore */ });
+
+    // Clean up window online/offline listeners
+    if (typeof window !== "undefined") {
+      if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
+      if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
+    }
+
+    // Clear block height polling interval
+    if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
 
     // Tear down Matrix
     resetMatrixClientService();

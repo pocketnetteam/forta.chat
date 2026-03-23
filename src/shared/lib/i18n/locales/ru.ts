@@ -427,6 +427,12 @@ export const ru: Record<TranslationKey, string> = {
   "tor.connecting": "Подключение...",
   "tor.error": "Ошибка",
   "tor.off": "Выкл",
+  "tor.verify": "Проверить",
+  "tor.verifying": "Проверка...",
+  "tor.verified": "Подтверждено — Tor IP: {ip}",
+  "tor.notUsingTor": "Tor не используется",
+  "tor.verifyFailed": "Ошибка проверки",
+  "tor.disableWarning": "Отключение Tor раскроет ваш реальный IP-адрес. Ваш трафик больше не будет анонимным. Продолжить?",
 
   // ── Wallet / PKOIN transfer ──
   "wallet.sendPkoin": "Отправить PKOIN",
@@ -558,6 +564,9 @@ export const ru: Record<TranslationKey, string> = {
   "system.missedCallFrom": "Пропущенный звонок от {sender}",
   "system.callWith": "Звонок с {sender}",
   "system.unknownEvent": "Системное событие",
+
+  // ── Common ──
+  "common.cancel": "Отмена",
 
   // ── Language names ──
   "locale.en": "English",

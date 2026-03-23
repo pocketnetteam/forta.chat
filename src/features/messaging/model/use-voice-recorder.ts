@@ -74,6 +74,7 @@ export function useVoiceRecorder() {
   };
 
   const cleanup = () => {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     if (durationTimer) { clearInterval(durationTimer); durationTimer = null; }
     if (waveformTimer) { clearInterval(waveformTimer); waveformTimer = null; }
     if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }

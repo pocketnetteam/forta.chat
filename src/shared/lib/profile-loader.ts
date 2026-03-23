@@ -2,8 +2,10 @@
  * ProfileLoader — DataLoader-pattern for user profile loading.
  *
  * Collects all address requests within a microtick into a single batch,
- * deduplicates across concurrent callers, and processes with concurrency
- * control + yielding to keep the UI responsive.
+ * then processes with concurrency control + yielding to keep the UI responsive.
+ *
+ * Deduplication of in-flight requests is handled by PromisePool inside
+ * loadUsersBatch — this class only handles microtick batching and yielding.
  *
  * Usage:
  *   const loader = new ProfileLoader(addr => userStore.loadUsersBatch(addr));
@@ -21,7 +23,6 @@ const YIELD_MS = 16; // ~1 frame
 
 export class ProfileLoader {
   private pending = new Set<string>();
-  private inflight = new Set<string>();
   private scheduled = false;
   private readonly loadFn: (addresses: string[]) => Promise<void>;
 
@@ -32,7 +33,7 @@ export class ProfileLoader {
   /** Enqueue addresses for loading. Collected into batches automatically. */
   load(addresses: string[]): void {
     for (const addr of addresses) {
-      if (addr && !this.inflight.has(addr)) {
+      if (addr) {
         this.pending.add(addr);
       }
     }
@@ -50,9 +51,6 @@ export class ProfileLoader {
     const all = [...this.pending];
     this.pending.clear();
 
-    // Mark as inflight to prevent duplicate requests
-    for (const addr of all) this.inflight.add(addr);
-
     // Process in batches with yielding
     for (let i = 0; i < all.length; i += BATCH_SIZE) {
       const batch = all.slice(i, i + BATCH_SIZE);
@@ -66,9 +64,6 @@ export class ProfileLoader {
         await new Promise(r => setTimeout(r, YIELD_MS));
       }
     }
-
-    // Release inflight markers
-    for (const addr of all) this.inflight.delete(addr);
 
     // If more requests accumulated during loading, flush again
     if (this.pending.size > 0) {

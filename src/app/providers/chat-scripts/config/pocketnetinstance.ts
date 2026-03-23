@@ -45,9 +45,14 @@ export const PocketnetInstance: PocketnetInstanceType = {
     sdk: {
       syncStorage: {
         eventListeners: {},
+        _storageHandler: null as ((e: StorageEvent) => void) | null,
         init() {
           window.storage_tab = Date.now();
-          window.addEventListener("storage", (e: StorageEvent) => {
+          // Remove previous listener if init() is called again (idempotent)
+          if (this._storageHandler) {
+            window.removeEventListener("storage", this._storageHandler);
+          }
+          this._storageHandler = (e: StorageEvent) => {
             if (!e.key) return;
 
             if (!e.oldValue) {
@@ -59,7 +64,8 @@ export const PocketnetInstance: PocketnetInstanceType = {
               return;
             }
             this.eventListeners[e.key]?.change?.(e);
-          });
+          };
+          window.addEventListener("storage", this._storageHandler);
         },
         off(eventType: string, lStorageProp: string) {
           if (this.eventListeners[lStorageProp]) {

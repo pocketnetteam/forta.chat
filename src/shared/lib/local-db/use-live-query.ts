@@ -6,6 +6,8 @@ export interface LiveQueryResult<T> {
   data: ShallowRef<T>;
   /** `false` until the first query result arrives; stays `true` across re-subscriptions */
   isReady: Ref<boolean>;
+  /** Last error from the query, or null if the query is healthy */
+  error: Ref<Error | null>;
 }
 
 /**
@@ -24,7 +26,13 @@ export function useLiveQuery<T>(
 ): LiveQueryResult<T> {
   const data = shallowRef<T>(initial as T) as ShallowRef<T>;
   const isReady = ref(false);
+  const error = ref<Error | null>(null) as Ref<Error | null>;
   let subscription: { unsubscribe(): void } | null = null;
+  let retryCount = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 1000;
 
   const subscribe = () => {
     subscription?.unsubscribe();
@@ -36,15 +44,32 @@ export function useLiveQuery<T>(
       next: (value: T) => {
         data.value = value;
         isReady.value = true;
+        error.value = null;
+        retryCount = 0; // Reset on success
       },
       error: (err: unknown) => {
         console.error("[useLiveQuery] query error:", err);
+        const wrapped = err instanceof Error ? err : new Error(String(err));
+
+        if (retryCount < MAX_RETRIES) {
+          retryCount++;
+          const delay = BASE_DELAY_MS * Math.pow(2, retryCount - 1);
+          console.warn(`[useLiveQuery] retrying (${retryCount}/${MAX_RETRIES}) in ${delay}ms`);
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            subscribe();
+          }, delay);
+        } else {
+          error.value = wrapped;
+        }
       },
     });
   };
 
   if (deps) {
     watch(deps, () => {
+      retryCount = 0;
+      error.value = null;
       subscribe();
     }, { immediate: true });
   } else {
@@ -54,7 +79,11 @@ export function useLiveQuery<T>(
   onScopeDispose(() => {
     subscription?.unsubscribe();
     subscription = null;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
   });
 
-  return { data, isReady };
+  return { data, isReady, error };
 }

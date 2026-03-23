@@ -2,7 +2,14 @@
  * Tests for message content parsing (links, mentions).
  */
 import { describe, it, expect } from "vitest";
-import { parseMessage, stripMentionAddresses, stripBastyonLinks } from "./message-format";
+import {
+  parseMessage,
+  stripMentionAddresses,
+  stripBastyonLinks,
+  isSafeUrl,
+  truncateMessage,
+  MAX_MESSAGE_LENGTH,
+} from "./message-format";
 
 describe("parseMessage", () => {
   it("returns single text segment for plain text", () => {
@@ -162,5 +169,117 @@ describe("stripBastyonLinks", () => {
 
   it("returns original text if no bastyon links", () => {
     expect(stripBastyonLinks("Hello world")).toBe("Hello world");
+  });
+});
+
+// ─── isSafeUrl ───────────────────────────────────────────────────────
+
+describe("isSafeUrl", () => {
+  // ─── Allowed URLs ─────────────────────────────────────────────────
+
+  it("allows https://example.com", () => {
+    expect(isSafeUrl("https://example.com")).toBe(true);
+  });
+
+  it("allows http URL with path and query", () => {
+    expect(isSafeUrl("http://example.com/path?q=1")).toBe(true);
+  });
+
+  it("allows public IP that looks like private range prefix (172.217.0.1 — Google)", () => {
+    expect(isSafeUrl("https://172.217.0.1")).toBe(true);
+  });
+
+  // ─── Dangerous schemes ────────────────────────────────────────────
+
+  it("rejects javascript: scheme", () => {
+    expect(isSafeUrl("javascript:alert(1)")).toBe(false);
+  });
+
+  it("rejects data: scheme", () => {
+    expect(isSafeUrl("data:text/html,<script>alert(1)</script>")).toBe(false);
+  });
+
+  // ─── Private / loopback IPs ───────────────────────────────────────
+
+  it("rejects loopback 127.0.0.1", () => {
+    expect(isSafeUrl("https://127.0.0.1/admin")).toBe(false);
+  });
+
+  it("rejects localhost", () => {
+    expect(isSafeUrl("https://localhost:3000")).toBe(false);
+  });
+
+  it("rejects 192.168.x.x (private class C)", () => {
+    expect(isSafeUrl("https://192.168.1.1")).toBe(false);
+  });
+
+  it("rejects 10.x.x.x (private class A)", () => {
+    expect(isSafeUrl("https://10.0.0.1")).toBe(false);
+  });
+
+  it("rejects 172.16.x.x (private class B start)", () => {
+    expect(isSafeUrl("https://172.16.0.1")).toBe(false);
+  });
+
+  // ─── Edge cases ───────────────────────────────────────────────────
+
+  it("rejects empty string", () => {
+    expect(isSafeUrl("")).toBe(false);
+  });
+
+  it("rejects ftp:// (non-http scheme)", () => {
+    expect(isSafeUrl("ftp://files.example.com")).toBe(false);
+  });
+});
+
+// ─── parseMessage + isSafeUrl integration ────────────────────────────
+
+describe("parseMessage URL safety", () => {
+  it("does not create link segments for private IPs", () => {
+    const segments = parseMessage("Check https://192.168.1.1/admin");
+    const links = segments.filter(s => s.type === "link");
+    expect(links).toHaveLength(0);
+  });
+
+  it("does not create link segments for localhost", () => {
+    const segments = parseMessage("Go to https://localhost:3000");
+    const links = segments.filter(s => s.type === "link");
+    expect(links).toHaveLength(0);
+  });
+
+  it("keeps public URLs as link segments", () => {
+    const segments = parseMessage("Visit https://example.com now");
+    const links = segments.filter(s => s.type === "link");
+    expect(links).toHaveLength(1);
+  });
+});
+
+// ─── truncateMessage ─────────────────────────────────────────────────
+
+describe("truncateMessage", () => {
+  it("returns original string when under limit", () => {
+    const msg = "Hello world";
+    expect(truncateMessage(msg)).toBe(msg);
+  });
+
+  it("returns original string at exact limit", () => {
+    const msg = "x".repeat(MAX_MESSAGE_LENGTH);
+    expect(truncateMessage(msg)).toBe(msg);
+    expect(truncateMessage(msg).length).toBe(MAX_MESSAGE_LENGTH);
+  });
+
+  it("truncates string exceeding limit", () => {
+    const msg = "y".repeat(MAX_MESSAGE_LENGTH + 100);
+    const result = truncateMessage(msg);
+    expect(result.length).toBe(MAX_MESSAGE_LENGTH);
+    expect(result).toBe("y".repeat(MAX_MESSAGE_LENGTH));
+  });
+
+  it("handles empty string", () => {
+    expect(truncateMessage("")).toBe("");
+  });
+
+  it("MAX_MESSAGE_LENGTH equals 65536", () => {
+    expect(MAX_MESSAGE_LENGTH).toBe(65536);
   });
 });

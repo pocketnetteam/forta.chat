@@ -32,7 +32,7 @@ vi.mock("@/app/providers/initializers/app-initializer", () => ({
 const mockCreateRoom = vi.fn();
 const mockJoinRoom = vi.fn();
 const mockGetRooms = vi.fn((): any[] => []);
-const mockGetRoom = vi.fn(() => null);
+const mockGetRoom = vi.fn(() => ({ selfMembership: "join" }));
 const mockSetPowerLevel = vi.fn();
 
 vi.mock("@/entities/matrix", () => ({

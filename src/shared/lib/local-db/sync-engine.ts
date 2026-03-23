@@ -103,8 +103,9 @@ export class SyncEngine {
               retries,
               lastAttemptAt: Date.now(),
             });
-            // Exponential backoff before next attempt
-            const delay = Math.min(1000 * 2 ** retries, MAX_BACKOFF_MS);
+            // Exponential backoff with jitter before next attempt
+            const base = Math.min(1000 * 2 ** retries, MAX_BACKOFF_MS);
+            const delay = base + Math.random() * Math.min(base * 0.5, 5000);
             await sleep(delay);
           }
         }

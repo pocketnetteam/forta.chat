@@ -563,6 +563,9 @@ export const en = {
   "system.callWith": "Call with {sender}",
   "system.unknownEvent": "System event",
 
+  // ── Common ──
+  "common.cancel": "Cancel",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",

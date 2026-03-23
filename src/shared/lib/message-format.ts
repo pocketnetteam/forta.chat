@@ -1,3 +1,59 @@
+/**
+ * Maximum allowed message body length (bytes).
+ * Messages exceeding this limit are truncated before sending.
+ */
+export const MAX_MESSAGE_LENGTH = 65536;
+
+/**
+ * Truncate a message body to MAX_MESSAGE_LENGTH characters.
+ * Returns the original string if it is within the limit.
+ */
+export function truncateMessage(text: string): string {
+  if (text.length <= MAX_MESSAGE_LENGTH) return text;
+  return text.slice(0, MAX_MESSAGE_LENGTH);
+}
+
+// ─── Private IP / dangerous-scheme detection ──────────────────────
+
+const PRIVATE_IP_RE =
+  /^https?:\/\/(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost)(?:[:/]|$)/i;
+
+const DANGEROUS_SCHEME_RE = /^(?:javascript|data|vbscript|blob):/i;
+
+/**
+ * Check whether a URL is safe for rendering as a clickable link.
+ *
+ * Rejects:
+ * - `javascript:`, `data:`, `vbscript:`, `blob:` schemes (XSS vectors)
+ * - Private / loopback IP addresses and `localhost` (SSRF vectors)
+ *
+ * Allows:
+ * - Standard `http://` and `https://` URLs pointing to public hosts
+ */
+export function isSafeUrl(url: string): boolean {
+  if (!url) return false;
+  if (DANGEROUS_SCHEME_RE.test(url)) return false;
+  try {
+    const parsed = new URL(url.startsWith("www.") ? `https://${url}` : url);
+    const protocol = parsed.protocol;
+    if (protocol !== "http:" && protocol !== "https:") return false;
+    const hostname = parsed.hostname;
+    if (hostname === "localhost" || hostname === "127.0.0.1") return false;
+    // Private IP ranges
+    const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ipMatch) {
+      const [, a, b] = ipMatch.map(Number);
+      if (a === 10) return false;
+      if (a === 192 && b === 168) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 127) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export type Segment =
   | { type: "text"; content: string }
   | { type: "link"; content: string; href: string }
@@ -5,6 +61,7 @@ export type Segment =
   | { type: "bastyonLink"; content: string; txid: string; isVideo: boolean };
 
 const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
+
 const BASTYON_RE = /(?:bastyon:\/\/|https?:\/\/(?:bastyon\.com|pocketnet\.app)\/)(?:index|post)\?[vs]=([a-f0-9]{64})(?:[&\w=]*)/gi;
 // Bastyon mention format: @<34-68 hex-char address>:<display_name>
 // Display name may contain unicode (Cyrillic etc.), underscores, digits
@@ -63,6 +120,7 @@ export function parseMessage(text: string): Segment[] {
     const overlap = bastyonRanges.some(([bs, be]) => start < be && end > bs);
     if (overlap) continue;
     const href = m[0].startsWith("www.") ? `https://${m[0]}` : m[0];
+    if (!isSafeUrl(href)) continue;
     matches.push({
       start,
       end,

@@ -1,4 +1,4 @@
-import { ref, type Ref } from "vue";
+import { ref, onScopeDispose, type Ref } from "vue";
 import { useAuthStore } from "@/entities/auth";
 import type { FileInfo, Message } from "@/entities/chat";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
@@ -13,6 +13,14 @@ interface FileDownloadState {
 
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
 const cache = new Map<string, string>();
+
+/** Revoke all cached blob URLs and clear the cache */
+export function revokeAllFileUrls() {
+  for (const url of cache.values()) {
+    try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+  }
+  cache.clear();
+}
 
 /** Download and optionally decrypt a file from the Matrix server.
  *  Needs senderId + timestamp to reconstruct the event for decryptKey(). */
@@ -63,6 +71,11 @@ async function downloadAndDecrypt(
 /** Composable for downloading and decrypting files/images */
 export function useFileDownload() {
   const states = ref<Record<string, FileDownloadState>>({});
+
+  // Auto-cleanup blob URLs when the composable's effect scope is destroyed
+  onScopeDispose(() => {
+    revokeAllFileUrls();
+  });
 
   const getState = (eventId: string): FileDownloadState => {
     if (!states.value[eventId]) {

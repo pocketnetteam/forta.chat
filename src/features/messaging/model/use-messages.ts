@@ -1,9 +1,11 @@
+import { onScopeDispose } from "vue";
 import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
+import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
@@ -22,19 +24,25 @@ export function useMessages() {
         resolve({ w: img.naturalWidth, h: img.naturalHeight });
         URL.revokeObjectURL(img.src);
       };
-      img.onerror = () => resolve({ w: 0, h: 0 });
+      img.onerror = () => { URL.revokeObjectURL(img.src); resolve({ w: 0, h: 0 }); };
       img.src = URL.createObjectURL(file);
     });
   };
 
   const sendMessage = async (content: string, linkPreview?: LinkPreview) => {
+    const MAX_MESSAGE_LENGTH = 65536;
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      console.warn('[sendMessage] Message exceeds max length, truncating');
+      content = content.slice(0, MAX_MESSAGE_LENGTH);
+    }
+
     const roomId = chatStore.activeRoomId;
     if (!roomId || !content.trim()) return;
 
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return;
 
-    const trimmed = content.trim();
+    const trimmed = truncateMessage(content.trim());
 
     // New path: Dexie createLocal → liveQuery shows instantly → SyncEngine sends
     if (isChatDbReady()) {
@@ -172,9 +180,12 @@ export function useMessages() {
     }
   };
 
-  // Listen for online event to drain queue
+  // Listen for online event to drain queue (with cleanup)
   if (typeof window !== "undefined") {
     window.addEventListener("online", drainOfflineQueue);
+    onScopeDispose(() => {
+      window.removeEventListener("online", drainOfflineQueue);
+    });
   }
 
   /** Send a file/image/video/audio message */
@@ -854,7 +865,7 @@ export function useMessages() {
   };
 
   const loadMessages = async (roomId: string) => {
-    await chatStore.loadRoomMessages(roomId);
+    await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
   };
 
   /** Set typing indicator */
@@ -920,7 +931,7 @@ export function useMessages() {
       }
     } catch (e) {
       console.error("[Reaction] Failed to toggle reaction:", e);
-      await chatStore.loadRoomMessages(roomId);
+      await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
     }
   };
 

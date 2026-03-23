@@ -178,7 +178,7 @@ export function useScrollToMessage(
 
             // fetchEventContext loaded events into the Matrix SDK's timeline.
             // Re-parse the full timeline to update the store and Dexie.
-            await chatStore.loadRoomMessages(roomId);
+            await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
 
             // Now check if the message is in the loaded list
             await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));

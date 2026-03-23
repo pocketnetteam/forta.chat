@@ -28,7 +28,7 @@ export function useNativeShare(options: UseNativeShareOptions = {}) {
     if (isNative) {
       return shareNative(payload);
     }
-    if (navigator.share) {
+    if (typeof navigator.share === 'function') {
       return shareWeb(payload);
     }
     return shareFallback(payload);

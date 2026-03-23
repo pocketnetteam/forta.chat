@@ -83,6 +83,9 @@ const saveDraftOnBlur = () => {
 onBeforeUnmount(() => {
   const roomId = chatStore.activeRoomId;
   if (roomId) saveDraft(roomId, text.value);
+  // Clean up any lingering recording mouse/move listeners
+  document.removeEventListener("mouseup", handleGlobalMouseUp);
+  document.removeEventListener("mousemove", handleGlobalMouseMove);
 });
 
 // --- Edit/reply ---
