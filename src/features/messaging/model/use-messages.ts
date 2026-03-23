@@ -5,6 +5,7 @@ import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
+import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
@@ -41,7 +42,7 @@ export function useMessages() {
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return;
 
-    const trimmed = content.trim();
+    const trimmed = truncateMessage(content.trim());
 
     // New path: Dexie createLocal → liveQuery shows instantly → SyncEngine sends
     if (isChatDbReady()) {

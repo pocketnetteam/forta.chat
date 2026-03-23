@@ -1,3 +1,44 @@
+/**
+ * Maximum allowed message body length (bytes).
+ * Messages exceeding this limit are truncated before sending.
+ */
+export const MAX_MESSAGE_LENGTH = 65536;
+
+/**
+ * Truncate a message body to MAX_MESSAGE_LENGTH characters.
+ * Returns the original string if it is within the limit.
+ */
+export function truncateMessage(text: string): string {
+  if (text.length <= MAX_MESSAGE_LENGTH) return text;
+  return text.slice(0, MAX_MESSAGE_LENGTH);
+}
+
+// ─── Private IP / dangerous-scheme detection ──────────────────────
+
+const PRIVATE_IP_RE =
+  /^https?:\/\/(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost)(?:[:/]|$)/i;
+
+const DANGEROUS_SCHEME_RE = /^(?:javascript|data|vbscript|blob):/i;
+
+/**
+ * Check whether a URL is safe for rendering as a clickable link.
+ *
+ * Rejects:
+ * - `javascript:`, `data:`, `vbscript:`, `blob:` schemes (XSS vectors)
+ * - Private / loopback IP addresses and `localhost` (SSRF vectors)
+ *
+ * Allows:
+ * - Standard `http://` and `https://` URLs pointing to public hosts
+ */
+export function isSafeUrl(url: string): boolean {
+  if (!url) return false;
+  if (DANGEROUS_SCHEME_RE.test(url)) return false;
+  if (PRIVATE_IP_RE.test(url)) return false;
+  // Only allow http(s) schemes
+  if (!/^https?:\/\//i.test(url)) return false;
+  return true;
+}
+
 export type Segment =
   | { type: "text"; content: string }
   | { type: "link"; content: string; href: string }
