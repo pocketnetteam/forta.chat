@@ -26,7 +26,7 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Build web assets
-        run: npm run build
+        run: npx vite build
 
       - name: Sync Capacitor Android
         run: npx cap sync android
