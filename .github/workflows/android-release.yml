@@ -77,11 +77,26 @@ jobs:
           mv android/app/build/outputs/apk/release/app-release.apk \
              android/app/build/outputs/apk/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
 
+      - name: Extract release notes from tag
+        id: notes
+        run: |
+          git fetch origin --tags --force
+          BODY="$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")"
+          # Use tag body if present, otherwise fall back to subject
+          if [ -z "$BODY" ]; then
+            BODY="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")"
+          fi
+          {
+            echo "NOTES<<EOFNOTES"
+            echo "$BODY"
+            echo "EOFNOTES"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "Forta Chat ${{ github.ref_name }}"
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.NOTES }}
           files: android/app/build/outputs/apk/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
