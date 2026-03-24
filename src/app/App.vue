@@ -9,7 +9,7 @@ import IncomingCallModal from "@/features/video-calls/ui/IncomingCallModal.vue";
 import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
-import { SyncBanner, handleSdkSync } from "@/features/sync-status";
+import { handleSdkSync } from "@/features/sync-status";
 import { useRouter } from "vue-router";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
@@ -144,7 +144,6 @@ onUnmounted(() => {
 <template>
   <div class="relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh; padding-top: var(--safe-area-inset-top, 0px)">
     <TitleBar v-if="isElectron" />
-    <SyncBanner />
     <div class="relative min-h-0 flex-1 overflow-hidden">
       <transition :name="isMobile ? '' : 'fade'" mode="out-in">
         <router-view class="h-full" />

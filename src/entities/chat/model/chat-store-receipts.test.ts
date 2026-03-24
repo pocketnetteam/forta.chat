@@ -43,12 +43,26 @@ vi.mock("@/entities/matrix", () => ({
   })),
 }));
 
+/** Advance coalescing timer (100ms) and flush microtasks */
+async function flushCoalescing() {
+  vi.advanceTimersByTime(150);
+  await new Promise<void>((r) => { queueMicrotask(r); });
+  await new Promise<void>((r) => { queueMicrotask(r); });
+}
+
 describe("receipt throttling", () => {
   let store: ReturnType<typeof useChatStore>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    // Ensure document.visibilityState returns "visible" for sendReadReceiptIfVisible
+    vi.stubGlobal("document", {
+      ...document,
+      visibilityState: "visible",
+      addEventListener: document.addEventListener.bind(document),
+      removeEventListener: document.removeEventListener.bind(document),
+    });
     setActivePinia(createTestingPinia({ stubActions: false }));
     store = useChatStore();
     store.addRoom(makeRoom({ id: "!r1:s" }));
@@ -57,32 +71,39 @@ describe("receipt throttling", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("sends receipt on first call", async () => {
     await store.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
   });
 
   it("throttles rapid calls within cooldown window", async () => {
     await store.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
 
     // Within 3s cooldown — queued, not sent
     await store.advanceInboundWatermark("!r1:s", 2000);
+    await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
 
     await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
   });
 
   it("allows receipt after cooldown expires", async () => {
     await store.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
 
     vi.advanceTimersByTime(3100);
 
     await store.advanceInboundWatermark("!r1:s", 2000);
+    await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(2);
   });
 
@@ -90,7 +111,11 @@ describe("receipt throttling", () => {
     store.addRoom(makeRoom({ id: "!r2:s" }));
 
     await store.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
+
+    // Room change flushes previous room immediately + starts coalescing for new room
     await store.advanceInboundWatermark("!r2:s", 1000);
+    await flushCoalescing();
 
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(2);
   });

@@ -6,12 +6,12 @@ export type DisplayPhase = SyncPhase | "idle";
 const SHOW_DELAY: Partial<Record<SyncPhase, number>> = {
   offline: 0,
   error: 0,
-  connecting: 1000,
-  catching_up: 1000,
+  connecting: 1500,
+  catching_up: 1500,
 };
 
 const MIN_DISPLAY = 600;
-const SUCCESS_SHOW = 800;
+const SUCCESS_SHOW = 0;
 
 function isActivePhase(s: string): boolean {
   return s === "offline" || s === "connecting" || s === "catching_up" || s === "error";

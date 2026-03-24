@@ -5,6 +5,7 @@ import { useChannelStore } from "@/entities/channel";
 import { InviteModal } from "@/features/invite";
 import { useWallet } from "@/features/wallet/model/use-wallet";
 import { useChatStore } from "@/entities/chat";
+import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import BottomTabBar from "./ui/BottomTabBar.vue";
 import ContactsPanel from "./ui/ContactsPanel.vue";
@@ -151,7 +152,7 @@ watch(walletAvailable, (v) => { if (v) loadBalance(); }, { immediate: true });
         <div
           class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-3"
         >
-          <span class="flex-1 pl-1 text-base font-semibold text-text-color">{{ t("nav.chats") }}</span>
+          <ConnectionStatusHeader />
 
           <!-- PKOIN Wallet -->
           <button
