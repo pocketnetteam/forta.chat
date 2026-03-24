@@ -1,7 +1,9 @@
 import { type Ref } from "vue";
 
-const VISIBILITY_THRESHOLD = 0.5;   // 50% of element visible
-const BATCH_INTERVAL_MS = 2000;     // flush batch every 2 seconds
+const VISIBILITY_THRESHOLD = 0.3;        // lowered from 0.5 for mobile (dynamic toolbar clips viewport)
+const BATCH_INTERVAL_MS = 2000;           // flush batch every 2 seconds
+const SCROLL_SCAN_DEBOUNCE_MS = 300;      // fallback scan after scroll settles
+const DELAYED_SCAN_MS = 500;              // extra scan for slow mobile layout
 
 export interface ReadTrackerOptions {
   /** The scroll container element */
@@ -24,6 +26,10 @@ export function useReadTracker(options: ReadTrackerOptions) {
   let observer: IntersectionObserver | null = null;
   /** Stored root element for use by performManualScan() */
   let trackedRoot: HTMLElement | null = null;
+  /** Scroll-based fallback handler */
+  let scrollHandler: (() => void) | null = null;
+  let scrollScanTimer: ReturnType<typeof setTimeout> | null = null;
+  let delayedScanTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Elements registered via observeElement() before startTracking() was called.
@@ -47,13 +53,21 @@ export function useReadTracker(options: ReadTrackerOptions) {
     }
   }
 
-  /** Imperative scan: check all tracked elements via getBoundingClientRect. */
+  /**
+   * Imperative scan: check all tracked elements via getBoundingClientRect.
+   * This is the iOS Safari safety net — works regardless of IntersectionObserver
+   * bugs with column-reverse containers.
+   */
   function scanViewport() {
-    if (!observer || !trackedRoot) return;
+    if (!trackedRoot) return;
     const rootRect = trackedRoot.getBoundingClientRect();
+    if (rootRect.height === 0) return; // collapsed container — skip
     const tracked = trackedRoot.querySelectorAll<HTMLElement>("[data-message-ts]");
     for (const el of tracked) {
       const elRect = el.getBoundingClientRect();
+      // Element fully outside viewport — skip early
+      if (elRect.bottom <= rootRect.top || elRect.top >= rootRect.bottom) continue;
+
       const visibleTop = Math.max(elRect.top, rootRect.top);
       const visibleBottom = Math.min(elRect.bottom, rootRect.bottom);
       const visibleHeight = visibleBottom - visibleTop;
@@ -62,6 +76,16 @@ export function useReadTracker(options: ReadTrackerOptions) {
         promoteToRead(el);
       }
     }
+  }
+
+  /** Scroll-based fallback: debounced scanViewport after each scroll event. */
+  function onScrollFallback() {
+    if (scrollScanTimer !== null) clearTimeout(scrollScanTimer);
+    scrollScanTimer = setTimeout(() => {
+      scrollScanTimer = null;
+      scanViewport();
+      // batch timer will flush — no need to flush here
+    }, SCROLL_SCAN_DEBOUNCE_MS);
   }
 
   function startTracking(container?: HTMLElement | null): boolean {
@@ -75,6 +99,9 @@ export function useReadTracker(options: ReadTrackerOptions) {
 
     trackedRoot = root;
 
+    // ═══ PRIMARY: IntersectionObserver ═══
+    // Multiple thresholds increase chances of callback firing on iOS Safari.
+    // rootMargin adds 50px buffer for iOS dynamic toolbar / safe area.
     observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -88,7 +115,8 @@ export function useReadTracker(options: ReadTrackerOptions) {
       },
       {
         root,
-        threshold: [0, VISIBILITY_THRESHOLD],
+        threshold: [0, 0.3, 0.5],
+        rootMargin: "50px 0px 50px 0px",
       },
     );
 
@@ -99,6 +127,11 @@ export function useReadTracker(options: ReadTrackerOptions) {
       observer.observe(el);
     }
     pendingElements.clear();
+
+    // ═══ FALLBACK: scroll event → debounced getBoundingClientRect scan ═══
+    // Guarantees read detection even when IO is broken (iOS Safari + column-reverse).
+    scrollHandler = onScrollFallback;
+    root.addEventListener("scroll", scrollHandler, { passive: true });
 
     // Periodic flush of the high-water mark
     batchTimer = setInterval(flushBatch, BATCH_INTERVAL_MS);
@@ -115,6 +148,14 @@ export function useReadTracker(options: ReadTrackerOptions) {
       scanViewport();
       flushBatch();
     });
+
+    // Delayed third scan: slow mobile devices may not settle layout within 1 frame.
+    delayedScanTimer = setTimeout(() => {
+      delayedScanTimer = null;
+      if (!observer) return;
+      scanViewport();
+      flushBatch();
+    }, DELAYED_SCAN_MS);
 
     return true;
   }
@@ -148,7 +189,22 @@ export function useReadTracker(options: ReadTrackerOptions) {
   function stopTracking() {
     observer?.disconnect();
     observer = null;
+
+    // Remove scroll fallback listener
+    if (trackedRoot && scrollHandler) {
+      trackedRoot.removeEventListener("scroll", scrollHandler);
+    }
+    scrollHandler = null;
     trackedRoot = null;
+
+    if (scrollScanTimer !== null) {
+      clearTimeout(scrollScanTimer);
+      scrollScanTimer = null;
+    }
+    if (delayedScanTimer !== null) {
+      clearTimeout(delayedScanTimer);
+      delayedScanTimer = null;
+    }
     if (batchTimer !== null) {
       clearInterval(batchTimer);
       batchTimer = null;

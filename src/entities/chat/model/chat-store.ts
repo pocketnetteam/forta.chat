@@ -1681,10 +1681,44 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     optimisticRemoveRoom(roomId);
   };
 
+  /** Coalescing state for advanceInboundWatermark — reduces Dexie writes during fast scroll.
+   *  Instead of writing every 2s batch immediately, waits 100ms to merge rapid bursts. */
+  let watermarkCoalesceTimer: ReturnType<typeof setTimeout> | null = null;
+  let watermarkCoalesceRoomId: string | null = null;
+  let watermarkCoalesceTs = 0;
+
   /** Advance the inbound read watermark (called by read tracker on batch flush).
-   *  Delegates to commitReadWatermark for atomic Dexie + Matrix sync. */
+   *  Coalesces rapid updates: waits 100ms before committing to Dexie + Matrix,
+   *  so fast scrolling through 100 messages produces ~1 write instead of many. */
   const advanceInboundWatermark = async (roomId: string, timestamp: number) => {
-    await commitReadWatermark(roomId, timestamp);
+    // Room changed — flush previous immediately
+    if (watermarkCoalesceRoomId && watermarkCoalesceRoomId !== roomId) {
+      if (watermarkCoalesceTimer !== null) {
+        clearTimeout(watermarkCoalesceTimer);
+        watermarkCoalesceTimer = null;
+      }
+      const prevRoom = watermarkCoalesceRoomId;
+      const prevTs = watermarkCoalesceTs;
+      watermarkCoalesceRoomId = null;
+      watermarkCoalesceTs = 0;
+      commitReadWatermark(prevRoom, prevTs).catch(() => {});
+    }
+
+    watermarkCoalesceRoomId = roomId;
+    watermarkCoalesceTs = Math.max(watermarkCoalesceTs, timestamp);
+
+    if (watermarkCoalesceTimer !== null) return; // already scheduled
+
+    watermarkCoalesceTimer = setTimeout(async () => {
+      watermarkCoalesceTimer = null;
+      const coalescedRoom = watermarkCoalesceRoomId;
+      const coalescedTs = watermarkCoalesceTs;
+      watermarkCoalesceRoomId = null;
+      watermarkCoalesceTs = 0;
+      if (coalescedRoom && coalescedTs > 0) {
+        await commitReadWatermark(coalescedRoom, coalescedTs);
+      }
+    }, 100);
   };
 
   /** Expand the message window for scroll-up pagination.

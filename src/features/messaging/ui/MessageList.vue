@@ -32,7 +32,7 @@ const { loadMessages, toggleReaction, deleteMessage, votePoll, endPoll, retryMed
 const { toast } = useToast();
 const { t } = useI18n();
 
-const { bannerState, freezeBanner, dismissBanner, hasBanner } = useUnreadBanner();
+const { bannerState, freezeBanner, dismissBanner, forceDismiss, hasBanner } = useUnreadBanner();
 
 /** Resolve system message text dynamically using current display names + i18n */
 const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: string; senderAddr: string; targetAddr?: string; extra?: Record<string, string> } }): string => {
@@ -242,7 +242,13 @@ const virtualItems = computed<VirtualItem[]>(() => {
     items.push({ id: (msg as any)._key || msg.id, type: "message", message: msg, index: i });
 
     // Insert unread banner AFTER the last read message
-    if (frozenLastReadId && msg.id === frozenLastReadId && frozenUnreadCount > 0) {
+    // Match by id or _key (stable across tempId→eventId flip)
+    const msgKey = (msg as any)._key;
+    if (
+      frozenLastReadId &&
+      frozenUnreadCount > 0 &&
+      (msg.id === frozenLastReadId || (msgKey && msgKey === frozenLastReadId))
+    ) {
       items.push({ id: "unread-banner", type: "unread-banner", unreadCount: frozenUnreadCount });
     }
   }
@@ -314,11 +320,6 @@ const handleReturnToLatest = async () => {
   scrollToBottom();
 };
 
-/** Grace period: don't auto-dismiss banner right after room open.
- *  The banner may be near the bottom of a short message list, and the
- *  initial checkScroll() would immediately dismiss it before the user sees it. */
-let bannerDismissAllowed = false;
-
 /** Check if user is scrolled near the bottom.
  *  In column-reverse: scrollTop=0 means at the bottom (newest messages).
  *  Chrome returns negative scrollTop for column-reverse — use abs. */
@@ -330,7 +331,9 @@ const checkScroll = () => {
   showScrollFab.value = dist > 300;
   if (isNearBottom.value) {
     newMessageCount.value = 0;
-    if (hasBanner() && bannerDismissAllowed) dismissBanner();
+    // dismissBanner() respects grace period inside the composable —
+    // no-op during the first 2s after freeze, preventing race condition.
+    if (hasBanner()) dismissBanner();
   }
 };
 
@@ -413,7 +416,6 @@ watch(
     recentMessageIds.value.clear();
     isNearBottom.value = true;
     networkWaiting.value = false;
-    bannerDismissAllowed = false;
     lastScrollTop = 0;
     lastScrollTime = 0;
     scrollVelocity = 0;
@@ -424,7 +426,7 @@ watch(
       cancelAnimationFrame(scrollThrottleRaf);
       scrollThrottleRaf = null;
     }
-    dismissBanner();
+    forceDismiss();
     readTracker.stopTracking();
 
     // ═══ PHASE 2: DETERMINE ANCHOR ═══
@@ -566,8 +568,7 @@ watch(
       // ready when user scrolls up — zero network latency on scroll path.
       startPrefetch(roomId);
 
-      // Allow banner dismissal after user has had time to see it
-      setTimeout(() => { bannerDismissAllowed = true; }, 2000);
+      // Grace period is now handled inside useUnreadBanner (dismiss lock).
 
       // Start read tracking with container polling instead of fixed timeout.
       // getScrollContainer() may return null if VList hasn't created its
