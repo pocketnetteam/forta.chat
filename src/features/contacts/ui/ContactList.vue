@@ -12,6 +12,7 @@ import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-f
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
 import { cleanMatrixIds, resolveSystemText, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
+import { isEncryptedPlaceholder } from "@/shared/lib/utils/is-encrypted-placeholder";
 import { useLongPress } from "@/shared/lib/gestures";
 import { ContextMenu } from "@/shared/ui/context-menu";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
@@ -580,6 +581,11 @@ const getRoomLongPress = (room: ChatRoom) => {
               >
                 {{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
               </span>
+              <!-- Shimmer skeleton while encrypted message is being decrypted -->
+              <span
+                v-else-if="isEncryptedPlaceholder((item as ChatRoom).lastMessage?.content)"
+                class="inline-block h-3 w-32 animate-pulse rounded bg-neutral-grad-2"
+              />
               <span v-else class="truncate text-sm text-text-on-main-bg-color">
                 <span v-if="(item as ChatRoom).lastMessageReaction" class="mr-0.5">{{ (item as ChatRoom).lastMessageReaction!.emoji }}</span>{{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
               </span>

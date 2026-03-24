@@ -4,6 +4,7 @@ import { MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
+import { isEncryptedPlaceholder } from "./is-encrypted-placeholder";
 
 /**
  * Format a message for preview display (chat list, search results).
@@ -16,6 +17,7 @@ export function useFormatPreview() {
 
   const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
     if (!msg) return t("contactList.noMessages");
+    if (isEncryptedPlaceholder(msg.content)) return "";
     if (msg.deleted || (!msg.content && msg.type === MessageType.text && !msg.fileInfo)) {
       return `🚫 ${t("message.deleted")}`;
     }

@@ -180,6 +180,7 @@ const loadingMore = ref(false);
 const switching = ref(false); // true during room switch — suppresses watchers
 const settled = ref(false); // false until messages loaded + scrolled — hides scroller to prevent flicker
 const refreshingStaleCache = ref(false); // true when showing stale cached messages while fresh data loads
+const loadEverAttempted = ref(false); // true only after at least one load cycle ran for the current room
 const hasMore = ref(true);
 const newMessageCount = ref(0);
 
@@ -408,6 +409,7 @@ watch(
     switching.value = true;
     settled.value = false;
     loading.value = false;
+    loadEverAttempted.value = false;
     refreshingStaleCache.value = false;
     newMessageCount.value = 0;
     hasMore.value = true;
@@ -485,8 +487,12 @@ watch(
       }
     }
 
-    // If no anchor was set, do normal load
-    if (anchorItemIndex === -1 && chatStore.activeMessages.length === 0) {
+    // If no anchor was set, do normal load.
+    // Guard: verify messages belong to the TARGET room, not stale liveQuery data
+    // from the previous room (useLiveQuery intentionally keeps stale data during re-subscription).
+    const hasValidMessages = chatStore.activeMessages.length > 0
+      && chatStore.activeMessages[0]?.roomId === roomId;
+    if (anchorItemIndex === -1 && !hasValidMessages) {
       const cacheAge = await chatStore.loadCachedMessages(roomId);
       if (isStale()) return;
 
@@ -498,7 +504,8 @@ watch(
         }
       }
 
-      const hasCached = chatStore.activeMessages.length > 0;
+      const hasCached = chatStore.activeMessages.length > 0
+        && chatStore.activeMessages[0]?.roomId === roomId;
       const STALE_THRESHOLD = 60_000;
 
       if (!hasCached) {
@@ -528,6 +535,10 @@ watch(
         loadMessages(roomId).catch(() => {});
       }
     }
+
+    // Mark that at least one load cycle completed for this room.
+    // Empty state is only allowed after this flag is set.
+    loadEverAttempted.value = true;
 
     if (isStale()) return;
 
@@ -1016,13 +1027,14 @@ defineExpose({ scrollToMessage, setSearchQuery });
       </div>
     </transition>
 
-    <!-- Loading state: skeleton ONLY on initial room load when no messages exist yet.
+    <!-- Loading state: skeleton on initial room load when no messages exist yet.
+         Also show skeleton when load hasn't been attempted yet (prevents empty state flash).
          Never during pagination (expandMessageWindow / loadMoreMessages) to avoid skeleton flash. -->
-    <MessageSkeleton v-if="(loading || switching) && chatStore.activeMessages.length === 0" />
+    <MessageSkeleton v-if="((loading || switching || !loadEverAttempted) && chatStore.activeMessages.length === 0)" />
 
-    <!-- Empty state (only after fully loaded + settled, not during switching) -->
+    <!-- Empty state (only after fully loaded + settled + load was attempted, not during switching) -->
     <div
-      v-if="!loading && !switching && chatStore.activeMessages.length === 0 && settled"
+      v-if="!loading && !switching && loadEverAttempted && chatStore.activeMessages.length === 0 && settled"
       class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-text-on-main-bg-color"
     >
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="opacity-20">
