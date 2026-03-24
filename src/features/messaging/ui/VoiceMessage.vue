@@ -80,12 +80,11 @@ const playedBars = computed(() => Math.floor(currentProgress.value * BARS));
 // Generate waveform from audio buffer when no stored data
 const generateWaveform = async (url: string) => {
   if (waveform.value.length > 0) return;
+  const ctx = new AudioContext();
   try {
     const response = await fetch(url);
     const arrayBuffer = await response.arrayBuffer();
-    const ctx = new AudioContext();
     const buffer = await ctx.decodeAudioData(arrayBuffer);
-    ctx.close();
     const channelData = buffer.getChannelData(0);
     const samples: number[] = [];
     const step = Math.floor(channelData.length / 50);
@@ -98,25 +97,34 @@ const generateWaveform = async (url: string) => {
       samples.push(sum / step);
     }
     waveform.value = samples;
-  } catch { /* ignore */ }
+  } catch { /* ignore */ } finally {
+    ctx.close();
+  }
 };
 
-// Ensure file is downloaded, then toggle playback via global singleton
-const handleTogglePlay = async () => {
-  if (!fileState.value.objectUrl) {
-    await download(props.message);
-  }
+// Toggle playback — MUST be synchronous from click to .play() to preserve
+// the user gesture chain on mobile WebViews. The file is preloaded on mount
+// (line 27-29), so objectUrl should be available by the time user taps play.
+// If not yet ready, we kick off the download and return — user taps again.
+const handleTogglePlay = () => {
   const url = fileState.value.objectUrl;
-  if (!url) return;
+  if (!url) {
+    // File not yet downloaded — trigger download (already started on mount,
+    // this handles edge cases where mount download failed or was slow)
+    download(props.message);
+    return;
+  }
 
-  generateWaveform(url);
-
+  // Synchronous call — no await between click event and .play()
   playback.togglePlay({
     messageId: props.message.id,
     roomId: props.message.roomId,
     objectUrl: url,
     duration: totalDuration.value,
   });
+
+  // Generate waveform in background (non-blocking)
+  generateWaveform(url);
 };
 
 // Drag-seek via pointer events

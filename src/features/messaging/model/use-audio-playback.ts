@@ -1,4 +1,5 @@
 import { ref, computed, shallowRef } from "vue";
+import { isNative } from "@/shared/lib/platform";
 
 export type PlaybackState = "idle" | "loading" | "playing" | "paused" | "ended" | "failed";
 
@@ -9,6 +10,93 @@ interface PlaybackInfo {
   duration: number;
 }
 
+// ---------------------------------------------------------------------------
+// iOS Silent Mode bypass via AudioContext unlock
+// ---------------------------------------------------------------------------
+// On iOS WKWebView, HTML5 Audio plays as "ambient" sound — muted by the
+// hardware Silent Mode switch. Creating and resuming an AudioContext within
+// a user gesture forces the AVAudioSession into playback mode, making all
+// subsequent audio (including HTML5 Audio) audible regardless of the switch.
+// ---------------------------------------------------------------------------
+let audioCtx: AudioContext | null = null;
+let audioUnlocked = false;
+
+function getOrCreateAudioContext(): AudioContext {
+  if (!audioCtx || audioCtx.state === "closed") {
+    audioCtx = new AudioContext();
+  }
+  return audioCtx;
+}
+
+/**
+ * Must be called **synchronously** inside a click/tap handler.
+ * Plays a 1-sample silent buffer to activate the iOS audio session.
+ */
+function unlockAudio(): void {
+  if (audioUnlocked) return;
+
+  try {
+    const ctx = getOrCreateAudioContext();
+
+    // Play a silent buffer to wake up the audio session
+    const buf = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {
+        // Resume failed — allow re-attempt on next user gesture
+        audioUnlocked = false;
+      });
+    }
+
+    audioUnlocked = true;
+    console.log("[audio] AudioContext unlocked, state:", ctx.state);
+  } catch (e) {
+    console.warn("[audio] AudioContext unlock failed:", e);
+  }
+}
+
+// On iOS, backgrounding the app suspends the AudioContext. Re-unlock on foreground
+// to restore the playback audio session, otherwise sound silently stops working.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && audioCtx?.state === "suspended") {
+      audioUnlocked = false;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Codec support detection
+// ---------------------------------------------------------------------------
+const codecCache = new Map<string, boolean>();
+
+function canPlay(mimeType: string): boolean {
+  if (codecCache.has(mimeType)) return codecCache.get(mimeType)!;
+  const el = document.createElement("audio");
+  const result = el.canPlayType(mimeType);
+  const ok = result === "probably" || result === "maybe";
+  codecCache.set(mimeType, ok);
+  return ok;
+}
+
+/** Returns codec support map for the current platform. */
+export function checkCodecSupport() {
+  return {
+    mp3: canPlay("audio/mpeg"),
+    ogg: canPlay("audio/ogg; codecs=opus"),
+    webm: canPlay("audio/webm; codecs=opus"),
+    wav: canPlay("audio/wav"),
+    aac: canPlay("audio/aac"),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Global singleton state
+// ---------------------------------------------------------------------------
 const audio = shallowRef<HTMLAudioElement | null>(null);
 const state = ref<PlaybackState>("idle");
 const currentMessageId = ref<string | null>(null);
@@ -47,11 +135,28 @@ function setupAudioListeners(el: HTMLAudioElement) {
     }
   };
   el.onerror = () => {
+    const err = el.error;
+    console.error("[audio] playback error:", {
+      code: err?.code,
+      message: err?.message,
+      codeName: ["", "ABORTED", "NETWORK", "DECODE", "SRC_NOT_SUPPORTED"][err?.code ?? 0],
+      networkState: el.networkState,
+      readyState: el.readyState,
+      src: el.src?.substring(0, 60),
+    });
     state.value = "failed";
   };
   el.onloadedmetadata = () => {
     duration.value = el.duration;
   };
+
+  // Diagnostic listeners (mobile debugging)
+  if (isNative) {
+    el.onstalled = () => console.warn("[audio] stalled");
+    el.onsuspend = () => console.log("[audio] suspend");
+    el.onwaiting = () => console.log("[audio] waiting");
+    el.onabort = () => console.warn("[audio] abort");
+  }
 }
 
 export function useAudioPlayback() {
@@ -67,6 +172,9 @@ export function useAudioPlayback() {
   });
 
   async function play(info: PlaybackInfo) {
+    // Unlock audio session on first play (must be synchronous in user gesture)
+    unlockAudio();
+
     if (currentMessageId.value === info.messageId && audio.value && state.value === "paused") {
       await audio.value.play();
       state.value = "playing";
@@ -83,14 +191,28 @@ export function useAudioPlayback() {
     currentMessageId.value = info.messageId;
     currentRoomId.value = info.roomId;
     duration.value = info.duration;
+
     try {
-      const el = new Audio(info.objectUrl);
+      const el = new Audio();
       el.playbackRate = playbackRate.value;
       setupAudioListeners(el);
       audio.value = el;
+
+      // Set src and call play() synchronously — preserves user gesture chain.
+      // The browser binds the play() Promise to the current user activation.
+      el.src = info.objectUrl;
       await el.play();
       state.value = "playing";
-    } catch {
+    } catch (e: unknown) {
+      const err = e as Error;
+      console.error("[audio] play() rejected:", err.name, err.message);
+
+      // NotAllowedError = autoplay blocked / user gesture expired
+      // NotSupportedError = codec not supported
+      if (err.name === "NotAllowedError") {
+        console.error("[audio] User gesture likely expired before play(). " +
+          "Ensure no async operations between click and play().");
+      }
       state.value = "failed";
     }
   }
