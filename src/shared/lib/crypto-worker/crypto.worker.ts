@@ -7,9 +7,9 @@
  * No DOM, no Vue, no Matrix SDK — pure computation only.
  */
 
-// NOTE: `global` and `process` polyfills are injected by the blob bootstrap
-// in bridge.ts BEFORE this module loads. Do NOT add them here — ES module
-// imports are hoisted and would execute before inline polyfill code.
+// MUST be first import — sets global/window/process before Node.js packages load.
+// ES modules evaluate side-effect imports in declaration order.
+import "./worker-polyfills";
 
 import { ProjectivePoint } from "@noble/secp256k1";
 import * as miscreant from "miscreant";

@@ -22,27 +22,16 @@ const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Err
 
 function getWorker(): Worker {
   if (!worker) {
-    // Blob wrapper sets `global` and `process` BEFORE any module loads.
-    // ES module imports are hoisted, so side-effect polyfill imports don't help —
-    // pbkdf2/create-hash reference `global` at parse time.
-    const workerUrl = new URL("./crypto.worker.ts", import.meta.url).href;
-    // Buffer early messages: dynamic import() is async, so self.onmessage from
-    // the crypto module isn't set until import resolves. Messages sent before
-    // that would be lost. The bootstrap queues them and replays after import.
-    const bootstrap = [
-      "self.global=self;self.window=self;self.process={browser:true,env:{}};",
-      "const _q=[];self.onmessage=e=>_q.push(e);",
-      `import("${workerUrl}").then(()=>{`,
-      "  const h=self.onmessage;for(const e of _q)h(e);",
-      "});",
-    ].join("");
-    const blob = new Blob([bootstrap], { type: "application/javascript" });
-    const blobUrl = URL.createObjectURL(blob);
+    // Standard Vite worker — Vite bundles crypto.worker.ts as a separate chunk.
+    // Polyfills (global, window, process) are handled inside the worker via
+    // `import "./worker-polyfills"` as the first import in crypto.worker.ts.
     try {
-      worker = new Worker(blobUrl, { type: "module" });
+      worker = new Worker(
+        new URL("./crypto.worker.ts", import.meta.url),
+        { type: "module" },
+      );
     } catch (e) {
       console.error("[CryptoBridge] failed to create worker:", e);
-      URL.revokeObjectURL(blobUrl);
       throw e;
     }
     worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
