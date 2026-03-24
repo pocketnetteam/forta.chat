@@ -9,14 +9,29 @@ import com.forta.chat.plugins.tor.TorPlugin
 import com.forta.chat.plugins.calls.CallPlugin
 import com.forta.chat.plugins.filetransfer.TorFilePlugin
 import com.forta.chat.plugins.webrtc.WebRTCPlugin
+import com.forta.chat.plugins.updater.UpdaterPlugin
+import com.forta.chat.updater.AppUpdater
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class MainActivity : BridgeActivity() {
+
+    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(TorPlugin::class.java)
         registerPlugin(CallPlugin::class.java)
         registerPlugin(TorFilePlugin::class.java)
         registerPlugin(WebRTCPlugin::class.java)
+        registerPlugin(UpdaterPlugin::class.java)
         super.onCreate(savedInstanceState)
+
+        // Auto-check for updates (respects 1-hour cache)
+        activityScope.launch {
+            AppUpdater.checkForUpdateIfNeeded(this@MainActivity, isManual = false)
+        }
 
         // Inject real safe area insets as CSS variables into the WebView
         val rootView = findViewById<View>(android.R.id.content)
