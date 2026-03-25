@@ -10,6 +10,7 @@ import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { handleSdkSync } from "@/features/sync-status";
+import { isNative } from "@/shared/lib/platform";
 import { useRouter } from "vue-router";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
@@ -116,6 +117,24 @@ onMounted(async () => {
     onUnmounted(() => vv.removeEventListener("resize", updateKeyboardHeight));
   }
 
+  // On native platforms, scroll focused inputs into view when keyboard opens
+  if (isNative) {
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        setTimeout(() => {
+          target.scrollIntoView({ block: "center", behavior: "smooth" });
+        }, 300);
+      }
+    };
+    document.addEventListener("focusin", handleFocusIn);
+    onUnmounted(() => document.removeEventListener("focusin", handleFocusIn));
+  }
+
   try {
     await authStore.fetchUserInfo();
   } catch (e) {
@@ -142,7 +161,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh; padding-top: var(--safe-area-inset-top, 0px)">
+  <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh">
     <TitleBar v-if="isElectron" />
     <div class="relative min-h-0 flex-1 overflow-hidden">
       <transition :name="isMobile ? '' : 'fade'" mode="out-in">

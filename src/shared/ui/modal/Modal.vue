@@ -62,7 +62,7 @@ watch(() => props.show, (val) => {
     <transition name="modal-fade">
       <div
         v-if="props.show"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-background-overlay"
+        class="safe-all fixed inset-0 z-50 flex items-center justify-center bg-background-overlay"
         @click.self="onOverlayClick"
         @keydown="onKeydown"
       >
@@ -72,7 +72,7 @@ watch(() => props.show, (val) => {
           aria-modal="true"
           :aria-label="props.ariaLabel"
           tabindex="-1"
-          class="max-h-[90vh] w-full max-w-md overflow-auto rounded-xl bg-background-total-theme p-6 shadow-xl outline-none"
+          class="max-h-full w-full max-w-md overflow-auto rounded-xl bg-background-total-theme p-6 shadow-xl outline-none"
         >
           <slot />
         </div>

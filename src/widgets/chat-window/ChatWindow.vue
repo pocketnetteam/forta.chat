@@ -282,7 +282,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="chatWindowRef" class="relative flex h-full flex-col bg-background-total-theme" style="padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px))">
+  <div ref="chatWindowRef" class="safe-bottom relative flex h-full flex-col bg-background-total-theme">
     <!-- Chat header -->
     <div
       v-if="chatStore.activeRoom && !isChannelView"

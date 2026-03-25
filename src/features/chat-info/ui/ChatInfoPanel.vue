@@ -406,7 +406,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
     <transition name="panel-slide">
       <div
         v-if="props.show"
-        class="fixed right-0 top-0 z-50 h-full w-full bg-background-total-theme shadow-xl sm:w-[360px] sm:max-w-full"
+        class="safe-y fixed right-0 top-0 z-50 h-full w-full bg-background-total-theme shadow-xl sm:w-[360px] sm:max-w-full"
         @click.stop
       >
         <div v-if="room" class="flex h-full flex-col">
