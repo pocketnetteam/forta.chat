@@ -1109,6 +1109,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     debouncedCacheRooms();
     } finally {
       fullRefreshInFlight = false;
+      // Flush any room changes that accumulated while the chunked refresh was running.
+      // Without this, changedRoomIds pile up because refreshRoomsImmediate() returns
+      // early during fullRefreshInFlight, and no subsequent trigger may arrive to drain them.
+      if (changedRoomIds.size > 0) {
+        refreshRooms();
+      }
     }
   };
 
