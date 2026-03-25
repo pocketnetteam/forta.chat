@@ -12,6 +12,7 @@ import { defineStore } from "pinia";
 import { computed, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
+import { isNative } from "@/shared/lib/platform";
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import { useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
@@ -1542,9 +1543,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const pendingReadWatermarks = new Map<string, number>();
 
   /** Send a read receipt if the page is visible, otherwise queue for later.
-   *  Returns true if the receipt was sent successfully. */
+   *  On native platforms (Capacitor WebView), document.visibilityState is unreliable —
+   *  it can report "hidden" even when the app is in foreground — so we always send. */
   const sendReadReceiptIfVisible = async (roomId: string, event: unknown): Promise<boolean> => {
-    if (document.visibilityState === "visible") {
+    const shouldSend = isNative || document.visibilityState === "visible";
+    if (shouldSend) {
       try {
         const matrixService = getMatrixClientService();
         const success = await matrixService.sendReadReceipt(event);
@@ -1580,6 +1583,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         pendingReadReceipts.clear();
       }
     });
+  }
+
+  // Capacitor native: flush pending receipts when app returns to foreground.
+  // visibilitychange is unreliable in WebView — use Capacitor's appStateChange instead.
+  if (isNative) {
+    import("@capacitor/app").then(({ App }) => {
+      App.addListener("appStateChange", ({ isActive }) => {
+        if (isActive) {
+          flushPendingReadWatermarks();
+        }
+      });
+    }).catch(() => {});
   }
 
   /** Find a Matrix event in the room timeline closest to (<=) the given timestamp.
@@ -1641,20 +1656,35 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const success = await sendReadReceiptIfVisible(roomId, event);
       if (success) {
         pendingReadWatermarks.delete(roomId);
+        watermarkQueuedAt.delete(roomId);
       }
     } else {
       pendingReadWatermarks.set(roomId, timestamp);
+      if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, Date.now());
     }
   };
 
   /** Retry pending read watermarks — called on sync cycles, throttled globally */
   const WATERMARK_FLUSH_INTERVAL = 5000;
+  const STALE_WATERMARK_WARN_MS = 30_000; // warn if a receipt is stuck for >30s
   let lastWatermarkFlush = 0;
+  /** Track when each pending watermark was first queued (for staleness warnings) */
+  const watermarkQueuedAt = new Map<string, number>();
   const flushPendingReadWatermarks = () => {
     const now = Date.now();
     if (now - lastWatermarkFlush < WATERMARK_FLUSH_INTERVAL) return;
     if (pendingReadWatermarks.size === 0) return;
     lastWatermarkFlush = now;
+
+    // Warn about stale pending receipts
+    for (const [roomId] of pendingReadWatermarks) {
+      const queuedAt = watermarkQueuedAt.get(roomId);
+      if (queuedAt && now - queuedAt > STALE_WATERMARK_WARN_MS) {
+        console.warn(`[chat-store] stale read receipt for room ${roomId} — pending for ${Math.round((now - queuedAt) / 1000)}s`);
+      } else if (!queuedAt) {
+        watermarkQueuedAt.set(roomId, now);
+      }
+    }
 
     // Snapshot entries to avoid mutation-during-iteration
     const entries = [...pendingReadWatermarks];
@@ -1663,7 +1693,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (event) {
         receiptCooldowns.set(roomId, now);
         sendReadReceiptIfVisible(roomId, event).then((success) => {
-          if (success) pendingReadWatermarks.delete(roomId);
+          if (success) {
+            pendingReadWatermarks.delete(roomId);
+            watermarkQueuedAt.delete(roomId);
+          }
         }).catch(() => {});
       }
     }

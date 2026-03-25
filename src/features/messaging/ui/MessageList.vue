@@ -278,6 +278,17 @@ const getScrollContainer = (): HTMLElement | null => {
   return scrollerRef.value?.getContainerEl?.() ?? listRef.value ?? null;
 };
 
+/** Find timestamp of the latest inbound message (for read-on-open fallback). */
+const findLatestInboundTimestamp = (): number => {
+  const msgs = chatStore.activeMessages;
+  const myAddr = authStore.address;
+  // Messages are sorted oldest→newest; scan from end for latest inbound
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].senderId !== myAddr) return msgs[i].timestamp;
+  }
+  return 0;
+};
+
 const readTracker = useReadTracker({
   containerRef: computed(() => getScrollContainer()),
   getMessageTs: (el: HTMLElement) => {
@@ -585,7 +596,7 @@ watch(
       // getScrollContainer() may return null if VList hasn't created its
       // internal scroll element yet — poll until available (max ~1s).
       const startReadTracking = async () => {
-        const MAX_ATTEMPTS = 20;
+        const MAX_ATTEMPTS = 40; // 40×50ms = 2s — mobile may need longer for layout to settle
         const POLL_MS = 50;
         for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
           if (chatStore.activeRoomId !== roomId) return; // room changed
@@ -597,6 +608,17 @@ watch(
               requestAnimationFrame(() => {
                 readTracker.performManualScan();
                 readTracker.flushNow();
+
+                // Mobile fix: if user lands at the bottom on chat open,
+                // immediately mark the latest inbound message as read.
+                // IntersectionObserver may not fire in mobile WebViews
+                // (column-reverse + dynamic toolbar layout shifts).
+                if (isNearBottom.value) {
+                  const latestTs = findLatestInboundTimestamp();
+                  if (latestTs > 0) {
+                    chatStore.advanceInboundWatermark(roomId, latestTs);
+                  }
+                }
               });
               return;
             }

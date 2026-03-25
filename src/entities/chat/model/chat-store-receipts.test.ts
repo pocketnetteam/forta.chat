@@ -13,6 +13,15 @@ vi.mock("@/shared/lib/cache/chat-cache", () => ({
   getCacheTimestamp: vi.fn(() => Promise.resolve(null)),
 }));
 
+vi.mock("@/shared/lib/platform", () => ({
+  get isNative() { return (globalThis as any).__TEST_IS_NATIVE ?? false; },
+  isAndroid: false,
+  isIOS: false,
+  isElectron: false,
+  isWeb: true,
+  currentPlatform: "web" as const,
+}));
+
 const mockSendReadReceipt = vi.fn(async () => true);
 
 vi.mock("@/entities/matrix", () => ({
@@ -118,5 +127,31 @@ describe("receipt throttling", () => {
     await flushCoalescing();
 
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends receipt on native even when document.visibilityState is hidden", async () => {
+    // Simulate native platform where visibilityState is unreliable
+    (globalThis as any).__TEST_IS_NATIVE = true;
+    vi.stubGlobal("document", {
+      ...document,
+      visibilityState: "hidden", // would normally block sending
+      addEventListener: document.addEventListener.bind(document),
+      removeEventListener: document.removeEventListener.bind(document),
+    });
+
+    // Re-create store to pick up the new isNative value
+    setActivePinia(createTestingPinia({ stubActions: false }));
+    const nativeStore = useChatStore();
+    nativeStore.addRoom(makeRoom({ id: "!r1:s" }));
+    nativeStore.addMessage("!r1:s", makeMsg({ roomId: "!r1:s", timestamp: 1000 }));
+
+    await nativeStore.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
+
+    // Should send even though visibilityState is "hidden"
+    expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+
+    // Cleanup
+    delete (globalThis as any).__TEST_IS_NATIVE;
   });
 });

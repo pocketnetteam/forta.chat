@@ -4,6 +4,7 @@ const VISIBILITY_THRESHOLD = 0.3;        // lowered from 0.5 for mobile (dynamic
 const BATCH_INTERVAL_MS = 2000;           // flush batch every 2 seconds
 const SCROLL_SCAN_DEBOUNCE_MS = 300;      // fallback scan after scroll settles
 const DELAYED_SCAN_MS = 500;              // extra scan for slow mobile layout
+const RESIZE_SCAN_DEBOUNCE_MS = 200;      // re-scan after container resize settles
 
 export interface ReadTrackerOptions {
   /** The scroll container element */
@@ -30,6 +31,9 @@ export function useReadTracker(options: ReadTrackerOptions) {
   let scrollHandler: (() => void) | null = null;
   let scrollScanTimer: ReturnType<typeof setTimeout> | null = null;
   let delayedScanTimer: ReturnType<typeof setTimeout> | null = null;
+  /** ResizeObserver for container layout changes (keyboard, dynamic toolbar) */
+  let resizeObserver: ResizeObserver | null = null;
+  let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Elements registered via observeElement() before startTracking() was called.
@@ -88,6 +92,18 @@ export function useReadTracker(options: ReadTrackerOptions) {
     }, SCROLL_SCAN_DEBOUNCE_MS);
   }
 
+  /** Resize-based fallback: re-scan when container dimensions change.
+   *  Handles mobile keyboard show/hide, dynamic toolbar collapse/expand,
+   *  and iOS safe-area changes that shift visible content. */
+  function onContainerResize() {
+    if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
+    resizeScanTimer = setTimeout(() => {
+      resizeScanTimer = null;
+      scanViewport();
+      flushBatch();
+    }, RESIZE_SCAN_DEBOUNCE_MS);
+  }
+
   function startTracking(container?: HTMLElement | null): boolean {
     if (observer) return true; // already tracking
 
@@ -128,10 +144,16 @@ export function useReadTracker(options: ReadTrackerOptions) {
     }
     pendingElements.clear();
 
-    // ═══ FALLBACK: scroll event → debounced getBoundingClientRect scan ═══
+    // ═══ FALLBACK 1: scroll event → debounced getBoundingClientRect scan ═══
     // Guarantees read detection even when IO is broken (iOS Safari + column-reverse).
     scrollHandler = onScrollFallback;
     root.addEventListener("scroll", scrollHandler, { passive: true });
+
+    // ═══ FALLBACK 2: ResizeObserver → debounced scan on layout changes ═══
+    // Mobile keyboards, dynamic toolbars, and safe-area changes resize the
+    // scroll container. IntersectionObserver may miss these, so re-scan.
+    resizeObserver = new ResizeObserver(onContainerResize);
+    resizeObserver.observe(root);
 
     // Periodic flush of the high-water mark
     batchTimer = setInterval(flushBatch, BATCH_INTERVAL_MS);
@@ -195,6 +217,15 @@ export function useReadTracker(options: ReadTrackerOptions) {
       trackedRoot.removeEventListener("scroll", scrollHandler);
     }
     scrollHandler = null;
+
+    // Remove resize observer
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    if (resizeScanTimer !== null) {
+      clearTimeout(resizeScanTimer);
+      resizeScanTimer = null;
+    }
+
     trackedRoot = null;
 
     if (scrollScanTimer !== null) {
