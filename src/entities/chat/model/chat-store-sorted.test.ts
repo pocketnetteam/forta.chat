@@ -106,3 +106,42 @@ describe("sortedRooms", () => {
     expect(store.sortedRooms.map(r => r.id)).toEqual(["!y:s", "!x:s"]);
   });
 });
+
+describe("large room list", () => {
+  let store: ReturnType<typeof useChatStore>;
+
+  beforeEach(() => {
+    setActivePinia(createTestingPinia({ stubActions: false }));
+    store = useChatStore();
+  });
+
+  it("correctly sorts 500 rooms by timestamp", () => {
+    const rooms = Array.from({ length: 500 }, (_, i) =>
+      makeRoom({
+        id: `!r${i}:s`,
+        lastMessage: makeMsgField({ timestamp: Math.floor(Math.random() * 100000) }),
+      })
+    );
+    store.rooms = rooms;
+    const sorted = store.sortedRooms;
+    expect(sorted).toHaveLength(500);
+    for (let i = 1; i < sorted.length; i++) {
+      const prevTs = sorted[i - 1].lastMessage?.timestamp ?? 0;
+      const currTs = sorted[i].lastMessage?.timestamp ?? 0;
+      expect(prevTs).toBeGreaterThanOrEqual(currTs);
+    }
+  });
+
+  it("pinned rooms stay at top with 500 rooms", () => {
+    const rooms = Array.from({ length: 500 }, (_, i) =>
+      makeRoom({
+        id: `!r${i}:s`,
+        lastMessage: makeMsgField({ timestamp: 1000 + i }),
+      })
+    );
+    store.rooms = rooms;
+    store.togglePinRoom("!r0:s");
+    const sorted = store.sortedRooms;
+    expect(sorted[0].id).toBe("!r0:s");
+  });
+});
