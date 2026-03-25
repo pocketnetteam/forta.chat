@@ -143,6 +143,12 @@ const handleKeydown = (e: KeyboardEvent) => {
 };
 
 const handleInput = () => {
+  // On mobile IME keyboards, Vue 3 v-model delays updating the ref until
+  // compositionend. Sync from DOM immediately so the send button appears.
+  const el = textareaRef.value;
+  if (el && el.value !== text.value) {
+    text.value = el.value;
+  }
   autoResize();
   mention.onCursorChange();
   setTyping(true);
@@ -541,6 +547,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
           :style="{ maxHeight: maxTextareaHeight + 'px', fontSize: '16px' }"
           :disabled="sending"
           @keydown="handleKeydown" @input="handleInput" @blur="saveDraftOnBlur"
+          @compositionupdate="handleInput" @compositionend="handleInput"
           @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()" @keyup="mention.onCursorChange()"
         />
 

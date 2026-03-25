@@ -211,6 +211,13 @@ const virtualItems = computed<VirtualItem[]>(() => {
   const msgs = chatStore.activeMessages;
   const items: VirtualItem[] = [];
   const { frozenLastReadId, frozenUnreadCount } = bannerState.value;
+  const myAddr = authStore.address;
+
+  // Track whether we've found the last-read message and need to insert the banner.
+  // The banner goes BEFORE the first inbound (not own) message after the last-read marker.
+  // This ensures own messages sent after the watermark stay ABOVE the banner.
+  let bannerPending = false;
+  let bannerInserted = false;
 
   for (let i = 0; i < msgs.length; i++) {
     const msg = msgs[i];
@@ -234,7 +241,19 @@ const virtualItems = computed<VirtualItem[]>(() => {
     const prevMsg = msgs[i - 1];
     const dateLabel = getDateLabel(msg.timestamp, prevMsg?.timestamp);
 
-    if (dateLabel) {
+    // If banner is pending and this is an inbound message, insert banner BEFORE it
+    // (before its date separator if one exists, so the banner sits right above the first unread)
+    if (bannerPending && !bannerInserted && msg.senderId !== myAddr) {
+      // Insert banner before the date separator (if any) for this message
+      if (dateLabel) {
+        const stableId = (msg as any)._key || msg.id;
+        items.push({ id: "unread-banner", type: "unread-banner", unreadCount: frozenUnreadCount });
+        items.push({ id: `date-${stableId}`, type: "date-separator", label: dateLabel });
+      } else {
+        items.push({ id: "unread-banner", type: "unread-banner", unreadCount: frozenUnreadCount });
+      }
+      bannerInserted = true;
+    } else if (dateLabel) {
       const stableId = (msg as any)._key || msg.id;
       items.push({ id: `date-${stableId}`, type: "date-separator", label: dateLabel });
     }
@@ -242,15 +261,12 @@ const virtualItems = computed<VirtualItem[]>(() => {
     // Use _key (stable across tempId→serverId rename) for consistent item identity.
     items.push({ id: (msg as any)._key || msg.id, type: "message", message: msg, index: i });
 
-    // Insert unread banner AFTER the last read message
-    // Match by id or _key (stable across tempId→eventId flip)
-    const msgKey = (msg as any)._key;
-    if (
-      frozenLastReadId &&
-      frozenUnreadCount > 0 &&
-      (msg.id === frozenLastReadId || (msgKey && msgKey === frozenLastReadId))
-    ) {
-      items.push({ id: "unread-banner", type: "unread-banner", unreadCount: frozenUnreadCount });
+    // Mark the last-read message — banner will be inserted before the next inbound message
+    if (!bannerInserted && frozenLastReadId && frozenUnreadCount > 0) {
+      const msgKey = (msg as any)._key;
+      if (msg.id === frozenLastReadId || (msgKey && msgKey === frozenLastReadId)) {
+        bannerPending = true;
+      }
     }
   }
 
