@@ -572,6 +572,9 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Common ──
   "common.cancel": "Отмена",
+  "common.unknownUser": "Пользователь",
+  "common.encryptedChat": "Чат",
+  "message.notDecrypted": "Сообщение не расшифровано",
 
   // ── Language names ──
   "locale.en": "English",

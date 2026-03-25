@@ -570,6 +570,9 @@ export const en = {
 
   // ── Common ──
   "common.cancel": "Cancel",
+  "common.unknownUser": "User",
+  "common.encryptedChat": "Chat",
+  "message.notDecrypted": "Message not decrypted",
 
   // ── Language names ──
   "locale.en": "English",
