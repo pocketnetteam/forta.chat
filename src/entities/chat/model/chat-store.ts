@@ -312,6 +312,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let lastFullRefresh = 0;
   const FULL_REFRESH_INTERVAL = 60_000; // Reconciliation fallback
   let membersLoadedOnce = false; // One-time member loading for stale lazy-load cache
+  let fullRefreshInFlight = false; // Re-entrancy guard for async fullRoomRefresh
 
   /** Schedule a callback during browser idle time, with setTimeout fallback */
   const scheduleIdle = (cb: () => void, fallbackMs = 200) => {
@@ -908,6 +909,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     kit: MatrixKit,
     myUserId: string,
   ) => {
+    if (fullRefreshInFlight) return;
+    fullRefreshInFlight = true;
+    try {
     perfMark("fullRoomRefresh-start");
     // Retry previously failed decryptions on full refresh
     decryptFailedRooms.clear();
@@ -920,6 +924,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const prevActiveRoom = activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
 
     const interactiveRooms = filterInteractiveRooms(matrixRooms);
+    const prevActiveIsExternal = prevActiveRoom && !interactiveRooms.some((r: any) => (r.roomId as string) === prevActiveRoom.id);
 
     const ROOM_CHUNK = 50;
     const newRooms: ChatRoom[] = [];
@@ -968,7 +973,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (chatDbKitRef.value) {
       const dbKit = chatDbKitRef.value;
       const now = Date.now();
-      const updates = newRooms.map(r => ({
+      const dexieSourceRooms = prevActiveIsExternal
+        ? newRooms.filter(r => r.id !== prevActiveRoom!.id)
+        : newRooms;
+      const updates = dexieSourceRooms.map(r => ({
         id: r.id,
         name: r.name,
         avatar: r.avatar,
@@ -1001,7 +1009,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           try {
             await dbKit.rooms.bulkSyncRooms(chunk);
           } catch (e) {
-            console.warn("[chat-store] Dexie room sync failed:", e);
+            console.warn("[chat-store] Dexie room sync chunk failed:", e);
+            if (!chatDbKitRef.value) break; // DB torn down — abort remaining
           }
           if (i + DB_CHUNK < updates.length) {
             await yieldToMain();
@@ -1051,6 +1060,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     perfMark("fullRoomRefresh-end");
     perfMeasure("fullRoomRefresh", "fullRoomRefresh-start", "fullRoomRefresh-end");
     debouncedCacheRooms();
+    } finally {
+      fullRefreshInFlight = false;
+    }
   };
 
   /** One-time: load members from server for rooms with only self as member.
