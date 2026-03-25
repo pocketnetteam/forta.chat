@@ -557,8 +557,19 @@ class NativeRTCPeerConnection extends EventTarget {
 // getUserMedia proxy — returns a dummy stream on native; real media is native
 // ---------------------------------------------------------------------------
 
-const originalGetUserMedia =
+// Captured lazily inside installNativeWebRTCProxy() when mediaDevices is confirmed present.
+// Module-level capture is unreliable on Android WebView (mediaDevices may not exist yet).
+let originalGetUserMedia: typeof navigator.mediaDevices.getUserMedia | undefined =
   navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+
+/**
+ * Returns the real browser getUserMedia, bypassing the native WebRTC proxy.
+ * Use this in voice/video recorders that need actual media streams,
+ * not the dummy streams returned by the proxy (which are for WebRTC calls only).
+ */
+export function getRealGetUserMedia(): typeof navigator.mediaDevices.getUserMedia | undefined {
+  return originalGetUserMedia;
+}
 
 async function nativeGetUserMedia(
   constraints?: MediaStreamConstraints
@@ -623,6 +634,10 @@ export function installNativeWebRTCProxy(): void {
   (window as any).webkitRTCPeerConnection = NativeRTCPeerConnection as any;
 
   if (navigator.mediaDevices) {
+    // Capture real getUserMedia before replacing (in case module-level capture missed it)
+    if (!originalGetUserMedia) {
+      originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    }
     navigator.mediaDevices.getUserMedia = nativeGetUserMedia;
   }
 

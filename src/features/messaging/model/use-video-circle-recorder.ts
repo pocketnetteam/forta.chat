@@ -1,16 +1,25 @@
 import { ref, type Ref } from "vue";
+import { isNative } from "@/shared/lib/platform";
+import { getRealGetUserMedia } from "@/shared/lib/native-webrtc";
 
 export type VideoRecorderState = "idle" | "recording" | "locked" | "preview";
 
 const MAX_DURATION = 60;
-const PREFERRED_MIME = "video/webm;codecs=vp9,opus";
-const FALLBACK_MIME = "video/webm";
+
+const MIME_CANDIDATES = [
+  "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+  "video/webm;codecs=vp9,opus",
+  "video/webm;codecs=vp8,opus",
+  "video/webm",
+];
 
 function getSupportedMimeType(): string {
-  if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(PREFERRED_MIME)) {
-    return PREFERRED_MIME;
+  if (typeof MediaRecorder === "undefined") return "";
+  for (const mime of MIME_CANDIDATES) {
+    if (MediaRecorder.isTypeSupported(mime)) return mime;
   }
-  return FALLBACK_MIME;
+  // Empty string lets MediaRecorder choose its default codec
+  return "";
 }
 
 export function useVideoCircleRecorder() {
@@ -22,7 +31,7 @@ export function useVideoCircleRecorder() {
   let mediaRecorder: MediaRecorder | null = null;
   let durationTimer: ReturnType<typeof setInterval> | null = null;
   let videoChunks: Blob[] = [];
-  let mimeType = FALLBACK_MIME;
+  let mimeType = "";
 
   const cleanup = () => {
     if (durationTimer) { clearInterval(durationTimer); durationTimer = null; }
@@ -35,24 +44,48 @@ export function useVideoCircleRecorder() {
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const t0 = Date.now();
+      const gum = (isNative && getRealGetUserMedia()) || navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      const stream = await gum({
         video: { facingMode: "user", width: { ideal: 480 }, height: { ideal: 480 } },
         audio: true,
       });
 
+      // Validate real tracks (not dummy from WebRTC proxy)
+      const vt = stream.getVideoTracks();
+      const at = stream.getAudioTracks();
+      if (vt.length === 0 || at.length === 0 || !vt[0].enabled || !at[0].enabled) {
+        console.error("[VideoCircle] Missing or disabled tracks — video:", vt.length, "audio:", at.length,
+          "vEnabled:", vt[0]?.enabled, "aEnabled:", at[0]?.enabled);
+        stream.getTracks().forEach(t => t.stop());
+        cleanup();
+        return;
+      }
       videoStream.value = stream;
       videoChunks = [];
       mimeType = getSupportedMimeType();
+      console.log("[VideoCircle] Started — video:", vt.length, "audio:", at.length, "mime:", mimeType);
 
-      mediaRecorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      // Read actual mimeType from recorder (may differ from requested when empty)
+      if (!mimeType && mediaRecorder.mimeType) {
+        mimeType = mediaRecorder.mimeType;
+      }
 
       mediaRecorder.addEventListener("dataavailable", (e: BlobEvent) => {
         if (e.data.size > 0) videoChunks.push(e.data);
       });
 
       mediaRecorder.start(1000);
-      state.value = "recording";
       duration.value = 0;
+
+      // If getUserMedia took >500ms, a permission dialog was likely shown,
+      // which breaks the touch-hold gesture. Auto-switch to "locked" (hands-free)
+      // so the user has visible send/cancel buttons.
+      const gumDelayMs = Date.now() - t0;
+      state.value = gumDelayMs > 500 ? "locked" : "recording";
 
       durationTimer = setInterval(() => {
         duration.value++;
@@ -100,7 +133,8 @@ export function useVideoCircleRecorder() {
       return null;
     }
     state.value = "idle";
-    const file = new File([blob], `video_circle_${Date.now()}.webm`, { type: mimeType });
+    const ext = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+    const file = new File([blob], `video_circle_${Date.now()}.${ext}`, { type: mimeType });
     return { file, duration: currentDuration };
   };
 
@@ -120,7 +154,8 @@ export function useVideoCircleRecorder() {
     const dur = duration.value;
     recordedBlob.value = null;
     state.value = "idle";
-    const file = new File([blob], `video_circle_${Date.now()}.webm`, { type: mimeType });
+    const ext = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+    const file = new File([blob], `video_circle_${Date.now()}.${ext}`, { type: mimeType });
     return { file, duration: dur };
   };
 

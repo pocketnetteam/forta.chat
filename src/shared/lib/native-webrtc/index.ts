@@ -4,4 +4,5 @@ export {
   installNativeWebRTCProxy,
   uninstallNativeWebRTCProxy,
   isNativeWebRTCInstalled,
+  getRealGetUserMedia,
 } from "./rtc-peer-connection-proxy";

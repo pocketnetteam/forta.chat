@@ -1,4 +1,6 @@
 import { ref } from "vue";
+import { isNative } from "@/shared/lib/platform";
+import { getRealGetUserMedia } from "@/shared/lib/native-webrtc";
 import AudioRecorder from "audio-recorder-polyfill";
 // @ts-expect-error — no types for mpeg-encoder
 import mpegEncoder from "audio-recorder-polyfill/mpeg-encoder";
@@ -31,7 +33,20 @@ export function useVoiceRecorder() {
 
   const startRecording = async () => {
     try {
-      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const t0 = Date.now();
+      const gum = (isNative && getRealGetUserMedia()) || navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      audioStream = await gum({ audio: true });
+
+      // Validate we got real audio tracks (not dummy from WebRTC proxy)
+      const audioTracks = audioStream.getAudioTracks();
+      if (audioTracks.length === 0 || !audioTracks[0].enabled) {
+        console.error("[VoiceRecorder] No usable audio tracks — count:", audioTracks.length, "enabled:", audioTracks[0]?.enabled);
+        audioStream.getTracks().forEach(t => t.stop());
+        cleanup();
+        return;
+      }
+      console.log("[VoiceRecorder] Started with", audioTracks.length, "audio track(s)");
+
       audioChunks = [];
 
       // Set up analyser for waveform
@@ -49,9 +64,13 @@ export function useVoiceRecorder() {
       });
 
       mediaRecorder.start(1000);   // flush data every 1s so encoder Worker keeps up
-      state.value = "recording";
       duration.value = 0;
       waveformData.value = [];
+
+      // If getUserMedia took >500ms, a permission dialog was likely shown,
+      // which breaks the touch-hold gesture. Auto-switch to "locked" (hands-free).
+      const gumDelayMs = Date.now() - t0;
+      state.value = gumDelayMs > 500 ? "locked" : "recording";
 
       // Duration timer
       durationTimer = setInterval(() => {
