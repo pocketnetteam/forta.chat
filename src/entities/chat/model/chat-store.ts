@@ -700,7 +700,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           cached.ts === ts &&
           cached.unread === lr.unreadCount &&
           cached.name === lr.name &&
-          cached.membership === lr.membership
+          cached.membership === lr.membership &&
+          cached.room.avatar === lr.avatar
         ) {
           return cached.room;
         }
@@ -985,10 +986,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
 
       if (i === 0) {
-        // First chunk — publish immediately for early first-paint
-        if (prevActiveRoom && !newRooms.some(r => r.id === prevActiveRoom.id)) {
-          newRooms.push(prevActiveRoom);
-        }
+        // First chunk — publish immediately for early first-paint.
+        // prevActiveRoom is NOT injected here to avoid duplicates when it
+        // appears in a later chunk; the final block handles it instead.
         rooms.value = [...newRooms];
         rebuildRoomsMap();
         perfMark("fullRoomRefresh-firstChunk");
@@ -1489,6 +1489,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (!matrixService.isReady() || !kit) {
       return;
     }
+
+    // Skip if a chunked full refresh is still running — changedRoomIds
+    // will accumulate and be processed when the next refresh fires.
+    if (fullRefreshInFlight) return;
 
     const myUserId = matrixService.getUserId() ?? "";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
