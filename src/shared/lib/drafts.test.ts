@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { getDraft, saveDraft, clearDraft } from "./drafts";
+import { getDraft, saveDraft, clearDraft, _resetMigration } from "./drafts";
 
 describe("drafts", () => {
   beforeEach(() => {
     localStorage.clear();
+    _resetMigration();
   });
 
   it("returns empty string for non-existent draft", () => {
@@ -39,7 +40,19 @@ describe("drafts", () => {
     expect(getDraft("!room2:server")).toBe("draft2");
   });
 
-  it("recovers from corrupted JSON in localStorage", () => {
+  it("migrates legacy single-key format on first access", () => {
+    // Simulate legacy format
+    localStorage.setItem("bastyon-chat:drafts", JSON.stringify({
+      "!room1:server": "old draft 1",
+      "!room2:server": "old draft 2",
+    }));
+    expect(getDraft("!room1:server")).toBe("old draft 1");
+    expect(getDraft("!room2:server")).toBe("old draft 2");
+    // Legacy key should be removed after migration
+    expect(localStorage.getItem("bastyon-chat:drafts")).toBeNull();
+  });
+
+  it("recovers from corrupted legacy JSON in localStorage", () => {
     localStorage.setItem("bastyon-chat:drafts", "not valid json{{{");
     expect(getDraft("!room1:server")).toBe("");
   });

@@ -87,25 +87,25 @@ export function useLinkPreview(text: Ref<string>) {
 
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
-  watch(text, (val) => {
+  watch(text, () => {
     clearTimeout(debounceTimer);
-    const url = detectUrl(val);
-
-    if (!url) {
-      preview.value = null;
-      loading.value = false;
-      lastUrl.value = null;
-      dismissed.value = false;
-      return;
-    }
-
-    if (url === lastUrl.value) return;
-
-    dismissed.value = false;
-    lastUrl.value = url;
-    loading.value = true;
-
     debounceTimer = setTimeout(async () => {
+      const url = detectUrl(text.value);
+
+      if (!url) {
+        preview.value = null;
+        loading.value = false;
+        lastUrl.value = null;
+        dismissed.value = false;
+        return;
+      }
+
+      if (url === lastUrl.value) return;
+
+      dismissed.value = false;
+      lastUrl.value = url;
+      loading.value = true;
+
       try {
         preview.value = await fetchPreview(url);
       } catch {
