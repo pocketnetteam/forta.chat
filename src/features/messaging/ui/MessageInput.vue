@@ -51,6 +51,8 @@ const mention = useMentionAutocomplete(text, textareaRef);
 const fileInputRef = ref<HTMLInputElement>();
 const sending = ref(false);
 let typingTimeout: ReturnType<typeof setTimeout> | null = null;
+let lastTypingSent = 0;
+const TYPING_THROTTLE_MS = 3000;
 
 // --- Drafts ---
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -92,7 +94,7 @@ onBeforeUnmount(() => {
 watch(() => chatStore.editingMessage, (editing) => {
   if (editing) {
     text.value = editing.content;
-    nextTick(() => { textareaRef.value?.focus(); autoResize(); });
+    nextTick(() => { textareaRef.value?.focus(); autoGrowSync(); });
   }
 }, { immediate: true });
 
@@ -111,7 +113,19 @@ const cancelEdit = () => {
 
 const maxTextareaHeight = computed(() => isMobile.value ? 120 : 200);
 
+let resizeRaf = 0;
 const autoGrow = () => {
+  cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(() => {
+    const el = textareaRef.value;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, maxTextareaHeight.value) + "px";
+  });
+};
+
+// Synchronous version for cases where we need immediate resize (edit mode, room switch)
+const autoGrowSync = () => {
   const el = textareaRef.value;
   if (!el) return;
   el.style.height = "auto";
@@ -151,9 +165,15 @@ const handleInput = () => {
   }
   autoResize();
   mention.onCursorChange();
-  setTyping(true);
+
+  // Throttle typing indicator: send at most once per TYPING_THROTTLE_MS
+  const now = Date.now();
+  if (now - lastTypingSent >= TYPING_THROTTLE_MS) {
+    lastTypingSent = now;
+    setTyping(true);
+  }
   if (typingTimeout) clearTimeout(typingTimeout);
-  typingTimeout = setTimeout(() => setTyping(false), 5000);
+  typingTimeout = setTimeout(() => { setTyping(false); lastTypingSent = 0; }, 5000);
 };
 
 // --- Attachment/polls ---
@@ -548,7 +568,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
           :disabled="sending"
           @keydown="handleKeydown" @input="handleInput" @blur="saveDraftOnBlur"
           @compositionupdate="handleInput" @compositionend="handleInput"
-          @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()" @keyup="mention.onCursorChange()"
+          @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()"
         />
 
         <!-- PKOIN button -->
