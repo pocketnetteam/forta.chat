@@ -438,6 +438,7 @@ export const ru: Record<TranslationKey, string> = {
   "tor.notUsingTor": "Tor не используется",
   "tor.verifyFailed": "Ошибка проверки",
   "tor.disableWarning": "Отключение Tor раскроет ваш реальный IP-адрес. Ваш трафик больше не будет анонимным. Продолжить?",
+  "tor.initFailed": "Безопасное соединение недоступно. Включите Tor в Настройках.",
 
   // ── Wallet / PKOIN transfer ──
   "wallet.sendPkoin": "Отправить PKOIN",

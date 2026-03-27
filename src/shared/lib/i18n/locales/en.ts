@@ -436,6 +436,7 @@ export const en = {
   "tor.notUsingTor": "Not using Tor",
   "tor.verifyFailed": "Verification failed",
   "tor.disableWarning": "Disabling Tor will expose your real IP address. Your traffic will no longer be anonymous. Continue?",
+  "tor.initFailed": "Secure connection unavailable. You can enable Tor in Settings.",
 
   // ── Wallet / PKOIN transfer ──
   "wallet.sendPkoin": "Send PKOIN",

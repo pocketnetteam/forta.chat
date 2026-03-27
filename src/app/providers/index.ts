@@ -56,12 +56,31 @@ export const setupProviders = async (app: App) => {
     syncStatusBar();
     watch(() => themeStore.isDarkMode, syncStatusBar);
 
-    // Start Tor daemon and reverse proxy before Matrix client connects
+    // Start Tor daemon in background — does NOT block boot.
+    // App loads with direct connections; switches to Tor when ready.
     bootStatus.setStep("tor");
     const { torService } = await import('@/shared/lib/tor');
-    await withTimeout(torService.init('always'), 30_000, "Tor init");
+    torService.initBackground();
     // Wire store to native torService reactive state
     useTorStore().init();
+
+    // Notify user if Tor fails to start (after app is mounted)
+    const torWatch = watch(
+      () => torService.initFailed.value,
+      (failed) => {
+        if (failed) {
+          import('@/shared/lib/use-toast').then(({ useToast }) => {
+            const { toast } = useToast();
+            toast(
+              'Secure connection unavailable. You can enable Tor in Settings.',
+              'error',
+              8000,
+            );
+          });
+          torWatch(); // stop watching
+        }
+      },
+    );
   }
 
   // Scripts must finish before router mounts the app — components

@@ -33,6 +33,9 @@ class TorManager(private val config: ConfigurationManager) {
         bridgeType: BridgeType = BridgeType.NONE,
         customBridges: List<String> = emptyList()
     ) {
+        val bootStart = android.os.SystemClock.elapsedRealtime()
+        fun elapsed() = android.os.SystemClock.elapsedRealtime() - bootStart
+
         lock.withLock {
             if (state.get() != TorState.STOPPED) {
                 Log.w(TAG, "Tor already ${state.get()}, ignoring start")
@@ -43,12 +46,40 @@ class TorManager(private val config: ConfigurationManager) {
         }
 
         config.ensureGeoIPFiles()
+        Log.i(TAG, "[BOOT] T+${elapsed()}ms geoip files ready")
+
+        // Pre-check: remove stale lock file from previous crash
+        val lockFile = java.io.File(config.torDataDir, "lock")
+        if (lockFile.exists()) {
+            Log.w(TAG, "[BOOT] Removing stale Tor lock file")
+            lockFile.delete()
+        }
+
+        // Pre-check: verify SOCKS port is free
+        try {
+            val socket = java.net.Socket()
+            socket.connect(java.net.InetSocketAddress("127.0.0.1", config.torDefaultSocksPort), 500)
+            socket.close()
+            Log.w(TAG, "[BOOT] SOCKS port ${config.torDefaultSocksPort} in use — killing stale process")
+            val pidFile = java.io.File(config.torPidPath)
+            if (pidFile.exists()) {
+                val pid = pidFile.readText().trim().toIntOrNull()
+                if (pid != null) {
+                    try { Runtime.getRuntime().exec(arrayOf("kill", "-9", pid.toString())) } catch (_: Exception) {}
+                }
+                pidFile.delete()
+            }
+            Thread.sleep(1000)
+        } catch (_: Exception) {
+            // Port is free — good
+        }
 
         val torrc = config.generateTorrc(mode, bridgeType, customBridges)
         File(config.torConfPath).apply {
             parentFile?.mkdirs()
             writeText(torrc)
         }
+        Log.i(TAG, "[BOOT] T+${elapsed()}ms torrc written")
 
         File(config.torPath).setExecutable(true)
 
@@ -62,9 +93,11 @@ class TorManager(private val config: ConfigurationManager) {
                         override fun onStdOutput(line: String) {
                             val pct = ProcessRunner.parseBootstrapPercent(line)
                             if (pct != null) {
+                                Log.i(TAG, "[BOOT] T+${elapsed()}ms Bootstrap $pct%")
                                 bootstrapPercent.set(pct)
                                 onBootstrapProgress?.invoke(pct)
                                 if (pct >= 100) {
+                                    Log.i(TAG, "[BOOT] T+${elapsed()}ms Tor ready, starting reverse proxy")
                                     startReverseProxy()
                                     setState(TorState.RUNNING)
                                 }

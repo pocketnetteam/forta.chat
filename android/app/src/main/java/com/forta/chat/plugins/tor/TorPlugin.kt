@@ -197,4 +197,21 @@ class TorPlugin : Plugin() {
             }
         }.start()
     }
+
+    @PluginMethod
+    fun clearTorCache(call: PluginCall) {
+        Thread {
+            try {
+                torManager.stopTor()
+                val dataDir = java.io.File(config.torDataDir)
+                if (dataDir.exists()) {
+                    dataDir.deleteRecursively()
+                    Log.i("TorPlugin", "Tor data directory cleared: ${config.torDataDir}")
+                }
+                call.resolve()
+            } catch (e: Exception) {
+                call.reject("Failed to clear Tor cache: ${e.message}", e)
+            }
+        }.start()
+    }
 }
