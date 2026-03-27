@@ -31,9 +31,17 @@ import { getMatrixClientService } from "@/entities/matrix";
 const mockedGetCachedMessages = vi.mocked(getCachedMessages);
 const mockedGetMatrixClientService = vi.mocked(getMatrixClientService);
 
+/** Wait for a condition to be true (polls every 10ms, max 2s). */
+async function waitFor(fn: () => boolean, timeout = 2000) {
+  const start = Date.now();
+  while (!fn()) {
+    if (Date.now() - start > timeout) throw new Error("waitFor timed out");
+    await new Promise(r => setTimeout(r, 10));
+  }
+}
+
 describe("preloadVisibleRooms", () => {
   let store: ReturnType<typeof useChatStore>;
-  let mockGetRoom: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -42,10 +50,8 @@ describe("preloadVisibleRooms", () => {
     setActivePinia(createTestingPinia({ stubActions: false }));
     store = useChatStore();
 
-    // Provide getRoom on the matrix service mock.
-    // Return a minimal fake room so preloadVisibleRooms sees SDK as ready.
-    // loadRoomMessages will still exit early (no timeline events).
-    mockGetRoom = vi.fn(() => ({ getLiveTimeline: () => ({ getEvents: () => [] }), currentState: { getStateEvents: () => [] } }));
+    // Provide a matrix service mock with getRooms returning a fake room
+    // so preloadVisibleRooms sees SDK as ready.
     mockedGetMatrixClientService.mockReturnValue({
       kit: {
         client: { sendEvent: vi.fn(), redactEvent: vi.fn(), scrollback: vi.fn(), setRoomTopic: vi.fn(), sendStateEvent: vi.fn(), getUserId: vi.fn(() => "@mock:s") },
@@ -59,14 +65,14 @@ describe("preloadVisibleRooms", () => {
       scrollback: vi.fn(),
       joinRoom: vi.fn(),
       createRoom: vi.fn(),
-      getRoom: mockGetRoom,
+      getRoom: vi.fn(() => ({ getLiveTimeline: () => ({ getEvents: () => [] }), currentState: { getStateEvents: () => [] } })),
       isReady: vi.fn(() => true),
       getUserId: vi.fn(() => "@mock:s"),
       getRooms: vi.fn(() => [{ roomId: "!fake:s" }]),
     } as any);
   });
 
-  it("calls loadRoomMessages for neighbor rooms when active room is set", async () => {
+  it("enqueues neighbor rooms via ensureRoomsLoaded when active room is set", async () => {
     store.rooms = [
       makeRoom({ id: "!r1:s", updatedAt: 300 }),
       makeRoom({ id: "!r2:s", updatedAt: 200 }),
@@ -76,8 +82,9 @@ describe("preloadVisibleRooms", () => {
 
     await store.preloadVisibleRooms();
 
-    // !r2:s is the next neighbor after active !r1:s — gets network preload
-    expect(mockGetRoom).toHaveBeenCalledWith("!r2:s");
+    // !r2:s is the next neighbor after active !r1:s — should be tracked in roomFetchStates
+    await waitFor(() => store.roomFetchStates.get("!r2:s")?.status === "success");
+    expect(store.roomFetchStates.get("!r2:s")?.status).toBe("success");
   });
 
   it("loads from cache for rooms outside neighbor range", async () => {
@@ -110,8 +117,6 @@ describe("preloadVisibleRooms", () => {
 
     // Cache was consulted for the neighbor room (room had no messages)
     expect(mockedGetCachedMessages).toHaveBeenCalledWith("!r1:s");
-    // After cache, loadRoomMessages runs and overwrites with network data.
-    // The important assertion is that cache was consulted first.
   });
 
   it("skips cache load when room already has messages", async () => {
@@ -123,11 +128,12 @@ describe("preloadVisibleRooms", () => {
     store.addMessage("!r1:s", makeMsg({ roomId: "!r1:s" }));
 
     await store.preloadVisibleRooms();
+    await waitFor(() => store.roomFetchStates.get("!r1:s")?.status === "success");
 
     // Cache not called — messages already present
     expect(mockedGetCachedMessages).not.toHaveBeenCalledWith("!r1:s");
-    // But loadRoomMessages was still attempted (neighbor room)
-    expect(mockGetRoom).toHaveBeenCalledWith("!r1:s");
+    // But room was still processed by ensureRoomsLoaded
+    expect(store.roomFetchStates.get("!r1:s")?.status).toBe("success");
   });
 
   it("skips the active room from neighbor preload", async () => {
@@ -138,9 +144,10 @@ describe("preloadVisibleRooms", () => {
     store.activeRoomId = "!active:s";
 
     await store.preloadVisibleRooms();
+    await waitFor(() => store.roomFetchStates.get("!other:s")?.status === "success");
 
-    expect(mockGetRoom).not.toHaveBeenCalledWith("!active:s");
-    expect(mockGetRoom).toHaveBeenCalledWith("!other:s");
+    expect(store.roomFetchStates.has("!active:s")).toBe(false);
+    expect(store.roomFetchStates.get("!other:s")?.status).toBe("success");
   });
 
   it("skips invite rooms", async () => {
@@ -152,9 +159,10 @@ describe("preloadVisibleRooms", () => {
     store.activeRoomId = "!active:s";
 
     await store.preloadVisibleRooms();
+    await waitFor(() => store.roomFetchStates.get("!joined:s")?.status === "success");
 
-    expect(mockGetRoom).not.toHaveBeenCalledWith("!invited:s");
-    expect(mockGetRoom).toHaveBeenCalledWith("!joined:s");
+    expect(store.roomFetchStates.has("!invited:s")).toBe(false);
+    expect(store.roomFetchStates.get("!joined:s")?.status).toBe("success");
   });
 
   it("only runs once (idempotent)", async () => {
@@ -165,9 +173,14 @@ describe("preloadVisibleRooms", () => {
     store.activeRoomId = "!active:s";
 
     await store.preloadVisibleRooms();
-    await store.preloadVisibleRooms(); // no-op
+    await waitFor(() => store.roomFetchStates.get("!r1:s")?.status === "success");
 
-    expect(mockGetRoom).toHaveBeenCalledTimes(1);
+    const cacheCallCount = mockedGetCachedMessages.mock.calls.length;
+    await store.preloadVisibleRooms(); // no-op (preloadDone = true)
+    await new Promise(r => setTimeout(r, 100));
+
+    // Second call should not trigger any additional cache calls
+    expect(mockedGetCachedMessages).toHaveBeenCalledTimes(cacheCallCount);
   });
 
   it("silently handles errors and continues", async () => {
@@ -202,10 +215,10 @@ describe("preloadVisibleRooms", () => {
     store.activeRoomId = "!active:s";
 
     await store.preloadVisibleRooms();
+    await waitFor(() => store.roomFetchStates.get("!normal:s")?.status === "success");
 
-    expect(mockGetRoom).not.toHaveBeenCalledWith("!active:s");
-    expect(mockGetRoom).not.toHaveBeenCalledWith("!invite:s");
-    // !normal:s is the neighbor after active
-    expect(mockGetRoom).toHaveBeenCalledWith("!normal:s");
+    expect(store.roomFetchStates.has("!active:s")).toBe(false);
+    expect(store.roomFetchStates.has("!invite:s")).toBe(false);
+    expect(store.roomFetchStates.get("!normal:s")?.status).toBe("success");
   });
 });

@@ -21,6 +21,7 @@ export const ru: Record<TranslationKey, string> = {
   "contactList.noConversations": "Диалогов пока нет",
   "contactList.inviteToChat": "Приглашение в чат",
   "contactList.noMessages": "Нет сообщений",
+  "contactList.loadError": "Ошибка загрузки",
   "contactList.you": "Вы",
   "contactList.typing": "печатает...",
   "contactList.typingCount": "{count} печатают...",

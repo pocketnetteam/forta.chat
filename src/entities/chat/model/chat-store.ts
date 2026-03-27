@@ -9,7 +9,7 @@ import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/l
 import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
-import { computed, ref, shallowRef, triggerRef, watch } from "vue";
+import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
 import { isNative } from "@/shared/lib/platform";
@@ -102,8 +102,25 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     if (!lastTs && raw.origin_server_ts) {
       lastTs = raw.origin_server_ts as number;
     }
-    // Find last actual message
-    if (!lastMessage && raw.type === "m.room.message" && raw.content) {
+    // Find last actual message (including redacted/deleted)
+    if (!lastMessage && raw.type === "m.room.message") {
+      // Redacted message — content stripped by server
+      const isRedacted = !raw.content
+        || (typeof raw.content === "object" && Object.keys(raw.content as object).length === 0)
+        || (raw.unsigned as any)?.redacted_because;
+      if (isRedacted) {
+        lastMessage = {
+          id: raw.event_id as string,
+          roomId,
+          senderId: matrixIdToAddress((raw.sender as string) ?? ""),
+          content: "",
+          timestamp: (raw.origin_server_ts as number) ?? 0,
+          status: MessageStatus.sent,
+          type: MessageType.text,
+          deleted: true,
+        };
+        continue;
+      }
       const content = raw.content as Record<string, unknown>;
       const msgtype = content.msgtype as string;
       let previewBody: string;
@@ -857,10 +874,191 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const NEIGHBOR_PRELOAD_COUNT = 1; // rooms above/below active to network-preload
   let preloadDone = false;
 
-  /** Track which rooms have already been preloaded (cache + network) to avoid double work */
-  const preloadedRoomIds = new Set<string>();
-  /** Track rooms where cache phase started (but network may still be pending) */
-  const cachePreloadedRoomIds = new Set<string>();
+  // ── Viewport-fetch state machine ─────────────────────────────────
+  // Replaces the old once-only preloadedRoomIds/cachePreloadedRoomIds Sets
+  // with a proper per-room state machine that supports retry.
+
+  interface RoomFetchState {
+    status: "idle" | "loading" | "success" | "error";
+    retryCount: number;
+    lastAttemptAt: number;
+    error?: string;
+  }
+
+  const VIEWPORT_FETCH_MAX_RETRY = 3;
+  const VIEWPORT_FETCH_MAX_CONCURRENT = 5;
+  let viewportFetchActiveCount = 0;
+  /** Current viewport generation — when a new scroll position arrives, previous fetches are cancelled. */
+  let currentViewportGeneration = 0;
+
+  type FetchPriority = "high" | "low";
+  interface PendingFetchItem {
+    id: string;
+    priority: FetchPriority;
+    generation: number;
+  }
+  const pendingFetchQueue: PendingFetchItem[] = [];
+
+  const roomFetchStates = reactive(new Map<string, RoomFetchState>());
+
+  /** Fetch room data for viewport preview: cache first, then network (loadRoomMessages).
+   *  Checks generation between async steps — if the user scrolled away, aborts early. */
+  const fetchRoomPreview = async (roomId: string, generation: number): Promise<void> => {
+    // Stale generation — user scrolled away, abort
+    if (generation !== currentViewportGeneration) return;
+
+    const prev = roomFetchStates.get(roomId);
+    const retryCount = prev?.retryCount ?? 0;
+
+    roomFetchStates.set(roomId, {
+      status: "loading",
+      retryCount,
+      lastAttemptAt: Date.now(),
+    });
+
+    try {
+      if (generation !== currentViewportGeneration) return;
+
+      // Phase 1: cache (fast, from Dexie/localStorage)
+      if (!messages.value[roomId]?.length) {
+        await loadCachedMessages(roomId).catch(() => {});
+      }
+
+      if (generation !== currentViewportGeneration) return;
+
+      // Phase 2: network — loadRoomMessages fetches from Matrix SDK (scrollback)
+      await loadRoomMessages(roomId);
+
+      if (generation !== currentViewportGeneration) return;
+
+      roomFetchStates.set(roomId, {
+        status: "success",
+        retryCount,
+        lastAttemptAt: Date.now(),
+      });
+    } catch (e) {
+      // Don't mark error if generation is stale
+      if (generation !== currentViewportGeneration) return;
+
+      console.warn(`[viewport-fetch] Room ${roomId} failed (attempt ${retryCount + 1}):`, e);
+      roomFetchStates.set(roomId, {
+        status: "error",
+        retryCount: retryCount + 1,
+        lastAttemptAt: Date.now(),
+        error: String(e),
+      });
+    }
+  };
+
+  /** Drain the pending fetch queue, respecting concurrency limit. */
+  const drainFetchQueue = () => {
+    while (pendingFetchQueue.length > 0 && viewportFetchActiveCount < VIEWPORT_FETCH_MAX_CONCURRENT) {
+      const item = pendingFetchQueue.shift()!;
+
+      // Skip stale generation items
+      if (item.generation !== currentViewportGeneration) continue;
+
+      // Skip if room was already loaded by another path while waiting in queue
+      const currentState = roomFetchStates.get(item.id);
+      if (currentState?.status === "success") continue;
+
+      viewportFetchActiveCount++;
+      fetchRoomPreview(item.id, item.generation).finally(() => {
+        viewportFetchActiveCount--;
+        drainFetchQueue();
+      });
+    }
+  };
+
+  /** Ensure rooms are loaded. Rooms in idle/error (with cooldown passed) will be fetched.
+   *  Priority 'high' = viewport-visible rooms, enqueued at front.
+   *  Priority 'low' = prefetch buffer rooms, enqueued at back.
+   *  @param generation — viewport scroll generation; new generation cancels pending from old. */
+  const ensureRoomsLoaded = (roomIds: string[], priority: FetchPriority = "high", generation?: number) => {
+    // Update generation and clear stale queue items
+    if (generation != null) {
+      if (generation > currentViewportGeneration) {
+        currentViewportGeneration = generation;
+        // Clear queue — all pending items are from a stale viewport position
+        pendingFetchQueue.length = 0;
+        // Reset loading states for rooms that were queued but not yet fetched
+        for (const [id, state] of roomFetchStates) {
+          if (state.status === "loading") {
+            roomFetchStates.set(id, { status: "idle", retryCount: state.retryCount, lastAttemptAt: state.lastAttemptAt });
+          }
+        }
+      }
+    }
+    const gen = generation ?? currentViewportGeneration;
+
+    for (const id of roomIds) {
+      if (id === activeRoomId.value) continue;
+      const room = getRoomById(id);
+      if (!room || room.membership === "invite") continue;
+
+      const state = roomFetchStates.get(id);
+
+      // Already loaded or loading — skip
+      if (state?.status === "success") continue;
+      if (state?.status === "loading") continue;
+
+      // Error — check retry limit and cooldown
+      if (state?.status === "error") {
+        if (state.retryCount >= VIEWPORT_FETCH_MAX_RETRY) continue;
+        const cooldown = Math.min(1000 * Math.pow(2, state.retryCount - 1), 10_000);
+        if (Date.now() - state.lastAttemptAt < cooldown) continue;
+      }
+
+      // Check if already in queue
+      const existingIdx = pendingFetchQueue.findIndex(p => p.id === id);
+      if (existingIdx >= 0) {
+        // Promote to high priority if needed
+        if (priority === "high" && pendingFetchQueue[existingIdx].priority === "low") {
+          const [existing] = pendingFetchQueue.splice(existingIdx, 1);
+          existing.priority = "high";
+          const firstLowIdx = pendingFetchQueue.findIndex(p => p.priority === "low");
+          if (firstLowIdx >= 0) {
+            pendingFetchQueue.splice(firstLowIdx, 0, existing);
+          } else {
+            pendingFetchQueue.push(existing);
+          }
+        }
+        continue;
+      }
+
+      // Mark as loading preemptively so concurrent calls don't double-enqueue
+      roomFetchStates.set(id, {
+        status: "loading",
+        retryCount: state?.retryCount ?? 0,
+        lastAttemptAt: Date.now(),
+      });
+
+      // Enqueue — high priority at front (after existing high), low at back
+      const item: PendingFetchItem = { id, priority, generation: gen };
+      if (priority === "high") {
+        const firstLowIdx = pendingFetchQueue.findIndex(p => p.priority === "low");
+        if (firstLowIdx >= 0) {
+          pendingFetchQueue.splice(firstLowIdx, 0, item);
+        } else {
+          pendingFetchQueue.push(item);
+        }
+      } else {
+        pendingFetchQueue.push(item);
+      }
+    }
+
+    drainFetchQueue();
+  };
+
+  /** Manual retry for a specific room — resets retry count and immediately enqueues. */
+  const retryRoomFetch = (roomId: string) => {
+    roomFetchStates.set(roomId, {
+      status: "idle",
+      retryCount: 0,
+      lastAttemptAt: 0,
+    });
+    ensureRoomsLoaded([roomId], "high");
+  };
 
   /** Background-preload messages for rooms near the active room.
    *  Phase 1: active room + 2 neighbors get immediate network preload.
@@ -902,28 +1100,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       r => r.id !== activeId && r.membership !== "invite",
     );
 
-    // Phase 1: cache + network for priority rooms
-    for (const room of priorityFiltered) {
-      cachePreloadedRoomIds.add(room.id);
-      preloadedRoomIds.add(room.id);
-      if (!messages.value[room.id]?.length) {
-        await loadCachedMessages(room.id).catch(() => {});
-      }
-      await loadRoomMessages(room.id).catch(() => {});
-    }
+    // Phase 1: cache + network for priority rooms via ensureRoomsLoaded
+    ensureRoomsLoaded(priorityFiltered.map(r => r.id), "high");
 
-    // Phase 2: cache-only preload for remaining viewport rooms via idle callback
+    // Phase 2: cache-only preload for remaining viewport rooms via idle callback.
+    // These rooms are NOT added to roomFetchStates — intentionally allowing
+    // ensureRoomsLoaded to trigger a full network fetch when the user scrolls to them.
     const remaining = sorted
       .slice(0, PRELOAD_COUNT)
-      .filter(r => r.id !== activeId && r.membership !== "invite" && !cachePreloadedRoomIds.has(r.id));
+      .filter(r => r.id !== activeId && r.membership !== "invite" &&
+        !roomFetchStates.has(r.id));
 
     if (remaining.length > 0) {
       const loadNextBatch = (offset: number) => {
         const batch = remaining.slice(offset, offset + 3);
         if (batch.length === 0) return;
         Promise.all(batch.map(room => {
-          cachePreloadedRoomIds.add(room.id);
-          preloadedRoomIds.add(room.id); // Prevent preloadRoomsByIds from triggering network load
           return messages.value[room.id]?.length ? Promise.resolve() : loadCachedMessages(room.id).catch(() => {});
         })).then(() => {
           if (offset + 3 < remaining.length) {
@@ -936,38 +1128,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Viewport-based preload: preload messages for specific room IDs (called from contact list on scroll).
-   *  Phase 1 (cache) runs immediately; Phase 2 (network) runs in background batches. */
+   *  Delegates to ensureRoomsLoaded with proper state tracking and retry support. */
   const preloadRoomsByIds = (roomIds: string[]) => {
-    const toCache: string[] = [];
-    const toNetwork: string[] = [];
-    for (const id of roomIds) {
-      if (id === activeRoomId.value) continue;
-      const room = getRoomById(id);
-      if (!room || room.membership === "invite") continue;
-      if (!cachePreloadedRoomIds.has(id)) {
-        cachePreloadedRoomIds.add(id);
-        if (!messages.value[id]?.length) toCache.push(id);
-      }
-      if (!preloadedRoomIds.has(id)) {
-        preloadedRoomIds.add(id);
-        toNetwork.push(id);
-      }
-    }
-    // Phase 1: cache (fast, parallel)
-    if (toCache.length > 0) {
-      Promise.all(toCache.map(id => loadCachedMessages(id).catch(() => {})));
-    }
-    // Phase 2: network (batched, background)
-    if (toNetwork.length > 0) {
-      (async () => {
-        const BATCH = 3;
-        for (let i = 0; i < toNetwork.length; i += BATCH) {
-          const batch = toNetwork.slice(i, i + BATCH);
-          await Promise.all(batch.map(id => loadRoomMessages(id).catch(() => {})));
-          await new Promise(r => setTimeout(r, 0));
-        }
-      })();
-    }
+    ensureRoomsLoaded(roomIds, "high");
   };
 
   /** Full room rebuild — used for initial sync and periodic reconciliation */
@@ -4675,6 +4838,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     pinnedRoomIds,
     preloadRoomsByIds,
     preloadVisibleRooms,
+    ensureRoomsLoaded,
+    roomFetchStates,
+    retryRoomFetch,
     cyclePinnedMessage,
     refreshRooms,
     refreshRoomsNow,
@@ -4720,6 +4886,27 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     /** Clear profile-requested flags for given rooms so loadProfilesForRoomIds retries them */
     clearProfileCache(roomIds: string[]) {
       for (const id of roomIds) profilesRequestedForRooms.delete(id);
+    },
+    /** Load members from server for rooms with incomplete member lists, then re-fetch profiles.
+     *  This resolves room names for 1:1 chats where members weren't loaded during initial sync. */
+    async loadMembersForRooms(roomIds: string[]) {
+      try {
+        const matrixService = getMatrixClientService();
+        if (!matrixService.isReady()) return;
+        const kit = matrixKitRef.value;
+        await Promise.all(roomIds.map(async (roomId) => {
+          const matrixRoom = matrixService.getRoom(roomId);
+          if (matrixRoom && typeof (matrixRoom as any).loadMembersIfNeeded === "function") {
+            try {
+              await (matrixRoom as any).loadMembersIfNeeded();
+              // Update display names from new member data
+              if (kit) updateDisplayNames([matrixRoom], kit);
+              profilesRequestedForRooms.delete(roomId);
+            } catch { /* ignore per-room failures */ }
+          }
+        }));
+        loadProfilesForRoomIds(roomIds);
+      } catch { /* matrix service not ready */ }
     },
     /** Dispose write buffer (call on logout / cleanup) */
     disposeWriteBuffer() {

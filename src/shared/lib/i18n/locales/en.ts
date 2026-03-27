@@ -19,6 +19,7 @@ export const en = {
   "contactList.noConversations": "No conversations yet",
   "contactList.inviteToChat": "Invitation to chat",
   "contactList.noMessages": "No messages",
+  "contactList.loadError": "Loading failed",
   "contactList.you": "You",
   "contactList.typing": "typing...",
   "contactList.typingCount": "{count} typing...",

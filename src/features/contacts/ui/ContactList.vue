@@ -162,16 +162,50 @@ function getRoomTitle(room: ChatRoom): DisplayResult {
 
 /** Unified display state for message preview: resolving → skeleton, failed → fallback, ready → text */
 function getPreview(room: ChatRoom): DisplayResult {
-  if (!room.lastMessage) {
-    // During initial sync, rooms appear before messages load → show skeleton, not "no messages"
-    if (!chatStore.namesReady) return { state: "resolving", text: "" };
-    return { state: "ready", text: t("contactList.noMessages") };
+  // Primary: use room.lastMessage from Dexie LiveRoom
+  if (room.lastMessage) {
+    // Deleted message — show explicit "deleted" text
+    if (room.lastMessage.deleted || (!room.lastMessage.content && room.lastMessage.type === MessageType.text)) {
+      return { state: "ready", text: `🚫 ${t("message.deleted")}` };
+    }
+    return getMessagePreviewForUI(
+      room.lastMessage.content,
+      room.lastMessage.decryptionStatus,
+      t("message.notDecrypted"),
+    );
   }
-  return getMessagePreviewForUI(
-    room.lastMessage.content,
-    room.lastMessage.decryptionStatus,
-    t("message.notDecrypted"),
-  );
+  // Fallback: if Dexie doesn't have lastMessage but messages[] does (loaded via viewport-fetch),
+  // use the last message from the in-memory array
+  const msgs = chatStore.messages[room.id];
+  if (msgs?.length) {
+    const last = msgs[msgs.length - 1];
+    // Deleted message
+    if (last.deleted || (!last.content && last.type === MessageType.text)) {
+      return { state: "ready", text: `🚫 ${t("message.deleted")}` };
+    }
+    // For group chats: if sender name isn't resolved yet, show skeleton instead of raw ID
+    if (room.isGroup && last.senderId) {
+      const senderName = chatStore.getDisplayName(last.senderId);
+      if (isUnresolvedName(senderName)) return { state: "resolving", text: "" };
+    }
+    return getMessagePreviewForUI(
+      last.content,
+      last.decryptionStatus,
+      t("message.notDecrypted"),
+    );
+  }
+  // During initial sync, rooms appear before messages load → show skeleton, not "no messages"
+  if (!chatStore.namesReady) return { state: "resolving", text: "" };
+  // Check if viewport-fetch is still loading this room
+  const fetchState = chatStore.roomFetchStates.get(room.id);
+  if (fetchState?.status === "loading") return { state: "resolving", text: "" };
+  return { state: "ready", text: t("contactList.noMessages") };
+}
+
+/** Check if room data fetch is in error state (for retry UI) */
+function isRoomFetchError(roomId: string): boolean {
+  const state = chatStore.roomFetchStates.get(roomId);
+  return state?.status === "error";
 }
 
 // --- Retry unresolved room names (up to 5 attempts with exponential backoff) ---
@@ -200,9 +234,9 @@ watch(unresolvedRoomSet, (set) => {
   const delay = NAME_RETRY_BASE_MS * Math.pow(2, nameRetryCount);
   nameRetryTimer = setTimeout(() => {
     nameRetryCount++;
-    console.debug(`[contact-list] name-retry attempt=${nameRetryCount} unresolved=${unresolvedRoomIds.length} delayMs=${delay}`);
     chatStore.clearProfileCache(unresolvedRoomIds);
-    chatStore.loadProfilesForRoomIds(unresolvedRoomIds);
+    // Load members from server (resolves 1:1 chat names) then re-fetch profiles
+    chatStore.loadMembersForRooms(unresolvedRoomIds);
   }, delay);
 }, { immediate: true });
 
@@ -268,22 +302,23 @@ const getChannelPreview = (channel: Channel): string => {
 const PAGE_SIZE = 50;
 const displayLimit = ref(PAGE_SIZE);
 
-/** Unified list item with a stable `_key` for RecycleScroller */
-type UnifiedItem = (ChatRoom | Channel) & { _key: string };
+/** Unified list item with a stable `_key` for RecycleScroller.
+ *  _title is pre-computed to avoid reactive lookup flash during recycling. */
+type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult };
 
 const allFilteredRooms = computed<UnifiedItem[]>(() => {
   const rooms = chatStore.sortedRooms;
-  // Touch roomNameMap to keep reactive dependency (names resolve async)
-  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-  roomNameMap.value;
-  if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite").map(r => ({ ...r, _key: r.id }));
-  if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite").map(r => ({ ...r, _key: r.id }));
-  if (props.filter === "invites") return rooms.filter(r => r.membership === "invite").map(r => ({ ...r, _key: r.id }));
+  // roomNameMap dependency is consumed by toItem → getRoomTitle → resolveRoomName
+  const toItem = (r: ChatRoom): UnifiedItem => ({ ...r, _key: r.id, _title: getRoomTitle(r) });
+
+  if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite").map(toItem);
+  if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite").map(toItem);
+  if (props.filter === "invites") return rooms.filter(r => r.membership === "invite").map(toItem);
 
   // "all": mix rooms + channels, sorted by time.
   // Joined rooms sort above invites at the same timestamp to prevent
   // invite spam from pushing personal chats out of the visible area.
-  const roomItems: UnifiedItem[] = rooms.map(r => ({ ...r, _key: r.id }));
+  const roomItems: UnifiedItem[] = rooms.map(toItem);
   const channelItems: UnifiedItem[] = channelStore.channels.map(c => ({ ...c, _key: `ch:${c.address}` }));
   const merged = [...roomItems, ...channelItems];
   merged.sort((a, b) => {
@@ -316,27 +351,48 @@ const loadMoreRooms = () => {
 
 const scrollerRef = ref<InstanceType<typeof RecycleScroller>>();
 const ITEM_HEIGHT = 68;
-const PREFETCH_BUFFER = 10; // extra rooms to prefetch ahead of viewport
 
-/** Calculate which rooms are visible + buffer, then load their profiles + preload messages */
+/** Track current viewport generation — incremented on each scroll, previous batch stops. */
+let viewportGeneration = 0;
+
+/** Calculate which rooms are visible, load profiles + messages for them.
+ *  On scroll: cancels previous batch, loads only new visible rooms. */
 const loadVisibleRooms = () => {
   const el = scrollerRef.value?.$el as HTMLElement | undefined;
   if (!el) return;
   const { scrollTop, clientHeight } = el;
-  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 2);
+
+  // Only the actual viewport + small overscan (1 above, 2 below)
+  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 1);
   const lastIdx = Math.min(
     filteredRooms.value.length - 1,
-    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + PREFETCH_BUFFER,
+    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + 2,
   );
+
   const visibleIds: string[] = [];
   for (let i = firstIdx; i <= lastIdx; i++) {
     const item = filteredRooms.value[i];
     if (item && !isChannel(item)) visibleIds.push((item as ChatRoom).id);
   }
-  if (visibleIds.length > 0) {
-    chatStore.loadProfilesForRoomIds(visibleIds);
-    chatStore.preloadRoomsByIds(visibleIds);
+
+  if (visibleIds.length === 0) return;
+
+  // Cancel previous batch by incrementing generation
+  const gen = ++viewportGeneration;
+
+  // 1. Profiles (names, avatars) — always load
+  chatStore.loadProfilesForRoomIds(visibleIds);
+
+  // 1b. For rooms with unresolved names, eagerly load members from server
+  //     (Matrix SDK lazy-loads members, so room.members may be empty until this call)
+  const unresolved = unresolvedRoomSet.value;
+  if (unresolved.size > 0) {
+    const needMembers = visibleIds.filter(id => unresolved.has(id));
+    if (needMembers.length > 0) chatStore.loadMembersForRooms(needMembers);
   }
+
+  // 2. Message preload — only for rooms without data, cancellable
+  chatStore.ensureRoomsLoaded(visibleIds, "high", gen);
 };
 
 let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -365,10 +421,14 @@ const attachScrollListener = () => {
 
 onMounted(() => {
   attachScrollListener();
-  // Initial viewport profile load
+  // Initial viewport profile load (may no-op if scroller not yet rendered)
   nextTick(loadVisibleRooms);
 });
-watch(scrollerRef, attachScrollListener);
+// When scroller ref becomes available (v-if becomes true), attach listener and load visible rooms
+watch(scrollerRef, (val) => {
+  attachScrollListener();
+  if (val) nextTick(loadVisibleRooms);
+});
 onUnmounted(() => { scrollEl?.removeEventListener("scroll", onScrollerScroll); });
 
 // Context menu
@@ -507,7 +567,7 @@ const getRoomLongPress = (room: ChatRoom) => {
           v-else
           class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
           :class="(item as ChatRoom).id === chatStore.activeRoomId ? 'bg-color-bg-ac/10' : ''"
-          :aria-label="`${resolveRoomName(item as ChatRoom)}${(item as ChatRoom).unreadCount ? `, ${(item as ChatRoom).unreadCount} unread` : ''}`"
+          :aria-label="`${item._title?.text || ''}${(item as ChatRoom).unreadCount ? `, ${(item as ChatRoom).unreadCount} unread` : ''}`"
           @click="handleSelect(item as ChatRoom)"
           @contextmenu.prevent="(e: MouseEvent) => { ctxMenu = { show: true, x: e.clientX, y: e.clientY, roomId: (item as ChatRoom).id }; }"
           @pointerdown="(e: PointerEvent) => getRoomLongPress(item as ChatRoom).onPointerdown(e)"
@@ -515,19 +575,15 @@ const getRoomLongPress = (room: ChatRoom) => {
           @pointerup="() => getRoomLongPress(item as ChatRoom).onPointerup()"
           @pointerleave="() => getRoomLongPress(item as ChatRoom).onPointerleave()"
         >
-          <!-- Avatar -->
+          <!-- Avatar — always rendered, decoupled from name resolution to avoid
+               remounting (which re-requests images on every fullRoomRefresh cycle) -->
           <div class="relative shrink-0">
-            <!-- Skeleton circle while name is resolving -->
-            <div
-              v-if="getRoomTitle(item as ChatRoom).state === 'resolving'"
-              class="h-10 w-10 animate-pulse rounded-full bg-neutral-grad-2"
-            />
             <UserAvatar
-              v-else-if="(item as ChatRoom).avatar?.startsWith('__pocketnet__:')"
+              v-if="(item as ChatRoom).avatar?.startsWith('__pocketnet__:')"
               :address="(item as ChatRoom).avatar!.replace('__pocketnet__:', '')"
               size="md"
             />
-            <Avatar v-else :src="(item as ChatRoom).avatar" :name="getRoomTitle(item as ChatRoom).text" size="md" />
+            <Avatar v-else :src="(item as ChatRoom).avatar" :name="item._title?.text || ''" size="md" />
             <!-- Invite badge -->
             <div
               v-if="(item as ChatRoom).membership === 'invite'"
@@ -551,9 +607,9 @@ const getRoomLongPress = (room: ChatRoom) => {
           <div class="min-w-0 flex-1">
             <!-- Name row: name + timestamp + pin/mute icons -->
             <div class="flex items-center justify-between gap-2">
-              <span v-if="getRoomTitle(item as ChatRoom).state === 'resolving'" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+              <span v-if="item._title?.state === 'resolving'" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
               <span v-else class="flex items-center gap-1 truncate text-[15px] font-medium text-text-color">
-                {{ getRoomTitle(item as ChatRoom).text }}
+                {{ item._title?.text }}
                 <svg v-if="chatStore.pinnedRoomIds.has((item as ChatRoom).id)" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-text-on-main-bg-color">
                   <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
                 </svg>
@@ -594,6 +650,17 @@ const getRoomLongPress = (room: ChatRoom) => {
               <span v-else-if="(item as ChatRoom).membership === 'invite'" class="truncate text-sm italic text-color-bg-ac">
                 {{ t("contactList.inviteToChat") }}
               </span>
+              <!-- Fetch error — show retry button -->
+              <span
+                v-else-if="isRoomFetchError((item as ChatRoom).id) && !getPreview(item as ChatRoom).text"
+                class="flex items-center gap-1 truncate text-sm text-text-on-main-bg-color"
+              >
+                <span class="italic opacity-60">{{ t("contactList.loadError") }}</span>
+                <button
+                  class="ml-1 rounded p-0.5 text-xs text-color-bg-ac hover:bg-neutral-grad-2"
+                  @click.stop="chatStore.retryRoomFetch((item as ChatRoom).id)"
+                >↻</button>
+              </span>
               <!-- Skeleton while encrypted message is being decrypted -->
               <span
                 v-else-if="getPreview(item as ChatRoom).state === 'resolving'"
@@ -618,6 +685,13 @@ const getRoomLongPress = (room: ChatRoom) => {
                 class="truncate text-sm italic text-text-on-main-bg-color"
               >
                 {{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
+              </span>
+              <!-- Fallback: Dexie lastMessage is null but viewport-fetch loaded messages into store -->
+              <span
+                v-else-if="!(item as ChatRoom).lastMessage && getPreview(item as ChatRoom).text"
+                class="truncate text-sm text-text-on-main-bg-color"
+              >
+                {{ getPreview(item as ChatRoom).text }}
               </span>
               <span v-else class="truncate text-sm text-text-on-main-bg-color">
                 <span v-if="(item as ChatRoom).lastMessageReaction" class="mr-0.5">{{ (item as ChatRoom).lastMessageReaction!.emoji }}</span>{{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
