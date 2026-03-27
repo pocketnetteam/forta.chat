@@ -20,14 +20,11 @@ export class RoomRepository {
     return rooms;
   }
 
-  /** Sort key: two-tier — joined rooms always above invites, then by lastMessageTimestamp.
-   *  Invites are penalized with a large negative offset so they NEVER float above
-   *  active chats, regardless of any timestamp pollution from sync. */
+  /** Sort key: all rooms (joined + invited) sorted by effective timestamp.
+   *  Falls back to updatedAt for rooms without messages (e.g. fresh invites
+   *  where updatedAt = invite origin_server_ts). */
   private sortKey(r: LocalRoom): number {
-    const ts = r.lastMessageTimestamp || 0;
-    // Invites get a massive penalty: pushed below all joined rooms with messages.
-    // Using -1e15 (~31,000 years offset) guarantees invites sort below any real timestamp.
-    return r.membership === "invite" ? ts - 1e15 : ts;
+    return r.lastMessageTimestamp || r.updatedAt || 0;
   }
 
   /** Get all joined rooms sorted by last activity (newest first), excluding tombstones */

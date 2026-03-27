@@ -37,13 +37,13 @@ describe("sortedRooms", () => {
     expect(sorted[1].id).toBe("!b:s");
   });
 
-  it("sorts joined rooms above invites regardless of timestamp", () => {
+  it("sorts invites alongside joined rooms by timestamp", () => {
     const joined = makeRoom({ id: "!j:s", membership: "join", lastMessage: makeMsgField({ timestamp: 100 }) });
     const invite = makeRoom({ id: "!i:s", membership: "invite", lastMessage: makeMsgField({ timestamp: 9999 }) });
     store.rooms = [invite, joined];
     const sorted = store.sortedRooms;
-    expect(sorted[0].id).toBe("!j:s");
-    expect(sorted[1].id).toBe("!i:s");
+    expect(sorted[0].id).toBe("!i:s"); // newer timestamp wins, regardless of membership
+    expect(sorted[1].id).toBe("!j:s");
   });
 
   it("sorts by timestamp within same tier (newest first)", () => {
@@ -121,6 +121,76 @@ describe("sortedRooms", () => {
     expect(store.sortedRooms).toHaveLength(2);
     // !y:s (timestamp 300) sorts before !x:s (timestamp 100)
     expect(store.sortedRooms.map(r => r.id)).toEqual(["!y:s", "!x:s"]);
+  });
+});
+
+describe("invite room sorting with updatedAt fallback", () => {
+  let store: ReturnType<typeof useChatStore>;
+
+  beforeEach(() => {
+    setActivePinia(createTestingPinia({ stubActions: false }));
+    store = useChatStore();
+  });
+
+  it("sorts invite without lastMessage by updatedAt (not at bottom)", () => {
+    // Invite with no timeline events but a valid updatedAt (invite origin_server_ts)
+    const inviteNew = makeRoom({ id: "!inv1:s", membership: "invite", updatedAt: 5000 });
+    const inviteOld = makeRoom({ id: "!inv2:s", membership: "invite", updatedAt: 1000 });
+    store.rooms = [inviteOld, inviteNew];
+    const sorted = store.sortedRooms;
+    expect(sorted[0].id).toBe("!inv1:s"); // newer updatedAt first
+    expect(sorted[1].id).toBe("!inv2:s");
+  });
+
+  it("sorts invite with lastMessage by message timestamp (not updatedAt)", () => {
+    // Invite in active channel — has message history
+    const inviteWithMsg = makeRoom({
+      id: "!inv1:s",
+      membership: "invite",
+      updatedAt: 1000,
+      lastMessage: makeMsgField({ timestamp: 5000 }),
+    });
+    const inviteWithOlderMsg = makeRoom({
+      id: "!inv2:s",
+      membership: "invite",
+      updatedAt: 9000, // higher updatedAt but older message
+      lastMessage: makeMsgField({ timestamp: 2000 }),
+    });
+    store.rooms = [inviteWithOlderMsg, inviteWithMsg];
+    const sorted = store.sortedRooms;
+    expect(sorted[0].id).toBe("!inv1:s"); // sorted by message timestamp, not updatedAt
+  });
+
+  it("invite without any date (updatedAt=0, no lastMessage) goes to bottom", () => {
+    const inviteWithDate = makeRoom({ id: "!inv1:s", membership: "invite", updatedAt: 5000 });
+    const inviteNoDate = makeRoom({ id: "!inv2:s", membership: "invite", updatedAt: 0 });
+    store.rooms = [inviteNoDate, inviteWithDate];
+    const sorted = store.sortedRooms;
+    expect(sorted[0].id).toBe("!inv1:s");
+    expect(sorted[1].id).toBe("!inv2:s"); // no date → bottom
+  });
+
+  it("invite with newer updatedAt sorts above joined room with older updatedAt", () => {
+    const joined = makeRoom({ id: "!j:s", membership: "join", updatedAt: 100 });
+    const invite = makeRoom({ id: "!i:s", membership: "invite", updatedAt: 99999 });
+    store.rooms = [invite, joined];
+    const sorted = store.sortedRooms;
+    expect(sorted[0].id).toBe("!i:s"); // newer date wins, membership doesn't matter
+    expect(sorted[1].id).toBe("!j:s");
+  });
+
+  it("mixed invites: some with messages, some with only updatedAt", () => {
+    const invMsg = makeRoom({
+      id: "!inv1:s",
+      membership: "invite",
+      updatedAt: 1000,
+      lastMessage: makeMsgField({ timestamp: 8000 }),
+    });
+    const invDate = makeRoom({ id: "!inv2:s", membership: "invite", updatedAt: 5000 });
+    const invEmpty = makeRoom({ id: "!inv3:s", membership: "invite", updatedAt: 0 });
+    store.rooms = [invEmpty, invDate, invMsg];
+    const sorted = store.sortedRooms;
+    expect(sorted.map(r => r.id)).toEqual(["!inv1:s", "!inv2:s", "!inv3:s"]);
   });
 });
 

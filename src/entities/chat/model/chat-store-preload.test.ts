@@ -195,8 +195,8 @@ describe("preloadVisibleRooms", () => {
   it("combines filters: skips active and invite, processes neighbors", async () => {
     store.rooms = [
       makeRoom({ id: "!active:s", updatedAt: 500 }),
-      makeRoom({ id: "!invite:s", updatedAt: 400, membership: "invite" }),
-      makeRoom({ id: "!normal:s", updatedAt: 300 }),
+      makeRoom({ id: "!normal:s", updatedAt: 400 }),
+      makeRoom({ id: "!invite:s", updatedAt: 300, membership: "invite" }),
       makeRoom({ id: "!also-normal:s", updatedAt: 200 }),
     ];
     store.activeRoomId = "!active:s";
@@ -205,7 +205,7 @@ describe("preloadVisibleRooms", () => {
 
     expect(mockGetRoom).not.toHaveBeenCalledWith("!active:s");
     expect(mockGetRoom).not.toHaveBeenCalledWith("!invite:s");
-    // !normal:s is the neighbor after active (invite is filtered)
+    // !normal:s is the neighbor after active
     expect(mockGetRoom).toHaveBeenCalledWith("!normal:s");
   });
 });

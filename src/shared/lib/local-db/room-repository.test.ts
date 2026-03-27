@@ -211,15 +211,15 @@ describe("RoomRepository", () => {
       expect(rooms.map((r) => r.id)).toEqual(["!new:s", "!mid:s", "!old:s"]);
     });
 
-    it("sorts invites below joined rooms", async () => {
+    it("sorts invites alongside joined rooms by timestamp", async () => {
       await db.rooms.bulkPut([
         makeLocalRoom({ id: "!invite:s", lastMessageTimestamp: 9999, membership: "invite" }),
         makeLocalRoom({ id: "!joined:s", lastMessageTimestamp: 100, membership: "join" }),
       ]);
 
       const rooms = await repo.getAllRooms();
-      expect(rooms[0].id).toBe("!joined:s");
-      expect(rooms[1].id).toBe("!invite:s");
+      expect(rooms[0].id).toBe("!invite:s"); // newer timestamp wins
+      expect(rooms[1].id).toBe("!joined:s");
     });
 
     it("excludes tombstoned rooms", async () => {

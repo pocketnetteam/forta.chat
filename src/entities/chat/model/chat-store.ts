@@ -263,12 +263,19 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
       // instead of using Date.now() which inflates sort position
       if (membership === "invite") {
         try {
-          const memberEvent = room.currentState?.getMember?.(myUserId);
-          const inviteTs = memberEvent?.event?.origin_server_ts;
+          // Primary: getMember().event (not always populated by SDK for invites)
+          const memberObj = room.currentState?.getMember?.(myUserId);
+          const inviteTs = memberObj?.event?.origin_server_ts;
           if (inviteTs && typeof inviteTs === "number") return inviteTs;
         } catch { /* ignore */ }
-        // Fallback: try room creation event
         try {
+          // Fallback: getStateEvents('m.room.member', myUserId) — always has origin_server_ts
+          const stateEvent = room.currentState?.getStateEvents?.("m.room.member", myUserId);
+          const stateTs = stateEvent?.event?.origin_server_ts;
+          if (stateTs && typeof stateTs === "number") return stateTs;
+        } catch { /* ignore */ }
+        try {
+          // Last fallback: room creation event
           const createEvent = room.currentState?.getStateEvents?.("m.room.create", "");
           const createTs = createEvent?.event?.origin_server_ts;
           if (createTs && typeof createTs === "number") return createTs;
@@ -773,13 +780,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const aPinned = pinned.has(a.id) ? 1 : 0;
         const bPinned = pinned.has(b.id) ? 1 : 0;
         if (aPinned !== bPinned) return bPinned - aPinned;
-        // Tier 1: joined rooms ALWAYS above invites
-        const aInvite = a.membership === "invite" ? 1 : 0;
-        const bInvite = b.membership === "invite" ? 1 : 0;
-        if (aInvite !== bInvite) return aInvite - bInvite;
-        // Tier 2: sort by last message time (within same membership tier)
-        const aTime = a.lastMessage?.timestamp ?? 0;
-        const bTime = b.lastMessage?.timestamp ?? 0;
+        // Sort all rooms (joined + invited) by effective date, newest first.
+        // Invites use updatedAt (= invite origin_server_ts) as fallback when no messages.
+        const aTime = a.lastMessage?.timestamp || a.updatedAt || 0;
+        const bTime = b.lastMessage?.timestamp || b.updatedAt || 0;
         return bTime - aTime;
       });
   };
@@ -1056,7 +1060,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         topic: r.topic || "",
         syncedAt: now,
         updatedAt: r.updatedAt,
-        lastMessageTimestamp: r.lastMessage?.timestamp,
+        lastMessageTimestamp: r.lastMessage?.timestamp || r.updatedAt || undefined,
         serverUnreadCount: r.unreadCount, // cross-device unread reconciliation
         // Full insert fields for genuinely new rooms
         unreadCount: r.unreadCount,
@@ -1306,7 +1310,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           topic: r.topic || "",
           syncedAt: now,
           updatedAt: r.updatedAt,
-          lastMessageTimestamp: r.lastMessage?.timestamp,
+          lastMessageTimestamp: r.lastMessage?.timestamp || r.updatedAt || undefined,
           serverUnreadCount: r.unreadCount, // cross-device unread reconciliation
           unreadCount: r.unreadCount,
           lastMessagePreview: r.lastMessage?.deleted
