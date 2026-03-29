@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { shallowRef, triggerRef } from "vue";
 import { createAppInitializer } from "@/app/providers/initializers/app-initializer";
-import { ProfileLoader } from "@/shared/lib/profile-loader";
+import { ProfileLoader, PROFILE_LOADER_BATCH_ACTIVE } from "@/shared/lib/profile-loader";
 import { PromisePool } from "@/shared/lib/promise-pool";
 
 import type { User } from "./types";
@@ -59,8 +59,11 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   // During first load, loadUsersBatch fires 10-13 times in quick succession —
   // each triggerRef causes a full Vue re-render cascade (~370ms long task).
   // This debounce collapses them into 1 trigger, eliminating the 2-minute freeze.
+  // When ProfileLoader batch is active, skip entirely — the onFlushComplete
+  // callback fires a single triggerRef after ALL batches complete.
   let _triggerTimer: ReturnType<typeof setTimeout> | null = null;
   function debouncedTrigger(): void {
+    if (PROFILE_LOADER_BATCH_ACTIVE.active) return; // suppress during batch
     if (_triggerTimer) return; // already scheduled
     _triggerTimer = setTimeout(() => {
       _triggerTimer = null;
@@ -156,8 +159,17 @@ export const useUserStore = defineStore(NAMESPACE, () => {
 
   /** DataLoader-style profile loading: collects all requests within a microtick
    *  into batches of 30, with yielding between batches for UI responsiveness.
-   *  Use this instead of calling loadUsersBatch directly from hot paths. */
-  const profileLoader = new ProfileLoader((addrs) => loadUsersBatch(addrs));
+   *  Use this instead of calling loadUsersBatch directly from hot paths.
+   *  onFlushComplete triggers a single reactive update after ALL batches complete. */
+  const profileLoader = new ProfileLoader(
+    (addrs) => loadUsersBatch(addrs),
+    () => {
+      // Single triggerRef after all batches instead of N intermediate ones
+      if (_triggerTimer) { clearTimeout(_triggerTimer); _triggerTimer = null; }
+      triggerRef(users);
+      debouncedCacheUsers(users.value);
+    },
+  );
   const enqueueProfiles = (addresses: string[]) => profileLoader.load(addresses);
 
   /** Background-refresh stale profiles without blocking UI.

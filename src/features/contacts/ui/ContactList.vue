@@ -64,14 +64,28 @@ function getItemTimestamp(item: ChatRoom | Channel): number {
 }
 
 /** Reactive map of room ID → resolved display name.
- *  Using a computed ensures RecycleScroller re-renders when userStore.users changes. */
+ *  Incrementally updated: only creates a new map reference when at least one name
+ *  actually changed. This prevents cascading re-renders in allFilteredRooms/RecycleScroller
+ *  when a profile load returns the same names (e.g. stale cache refresh). */
+let _prevNameMapResult: Record<string, string> = {};
 const roomNameMap = computed(() => {
   const allUsers = userStore.users;
   const myHexId = authStore.address ? hexEncode(authStore.address) : "";
   const map: Record<string, string> = {};
+  let changed = false;
   for (const room of chatStore.sortedRooms) {
-    map[room.id] = _resolveRoomName(room, allUsers, myHexId);
+    const name = _resolveRoomName(room, allUsers, myHexId);
+    map[room.id] = name;
+    if (!changed && _prevNameMapResult[room.id] !== name) changed = true;
   }
+  // Also detect removed rooms
+  if (!changed) {
+    for (const id in _prevNameMapResult) {
+      if (!(id in map)) { changed = true; break; }
+    }
+  }
+  if (!changed) return _prevNameMapResult;
+  _prevNameMapResult = map;
   return map;
 });
 
@@ -306,10 +320,24 @@ const displayLimit = ref(PAGE_SIZE);
  *  _title is pre-computed to avoid reactive lookup flash during recycling. */
 type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult };
 
+// Cache UnifiedItem objects by room id + version to reduce GC pressure.
+// Only create a new object when the room's display-affecting fields change.
+const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; item: UnifiedItem }>();
+
 const allFilteredRooms = computed<UnifiedItem[]>(() => {
   const rooms = chatStore.sortedRooms;
   // roomNameMap dependency is consumed by toItem → getRoomTitle → resolveRoomName
-  const toItem = (r: ChatRoom): UnifiedItem => ({ ...r, _key: r.id, _title: getRoomTitle(r) });
+  const toItem = (r: ChatRoom): UnifiedItem => {
+    const ts = r.lastMessage?.timestamp ?? r.updatedAt ?? 0;
+    const cached = _unifiedItemCache.get(r.id);
+    if (cached && cached.ts === ts && cached.unread === r.unreadCount
+        && cached.name === r.name && cached.membership === (r.membership ?? "join")) {
+      return cached.item;
+    }
+    const item: UnifiedItem = { ...r, _key: r.id, _title: getRoomTitle(r) };
+    _unifiedItemCache.set(r.id, { ts, unread: r.unreadCount, name: r.name, membership: r.membership ?? "join", item });
+    return item;
+  };
 
   if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite").map(toItem);
   if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite").map(toItem);

@@ -21,6 +21,9 @@ const BATCH_SIZE = 10;
 /** Pause between batches to yield to the event loop (ms) */
 const YIELD_MS = 150;
 
+/** Sentinel value to signal the loadFn to suppress intermediate reactive triggers */
+export const PROFILE_LOADER_BATCH_ACTIVE = { active: false };
+
 /** Schedule callback during idle time, falling back to setTimeout */
 function scheduleIdle(cb: () => void): void {
   if (typeof requestIdleCallback === "function") {
@@ -34,9 +37,11 @@ export class ProfileLoader {
   private pending = new Set<string>();
   private scheduled = false;
   private readonly loadFn: (addresses: string[]) => Promise<void>;
+  private readonly onFlushComplete?: () => void;
 
-  constructor(loadFn: (addresses: string[]) => Promise<void>) {
+  constructor(loadFn: (addresses: string[]) => Promise<void>, onFlushComplete?: () => void) {
     this.loadFn = loadFn;
+    this.onFlushComplete = onFlushComplete;
   }
 
   /** Enqueue addresses for loading. Collected into batches automatically. */
@@ -60,6 +65,10 @@ export class ProfileLoader {
     const all = [...this.pending];
     this.pending.clear();
 
+    // Suppress intermediate reactive triggers during batch loading.
+    // The onFlushComplete callback fires once at the end to trigger a single UI update.
+    PROFILE_LOADER_BATCH_ACTIVE.active = true;
+
     // Process in small batches with generous yielding between them
     for (let i = 0; i < all.length; i += BATCH_SIZE) {
       const batch = all.slice(i, i + BATCH_SIZE);
@@ -73,6 +82,10 @@ export class ProfileLoader {
         await new Promise(r => setTimeout(r, YIELD_MS));
       }
     }
+
+    PROFILE_LOADER_BATCH_ACTIVE.active = false;
+    // Notify store to trigger a single reactive update for all loaded profiles
+    this.onFlushComplete?.();
 
     // If more requests accumulated during loading, flush again via idle
     if (this.pending.size > 0) {

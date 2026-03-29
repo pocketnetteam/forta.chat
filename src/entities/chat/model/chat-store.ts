@@ -336,7 +336,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const changedRoomIds = new Set<string>();
   let lastSyncState: "PREPARED" | "SYNCING" | null = null;
   let lastFullRefresh = 0;
-  const FULL_REFRESH_INTERVAL = 60_000; // Reconciliation fallback
+  const FULL_REFRESH_INTERVAL = 300_000; // Reconciliation fallback (5 min — incremental is sufficient)
   let membersLoadedOnce = false; // One-time member loading for stale lazy-load cache
   let fullRefreshInFlight = false; // Re-entrancy guard for async fullRoomRefresh
 
@@ -810,6 +810,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const _sortedRoomsRef = shallowRef<ChatRoom[]>([]);
   let _sortedThrottleTimer: ReturnType<typeof setTimeout> | null = null;
   let _sortedDirty = false;
+  // Suppress Dexie-triggered recomputes during fullRoomRefresh to avoid
+  // intermediate re-sorts while bulkSyncRooms writes are landing.
+  let _suppressDexieRecompute = false;
 
   const _recomputeSorted = () => {
     perfCount("sortedRooms:recompute");
@@ -828,6 +831,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   watch(
     () => dexieRooms.value,
     () => {
+      if (_suppressDexieRecompute) {
+        _sortedDirty = true;
+        return;
+      }
       if (!_sortedThrottleTimer) {
         // Leading edge: fire immediately for first paint
         _recomputeSorted();
@@ -1141,6 +1148,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   ) => {
     if (fullRefreshInFlight) return;
     fullRefreshInFlight = true;
+    _suppressDexieRecompute = true;
     try {
     perfMark("fullRoomRefresh-start");
     // Retry previously failed decryptions on full refresh
@@ -1175,24 +1183,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         newRooms.push(room);
       }
 
-      if (i === 0) {
-        // First chunk — publish immediately for early first-paint.
-        // prevActiveRoom is NOT injected here to avoid duplicates when it
-        // appears in a later chunk; the final block handles it instead.
-        rooms.value = [...newRooms];
-        rebuildRoomsMap();
-        perfMark("fullRoomRefresh-firstChunk");
-        perfMeasure("fullRoomRefresh:firstChunk", "fullRoomRefresh-start", "fullRoomRefresh-firstChunk");
-      }
-
-      // Yield between chunks (skip after first chunk if that was the only one)
+      // Yield between chunks to keep UI responsive, but do NOT publish
+      // intermediate rooms.value — Dexie stale data provides first-paint.
+      // Publishing per-chunk caused 4-6 intermediate re-sorts on large accounts.
       if (i + ROOM_CHUNK < interactiveRooms.length) {
         await yieldToMain();
       }
     }
 
-    // Final assignment with the complete list (skip if only one chunk)
-    if (interactiveRooms.length > ROOM_CHUNK) {
+    // Single atomic publish after all chunks are built
+    {
       if (prevActiveRoom && !newRooms.some(r => r.id === prevActiveRoom.id)) {
         newRooms.push(prevActiveRoom);
       }
@@ -1299,6 +1299,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     debouncedCacheRooms();
     } finally {
       fullRefreshInFlight = false;
+      _suppressDexieRecompute = false;
+      // Single recompute after all writes have landed
+      if (_sortedDirty) _recomputeSorted();
       // Flush any room changes that accumulated while the chunked refresh was running.
       // Without this, changedRoomIds pile up because refreshRoomsImmediate() returns
       // early during fullRefreshInFlight, and no subsequent trigger may arrive to drain them.
@@ -1314,13 +1317,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const myHexId = getmatrixid(myUserId);
     const toLoad: any[] = [];
 
-    // Find rooms that need member loading (only self as member)
+    // Find rooms that need member loading (only self as member from SDK).
+    // Skip rooms where Dexie/roomsMap already has resolved members (e.g. from cache).
     for (const mr of matrixRooms) {
       const members = kit.getRoomMembers(mr);
       const memberIds = members.map((m: Record<string, unknown>) => getmatrixid(m.userId as string));
       const others = memberIds.filter(id => id !== myHexId);
 
       if (others.length === 0 && typeof mr.loadMembersIfNeeded === "function") {
+        // Check if roomsMap already has members from Dexie cache
+        const existing = roomsMap.get(mr.roomId as string);
+        if (existing && existing.members.length > 1) continue;
         toLoad.push(mr);
       }
     }

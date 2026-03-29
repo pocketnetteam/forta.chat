@@ -125,7 +125,21 @@ export class RoomRepository {
         const prev = existingMap.get(update.id);
 
         if (prev) {
-          // ── Existing room: update metadata only ──
+          // ── Existing room: skip if nothing display-relevant changed ──
+          const tsAdvanced = (update.lastMessageTimestamp ?? 0) > (prev.lastMessageTimestamp ?? 0)
+            || (update.updatedAt ?? 0) > (prev.updatedAt ?? 0);
+          const metaChanged = (update.name !== undefined && update.name !== prev.name)
+            || (update.avatar !== undefined && update.avatar !== prev.avatar)
+            || (update.membership !== undefined && update.membership !== prev.membership)
+            || (update.topic !== undefined && update.topic !== prev.topic);
+          const unreadReconcile = update.serverUnreadCount === 0 && (prev.unreadCount ?? 0) > 0;
+          const needsRevive = prev.isDeleted;
+
+          if (!tsAdvanced && !metaChanged && !unreadReconcile && !needsRevive) {
+            continue; // Skip unchanged room — avoid unnecessary Dexie write
+          }
+
+          // ── Update metadata ──
           const patched: LocalRoom = { ...prev };
 
           if (update.name !== undefined) patched.name = update.name;
@@ -148,7 +162,7 @@ export class RoomRepository {
           }
 
           // Revive tombstoned rooms
-          if (prev.isDeleted) {
+          if (needsRevive) {
             patched.isDeleted = false;
             patched.deletedAt = null;
             patched.deleteReason = null;
@@ -156,7 +170,7 @@ export class RoomRepository {
 
           // Cross-device unread reconciliation: if server says 0 unread
           // but local Dexie still has >0, another device read them.
-          if (update.serverUnreadCount === 0 && (prev.unreadCount ?? 0) > 0) {
+          if (unreadReconcile) {
             patched.unreadCount = 0;
             // Advance inbound watermark so future counts are correct
             const latestTs = prev.lastMessageTimestamp ?? prev.updatedAt ?? 0;

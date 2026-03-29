@@ -656,16 +656,16 @@ watch(
   { immediate: true },
 );
 
-// Track the last message's identity to detect real appends
-// (replaces unreliable length-based watcher that missed setMessages replacements)
+// Track the last message's identity to detect real appends.
+// Only tracks the newest message's stable key — NOT array length.
+// Including length caused false scroll-to-bottom on expandMessageWindow.
 const lastMessageIdentity = computed(() => {
   const msgs = chatStore.activeMessages;
   if (!msgs.length) return null;
   const last = msgs[msgs.length - 1];
   // Use _key (clientId, stable) instead of id (flips clientId→eventId after confirmSent)
   // to avoid false triggers when message status changes.
-  const stableId = (last as any)._key || last.id;
-  return `${stableId}:${msgs.length}`;
+  return (last as any)._key || last.id;
 });
 
 watch(lastMessageIdentity, (newVal, oldVal) => {
@@ -921,9 +921,10 @@ const attachContentObserver = () => {
   if (!el) return;
 
   contentResizeObserver = new ResizeObserver(() => {
-    if (switching.value) return;
+    if (switching.value || loadingMore.value) return;
     // In column-reverse, near bottom = scrollTop ≈ 0.
     // When content resizes and we're near bottom, keep at bottom.
+    // Skip during loadingMore to prevent scroll reset on history prepend.
     if (pendingScrollToBottom || isNearBottom.value) {
       const scrollEl = getScrollContainer();
       if (scrollEl) scrollEl.scrollTop = 0;
