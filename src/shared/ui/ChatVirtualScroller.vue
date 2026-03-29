@@ -156,7 +156,7 @@ onBeforeUnmount(() => {
   <div
     ref="containerRef"
     style="display: flex; flex-direction: column-reverse"
-    class="overflow-y-auto"
+    class="overflow-y-auto overflow-x-hidden"
     @scroll.passive="onScroll"
   >
     <div

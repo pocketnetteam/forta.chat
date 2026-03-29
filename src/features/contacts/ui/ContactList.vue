@@ -322,7 +322,7 @@ type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult
 
 // Cache UnifiedItem objects by room id + version to reduce GC pressure.
 // Only create a new object when the room's display-affecting fields change.
-const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; item: UnifiedItem }>();
+const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; preview: string; item: UnifiedItem }>();
 
 const allFilteredRooms = computed<UnifiedItem[]>(() => {
   const rooms = chatStore.sortedRooms;
@@ -330,14 +330,15 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
   const toItem = (r: ChatRoom): UnifiedItem => {
     const ts = r.lastMessage?.timestamp ?? r.updatedAt ?? 0;
     const msgStatus = r.lastMessage?.status ?? "";
+    const preview = r.lastMessage?.content ?? "";
     const cached = _unifiedItemCache.get(r.id);
     if (cached && cached.ts === ts && cached.unread === r.unreadCount
         && cached.name === r.name && cached.membership === (r.membership ?? "join")
-        && cached.msgStatus === msgStatus) {
+        && cached.msgStatus === msgStatus && cached.preview === preview) {
       return cached.item;
     }
     const item: UnifiedItem = { ...r, _key: r.id, _title: getRoomTitle(r) };
-    _unifiedItemCache.set(r.id, { ts, unread: r.unreadCount, name: r.name, membership: r.membership ?? "join", msgStatus, item });
+    _unifiedItemCache.set(r.id, { ts, unread: r.unreadCount, name: r.name, membership: r.membership ?? "join", msgStatus, preview, item });
     return item;
   };
 
