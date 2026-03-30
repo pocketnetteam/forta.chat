@@ -391,6 +391,17 @@ onUnmounted(() => {
       v-else-if="!chatStore.activeRoom"
       class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center text-text-on-main-bg-color"
     >
+      <!-- Back button (mobile only) -->
+      <button
+        class="btn-press absolute left-3 top-3 flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0 md:hidden"
+        :aria-label="t('nav.back')"
+        @click="emit('back')"
+      >
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+        </svg>
+      </button>
+
       <div class="flex h-20 w-20 items-center justify-center rounded-full bg-color-bg-ac/8">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" class="text-color-bg-ac/50">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
