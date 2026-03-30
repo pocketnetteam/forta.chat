@@ -347,6 +347,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             chatStore.setTypingUsers(roomId, current.filter((u) => u !== userId));
           }
         },
+        onRoom: (room: unknown) => {
+          const roomId = (room as any)?.roomId as string;
+          if (roomId) chatStore.markRoomChanged(roomId);
+        },
         onIncomingCall: (call: unknown) => {
           try {
             const callService = useCallService();

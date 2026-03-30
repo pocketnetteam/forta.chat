@@ -54,6 +54,7 @@ export class MatrixClientService {
   private onRedaction: RedactionCallback | null = null;
   private onMyMembership: MyMembershipCallback | null = null;
   private onIncomingCall: IncomingCallCallback | null = null;
+  private onRoom: ((room: unknown) => void) | null = null;
 
   constructor(domain?: string) {
     this.baseUrl = `https://${domain ?? MATRIX_SERVER}`;
@@ -73,6 +74,7 @@ export class MatrixClientService {
     onRedaction?: RedactionCallback;
     onMyMembership?: MyMembershipCallback;
     onIncomingCall?: IncomingCallCallback;
+    onRoom?: (room: unknown) => void;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
     if (handlers.onTimeline) this.onTimeline = handlers.onTimeline;
@@ -82,6 +84,7 @@ export class MatrixClientService {
     if (handlers.onRedaction) this.onRedaction = handlers.onRedaction;
     if (handlers.onMyMembership) this.onMyMembership = handlers.onMyMembership;
     if (handlers.onIncomingCall) this.onIncomingCall = handlers.onIncomingCall;
+    if (handlers.onRoom) this.onRoom = handlers.onRoom;
   }
 
   /** Custom request function using axios (matching bastyon-chat pattern) */
@@ -377,6 +380,12 @@ export class MatrixClientService {
       this.onIncomingCall?.(call);
     });
 
+    // Detect new rooms added to the SDK (avoids O(n) scan in incrementalRoomRefresh)
+    this.client.on("Room" as string, (room: unknown) => {
+      if (!this.chatsReady) return;
+      this.onRoom?.(room);
+    });
+
     this.client.on("sync", (state: string) => {
       if (state === "PREPARED" || state === "SYNCING") {
         if (!this.chatsReady) {
@@ -569,6 +578,19 @@ export class MatrixClientService {
       await this.client.scrollback(room, limit);
     } catch (e) {
       console.warn("[matrix-client] scrollback error:", e);
+    }
+  }
+
+  /** Fetch a single event by ID directly from the server.
+   *  Bypasses the sync pipeline — used for push fast-path. */
+  async fetchRoomEvent(roomId: string, eventId: string): Promise<Record<string, unknown> | null> {
+    if (!this.client) return null;
+    try {
+      const event = await this.client.fetchRoomEvent(roomId, eventId);
+      return event as Record<string, unknown>;
+    } catch (e) {
+      console.warn("[matrix-client] fetchRoomEvent error:", e);
+      return null;
     }
   }
 

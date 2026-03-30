@@ -82,24 +82,73 @@ class PushService {
     }
 
     try {
+      // 1. Already in timeline?
+      const existing = this.findDecryptedEvent(roomId, eventId);
+      if (existing) {
+        await this.replaceNotification(roomId, eventId, existing);
+        return;
+      }
+
+      // 2. FAST PATH: targeted fetch
+      if (eventId) {
+        const fetched = await this.tryTargetedFetch(roomId, eventId);
+        if (fetched) {
+          await this.replaceNotification(roomId, eventId, fetched);
+          return;
+        }
+      }
+
+      // 3. SLOW PATH: wait for sync
       const result = await this.waitForDecryptedEvent(roomId, eventId, 15000);
       if (!result) return;
-
-      // Replace native notification with decrypted content
-      await LocalNotifications.schedule({
-        notifications: [{
-          id: roomId.hashCode(),
-          title: result.senderName,
-          body: result.body,
-          channelId: 'messages',
-          extra: { room_id: roomId, event_id: eventId },
-        }],
-      });
-      // Cancel the native notification (replaced by local one above)
-      await PushData.cancelNotification({ roomId });
+      await this.replaceNotification(roomId, eventId, result);
     } catch (e) {
       console.warn('[PushService] Decrypt failed, keeping native notification:', e);
     }
+  }
+
+  /** Extract message from a directly-fetched event */
+  private async tryTargetedFetch(
+    roomId: string,
+    eventId: string,
+  ): Promise<{ senderName: string; body: string } | null> {
+    try {
+      const { getMatrixClientService } = await import("@/entities/matrix/model/matrix-client");
+      const matrixService = getMatrixClientService();
+      const raw = await matrixService.fetchRoomEvent(roomId, eventId);
+      if (!raw) return null;
+
+      if (raw.type === "m.room.message") {
+        const content = raw.content as Record<string, unknown>;
+        const body = content?.body;
+        if (body && typeof body === "string") {
+          const senderName = (raw.sender as string) || "Unknown";
+          return { senderName, body: this.formatBody(content) };
+        }
+      }
+      // Encrypted messages need SDK decryption — fall through
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Replace native notification with decrypted content */
+  private async replaceNotification(
+    roomId: string,
+    eventId: string | undefined,
+    result: { senderName: string; body: string },
+  ): Promise<void> {
+    await LocalNotifications.schedule({
+      notifications: [{
+        id: roomId.hashCode(),
+        title: result.senderName,
+        body: result.body,
+        channelId: 'messages',
+        extra: { room_id: roomId, event_id: eventId },
+      }],
+    });
+    await PushData.cancelNotification({ roomId });
   }
 
   /**
