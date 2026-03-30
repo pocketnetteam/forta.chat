@@ -340,6 +340,19 @@ class PushService {
       }
     });
 
+    // Check for buffered push intent from cold-start (native fired before JS was ready)
+    try {
+      const pending = await PushData.getPendingIntent();
+      if (pending.roomId) {
+        console.log('[PushService] Found pending push intent from cold start:', pending.roomId);
+        window.dispatchEvent(new CustomEvent('push:openRoom', {
+          detail: { roomId: pending.roomId, eventId: pending.eventId },
+        }));
+      }
+    } catch (e) {
+      console.warn('[PushService] Failed to check pending intent:', e);
+    }
+
     // 4. Register for FCM
     await PushNotifications.removeAllListeners();
 

@@ -17,12 +17,15 @@ import com.getcapacitor.annotation.CapacitorPlugin
 @CapacitorPlugin(name = "PushData")
 class PushDataPlugin : Plugin() {
 
+    /** Buffered push intent data for cold-start retrieval by JS */
+    private var pendingPushRoom: JSObject? = null
+
     override fun load() {
         // Register with FCM service so it can forward push data to us
         FortaFirebaseMessagingService.pluginInstance = this
 
-        // Check if the activity was started from a push notification tap
-        activity?.intent?.let { forwardPushIntent(it) }
+        // Buffer push intent for cold-start (JS listeners aren't ready yet)
+        activity?.intent?.let { bufferPushIntent(it) }
     }
 
     override fun handleOnDestroy() {
@@ -46,6 +49,22 @@ class PushDataPlugin : Plugin() {
         notifyListeners("pushReceived", jsData)
     }
 
+    /** Extract push data from intent and buffer it (for cold-start before JS is ready) */
+    private fun bufferPushIntent(intent: Intent) {
+        val roomId = intent.getStringExtra(FortaFirebaseMessagingService.EXTRA_PUSH_ROOM_ID)
+            ?: return
+        val eventId = intent.getStringExtra(FortaFirebaseMessagingService.EXTRA_PUSH_EVENT_ID)
+        // Clear to avoid re-firing
+        intent.removeExtra(FortaFirebaseMessagingService.EXTRA_PUSH_ROOM_ID)
+        intent.removeExtra(FortaFirebaseMessagingService.EXTRA_PUSH_EVENT_ID)
+
+        val data = JSObject()
+        data.put("roomId", roomId)
+        if (eventId != null) data.put("eventId", eventId)
+        pendingPushRoom = data
+    }
+
+    /** Extract push data from intent and notify JS immediately (app already running) */
     private fun forwardPushIntent(intent: Intent) {
         val roomId = intent.getStringExtra(FortaFirebaseMessagingService.EXTRA_PUSH_ROOM_ID)
             ?: return
@@ -58,6 +77,18 @@ class PushDataPlugin : Plugin() {
         data.put("roomId", roomId)
         if (eventId != null) data.put("eventId", eventId)
         notifyListeners("pushOpenRoom", data)
+    }
+
+    /** Called by JS to retrieve buffered push intent from cold-start */
+    @PluginMethod
+    fun getPendingIntent(call: PluginCall) {
+        val pending = pendingPushRoom
+        pendingPushRoom = null
+        if (pending != null) {
+            call.resolve(pending)
+        } else {
+            call.resolve(JSObject())
+        }
     }
 
     @PluginMethod

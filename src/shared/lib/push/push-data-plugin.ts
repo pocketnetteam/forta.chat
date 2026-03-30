@@ -17,6 +17,7 @@ interface PushDataPlugin extends Plugin {
   cacheRoomName(options: { roomId: string; name: string }): Promise<void>;
   cacheRoomNames(options: { rooms: Record<string, string> }): Promise<void>;
   cancelNotification(options: { roomId: string }): Promise<void>;
+  getPendingIntent(): Promise<{ roomId?: string; eventId?: string }>;
   addListener(event: 'pushReceived', handler: (data: PushPayload) => void): Promise<PluginListenerHandle>;
   addListener(event: 'pushOpenRoom', handler: (data: { roomId: string; eventId?: string }) => void): Promise<PluginListenerHandle>;
 }

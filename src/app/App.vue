@@ -68,6 +68,39 @@ const processReferral = async () => {
   }
 };
 
+// Handle push notification tap → navigate to specific chat room
+const processPushOpenRoom = (roomId: string) => {
+  if (!authStore.isAuthenticated || !authStore.matrixReady) {
+    // Defer until Matrix is ready
+    localStorage.setItem("bastyon-chat-push-room", roomId);
+    return;
+  }
+  console.log('[App] Push tap: navigating to room', roomId);
+  // Kick Matrix sync immediately — WebView may have been suspended in background
+  import("@/entities/matrix").then(({ getMatrixClientService }) => {
+    getMatrixClientService().client?.retryImmediately();
+  }).catch(() => {});
+  chatStore.setActiveRoom(roomId);
+  router.push({ name: "ChatPage" });
+};
+
+const processPendingPushRoom = () => {
+  const roomId = localStorage.getItem("bastyon-chat-push-room");
+  if (!roomId) return;
+  localStorage.removeItem("bastyon-chat-push-room");
+  if (!authStore.isAuthenticated || !authStore.matrixReady) return;
+  console.log('[App] Processing deferred push room:', roomId);
+  chatStore.setActiveRoom(roomId);
+  router.push({ name: "ChatPage" });
+};
+
+if (isNative) {
+  window.addEventListener('push:openRoom', ((e: CustomEvent) => {
+    const roomId = e.detail?.roomId;
+    if (roomId) processPushOpenRoom(roomId);
+  }) as EventListener);
+}
+
 // Watch for Matrix becoming ready (e.g., after registration poll completes)
 watch(
   () => authStore.matrixReady,
@@ -75,6 +108,7 @@ watch(
     if (ready) {
       if (localStorage.getItem("bastyon-chat-referral")) processReferral();
       if (localStorage.getItem("bastyon-chat-join-room")) processJoinRoom();
+      processPendingPushRoom();
     }
   },
 );
