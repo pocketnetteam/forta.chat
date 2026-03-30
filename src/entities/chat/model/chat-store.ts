@@ -1829,6 +1829,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Start background preloading after rooms are built
       // Delay lets the UI render the room list and decrypt previews first
       setTimeout(() => preloadVisibleRooms(), 500);
+
+      // Schedule room cleanup 30s after init (non-blocking)
+      setTimeout(async () => {
+        if (!chatDbKitRef.value) return;
+        const matrixService = getMatrixClientService();
+
+        const { cleanupStaleRooms } = await import("./room-cleanup");
+        await cleanupStaleRooms({
+          getAllRooms: () => chatDbKitRef.value!.rooms.getAllRooms(),
+          deleteRooms: async (ids) => {
+            for (const id of ids) {
+              await chatDbKitRef.value!.rooms.removeRoom(id).catch(() => {});
+            }
+          },
+          isRoomInSdk: (id) => !!matrixService.getRoom(id),
+          getRoomHistoryVisibility: (id) => {
+            try {
+              const room = matrixService.getRoom(id) as any;
+              const ev = room?.currentState?.getStateEvents?.("m.room.history_visibility", "");
+              return ev?.getContent?.()?.history_visibility ?? null;
+            } catch { return null; }
+          },
+        });
+      }, 30_000);
     }
   };
 
