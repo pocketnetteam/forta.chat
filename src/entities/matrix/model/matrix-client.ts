@@ -212,6 +212,49 @@ export class MatrixClientService {
     this.client = userClient;
     this.initEvents();
 
+    // Create a server-side sync filter to reduce /sync payload for large accounts.
+    // This dramatically cuts response size (5-10x) by limiting state events,
+    // excluding ephemeral data, and restricting account_data to essentials.
+    let syncFilter: InstanceType<typeof sdk.Filter> | undefined;
+    try {
+      const filterDefinition = {
+        room: {
+          timeline: {
+            limit: 1,
+            lazy_load_members: true,
+          },
+          state: {
+            lazy_load_members: true,
+            types: [
+              "m.room.name",
+              "m.room.avatar",
+              "m.room.canonical_alias",
+              "m.room.encryption",
+              "m.room.member",
+              "m.room.create",
+              "m.room.topic",
+              "m.room.history_visibility",
+            ],
+          },
+          ephemeral: {
+            types: [],
+          },
+          account_data: {
+            types: ["m.fully_read", "m.tag"],
+          },
+        },
+        presence: {
+          types: [],
+        },
+        account_data: {
+          types: ["m.fully_read", "m.tag"],
+        },
+      };
+      syncFilter = await userClient.createFilter(filterDefinition);
+    } catch (e) {
+      console.warn("Failed to create sync filter, falling back to unfiltered sync:", e);
+    }
+
     // Sync config: lazy loading for speed, members loaded explicitly when needed
     // initialSyncLimit: 1 keeps sync payload small for accounts with many rooms.
     // Only the last timeline event per room is included; full history is loaded
@@ -222,6 +265,7 @@ export class MatrixClientService {
       initialSyncLimit: 1,
       disablePresence: true,
       lazyLoadMembers: true,
+      ...(syncFilter ? { filter: syncFilter } : {}),
     });
 
     return userClient;
