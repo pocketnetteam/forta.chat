@@ -1,6 +1,11 @@
 import type { ChatDatabase, LocalRoom, LocalMessageStatus } from "./schema";
 import type { MessageType } from "@/entities/chat/model/types";
 
+/** Delta change reported by observeRoomChanges */
+export type RoomChange =
+  | { type: "upsert"; room: LocalRoom }
+  | { type: "delete"; roomId: string };
+
 export class RoomRepository {
   constructor(private db: ChatDatabase) {}
 
@@ -27,14 +32,15 @@ export class RoomRepository {
     return r.lastMessageTimestamp || r.updatedAt || 0;
   }
 
-  /** Get all joined rooms sorted by last activity (newest first), excluding tombstones */
+  /** Get all joined rooms (UNSORTED), excluding tombstones.
+   *  Caller (chat-store) is responsible for sorting. */
   async getJoinedRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
       .where("membership")
       .equals("join")
       .and(r => !r.isDeleted)
       .toArray();
-    return this.healUpdatedAt(rooms).sort((a, b) => this.sortKey(b) - this.sortKey(a));
+    return this.healUpdatedAt(rooms);
   }
 
   /** Get invited rooms, excluding tombstones */
@@ -44,14 +50,15 @@ export class RoomRepository {
       .toArray();
   }
 
-  /** Get all active rooms (joined + invited, non-tombstoned), sorted by last message time desc */
+  /** Get all active rooms (joined + invited, non-tombstoned). Returns UNSORTED.
+   *  Caller (chat-store) is responsible for sorting. */
   async getAllRooms(): Promise<LocalRoom[]> {
     const rooms = await this.db.rooms
       .where("membership")
       .anyOf(["join", "invite"])
       .and(r => !r.isDeleted)
       .toArray();
-    return this.healUpdatedAt(rooms).sort((a, b) => this.sortKey(b) - this.sortKey(a));
+    return this.healUpdatedAt(rooms);
   }
 
   /** Get a single room by ID */
@@ -386,5 +393,59 @@ export class RoomRepository {
 
     console.log(`[RoomRepo] GC: cleaned ${staleRooms.length} tombstoned rooms`);
     return staleRooms.length;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reactive observation (delta-based)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Subscribe to room table changes via Dexie hooks.
+   * Changes are micro-batched: multiple writes in the same tick are delivered
+   * as a single callback invocation.
+   * Returns an unsubscribe function.
+   */
+  observeRoomChanges(callback: (changes: RoomChange[]) => void): () => void {
+    let buffer: RoomChange[] = [];
+    let flushScheduled = false;
+
+    const scheduleFlush = () => {
+      if (flushScheduled) return;
+      flushScheduled = true;
+      queueMicrotask(() => {
+        flushScheduled = false;
+        if (buffer.length === 0) return;
+        const batch = buffer;
+        buffer = [];
+        callback(batch);
+      });
+    };
+
+    const onCreating = function (this: any, primKey: string, obj: LocalRoom) {
+      buffer.push({ type: "upsert", room: { ...obj } });
+      scheduleFlush();
+    };
+
+    const onUpdating = function (this: any, mods: object, primKey: string, obj: LocalRoom) {
+      const updated = { ...obj, ...mods } as LocalRoom;
+      buffer.push({ type: "upsert", room: updated });
+      scheduleFlush();
+    };
+
+    const onDeleting = function (this: any, primKey: string, obj: LocalRoom) {
+      buffer.push({ type: "delete", roomId: primKey });
+      scheduleFlush();
+    };
+
+    this.db.rooms.hook("creating", onCreating);
+    this.db.rooms.hook("updating", onUpdating);
+    this.db.rooms.hook("deleting", onDeleting);
+
+    return () => {
+      this.db.rooms.hook("creating").unsubscribe(onCreating);
+      this.db.rooms.hook("updating").unsubscribe(onUpdating);
+      this.db.rooms.hook("deleting").unsubscribe(onDeleting);
+      buffer = [];
+    };
   }
 }

@@ -169,8 +169,10 @@ describe("RoomRepository", () => {
 
       const rooms = await repo.getAllRooms();
       expect(rooms).toHaveLength(150);
-      expect(rooms[0].id).toBe("!r149:s");
-      expect(rooms[149].id).toBe("!r0:s");
+      // getAllRooms returns UNSORTED — just verify all rooms are present
+      const ids = new Set(rooms.map((r) => r.id));
+      expect(ids.has("!r0:s")).toBe(true);
+      expect(ids.has("!r149:s")).toBe(true);
     });
 
     it("chunked updates correctly patch existing rooms", async () => {
@@ -197,10 +199,10 @@ describe("RoomRepository", () => {
     });
   });
 
-  // ── getAllRooms sorting ──────────────────────────────────────────
+  // ── getAllRooms (unsorted) ────────────────────────────────────────
 
   describe("getAllRooms", () => {
-    it("returns joined and invited sorted by timestamp desc", async () => {
+    it("returns joined and invited rooms (unsorted)", async () => {
       await db.rooms.bulkPut([
         makeLocalRoom({ id: "!old:s", lastMessageTimestamp: 1000, membership: "join" }),
         makeLocalRoom({ id: "!new:s", lastMessageTimestamp: 3000, membership: "join" }),
@@ -208,18 +210,19 @@ describe("RoomRepository", () => {
       ]);
 
       const rooms = await repo.getAllRooms();
-      expect(rooms.map((r) => r.id)).toEqual(["!new:s", "!mid:s", "!old:s"]);
+      expect(rooms).toHaveLength(3);
+      expect(rooms.map((r) => r.id).sort()).toEqual(["!mid:s", "!new:s", "!old:s"]);
     });
 
-    it("sorts invites alongside joined rooms by timestamp", async () => {
+    it("includes invites alongside joined rooms", async () => {
       await db.rooms.bulkPut([
         makeLocalRoom({ id: "!invite:s", lastMessageTimestamp: 9999, membership: "invite" }),
         makeLocalRoom({ id: "!joined:s", lastMessageTimestamp: 100, membership: "join" }),
       ]);
 
       const rooms = await repo.getAllRooms();
-      expect(rooms[0].id).toBe("!invite:s"); // newer timestamp wins
-      expect(rooms[1].id).toBe("!joined:s");
+      expect(rooms).toHaveLength(2);
+      expect(rooms.map((r) => r.id).sort()).toEqual(["!invite:s", "!joined:s"]);
     });
 
     it("excludes tombstoned rooms", async () => {
