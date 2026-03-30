@@ -196,8 +196,13 @@ function getPreview(room: ChatRoom): DisplayResult {
     if (room.lastMessage.deleted || (!room.lastMessage.content && room.lastMessage.type === MessageType.text)) {
       return { state: "ready", text: `🚫 ${t("message.deleted")}` };
     }
+    // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)
+    const content = room.lastMessage.content;
+    const cleaned = (content && !content.startsWith("[encrypted"))
+      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content)))
+      : content;
     return getMessagePreviewForUI(
-      room.lastMessage.content,
+      cleaned,
       room.lastMessage.decryptionStatus,
       t("message.notDecrypted"),
     );
@@ -216,8 +221,14 @@ function getPreview(room: ChatRoom): DisplayResult {
       const senderName = chatStore.getDisplayName(last.senderId);
       if (isUnresolvedName(senderName)) return { state: "resolving", text: "" };
     }
+    // System messages: resolve via formatPreview (handles i18n + name resolution)
+    if (last.type === MessageType.system) {
+      return { state: "ready", text: formatPreview(last, room) };
+    }
+    // Strip bastyon links and matrix IDs from fallback preview (same as formatPreview does)
+    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content)));
     return getMessagePreviewForUI(
-      last.content,
+      cleaned,
       last.decryptionStatus,
       t("message.notDecrypted"),
     );
