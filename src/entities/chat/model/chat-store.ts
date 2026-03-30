@@ -2066,12 +2066,26 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     });
   }
 
-  // Capacitor native: flush pending receipts when app returns to foreground.
+  // Capacitor native: resume sync + flush receipts when app returns to foreground.
   // visibilitychange is unreliable in WebView — use Capacitor's appStateChange instead.
+  // Without this, WebView suspension causes up to 60s delay before new messages appear.
   if (isNative) {
     import("@capacitor/app").then(({ App }) => {
       App.addListener("appStateChange", ({ isActive }) => {
         if (isActive) {
+          // 1. Kick Matrix sync — WebView suspension aborts the pending /sync long-poll,
+          //    leaving the SDK in backoff. retryImmediately() bypasses backoff delay.
+          try {
+            const matrixService = getMatrixClientService();
+            if (matrixService.client) {
+              matrixService.client.retryImmediately();
+            }
+          } catch { /* matrix not ready yet */ }
+
+          // 2. Process any room changes that accumulated during background
+          refreshRooms();
+
+          // 3. Flush pending read receipts
           flushPendingReadWatermarks();
         }
       });
