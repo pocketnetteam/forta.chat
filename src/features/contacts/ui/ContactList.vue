@@ -468,6 +468,21 @@ const loadVisibleRooms = () => {
   // 1. Profiles (names, avatars) — always load
   chatStore.loadProfilesForRoomIds(visibleIds);
 
+  // 1a. Load profiles for addresses in system message previews (sender/target)
+  //     These may not be current room members, so loadProfilesForRoomIds misses them.
+  const sysAddrs: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const item = filteredRooms.value[i];
+    if (item && !isChannel(item)) {
+      const meta = (item as ChatRoom).lastMessage?.systemMeta;
+      if (meta) {
+        if (meta.senderAddr && !userStore.users[meta.senderAddr]) sysAddrs.push(meta.senderAddr);
+        if (meta.targetAddr && !userStore.users[meta.targetAddr]) sysAddrs.push(meta.targetAddr);
+      }
+    }
+  }
+  if (sysAddrs.length > 0) userStore.enqueueProfiles(sysAddrs);
+
   // 1b. For rooms with unresolved names, eagerly load members from server
   //     (Matrix SDK lazy-loads members, so room.members may be empty until this call)
   const unresolved = unresolvedRoomSet.value;

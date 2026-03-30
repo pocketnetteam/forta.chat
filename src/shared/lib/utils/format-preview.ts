@@ -51,7 +51,10 @@ export function useFormatPreview() {
             msg.systemMeta.template,
             msg.systemMeta.senderAddr,
             msg.systemMeta.targetAddr,
-            (addr) => chatStore.getDisplayName(addr),
+            (addr) => {
+              const name = chatStore.getDisplayName(addr);
+              return isUnresolvedName(name) ? t("common.unknownUser") : name;
+            },
             t,
             msg.systemMeta.extra,
           );
