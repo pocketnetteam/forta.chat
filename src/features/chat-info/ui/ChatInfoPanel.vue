@@ -4,7 +4,7 @@ import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { MATRIX_SERVER } from "@/shared/config";
+import { MATRIX_SERVER, APP_PUBLIC_URL } from "@/shared/config";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { matrixIdToAddress, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
@@ -69,8 +69,7 @@ watch(room, refreshRoomPublic, { immediate: true });
 
 const inviteLink = computed(() => {
   if (!room.value) return "";
-  const base = window.location.origin + window.location.pathname;
-  return `${base}#/join?room=${encodeURIComponent(room.value.id)}`;
+  return `${APP_PUBLIC_URL}/#/join?room=${encodeURIComponent(room.value.id)}`;
 });
 
 const togglePublic = async () => {
