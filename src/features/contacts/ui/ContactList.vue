@@ -537,8 +537,12 @@ const attachScrollListener = () => {
 
 onMounted(() => {
   attachScrollListener();
-  // Initial viewport profile load (may no-op if scroller not yet rendered)
-  nextTick(loadVisibleRooms);
+  // Initial viewport profile load — retry after transition settles
+  nextTick(() => {
+    loadVisibleRooms();
+    // Retry after transition animation (scroller may not be in DOM yet)
+    setTimeout(loadVisibleRooms, 350);
+  });
 });
 // When scroller ref becomes available (v-if becomes true), attach listener and load visible rooms
 watch(scrollerRef, (val) => {

@@ -28,7 +28,7 @@ function parsePost(raw: Record<string, unknown>): ChannelPost {
     images: Array.isArray(raw.images ?? raw.i)
       ? (raw.images ?? raw.i) as string[]
       : undefined,
-    url: raw.url ? tryDecode(raw.url) : undefined,
+    url: (raw.url ?? raw.u) ? tryDecode(raw.url ?? raw.u) : undefined,
     tags: Array.isArray(raw.tags ?? raw.t)
       ? (raw.tags ?? raw.t) as string[]
       : undefined,
@@ -85,7 +85,7 @@ export const useChannelStore = defineStore("channel", () => {
       channelsPage.value = 0;
       hasMoreChannels.value = true;
       channels.value = [];
-      blockHeight.value = 0;
+      blockHeight.value = 4675546;
     }
 
     if (!hasMoreChannels.value) return;

@@ -20,6 +20,7 @@ const { toast } = useToast();
 
 const scrollContainerRef = ref<HTMLElement>();
 const showChannelInfo = ref(false);
+const showScrollFab = ref(false);
 
 const activeChannel = computed(() => channelStore.activeChannel);
 const posts = computed(() => channelStore.activePosts);
@@ -91,22 +92,69 @@ const displayItems = computed<DisplayItem[]>(() => {
 });
 
 /* ── Infinite scroll upward (load older posts) ── */
+const LOAD_THRESHOLD = 1200;
+const VELOCITY_BOOST_THRESHOLD = 1500;
+const networkWaiting = ref(false);
 let loadingMore = false;
+let lastScrollTop = 0;
+let lastScrollTime = 0;
+let scrollVelocity = 0;
+
+function scrollToBottom() {
+  const el = scrollContainerRef.value;
+  if (el) el.scrollTop = 0;
+}
 
 function onScroll() {
   const el = scrollContainerRef.value;
   if (!el || loadingMore) return;
 
-  // column-reverse: scrollTop is negative, scrolling "up" means towards 0
-  // When user scrolls to visual top (oldest posts), load more
-  const scrollBottom = el.scrollHeight + el.scrollTop - el.clientHeight;
-  if (scrollBottom < 200 && hasMore.value && !isLoading.value && channelStore.activeChannelAddress) {
+  // column-reverse: scrollTop=0 is bottom, negative toward top
+  const dist = Math.abs(el.scrollTop);
+  showScrollFab.value = dist > 300;
+
+  const scrollTop = el.scrollTop;
+  const now = performance.now();
+  const dt = now - lastScrollTime;
+  if (dt > 0) scrollVelocity = Math.abs(scrollTop - lastScrollTop) / dt * 1000;
+  lastScrollTop = scrollTop;
+  lastScrollTime = now;
+
+  if (!hasMore.value || !channelStore.activeChannelAddress) return;
+
+  // column-reverse: scrollTop=0 is bottom (newest), negative values go toward top (oldest)
+  // distFromTop = how far from the oldest posts
+  const distFromTop = el.scrollHeight + scrollTop - el.clientHeight;
+
+  // Velocity-adaptive threshold — fast scroll triggers load earlier
+  const speed = Math.abs(scrollVelocity);
+  const effectiveThreshold = speed > 3000 ? 3000
+    : speed > VELOCITY_BOOST_THRESHOLD ? 2000
+    : LOAD_THRESHOLD;
+
+  if (distFromTop < effectiveThreshold) {
     loadingMore = true;
+    networkWaiting.value = true;
     channelStore.fetchPosts(channelStore.activeChannelAddress).finally(() => {
       loadingMore = false;
+      networkWaiting.value = false;
     });
   }
 }
+
+// Reset scroll and state when switching channels
+watch(() => channelStore.activeChannelAddress, () => {
+  networkWaiting.value = false;
+  showScrollFab.value = false;
+  loadingMore = false;
+  lastScrollTop = 0;
+  lastScrollTime = 0;
+  scrollVelocity = 0;
+  nextTick(() => {
+    const el = scrollContainerRef.value;
+    if (el) el.scrollTop = 0;
+  });
+});
 
 onMounted(() => {
   scrollContainerRef.value?.addEventListener("scroll", onScroll, { passive: true });
@@ -193,6 +241,14 @@ function onCtxMenuSelect(action: string) {
       </button>
     </div>
 
+    <!-- Network wait shimmer — subtle 2px bar when fetching older posts -->
+    <transition name="fade-refresh">
+      <div
+        v-if="networkWaiting"
+        class="pointer-events-none absolute inset-x-0 top-14 z-30 h-0.5 animate-shimmer bg-gradient-to-r from-transparent via-color-bg-ac/40 to-transparent"
+      />
+    </transition>
+
     <!-- Loading skeleton -->
     <div
       v-if="isLoading && posts.length === 0"
@@ -268,13 +324,6 @@ function onCtxMenuSelect(action: string) {
         </div>
       </template>
 
-      <!-- Load-more spinner at visual top -->
-      <div
-        v-if="isLoading && posts.length > 0"
-        class="flex justify-center py-3"
-      >
-        <div class="h-5 w-5 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
-      </div>
     </div>
 
     <!-- Context menu -->
@@ -294,6 +343,19 @@ function onCtxMenuSelect(action: string) {
       @close="showSharePicker = false"
     />
 
+    <!-- Scroll-to-bottom FAB -->
+    <transition name="fab">
+      <button
+        v-if="showScrollFab"
+        class="absolute bottom-4 right-4 flex h-11 w-11 items-center justify-center rounded-full bg-background-total-theme shadow-lg transition-all hover:bg-neutral-grad-0"
+        @click="scrollToBottom()"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+    </transition>
+
     <!-- Channel info panel -->
     <ChannelInfoPanel
       :show="showChannelInfo"
@@ -307,5 +369,36 @@ function onCtxMenuSelect(action: string) {
 <style scoped>
 .msg-enter-other {
   animation: msg-in-other 0.25s ease-out both;
+}
+
+/* Shimmer bar animation */
+@keyframes shimmer-move {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.animate-shimmer {
+  animation: shimmer-move 1.5s ease-in-out infinite;
+}
+
+.fade-refresh-enter-active,
+.fade-refresh-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-refresh-enter-from,
+.fade-refresh-leave-to {
+  opacity: 0;
+}
+
+/* FAB appear/disappear */
+.fab-enter-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.fab-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.fab-enter-from,
+.fab-leave-to {
+  opacity: 0;
+  transform: scale(0.8);
 }
 </style>

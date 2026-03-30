@@ -32,6 +32,7 @@ const visibleTabs = computed(() =>
 );
 
 const tabRefs = ref<HTMLElement[]>([]);
+const scrollContainer = ref<HTMLElement | null>(null);
 const indicatorStyle = ref<{ left: string; width: string }>({ left: "0px", width: "0px" });
 
 const updateIndicator = () => {
@@ -42,6 +43,8 @@ const updateIndicator = () => {
       left: `${el.offsetLeft + el.offsetWidth * 0.25}px`,
       width: `${el.offsetWidth * 0.5}px`,
     };
+    // Scroll active tab into view like Telegram
+    el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
   }
 };
 
@@ -51,12 +54,12 @@ onMounted(() => nextTick(updateIndicator));
 </script>
 
 <template>
-  <div class="relative flex border-b border-neutral-grad-0">
+  <div ref="scrollContainer" class="folder-tabs relative flex overflow-x-auto border-b border-neutral-grad-0">
     <button
       v-for="(tab, i) in visibleTabs"
       :key="tab.value"
       :ref="(el) => { if (el) tabRefs[i] = el as HTMLElement }"
-      class="relative flex-1 py-2.5 text-center text-sm font-medium transition-colors"
+      class="relative shrink-0 px-4 py-2.5 text-center text-[13px] font-medium whitespace-nowrap transition-colors"
       :class="props.modelValue === tab.value ? 'text-color-bg-ac' : 'text-text-on-main-bg-color hover:text-text-color'"
       @click="emit('update:modelValue', tab.value)"
     >
@@ -75,3 +78,13 @@ onMounted(() => nextTick(updateIndicator));
     />
   </div>
 </template>
+
+<style scoped>
+.folder-tabs {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.folder-tabs::-webkit-scrollbar {
+  display: none;
+}
+</style>

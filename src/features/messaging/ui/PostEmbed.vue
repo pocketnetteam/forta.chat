@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
-import { parseVideoUrl } from "@/shared/lib/video-embed";
+import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
 
 interface Props {
   txid: string;
@@ -17,8 +17,10 @@ const loading = ref(true);
 const error = ref(false);
 const authorName = ref("");
 const authorImage = ref("");
+const peertubeThumb = ref("");
 
 const videoInfo = computed(() => (post.value?.url ? parseVideoUrl(post.value.url) : null));
+const resolvedThumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.thumbUrl || "");
 
 const firstImage = computed(() => {
   if (!post.value?.images?.length) return null;
@@ -46,6 +48,12 @@ onMounted(async () => {
       return;
     }
     post.value = data;
+
+    // Fetch PeerTube thumbnail
+    const vi = data.url ? parseVideoUrl(data.url) : null;
+    if (vi?.type === "peertube" && vi.apiUrl) {
+      fetchPeerTubeThumb(vi.apiUrl).then(url => { peertubeThumb.value = url; });
+    }
 
     if (data.address) {
       await authStore.loadUsersInfo([data.address]);
@@ -111,9 +119,9 @@ const openVideo = (e: Event) => {
     @click="openPost"
   >
     <!-- Video thumbnail -->
-    <div v-if="videoInfo?.thumbUrl" class="relative">
+    <div v-if="videoInfo && resolvedThumbUrl" class="relative">
       <img
-        :src="videoInfo.thumbUrl"
+        :src="resolvedThumbUrl"
         alt=""
         class="h-40 w-full object-cover"
         loading="lazy"

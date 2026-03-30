@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { parseVideoUrl } from "@/shared/lib/video-embed";
+import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
 
 interface Props {
   url: string;
@@ -11,8 +11,17 @@ const props = withDefaults(defineProps<Props>(), { inline: false });
 const videoInfo = computed(() => parseVideoUrl(props.url));
 const playing = ref(false);
 const error = ref(false);
+const peertubeThumb = ref("");
 
-const thumbUrl = computed(() => videoInfo.value?.thumbUrl || "");
+const thumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.thumbUrl || "");
+
+// Fetch PeerTube thumbnail via API
+onMounted(async () => {
+  const info = videoInfo.value;
+  if (info?.type === "peertube" && info.apiUrl) {
+    peertubeThumb.value = await fetchPeerTubeThumb(info.apiUrl);
+  }
+});
 
 const play = () => {
   playing.value = true;

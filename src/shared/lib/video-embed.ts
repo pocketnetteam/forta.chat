@@ -3,6 +3,7 @@ export interface VideoInfo {
   id: string;
   embedUrl: string;
   thumbUrl: string;
+  apiUrl?: string;
 }
 
 const YT_RE = /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/;
@@ -34,13 +35,31 @@ export function parseVideoUrl(url: string): VideoInfo | null {
 
   const pt = url.match(PEERTUBE_RE);
   if (pt) {
+    const host = pt[1];
+    const id = pt[2];
     return {
       type: "peertube",
-      id: pt[2],
-      embedUrl: `https://${pt[1]}/videos/embed/${pt[2]}`,
-      thumbUrl: `https://${pt[1]}/lazy-static/previews/${pt[2]}.jpg`,
+      id,
+      embedUrl: `https://${host}/videos/embed/${id}`,
+      thumbUrl: "",
+      apiUrl: `https://${host}/api/v1/videos/${id}`,
     };
   }
 
   return null;
+}
+
+/** Fetch PeerTube thumbnail via API (the preview UUID differs from the video UUID) */
+export async function fetchPeerTubeThumb(apiUrl: string): Promise<string> {
+  try {
+    const resp = await fetch(apiUrl, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return "";
+    const data = await resp.json();
+    const path = data.previewPath || data.thumbnailPath;
+    if (!path) return "";
+    const origin = new URL(apiUrl).origin;
+    return `${origin}${path}`;
+  } catch {
+    return "";
+  }
 }

@@ -49,9 +49,7 @@ const handleSend = async () => {
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return;
 
-    const text = props.postTitle
-      ? `${props.postTitle}\n${props.postLink}`
-      : props.postLink;
+    const text = props.postLink;
 
     for (const targetRoomId of selectedRoomIds.value) {
       const roomCrypto = (authStore as any).pcrypto?.rooms?.[targetRoomId];
