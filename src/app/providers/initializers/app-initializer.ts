@@ -533,36 +533,17 @@ export class AppInitializer {
     }
   }
 
-  /** Fetch channels the user is subscribed to.
-   *  Uses direct HTTP POST to Bastyon node — getsubscribeschannels is not available via proxy API. */
-  private static readonly BASTYON_NODE_URL = "/bastyon-node";
-
+  /** Fetch channels the user is subscribed to via SDK RPC (routed through proxy node). */
   async getSubscribesChannels(
     address: string,
     blockNumber = 0,
     page = 0,
     pageSize = 20
   ): Promise<{ channels: any[]; height: number } | undefined> {
+    if (!this.api) return undefined;
     try {
-      const response = await fetch(AppInitializer.BASTYON_NODE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          method: "getsubscribeschannels",
-          params: [address, blockNumber, page, pageSize, 1],
-        }),
-      });
-      if (!response.ok) {
-        console.error("[appInit] getSubscribesChannels HTTP error:", response.status);
-        return undefined;
-      }
-      const json = await response.json();
-      if (json.error) {
-        console.error("[appInit] getSubscribesChannels RPC error:", json.error);
-        return undefined;
-      }
-      // Response: { result: { height, channels: [...] }, error, id }
-      const result = json.result ?? json;
+      const data = await this.api.rpc("getsubscribeschannels", [address, blockNumber, page, pageSize, 1]);
+      const result = data?.result ?? data;
       return {
         height: result.height ?? 0,
         channels: result.channels ?? [],
@@ -573,44 +554,28 @@ export class AppInitializer {
     }
   }
 
-  /** Fetch posts for a specific channel/user profile.
-   *  Uses direct HTTP POST to Bastyon node — same endpoint as getsubscribeschannels. */
+  /** Fetch posts for a specific channel/user profile via SDK RPC. */
   async getProfileFeed(
     authorAddress: string,
     options?: { height?: number; startTxid?: string; count?: number }
   ): Promise<any[]> {
+    if (!this.api) return [];
     try {
       const opts = options ?? {};
-      const response = await fetch(AppInitializer.BASTYON_NODE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          method: "getprofilefeed",
-          params: [
-            Number(opts.height ?? 0),
-            opts.startTxid ?? "",
-            opts.count ?? 10,
-            "",   // lang
-            [],   // tagsfilter
-            [],   // type
-            [],   // reserved
-            [],   // reserved
-            [],   // tagsexcluded
-            "",   // keyword
-            authorAddress,
-          ],
-        }),
-      });
-      if (!response.ok) {
-        console.error("[appInit] getProfileFeed HTTP error:", response.status);
-        return [];
-      }
-      const json = await response.json();
-      if (json.error) {
-        console.error("[appInit] getProfileFeed RPC error:", json.error);
-        return [];
-      }
-      const result = json.result ?? json;
+      const data = await this.api.rpc("getprofilefeed", [
+        Number(opts.height ?? 0),
+        opts.startTxid ?? "",
+        opts.count ?? 10,
+        "",   // lang
+        [],   // tagsfilter
+        [],   // type
+        [],   // reserved
+        [],   // reserved
+        [],   // tagsexcluded
+        "",   // keyword
+        authorAddress,
+      ]);
+      const result = data?.result ?? data;
       return Array.isArray(result) ? result : result?.contents ?? [];
     } catch (e) {
       console.error("[appInit] getProfileFeed error:", e);

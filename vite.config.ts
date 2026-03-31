@@ -44,13 +44,6 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     allowedHosts: true,
-    proxy: {
-      "/bastyon-node": {
-        target: "http://1.pocketnet.app:38081",
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/bastyon-node/, ""),
-      },
-    },
   },
   define: {
     global: "globalThis",
