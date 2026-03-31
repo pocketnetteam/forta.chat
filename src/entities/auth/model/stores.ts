@@ -301,6 +301,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             if (isNative && state === "PREPARED") {
               import('@/shared/lib/push').then(({ pushService }) => {
                 pushService.syncRoomNamesToNative();
+                pushService.syncSenderNamesToNative();
               }).catch(() => {});
             }
           }
@@ -433,6 +434,22 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 if (room.name) map[room.id] = room.name;
               }
               return map;
+            });
+
+            pushService.setAllSenderNamesGetter(() => {
+              const senders: Record<string, string> = {};
+              const client = matrixService.client;
+              if (!client) return senders;
+              for (const room of client.getRooms()) {
+                for (const member of room.getJoinedMembers()) {
+                  const userId = member.userId;
+                  const name = member.name;
+                  if (name && name !== userId && !senders[userId]) {
+                    senders[userId] = name;
+                  }
+                }
+              }
+              return senders;
             });
 
             console.log('[auth] Initializing push service...');
