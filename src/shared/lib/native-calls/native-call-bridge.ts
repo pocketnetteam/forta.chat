@@ -17,9 +17,20 @@ interface NativeCallNativePlugin {
   reportCallConnected(options: { callId: string }): Promise<void>;
   reportCallEnded(options: { callId: string }): Promise<void>;
   requestAudioPermission(): Promise<{ granted: boolean }>;
+  getAudioDevices(): Promise<{
+    active: string;
+    devices: Array<{ type: string; name: string }>;
+  }>;
+  setAudioDevice(options: { type: string }): Promise<void>;
+  startAudioRouting(options: { callType: string }): Promise<void>;
+  stopAudioRouting(): Promise<void>;
   addListener(event: 'callAnswered', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
   addListener(event: 'callDeclined', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
   addListener(event: 'callEnded', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
+  addListener(event: 'audioDevicesChanged', cb: (data: {
+    active: string;
+    devices: Array<{ type: string; name: string }>;
+  }) => void): Promise<{ remove: () => void }>;
 }
 
 const NativeCall = registerPlugin<NativeCallNativePlugin>('NativeCall');

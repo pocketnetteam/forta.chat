@@ -13,7 +13,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -26,6 +25,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.forta.chat.R
 import com.forta.chat.plugins.webrtc.NativeWebRTCManager
@@ -101,16 +101,17 @@ class CallActivity : Activity(), SensorEventListener {
     // State
     private var isMuted = false
     private var isVideoEnabled = true
-    private var isSpeakerOn = false
     private var callType = "video"
     private var callDurationSeconds = 0
     private var isConnected = false
+
+    // Audio routing
+    private lateinit var audioRouter: AudioRouter
 
     // Sensors & Power
     private var sensorManager: SensorManager? = null
     private var proximitySensor: Sensor? = null
     private var proximityWakeLock: PowerManager.WakeLock? = null
-    private var audioManager: AudioManager? = null
 
     // Timer
     private val handler = Handler(Looper.getMainLooper())
@@ -173,13 +174,14 @@ class CallActivity : Activity(), SensorEventListener {
             startPulseAnimation()
         }
 
-        // Audio
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-        if (callType == "video") {
-            audioManager?.isSpeakerphoneOn = true
-            isSpeakerOn = true
-        }
+        // Audio routing
+        audioRouter = AudioRouter(this)
+        audioRouter.setListener(object : AudioRouter.Listener {
+            override fun onAudioDeviceChanged(state: AudioRouter.AudioDeviceState) {
+                runOnUiThread { updateAudioRouteUI(state) }
+            }
+        })
+        audioRouter.start(callType)
 
         // Proximity sensor (for voice calls)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -240,8 +242,7 @@ class CallActivity : Activity(), SensorEventListener {
             Log.e(TAG, "Error releasing renderers", e)
         }
 
-        audioManager?.mode = AudioManager.MODE_NORMAL
-        audioManager?.isSpeakerphoneOn = false
+        audioRouter.stop()
 
         super.onDestroy()
     }
@@ -272,7 +273,7 @@ class CallActivity : Activity(), SensorEventListener {
         btnMute.setOnClickListener { toggleMute() }
         btnVideo.setOnClickListener { toggleVideo() }
         btnFlip.setOnClickListener { flipCamera() }
-        btnAudioRoute.setOnClickListener { toggleSpeaker() }
+        btnAudioRoute.setOnClickListener { showAudioRouteSheet() }
         btnHangup.setOnClickListener { hangup() }
 
         // Tap anywhere to toggle controls visibility
@@ -385,10 +386,71 @@ class CallActivity : Activity(), SensorEventListener {
         WebRTCPlugin.manager?.switchCamera()
     }
 
-    private fun toggleSpeaker() {
-        isSpeakerOn = !isSpeakerOn
-        audioManager?.isSpeakerphoneOn = isSpeakerOn
-        updateButtonStates()
+    private fun showAudioRouteSheet() {
+        val state = audioRouter.getState()
+        val sheetView = layoutInflater.inflate(R.layout.bottom_sheet_audio_route, null)
+        val container = sheetView.findViewById<LinearLayout>(R.id.audio_devices_container)
+
+        val popup = android.widget.PopupWindow(
+            sheetView,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+            true
+        ).apply {
+            animationStyle = android.R.style.Animation_InputMethod
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            elevation = 16f
+        }
+
+        for (device in state.available) {
+            val row = layoutInflater.inflate(R.layout.item_audio_device, container, false)
+            val icon = row.findViewById<android.widget.ImageView>(R.id.device_icon)
+            val name = row.findViewById<TextView>(R.id.device_name)
+            val check = row.findViewById<android.widget.ImageView>(R.id.device_check)
+
+            icon.setImageResource(when (device) {
+                AudioRouter.Device.EARPIECE -> R.drawable.ic_hearing
+                AudioRouter.Device.SPEAKER -> R.drawable.ic_volume_up
+                AudioRouter.Device.BLUETOOTH -> R.drawable.ic_bluetooth
+                AudioRouter.Device.WIRED_HEADSET -> R.drawable.ic_hearing
+            })
+            name.text = when (device) {
+                AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: "Bluetooth"
+                else -> device.label
+            }
+            check.visibility = if (device == state.active) View.VISIBLE else View.GONE
+
+            row.setOnClickListener {
+                audioRouter.setDevice(device)
+                popup.dismiss()
+            }
+            container.addView(row)
+        }
+
+        popup.showAtLocation(controlsBar, android.view.Gravity.BOTTOM, 0, 0)
+    }
+
+    private fun updateAudioRouteUI(state: AudioRouter.AudioDeviceState) {
+        val iconRes = when (state.active) {
+            AudioRouter.Device.EARPIECE -> R.drawable.ic_hearing
+            AudioRouter.Device.SPEAKER -> R.drawable.ic_volume_up
+            AudioRouter.Device.BLUETOOTH -> R.drawable.ic_bluetooth
+            AudioRouter.Device.WIRED_HEADSET -> R.drawable.ic_hearing
+        }
+        btnAudioRoute.setImageResource(iconRes)
+
+        val isNonDefault = state.active != AudioRouter.Device.EARPIECE
+        btnAudioRoute.setBackgroundResource(
+            if (isNonDefault) R.drawable.btn_call_control_active else R.drawable.btn_call_control
+        )
+        val tint = if (isNonDefault) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnAudioRoute.setColorFilter(tint)
+
+        val label = when (state.active) {
+            AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: "BT"
+            else -> state.active.label
+        }
+        findViewById<TextView>(R.id.label_audio_route)?.text = label
     }
 
     private fun hangup() {
@@ -409,12 +471,6 @@ class CallActivity : Activity(), SensorEventListener {
         val videoTint = if (!isVideoEnabled) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
         btnVideo.setColorFilter(videoTint)
         findViewById<TextView>(R.id.label_video)?.text = if (isVideoEnabled) "Video Off" else "Video On"
-
-        btnAudioRoute.setImageResource(if (isSpeakerOn) R.drawable.ic_volume_up else R.drawable.ic_hearing)
-        btnAudioRoute.setBackgroundResource(if (isSpeakerOn) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
-        val speakerTint = if (isSpeakerOn) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
-        btnAudioRoute.setColorFilter(speakerTint)
-        findViewById<TextView>(R.id.label_audio_route)?.text = if (isSpeakerOn) "Earpiece" else "Speaker"
     }
 
     // -----------------------------------------------------------------------

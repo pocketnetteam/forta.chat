@@ -17,6 +17,8 @@ class CallPlugin : Plugin() {
         private const val TAG = "CallPlugin"
     }
 
+    private var audioRouter: AudioRouter? = null
+
     override fun load() {
         try {
             CallConnectionService.registerPhoneAccount(context)
@@ -39,6 +41,27 @@ class CallPlugin : Plugin() {
                 put("callId", callId)
             })
         }
+
+        // Initialize AudioRouter for JS-side audio control
+        audioRouter = AudioRouter(context)
+        audioRouter?.setListener(object : AudioRouter.Listener {
+            override fun onAudioDeviceChanged(state: AudioRouter.AudioDeviceState) {
+                val data = JSObject().apply {
+                    put("active", state.active.name.lowercase())
+                    val devicesArray = org.json.JSONArray()
+                    for (d in state.available) {
+                        devicesArray.put(org.json.JSONObject().apply {
+                            put("type", d.name.lowercase())
+                            put("name", if (d == AudioRouter.Device.BLUETOOTH) {
+                                audioRouter?.getBluetoothDeviceName() ?: "Bluetooth"
+                            } else d.label)
+                        })
+                    }
+                    put("devices", devicesArray)
+                }
+                notifyListeners("audioDevicesChanged", data)
+            }
+        })
     }
 
     @PluginMethod
@@ -137,5 +160,61 @@ class CallPlugin : Plugin() {
         }
         activity.requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), 1001)
         call.resolve(JSObject().apply { put("granted", false) })
+    }
+
+    @PluginMethod
+    fun getAudioDevices(call: PluginCall) {
+        val router = audioRouter ?: run {
+            call.reject("AudioRouter not initialized")
+            return
+        }
+        val state = router.getState()
+        val result = JSObject().apply {
+            put("active", state.active.name.lowercase())
+            val devicesArray = org.json.JSONArray()
+            for (d in state.available) {
+                devicesArray.put(org.json.JSONObject().apply {
+                    put("type", d.name.lowercase())
+                    put("name", if (d == AudioRouter.Device.BLUETOOTH) {
+                        router.getBluetoothDeviceName() ?: "Bluetooth"
+                    } else d.label)
+                })
+            }
+            put("devices", devicesArray)
+        }
+        call.resolve(result)
+    }
+
+    @PluginMethod
+    fun setAudioDevice(call: PluginCall) {
+        val type = call.getString("type") ?: run {
+            call.reject("Missing type")
+            return
+        }
+        val device = when (type.lowercase()) {
+            "earpiece" -> AudioRouter.Device.EARPIECE
+            "speaker" -> AudioRouter.Device.SPEAKER
+            "bluetooth" -> AudioRouter.Device.BLUETOOTH
+            "wired_headset" -> AudioRouter.Device.WIRED_HEADSET
+            else -> {
+                call.reject("Unknown device type: $type")
+                return
+            }
+        }
+        audioRouter?.setDevice(device)
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun startAudioRouting(call: PluginCall) {
+        val callType = call.getString("callType") ?: "voice"
+        audioRouter?.start(callType)
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun stopAudioRouting(call: PluginCall) {
+        audioRouter?.stop()
+        call.resolve()
     }
 }
