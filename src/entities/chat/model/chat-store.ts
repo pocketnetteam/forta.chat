@@ -2357,6 +2357,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Refresh to get full room data now that we're a member
       refreshRooms();
+
+      // Force reload active room data — activeRoomId didn't change so watchers
+      // won't fire. Re-calling setActiveRoom triggers profile/member loading
+      // and clears the invite preview.
+      if (activeRoomId.value === roomId) {
+        profilesRequestedForRooms.delete(roomId);
+        setActiveRoom(roomId);
+      }
     } catch (e) {
       console.warn("[chat-store] acceptInvite error:", e);
     }

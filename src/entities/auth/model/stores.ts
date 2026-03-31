@@ -293,8 +293,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
+      let _lastSyncState: string | null = null;
       matrixService.setHandlers({
         onSync: (state) => {
+          const wasDisconnected = _lastSyncState === "ERROR" || _lastSyncState === "RECONNECTING";
+          _lastSyncState = state;
+
           if (state === "PREPARED" || state === "SYNCING") {
             chatStore.refreshRooms(state);
             // Sync room names to native for push notification display
@@ -303,6 +307,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 pushService.syncRoomNamesToNative();
               }).catch(() => {});
             }
+            // After recovering from sync error — force full room refresh to catch missed events
+            if (wasDisconnected && state === "SYNCING") {
+              console.log("[auth] Sync recovered from disconnect — forcing full refresh");
+              chatStore.refreshRooms("PREPARED");
+            }
+          } else if (state === "ERROR" || state === "RECONNECTING") {
+            console.warn(`[auth] Sync state: ${state}`);
           }
           _onSyncStatusCallback?.(state);
         },
