@@ -533,7 +533,10 @@ export class AppInitializer {
     }
   }
 
-  /** Fetch channels the user is subscribed to via SDK RPC (routed through proxy node). */
+  /** Node key for RPC calls that require a specific blockchain node. */
+  private static readonly BASTYON_NODE_KEY = "94.156.128.149:38081";
+
+  /** Fetch channels the user is subscribed to via SDK RPC (routed through proxy node to specific node). */
   async getSubscribesChannels(
     address: string,
     blockNumber = 0,
@@ -542,7 +545,11 @@ export class AppInitializer {
   ): Promise<{ channels: any[]; height: number } | undefined> {
     if (!this.api) return undefined;
     try {
-      const data = await this.api.rpc("getsubscribeschannels", [address, blockNumber, page, pageSize, 1]);
+      const data = await this.api.rpc(
+        "getsubscribeschannels",
+        [address, blockNumber, page, pageSize, 1],
+        { fnode: AppInitializer.BASTYON_NODE_KEY }
+      );
       const result = data?.result ?? data;
       return {
         height: result.height ?? 0,
@@ -562,19 +569,23 @@ export class AppInitializer {
     if (!this.api) return [];
     try {
       const opts = options ?? {};
-      const data = await this.api.rpc("getprofilefeed", [
-        Number(opts.height ?? 0),
-        opts.startTxid ?? "",
-        opts.count ?? 10,
-        "",   // lang
-        [],   // tagsfilter
-        [],   // type
-        [],   // reserved
-        [],   // reserved
-        [],   // tagsexcluded
-        "",   // keyword
-        authorAddress,
-      ]);
+      const data = await this.api.rpc(
+        "getprofilefeed",
+        [
+          Number(opts.height ?? 0),
+          opts.startTxid ?? "",
+          opts.count ?? 10,
+          "",   // lang
+          [],   // tagsfilter
+          [],   // type
+          [],   // reserved
+          [],   // reserved
+          [],   // tagsexcluded
+          "",   // keyword
+          authorAddress,
+        ],
+        { fnode: AppInitializer.BASTYON_NODE_KEY }
+      );
       const result = data?.result ?? data;
       return Array.isArray(result) ? result : result?.contents ?? [];
     } catch (e) {
