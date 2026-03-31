@@ -41,7 +41,8 @@ watch(() => props.messageId, (id) => {
 const currentMessage = computed(() => mediaMessages.value[currentIndex.value] ?? null);
 const currentUrl = computed(() => {
   if (!currentMessage.value) return null;
-  return getState(currentMessage.value.id).objectUrl;
+  const key = currentMessage.value._key || currentMessage.value.id;
+  return getState(key).objectUrl;
 });
 
 const resetTransform = () => {
@@ -118,7 +119,7 @@ const handleKeydown = (e: KeyboardEvent) => {
 
 // Ensure media is downloaded
 watch(currentMessage, async (msg) => {
-  if (msg && msg.type === MessageType.image && msg.fileInfo && !getState(msg.id).objectUrl) {
+  if (msg && msg.type === MessageType.image && msg.fileInfo && !getState(msg._key || msg.id).objectUrl) {
     await download(msg);
   }
 });

@@ -44,7 +44,7 @@ const grouped = computed<MonthGroup[]>(() => {
 
 // Auto-download thumbnails
 const ensureLoaded = (msg: Message) => {
-  const state = getState(msg.id);
+  const state = getState(msg._key || msg.id);
   if (!state.objectUrl && !state.loading) download(msg);
 };
 </script>
@@ -74,8 +74,8 @@ const ensureLoaded = (msg: Message) => {
           @vue:mounted="ensureLoaded(msg)"
         >
           <img
-            v-if="getState(msg.id).objectUrl"
-            :src="getState(msg.id).objectUrl!"
+            v-if="getState(msg._key || msg.id).objectUrl"
+            :src="getState(msg._key || msg.id).objectUrl!"
             alt=""
             class="h-full w-full object-cover"
             loading="lazy"

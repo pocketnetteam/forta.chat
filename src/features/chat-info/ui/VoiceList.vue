@@ -52,7 +52,7 @@ function getSenderName(address: string): string {
 const playback = useAudioPlayback();
 
 const togglePlay = async (msg: Message) => {
-  let url = getState(msg.id).objectUrl;
+  let url = getState(msg._key || msg.id).objectUrl;
   if (!url) {
     const result = await download(msg);
     url = result ?? null;
@@ -94,7 +94,7 @@ const togglePlay = async (msg: Message) => {
         <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-text-on-main-bg-color/20 text-text-color">
           <!-- Loading -->
           <div
-            v-if="getState(msg.id).loading"
+            v-if="getState(msg._key || msg.id).loading"
             class="h-5 w-5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent"
           />
           <!-- Pause icon -->

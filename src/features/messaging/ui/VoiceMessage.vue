@@ -13,7 +13,8 @@ interface Props {
 const props = defineProps<Props>();
 
 const { getState, download } = useFileDownload();
-const fileState = computed(() => getState(props.message.id));
+const fileCacheKey = computed(() => props.message._key || props.message.id);
+const fileState = computed(() => getState(fileCacheKey.value));
 
 const playback = useAudioPlayback();
 

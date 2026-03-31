@@ -54,7 +54,7 @@ playback.setOnEnded(async (endedMessageId: string, roomId: string) => {
 
     // Found next unlistened voice message — download if needed and play
     if (!next.fileInfo) break;
-    let objectUrl = fileDownload.getState(next.id).objectUrl;
+    let objectUrl = fileDownload.getState(next._key || next.id).objectUrl;
     if (!objectUrl) {
       objectUrl = (await fileDownload.download(next)) ?? null;
     }

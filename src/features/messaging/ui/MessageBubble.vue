@@ -176,7 +176,11 @@ const time = computed(() => formatTime(new Date(props.message.timestamp)));
 
 const isFile = computed(() => props.message.type === MessageType.file);
 const hasFileInfo = computed(() => !!props.message.fileInfo);
-const fileState = computed(() => getState(props.message.id));
+// Must use the same cache key as download() — _key (stable clientId) when available,
+// otherwise id. Without this, getState and download write to different state entries
+// and images show an infinite spinner.
+const fileCacheKey = computed(() => props.message._key || props.message.id);
+const fileState = computed(() => getState(fileCacheKey.value));
 
 /** Telegram-style sender colors (same palette as Avatar) */
 const SENDER_COLORS = ["#E17076", "#FAA774", "#A695E7", "#7BC862", "#6EC9CB", "#65AADD", "#EE7AAE"];

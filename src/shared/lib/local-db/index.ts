@@ -107,6 +107,11 @@ export function initChatDb(
   // Recover operations stranded in "syncing" state after app crash, then start queue
   syncEngine.recoverStrandedOps().then(() => syncEngine.processQueue()).catch(() => {});
 
+  // Recover media uploads stuck in "pending" from a previous session (fire-and-forget IIFEs lost on reload/crash)
+  messages.recoverStuckMedia().then((count) => {
+    if (count > 0) console.info(`[local-db] Recovered ${count} stuck media upload(s) → marked as failed`);
+  }).catch(() => {});
+
   // Start processing any pending decryption jobs from previous session
   decryptionWorker.tick().catch(() => {});
 

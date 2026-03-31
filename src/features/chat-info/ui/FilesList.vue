@@ -56,7 +56,7 @@ const grouped = computed<MonthGroup[]>(() => {
 
 // Click handler: download and save
 const handleClick = async (msg: Message) => {
-  const state = getState(msg.id);
+  const state = getState(msg._key || msg.id);
   if (state.objectUrl) {
     saveFile(state.objectUrl, msg.fileInfo?.name ?? "file");
     return;
@@ -121,7 +121,7 @@ const handleClick = async (msg: Message) => {
 
         <!-- Loading indicator -->
         <div
-          v-if="getState(msg.id).loading"
+          v-if="getState(msg._key || msg.id).loading"
           class="h-4 w-4 animate-spin rounded-full border-2 border-neutral-grad-0 border-t-color-bg-ac"
         />
       </button>
