@@ -56,7 +56,7 @@ onUnmounted(() => {
     <Transition name="fade">
       <div
         v-if="show"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm safe-all"
       >
         <div class="flex flex-col items-center gap-6">
           <!-- Pulsating ring animation -->
