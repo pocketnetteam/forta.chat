@@ -35,7 +35,7 @@ const handleRegister = async () => {
     // Go straight to chat — the blocking overlay in App.vue handles the waiting state
     router.push({ name: "ChatPage" });
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Registration failed";
+    error.value = e instanceof Error ? e.message : t("register.registrationFailed");
     registering.value = false;
   }
 };

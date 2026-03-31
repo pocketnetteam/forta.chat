@@ -156,7 +156,7 @@ const waveformBars = computed(() => {
     </button>
     <button
       class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:brightness-110 sm:h-10 sm:w-10"
-      title="Send"
+      :title="t('voice.send')"
       @click="emit('stopAndSend')"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
@@ -169,7 +169,7 @@ const waveformBars = computed(() => {
   <div v-else-if="state === 'preview'" class="mx-auto flex min-w-0 max-w-6xl items-center gap-1.5 px-2 py-2 sm:gap-2">
     <button
       class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-neutral-grad-0 sm:h-10 sm:w-10"
-      title="Discard"
+      :title="t('voice.discard')"
       @click="emit('cancel')"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -187,7 +187,7 @@ const waveformBars = computed(() => {
     <div class="flex-1" />
     <button
       class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:brightness-110 sm:h-10 sm:w-10"
-      title="Send"
+      :title="t('voice.send')"
       @click="emit('sendPreview')"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
@@ -200,7 +200,7 @@ const waveformBars = computed(() => {
   <button
     v-else
     class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
-    title="Voice message"
+    :title="t('voice.voiceMessage')"
     @touchstart.prevent="handleTouchStart"
     @touchmove="handleTouchMove"
     @touchend="handleTouchEnd"

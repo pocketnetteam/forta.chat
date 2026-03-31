@@ -24,9 +24,14 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.forta.chat.MainActivity
 import com.forta.chat.R
+import com.forta.chat.plugins.locale.LocaleHelper
 import com.forta.chat.utils.WindowInsetsHelper
 
 class IncomingCallActivity : Activity() {
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.wrapContext(newBase))
+    }
 
     companion object {
         private const val TAG = "IncomingCallActivity"
@@ -103,7 +108,7 @@ class IncomingCallActivity : Activity() {
         // Bind views
         findViewById<TextView>(R.id.caller_name).text = callerName
         findViewById<TextView>(R.id.call_type).text =
-            if (hasVideo) "Входящий видеозвонок" else "Входящий аудиозвонок"
+            if (hasVideo) getString(R.string.incoming_video_call) else getString(R.string.incoming_audio_call)
         findViewById<TextView>(R.id.countdown_text).text = "${countdownSeconds}s"
 
         // Avatar initials

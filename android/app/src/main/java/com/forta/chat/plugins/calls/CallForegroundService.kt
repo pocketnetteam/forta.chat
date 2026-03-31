@@ -15,6 +15,8 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.forta.chat.R
+import com.forta.chat.plugins.locale.LocaleHelper
 
 /**
  * Foreground service that keeps the call alive when the app is backgrounded.
@@ -26,6 +28,10 @@ import androidx.core.app.NotificationCompat
  * - Lifecycle tied to call duration
  */
 class CallForegroundService : Service() {
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.wrapContext(newBase))
+    }
 
     companion object {
         private const val TAG = "CallForegroundService"
@@ -94,7 +100,7 @@ class CallForegroundService : Service() {
             ACTION_START -> {
                 callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
                 callType = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "voice"
-                startForegroundWithNotification("Connecting...")
+                startForegroundWithNotification(getString(R.string.call_connecting))
                 acquireWakeLock()
                 requestAudioFocus()
                 Log.d(TAG, "Service started for call with $callerName")
@@ -134,10 +140,10 @@ class CallForegroundService : Service() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Active Call",
+            getString(R.string.channel_active_call),
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Shows when a call is in progress"
+            description = getString(R.string.channel_active_call_desc)
             setSound(null, null)
             enableVibration(false)
         }
@@ -173,7 +179,7 @@ class CallForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val typeLabel = if (callType == "video") "Video call" else "Voice call"
+        val typeLabel = if (callType == "video") getString(R.string.call_video_call) else getString(R.string.call_voice_call)
 
         val caller = androidx.core.app.Person.Builder()
             .setName(callerName)
@@ -194,11 +200,11 @@ class CallForegroundService : Service() {
             )
             builder.setContentText(status)
         } else {
-            builder.setContentTitle("$typeLabel with $callerName")
+            builder.setContentTitle(if (callType == "video") getString(R.string.call_video_call_with, callerName) else getString(R.string.call_voice_call_with, callerName))
             builder.setContentText(status)
             builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
-                "Hang Up",
+                getString(R.string.call_hang_up),
                 hangupPendingIntent
             )
         }

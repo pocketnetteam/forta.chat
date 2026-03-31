@@ -18,7 +18,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Audio Output"
+        android:text="@string/call_audio_output"
         android:textColor="#99FFFFFF"
         android:textSize="13sp"
         android:paddingStart="20dp"

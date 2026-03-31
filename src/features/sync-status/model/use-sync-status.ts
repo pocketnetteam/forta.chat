@@ -1,6 +1,7 @@
 import { ref, computed, watch, type Ref, type ComputedRef } from "vue";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { useDebouncedStatus, type DisplayPhase } from "./use-debounced-status";
+import { useI18n, type TranslationKey } from "@/shared/lib/i18n";
 
 export type SyncPhase =
   | "offline"
@@ -118,15 +119,19 @@ export function useSyncStatus(): SyncStatusReturn {
     return s !== "idle" && s !== "syncing";
   });
 
+  const { t } = useI18n();
+
+  const bannerTextKeys: Record<string, TranslationKey> = {
+    offline: "sync.offline",
+    connecting: "sync.connecting",
+    catching_up: "sync.catchingUp",
+    up_to_date: "sync.upToDate",
+    error: "sync.error",
+  };
+
   const bannerText = computed(() => {
-    switch (visibleStatus.value) {
-      case "offline": return "Ожидание сети...";
-      case "connecting": return "Соединение...";
-      case "catching_up": return "Обновление...";
-      case "up_to_date": return "Обновлено";
-      case "error": return "Не удалось подключиться";
-      default: return "";
-    }
+    const key = bannerTextKeys[visibleStatus.value];
+    return key ? t(key) : "";
   });
 
   const bannerVariant = computed<"warning" | "info" | "success" | "error">(() => {

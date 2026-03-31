@@ -10,6 +10,7 @@ import EmojiPicker from "@/features/messaging/ui/EmojiPicker.vue";
 import { ref } from "vue";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
+const { t } = useI18n();
 const themeStore = useThemeStore();
 const router = useRouter();
 
@@ -68,17 +69,17 @@ const FONT_SIZES: { label: string; value: FontSize }[] = [
 ];
 
 // --- Density ---
-const DENSITIES: { label: string; value: MessageDensity }[] = [
-  { label: "Compact", value: "compact" },
-  { label: "Default", value: "default" },
-  { label: "Comfortable", value: "comfortable" },
+const DENSITIES: { labelKey: "appearance.compact" | "appearance.default" | "appearance.comfortable"; value: MessageDensity }[] = [
+  { labelKey: "appearance.compact", value: "compact" },
+  { labelKey: "appearance.default", value: "default" },
+  { labelKey: "appearance.comfortable", value: "comfortable" },
 ];
 
 // --- Bubble corners ---
-const CORNERS: { label: string; value: BubbleCorners }[] = [
-  { label: "Sharp", value: "sharp" },
-  { label: "Default", value: "default" },
-  { label: "Round", value: "round" },
+const CORNERS: { labelKey: "appearance.sharp" | "appearance.default" | "appearance.round"; value: BubbleCorners }[] = [
+  { labelKey: "appearance.sharp", value: "sharp" },
+  { labelKey: "appearance.default", value: "default" },
+  { labelKey: "appearance.round", value: "round" },
 ];
 
 // --- Quick reactions editing ---
@@ -130,7 +131,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
             <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
           </svg>
         </button>
-        <h1 class="text-lg font-bold text-text-color">Appearance</h1>
+        <h1 class="text-lg font-bold text-text-color">{{ t("settings.appearance") }}</h1>
       </div>
 
       <!-- Scrollable content -->
@@ -216,7 +217,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
         <div class="space-y-6 p-4">
 
           <!-- Section 1: Theme -->
-          <SettingsSection title="Theme">
+          <SettingsSection :title="t('appearance.theme')">
             <div class="flex gap-3">
               <button
                 class="flex flex-1 flex-col items-center gap-2 rounded-xl border-2 p-3 transition-all"
@@ -231,7 +232,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                     <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
                   </svg>
                 </div>
-                <span class="text-sm font-medium text-text-color">Light</span>
+                <span class="text-sm font-medium text-text-color">{{ t("appearance.light") }}</span>
               </button>
               <button
                 class="flex flex-1 flex-col items-center gap-2 rounded-xl border-2 p-3 transition-all"
@@ -243,13 +244,13 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
                   </svg>
                 </div>
-                <span class="text-sm font-medium text-text-color">Dark</span>
+                <span class="text-sm font-medium text-text-color">{{ t("appearance.dark") }}</span>
               </button>
             </div>
           </SettingsSection>
 
           <!-- Section 2: Accent Color -->
-          <SettingsSection title="Accent Color">
+          <SettingsSection :title="t('appearance.accentColor')">
             <div class="flex flex-wrap gap-3">
               <button
                 v-for="color in ACCENT_COLORS"
@@ -294,7 +295,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                     <polyline points="20 6 9 17 4 12" />
                   </svg>
                 </div>
-                <span class="text-[11px] text-text-on-main-bg-color">Custom</span>
+                <span class="text-[11px] text-text-on-main-bg-color">{{ t("appearance.custom") }}</span>
               </button>
             </div>
             <!-- Custom hex input (inline) -->
@@ -315,19 +316,19 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 :disabled="!isValidHex(customHex)"
                 @click="applyCustomAccent"
               >
-                Apply
+                {{ t("appearance.apply") }}
               </button>
               <button
                 class="h-9 rounded-lg px-3 text-sm text-text-on-main-bg-color hover:bg-neutral-grad-0"
                 @click="showCustomAccent = false"
               >
-                Cancel
+                {{ t("appearance.cancel") }}
               </button>
             </div>
           </SettingsSection>
 
           <!-- Section 3: Chat Background -->
-          <SettingsSection title="Chat Background" description="Customize the chat area background">
+          <SettingsSection :title="t('appearance.chatBackground')" :description="t('appearance.chatBackgroundDesc')">
             <div class="flex flex-wrap gap-2">
               <!-- Default -->
               <button
@@ -390,13 +391,13 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 :disabled="!isValidHex(customWallpaperHex)"
                 @click="applyCustomWallpaper"
               >
-                Apply
+                {{ t("appearance.apply") }}
               </button>
             </div>
           </SettingsSection>
 
           <!-- Section 4: Font Size -->
-          <SettingsSection title="Font Size">
+          <SettingsSection :title="t('appearance.fontSize')">
             <div class="flex rounded-lg bg-background-secondary-theme p-1">
               <button
                 v-for="fs in FONT_SIZES"
@@ -409,12 +410,12 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
               </button>
             </div>
             <p class="mt-1 text-text-on-main-bg-color" :style="{ fontSize: 'var(--font-size-base)' }">
-              Preview text at current size
+              {{ t("appearance.fontSizePreview") }}
             </p>
           </SettingsSection>
 
           <!-- Section 5: Message Density -->
-          <SettingsSection title="Message Density" description="Control spacing between messages">
+          <SettingsSection :title="t('appearance.messageDensity')" :description="t('appearance.messageDensityDesc')">
             <div class="flex rounded-lg bg-background-secondary-theme p-1">
               <button
                 v-for="d in DENSITIES"
@@ -423,13 +424,13 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 :class="themeStore.messageDensity === d.value ? 'bg-color-bg-ac text-text-on-bg-ac-color shadow-sm' : 'text-text-on-main-bg-color hover:text-text-color'"
                 @click="themeStore.setMessageDensity(d.value)"
               >
-                {{ d.label }}
+                {{ t(d.labelKey) }}
               </button>
             </div>
           </SettingsSection>
 
           <!-- Section 6: Bubble Corners -->
-          <SettingsSection title="Bubble Corners">
+          <SettingsSection :title="t('appearance.bubbleCorners')">
             <div class="flex rounded-lg bg-background-secondary-theme p-1">
               <button
                 v-for="c in CORNERS"
@@ -438,13 +439,13 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 :class="themeStore.bubbleCorners === c.value ? 'bg-color-bg-ac text-text-on-bg-ac-color shadow-sm' : 'text-text-on-main-bg-color hover:text-text-color'"
                 @click="themeStore.setBubbleCorners(c.value)"
               >
-                {{ c.label }}
+                {{ t(c.labelKey) }}
               </button>
             </div>
           </SettingsSection>
 
           <!-- Section 7: Toggle settings -->
-          <SettingsSection title="Chat Options">
+          <SettingsSection :title="t('appearance.chatOptions')">
             <div class="space-y-1">
               <!-- Show avatars -->
               <div class="flex items-center justify-between rounded-lg p-3">
@@ -452,7 +453,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
                   </svg>
-                  <span class="text-sm text-text-color">Show avatars in chats</span>
+                  <span class="text-sm text-text-color">{{ t("appearance.showAvatars") }}</span>
                 </div>
                 <Toggle
                   :model-value="themeStore.showAvatarsInChat"
@@ -465,7 +466,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                     <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
                   </svg>
-                  <span class="text-sm text-text-color">Show timestamps</span>
+                  <span class="text-sm text-text-color">{{ t("appearance.showTimestamps") }}</span>
                 </div>
                 <Toggle
                   :model-value="themeStore.showTimestamps"
@@ -478,7 +479,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                     <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
                   </svg>
-                  <span class="text-sm text-text-color">Group consecutive messages</span>
+                  <span class="text-sm text-text-color">{{ t("appearance.groupMessages") }}</span>
                 </div>
                 <Toggle
                   :model-value="themeStore.messageGrouping"
@@ -491,7 +492,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
-                  <span class="text-sm text-text-color">Enable animations</span>
+                  <span class="text-sm text-text-color">{{ t("appearance.enableAnimations") }}</span>
                 </div>
                 <Toggle
                   :model-value="themeStore.animationsEnabled"
@@ -504,7 +505,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                     <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />
                   </svg>
-                  <span class="text-sm text-text-color">Animated Reactions</span>
+                  <span class="text-sm text-text-color">{{ t("appearance.animatedReactions") }}</span>
                 </div>
                 <Toggle
                   :model-value="themeStore.animatedReactions"
@@ -515,7 +516,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
           </SettingsSection>
 
           <!-- Section 8: Quick Reactions -->
-          <SettingsSection title="Quick Reactions" description="Customize the emoji shortcuts shown in the context menu">
+          <SettingsSection :title="t('appearance.quickReactions')" :description="t('appearance.quickReactionsDesc')">
             <div class="flex items-center gap-2">
               <div class="flex gap-1.5">
                 <button
@@ -533,25 +534,25 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 class="ml-auto rounded-lg px-3 py-1.5 text-sm font-medium text-color-bg-ac transition-colors hover:bg-color-bg-ac/5"
                 @click="editingQuickReactions = true"
               >
-                Edit
+                {{ t("appearance.edit") }}
               </button>
               <div v-else class="ml-auto flex gap-2">
                 <button
                   class="rounded-lg px-3 py-1.5 text-xs text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
                   @click="resetQuickReactions"
                 >
-                  Reset
+                  {{ t("appearance.reset") }}
                 </button>
                 <button
                   class="rounded-lg bg-color-bg-ac px-3 py-1.5 text-xs font-medium text-text-on-bg-ac-color transition-colors"
                   @click="editingQuickReactions = false"
                 >
-                  Done
+                  {{ t("appearance.done") }}
                 </button>
               </div>
             </div>
             <p v-if="editingQuickReactions" class="mt-1.5 text-xs text-text-on-main-bg-color">
-              Tap an emoji to replace it
+              {{ t("appearance.tapToReplace") }}
             </p>
           </SettingsSection>
 
@@ -570,7 +571,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
               class="w-full rounded-lg border border-color-bad/30 px-4 py-3 text-sm font-medium text-color-bad transition-colors hover:bg-color-bad/5"
               @click="showResetModal = true"
             >
-              Reset to Defaults
+              {{ t("appearance.resetToDefaults") }}
             </button>
           </div>
         </div>
@@ -579,22 +580,22 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
       <!-- Reset confirmation modal -->
       <Modal :show="showResetModal" @close="showResetModal = false">
         <div class="p-5">
-          <h3 class="mb-2 text-base font-semibold text-text-color">Reset Appearance?</h3>
+          <h3 class="mb-2 text-base font-semibold text-text-color">{{ t("appearance.resetAppearance") }}</h3>
           <p class="mb-4 text-sm text-text-on-main-bg-color">
-            This will reset all appearance settings to their default values.
+            {{ t("appearance.resetConfirm") }}
           </p>
           <div class="flex gap-2">
             <button
               class="flex-1 rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
               @click="confirmReset"
             >
-              Reset
+              {{ t("appearance.reset") }}
             </button>
             <button
               class="flex-1 rounded-lg bg-neutral-grad-0 px-4 py-2.5 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
               @click="showResetModal = false"
             >
-              Cancel
+              {{ t("appearance.cancel") }}
             </button>
           </div>
         </div>

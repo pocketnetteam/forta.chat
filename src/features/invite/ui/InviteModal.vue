@@ -34,13 +34,13 @@ const copyLink = async () => {
 const handleNativeShare = async () => {
   await share({
     title: t("invite.title"),
-    text: "Join me on Forta Chat!",
+    text: t("invite.shareText"),
     url: inviteLink.value,
   });
 };
 
 const shareUrl = (platform: string) => {
-  const text = encodeURIComponent("Join me on Forta Chat!");
+  const text = encodeURIComponent(t("invite.shareText"));
   const url = encodeURIComponent(inviteLink.value);
 
   const urls: Record<string, string> = {

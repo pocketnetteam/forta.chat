@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.telecom.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.forta.chat.R
 
 class CallConnectionService : ConnectionService() {
 
@@ -147,10 +148,10 @@ class CallConnectionService : ConnectionService() {
         val channelId = "incoming_calls"
         val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
-            channelId, "Incoming Calls",
+            channelId, applicationContext.getString(R.string.channel_incoming_calls),
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Incoming call notifications"
+            description = applicationContext.getString(R.string.channel_incoming_calls_desc)
             setSound(null, null)
         }
         notificationManager.createNotificationChannel(channel)
@@ -189,7 +190,7 @@ class CallConnectionService : ConnectionService() {
                 )
             )
         } else {
-            builder.setContentTitle("Incoming call")
+            builder.setContentTitle(applicationContext.getString(R.string.push_incoming_call))
             builder.setContentText(callerName)
         }
 

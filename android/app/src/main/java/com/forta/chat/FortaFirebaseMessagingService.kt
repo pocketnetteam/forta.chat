@@ -38,16 +38,16 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
 
         if (nm.getNotificationChannel(CHANNEL_MESSAGES) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_MESSAGES, "Messages", NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "Chat message notifications"
+                NotificationChannel(CHANNEL_MESSAGES, getString(R.string.channel_messages), NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = getString(R.string.channel_messages_desc)
                     enableVibration(true)
                 }
             )
         }
         if (nm.getNotificationChannel(CHANNEL_CALLS) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_CALLS, "Calls", NotificationManager.IMPORTANCE_MAX).apply {
-                    description = "Incoming call notifications"
+                NotificationChannel(CHANNEL_CALLS, getString(R.string.channel_calls), NotificationManager.IMPORTANCE_MAX).apply {
+                    description = getString(R.string.channel_calls_desc)
                     enableVibration(true)
                     setSound(
                         RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
@@ -108,7 +108,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             ?: (sender?.let { getCachedSenderName(it) })
             ?: roomName
             ?: getCachedRoomName(roomId)
-            ?: "Новое сообщение"
+            ?: getString(R.string.push_new_message)
         val body = previewByMsgtype(contentMsgtype)
 
         // Show notification (JS may replace it later with decrypted content)
@@ -128,11 +128,11 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun previewByMsgtype(msgtype: String?): String {
         return when (msgtype) {
-            "m.image" -> "\uD83D\uDCF7 Фото"
-            "m.video" -> "\uD83C\uDFA5 Видео"
-            "m.audio" -> "\uD83C\uDF99 Голосовое сообщение"
-            "m.file" -> "\uD83D\uDCCE Файл"
-            else -> "Новое сообщение"
+            "m.image" -> getString(R.string.push_photo)
+            "m.video" -> getString(R.string.push_video)
+            "m.audio" -> getString(R.string.push_voice_message)
+            "m.file" -> getString(R.string.push_file)
+            else -> getString(R.string.push_new_message)
         }
     }
 
@@ -223,7 +223,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_CALLS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(callerName)
-            .setContentText("Входящий звонок")
+            .setContentText(getString(R.string.push_incoming_call))
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_MAX)

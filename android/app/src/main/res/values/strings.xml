@@ -4,4 +4,63 @@
     <string name="title_activity_main">Forta Chat</string>
     <string name="package_name">com.forta.chat</string>
     <string name="custom_url_scheme">com.forta.chat</string>
+
+    <!-- Push notifications -->
+    <string name="push_new_message">New message</string>
+    <string name="push_photo">📷 Photo</string>
+    <string name="push_video">🎥 Video</string>
+    <string name="push_voice_message">🎙 Voice message</string>
+    <string name="push_file">📎 File</string>
+    <string name="push_incoming_call">Incoming call</string>
+
+    <!-- Notification channels -->
+    <string name="channel_messages">Messages</string>
+    <string name="channel_messages_desc">Chat message notifications</string>
+    <string name="channel_calls">Calls</string>
+    <string name="channel_calls_desc">Incoming call notifications</string>
+    <string name="channel_active_call">Active Call</string>
+    <string name="channel_active_call_desc">Shows when a call is in progress</string>
+    <string name="channel_incoming_calls">Incoming Calls</string>
+    <string name="channel_incoming_calls_desc">Incoming call notifications</string>
+
+    <!-- Call UI -->
+    <string name="call_connecting">Connecting…</string>
+    <string name="call_camera_off">Camera off</string>
+    <string name="call_mute">Mute</string>
+    <string name="call_unmute">Unmute</string>
+    <string name="call_video">Video</string>
+    <string name="call_video_off">Video Off</string>
+    <string name="call_video_on">Video On</string>
+    <string name="call_flip">Flip</string>
+    <string name="call_speaker">Speaker</string>
+    <string name="call_hang_up">Hang Up</string>
+    <string name="call_earpiece">Earpiece</string>
+    <string name="call_wired_headset">Wired Headset</string>
+    <string name="call_audio_output">Audio Output</string>
+    <string name="call_bluetooth">Bluetooth</string>
+    <string name="call_bluetooth_short">BT</string>
+    <string name="call_video_call">Video call</string>
+    <string name="call_voice_call">Voice call</string>
+    <string name="call_video_call_with">Video call with %s</string>
+    <string name="call_voice_call_with">Voice call with %s</string>
+
+    <!-- Incoming call -->
+    <string name="incoming_video_call">Incoming video call</string>
+    <string name="incoming_audio_call">Incoming audio call</string>
+    <string name="call_decline">Decline</string>
+    <string name="call_accept">Accept</string>
+
+    <!-- Updater -->
+    <string name="updater_up_to_date">You are using the latest version (%s)</string>
+    <string name="updater_check_failed">Failed to check for updates: %s</string>
+    <string name="updater_available_title">Update available</string>
+    <string name="updater_available_message">New version %s is available for download. Update now?</string>
+    <string name="updater_update">Update</string>
+    <string name="updater_open_browser">Open in browser</string>
+    <string name="updater_later">Later</string>
+    <string name="updater_preparing">Preparing…</string>
+    <string name="updater_downloading_title">Downloading update %s</string>
+    <string name="updater_cancel">Cancel</string>
+    <string name="updater_downloaded_percent">Downloaded %d%%</string>
+    <string name="updater_download_error">Download error: %s</string>
 </resources>

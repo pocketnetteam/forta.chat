@@ -12,6 +12,7 @@ import com.forta.chat.plugins.filetransfer.TorFilePlugin
 import com.forta.chat.plugins.webrtc.WebRTCPlugin
 import com.forta.chat.plugins.updater.UpdaterPlugin
 import com.forta.chat.plugins.push.PushDataPlugin
+import com.forta.chat.plugins.locale.LocalePlugin
 import com.forta.chat.updater.AppUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,7 @@ class MainActivity : BridgeActivity() {
         registerPlugin(WebRTCPlugin::class.java)
         registerPlugin(UpdaterPlugin::class.java)
         registerPlugin(PushDataPlugin::class.java)
+        registerPlugin(LocalePlugin::class.java)
         super.onCreate(savedInstanceState)
 
         // Enable edge-to-edge: content draws behind system bars, insets are non-zero

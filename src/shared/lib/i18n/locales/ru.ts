@@ -579,6 +579,47 @@ export const ru: Record<TranslationKey, string> = {
   "common.encryptedChat": "Чат",
   "message.notDecrypted": "Сообщение не расшифровано",
 
+  // ── Sync status ──
+  "sync.offline": "Ожидание сети...",
+  "sync.connecting": "Соединение...",
+  "sync.catchingUp": "Обновление...",
+  "sync.upToDate": "Обновлено",
+  "sync.error": "Не удалось подключиться",
+
+  // ── Push notifications ──
+  "push.newMessage": "Новое сообщение",
+  "push.photo": "📷 Фото",
+  "push.video": "🎥 Видео",
+  "push.voiceMessage": "🎤 Голосовое сообщение",
+  "push.unknownSender": "Неизвестный",
+  "push.file": "📎 Файл",
+
+  // ── Notification channels ──
+  "channel.messages": "Сообщения",
+  "channel.messagesDesc": "Уведомления о сообщениях",
+  "channel.calls": "Звонки",
+  "channel.callsDesc": "Уведомления о входящих звонках",
+
+  // ── Boot / Loading screen ──
+  "boot.loadingScripts": "Загрузка скриптов…",
+  "boot.secureConnection": "Установка безопасного соединения…",
+  "boot.authenticating": "Аутентификация…",
+  "boot.connectingServer": "Подключение к серверу…",
+  "boot.syncingMessages": "Синхронизация сообщений…",
+  "boot.loading": "Загрузка Forta Chat…",
+  "boot.failed": "Не удалось запустить Forta Chat",
+  "boot.retry": "Повторить",
+  "boot.clearing": "Очистка…",
+  "boot.clearCache": "Очистить кеш и повторить",
+
+  // ── Misc ──
+  "chat.messageNotFound": "Сообщение не найдено",
+  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования. Отправка сообщений временно недоступна.",
+  "tor.disable": "Отключить Tor",
+  "register.registrationFailed": "Ошибка регистрации",
+  "register.captchaLoadFailed": "Не удалось загрузить капчу",
+  "invite.shareText": "Присоединяйтесь ко мне в Forta Chat!",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",

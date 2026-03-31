@@ -2,6 +2,7 @@ import { PushNotifications } from '@capacitor/push-notifications';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
+import { tRaw } from '@/shared/lib/i18n';
 
 class PushService {
   private fcmToken: string | null = null;
@@ -145,7 +146,7 @@ class PushService {
           const senderId = raw.sender as string;
           const room = this.matrixClient?.getRoom(roomId);
           const member = room?.getMember(senderId);
-          const senderName = member?.name || senderId || "Unknown";
+          const senderName = member?.name || senderId || tRaw('push.unknownSender');
           return { senderName, body: this.formatBody(content) };
         }
       }
@@ -213,7 +214,7 @@ class PushService {
         if (!body || typeof body !== 'string') return null;
         // Skip if body is still ciphertext (base64 blob)
         if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
-        const senderName = event.sender?.name || event.getSender?.() || 'Unknown';
+        const senderName = event.sender?.name || event.getSender?.() || tRaw('push.unknownSender');
         return { senderName, body: this.formatBody(content) };
       };
 
@@ -261,7 +262,7 @@ class PushService {
       const body = content?.body;
       if (!body || typeof body !== 'string') continue;
       if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) continue;
-      const senderName = ev.sender?.name || ev.getSender?.() || 'Unknown';
+      const senderName = ev.sender?.name || ev.getSender?.() || tRaw('push.unknownSender');
       return { senderName, body: this.formatBody(content) };
     }
     return null;
@@ -270,12 +271,12 @@ class PushService {
   /** Format message body based on msgtype */
   private formatBody(content: any): string {
     const msgtype = content?.msgtype;
-    const body = content?.body || 'Новое сообщение';
+    const body = content?.body || tRaw('push.newMessage');
     switch (msgtype) {
-      case 'm.image': return '📷 Фото';
-      case 'm.video': return '🎥 Видео';
-      case 'm.audio': return '🎤 Голосовое сообщение';
-      case 'm.file': return `📎 ${body}`;
+      case 'm.image': return tRaw('push.photo');
+      case 'm.video': return tRaw('push.video');
+      case 'm.audio': return tRaw('push.voiceMessage');
+      case 'm.file': return `${tRaw('push.file')} ${body}`;
       default: return body;
     }
   }
@@ -291,7 +292,7 @@ class PushService {
     if (data.msg_type === 'm.call.invite') {
       this.onCallPush?.({
         callId: data.event_id || '',
-        callerName: data.sender_display_name || 'Unknown',
+        callerName: data.sender_display_name || tRaw('push.unknownSender'),
         roomId,
         hasVideo: false,
       });
@@ -329,16 +330,16 @@ class PushService {
     await LocalNotifications.requestPermissions();
     await LocalNotifications.createChannel({
       id: 'messages',
-      name: 'Messages',
-      description: 'Chat message notifications',
+      name: tRaw('channel.messages'),
+      description: tRaw('channel.messagesDesc'),
       importance: 4,
       sound: 'default',
       vibration: true,
     });
     await LocalNotifications.createChannel({
       id: 'calls',
-      name: 'Calls',
-      description: 'Incoming call notifications',
+      name: tRaw('channel.calls'),
+      description: tRaw('channel.callsDesc'),
       importance: 5,
       sound: 'ringtone',
       vibration: true,

@@ -11,6 +11,8 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import com.forta.chat.R
+import com.forta.chat.plugins.locale.LocaleHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
@@ -64,6 +66,8 @@ object AppUpdater {
     // ---- Public API ----
 
     suspend fun checkForUpdateIfNeeded(context: Context, isManual: Boolean) {
+        // Localized context for getString() — keeps Activity token from original context for dialogs
+        val lc = LocaleHelper.wrapContext(context)
         try {
             if (!isManual && !isAutoCheckDue(context)) {
                 Log.d(TAG, "Auto-check skipped: last check was less than 1 hour ago")
@@ -91,7 +95,7 @@ object AppUpdater {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(
                             context,
-                            "Вы используете последнюю версию ($currentVersion)",
+                            lc.getString(R.string.updater_up_to_date, currentVersion),
                             Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -103,7 +107,7 @@ object AppUpdater {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(
                         context,
-                        "Не удалось проверить обновления: ${e.localizedMessage}",
+                        lc.getString(R.string.updater_check_failed, e.localizedMessage),
                         Toast.LENGTH_LONG
                     ).show()
                 }
@@ -194,18 +198,19 @@ object AppUpdater {
     // ---- UI ----
 
     private fun showUpdateDialog(context: Context, releaseInfo: GithubReleaseInfo) {
+        val lc = LocaleHelper.wrapContext(context)
         AlertDialog.Builder(context)
-            .setTitle("Доступно обновление")
-            .setMessage("Новая версия ${releaseInfo.versionName} доступна для загрузки. Обновить сейчас?")
-            .setPositiveButton("Обновить") { _, _ ->
+            .setTitle(lc.getString(R.string.updater_available_title))
+            .setMessage(lc.getString(R.string.updater_available_message, releaseInfo.versionName))
+            .setPositiveButton(lc.getString(R.string.updater_update)) { _, _ ->
                 // Always download and try to install — Android will prompt for
                 // "install from unknown sources" permission if needed
                 startDownloadWithProgressDialog(context, releaseInfo)
             }
-            .setNeutralButton("Открыть в браузере") { _, _ ->
+            .setNeutralButton(lc.getString(R.string.updater_open_browser)) { _, _ ->
                 openReleasePage(context, releaseInfo.releasePageUrl)
             }
-            .setNegativeButton("Позже", null)
+            .setNegativeButton(lc.getString(R.string.updater_later), null)
             .show()
     }
 
@@ -218,6 +223,7 @@ object AppUpdater {
     // ---- Download with progress dialog ----
 
     private fun startDownloadWithProgressDialog(context: Context, releaseInfo: GithubReleaseInfo) {
+        val lc = LocaleHelper.wrapContext(context)
         // Build progress dialog layout
         val padding = (24 * context.resources.displayMetrics.density).toInt()
         val layout = LinearLayout(context).apply {
@@ -235,7 +241,7 @@ object AppUpdater {
         }
 
         val progressText = TextView(context).apply {
-            text = "Подготовка..."
+            text = lc.getString(R.string.updater_preparing)
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -249,10 +255,10 @@ object AppUpdater {
         layout.addView(progressText)
 
         val dialog = AlertDialog.Builder(context)
-            .setTitle("Загрузка обновления ${releaseInfo.versionName}")
+            .setTitle(lc.getString(R.string.updater_downloading_title, releaseInfo.versionName))
             .setView(layout)
             .setCancelable(false)
-            .setNegativeButton("Отмена", null)
+            .setNegativeButton(lc.getString(R.string.updater_cancel), null)
             .create()
 
         dialog.show()
@@ -263,7 +269,7 @@ object AppUpdater {
                 val apkFile = downloadApk(context, releaseInfo.apkUrl) { percent ->
                     launch(Dispatchers.Main) {
                         progressBar.progress = percent
-                        progressText.text = "Скачано $percent%"
+                        progressText.text = lc.getString(R.string.updater_downloaded_percent, percent)
                     }
                 }
 
@@ -289,7 +295,7 @@ object AppUpdater {
                     dialog.dismiss()
                     Toast.makeText(
                         context,
-                        "Ошибка загрузки: ${e.localizedMessage}",
+                        lc.getString(R.string.updater_download_error, e.localizedMessage),
                         Toast.LENGTH_LONG
                     ).show()
                 }
