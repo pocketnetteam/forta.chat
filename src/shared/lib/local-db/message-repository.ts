@@ -398,6 +398,26 @@ export class MessageRepository {
     });
   }
 
+  /** Recover media messages stuck in "pending" from a previous session.
+   *  Fire-and-forget upload IIFEs are lost on reload/crash — this marks
+   *  orphaned uploads as "failed" so the user sees a retry button instead
+   *  of an infinite spinner.
+   *  @param maxAgeMs — only recover messages older than this (default 2 min) */
+  async recoverStuckMedia(maxAgeMs = 2 * 60 * 1000): Promise<number> {
+    const cutoff = Date.now() - maxAgeMs;
+    // Note: "status" has no standalone index (only [roomId+status] compound).
+    // Dexie falls back to a table scan, but this runs once at startup and
+    // the JS filter narrows results quickly — acceptable tradeoff.
+    return this.db.messages
+      .where("status")
+      .equals("pending")
+      .filter((m) => m.uploadProgress !== undefined && m.timestamp < cutoff)
+      .modify({
+        status: "failed" as LocalMessageStatus,
+        uploadProgress: undefined,
+      });
+  }
+
   /** Get the room ID for a given event (used by sync engine) */
   async getRoomIdForEvent(eventId: string): Promise<string | undefined> {
     const msg = await this.getByEventId(eventId);

@@ -11,6 +11,10 @@ import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import { invalidateDownloadCache } from "./use-file-download";
+import { withTimeout } from "@/shared/lib/with-timeout";
+
+/** Max time for the entire media pipeline (encrypt + upload + send event + confirm) */
+const MEDIA_PIPELINE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 export function useMessages() {
   const chatStore = useChatStore();
@@ -224,56 +228,61 @@ export function useMessages() {
           uploadProgress: 0,
         });
 
-        // Async upload pipeline
+        // Async upload pipeline (with timeout to prevent infinite spinner)
         (async () => {
           try {
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            await withTimeout((async () => {
+              const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const fileInfo: Record<string, any> = {
-              name: file.name,
-              type: file.type,
-              size: file.size,
-            };
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const fileInfo: Record<string, any> = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+              };
 
-            let fileToUpload: Blob = file;
+              let fileToUpload: Blob = file;
 
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await roomCrypto.encryptFile(file);
-              fileInfo.secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
+              if (roomCrypto?.canBeEncrypt()) {
+                const encrypted = await roomCrypto.encryptFile(file);
+                fileInfo.secrets = encrypted.secrets;
+                fileToUpload = encrypted.file;
+              }
 
-            const url = await matrixService.uploadContent(fileToUpload, (progress) => {
-              const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
-            fileInfo.url = url;
+              const url = await matrixService.uploadContent(fileToUpload, (progress) => {
+                const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
+              });
+              fileInfo.url = url;
 
-            const body = JSON.stringify(fileInfo);
-            const serverEventId = await matrixService.sendEncryptedText(roomId, {
-              body,
-              msgtype: "m.file",
-            }, localMsg.clientId);
+              const body = JSON.stringify(fileInfo);
+              const serverEventId = await matrixService.sendEncryptedText(roomId, {
+                body,
+                msgtype: "m.file",
+              }, localMsg.clientId);
 
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              url,
-              ...(fileInfo.secrets ? { secrets: fileInfo.secrets } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
+              const serverFileInfo: FileInfo = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                url,
+                ...(fileInfo.secrets ? { secrets: fileInfo.secrets } : {}),
+              };
+              await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
-            // Invalidate download cache before revoking blob URL to prevent stale references
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+              invalidateDownloadCache(localMsg.clientId);
+              setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+            })(), MEDIA_PIPELINE_TIMEOUT, "File upload");
           } catch (e) {
             console.error("Failed to send file (Dexie path):", e);
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-              status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
-              uploadProgress: undefined,
-            });
+            // Only mark failed if not already confirmed (race: timeout fires after confirmMediaSent)
+            const current = await dbKit.messages.getByClientId(localMsg.clientId);
+            if (current && current.status !== "synced") {
+              await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
+                status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
+                uploadProgress: undefined,
+              });
+            }
           }
         })();
 
@@ -385,63 +394,68 @@ export function useMessages() {
           uploadProgress: 0,
         });
 
-        // Async upload pipeline
+        // Async upload pipeline (with timeout to prevent infinite spinner)
         (async () => {
           try {
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            await withTimeout((async () => {
+              const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
 
-            let fileToUpload: Blob = file;
-            let secrets: Record<string, unknown> | undefined;
+              let fileToUpload: Blob = file;
+              let secrets: Record<string, unknown> | undefined;
 
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await roomCrypto.encryptFile(file);
-              secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
+              if (roomCrypto?.canBeEncrypt()) {
+                const encrypted = await roomCrypto.encryptFile(file);
+                secrets = encrypted.secrets;
+                fileToUpload = encrypted.file;
+              }
 
-            const url = await matrixService.uploadContent(fileToUpload, (progress) => {
-              const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
+              const url = await matrixService.uploadContent(fileToUpload, (progress) => {
+                const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
+              });
 
-            const content: Record<string, unknown> = {
-              body: options.caption || "Image",
-              msgtype: "m.image",
-              url,
-              info: {
+              const content: Record<string, unknown> = {
+                body: options.caption || "Image",
+                msgtype: "m.image",
+                url,
+                info: {
+                  w: dimensions.w,
+                  h: dimensions.h,
+                  mimetype: file.type,
+                  size: file.size,
+                  ...(secrets ? { secrets } : {}),
+                  ...(options.caption ? { caption: options.caption } : {}),
+                  ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
+                },
+              };
+
+              const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
+
+              const serverFileInfo: FileInfo = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                url,
                 w: dimensions.w,
                 h: dimensions.h,
-                mimetype: file.type,
-                size: file.size,
-                ...(secrets ? { secrets } : {}),
-                ...(options.caption ? { caption: options.caption } : {}),
-                ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
-              },
-            };
+                caption: options.caption,
+                captionAbove: options.captionAbove,
+                ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
+              };
+              await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
-            const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
-
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              url,
-              w: dimensions.w,
-              h: dimensions.h,
-              caption: options.caption,
-              captionAbove: options.captionAbove,
-              ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
-
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+              invalidateDownloadCache(localMsg.clientId);
+              setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+            })(), MEDIA_PIPELINE_TIMEOUT, "Image upload");
           } catch (e) {
             console.error("Failed to send image (Dexie path):", e);
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-              status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
-              uploadProgress: undefined,
-            });
+            const current = await dbKit.messages.getByClientId(localMsg.clientId);
+            if (current && current.status !== "synced") {
+              await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
+                status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
+                uploadProgress: undefined,
+              });
+            }
           }
         })();
 
@@ -558,61 +572,66 @@ export function useMessages() {
           uploadProgress: 0,
         });
 
-        // Async upload pipeline
+        // Async upload pipeline (with timeout to prevent infinite spinner)
         (async () => {
           try {
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            await withTimeout((async () => {
+              const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
 
-            let fileToUpload: Blob = file;
-            let secrets: Record<string, unknown> | undefined;
+              let fileToUpload: Blob = file;
+              let secrets: Record<string, unknown> | undefined;
 
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await roomCrypto.encryptFile(file);
-              secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
+              if (roomCrypto?.canBeEncrypt()) {
+                const encrypted = await roomCrypto.encryptFile(file);
+                secrets = encrypted.secrets;
+                fileToUpload = encrypted.file;
+              }
 
-            const url = await matrixService.uploadContent(fileToUpload, (progress) => {
-              const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
+              const url = await matrixService.uploadContent(fileToUpload, (progress) => {
+                const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
+              });
 
-            const intWaveform = options.waveform?.map((v: number) => Math.round(v * 1024));
+              const intWaveform = options.waveform?.map((v: number) => Math.round(v * 1024));
 
-            const content: Record<string, unknown> = {
-              body: "Audio",
-              msgtype: "m.audio",
-              url,
-              info: {
-                mimetype: file.type,
-                size: Math.round(file.size),
-                duration: options.duration ? Math.round(options.duration * 1000) : undefined,
-                waveform: intWaveform,
-                ...(secrets ? { secrets } : {}),
-              },
-            };
+              const content: Record<string, unknown> = {
+                body: "Audio",
+                msgtype: "m.audio",
+                url,
+                info: {
+                  mimetype: file.type,
+                  size: Math.round(file.size),
+                  duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+                  waveform: intWaveform,
+                  ...(secrets ? { secrets } : {}),
+                },
+              };
 
-            const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
+              const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
 
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              url,
-              duration: options.duration,
-              waveform: options.waveform,
-              ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
+              const serverFileInfo: FileInfo = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                url,
+                duration: options.duration,
+                waveform: options.waveform,
+                ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
+              };
+              await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+              invalidateDownloadCache(localMsg.clientId);
+              setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+            })(), MEDIA_PIPELINE_TIMEOUT, "Audio upload");
           } catch (e) {
             console.error("Failed to send audio (Dexie path):", e);
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-              status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
-              uploadProgress: undefined,
-            });
+            const current = await dbKit.messages.getByClientId(localMsg.clientId);
+            if (current && current.status !== "synced") {
+              await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
+                status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
+                uploadProgress: undefined,
+              });
+            }
           }
         })();
 
@@ -728,63 +747,68 @@ export function useMessages() {
           uploadProgress: 0,
         });
 
-        // Async upload pipeline
+        // Async upload pipeline (with timeout to prevent infinite spinner)
         (async () => {
           try {
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            await withTimeout((async () => {
+              const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
 
-            let fileToUpload: Blob = file;
-            let secrets: Record<string, unknown> | undefined;
+              let fileToUpload: Blob = file;
+              let secrets: Record<string, unknown> | undefined;
 
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await roomCrypto.encryptFile(file);
-              secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
+              if (roomCrypto?.canBeEncrypt()) {
+                const encrypted = await roomCrypto.encryptFile(file);
+                secrets = encrypted.secrets;
+                fileToUpload = encrypted.file;
+              }
 
-            const url = await matrixService.uploadContent(fileToUpload, (progress) => {
-              const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
+              const url = await matrixService.uploadContent(fileToUpload, (progress) => {
+                const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
+              });
 
-            const content: Record<string, unknown> = {
-              body: "Video message",
-              msgtype: "m.video",
-              url,
-              info: {
-                mimetype: file.type,
-                size: Math.round(file.size),
+              const content: Record<string, unknown> = {
+                body: "Video message",
+                msgtype: "m.video",
+                url,
+                info: {
+                  mimetype: file.type,
+                  size: Math.round(file.size),
+                  w: 480,
+                  h: 480,
+                  duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+                  videoNote: true,
+                  ...(secrets ? { secrets } : {}),
+                },
+              };
+
+              const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
+
+              const serverFileInfo: FileInfo = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                url,
                 w: 480,
                 h: 480,
-                duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+                duration: options.duration,
                 videoNote: true,
-                ...(secrets ? { secrets } : {}),
-              },
-            };
+                ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
+              };
+              await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
-            const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
-
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              url,
-              w: 480,
-              h: 480,
-              duration: options.duration,
-              videoNote: true,
-              ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
-
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+              invalidateDownloadCache(localMsg.clientId);
+              setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+            })(), MEDIA_PIPELINE_TIMEOUT, "Video circle upload");
           } catch (e) {
             console.error("Failed to send video circle (Dexie path):", e);
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-              status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
-              uploadProgress: undefined,
-            });
+            const current = await dbKit.messages.getByClientId(localMsg.clientId);
+            if (current && current.status !== "synced") {
+              await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
+                status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
+                uploadProgress: undefined,
+              });
+            }
           }
         })();
 
@@ -1538,59 +1562,64 @@ export function useMessages() {
           uploadProgress: 0,
         });
 
-        // Async upload pipeline
+        // Async upload pipeline (with timeout to prevent infinite spinner)
         (async () => {
           try {
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            await withTimeout((async () => {
+              const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
 
-            let fileToUpload: Blob = file;
-            let secrets: Record<string, unknown> | undefined;
+              let fileToUpload: Blob = file;
+              let secrets: Record<string, unknown> | undefined;
 
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await roomCrypto.encryptFile(file);
-              secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
+              if (roomCrypto?.canBeEncrypt()) {
+                const encrypted = await roomCrypto.encryptFile(file);
+                secrets = encrypted.secrets;
+                fileToUpload = encrypted.file;
+              }
 
-            const url = await matrixService.uploadContent(fileToUpload, (progress) => {
-              const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
+              const url = await matrixService.uploadContent(fileToUpload, (progress) => {
+                const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+                dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
+              });
 
-            const content: Record<string, unknown> = {
-              body: info?.title || "GIF",
-              msgtype: "m.image",
-              url,
-              info: {
+              const content: Record<string, unknown> = {
+                body: info?.title || "GIF",
+                msgtype: "m.image",
+                url,
+                info: {
+                  w,
+                  h,
+                  mimetype: file.type,
+                  size: file.size,
+                  ...(secrets ? { secrets } : {}),
+                },
+              };
+
+              const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
+
+              const serverFileInfo: FileInfo = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                url,
                 w,
                 h,
-                mimetype: file.type,
-                size: file.size,
-                ...(secrets ? { secrets } : {}),
-              },
-            };
+                ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
+              };
+              await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
-            const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
-
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              url,
-              w,
-              h,
-              ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
-
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+              invalidateDownloadCache(localMsg.clientId);
+              setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+            })(), MEDIA_PIPELINE_TIMEOUT, "GIF upload");
           } catch (e) {
             console.error("Failed to send GIF (Dexie path):", e);
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-              status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
-              uploadProgress: undefined,
-            });
+            const current = await dbKit.messages.getByClientId(localMsg.clientId);
+            if (current && current.status !== "synced") {
+              await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
+                status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
+                uploadProgress: undefined,
+              });
+            }
           }
         })();
 
@@ -1714,89 +1743,94 @@ export function useMessages() {
       uploadProgress: 0,
     });
 
-    // Re-run upload pipeline
+    // Re-run upload pipeline (with timeout to prevent infinite spinner)
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-      let fileToUpload: Blob = file;
-      let secrets: Record<string, unknown> | undefined;
+      await withTimeout((async () => {
+        const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+        let fileToUpload: Blob = file;
+        let secrets: Record<string, unknown> | undefined;
 
-      if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await roomCrypto.encryptFile(file);
-        secrets = encrypted.secrets;
-        fileToUpload = encrypted.file;
-      }
+        if (roomCrypto?.canBeEncrypt()) {
+          const encrypted = await roomCrypto.encryptFile(file);
+          secrets = encrypted.secrets;
+          fileToUpload = encrypted.file;
+        }
 
-      const url = await matrixService.uploadContent(fileToUpload, (progress) => {
-        const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
-        dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-      });
+        const url = await matrixService.uploadContent(fileToUpload, (progress) => {
+          const percent = progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+          dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
+        });
 
-      // Build event content based on message type
-      const fi = localMsg.fileInfo!;
-      let content: Record<string, unknown>;
+        // Build event content based on message type
+        const fi = localMsg.fileInfo!;
+        let content: Record<string, unknown>;
 
-      if (localMsg.type === "image") {
-        content = {
-          body: fi.caption || "Image",
-          msgtype: "m.image",
+        if (localMsg.type === "image") {
+          content = {
+            body: fi.caption || "Image",
+            msgtype: "m.image",
+            url,
+            info: {
+              w: fi.w, h: fi.h, mimetype: fi.type, size: fi.size,
+              ...(secrets ? { secrets } : {}),
+              ...(fi.caption ? { caption: fi.caption } : {}),
+              ...(fi.captionAbove != null ? { captionAbove: fi.captionAbove } : {}),
+            },
+          };
+        } else if (localMsg.type === "audio") {
+          const intWaveform = fi.waveform?.map((v: number) => Math.round(v * 1024));
+          content = {
+            body: "Audio",
+            msgtype: "m.audio",
+            url,
+            info: {
+              mimetype: fi.type, size: Math.round(fi.size),
+              duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
+              waveform: intWaveform,
+              ...(secrets ? { secrets } : {}),
+            },
+          };
+        } else if (localMsg.type === "videoCircle") {
+          content = {
+            body: "Video message",
+            msgtype: "m.video",
+            url,
+            info: {
+              mimetype: fi.type, size: Math.round(fi.size), w: 480, h: 480,
+              duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
+              videoNote: true,
+              ...(secrets ? { secrets } : {}),
+            },
+          };
+        } else {
+          // Generic file (m.file)
+          const fileBody: Record<string, unknown> = {
+            name: fi.name, type: fi.type, size: fi.size, url,
+          };
+          if (secrets) fileBody.secrets = secrets;
+          content = { body: JSON.stringify(fileBody), msgtype: "m.file" };
+        }
+
+        const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
+        await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, {
+          ...fi,
           url,
-          info: {
-            w: fi.w, h: fi.h, mimetype: fi.type, size: fi.size,
-            ...(secrets ? { secrets } : {}),
-            ...(fi.caption ? { caption: fi.caption } : {}),
-            ...(fi.captionAbove != null ? { captionAbove: fi.captionAbove } : {}),
-          },
-        };
-      } else if (localMsg.type === "audio") {
-        const intWaveform = fi.waveform?.map((v: number) => Math.round(v * 1024));
-        content = {
-          body: "Audio",
-          msgtype: "m.audio",
-          url,
-          info: {
-            mimetype: fi.type, size: Math.round(fi.size),
-            duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
-            waveform: intWaveform,
-            ...(secrets ? { secrets } : {}),
-          },
-        };
-      } else if (localMsg.type === "videoCircle") {
-        content = {
-          body: "Video message",
-          msgtype: "m.video",
-          url,
-          info: {
-            mimetype: fi.type, size: Math.round(fi.size), w: 480, h: 480,
-            duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
-            videoNote: true,
-            ...(secrets ? { secrets } : {}),
-          },
-        };
-      } else {
-        // Generic file (m.file)
-        const fileBody: Record<string, unknown> = {
-          name: fi.name, type: fi.type, size: fi.size, url,
-        };
-        if (secrets) fileBody.secrets = secrets;
-        content = { body: JSON.stringify(fileBody), msgtype: "m.file" };
-      }
+          secrets: secrets as FileInfo["secrets"],
+        }, roomId);
 
-      const serverEventId = await matrixService.sendEncryptedText(roomId, content, localMsg.clientId);
-      await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, {
-        ...fi,
-        url,
-        secrets: secrets as FileInfo["secrets"],
-      }, roomId);
-
-      invalidateDownloadCache(localMsg.clientId);
-      const blobToRevoke = localMsg.localBlobUrl;
-      if (blobToRevoke) setTimeout(() => URL.revokeObjectURL(blobToRevoke), 5000);
+        invalidateDownloadCache(localMsg.clientId);
+        const blobToRevoke = localMsg.localBlobUrl;
+        if (blobToRevoke) setTimeout(() => URL.revokeObjectURL(blobToRevoke), 5000);
+      })(), MEDIA_PIPELINE_TIMEOUT, "Media retry upload");
     } catch (e) {
       console.error("[retry] Upload failed again:", e);
-      await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-        status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
-        uploadProgress: undefined,
-      });
+      const current = await dbKit.messages.getByClientId(localMsg.clientId);
+      if (current && current.status !== "synced") {
+        await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
+          status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
+          uploadProgress: undefined,
+        });
+      }
     }
   };
 
