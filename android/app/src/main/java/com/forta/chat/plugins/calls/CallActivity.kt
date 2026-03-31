@@ -29,6 +29,7 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.forta.chat.R
+import com.forta.chat.plugins.locale.LocaleHelper
 import com.forta.chat.utils.WindowInsetsHelper
 import com.forta.chat.plugins.webrtc.NativeWebRTCManager
 import com.forta.chat.plugins.webrtc.WebRTCPlugin
@@ -47,6 +48,10 @@ import org.webrtc.VideoTrack
  * - Auto-hiding controls (show on tap, hide after 5s)
  */
 class CallActivity : Activity(), SensorEventListener {
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.wrapContext(newBase))
+    }
 
     companion object {
         private const val TAG = "CallActivity"
@@ -191,7 +196,7 @@ class CallActivity : Activity(), SensorEventListener {
         isVideoEnabled = callType == "video"
 
         callerNameText.text = callerName
-        callStatusText.text = "Connecting..."
+        callStatusText.text = getString(R.string.call_connecting)
 
         // Mode setup
         if (callType == "voice") {
@@ -556,8 +561,10 @@ class CallActivity : Activity(), SensorEventListener {
                 AudioRouter.Device.WIRED_HEADSET -> R.drawable.ic_hearing
             })
             name.text = when (device) {
-                AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: "Bluetooth"
-                else -> device.label
+                AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: getString(R.string.call_bluetooth)
+                AudioRouter.Device.EARPIECE -> getString(R.string.call_earpiece)
+                AudioRouter.Device.SPEAKER -> getString(R.string.call_speaker)
+                AudioRouter.Device.WIRED_HEADSET -> getString(R.string.call_wired_headset)
             }
             check.visibility = if (device == state.active) View.VISIBLE else View.GONE
 
@@ -588,8 +595,10 @@ class CallActivity : Activity(), SensorEventListener {
         btnAudioRoute.setColorFilter(tint)
 
         val label = when (state.active) {
-            AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: "BT"
-            else -> state.active.label
+            AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: getString(R.string.call_bluetooth_short)
+            AudioRouter.Device.EARPIECE -> getString(R.string.call_earpiece)
+            AudioRouter.Device.SPEAKER -> getString(R.string.call_speaker)
+            AudioRouter.Device.WIRED_HEADSET -> getString(R.string.call_wired_headset)
         }
         findViewById<TextView>(R.id.label_audio_route)?.text = label
     }
@@ -605,13 +614,13 @@ class CallActivity : Activity(), SensorEventListener {
         btnMute.setBackgroundResource(if (isMuted) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
         val muteTint = if (isMuted) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
         btnMute.setColorFilter(muteTint)
-        findViewById<TextView>(R.id.label_mute)?.text = if (isMuted) "Unmute" else "Mute"
+        findViewById<TextView>(R.id.label_mute)?.text = if (isMuted) getString(R.string.call_unmute) else getString(R.string.call_mute)
 
         btnVideo.setImageResource(if (isVideoEnabled) R.drawable.ic_videocam else R.drawable.ic_videocam_off)
         btnVideo.setBackgroundResource(if (!isVideoEnabled) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
         val videoTint = if (!isVideoEnabled) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
         btnVideo.setColorFilter(videoTint)
-        findViewById<TextView>(R.id.label_video)?.text = if (isVideoEnabled) "Video Off" else "Video On"
+        findViewById<TextView>(R.id.label_video)?.text = if (isVideoEnabled) getString(R.string.call_video_off) else getString(R.string.call_video_on)
     }
 
     // -----------------------------------------------------------------------

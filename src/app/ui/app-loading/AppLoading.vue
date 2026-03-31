@@ -1,21 +1,24 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { bootStatus } from "@/app/model/boot-status";
+import { useI18n, type TranslationKey } from "@/shared/lib/i18n";
 
+const { t } = useI18n();
 const state = computed(() => bootStatus.state.value);
 const error = computed(() => bootStatus.error.value);
 
-const stepLabels: Record<string, string> = {
-  scripts: "Loading scripts…",
-  tor: "Starting secure connection…",
-  auth: "Authenticating…",
-  matrix: "Connecting to server…",
-  sync: "Syncing messages…",
+const stepKeys: Record<string, TranslationKey> = {
+  scripts: "boot.loadingScripts",
+  tor: "boot.secureConnection",
+  auth: "boot.authenticating",
+  matrix: "boot.connectingServer",
+  sync: "boot.syncingMessages",
 };
 
-const stepLabel = computed(
-  () => stepLabels[bootStatus.currentStep.value] ?? "Loading Forta Chat…",
-);
+const stepLabel = computed(() => {
+  const key = stepKeys[bootStatus.currentStep.value];
+  return key ? t(key) : t("boot.loading");
+});
 
 const clearing = ref(false);
 
@@ -75,7 +78,7 @@ const clearAndRetry = async () => {
           !
         </div>
 
-        <p class="text-sm text-red-400">Failed to start Forta Chat</p>
+        <p class="text-sm text-red-400">{{ t("boot.failed") }}</p>
         <p v-if="error" class="max-w-xs text-center text-xs text-white/40">
           {{ error }}
         </p>
@@ -84,7 +87,7 @@ const clearAndRetry = async () => {
           class="mt-2 rounded-lg bg-white/10 px-5 py-2 text-sm text-white transition-colors hover:bg-white/20"
           @click="retry"
         >
-          Retry
+          {{ t("boot.retry") }}
         </button>
 
         <button
@@ -92,7 +95,7 @@ const clearAndRetry = async () => {
           :disabled="clearing"
           @click="clearAndRetry"
         >
-          {{ clearing ? "Clearing…" : "Clear cache & retry" }}
+          {{ clearing ? t("boot.clearing") : t("boot.clearCache") }}
         </button>
       </template>
     </div>

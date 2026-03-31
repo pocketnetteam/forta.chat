@@ -3,6 +3,7 @@ import { useChatStore } from "@/entities/chat";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { getMatrixClientService } from "@/entities/matrix";
 import { useToast } from "@/shared/lib/use-toast";
+import { useI18n } from "@/shared/lib/i18n";
 import type { Message } from "@/entities/chat/model/types";
 import { MessageStatus } from "@/entities/chat/model/types";
 import type { LocalMessage } from "@/shared/lib/local-db/schema";
@@ -65,6 +66,7 @@ export function useScrollToMessage(
   const scrollTarget = ref<ScrollTarget | null>(null);
   const chatStore = useChatStore();
   const { toast } = useToast();
+  const { t } = useI18n();
 
   // ---- helpers ----
 
@@ -172,7 +174,7 @@ export function useScrollToMessage(
             const rawEvents = await matrixService.fetchEventContext(roomId, messageId, 50);
 
             if (!rawEvents || rawEvents.length === 0) {
-              fail("Сообщение не найдено");
+              fail(t("chat.messageNotFound"));
               return;
             }
 

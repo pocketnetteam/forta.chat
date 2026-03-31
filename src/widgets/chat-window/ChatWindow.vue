@@ -518,7 +518,7 @@ onUnmounted(() => {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-amber-500">
             <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
           </svg>
-          <span>Peer hasn't published encryption keys yet. Messaging is temporarily unavailable.</span>
+          <span>{{ t("chat.peerKeysMissing") }}</span>
         </div>
         <MessageList ref="messageListRef" />
         <SelectionBar

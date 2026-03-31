@@ -579,6 +579,47 @@ export const en = {
   "common.encryptedChat": "Chat",
   "message.notDecrypted": "Message not decrypted",
 
+  // ── Sync status ──
+  "sync.offline": "Waiting for network...",
+  "sync.connecting": "Connecting...",
+  "sync.catchingUp": "Updating...",
+  "sync.upToDate": "Up to date",
+  "sync.error": "Failed to connect",
+
+  // ── Push notifications ──
+  "push.newMessage": "New message",
+  "push.photo": "📷 Photo",
+  "push.video": "🎥 Video",
+  "push.voiceMessage": "🎤 Voice message",
+  "push.unknownSender": "Unknown",
+  "push.file": "📎 File",
+
+  // ── Notification channels ──
+  "channel.messages": "Messages",
+  "channel.messagesDesc": "Chat message notifications",
+  "channel.calls": "Calls",
+  "channel.callsDesc": "Incoming call notifications",
+
+  // ── Boot / Loading screen ──
+  "boot.loadingScripts": "Loading scripts…",
+  "boot.secureConnection": "Starting secure connection…",
+  "boot.authenticating": "Authenticating…",
+  "boot.connectingServer": "Connecting to server…",
+  "boot.syncingMessages": "Syncing messages…",
+  "boot.loading": "Loading Forta Chat…",
+  "boot.failed": "Failed to start Forta Chat",
+  "boot.retry": "Retry",
+  "boot.clearing": "Clearing…",
+  "boot.clearCache": "Clear cache & retry",
+
+  // ── Misc ──
+  "chat.messageNotFound": "Message not found",
+  "chat.peerKeysMissing": "Peer hasn't published encryption keys yet. Messaging is temporarily unavailable.",
+  "tor.disable": "Disable Tor",
+  "register.registrationFailed": "Registration failed",
+  "register.captchaLoadFailed": "Failed to load captcha",
+  "invite.shareText": "Join me on Forta Chat!",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",

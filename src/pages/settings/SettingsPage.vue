@@ -6,6 +6,7 @@ import { Toggle } from "@/shared/ui/toggle";
 import { isNative } from "@/shared/lib/platform";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
+const { t } = useI18n();
 const themeStore = useThemeStore();
 const torStore = useTorStore();
 const router = useRouter();
@@ -32,13 +33,13 @@ const torDotClass = computed(() => {
 const torSubtitle = computed(() => {
   if (!torStore.isEnabled) return null;
   const r = torStore.verifyResult;
-  if (torStore.isVerifying) return { text: "Verifying...", color: "text-text-on-main-bg-color", spin: true };
+  if (torStore.isVerifying) return { text: t("tor.verifying"), color: "text-text-on-main-bg-color", spin: true };
   if (torStore.isConnecting && torStore.info) return { text: torStore.info, color: "text-color-star-yellow", spin: false };
-  if (torStore.isConnecting) return { text: "Connecting...", color: "text-color-star-yellow", spin: false };
-  if (torStore.status === "failed") return { text: "Tor failed to start. Try toggling off and on.", color: "text-color-bad", spin: false };
+  if (torStore.isConnecting) return { text: t("tor.connecting"), color: "text-color-star-yellow", spin: false };
+  if (torStore.status === "failed") return { text: t("settings.torFailed"), color: "text-color-bad", spin: false };
   if (torStore.isConnected && r?.isTor) return { text: r.ip, color: "text-color-good", spin: false };
-  if (torStore.isConnected && r && !r.isTor) return { text: "Not using Tor", color: "text-color-bad", spin: false };
-  if (torStore.isConnected && !r) return { text: "Verifying...", color: "text-text-on-main-bg-color", spin: true };
+  if (torStore.isConnected && r && !r.isTor) return { text: t("tor.notUsingTor"), color: "text-color-bad", spin: false };
+  if (torStore.isConnected && !r) return { text: t("tor.verifying"), color: "text-text-on-main-bg-color", spin: true };
   return null;
 });
 
@@ -59,7 +60,7 @@ const confirmDisableTor = () => {
 <template>
   <MainLayout>
     <div class="mx-auto max-w-2xl px-4 py-6 md:px-6">
-      <h1 class="mb-6 text-xl font-bold text-text-color">Settings</h1>
+      <h1 class="mb-6 text-xl font-bold text-text-color">{{ t("settings.title") }}</h1>
 
       <div class="space-y-2">
         <!-- Appearance -->
@@ -75,7 +76,7 @@ const confirmDisableTor = () => {
               <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span class="text-text-color">Appearance</span>
+            <span class="text-text-color">{{ t("settings.appearance") }}</span>
           </div>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
             <polyline points="9 18 15 12 9 6" />
@@ -88,7 +89,7 @@ const confirmDisableTor = () => {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
-            <span class="text-text-color">Dark Mode</span>
+            <span class="text-text-color">{{ t("settings.darkMode") }}</span>
           </div>
           <Toggle
             :model-value="themeStore.isDarkMode"
@@ -106,7 +107,7 @@ const confirmDisableTor = () => {
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
               </svg>
-              <span class="text-text-color">Tor Proxy</span>
+              <span class="text-text-color">{{ t("settings.torProxy") }}</span>
             </div>
             <Toggle
               :model-value="torStore.isEnabled"
@@ -149,20 +150,20 @@ const confirmDisableTor = () => {
           >
             <div class="mx-4 max-w-sm rounded-xl bg-background-secondary-theme p-6 shadow-xl">
               <p class="mb-4 text-sm text-text-color">
-                Disabling Tor will expose your real IP address. Your traffic will no longer be anonymous. Continue?
+                {{ t("tor.disableWarning") }}
               </p>
               <div class="flex justify-end gap-3">
                 <button
                   class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
                   @click="showDisableWarning = false"
                 >
-                  Cancel
+                  {{ t("common.cancel") }}
                 </button>
                 <button
                   class="rounded-lg bg-color-bad px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-80"
                   @click="confirmDisableTor()"
                 >
-                  Disable Tor
+                  {{ t("tor.disable") }}
                 </button>
               </div>
             </div>
@@ -176,9 +177,9 @@ const confirmDisableTor = () => {
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
               <path d="M13.73 21a2 2 0 0 1-3.46 0" />
             </svg>
-            <span class="text-text-color">Notifications</span>
+            <span class="text-text-color">{{ t("settings.notifications") }}</span>
           </div>
-          <span class="text-xs text-text-on-main-bg-color">Enabled</span>
+          <span class="text-xs text-text-on-main-bg-color">{{ t("settings.enabled") }}</span>
         </div>
 
         <!-- Privacy (placeholder) -->
@@ -188,7 +189,7 @@ const confirmDisableTor = () => {
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
               <path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
-            <span class="text-text-color">Privacy</span>
+            <span class="text-text-color">{{ t("settings.privacy") }}</span>
           </div>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
             <polyline points="9 18 15 12 9 6" />

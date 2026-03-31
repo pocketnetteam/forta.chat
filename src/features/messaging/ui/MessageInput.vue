@@ -492,7 +492,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
           </svg>
         </div>
         <div class="min-w-0 flex-1">
-          <div class="text-xs font-medium text-color-bg-ac">Editing</div>
+          <div class="text-xs font-medium text-color-bg-ac">{{ t("message.editing") }}</div>
           <div class="truncate text-xs text-text-on-main-bg-color">{{ chatStore.editingMessage?.content }}</div>
         </div>
         <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelEdit">

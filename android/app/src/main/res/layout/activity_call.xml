@@ -42,7 +42,7 @@
             android:id="@+id/remote_no_video_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Camera off"
+            android:text="@string/call_camera_off"
             android:textColor="#99FFFFFF"
             android:textSize="14sp"
             android:layout_marginTop="12dp" />
@@ -171,7 +171,7 @@
                     android:id="@+id/label_mute"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Mute"
+                    android:text="@string/call_mute"
                     android:textColor="#BBFFFFFF"
                     android:textSize="11sp"
                     android:layout_marginTop="6dp" />
@@ -198,7 +198,7 @@
                     android:id="@+id/label_video"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Video"
+                    android:text="@string/call_video"
                     android:textColor="#BBFFFFFF"
                     android:textSize="11sp"
                     android:layout_marginTop="6dp" />
@@ -226,7 +226,7 @@
                     android:id="@+id/label_flip"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Flip"
+                    android:text="@string/call_flip"
                     android:textColor="#BBFFFFFF"
                     android:textSize="11sp"
                     android:layout_marginTop="6dp" />
@@ -253,7 +253,7 @@
                     android:id="@+id/label_audio_route"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Speaker"
+                    android:text="@string/call_speaker"
                     android:textColor="#BBFFFFFF"
                     android:textSize="11sp"
                     android:layout_marginTop="6dp" />

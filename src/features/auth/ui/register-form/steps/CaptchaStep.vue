@@ -33,7 +33,7 @@ const loadCaptcha = async (clearError = true) => {
     captchaSvg.value = sanitizeSvg(result?.img || "");
     loading.value = false;
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Failed to load captcha";
+    error.value = e instanceof Error ? e.message : t("register.captchaLoadFailed");
     loading.value = false;
   }
 };

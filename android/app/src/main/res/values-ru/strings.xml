@@ -1,0 +1,61 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <!-- Push notifications -->
+    <string name="push_new_message">Новое сообщение</string>
+    <string name="push_photo">📷 Фото</string>
+    <string name="push_video">🎥 Видео</string>
+    <string name="push_voice_message">🎙 Голосовое сообщение</string>
+    <string name="push_file">📎 Файл</string>
+    <string name="push_incoming_call">Входящий звонок</string>
+
+    <!-- Notification channels -->
+    <string name="channel_messages">Сообщения</string>
+    <string name="channel_messages_desc">Уведомления о сообщениях</string>
+    <string name="channel_calls">Звонки</string>
+    <string name="channel_calls_desc">Уведомления о входящих звонках</string>
+    <string name="channel_active_call">Активный звонок</string>
+    <string name="channel_active_call_desc">Отображается во время звонка</string>
+    <string name="channel_incoming_calls">Входящие звонки</string>
+    <string name="channel_incoming_calls_desc">Уведомления о входящих звонках</string>
+
+    <!-- Call UI -->
+    <string name="call_connecting">Соединение…</string>
+    <string name="call_camera_off">Камера выкл</string>
+    <string name="call_mute">Выкл. микрофон</string>
+    <string name="call_unmute">Вкл. микрофон</string>
+    <string name="call_video">Видео</string>
+    <string name="call_video_off">Выкл. видео</string>
+    <string name="call_video_on">Вкл. видео</string>
+    <string name="call_flip">Камера</string>
+    <string name="call_speaker">Динамик</string>
+    <string name="call_hang_up">Завершить</string>
+    <string name="call_earpiece">Динамик телефона</string>
+    <string name="call_wired_headset">Проводная гарнитура</string>
+    <string name="call_audio_output">Аудиовыход</string>
+    <string name="call_bluetooth">Bluetooth</string>
+    <string name="call_bluetooth_short">BT</string>
+    <string name="call_video_call">Видеозвонок</string>
+    <string name="call_voice_call">Голосовой звонок</string>
+    <string name="call_video_call_with">Видеозвонок с %s</string>
+    <string name="call_voice_call_with">Голосовой звонок с %s</string>
+
+    <!-- Incoming call -->
+    <string name="incoming_video_call">Входящий видеозвонок</string>
+    <string name="incoming_audio_call">Входящий аудиозвонок</string>
+    <string name="call_decline">Отклонить</string>
+    <string name="call_accept">Принять</string>
+
+    <!-- Updater -->
+    <string name="updater_up_to_date">Вы используете последнюю версию (%s)</string>
+    <string name="updater_check_failed">Не удалось проверить обновления: %s</string>
+    <string name="updater_available_title">Доступно обновление</string>
+    <string name="updater_available_message">Новая версия %s доступна для загрузки. Обновить сейчас?</string>
+    <string name="updater_update">Обновить</string>
+    <string name="updater_open_browser">Открыть в браузере</string>
+    <string name="updater_later">Позже</string>
+    <string name="updater_preparing">Подготовка…</string>
+    <string name="updater_downloading_title">Загрузка обновления %s</string>
+    <string name="updater_cancel">Отмена</string>
+    <string name="updater_downloaded_percent">Скачано %d%%</string>
+    <string name="updater_download_error">Ошибка загрузки: %s</string>
+</resources>

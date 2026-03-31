@@ -1271,25 +1271,25 @@ defineExpose({ scrollToMessage, setSearchQuery });
           @click.self="chatStore.deletingMessage = null"
         >
           <div class="w-full max-w-xs rounded-xl bg-background-total-theme p-5 shadow-xl">
-            <h3 class="mb-4 text-base font-semibold text-text-color">Delete message?</h3>
+            <h3 class="mb-4 text-base font-semibold text-text-color">{{ t("messageList.deleteMessage") }}</h3>
             <div class="flex flex-col gap-2">
               <button
                 class="rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
                 @click="handleDeleteForEveryone"
               >
-                Delete for everyone
+                {{ t("messageList.deleteForEveryone") }}
               </button>
               <button
                 class="rounded-lg bg-neutral-grad-0 px-4 py-2.5 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
                 @click="handleDeleteForMe"
               >
-                Delete for me
+                {{ t("messageList.deleteForMe") }}
               </button>
               <button
                 class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
                 @click="chatStore.deletingMessage = null"
               >
-                Cancel
+                {{ t("messageList.cancel") }}
               </button>
             </div>
           </div>

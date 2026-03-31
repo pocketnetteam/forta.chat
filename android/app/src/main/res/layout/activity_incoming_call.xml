@@ -118,7 +118,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Отклонить"
+                    android:text="@string/call_decline"
                     android:textColor="#99FFFFFF"
                     android:textSize="13sp"
                     android:layout_marginTop="8dp" />
@@ -146,7 +146,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Принять"
+                    android:text="@string/call_accept"
                     android:textColor="#99FFFFFF"
                     android:textSize="13sp"
                     android:layout_marginTop="8dp" />
