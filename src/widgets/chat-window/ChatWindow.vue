@@ -78,11 +78,13 @@ watch(() => chatStore.activeRoomId, (roomId) => {
 const peerKeysMissing = computed(() => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return false;
+  // Only show warning for 1:1 chats — group chats don't require all members to have keys
+  if (chatStore.activeRoom?.isGroup) return false;
   return chatStore.peerKeysStatus.get(roomId) === "missing";
 });
 
 watch(() => chatStore.activeRoomId, async (roomId) => {
-  if (roomId) {
+  if (roomId && !chatStore.activeRoom?.isGroup) {
     await chatStore.checkPeerKeys(roomId);
   }
 }, { immediate: true });

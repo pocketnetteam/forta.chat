@@ -245,12 +245,22 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 }
               }
 
-              // Ensure source always has an id field for deterministic sort order.
-              // Fallback to SDK user data if rawProfile is missing.
+              // Ensure source always has a numeric `id` field for deterministic
+              // sort order in preparedUsers (must match lodash _.sortBy(u => u.source.id)
+              // used by the old bastyon-chat client).
+              // Priority: rawProfile (has Pocketnet numeric id) > sdkUser > empty.
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const source: Record<string, unknown> = rawProfile
+              const rawSource: Record<string, unknown> = rawProfile
                 ? rawProfile
                 : (sdkUser ? { ...(sdkUser as any), address: rawAddr } : { address: rawAddr });
+
+              // If source still has no `id`, try to extract from SDK user data.
+              // Without a numeric id the sort order diverges from the old client
+              // (lodash _.sortBy places undefined at end; missing id would break ECDH).
+              const source: Record<string, unknown> = rawSource;
+              if (source.id == null && sdkUser && (sdkUser as any).id != null) {
+                source.id = (sdkUser as any).id;
+              }
 
               console.error("[getUsersInfo] id=" + hexId.slice(0,10) + " sdkPath=" + sdkPath + " sdkKeys=" + ((sdkUser as any)?.keys?.length ?? 0) + " finalKeys=" + keys.length + " k0=" + (keys[0]?.slice(0,10) ?? "none") + " sdkUser=" + (sdkUser ? "yes" : "no") + " sourceId=" + ((source as any)?.id ?? "none"));
 

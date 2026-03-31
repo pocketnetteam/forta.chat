@@ -284,23 +284,27 @@ export class Pcrypto {
       return us.map(function (u) { return usersinfo[u.id]; }).filter(function (u) { return !!u; });
     }
 
+    // Sort comparator matching lodash _.sortBy(arr, u => u.source.id):
+    // null/undefined values go to the END (lodash behaviour), NOT to the beginning.
+    function sortBySourceId(a: CryptoUserInfo, b: CryptoUserInfo): number {
+      const aId = a.source?.id;
+      const bId = b.source?.id;
+      if (aId == null && bId == null) return 0;
+      if (aId == null) return 1;   // null → end (matches lodash _.sortBy)
+      if (bId == null) return -1;  // null → end (matches lodash _.sortBy)
+      if (aId < bId) return -1;
+      if (aId > bId) return 1;
+      return 0;
+    }
+
     // ---- preparedUsers — match of original lines 66-86 ----
     function preparedUsers(time: number, v?: number): CryptoUserInfo[] {
       const filtered = getusersinfobytime(time).filter(function (ui) {
         return ui.keys && ui.keys.length >= m;
       });
       if (v && v > 1) {
-        // Original: _.sortBy(r, u => u.source.id) — sort by Pocketnet numeric user ID
-        filtered.sort((a, b) => {
-          const aId = a.source?.id;
-          const bId = b.source?.id;
-          if (aId == null && bId == null) return 0;
-          if (aId == null) return -1;
-          if (bId == null) return 1;
-          if (aId < bId) return -1;
-          if (aId > bId) return 1;
-          return 0;
-        });
+        // Must match lodash _.sortBy(r, u => u.source.id) — null/undefined goes LAST
+        filtered.sort(sortBySourceId);
       }
       return filtered;
     }
@@ -317,17 +321,8 @@ export class Pcrypto {
         }
       }
       if (v && v > 1) {
-        // Original: _.sortBy(ui, u => u.source.id) — sort by Pocketnet numeric user ID
-        ui.sort((a, b) => {
-          const aId = a.source?.id;
-          const bId = b.source?.id;
-          if (aId == null && bId == null) return 0;
-          if (aId == null) return -1;
-          if (bId == null) return 1;
-          if (aId < bId) return -1;
-          if (aId > bId) return 1;
-          return 0;
-        });
+        // Must match lodash _.sortBy(r, u => u.source.id) — null/undefined goes LAST
+        ui.sort(sortBySourceId);
       }
       return ui;
     }

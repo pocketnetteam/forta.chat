@@ -81,8 +81,12 @@ interface CryptoUser {
 }
 
 function cuhash(users: CryptoUser[], num: number, block: number): Uint8Array {
+  // block is always > 0 in normal flows (currentblock.height or 10 for groups).
+  // Fallback must NOT use a hardcoded constant — the main-thread version uses
+  // pcrypto.currentblock.height, but the worker has no access to it.
+  // Since block is always provided by the caller and is never 0, just use it directly.
   const input =
-    users.map((u) => u.keys[num]).join("") + (block || 1);
+    users.map((u) => u.keys[num]).join("") + block;
   return pbkdf2.pbkdf2Sync(
     hexFromBytes(sha224(input)),
     salt,
