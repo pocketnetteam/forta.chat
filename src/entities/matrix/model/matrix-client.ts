@@ -241,7 +241,7 @@ export class MatrixClientService {
             ],
           },
           ephemeral: {
-            types: [],
+            types: ["m.receipt", "m.typing"],
           },
           account_data: {
             types: ["m.fully_read", "m.tag"],

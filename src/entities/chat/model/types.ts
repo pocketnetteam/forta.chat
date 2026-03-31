@@ -69,6 +69,8 @@ export interface LinkPreview {
 
 export interface Message {
   id: string;
+  /** Stable key that doesn't change when id flips from clientId to eventId after send confirmation */
+  _key?: string;
   roomId: string;
   senderId: string;
   content: string;

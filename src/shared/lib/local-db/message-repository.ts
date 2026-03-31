@@ -150,9 +150,11 @@ export class MessageRepository {
     if (msg.clientId) {
       const existing = await this.getByClientId(msg.clientId);
       if (existing) {
-        // If upload is still in-flight (has localBlobUrl), only store eventId
-        // — let confirmMediaSent handle the final status transition
-        if (existing.localBlobUrl) {
+        // If upload is still in-flight (has localBlobUrl) and hasn't failed,
+        // only store eventId — let confirmMediaSent handle the final status transition.
+        // If the message is already "failed", the upload pipeline is dead and we should
+        // accept the server echo as the source of truth.
+        if (existing.localBlobUrl && existing.status !== "failed") {
           await this.db.messages.update(existing.localId!, {
             eventId: msg.eventId,
             serverTs: msg.serverTs ?? msg.timestamp,
@@ -458,6 +460,18 @@ export class MessageRepository {
       .limit(1)
       .toArray();
     return msgs[0];
+  }
+
+  /** Get the timestamp of the last inbound (non-own) message in a room */
+  async getLastInboundTimestamp(roomId: string, myAddress: string): Promise<number> {
+    const msgs = await this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, Dexie.minKey], [roomId, Dexie.maxKey], true, true)
+      .reverse()
+      .filter(m => m.senderId !== myAddress)
+      .limit(1)
+      .toArray();
+    return msgs[0]?.timestamp ?? 0;
   }
 
   // ---------------------------------------------------------------------------

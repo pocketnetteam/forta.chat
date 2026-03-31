@@ -10,6 +10,7 @@ import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
+import { invalidateDownloadCache } from "./use-file-download";
 
 export function useMessages() {
   const chatStore = useChatStore();
@@ -264,7 +265,8 @@ export function useMessages() {
             };
             await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
 
-            // Revoke blob URL after a short delay (UI may still reference it)
+            // Invalidate download cache before revoking blob URL to prevent stale references
+            invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
           } catch (e) {
             console.error("Failed to send file (Dexie path):", e);
@@ -432,6 +434,7 @@ export function useMessages() {
             };
             await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
 
+            invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
           } catch (e) {
             console.error("Failed to send image (Dexie path):", e);
@@ -602,6 +605,7 @@ export function useMessages() {
             };
             await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
 
+            invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
           } catch (e) {
             console.error("Failed to send audio (Dexie path):", e);
@@ -773,6 +777,7 @@ export function useMessages() {
             };
             await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
 
+            invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
           } catch (e) {
             console.error("Failed to send video circle (Dexie path):", e);
@@ -1578,6 +1583,7 @@ export function useMessages() {
             };
             await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
 
+            invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
           } catch (e) {
             console.error("Failed to send GIF (Dexie path):", e);
@@ -1782,6 +1788,7 @@ export function useMessages() {
         secrets: secrets as FileInfo["secrets"],
       });
 
+      invalidateDownloadCache(localMsg.clientId);
       const blobToRevoke = localMsg.localBlobUrl;
       if (blobToRevoke) setTimeout(() => URL.revokeObjectURL(blobToRevoke), 5000);
     } catch (e) {

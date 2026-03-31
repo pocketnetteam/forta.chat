@@ -10,7 +10,7 @@ export function localToMessage(
   local: LocalMessage,
   outboundWatermark?: number,
   myAddress?: string,
-): Message & { _key?: string } {
+): Message {
   const isDeleted = local.deleted || local.softDeleted;
   const isOwnMessage = myAddress && local.senderId === myAddress;
   const status = (outboundWatermark !== undefined && isOwnMessage)
