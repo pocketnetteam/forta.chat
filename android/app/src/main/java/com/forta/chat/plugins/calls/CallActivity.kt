@@ -1,5 +1,9 @@
 package com.forta.chat.plugins.calls
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
 import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.Context
@@ -20,6 +24,7 @@ import android.util.Rational
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.ImageButton
 import android.widget.TextView
 import com.forta.chat.R
@@ -83,8 +88,15 @@ class CallActivity : Activity(), SensorEventListener {
     private lateinit var btnMute: ImageButton
     private lateinit var btnVideo: ImageButton
     private lateinit var btnFlip: ImageButton
-    private lateinit var btnSpeaker: ImageButton
+    private lateinit var btnAudioRoute: ImageButton
     private lateinit var btnHangup: ImageButton
+
+    // Voice mode views
+    private var voiceBg: View? = null
+    private var voiceCenter: View? = null
+    private var avatarText: TextView? = null
+    private var flipContainer: View? = null
+    private var pulseAnimator: AnimatorSet? = null
 
     // State
     private var isMuted = false
@@ -150,6 +162,17 @@ class CallActivity : Activity(), SensorEventListener {
         callerNameText.text = callerName
         callStatusText.text = "Connecting..."
 
+        // Voice mode setup
+        if (callType == "voice") {
+            voiceBg?.visibility = View.VISIBLE
+            voiceCenter?.visibility = View.VISIBLE
+            remoteVideoView.visibility = View.GONE
+            localVideoView.visibility = View.GONE
+            flipContainer?.visibility = View.GONE
+            avatarText?.text = callerName.take(2).uppercase()
+            startPulseAnimation()
+        }
+
         // Audio
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -205,6 +228,7 @@ class CallActivity : Activity(), SensorEventListener {
     override fun onDestroy() {
         handler.removeCallbacks(timerRunnable)
         handler.removeCallbacks(hideControlsRunnable)
+        pulseAnimator?.cancel()
         onCallEnded = null
         onCallConnected = null
         // Note: onNativeHangup is wired by WebRTCPlugin.load() and stays alive
@@ -236,15 +260,19 @@ class CallActivity : Activity(), SensorEventListener {
         btnMute = findViewById(R.id.btn_mute)
         btnVideo = findViewById(R.id.btn_video)
         btnFlip = findViewById(R.id.btn_flip)
-        btnSpeaker = findViewById(R.id.btn_speaker)
+        btnAudioRoute = findViewById(R.id.btn_audio_route)
         btnHangup = findViewById(R.id.btn_hangup)
+        voiceBg = findViewById(R.id.voice_bg)
+        voiceCenter = findViewById(R.id.voice_center)
+        avatarText = findViewById(R.id.avatar_text)
+        flipContainer = findViewById(R.id.flip_container)
     }
 
     private fun setupListeners() {
         btnMute.setOnClickListener { toggleMute() }
         btnVideo.setOnClickListener { toggleVideo() }
         btnFlip.setOnClickListener { flipCamera() }
-        btnSpeaker.setOnClickListener { toggleSpeaker() }
+        btnAudioRoute.setOnClickListener { toggleSpeaker() }
         btnHangup.setOnClickListener { hangup() }
 
         // Tap anywhere to toggle controls visibility
@@ -292,6 +320,28 @@ class CallActivity : Activity(), SensorEventListener {
                 }
                 else -> false
             }
+        }
+    }
+
+    private fun startPulseAnimation() {
+        val outerRing = findViewById<View>(R.id.pulse_ring_outer) ?: return
+        val innerRing = findViewById<View>(R.id.pulse_ring_inner) ?: return
+        val outerScaleX = ObjectAnimator.ofFloat(outerRing, "scaleX", 1f, 1.3f, 1f)
+        val outerScaleY = ObjectAnimator.ofFloat(outerRing, "scaleY", 1f, 1.3f, 1f)
+        val outerAlpha = ObjectAnimator.ofFloat(outerRing, "alpha", 0.15f, 0.0f, 0.15f)
+        val innerScaleX = ObjectAnimator.ofFloat(innerRing, "scaleX", 1f, 1.15f, 1f)
+        val innerScaleY = ObjectAnimator.ofFloat(innerRing, "scaleY", 1f, 1.15f, 1f)
+        val innerAlpha = ObjectAnimator.ofFloat(innerRing, "alpha", 0.25f, 0.1f, 0.25f)
+        pulseAnimator = AnimatorSet().apply {
+            playTogether(outerScaleX, outerScaleY, outerAlpha, innerScaleX, innerScaleY, innerAlpha)
+            duration = 2000
+            interpolator = AccelerateDecelerateInterpolator()
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (!isFinishing) animation.start()
+                }
+            })
+            start()
         }
     }
 
@@ -348,15 +398,23 @@ class CallActivity : Activity(), SensorEventListener {
     }
 
     private fun updateButtonStates() {
-        // Use alpha to indicate toggle state (1.0 = active, 0.4 = inactive)
-        btnMute.alpha = if (isMuted) 1.0f else 0.5f
-        btnVideo.alpha = if (isVideoEnabled) 1.0f else 0.5f
-        btnSpeaker.alpha = if (isSpeakerOn) 1.0f else 0.5f
-
-        // Update labels
+        btnMute.setImageResource(if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic)
+        btnMute.setBackgroundResource(if (isMuted) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
+        val muteTint = if (isMuted) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnMute.setColorFilter(muteTint)
         findViewById<TextView>(R.id.label_mute)?.text = if (isMuted) "Unmute" else "Mute"
+
+        btnVideo.setImageResource(if (isVideoEnabled) R.drawable.ic_videocam else R.drawable.ic_videocam_off)
+        btnVideo.setBackgroundResource(if (!isVideoEnabled) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
+        val videoTint = if (!isVideoEnabled) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnVideo.setColorFilter(videoTint)
         findViewById<TextView>(R.id.label_video)?.text = if (isVideoEnabled) "Video Off" else "Video On"
-        findViewById<TextView>(R.id.label_speaker)?.text = if (isSpeakerOn) "Earpiece" else "Speaker"
+
+        btnAudioRoute.setImageResource(if (isSpeakerOn) R.drawable.ic_volume_up else R.drawable.ic_hearing)
+        btnAudioRoute.setBackgroundResource(if (isSpeakerOn) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
+        val speakerTint = if (isSpeakerOn) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnAudioRoute.setColorFilter(speakerTint)
+        findViewById<TextView>(R.id.label_audio_route)?.text = if (isSpeakerOn) "Earpiece" else "Speaker"
     }
 
     // -----------------------------------------------------------------------
