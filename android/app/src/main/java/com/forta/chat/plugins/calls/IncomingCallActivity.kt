@@ -20,9 +20,11 @@ import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.util.Log
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.forta.chat.MainActivity
 import com.forta.chat.R
+import com.forta.chat.utils.WindowInsetsHelper
 
 class IncomingCallActivity : Activity() {
 
@@ -83,6 +85,17 @@ class IncomingCallActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         setContentView(R.layout.activity_incoming_call)
+
+        // Apply real system bar insets instead of hardcoded 80dp margin
+        WindowInsetsHelper.setupEdgeToEdge(
+            activity = this,
+            onInsets = { _, bottom, _, _ ->
+                val buttonsContainer = findViewById<LinearLayout>(R.id.buttons_container)
+                val lp = buttonsContainer.layoutParams as LinearLayout.LayoutParams
+                lp.bottomMargin = bottom + (32 * resources.displayMetrics.density).toInt()
+                buttonsContainer.layoutParams = lp
+            }
+        )
 
         val callerName = intent.getStringExtra("callerName") ?: "Unknown"
         val hasVideo = intent.getBooleanExtra("hasVideo", false)

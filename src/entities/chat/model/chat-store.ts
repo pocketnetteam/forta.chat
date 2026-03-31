@@ -18,7 +18,7 @@ import { isNative } from "@/shared/lib/platform";
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import type { RoomChange } from "@/shared/lib/local-db";
 import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
-import type { ChatRoom, FileInfo, LinkPreview, Message, PollInfo, ReplyTo, TransferInfo } from "./types";
+import type { ChatRoom, FileInfo, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
 
 const NAMESPACE = "chat";
@@ -378,6 +378,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   // Track rooms that failed decryption — retry with backoff instead of permanent block
   const decryptFailedRooms = new Map<string, { count: number; lastAttempt: number }>();
+
+  // Track peer encryption key availability per room
+  const peerKeysStatus = reactive(new Map<string, PeerKeysStatus>());
   const DECRYPT_RETRY_DELAY = 10_000; // 10s before retrying a failed room
   const DECRYPT_MAX_RETRIES = 3;
 
@@ -2375,6 +2378,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Refresh to get full room data now that we're a member
       refreshRooms();
+
+      // Force reload active room data — activeRoomId didn't change so watchers
+      // won't fire. Re-calling setActiveRoom triggers profile/member loading
+      // and clears the invite preview.
+      if (activeRoomId.value === roomId) {
+        profilesRequestedForRooms.delete(roomId);
+        setActiveRoom(roomId);
+      }
     } catch (e) {
       console.warn("[chat-store] acceptInvite error:", e);
     }
@@ -5045,6 +5056,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return 0;
   };
 
+  /** Check if all peers in a room have published encryption keys.
+   *  Updates peerKeysStatus map and returns the status. */
+  const checkPeerKeys = async (roomId: string): Promise<PeerKeysStatus> => {
+    const authStore = useAuthStore();
+    const roomCrypto = authStore.pcrypto?.rooms[roomId];
+    if (!roomCrypto) {
+      peerKeysStatus.set(roomId, "unknown");
+      return "unknown";
+    }
+
+    const canEncrypt = roomCrypto.canBeEncrypt();
+    const status: PeerKeysStatus = canEncrypt ? "available" : "missing";
+    peerKeysStatus.set(roomId, status);
+    return status;
+  };
+
   /** Reset all in-memory state and account-specific localStorage (called on logout) */
   const cleanup = () => {
     rooms.value = [];
@@ -5072,6 +5099,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     decryptedPreviewCache.clear();
     changedRoomIds.clear();
     decryptFailedRooms.clear();
+    peerKeysStatus.clear();
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
     roomFetchStates.clear();
@@ -5091,6 +5119,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     addMessage,
     addRoom,
     advanceInboundWatermark,
+    checkPeerKeys,
     cleanup,
     clearDeletedRoom,
     deletingMessage,
@@ -5131,6 +5160,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     mutedRoomIds,
     optimisticAddReaction,
     optimisticRemoveReaction,
+    peerKeysStatus,
     setReactionEventId,
     pinMessage,
     pinnedMessageIndex,

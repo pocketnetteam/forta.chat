@@ -125,7 +125,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSRegPending, value: LSRegPending } =
     useLocalStorage<boolean>("registration_pending", false);
   const registrationPending = ref(LSRegPending);
-  let registrationPollTimer: ReturnType<typeof setInterval> | null = null;
+  let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Pending registration profile: stored until PKOIN arrives and UserInfo is broadcast
   type PendingRegProfile = { name: string; language: string; about: string; image?: string; encPublicKeys: string[] };
@@ -293,16 +293,28 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
+      let _lastSyncState: string | null = null;
       matrixService.setHandlers({
         onSync: (state) => {
+          const wasDisconnected = _lastSyncState === "ERROR" || _lastSyncState === "RECONNECTING";
+          _lastSyncState = state;
+
           if (state === "PREPARED" || state === "SYNCING") {
             chatStore.refreshRooms(state);
             // Sync room names to native for push notification display
             if (isNative && state === "PREPARED") {
               import('@/shared/lib/push').then(({ pushService }) => {
                 pushService.syncRoomNamesToNative();
+                pushService.syncSenderNamesToNative();
               }).catch(() => {});
             }
+            // After recovering from sync error — force full room refresh to catch missed events
+            if (wasDisconnected && state === "SYNCING") {
+              console.log("[auth] Sync recovered from disconnect — forcing full refresh");
+              chatStore.refreshRooms("PREPARED");
+            }
+          } else if (state === "ERROR" || state === "RECONNECTING") {
+            console.warn(`[auth] Sync state: ${state}`);
           }
           _onSyncStatusCallback?.(state);
         },
@@ -435,6 +447,22 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               return map;
             });
 
+            pushService.setAllSenderNamesGetter(() => {
+              const senders: Record<string, string> = {};
+              const client = matrixService.client;
+              if (!client) return senders;
+              for (const room of client.getRooms()) {
+                for (const member of room.getJoinedMembers()) {
+                  const userId = member.userId;
+                  const name = member.name;
+                  if (name && name !== userId && !senders[userId]) {
+                    senders[userId] = name;
+                  }
+                }
+              }
+              return senders;
+            });
+
             console.log('[auth] Initializing push service...');
             await pushService.init(matrixService.client);
 
@@ -495,6 +523,93 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     );
   };
 
+  /** Verify user has 12 published encryption keys; re-publish if missing.
+   *  Called on every login to catch users stuck in broken state.
+   *  Uses blockchain RPC (not local SDK cache) to avoid false negatives.
+   *  Skips if registration is already in progress (register() handles it). */
+  const verifyAndRepublishKeys = async () => {
+    if (!address.value || !privateKey.value) return;
+
+    // Don't interfere with active registration — register() manages its own poll
+    if (registrationPending.value || pendingRegProfile.value) {
+      console.log("[auth] Key verification skipped — registration in progress");
+      return;
+    }
+
+    // Step 1: Quick check via local SDK cache
+    const userData = appInitializer.getUserData(address.value);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cachedKeys: string[] = (userData as any)?.keys ?? [];
+
+    if (cachedKeys.length >= 12) {
+      console.log("[auth] Key verification OK (cache):", cachedKeys.length, "keys");
+      return;
+    }
+
+    // Step 2: Cache may be stale/empty after login — verify via blockchain RPC
+    console.log("[auth] Cache shows", cachedKeys.length, "keys, verifying via RPC...");
+    try {
+      const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+      const rawProfile = rawProfiles[0];
+      if (rawProfile) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
+        let blockchainKeys: string[] = [];
+        if (Array.isArray(rawKeys)) {
+          blockchainKeys = rawKeys.filter((k: string) => k);
+        } else if (typeof rawKeys === "string" && rawKeys) {
+          blockchainKeys = rawKeys.split(",").filter((k: string) => k);
+        }
+
+        if (blockchainKeys.length >= 12) {
+          console.log("[auth] Key verification OK (blockchain):", blockchainKeys.length, "keys");
+          return;
+        }
+        console.warn("[auth] Blockchain confirms only", blockchainKeys.length, "keys. Re-publishing...");
+      } else {
+        console.warn("[auth] No profile found on blockchain. Re-publishing...");
+      }
+    } catch (e) {
+      console.warn("[auth] RPC key check failed, skipping re-publish:", e);
+      // Don't block login if RPC fails — keys might be fine, cache just didn't load
+      return;
+    }
+
+    // Step 3: Keys genuinely missing — re-derive and re-publish
+    const encKeys = generateEncryptionKeys(privateKey.value);
+    const encPublicKeys = encKeys.map(k => k.public);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const name = (userData as any)?.name ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const language = (userData as any)?.language ?? "en";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const about = (userData as any)?.about ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const image = (userData as any)?.image ?? "";
+
+    const hasUnspents = await appInitializer.checkUnspents(address.value);
+    if (!hasUnspents) {
+      console.warn("[auth] No PKOIN for key re-publish. Setting pending for poll.");
+      setPendingRegProfile({ name, language, about, encPublicKeys, image });
+      setRegistrationPending(true);
+      startRegistrationPoll();
+      return;
+    }
+
+    try {
+      await appInitializer.syncNodeTime();
+      await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
+      console.log("[auth] Key re-publish broadcast sent. Starting confirmation poll.");
+      setRegistrationPending(true);
+      startRegistrationPoll();
+    } catch (e) {
+      console.error("[auth] Key re-publish failed:", e);
+      setPendingRegProfile({ name, language, about, encPublicKeys });
+      setRegistrationPending(true);
+      startRegistrationPoll();
+    }
+  };
+
   const { execute: login, isLoading: isLoggingIn } = useAsyncOperation(
     async (cryptoCredential: string) => {
       try {
@@ -508,6 +623,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         };
         setAuthData(authData);
         await fetchUserInfo();
+
+        // Verify encryption keys are published; re-publish if missing
+        await verifyAndRepublishKeys();
 
         // Initialize Matrix after successful auth
         await initMatrix();
@@ -656,20 +774,23 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setLSRegPending(val);
   };
 
-  /** Poll blockchain every 10s. Two phases:
+  /** Poll blockchain with exponential backoff. Two phases:
    *  Phase 1: Wait for PKOIN (unspents) to arrive, then broadcast UserInfo.
-   *  Phase 2: Wait for UserInfo to be confirmed on-chain (getuserstate + Actions status). */
+   *  Phase 2: Wait for UserInfo to be confirmed on-chain (getuserstate + Actions status).
+   *  NO TIMEOUT — polls indefinitely until confirmed or user logs out. */
   const startRegistrationPoll = () => {
-    if (registrationPollTimer) clearInterval(registrationPollTimer);
-    const startTime = Date.now();
-    const MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes fallback
+    if (registrationPollTimer) clearTimeout(registrationPollTimer);
+    let pollInterval = 3000;
+    const MAX_POLL_INTERVAL = 60000;
+    let attempt = 0;
     console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
 
-    registrationPollTimer = setInterval(async () => {
+    const poll = async () => {
       if (!address.value) {
         stopRegistrationPoll();
         return;
       }
+      attempt++;
       try {
         // Phase 1: Broadcast UserInfo once PKOIN arrives
         if (pendingRegProfile.value) {
@@ -678,23 +799,22 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             console.log("[auth] PKOIN received, broadcasting UserInfo...");
             await appInitializer.syncNodeTime();
             const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
-
-            // Re-initialize SDK account so it sees the new unspents
             await appInitializer.initializeAndFetchUserData(address.value);
-
             await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
             console.log("[auth] UserInfo broadcast requested, moving to phase 2");
             setPendingRegProfile(null);
+            pollInterval = 3000;
+            attempt = 0;
           } else {
-            console.log("[auth] Waiting for PKOIN...");
+            console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
           }
+          schedulePoll();
           return;
         }
 
         // Phase 2: Wait for blockchain confirmation of UserInfo
-        // Check 1: Actions system local status (instant)
         const actionsStatus = appInitializer.getAccountRegistrationStatus();
-        console.log("[auth] Registration poll — actions:", actionsStatus);
+        console.log("[auth] Registration poll — actions:", actionsStatus, "(attempt", attempt, ")");
 
         if (actionsStatus === 'registered') {
           console.log("[auth] Registration confirmed via Actions system!");
@@ -702,7 +822,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           return;
         }
 
-        // Check 2: Direct blockchain RPC (fallback if Actions system can't find account)
         const confirmed = await appInitializer.checkUserRegistered(address.value);
         if (confirmed) {
           console.log("[auth] Registration confirmed on blockchain!");
@@ -710,28 +829,27 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           return;
         }
 
-        console.log("[auth] Waiting for blockchain confirmation...");
-
-        // Fallback timeout
-        if (Date.now() - startTime > MAX_WAIT_MS) {
-          console.warn("[auth] Registration poll timeout, proceeding anyway");
-          setRegistrationPending(false);
-          stopRegistrationPoll();
-        }
+        console.log("[auth] Waiting for blockchain confirmation... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
       } catch (e) {
-        console.warn("[auth] Registration poll error:", e);
+        console.warn("[auth] Registration poll error (attempt", attempt, "):", e);
       }
-    }, 10000);
+      schedulePoll();
+    };
+
+    const schedulePoll = () => {
+      registrationPollTimer = setTimeout(poll, pollInterval);
+      pollInterval = Math.min(pollInterval * 2, MAX_POLL_INTERVAL);
+    };
+
+    poll();
 
     async function onRegistrationConfirmed() {
-      // Load full user data
       await appInitializer.initializeAndFetchUserData(
         address.value!,
         (data: UserData) => setUserInfo(data)
       );
       setRegistrationPending(false);
       stopRegistrationPoll();
-      // Re-init Matrix if needed (to pick up updated user info)
       if (!matrixReady.value) {
         PocketnetInstanceConfigurator.setUserAddress(address.value!);
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
@@ -744,23 +862,53 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   const stopRegistrationPoll = () => {
     if (registrationPollTimer) {
-      clearInterval(registrationPollTimer);
+      clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
   };
 
-  /** Resume polling on page reload if registration was pending */
-  const resumeRegistrationPoll = () => {
-    if (registrationPending.value && !registrationPollTimer) {
-      // Ensure POCKETNETINSTANCE has user address set (might not be if fetchUserInfo failed)
-      if (address.value && privateKey.value) {
-        PocketnetInstanceConfigurator.setUserAddress(address.value);
-        PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-          createKeyPair(privateKey.value!)
-        );
-      }
-      startRegistrationPoll();
+  /** Resume polling on page reload if registration was pending.
+   *  First verifies via blockchain RPC that keys are actually missing —
+   *  registrationPending may be stale from a previous failed attempt. */
+  const resumeRegistrationPoll = async () => {
+    if (!registrationPending.value || registrationPollTimer) return;
+
+    // Ensure POCKETNETINSTANCE has user address set
+    if (address.value && privateKey.value) {
+      PocketnetInstanceConfigurator.setUserAddress(address.value);
+      PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
+        createKeyPair(privateKey.value!)
+      );
     }
+
+    // Before resuming poll, check if keys are already on blockchain
+    // (registrationPending may be stale from a previous session)
+    if (address.value) {
+      try {
+        const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+        const rawProfile = rawProfiles[0];
+        if (rawProfile) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
+          let blockchainKeys: string[] = [];
+          if (Array.isArray(rawKeys)) {
+            blockchainKeys = rawKeys.filter((k: string) => k);
+          } else if (typeof rawKeys === "string" && rawKeys) {
+            blockchainKeys = rawKeys.split(",").filter((k: string) => k);
+          }
+          if (blockchainKeys.length >= 12) {
+            console.log("[auth] resumeRegistrationPoll: keys already on blockchain (" + blockchainKeys.length + "), clearing pending state");
+            setRegistrationPending(false);
+            setPendingRegProfile(null);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn("[auth] resumeRegistrationPoll: RPC check failed, resuming poll:", e);
+      }
+    }
+
+    startRegistrationPoll();
   };
 
   const clearRegistrationState = () => {

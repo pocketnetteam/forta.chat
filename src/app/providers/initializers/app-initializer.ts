@@ -2,6 +2,7 @@ import type { UserData } from "./types";
 
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
+import { isNative } from "@/shared/lib/platform";
 
 export interface BastyonPostData {
   txid: string;
@@ -533,16 +534,19 @@ export class AppInitializer {
     }
   }
 
-  /** Fetch channels the user is subscribed to.
-   *  Uses direct HTTP POST to Bastyon node — getsubscribeschannels is not available via proxy API. */
-  private static readonly BASTYON_NODE_URL = "/bastyon-node";
+  /** Direct node URL for RPC calls unsupported by proxy nodes.
+   *  Only usable on native platforms (Android/iOS) where mixed content is allowed. */
+  private static readonly BASTYON_NODE_URL = "http://94.156.128.149:38081/rpc";
 
+  /** Fetch channels the user is subscribed to.
+   *  Only available on native platforms — proxy nodes do not support this method. */
   async getSubscribesChannels(
     address: string,
     blockNumber = 0,
     page = 0,
     pageSize = 20
   ): Promise<{ channels: any[]; height: number } | undefined> {
+    if (!isNative) return undefined;
     try {
       const response = await fetch(AppInitializer.BASTYON_NODE_URL, {
         method: "POST",
@@ -561,7 +565,6 @@ export class AppInitializer {
         console.error("[appInit] getSubscribesChannels RPC error:", json.error);
         return undefined;
       }
-      // Response: { result: { height, channels: [...] }, error, id }
       const result = json.result ?? json;
       return {
         height: result.height ?? 0,
@@ -574,11 +577,12 @@ export class AppInitializer {
   }
 
   /** Fetch posts for a specific channel/user profile.
-   *  Uses direct HTTP POST to Bastyon node — same endpoint as getsubscribeschannels. */
+   *  Only available on native platforms — proxy nodes do not support this method. */
   async getProfileFeed(
     authorAddress: string,
     options?: { height?: number; startTxid?: string; count?: number }
   ): Promise<any[]> {
+    if (!isNative) return [];
     try {
       const opts = options ?? {};
       const response = await fetch(AppInitializer.BASTYON_NODE_URL, {

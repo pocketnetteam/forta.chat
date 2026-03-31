@@ -75,13 +75,28 @@ const processPushOpenRoom = (roomId: string) => {
     localStorage.setItem("bastyon-chat-push-room", roomId);
     return;
   }
-  console.log('[App] Push tap: navigating to room', roomId);
   // Kick Matrix sync immediately — WebView may have been suspended in background
   import("@/entities/matrix").then(({ getMatrixClientService }) => {
     getMatrixClientService().client?.retryImmediately();
   }).catch(() => {});
-  chatStore.setActiveRoom(roomId);
-  router.push({ name: "ChatPage" });
+
+  // Wait for rooms to load before navigating (on cold-start, sync may not have finished)
+  if (chatStore.roomsInitialized) {
+    chatStore.setActiveRoom(roomId);
+    router.push({ name: "ChatPage" });
+  } else {
+    const unwatch = watch(
+      () => chatStore.roomsInitialized,
+      (ready) => {
+        if (ready) {
+          unwatch();
+          chatStore.setActiveRoom(roomId);
+          router.push({ name: "ChatPage" });
+        }
+      },
+      { immediate: true },
+    );
+  }
 };
 
 const processPendingPushRoom = () => {
@@ -89,9 +104,7 @@ const processPendingPushRoom = () => {
   if (!roomId) return;
   localStorage.removeItem("bastyon-chat-push-room");
   if (!authStore.isAuthenticated || !authStore.matrixReady) return;
-  console.log('[App] Processing deferred push room:', roomId);
-  chatStore.setActiveRoom(roomId);
-  router.push({ name: "ChatPage" });
+  processPushOpenRoom(roomId);
 };
 
 if (isNative) {
@@ -196,6 +209,14 @@ onUnmounted(() => {
 
 <template>
   <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh">
+    <!-- Registration pending overlay — blocks chat until keys are published -->
+    <div v-if="authStore.registrationPending" class="fixed inset-0 z-50 flex items-center justify-center bg-white dark:bg-gray-900">
+      <div class="flex flex-col items-center gap-4 text-center px-8">
+        <div class="h-12 w-12 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Publishing encryption keys...</h2>
+        <p class="text-sm text-gray-500 dark:text-gray-400">This may take a few minutes. Please wait while your profile is being registered on the blockchain.</p>
+      </div>
+    </div>
     <TitleBar v-if="isElectron" />
     <div class="relative min-h-0 flex-1 overflow-hidden">
       <transition :name="isMobile ? '' : 'fade'" mode="out-in">

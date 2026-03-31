@@ -637,7 +637,10 @@ export class Pcrypto {
         if (!pcrypto.user.userinfo?.id || !users[pcrypto.user.userinfo.id]) return false;
 
         const usersinfoArray = Object.values(usersinfo);
-        return usersinfoArray.length > 1 && usersinfoArray.length < 50;
+        if (usersinfoArray.length <= 1 || usersinfoArray.length >= 50) return false;
+
+        // ALL participants must have 12 published keys for ECDH to work
+        return usersinfoArray.every(u => u.keys && u.keys.length >= m);
       },
 
       async prepare(): Promise<PcryptoRoomInstance> {
@@ -658,6 +661,13 @@ export class Pcrypto {
 
         // 1:1 chats use per-user ECDH + AES-SIV
         const _users = preparedUsers(0, version);
+
+        // Warn if not all room members have keys (encryption will be partial)
+        const allMembers = Object.values(usersinfo);
+        const missingKeys = allMembers.filter(u => !u.keys || u.keys.length < m);
+        if (missingKeys.length > 0) {
+          console.warn("[pcrypto] encryptEvent: " + missingKeys.length + " member(s) missing encryption keys:", missingKeys.map(u => u.id.slice(0, 10)));
+        }
 
         const encryptedEvent: Record<string, unknown> = {
           block: pcrypto.currentblock.height,
@@ -726,6 +736,13 @@ export class Pcrypto {
         } catch (e) {
           throw new Error("Not pcrypto format (JSON parse failed): " + String(e));
         }
+
+        // Check if encrypted payload exists at all
+        const allIds = Object.keys(body);
+        if (allIds.length === 0) {
+          throw new Error("Empty encrypted body — sender may lack encryption keys");
+        }
+
         const time = (event.origin_server_ts as number) || 1;
         const block = content.block as number;
         const eventVersion = content.version as number | undefined;
@@ -769,7 +786,7 @@ export class Pcrypto {
         }
 
         if (!bodyindex || !body[bodyindex]) {
-          throw new Error("emptyforme");
+          throw new Error("no encrypted payload for this user — sender may not have our encryption keys");
         }
 
         const bodyUserIds = Object.keys(body);

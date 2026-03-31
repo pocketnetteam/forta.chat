@@ -410,12 +410,13 @@ const isAnyScreenSharing = computed(
         <Transition name="header-fade">
           <div
             v-show="controlsVisible || !isConnected || !isVideoCall"
-            class="call-header absolute left-0 right-0 top-0 z-20 flex items-center justify-center"
+            class="call-header absolute left-0 right-0 top-0 z-20 flex items-center justify-center safe-top"
             :class="isMobile ? 'px-3 py-3' : 'px-6 py-4'"
           >
             <!-- Minimize button (top-left) -->
             <button
-              class="minimize-btn absolute left-4 top-4 z-30"
+              class="minimize-btn absolute left-4 z-30"
+              style="top: calc(var(--safe-area-inset-top, 0px) + 16px)"
               :title="t('call.minimize')"
               @click="minimize"
             >
@@ -450,7 +451,8 @@ const isAnyScreenSharing = computed(
             <Transition name="badge-pop">
               <div
                 v-if="isAnyScreenSharing"
-                class="absolute right-4 top-4 flex items-center gap-1.5 rounded-full bg-green-500/90 px-3 py-1 text-xs font-medium text-white shadow-lg"
+                class="absolute right-4 flex items-center gap-1.5 rounded-full bg-green-500/90 px-3 py-1 text-xs font-medium text-white shadow-lg"
+                style="top: calc(var(--safe-area-inset-top, 0px) + 16px)"
               >
                 <span class="h-2 w-2 rounded-full bg-white animate-pulse" />
                 {{ callStore.screenSharing ? t('call.screenShare') : t('call.screen') }}
@@ -655,8 +657,8 @@ const isAnyScreenSharing = computed(
         <Transition name="controls-slide">
           <div
             v-show="controlsVisible || !isConnected || !isVideoCall"
-            class="call-controls-bar absolute bottom-0 left-0 right-0 z-20 flex justify-center"
-            :class="isMobile ? 'pb-4 pt-8' : 'pb-6 pt-10'"
+            class="call-controls-bar absolute bottom-0 left-0 right-0 z-20 flex justify-center pb-safe"
+            :class="isMobile ? 'pt-8' : 'pt-10'"
           >
             <CallControls :compact="isMobile" />
           </div>

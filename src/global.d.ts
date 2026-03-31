@@ -138,7 +138,7 @@ declare var bitcoin: BitcoinLib;
 declare var Api: new (instance: PocketnetInstanceType) => {
   initIf(): Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  rpc(method: string, params?: unknown[]): Promise<any>;
+  rpc(method: string, params?: unknown[], options?: { fnode?: string; node?: string; ex?: boolean }): Promise<any>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fetchauth(path: string, data?: unknown, options?: { proxy?: string }): Promise<any>;
   get: {

@@ -74,6 +74,38 @@ playback.setOnEnded(async (endedMessageId: string, roomId: string) => {
 watch(() => chatStore.activeRoomId, (roomId) => {
   if (roomId) channelStore.clearActiveChannel();
 });
+
+const peerKeysMissing = computed(() => {
+  const roomId = chatStore.activeRoomId;
+  if (!roomId) return false;
+  return chatStore.peerKeysStatus.get(roomId) === "missing";
+});
+
+watch(() => chatStore.activeRoomId, async (roomId) => {
+  if (roomId) {
+    await chatStore.checkPeerKeys(roomId);
+  }
+}, { immediate: true });
+
+let peerKeyRecheckTimer: ReturnType<typeof setInterval> | null = null;
+
+watch(() => chatStore.activeRoomId, (roomId) => {
+  if (peerKeyRecheckTimer) { clearInterval(peerKeyRecheckTimer); peerKeyRecheckTimer = null; }
+  if (!roomId) return;
+
+  peerKeyRecheckTimer = setInterval(async () => {
+    const status = chatStore.peerKeysStatus.get(roomId);
+    if (status === "missing") {
+      const roomCrypto = authStore.pcrypto?.rooms[roomId];
+      if (roomCrypto) {
+        try {
+          await roomCrypto.prepare();
+          await chatStore.checkPeerKeys(roomId);
+        } catch { /* ignore */ }
+      }
+    }
+  }, 30_000);
+}, { immediate: true });
 const { toast } = useToast();
 
 const { t } = useI18n();
@@ -278,6 +310,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener("keydown", handleKeydown);
+  if (peerKeyRecheckTimer) { clearInterval(peerKeyRecheckTimer); peerKeyRecheckTimer = null; }
 });
 </script>
 
@@ -470,6 +503,12 @@ onUnmounted(() => {
           />
         </transition>
         <PinnedBar :is-admin="isAdmin" @scroll-to="handleScrollToMessage" />
+        <div v-if="peerKeysMissing" class="mx-4 my-2 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-4 py-3 text-sm text-amber-800 dark:text-amber-200 flex items-center gap-2">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-amber-500">
+            <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
+          </svg>
+          <span>Peer hasn't published encryption keys yet. Messaging is temporarily unavailable.</span>
+        </div>
         <MessageList ref="messageListRef" />
         <SelectionBar
           v-if="chatStore.selectionMode"

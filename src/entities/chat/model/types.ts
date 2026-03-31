@@ -157,3 +157,6 @@ export interface TransferInfo {
   to: string;
   message?: string;
 }
+
+/** Peer encryption key status for a room */
+export type PeerKeysStatus = "unknown" | "available" | "missing";

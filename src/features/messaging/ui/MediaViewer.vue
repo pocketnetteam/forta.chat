@@ -121,7 +121,7 @@ watch(currentMessage, async (msg) => {
     <transition name="media-fade">
       <div
         v-if="props.show && currentMessage"
-        class="fixed inset-0 z-50 flex flex-col bg-black"
+        class="fixed inset-0 z-50 flex flex-col bg-black safe-all"
         tabindex="0"
         @keydown="handleKeydown"
         @touchstart="onTouchstart"

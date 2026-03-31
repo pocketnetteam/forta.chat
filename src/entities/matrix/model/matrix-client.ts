@@ -392,6 +392,11 @@ export class MatrixClientService {
         if (!this.chatsReady) {
           this.chatsReady = true;
         }
+      } else if (state === "ERROR") {
+        console.warn("[matrix] Sync error — requesting immediate retry");
+        this.client?.retryImmediately();
+      } else if (state === "STOPPED") {
+        console.warn("[matrix] Sync stopped unexpectedly");
       }
       this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING");
     });

@@ -102,6 +102,13 @@ watch(() => chatStore.replyingTo, (reply) => {
   if (reply) nextTick(() => textareaRef.value?.focus());
 });
 
+const peerKeysOk = computed(() => {
+  const roomId = chatStore.activeRoomId;
+  if (!roomId) return true;
+  const status = chatStore.peerKeysStatus.get(roomId);
+  return status !== "missing";
+});
+
 const isEditing = computed(() => !!chatStore.editingMessage);
 
 const cancelEdit = () => {
@@ -138,7 +145,7 @@ const autoResize = autoGrow;
 const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
 
 const handleSend = () => {
-  if (!text.value.trim()) return;
+  if (!text.value.trim() || !peerKeysOk.value) return;
   const rawText = mention.resolveText();
   if (isEditing.value) { editMessage(chatStore.editingMessage!.id, rawText); chatStore.editingMessage = null; }
   else if (chatStore.replyingTo) { sendReply(rawText, linkPreview.activePreview.value ?? undefined); }
@@ -597,7 +604,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
         <transition name="btn-morph" mode="out-in">
           <button v-if="text.trim() || sending" key="send"
             class="send-btn flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
-            :disabled="!text.trim() || sending" @click="handleSend">
+            :disabled="!text.trim() || sending || !peerKeysOk" @click="handleSend">
             <svg v-if="sending" class="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
             <svg v-else-if="isEditing" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
             <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>

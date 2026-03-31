@@ -42,7 +42,7 @@ onUnmounted(closeDrawer);
         <transition @after-leave="onAfterLeaveTransition" name="slide-in">
           <div
             v-show="isDisplayCurrentDrawer"
-            class="h-screen w-[320px] bg-background-total-theme"
+            class="h-screen w-[320px] bg-background-total-theme safe-y"
             @click.stop
           >
             <slot name="content" />

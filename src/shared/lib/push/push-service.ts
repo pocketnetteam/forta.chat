@@ -10,6 +10,7 @@ class PushService {
   private getRoomInfo: ((roomId: string) => { roomName: string } | null) | null = null;
   private getActiveRoomId: (() => string | null) | null = null;
   private getAllRoomNames: (() => Record<string, string>) | null = null;
+  private getAllSenderNames: (() => Record<string, string>) | null = null;
 
   setCallHandler(handler: typeof this.onCallPush) {
     this.onCallPush = handler;
@@ -27,6 +28,10 @@ class PushService {
     this.getAllRoomNames = getter;
   }
 
+  setAllSenderNamesGetter(getter: () => Record<string, string>) {
+    this.getAllSenderNames = getter;
+  }
+
   /** Push all known room names to native SharedPreferences for offline display */
   async syncRoomNamesToNative(): Promise<void> {
     if (!this.getAllRoomNames) return;
@@ -37,6 +42,19 @@ class PushService {
       }
     } catch (e) {
       console.warn('[PushService] Failed to sync room names to native:', e);
+    }
+  }
+
+  /** Push all known sender display names to native SharedPreferences */
+  async syncSenderNamesToNative(): Promise<void> {
+    if (!this.getAllSenderNames) return;
+    try {
+      const senders = this.getAllSenderNames();
+      if (Object.keys(senders).length > 0) {
+        await PushData.cacheSenderNames({ senders });
+      }
+    } catch (e) {
+      console.warn('[PushService] Failed to sync sender names to native:', e);
     }
   }
 
@@ -77,9 +95,7 @@ class PushService {
    */
   private async tryDecryptAndReplace(data: PushPayload): Promise<void> {
     const { room_id: roomId, event_id: eventId } = data;
-    if (!roomId || !this.matrixClient) {
-      return;
-    }
+    if (!roomId || !this.matrixClient) return;
 
     try {
       // 1. Already in timeline?
@@ -122,7 +138,14 @@ class PushService {
         const content = raw.content as Record<string, unknown>;
         const body = content?.body;
         if (body && typeof body === "string") {
-          const senderName = (raw.sender as string) || "Unknown";
+          // Skip if body is still ciphertext (base64 blob — Bastyon E2EE wraps
+          // encrypted payloads inside m.room.message with a base64-encoded body)
+          if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
+          // Resolve display name from room member state instead of raw matrix ID
+          const senderId = raw.sender as string;
+          const room = this.matrixClient?.getRoom(roomId);
+          const member = room?.getMember(senderId);
+          const senderName = member?.name || senderId || "Unknown";
           return { senderName, body: this.formatBody(content) };
         }
       }
@@ -133,22 +156,24 @@ class PushService {
     }
   }
 
-  /** Replace native notification with decrypted content */
+  /**
+   * Replace native notification with decrypted content.
+   * Uses native PushDataPlugin.replaceNotificationContent() instead of
+   * Capacitor LocalNotifications.schedule() — this keeps the native PendingIntent
+   * with push_room_id/push_event_id extras, ensuring tap navigation works
+   * consistently (including cold-start via bufferPushIntent).
+   */
   private async replaceNotification(
     roomId: string,
     eventId: string | undefined,
     result: { senderName: string; body: string },
   ): Promise<void> {
-    await LocalNotifications.schedule({
-      notifications: [{
-        id: roomId.hashCode(),
-        title: result.senderName,
-        body: result.body,
-        channelId: 'messages',
-        extra: { room_id: roomId, event_id: eventId },
-      }],
+    await PushData.replaceNotificationContent({
+      roomId,
+      eventId,
+      title: result.senderName,
+      body: result.body,
     });
-    await PushData.cancelNotification({ roomId });
   }
 
   /**
@@ -361,6 +386,7 @@ class PushService {
       this.fcmToken = token;
       await this.registerPusher(matrixClient, token);
       await this.syncRoomNamesToNative();
+      await this.syncSenderNamesToNative();
     });
 
     PushNotifications.addListener('registrationError', (error) => {

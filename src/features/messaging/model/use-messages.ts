@@ -263,7 +263,7 @@ export function useMessages() {
               url,
               ...(fileInfo.secrets ? { secrets: fileInfo.secrets } : {}),
             };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
+            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
             // Invalidate download cache before revoking blob URL to prevent stale references
             invalidateDownloadCache(localMsg.clientId);
@@ -432,7 +432,7 @@ export function useMessages() {
               captionAbove: options.captionAbove,
               ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
             };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
+            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
             invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
@@ -603,7 +603,7 @@ export function useMessages() {
               waveform: options.waveform,
               ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
             };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
+            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
             invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
@@ -775,7 +775,7 @@ export function useMessages() {
               videoNote: true,
               ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
             };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
+            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
             invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
@@ -1581,7 +1581,7 @@ export function useMessages() {
               h,
               ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
             };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo);
+            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
 
             invalidateDownloadCache(localMsg.clientId);
             setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
@@ -1786,7 +1786,7 @@ export function useMessages() {
         ...fi,
         url,
         secrets: secrets as FileInfo["secrets"],
-      });
+      }, roomId);
 
       invalidateDownloadCache(localMsg.clientId);
       const blobToRevoke = localMsg.localBlobUrl;

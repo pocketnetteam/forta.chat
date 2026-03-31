@@ -1,9 +1,12 @@
 package com.forta.chat
 
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.RingtoneManager
+import android.os.Build
 import android.os.Bundle
 import android.telecom.TelecomManager
 import android.util.Log
@@ -23,20 +26,63 @@ import com.google.firebase.messaging.RemoteMessage
  */
 class FortaFirebaseMessagingService : FirebaseMessagingService() {
 
+    override fun onCreate() {
+        super.onCreate()
+        ensureChannels()
+    }
+
+    /** Create notification channels eagerly so they exist even when JS hasn't started */
+    private fun ensureChannels() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+
+        if (nm.getNotificationChannel(CHANNEL_MESSAGES) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_MESSAGES, "Messages", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Chat message notifications"
+                    enableVibration(true)
+                }
+            )
+        }
+        if (nm.getNotificationChannel(CHANNEL_CALLS) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_CALLS, "Calls", NotificationManager.IMPORTANCE_MAX).apply {
+                    description = "Incoming call notifications"
+                    enableVibration(true)
+                    setSound(
+                        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                            .build()
+                    )
+                }
+            )
+        }
+    }
+
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data
-        Log.d(TAG, "Push received. data=$data")
+        Log.d(TAG, "Push received: room_id=${data["room_id"]}, event_id=${data["event_id"]}, " +
+            "sender=${data["sender"]}, sender_display_name=${data["sender_display_name"]}, " +
+            "room_name=${data["room_name"]}, msg_type=${data["msg_type"]}, " +
+            "content_msgtype=${data["content_msgtype"]}")
 
         val roomId = data["room_id"] ?: return
         val eventId = data["event_id"]
         val msgType = data["msg_type"] ?: ""
         val contentMsgtype = data["content_msgtype"]
+        val sender = data["sender"]
         val senderName = data["sender_display_name"]
         val roomName = data["room_name"]
 
         // Cache room name if provided
         if (roomName != null) {
             cacheRoomName(this, roomId, roomName)
+        }
+
+        // Cache sender display name if provided (for future offline lookups)
+        if (senderName != null && sender != null) {
+            cacheSenderName(this, sender, senderName)
         }
 
         // Handle call hangup/cancel — dismiss incoming call screen
@@ -57,8 +103,12 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             return
         }
 
-        // Build notification text
-        val title = senderName ?: roomName ?: getCachedRoomName(roomId) ?: "Forta Chat"
+        // Build notification text — fallback chain for best possible title
+        val title = senderName
+            ?: (sender?.let { getCachedSenderName(it) })
+            ?: roomName
+            ?: getCachedRoomName(roomId)
+            ?: "Новое сообщение"
         val body = previewByMsgtype(contentMsgtype)
 
         // Show notification (JS may replace it later with decrypted content)
@@ -89,6 +139,11 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
     private fun getCachedRoomName(roomId: String): String? {
         return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString("room_name_$roomId", null)
+    }
+
+    private fun getCachedSenderName(sender: String): String? {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("sender_name_$sender", null)
     }
 
     private fun showMessageNotification(roomId: String, eventId: String?, title: String, body: String) {
@@ -211,6 +266,13 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString("room_name_$roomId", name)
+                .apply()
+        }
+
+        fun cacheSenderName(context: Context, sender: String, name: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString("sender_name_$sender", name)
                 .apply()
         }
     }

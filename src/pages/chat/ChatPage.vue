@@ -13,8 +13,9 @@ const authStore = useAuthStore();
 const { t } = useI18n();
 const { settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
 
-const showSidebar = ref(true);
-const isMobile = ref(false);
+const isMobile = ref(window.innerWidth < 768);
+// If navigating from push tap, activeRoomId is already set — skip sidebar immediately
+const showSidebar = ref(!(isMobile.value && chatStore.activeRoomId));
 
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 const checkMobile = () => {
@@ -25,7 +26,6 @@ const checkMobile = () => {
 };
 
 onMounted(() => {
-  isMobile.value = window.innerWidth < 768;
   window.addEventListener("resize", checkMobile);
 });
 
@@ -42,6 +42,19 @@ const onSelectRoom = () => {
     showSidebar.value = false;
   }
 };
+
+// When activeRoomId is set externally (e.g. push notification tap from App.vue),
+// automatically transition from sidebar to chat on mobile
+watch(
+  () => chatStore.activeRoomId,
+  (newId) => {
+    if (newId && isMobile.value && showSidebar.value) {
+      closeSettingsContent();
+      setTab("chats");
+      showSidebar.value = false;
+    }
+  },
+);
 
 const onBackToSidebar = () => {
   chatStore.setActiveRoom(null);
