@@ -175,6 +175,8 @@ export const en = {
   "message.transfer": "Transfer",
   "message.deleted": "This message was deleted",
   "message.retry": "Retry",
+  "message.failedToLoadImage": "Failed to load image",
+  "message.tapToRetry": "Tap to retry",
 
   // ── Message context menu ──
   "contextMenu.reply": "Reply",

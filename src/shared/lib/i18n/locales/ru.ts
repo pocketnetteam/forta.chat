@@ -177,6 +177,8 @@ export const ru: Record<TranslationKey, string> = {
   "message.transfer": "Перевод",
   "message.deleted": "Сообщение удалено",
   "message.retry": "Повторить",
+  "message.failedToLoadImage": "Не удалось загрузить",
+  "message.tapToRetry": "Нажмите для повтора",
 
   // ── Message context menu ──
   "contextMenu.reply": "Ответить",

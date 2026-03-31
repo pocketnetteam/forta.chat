@@ -233,6 +233,13 @@ const handleFileDownload = async () => {
   if (url) saveFile(url, props.message.fileInfo.name);
 };
 
+const retryDownload = () => {
+  // Clear stale error so download() can run again
+  const state = getState(fileCacheKey.value);
+  state.error = null;
+  download(props.message);
+};
+
 const handleVideoAudioLoad = () => {
   if (!props.message.fileInfo) return;
   download(props.message);
@@ -403,10 +410,12 @@ const replyPreviewSender = computed(() => {
           </div>
           <div
             v-else-if="fileState.error"
-            class="flex items-center justify-center bg-neutral-grad-0 text-xs text-color-bad"
+            class="flex cursor-pointer flex-col items-center justify-center gap-1 bg-neutral-grad-0 text-xs text-color-bad"
             :style="imagePlaceholderStyle"
+            @click.stop="retryDownload"
           >
-            Failed to load image
+            <span>{{ t('message.failedToLoadImage') }}</span>
+            <span class="text-[10px] opacity-60">{{ t('message.tapToRetry') }}</span>
           </div>
           <img v-else-if="fileState.objectUrl" :src="fileState.objectUrl" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" />
           <!-- Upload progress overlay -->

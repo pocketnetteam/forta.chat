@@ -27,8 +27,11 @@ export function invalidateDownloadCache(key: string) {
   cache.delete(key);
 }
 
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [1000, 3000, 6000]; // 1s, 3s, 6s
+
 /** Download and optionally decrypt a file from the Matrix server.
- *  Needs senderId + timestamp to reconstruct the event for decryptKey(). */
+ *  Retries up to MAX_RETRIES times on transient failures (network, crypto not ready). */
 async function downloadAndDecrypt(
   fileInfo: FileInfo,
   roomId: string,
@@ -37,40 +40,55 @@ async function downloadAndDecrypt(
 ): Promise<Blob> {
   if (!fileInfo.url) throw new Error("No file URL");
 
-  // Download the file
-  const response = await fetch(fileInfo.url);
-  if (!response.ok) throw new Error(`Download failed: ${response.status}`);
-  let blob = await response.blob();
+  let lastError: unknown;
 
-  // If the file has secrets, we need to decrypt it
-  if (fileInfo.secrets?.keys) {
-    const authStore = useAuthStore();
-    const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-    if (!roomCrypto) throw new Error("No room crypto for decryption");
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 1] ?? 6000));
+    }
 
-    // Build event-like object for decryptKey — matches the shape expected by
-    // decryptKey(): event.content.pbody.secrets.{keys,block}, event.sender, event.origin_server_ts
-    // Crypto internals use hex-encoded addresses (via getmatrixid), so re-encode the raw address
-    const hexSender = hexEncode(senderId).toLowerCase();
-    const event: Record<string, unknown> = {
-      content: {
-        pbody: {
-          secrets: fileInfo.secrets,
-        },
-      },
-      sender: hexSender,
-      origin_server_ts: timestamp,
-    };
+    try {
+      // Download the file
+      const response = await fetch(fileInfo.url);
+      if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+      let blob = await response.blob();
 
-    // Decrypt the symmetric file key
-    const decryptKey = await roomCrypto.decryptKey(event);
+      // If the file has secrets, we need to decrypt it
+      if (fileInfo.secrets?.keys) {
+        const authStore = useAuthStore();
+        const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+        if (!roomCrypto) throw new Error("No room crypto for decryption");
 
-    // Decrypt the file content
-    const decryptedFile = await roomCrypto.decryptFile(blob, decryptKey);
-    blob = decryptedFile;
+        // Build event-like object for decryptKey
+        const hexSender = hexEncode(senderId).toLowerCase();
+        const event: Record<string, unknown> = {
+          content: {
+            pbody: {
+              secrets: fileInfo.secrets,
+            },
+          },
+          sender: hexSender,
+          origin_server_ts: timestamp,
+        };
+
+        const decryptKey = await roomCrypto.decryptKey(event);
+        const decryptedFile = await roomCrypto.decryptFile(blob, decryptKey);
+        blob = decryptedFile;
+      }
+
+      return blob;
+    } catch (e) {
+      lastError = e;
+      // Don't retry on permanent errors (missing URL, 404, 403)
+      if (e instanceof Error) {
+        if (e.message === "No file URL") throw e;
+        if (e.message.includes("404") || e.message.includes("403")) throw e;
+      }
+      // Retry on transient errors (network, crypto not ready, etc.)
+    }
   }
 
-  return blob;
+  throw lastError;
 }
 
 /** Composable for downloading and decrypting files/images */
