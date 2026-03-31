@@ -157,7 +157,6 @@ class CallForegroundService : Service() {
     }
 
     private fun buildNotification(status: String): Notification {
-        // Tap notification → open CallActivity
         val contentIntent = Intent(this, CallActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -166,7 +165,6 @@ class CallForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Hangup action
         val hangupIntent = Intent(this, CallForegroundService::class.java).apply {
             action = ACTION_HANGUP
         }
@@ -177,21 +175,35 @@ class CallForegroundService : Service() {
 
         val typeLabel = if (callType == "video") "Video call" else "Voice call"
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val caller = androidx.core.app.Person.Builder()
+            .setName(callerName)
+            .setImportant(true)
+            .build()
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_call)
-            .setContentTitle("$typeLabel with $callerName")
-            .setContentText(status)
             .setOngoing(true)
             .setAutoCancel(false)
             .setContentIntent(contentPendingIntent)
-            .addAction(
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            builder.setStyle(
+                NotificationCompat.CallStyle.forOngoingCall(caller, hangupPendingIntent)
+            )
+            builder.setContentText(status)
+        } else {
+            builder.setContentTitle("$typeLabel with $callerName")
+            builder.setContentText(status)
+            builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "Hang Up",
                 hangupPendingIntent
             )
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .build()
+        }
+
+        return builder.build()
     }
 
     // -----------------------------------------------------------------------

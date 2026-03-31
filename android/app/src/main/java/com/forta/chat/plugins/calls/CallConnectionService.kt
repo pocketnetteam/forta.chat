@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.telecom.*
 import android.util.Log
@@ -118,7 +119,31 @@ class CallConnectionService : ConnectionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Create notification channel for calls
+        // Accept action
+        val acceptIntent = Intent(applicationContext, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("action", "accept")
+        }
+        val acceptPendingIntent = PendingIntent.getActivity(
+            applicationContext, 1, acceptIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Decline action
+        val declineIntent = Intent(applicationContext, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("action", "decline")
+        }
+        val declinePendingIntent = PendingIntent.getActivity(
+            applicationContext, 2, declineIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Create notification channel
         val channelId = "incoming_calls"
         val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
@@ -130,19 +155,45 @@ class CallConnectionService : ConnectionService() {
         }
         notificationManager.createNotificationChannel(channel)
 
-        // Full-screen intent notification (shows on lock screen)
-        val notification = NotificationCompat.Builder(applicationContext, channelId)
+        // FSI permission check for Android 14+ (USE_FULL_SCREEN_INTENT)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (!notificationManager.canUseFullScreenIntent()) {
+                Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted, FSI will be heads-up only")
+                try {
+                    applicationContext.startActivity(fullScreenIntent)
+                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "Direct activity start also failed, falling back to notification", e)
+                }
+            }
+        }
+
+        val caller = androidx.core.app.Person.Builder()
+            .setName(callerName)
+            .setImportant(true)
+            .build()
+
+        val builder = NotificationCompat.Builder(applicationContext, channelId)
             .setSmallIcon(android.R.drawable.ic_menu_call)
-            .setContentTitle("Incoming call")
-            .setContentText(callerName)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setFullScreenIntent(fullScreenPendingIntent, true)
             .setOngoing(true)
             .setAutoCancel(false)
-            .build()
 
-        notificationManager.notify(INCOMING_CALL_NOTIFICATION_ID, notification)
+        // Use CallStyle on Android 12+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setStyle(
+                NotificationCompat.CallStyle.forIncomingCall(
+                    caller, declinePendingIntent, acceptPendingIntent
+                )
+            )
+        } else {
+            builder.setContentTitle("Incoming call")
+            builder.setContentText(callerName)
+        }
+
+        notificationManager.notify(INCOMING_CALL_NOTIFICATION_ID, builder.build())
 
         // Start activity directly for foreground case
         try {
