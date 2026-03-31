@@ -420,6 +420,7 @@ export const en = {
   "auth.privateKeyPlaceholder": "Enter your private key (WIF/hex) or mnemonic phrase...",
   "auth.show": "Show",
   "auth.hide": "Hide",
+  "auth.howToFindKey": "How to find your private key?",
 
   // ── Welcome ──
   "welcome.title": "Forta Chat",

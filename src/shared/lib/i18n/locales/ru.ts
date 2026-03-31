@@ -422,6 +422,7 @@ export const ru: Record<TranslationKey, string> = {
   "auth.privateKeyPlaceholder": "Введите приватный ключ (WIF/hex) или мнемоническую фразу...",
   "auth.show": "Показать",
   "auth.hide": "Скрыть",
+  "auth.howToFindKey": "Как найти приватный ключ?",
 
   // ── Welcome ──
   "welcome.title": "Forta Chat",

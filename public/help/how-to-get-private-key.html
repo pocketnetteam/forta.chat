@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bastyon Private Key</title>
+<style>
+  :root {
+    --bg: #0e1621;
+    --card: #17212b;
+    --text: #f5f5f5;
+    --text-muted: #8b9bab;
+    --accent: #2CA5E0;
+    --warning: #e85d4a;
+    --border: #2b3a4a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --card: #f5f7fa;
+      --text: #1a1a1a;
+      --text-muted: #6b7280;
+      --accent: #2CA5E0;
+      --warning: #dc3545;
+      --border: #e5e7eb;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 20px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.5rem;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+  .warning {
+    background: var(--warning);
+    color: #fff;
+    padding: 12px 16px;
+    border-radius: 10px;
+    margin-bottom: 24px;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+  .lang-switch {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .lang-btn {
+    padding: 4px 12px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+  }
+  .lang-btn.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--card);
+  }
+  .step {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+    align-items: flex-start;
+  }
+  .step-num {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+  .step-content { flex: 1; }
+  .step-content p { margin-bottom: 10px; }
+  .step-content img {
+    width: 100%;
+    max-width: 340px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .step-content img.wide { max-width: 100%; }
+  .tab-group {
+    display: flex;
+    gap: 0;
+    margin-bottom: 0;
+    border-bottom: 2px solid var(--border);
+  }
+  .tab {
+    padding: 10px 20px;
+    cursor: pointer;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s;
+  }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab-panel { display: none; padding-top: 20px; }
+  .tab-panel.active { display: block; }
+  .info-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-top: 32px;
+    font-size: 0.9rem;
+  }
+  .info-box h3 { margin-bottom: 8px; font-size: 1rem; }
+  .info-box ul { padding-left: 20px; }
+  .info-box li { margin-bottom: 6px; }
+  strong { color: var(--accent); }
+  [data-lang] { display: none; }
+  [data-lang].visible { display: block; }
+</style>
+</head>
+<body>
+
+<div class="lang-switch">
+  <button class="lang-btn active" onclick="setLang('ru')">Русский</button>
+  <button class="lang-btn" onclick="setLang('en')">English</button>
+</div>
+
+<!-- ==================== RUSSIAN ==================== -->
+<div data-lang="ru" class="visible">
+
+<h1>Как найти приватный ключ Bastyon</h1>
+
+<div class="warning">
+  Приватный ключ &mdash; это ваш единственный способ входа в аккаунт Bastyon.
+  Никому его не показывайте и не вводите на сторонних сайтах!
+</div>
+
+<div class="tab-group">
+  <button class="tab active" onclick="switchTab('mobile','ru')">Мобильное приложение</button>
+  <button class="tab" onclick="switchTab('web','ru')">Веб-версия / Десктоп</button>
+</div>
+
+<div id="panel-mobile-ru" class="tab-panel active">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <p>Откройте приложение Bastyon и нажмите <strong>Меню</strong> (три полоски) в правом нижнем углу экрана.</p>
+      <img src="private-key/mobile-step1-menu.jpg" alt="Шаг 1: Нажмите Меню">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <p>В открывшемся меню прокрутите вниз и нажмите <strong>Приватный ключ</strong>.</p>
+      <img src="private-key/mobile-step2-private-key.jpg" alt="Шаг 2: Выберите Приватный ключ">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <p>Появится подтверждение: &laquo;Вы действительно хотите показать ваш приватный ключ?&raquo;. Нажмите <strong>Да</strong>.</p>
+      <img src="private-key/mobile-step3-confirm.jpg" alt="Шаг 3: Подтвердите">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <p>Ваш приватный ключ отобразится на экране. Нажмите <strong>Скопировать приватный ключ</strong>, чтобы скопировать его в буфер обмена.</p>
+      <img src="private-key/mobile-step4-copy.jpg" alt="Шаг 4: Скопируйте ключ">
+    </div>
+  </div>
+</div>
+
+<div id="panel-web-ru" class="tab-panel">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <p>Откройте Bastyon в браузере или десктоп-приложении. Нажмите на <strong>иконку профиля</strong> в правом верхнем углу.</p>
+      <img src="private-key/web-step1-profile.jpg" alt="Шаг 1: Нажмите на профиль" class="wide">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <p>В боковом меню нажмите <strong>Приватный ключ</strong>.</p>
+      <img src="private-key/web-step2-private-key.jpg" alt="Шаг 2: Выберите Приватный ключ" class="wide">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <p>Подтвердите действие, нажав <strong>Да</strong>.</p>
+      <img src="private-key/web-step3-confirm.jpg" alt="Шаг 3: Подтвердите" class="wide">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <p>Ваш приватный ключ появится на экране. Нажмите <strong>Скопировать приватный ключ</strong>.</p>
+      <img src="private-key/web-step4-copy.jpg" alt="Шаг 4: Скопируйте ключ" class="wide">
+    </div>
+  </div>
+</div>
+
+<div class="info-box">
+  <h3>Если не удаётся найти ключ</h3>
+  <ul>
+    <li>Убедитесь, что вы вошли в аккаунт Bastyon (не гостевой режим).</li>
+    <li>Если вы потеряли доступ к аккаунту и не сохранили ключ &mdash; восстановить его невозможно.</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Правила безопасности</h3>
+  <ul>
+    <li>Никогда не делитесь приватным ключом с другими людьми.</li>
+    <li>Не вводите ключ на сторонних сайтах &mdash; только в официальных приложениях Bastyon и Forta Chat.</li>
+    <li>Сохраните ключ в надёжном месте (например, в менеджере паролей).</li>
+    <li>Приватный ключ невозможно восстановить &mdash; если вы его потеряете, доступ к аккаунту будет утрачен навсегда.</li>
+  </ul>
+</div>
+
+</div>
+
+<!-- ==================== ENGLISH ==================== -->
+<div data-lang="en">
+
+<h1>How to find your Bastyon private key</h1>
+
+<div class="warning">
+  Your private key is the only way to log in to your Bastyon account.
+  Never share it with anyone or enter it on third-party websites!
+</div>
+
+<div class="tab-group">
+  <button class="tab active" onclick="switchTab('mobile','en')">Mobile app</button>
+  <button class="tab" onclick="switchTab('web','en')">Web / Desktop</button>
+</div>
+
+<div id="panel-mobile-en" class="tab-panel active">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <p>Open the Bastyon app and tap <strong>Menu</strong> (three lines) in the bottom-right corner.</p>
+      <img src="private-key/mobile-step1-menu.jpg" alt="Step 1: Tap Menu">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <p>Scroll down in the menu and tap <strong>Private key</strong> (Приватный ключ).</p>
+      <img src="private-key/mobile-step2-private-key.jpg" alt="Step 2: Tap Private key">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <p>A confirmation dialog will appear. Tap <strong>Yes</strong> (Да).</p>
+      <img src="private-key/mobile-step3-confirm.jpg" alt="Step 3: Confirm">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <p>Your private key will be displayed. Tap <strong>Copy private key</strong> (Скопировать приватный ключ) to copy it to the clipboard.</p>
+      <img src="private-key/mobile-step4-copy.jpg" alt="Step 4: Copy the key">
+    </div>
+  </div>
+</div>
+
+<div id="panel-web-en" class="tab-panel">
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <p>Open Bastyon in a browser or the desktop app. Click your <strong>profile icon</strong> in the top-right corner.</p>
+      <img src="private-key/web-step1-profile.jpg" alt="Step 1: Click profile" class="wide">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <p>In the sidebar menu, click <strong>Private key</strong> (Приватный ключ).</p>
+      <img src="private-key/web-step2-private-key.jpg" alt="Step 2: Click Private key" class="wide">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <p>Confirm by clicking <strong>Yes</strong> (Да).</p>
+      <img src="private-key/web-step3-confirm.jpg" alt="Step 3: Confirm" class="wide">
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <p>Your private key will appear on screen. Click <strong>Copy private key</strong> (Скопировать приватный ключ).</p>
+      <img src="private-key/web-step4-copy.jpg" alt="Step 4: Copy the key" class="wide">
+    </div>
+  </div>
+</div>
+
+<div class="info-box">
+  <h3>Can't find your key?</h3>
+  <ul>
+    <li>Make sure you are logged in to your Bastyon account (not in guest mode).</li>
+    <li>If you have lost access and did not save your key &mdash; it cannot be recovered.</li>
+  </ul>
+</div>
+
+<div class="info-box">
+  <h3>Security rules</h3>
+  <ul>
+    <li>Never share your private key with anyone.</li>
+    <li>Only enter your key in official Bastyon and Forta Chat apps.</li>
+    <li>Store your key in a safe place (e.g. a password manager).</li>
+    <li>Your private key cannot be recovered &mdash; if you lose it, your account is gone forever.</li>
+  </ul>
+</div>
+
+</div>
+
+<script>
+function setLang(lang) {
+  document.querySelectorAll('[data-lang]').forEach(el => el.classList.remove('visible'));
+  document.querySelector('[data-lang="' + lang + '"]').classList.add('visible');
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  document.documentElement.lang = lang;
+}
+
+function switchTab(name, lang) {
+  var parent = document.querySelector('[data-lang="' + lang + '"]');
+  parent.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  parent.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name + '-' + lang).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// Pick language: URL param > browser language > default ru
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  var lang = params.get('lang') || (navigator.language || '').slice(0, 2);
+  if (lang !== 'ru') setLang('en');
+})();
+</script>
+
+</body>
+</html>
