@@ -130,14 +130,22 @@ class IncomingCallActivity : Activity() {
         Log.d(TAG, "Accept pressed")
         cleanup()
 
-        // Try ConnectionService first
-        CallConnectionService.currentConnection?.onAnswer()
+        val callId = intent.getStringExtra("callId") ?: ""
+
+        // Try ConnectionService first; if unavailable, notify JS directly
+        val connection = CallConnectionService.currentConnection
+        if (connection != null) {
+            connection.onAnswer()
+        } else {
+            Log.w(TAG, "No ConnectionService connection, notifying JS directly")
+            CallConnection.onAnswered?.invoke(callId)
+        }
 
         // Open app — JS handles the actual WebRTC answer via Matrix SDK
         val mainIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("push_call_accept", true)
-            putExtra("callId", intent.getStringExtra("callId"))
+            putExtra("callId", callId)
             putExtra("roomId", intent.getStringExtra("roomId"))
         }
         startActivity(mainIntent)

@@ -1,5 +1,9 @@
 package com.forta.chat.plugins.calls
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
 import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.Context
@@ -9,7 +13,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -20,8 +23,10 @@ import android.util.Rational
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.forta.chat.R
 import com.forta.chat.utils.WindowInsetsHelper
@@ -46,6 +51,7 @@ class CallActivity : Activity(), SensorEventListener {
     companion object {
         private const val TAG = "CallActivity"
         private const val CONTROLS_HIDE_DELAY_MS = 5000L
+        private const val REQUEST_CAMERA_PERMISSION = 1002
 
         const val EXTRA_CALLER_NAME = "callerName"
         const val EXTRA_CALL_TYPE = "callType"
@@ -60,6 +66,15 @@ class CallActivity : Activity(), SensorEventListener {
 
         // Static callback for native hangup button
         var onNativeHangup: (() -> Unit)? = null
+
+        // Static callback for remote video received
+        var onRemoteVideo: (() -> Unit)? = null
+
+        // Static callback for native video toggle (needs JS renegotiation)
+        var onNativeVideoToggle: ((Boolean) -> Unit)? = null
+
+        // Static callback for remote video mute state changes
+        var onRemoteVideoMuted: ((Boolean) -> Unit)? = null
 
         fun launch(context: Context, callerName: String, callType: String, callId: String, direction: String) {
             val intent = Intent(context, CallActivity::class.java).apply {
@@ -85,22 +100,33 @@ class CallActivity : Activity(), SensorEventListener {
     private lateinit var btnMute: ImageButton
     private lateinit var btnVideo: ImageButton
     private lateinit var btnFlip: ImageButton
-    private lateinit var btnSpeaker: ImageButton
+    private lateinit var btnAudioRoute: ImageButton
     private lateinit var btnHangup: ImageButton
+
+    // Voice mode views
+    private var voiceBg: View? = null
+    private var voiceCenter: View? = null
+    private var avatarText: TextView? = null
+    private var flipContainer: View? = null
+    private var pulseAnimator: AnimatorSet? = null
+    private var remoteNoVideo: View? = null
+    private var remoteAvatarText: TextView? = null
 
     // State
     private var isMuted = false
     private var isVideoEnabled = true
-    private var isSpeakerOn = false
     private var callType = "video"
+    private var callerName = "Unknown"
     private var callDurationSeconds = 0
     private var isConnected = false
+
+    // Audio routing
+    private lateinit var audioRouter: AudioRouter
 
     // Sensors & Power
     private var sensorManager: SensorManager? = null
     private var proximitySensor: Sensor? = null
     private var proximityWakeLock: PowerManager.WakeLock? = null
-    private var audioManager: AudioManager? = null
 
     // Timer
     private val handler = Handler(Looper.getMainLooper())
@@ -140,6 +166,9 @@ class CallActivity : Activity(), SensorEventListener {
             )
         }
 
+        // Translucent window allows SurfaceView surfaces to be visible behind the window
+        window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+
         setContentView(R.layout.activity_call)
         bindViews()
         setupListeners()
@@ -157,20 +186,39 @@ class CallActivity : Activity(), SensorEventListener {
         )
 
         // Read extras
-        val callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
+        callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
         callType = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "video"
         isVideoEnabled = callType == "video"
 
         callerNameText.text = callerName
         callStatusText.text = "Connecting..."
 
-        // Audio
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-        if (callType == "video") {
-            audioManager?.isSpeakerphoneOn = true
-            isSpeakerOn = true
+        // Mode setup
+        if (callType == "voice") {
+            voiceBg?.visibility = View.VISIBLE
+            voiceCenter?.visibility = View.VISIBLE
+            remoteVideoView.visibility = View.GONE
+            localVideoView.visibility = View.GONE
+            flipContainer?.visibility = View.GONE
+            avatarText?.text = callerName.take(2).uppercase()
+            startPulseAnimation()
+        } else {
+            // Video call: show voice mode UI until remote video arrives
+            voiceBg?.visibility = View.VISIBLE
+            voiceCenter?.visibility = View.VISIBLE
+            avatarText?.text = callerName.take(2).uppercase()
+            remoteVideoView.visibility = View.GONE
+            startPulseAnimation()
         }
+
+        // Audio routing
+        audioRouter = AudioRouter(this)
+        audioRouter.setListener(object : AudioRouter.Listener {
+            override fun onAudioDeviceChanged(state: AudioRouter.AudioDeviceState) {
+                runOnUiThread { updateAudioRouteUI(state) }
+            }
+        })
+        audioRouter.start(callType)
 
         // Proximity sensor (for voice calls)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -185,13 +233,24 @@ class CallActivity : Activity(), SensorEventListener {
             )
         }
 
+        // Always init renderers (remote video needed for all call types)
         initVideoRenderers()
+
+        // Request camera permission if needed for video calls
+        if (isVideoEnabled && checkSelfPermission(android.Manifest.permission.CAMERA)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
+        }
         updateButtonStates()
 
         // Register for call end
         onCallEnded = { runOnUiThread { finish() } }
+        // Register for remote video
+        onRemoteVideo = { runOnUiThread { onRemoteVideoReceived() } }
+        // Register for remote video mute state
+        onRemoteVideoMuted = { muted -> runOnUiThread { onRemoteVideoMuteChanged(muted) } }
         // Register for call connected
-        onCallConnected = { runOnUiThread { onCallConnected() } }
+        onCallConnected = { runOnUiThread { handleCallConnected() } }
 
         Log.d(TAG, "CallActivity created: $callerName, type=$callType")
     }
@@ -216,11 +275,29 @@ class CallActivity : Activity(), SensorEventListener {
         super.onPause()
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CAMERA_PERMISSION &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            // Camera permission granted — start local video
+            val mgr = WebRTCPlugin.manager ?: return
+            mgr.startLocalVideo("", localVideoView)
+            localVideoView.visibility = View.VISIBLE
+            setupLocalVideoDrag()
+        }
+    }
+
     override fun onDestroy() {
         handler.removeCallbacks(timerRunnable)
         handler.removeCallbacks(hideControlsRunnable)
+        pulseAnimator?.cancel()
         onCallEnded = null
         onCallConnected = null
+        onRemoteVideo = null
+        onRemoteVideoMuted = null
         // Note: onNativeHangup is wired by WebRTCPlugin.load() and stays alive
 
         try {
@@ -230,8 +307,7 @@ class CallActivity : Activity(), SensorEventListener {
             Log.e(TAG, "Error releasing renderers", e)
         }
 
-        audioManager?.mode = AudioManager.MODE_NORMAL
-        audioManager?.isSpeakerphoneOn = false
+        audioRouter.stop()
 
         super.onDestroy()
     }
@@ -250,41 +326,71 @@ class CallActivity : Activity(), SensorEventListener {
         btnMute = findViewById(R.id.btn_mute)
         btnVideo = findViewById(R.id.btn_video)
         btnFlip = findViewById(R.id.btn_flip)
-        btnSpeaker = findViewById(R.id.btn_speaker)
+        btnAudioRoute = findViewById(R.id.btn_audio_route)
         btnHangup = findViewById(R.id.btn_hangup)
+        voiceBg = findViewById(R.id.voice_bg)
+        voiceCenter = findViewById(R.id.voice_center)
+        avatarText = findViewById(R.id.avatar_text)
+        flipContainer = findViewById(R.id.flip_container)
+        remoteNoVideo = findViewById(R.id.remote_no_video)
+        remoteAvatarText = findViewById(R.id.remote_avatar_text)
     }
 
     private fun setupListeners() {
         btnMute.setOnClickListener { toggleMute() }
         btnVideo.setOnClickListener { toggleVideo() }
         btnFlip.setOnClickListener { flipCamera() }
-        btnSpeaker.setOnClickListener { toggleSpeaker() }
+        btnAudioRoute.setOnClickListener { showAudioRouteSheet() }
         btnHangup.setOnClickListener { hangup() }
 
         // Tap anywhere to toggle controls visibility
         remoteVideoView.setOnClickListener { toggleControlsVisibility() }
     }
 
+    private var renderersInitialized = false
+
     private fun initVideoRenderers() {
-        val mgr = WebRTCPlugin.manager ?: return
-        val eglBase = mgr.getEglBase() ?: return
+        val mgr = WebRTCPlugin.manager ?: run {
+            Log.w(TAG, "initVideoRenderers: manager is null!")
+            return
+        }
+        val eglBase = mgr.getEglBase() ?: run {
+            Log.w(TAG, "initVideoRenderers: eglBase is null!")
+            return
+        }
 
-        remoteVideoView.init(eglBase.eglBaseContext, null)
-        remoteVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-        remoteVideoView.setEnableHardwareScaler(true)
-        remoteVideoView.setMirror(false)
+        if (!renderersInitialized) {
+            Log.d(TAG, "initVideoRenderers: initializing, remoteView visible=${remoteVideoView.visibility == View.VISIBLE}")
 
-        localVideoView.init(eglBase.eglBaseContext, null)
-        localVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-        localVideoView.setEnableHardwareScaler(true)
-        localVideoView.setMirror(true)
-        localVideoView.setZOrderMediaOverlay(true)
+            remoteVideoView.init(eglBase.eglBaseContext, null)
+            remoteVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+            remoteVideoView.setEnableHardwareScaler(true)
+            remoteVideoView.setMirror(false)
 
-        // Attach local video only for video calls
-        if (isVideoEnabled) {
+            localVideoView.init(eglBase.eglBaseContext, null)
+            localVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+            localVideoView.setEnableHardwareScaler(true)
+            localVideoView.setMirror(true)
+            localVideoView.setZOrderMediaOverlay(true)
+
+            // Attach remote renderer (may already have tracks from WebRTC negotiation)
+            mgr.attachRemoteRenderer(remoteVideoView)
+            renderersInitialized = true
+
+            // Check if remote video tracks already exist — hide placeholder if so
+            if (mgr.hasRemoteVideoTracks()) {
+                remoteNoVideo?.visibility = View.GONE
+                remoteVideoView.visibility = View.VISIBLE
+            }
+            Log.d(TAG, "initVideoRenderers: renderers initialized, remote renderer attached")
+        }
+
+        // Attach local video only for video calls with camera permission
+        if (isVideoEnabled && checkSelfPermission(android.Manifest.permission.CAMERA)
+            == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             mgr.startLocalVideo("", localVideoView)
             setupLocalVideoDrag()
-        } else {
+        } else if (!isVideoEnabled) {
             localVideoView.visibility = View.GONE
         }
     }
@@ -309,11 +415,33 @@ class CallActivity : Activity(), SensorEventListener {
         }
     }
 
+    private fun startPulseAnimation() {
+        val outerRing = findViewById<View>(R.id.pulse_ring_outer) ?: return
+        val innerRing = findViewById<View>(R.id.pulse_ring_inner) ?: return
+        val outerScaleX = ObjectAnimator.ofFloat(outerRing, "scaleX", 1f, 1.3f, 1f)
+        val outerScaleY = ObjectAnimator.ofFloat(outerRing, "scaleY", 1f, 1.3f, 1f)
+        val outerAlpha = ObjectAnimator.ofFloat(outerRing, "alpha", 0.15f, 0.0f, 0.15f)
+        val innerScaleX = ObjectAnimator.ofFloat(innerRing, "scaleX", 1f, 1.15f, 1f)
+        val innerScaleY = ObjectAnimator.ofFloat(innerRing, "scaleY", 1f, 1.15f, 1f)
+        val innerAlpha = ObjectAnimator.ofFloat(innerRing, "alpha", 0.25f, 0.1f, 0.25f)
+        pulseAnimator = AnimatorSet().apply {
+            playTogether(outerScaleX, outerScaleY, outerAlpha, innerScaleX, innerScaleY, innerAlpha)
+            duration = 2000
+            interpolator = AccelerateDecelerateInterpolator()
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (!isFinishing) animation.start()
+                }
+            })
+            start()
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Call state updates (called from WebRTCPlugin / bridge)
     // -----------------------------------------------------------------------
 
-    fun onCallConnected() {
+    fun handleCallConnected() {
         runOnUiThread {
             isConnected = true
             callStatusText.text = "00:00"
@@ -322,9 +450,33 @@ class CallActivity : Activity(), SensorEventListener {
         }
     }
 
-    fun attachRemoteVideoTrack(track: VideoTrack) {
+    fun onRemoteVideoReceived() {
         runOnUiThread {
-            track.addSink(remoteVideoView)
+            remoteNoVideo?.visibility = View.GONE
+            remoteVideoView.visibility = View.VISIBLE
+            // Hide voice mode UI when remote video arrives
+            voiceBg?.visibility = View.GONE
+            voiceCenter?.visibility = View.GONE
+            pulseAnimator?.cancel()
+        }
+    }
+
+    private fun onRemoteVideoMuteChanged(muted: Boolean) {
+        if (muted) {
+            // Show voice mode UI (same as voice call)
+            remoteNoVideo?.visibility = View.GONE
+            remoteVideoView.visibility = View.GONE
+            voiceBg?.visibility = View.VISIBLE
+            voiceCenter?.visibility = View.VISIBLE
+            avatarText?.text = callerName.take(2).uppercase()
+            startPulseAnimation()
+        } else {
+            // Show remote video
+            remoteNoVideo?.visibility = View.GONE
+            remoteVideoView.visibility = View.VISIBLE
+            voiceBg?.visibility = View.GONE
+            voiceCenter?.visibility = View.GONE
+            pulseAnimator?.cancel()
         }
     }
 
@@ -339,20 +491,107 @@ class CallActivity : Activity(), SensorEventListener {
     }
 
     private fun toggleVideo() {
+        if (!isVideoEnabled && checkSelfPermission(android.Manifest.permission.CAMERA)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
+            return
+        }
         isVideoEnabled = !isVideoEnabled
-        WebRTCPlugin.manager?.setVideoEnabled(isVideoEnabled)
-        localVideoView.visibility = if (isVideoEnabled) View.VISIBLE else View.GONE
+        val mgr = WebRTCPlugin.manager
+        mgr?.setVideoEnabled(isVideoEnabled)
+        if (isVideoEnabled) {
+            // Switch from voice to video mode
+            voiceBg?.visibility = View.GONE
+            voiceCenter?.visibility = View.GONE
+            pulseAnimator?.cancel()
+            remoteVideoView.visibility = View.VISIBLE
+            localVideoView.visibility = View.VISIBLE
+            flipContainer?.visibility = View.VISIBLE
+
+            // Ensure renderers are initialized
+            initVideoRenderers()
+            mgr?.startLocalVideo("", localVideoView)
+            setupLocalVideoDrag()
+        } else {
+            // Switch from video to voice mode
+            localVideoView.visibility = View.GONE
+            flipContainer?.visibility = View.GONE
+        }
         updateButtonStates()
+
+        // Notify JS for SDP renegotiation (mid-call video toggle)
+        onNativeVideoToggle?.invoke(isVideoEnabled)
     }
 
     private fun flipCamera() {
         WebRTCPlugin.manager?.switchCamera()
     }
 
-    private fun toggleSpeaker() {
-        isSpeakerOn = !isSpeakerOn
-        audioManager?.isSpeakerphoneOn = isSpeakerOn
-        updateButtonStates()
+    private fun showAudioRouteSheet() {
+        val state = audioRouter.getState()
+        val sheetView = layoutInflater.inflate(R.layout.bottom_sheet_audio_route, null)
+        val container = sheetView.findViewById<LinearLayout>(R.id.audio_devices_container)
+
+        val popup = android.widget.PopupWindow(
+            sheetView,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+            true
+        ).apply {
+            animationStyle = android.R.style.Animation_InputMethod
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            elevation = 16f
+        }
+
+        for (device in state.available) {
+            val row = layoutInflater.inflate(R.layout.item_audio_device, container, false)
+            val icon = row.findViewById<android.widget.ImageView>(R.id.device_icon)
+            val name = row.findViewById<TextView>(R.id.device_name)
+            val check = row.findViewById<android.widget.ImageView>(R.id.device_check)
+
+            icon.setImageResource(when (device) {
+                AudioRouter.Device.EARPIECE -> R.drawable.ic_hearing
+                AudioRouter.Device.SPEAKER -> R.drawable.ic_volume_up
+                AudioRouter.Device.BLUETOOTH -> R.drawable.ic_bluetooth
+                AudioRouter.Device.WIRED_HEADSET -> R.drawable.ic_hearing
+            })
+            name.text = when (device) {
+                AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: "Bluetooth"
+                else -> device.label
+            }
+            check.visibility = if (device == state.active) View.VISIBLE else View.GONE
+
+            row.setOnClickListener {
+                audioRouter.setDevice(device)
+                popup.dismiss()
+            }
+            container.addView(row)
+        }
+
+        popup.showAtLocation(controlsBar, android.view.Gravity.BOTTOM, 0, 0)
+    }
+
+    private fun updateAudioRouteUI(state: AudioRouter.AudioDeviceState) {
+        val iconRes = when (state.active) {
+            AudioRouter.Device.EARPIECE -> R.drawable.ic_hearing
+            AudioRouter.Device.SPEAKER -> R.drawable.ic_volume_up
+            AudioRouter.Device.BLUETOOTH -> R.drawable.ic_bluetooth
+            AudioRouter.Device.WIRED_HEADSET -> R.drawable.ic_hearing
+        }
+        btnAudioRoute.setImageResource(iconRes)
+
+        val isNonDefault = state.active != AudioRouter.Device.EARPIECE
+        btnAudioRoute.setBackgroundResource(
+            if (isNonDefault) R.drawable.btn_call_control_active else R.drawable.btn_call_control
+        )
+        val tint = if (isNonDefault) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnAudioRoute.setColorFilter(tint)
+
+        val label = when (state.active) {
+            AudioRouter.Device.BLUETOOTH -> audioRouter.getBluetoothDeviceName() ?: "BT"
+            else -> state.active.label
+        }
+        findViewById<TextView>(R.id.label_audio_route)?.text = label
     }
 
     private fun hangup() {
@@ -362,15 +601,17 @@ class CallActivity : Activity(), SensorEventListener {
     }
 
     private fun updateButtonStates() {
-        // Use alpha to indicate toggle state (1.0 = active, 0.4 = inactive)
-        btnMute.alpha = if (isMuted) 1.0f else 0.5f
-        btnVideo.alpha = if (isVideoEnabled) 1.0f else 0.5f
-        btnSpeaker.alpha = if (isSpeakerOn) 1.0f else 0.5f
-
-        // Update labels
+        btnMute.setImageResource(if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic)
+        btnMute.setBackgroundResource(if (isMuted) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
+        val muteTint = if (isMuted) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnMute.setColorFilter(muteTint)
         findViewById<TextView>(R.id.label_mute)?.text = if (isMuted) "Unmute" else "Mute"
+
+        btnVideo.setImageResource(if (isVideoEnabled) R.drawable.ic_videocam else R.drawable.ic_videocam_off)
+        btnVideo.setBackgroundResource(if (!isVideoEnabled) R.drawable.btn_call_control_active else R.drawable.btn_call_control)
+        val videoTint = if (!isVideoEnabled) android.graphics.Color.parseColor("#1A1A2E") else android.graphics.Color.WHITE
+        btnVideo.setColorFilter(videoTint)
         findViewById<TextView>(R.id.label_video)?.text = if (isVideoEnabled) "Video Off" else "Video On"
-        findViewById<TextView>(R.id.label_speaker)?.text = if (isSpeakerOn) "Earpiece" else "Speaker"
     }
 
     // -----------------------------------------------------------------------

@@ -40,6 +40,13 @@ class WebRTCPlugin : Plugin() {
             notifyListeners("onNativeHangup", JSObject())
         }
 
+        // Wire CallActivity native video toggle → JS event for renegotiation
+        com.forta.chat.plugins.calls.CallActivity.onNativeVideoToggle = { enabled ->
+            notifyListeners("onNativeVideoToggle", JSObject().apply {
+                put("enabled", enabled)
+            })
+        }
+
         Log.d(TAG, "WebRTCPlugin loaded, manager initialized")
     }
 
@@ -129,9 +136,10 @@ class WebRTCPlugin : Plugin() {
                     }
                     notifyListeners("onTrack", data)
 
-                    // Auto-attach remote video to renderer
+                    // Auto-attach remote video to renderer + notify CallActivity
                     if (track is VideoTrack) {
                         mgr.addRemoteTrackSink(track)
+                        com.forta.chat.plugins.calls.CallActivity.onRemoteVideo?.invoke()
                     }
                 }
 
@@ -385,6 +393,13 @@ class WebRTCPlugin : Plugin() {
         com.forta.chat.plugins.calls.CallForegroundService.updateStatus(
             context, status, duration
         )
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun updateRemoteVideoState(call: PluginCall) {
+        val muted = call.getBoolean("muted") ?: false
+        com.forta.chat.plugins.calls.CallActivity.onRemoteVideoMuted?.invoke(muted)
         call.resolve()
     }
 

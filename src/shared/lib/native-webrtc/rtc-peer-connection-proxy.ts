@@ -416,16 +416,19 @@ class NativeRTCPeerConnection extends EventTarget {
     } as unknown as RTCRtpSender;
     this._senders.push(sender);
 
-    // Fire negotiationneeded ONLY for outgoing calls (no remote description yet).
-    // For incoming calls, the SDK creates the answer itself after
-    // setRemoteDescription — firing negotiationneeded would trigger an
-    // unwanted immediate renegotiation that breaks the ICE connection.
+    // Fire negotiationneeded for:
+    // 1. Outgoing calls (no remote description yet) — initial setup
+    // 2. Mid-call track additions (ICE already connected) — e.g. voice→video upgrade
+    // Skip ONLY during incoming call setup (remote description set but ICE not yet connected)
+    // to avoid unwanted renegotiation that breaks ICE establishment.
     queueMicrotask(() => {
       if (this._closed) return;
-      if (this._remoteDescription) {
-        console.log("[NativeRTCProxy] addTrack: skipping negotiationneeded (answering)");
+      const iceConnected = this._iceConnectionState === "connected" || this._iceConnectionState === "completed";
+      if (this._remoteDescription && !iceConnected) {
+        console.log("[NativeRTCProxy] addTrack: skipping negotiationneeded (answering, ICE not yet connected)");
         return;
       }
+      console.log(`[NativeRTCProxy] addTrack: firing negotiationneeded (iceState=${this._iceConnectionState})`);
       const event = new Event("negotiationneeded");
       this.onnegotiationneeded?.(event);
       this._fireEvent(event);

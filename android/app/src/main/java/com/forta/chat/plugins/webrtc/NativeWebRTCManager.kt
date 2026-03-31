@@ -320,7 +320,12 @@ class NativeWebRTCManager(private val context: Context) {
 
     fun startLocalVideo(peerId: String, renderer: SurfaceViewRenderer? = null) {
         if (localVideoTrack != null) {
-            // Already started — add to specific PC if provided
+            // Already started — attach renderer if provided (e.g. CallActivity opened after track creation)
+            if (renderer != null && renderer != localRenderer) {
+                localRenderer?.let { localVideoTrack?.removeSink(it) }
+                localRenderer = renderer
+                localVideoTrack?.addSink(renderer)
+            }
             if (peerId.isNotEmpty()) {
                 peerConnections[peerId]?.addTrack(localVideoTrack, listOf("stream0"))
             }
@@ -460,10 +465,29 @@ class NativeWebRTCManager(private val context: Context) {
 
     fun attachRemoteRenderer(renderer: SurfaceViewRenderer) {
         remoteRenderer = renderer
+        // Re-attach any existing remote video tracks (if they arrived before renderer)
+        for ((_, pc) in peerConnections) {
+            for (transceiver in pc.transceivers) {
+                val track = transceiver.receiver?.track()
+                if (track is VideoTrack && track.enabled()) {
+                    track.addSink(renderer)
+                }
+            }
+        }
     }
 
     fun addRemoteTrackSink(track: VideoTrack) {
         remoteRenderer?.let { track.addSink(it) }
+    }
+
+    fun hasRemoteVideoTracks(): Boolean {
+        for ((_, pc) in peerConnections) {
+            for (transceiver in pc.transceivers) {
+                val track = transceiver.receiver?.track()
+                if (track is VideoTrack && track.enabled()) return true
+            }
+        }
+        return false
     }
 
     // -----------------------------------------------------------------------

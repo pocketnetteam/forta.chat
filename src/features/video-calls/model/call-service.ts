@@ -97,11 +97,18 @@ function syncRemoteVideoMuted(call: MatrixCall) {
     cleanupRemoteFeedListener();
 
     if (remoteFeed) {
-      callStore.remoteVideoMuted = remoteFeed.isVideoMuted();
-      maybeUpgradeToVideo(remoteFeed.isVideoMuted());
+      const initialMuted = remoteFeed.isVideoMuted();
+      callStore.remoteVideoMuted = initialMuted;
+      maybeUpgradeToVideo(initialMuted);
+      if (isNative) {
+        NativeWebRTC.updateRemoteVideoState({ muted: initialMuted }).catch(() => {});
+      }
       remoteFeedMuteHandler = (_audioMuted: boolean, videoMuted: boolean) => {
         callStore.remoteVideoMuted = videoMuted;
         maybeUpgradeToVideo(videoMuted);
+        if (isNative) {
+          NativeWebRTC.updateRemoteVideoState({ muted: videoMuted }).catch(() => {});
+        }
       };
       trackedRemoteFeed = remoteFeed;
       remoteFeed.on("mute_state_changed" as any, remoteFeedMuteHandler);
@@ -823,6 +830,22 @@ export function useCallService() {
     }
   }
 
+  /** Called from native CallActivity video toggle — triggers SDK renegotiation */
+  async function setLocalVideoMuted(muted: boolean) {
+    const call = callStore.matrixCall as MatrixCall | null;
+    if (!call) return;
+    try {
+      await call.setLocalVideoMuted(muted);
+      callStore.videoMuted = muted;
+      if (!muted && callStore.activeCall?.type === "voice") {
+        callStore.setActiveCall({ ...callStore.activeCall, type: "video" });
+      }
+      updateFeeds(call);
+    } catch (e) {
+      console.error("[call-service] setLocalVideoMuted error:", e);
+    }
+  }
+
   return {
     startCall,
     handleIncomingCall,
@@ -834,5 +857,6 @@ export function useCallService() {
     toggleScreenShare,
     setAudioDevice,
     setVideoDevice,
+    setLocalVideoMuted,
   };
 }

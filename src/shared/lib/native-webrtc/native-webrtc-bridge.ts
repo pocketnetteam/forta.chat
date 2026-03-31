@@ -49,6 +49,9 @@ export interface NativeWebRTCPlugin {
   closePeerConnection(options: { peerId: string }): Promise<void>;
   getConnectionState(options: { peerId: string }): Promise<{ state: string }>;
 
+  // Remote video state
+  updateRemoteVideoState(options: { muted: boolean }): Promise<void>;
+
   // Native Call UI
   launchCallUI(options: {
     callerName: string;
@@ -96,6 +99,11 @@ export interface NativeWebRTCPlugin {
   addListener(
     event: "onNativeHangup",
     handler: (data: Record<string, never>) => void
+  ): Promise<PluginListenerHandle>;
+
+  addListener(
+    event: "onNativeVideoToggle",
+    handler: (data: { enabled: boolean }) => void
   ): Promise<PluginListenerHandle>;
 }
 
