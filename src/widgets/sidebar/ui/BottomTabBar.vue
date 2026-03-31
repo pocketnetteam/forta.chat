@@ -28,7 +28,7 @@ const currentUser = computed(() =>
 <template>
   <nav
     aria-label="Main navigation"
-    class="flex h-14 shrink-0 border-t border-neutral-grad-0 bg-chat-sidebar"
+    class="flex h-14 shrink-0 border-t border-neutral-grad-0 bg-chat-sidebar box-content"
     style="padding-bottom: var(--safe-area-inset-bottom, 0px)"
   >
     <!-- Contacts -->

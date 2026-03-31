@@ -22,6 +22,12 @@ class MainActivity : BridgeActivity() {
 
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    // Cached inset values (dp) for re-injection after page loads
+    private var insetTop = 0
+    private var insetBottom = 0
+    private var insetLeft = 0
+    private var insetRight = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(TorPlugin::class.java)
         registerPlugin(CallPlugin::class.java)
@@ -44,24 +50,35 @@ class MainActivity : BridgeActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { view, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val density = resources.displayMetrics.density
-            val top = (systemBars.top / density).toInt()
-            val bottom = (systemBars.bottom / density).toInt()
-            val left = (systemBars.left / density).toInt()
-            val right = (systemBars.right / density).toInt()
+            insetTop = (systemBars.top / density).toInt()
+            insetBottom = (systemBars.bottom / density).toInt()
+            insetLeft = (systemBars.left / density).toInt()
+            insetRight = (systemBars.right / density).toInt()
 
-            bridge?.webView?.post {
-                bridge?.webView?.evaluateJavascript(
-                    """
-                    document.documentElement.style.setProperty('--safe-area-inset-top', '${top}px');
-                    document.documentElement.style.setProperty('--safe-area-inset-bottom', '${bottom}px');
-                    document.documentElement.style.setProperty('--safe-area-inset-left', '${left}px');
-                    document.documentElement.style.setProperty('--safe-area-inset-right', '${right}px');
-                    """.trimIndent(),
-                    null
-                )
-            }
-
+            injectSafeAreaInsets()
             ViewCompat.onApplyWindowInsets(view, insets)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-inject after resume — WebView may have reloaded or CSS may have overridden values
+        injectSafeAreaInsets()
+    }
+
+    private fun injectSafeAreaInsets() {
+        val webView = bridge?.webView ?: return
+        val js = """
+            (function() {
+                var s = document.documentElement.style;
+                s.setProperty('--safe-area-inset-top', '${insetTop}px');
+                s.setProperty('--safe-area-inset-bottom', '${insetBottom}px');
+                s.setProperty('--safe-area-inset-left', '${insetLeft}px');
+                s.setProperty('--safe-area-inset-right', '${insetRight}px');
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
+        // Re-inject after a delay to ensure CSS hasn't overridden values after page load
+        webView.postDelayed({ webView.evaluateJavascript(js, null) }, 1000)
     }
 }
