@@ -1,15 +1,16 @@
 import { ref } from "vue";
 import { isNative } from "@/shared/lib/platform";
 import { getRealGetUserMedia } from "@/shared/lib/native-webrtc";
-import AudioRecorder from "audio-recorder-polyfill";
-// @ts-expect-error — no types for mpeg-encoder
-import mpegEncoder from "audio-recorder-polyfill/mpeg-encoder";
-
-// Configure MP3 encoder (matching bastyon-chat)
-AudioRecorder.encoder = mpegEncoder;
-AudioRecorder.prototype.mimeType = "audio/mpeg";
 
 export type RecorderState = "idle" | "recording" | "locked" | "preview";
+
+/** Map MIME type to file extension */
+const mimeToExt = (mime: string): string => {
+  if (mime.includes("webm")) return "webm";
+  if (mime.includes("mp4")) return "m4a";
+  if (mime.includes("ogg")) return "ogg";
+  return "webm";
+};
 
 export function useVoiceRecorder() {
   const state = ref<RecorderState>("idle");
@@ -17,13 +18,14 @@ export function useVoiceRecorder() {
   const waveformData = ref<number[]>([]);
   const recordedBlob = ref<Blob | null>(null);
 
-  let mediaRecorder: InstanceType<typeof AudioRecorder> | null = null;
+  let mediaRecorder: MediaRecorder | null = null;
   let audioStream: MediaStream | null = null;
   let audioContext: AudioContext | null = null;
   let analyser: AnalyserNode | null = null;
   let durationTimer: ReturnType<typeof setInterval> | null = null;
   let waveformTimer: ReturnType<typeof setInterval> | null = null;
   let audioChunks: Blob[] = [];
+  let recordedMimeType = "";
 
   /** Compute RMS from frequency data (same as bastyon-chat generateRms) */
   const computeRms = (frequencies: Uint8Array): number => {
@@ -35,7 +37,13 @@ export function useVoiceRecorder() {
     try {
       const t0 = Date.now();
       const gum = (isNative && getRealGetUserMedia()) || navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-      audioStream = await gum({ audio: true });
+      audioStream = await gum({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
 
       // Validate we got real audio tracks (not dummy from WebRTC proxy)
       const audioTracks = audioStream.getAudioTracks();
@@ -56,14 +64,21 @@ export function useVoiceRecorder() {
       analyser.fftSize = 256;
       source.connect(analyser);
 
-      // Create recorder (MP3 32kbps)
-      mediaRecorder = new AudioRecorder(audioStream, { audioBitsPerSecond: 32000 });
+      // Pick best supported MIME type for native MediaRecorder
+      const mimeType =
+        typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : "audio/mp4";
+      recordedMimeType = mimeType;
+
+      mediaRecorder = new MediaRecorder(audioStream, { mimeType });
 
       mediaRecorder.addEventListener("dataavailable", (e: BlobEvent) => {
         if (e.data.size > 0) audioChunks.push(e.data);
       });
 
-      mediaRecorder.start(1000);   // flush data every 1s so encoder Worker keeps up
+      // Start without timeslice — one continuous stream, no chunk boundary artifacts
+      mediaRecorder.start();
       duration.value = 0;
       waveformData.value = [];
 
@@ -113,7 +128,7 @@ export function useVoiceRecorder() {
       // Safety timeout — if stop event never fires, resolve after 3s
       const timeout = setTimeout(() => {
         const blob = audioChunks.length > 0
-          ? new Blob(audioChunks, { type: "audio/mpeg" })
+          ? new Blob(audioChunks, { type: recordedMimeType })
           : null;
         cleanup();
         resolve(blob);
@@ -124,7 +139,7 @@ export function useVoiceRecorder() {
         // Small delay to ensure any final dataavailable has been processed
         setTimeout(() => {
           const blob = audioChunks.length > 0
-            ? new Blob(audioChunks, { type: "audio/mpeg" })
+            ? new Blob(audioChunks, { type: recordedMimeType })
             : null;
           cleanup();
           resolve(blob);
@@ -160,7 +175,8 @@ export function useVoiceRecorder() {
     }
     const waveform = [...waveformData.value];
     state.value = "idle";
-    const file = new File([blob], `voice_${Date.now()}.mp3`, { type: "audio/mpeg" });
+    const ext = mimeToExt(blob.type);
+    const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: blob.type });
     return { file, duration: dur, waveform };
   };
 
@@ -183,7 +199,8 @@ export function useVoiceRecorder() {
     const waveform = [...waveformData.value];
     recordedBlob.value = null;
     state.value = "idle";
-    const file = new File([blob], `voice_${Date.now()}.mp3`, { type: "audio/mpeg" });
+    const ext = mimeToExt(blob.type);
+    const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: blob.type });
     return { file, duration: dur, waveform };
   };
 

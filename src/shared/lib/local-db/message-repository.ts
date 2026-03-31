@@ -376,18 +376,26 @@ export class MessageRepository {
     clientId: string,
     eventId: string,
     serverFileInfo: LocalMessage["fileInfo"],
+    roomId: string,
   ): Promise<void> {
-    await this.db.messages
-      .where("clientId")
-      .equals(clientId)
-      .modify({
-        eventId,
-        status: "synced" as LocalMessageStatus,
-        serverTs: Date.now(),
-        fileInfo: serverFileInfo,
-        uploadProgress: undefined,
-        localBlobUrl: undefined,
+    await this.db.transaction('rw', [this.db.messages, this.db.rooms], async () => {
+      await this.db.messages
+        .where("clientId")
+        .equals(clientId)
+        .modify({
+          eventId,
+          status: "synced" as LocalMessageStatus,
+          serverTs: Date.now(),
+          fileInfo: serverFileInfo,
+          uploadProgress: undefined,
+          localBlobUrl: undefined,
+        });
+      // Update room list status — mirrors what syncSendMessage does in sync-engine.ts:228-231
+      await this.db.rooms.update(roomId, {
+        lastMessageLocalStatus: "synced" as LocalMessageStatus,
+        lastMessageEventId: eventId,
       });
+    });
   }
 
   /** Get the room ID for a given event (used by sync engine) */
