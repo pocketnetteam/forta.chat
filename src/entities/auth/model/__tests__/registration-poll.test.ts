@@ -62,10 +62,21 @@ describe("login key verification", () => {
     expect(matrixPos).toBeGreaterThan(verifyPos);
   });
 
-  it("verifyAndRepublishKeys should check for 12 keys", () => {
+  it("verifyAndRepublishKeys should check keys via both cache and RPC", () => {
     const source = getSource();
     const fnStart = source.indexOf("const verifyAndRepublishKeys");
-    const fnSection = source.slice(fnStart, fnStart + 1500);
-    expect(fnSection).toContain("publishedKeys.length >= 12");
+    const fnSection = source.slice(fnStart, fnStart + 2000);
+    // Should check cache first
+    expect(fnSection).toContain("cachedKeys.length >= 12");
+    // Should fallback to blockchain RPC
+    expect(fnSection).toContain("loadUsersInfoRaw");
+    expect(fnSection).toContain("blockchainKeys.length >= 12");
+  });
+
+  it("verifyAndRepublishKeys should not block login if RPC fails", () => {
+    const source = getSource();
+    const fnStart = source.indexOf("const verifyAndRepublishKeys");
+    const fnSection = source.slice(fnStart, fnStart + 2000);
+    expect(fnSection).toContain("skipping re-publish");
   });
 });

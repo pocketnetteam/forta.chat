@@ -496,71 +496,79 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   /** Verify user has 12 published encryption keys; re-publish if missing.
-   *  Called on every login to catch users stuck in broken state. */
+   *  Called on every login to catch users stuck in broken state.
+   *  Uses blockchain RPC (not local SDK cache) to avoid false negatives. */
   const verifyAndRepublishKeys = async () => {
     if (!address.value || !privateKey.value) return;
 
+    // Step 1: Quick check via local SDK cache
     const userData = appInitializer.getUserData(address.value);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const publishedKeys: string[] = (userData as any)?.keys ?? [];
+    const cachedKeys: string[] = (userData as any)?.keys ?? [];
 
-    if (publishedKeys.length >= 12) {
-      console.log("[auth] Key verification OK:", publishedKeys.length, "keys published");
+    if (cachedKeys.length >= 12) {
+      console.log("[auth] Key verification OK (cache):", cachedKeys.length, "keys");
       return;
     }
 
-    console.warn("[auth] Key verification FAILED: only", publishedKeys.length, "keys published. Re-publishing...");
+    // Step 2: Cache may be stale/empty after login — verify via blockchain RPC
+    console.log("[auth] Cache shows", cachedKeys.length, "keys, verifying via RPC...");
+    try {
+      const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+      const rawProfile = rawProfiles[0];
+      if (rawProfile) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
+        let blockchainKeys: string[] = [];
+        if (Array.isArray(rawKeys)) {
+          blockchainKeys = rawKeys.filter((k: string) => k);
+        } else if (typeof rawKeys === "string" && rawKeys) {
+          blockchainKeys = rawKeys.split(",").filter((k: string) => k);
+        }
 
-    // Re-derive the 12 encryption keys from private key
+        if (blockchainKeys.length >= 12) {
+          console.log("[auth] Key verification OK (blockchain):", blockchainKeys.length, "keys");
+          return;
+        }
+        console.warn("[auth] Blockchain confirms only", blockchainKeys.length, "keys. Re-publishing...");
+      } else {
+        console.warn("[auth] No profile found on blockchain. Re-publishing...");
+      }
+    } catch (e) {
+      console.warn("[auth] RPC key check failed, skipping re-publish:", e);
+      // Don't block login if RPC fails — keys might be fine, cache just didn't load
+      return;
+    }
+
+    // Step 3: Keys genuinely missing — re-derive and re-publish
     const encKeys = generateEncryptionKeys(privateKey.value);
     const encPublicKeys = encKeys.map(k => k.public);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const name = (userData as any)?.name ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const language = (userData as any)?.language ?? "en";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const about = (userData as any)?.about ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const image = (userData as any)?.image ?? "";
 
-    // Check if user has PKOIN for transaction
     const hasUnspents = await appInitializer.checkUnspents(address.value);
     if (!hasUnspents) {
-      console.warn("[auth] No PKOIN for key re-publish. Setting pending profile for poll.");
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const name = (userData as any)?.name ?? "";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const language = (userData as any)?.language ?? "en";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const about = (userData as any)?.about ?? "";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const image = (userData as any)?.image ?? "";
+      console.warn("[auth] No PKOIN for key re-publish. Setting pending for poll.");
       setPendingRegProfile({ name, language, about, encPublicKeys, image });
       setRegistrationPending(true);
       startRegistrationPoll();
       return;
     }
 
-    // Has PKOIN — publish immediately
     try {
       await appInitializer.syncNodeTime();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const name = (userData as any)?.name ?? "";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const language = (userData as any)?.language ?? "en";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const about = (userData as any)?.about ?? "";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const image = (userData as any)?.image ?? "";
-      await appInitializer.registerUserProfile(
-        address.value,
-        { name, language, about },
-        encPublicKeys,
-        image
-      );
+      await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
       console.log("[auth] Key re-publish broadcast sent. Starting confirmation poll.");
       setRegistrationPending(true);
       startRegistrationPoll();
     } catch (e) {
       console.error("[auth] Key re-publish failed:", e);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const name = (userData as any)?.name ?? "";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const language = (userData as any)?.language ?? "en";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const about = (userData as any)?.about ?? "";
       setPendingRegProfile({ name, language, about, encPublicKeys });
       setRegistrationPending(true);
       startRegistrationPoll();
