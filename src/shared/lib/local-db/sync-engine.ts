@@ -51,6 +51,33 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Recover operations stranded in "syncing" state (e.g. after app crash mid-send).
+   * Resets them back to "pending" so processQueue() will pick them up.
+   * Must be called once at startup before processQueue().
+   */
+  async recoverStrandedOps(): Promise<void> {
+    const stranded = await this.db.pendingOps
+      .where("status")
+      .equals("syncing")
+      .toArray();
+
+    if (stranded.length === 0) return;
+
+    console.info(`[SyncEngine] Recovering ${stranded.length} stranded "syncing" ops`);
+
+    for (const op of stranded) {
+      await this.db.pendingOps.update(op.id!, {
+        status: "pending",
+        retries: 0,
+      });
+      // Also reset the associated message status so UI shows "sending" not stuck
+      if (op.clientId) {
+        await this.messageRepo.updateStatus({ clientId: op.clientId }, "pending");
+      }
+    }
+  }
+
   /** Set the callback invoked after a successful sync operation */
   setOnChange(cb: OnChangeCallback): void {
     this.onChange = cb;

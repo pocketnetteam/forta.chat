@@ -22,6 +22,11 @@ export function revokeAllFileUrls() {
   cache.clear();
 }
 
+/** Remove a specific entry from the download cache (e.g. before blob URL revocation) */
+export function invalidateDownloadCache(key: string) {
+  cache.delete(key);
+}
+
 /** Download and optionally decrypt a file from the Matrix server.
  *  Needs senderId + timestamp to reconstruct the event for decryptKey(). */
 async function downloadAndDecrypt(
@@ -93,16 +98,18 @@ export function useFileDownload() {
   const download = async (message: Message) => {
     if (!message.fileInfo) return null;
 
-    const eventId = message.id;
+    // Use _key (stable clientId) if available, otherwise fall back to id.
+    // This prevents cache misses when id flips from clientId to eventId after send confirmation.
+    const cacheKey = message._key || message.id;
 
     // Already cached
-    if (cache.has(eventId)) {
-      const state = getState(eventId);
-      state.objectUrl = cache.get(eventId)!;
+    if (cache.has(cacheKey)) {
+      const state = getState(cacheKey);
+      state.objectUrl = cache.get(cacheKey)!;
       return state.objectUrl;
     }
 
-    const state = getState(eventId);
+    const state = getState(cacheKey);
     if (state.loading) return; // Already downloading
 
     state.loading = true;
@@ -121,7 +128,7 @@ export function useFileDownload() {
 
       state.objectUrl = url;
       state.blob = typedBlob;
-      cache.set(eventId, url);
+      cache.set(cacheKey, url);
 
       return url;
     } catch (e) {

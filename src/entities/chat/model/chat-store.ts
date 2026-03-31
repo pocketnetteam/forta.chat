@@ -555,17 +555,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const room = getRoomById(roomId);
     if (room) room.unreadCount = 0;
 
-    // Persist to Dexie + send Matrix receipt via commitReadWatermark
-    const roomMsgs = messages.value[roomId];
     const myAddr = useAuthStore().address;
+
+    // Dexie-first path: query the DB for the last inbound timestamp
+    if (chatDbKitRef.value && myAddr) {
+      chatDbKitRef.value.messages.getLastInboundTimestamp(roomId, myAddr)
+        .then((lastInboundTs) => {
+          if (lastInboundTs > 0) {
+            return commitReadWatermark(roomId, lastInboundTs);
+          } else {
+            return chatDbKitRef.value?.eventWriter.clearUnread(roomId);
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+
+    // Legacy fallback: read from in-memory store
+    const roomMsgs = messages.value[roomId];
     const lastInboundTs = roomMsgs
       ?.filter(m => m.senderId !== myAddr)
       .reduce((max, m) => (m.timestamp > max ? m.timestamp : max), 0) ?? 0;
 
     if (lastInboundTs > 0) {
       commitReadWatermark(roomId, lastInboundTs).catch(() => {});
-    } else if (chatDbKitRef.value) {
-      chatDbKitRef.value.eventWriter.clearUnread(roomId).catch(() => {});
     }
   };
 
@@ -604,9 +617,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const dexieRoomsReady = ref(false);
   const dexieRoomMap = new Map<string, LocalRoom>();
   let dexieChangesUnsub: (() => void) | null = null;
+  // Reactive version counter — incremented whenever dexieRoomMap is mutated.
+  // This makes computed properties that read from dexieRoomMap properly reactive.
+  const _dexieRoomMapVersion = ref(0);
 
   // Outbound watermark for active room — used to derive message statuses
   const activeRoomOutboundWatermark = computed(() => {
+    // Access version counter to register reactive dependency on dexieRoomMap mutations
+    void _dexieRoomMapVersion.value;
     if (!activeRoomId.value) return 0;
     const lr = dexieRoomMap.get(activeRoomId.value);
     return lr?.lastReadOutboundTs ?? 0;
@@ -930,6 +948,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const allRooms = await dbKit.rooms.getAllRooms();
     dexieRoomMap.clear();
     for (const r of allRooms) dexieRoomMap.set(r.id, r);
+    _dexieRoomMapVersion.value++;
     dexieRooms.value = allRooms;
     dexieRoomsReady.value = true;
     dexieChangesUnsub?.();
@@ -960,6 +979,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     }
     if (relevantChanges.length === 0) return;
+    _dexieRoomMapVersion.value++;
 
     if (_suppressDexieRecompute) {
       // Accumulate for deferred application — will be applied incrementally in finally block
@@ -1008,6 +1028,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         dexieChangesUnsub?.();
         dexieChangesUnsub = null;
         dexieRoomMap.clear();
+        _dexieRoomMapVersion.value++;
         dexieRooms.value = [];
         dexieRoomsReady.value = false;
         if (_fullRebuildTimer) { clearTimeout(_fullRebuildTimer); _fullRebuildTimer = null; }

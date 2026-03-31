@@ -104,6 +104,9 @@ export function initChatDb(
     return { decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>) };
   }, rooms);
 
+  // Recover operations stranded in "syncing" state after app crash, then start queue
+  syncEngine.recoverStrandedOps().then(() => syncEngine.processQueue()).catch(() => {});
+
   // Start processing any pending decryption jobs from previous session
   decryptionWorker.tick().catch(() => {});
 
