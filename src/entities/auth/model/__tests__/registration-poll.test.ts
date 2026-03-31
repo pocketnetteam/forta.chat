@@ -41,3 +41,31 @@ describe("registration poll", () => {
     expect(stopSection).toContain("clearTimeout");
   });
 });
+
+describe("login key verification", () => {
+  it("should have verifyAndRepublishKeys function", () => {
+    const source = getSource();
+    expect(source).toContain("verifyAndRepublishKeys");
+  });
+
+  it("login should call verifyAndRepublishKeys between fetchUserInfo and initMatrix", () => {
+    const source = getSource();
+    const loginSection = source.slice(
+      source.indexOf("execute: login"),
+      source.indexOf("execute: login") + 800
+    );
+    const fetchPos = loginSection.indexOf("fetchUserInfo");
+    const verifyPos = loginSection.indexOf("verifyAndRepublishKeys");
+    const matrixPos = loginSection.indexOf("initMatrix");
+    expect(fetchPos).toBeGreaterThan(-1);
+    expect(verifyPos).toBeGreaterThan(fetchPos);
+    expect(matrixPos).toBeGreaterThan(verifyPos);
+  });
+
+  it("verifyAndRepublishKeys should check for 12 keys", () => {
+    const source = getSource();
+    const fnStart = source.indexOf("const verifyAndRepublishKeys");
+    const fnSection = source.slice(fnStart, fnStart + 1500);
+    expect(fnSection).toContain("publishedKeys.length >= 12");
+  });
+});

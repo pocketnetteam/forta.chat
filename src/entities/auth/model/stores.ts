@@ -495,6 +495,78 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     );
   };
 
+  /** Verify user has 12 published encryption keys; re-publish if missing.
+   *  Called on every login to catch users stuck in broken state. */
+  const verifyAndRepublishKeys = async () => {
+    if (!address.value || !privateKey.value) return;
+
+    const userData = appInitializer.getUserData(address.value);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const publishedKeys: string[] = (userData as any)?.keys ?? [];
+
+    if (publishedKeys.length >= 12) {
+      console.log("[auth] Key verification OK:", publishedKeys.length, "keys published");
+      return;
+    }
+
+    console.warn("[auth] Key verification FAILED: only", publishedKeys.length, "keys published. Re-publishing...");
+
+    // Re-derive the 12 encryption keys from private key
+    const encKeys = generateEncryptionKeys(privateKey.value);
+    const encPublicKeys = encKeys.map(k => k.public);
+
+    // Check if user has PKOIN for transaction
+    const hasUnspents = await appInitializer.checkUnspents(address.value);
+    if (!hasUnspents) {
+      console.warn("[auth] No PKOIN for key re-publish. Setting pending profile for poll.");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const name = (userData as any)?.name ?? "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const language = (userData as any)?.language ?? "en";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const about = (userData as any)?.about ?? "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const image = (userData as any)?.image ?? "";
+      setPendingRegProfile({ name, language, about, encPublicKeys, image });
+      setRegistrationPending(true);
+      startRegistrationPoll();
+      return;
+    }
+
+    // Has PKOIN — publish immediately
+    try {
+      await appInitializer.syncNodeTime();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const name = (userData as any)?.name ?? "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const language = (userData as any)?.language ?? "en";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const about = (userData as any)?.about ?? "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const image = (userData as any)?.image ?? "";
+      await appInitializer.registerUserProfile(
+        address.value,
+        { name, language, about },
+        encPublicKeys,
+        image
+      );
+      console.log("[auth] Key re-publish broadcast sent. Starting confirmation poll.");
+      setRegistrationPending(true);
+      startRegistrationPoll();
+    } catch (e) {
+      console.error("[auth] Key re-publish failed:", e);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const name = (userData as any)?.name ?? "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const language = (userData as any)?.language ?? "en";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const about = (userData as any)?.about ?? "";
+      setPendingRegProfile({ name, language, about, encPublicKeys });
+      setRegistrationPending(true);
+      startRegistrationPoll();
+    }
+  };
+
   const { execute: login, isLoading: isLoggingIn } = useAsyncOperation(
     async (cryptoCredential: string) => {
       try {
@@ -508,6 +580,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         };
         setAuthData(authData);
         await fetchUserInfo();
+
+        // Verify encryption keys are published; re-publish if missing
+        await verifyAndRepublishKeys();
 
         // Initialize Matrix after successful auth
         await initMatrix();
