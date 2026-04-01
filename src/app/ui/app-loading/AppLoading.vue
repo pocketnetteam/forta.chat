@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { bootStatus } from "@/app/model/boot-status";
-import { useI18n, type TranslationKey } from "@/shared/lib/i18n";
+import { tRaw, type TranslationKey } from "@/shared/lib/i18n";
 
-const { t } = useI18n();
+const t = tRaw;
 const state = computed(() => bootStatus.state.value);
 const error = computed(() => bootStatus.error.value);
 
