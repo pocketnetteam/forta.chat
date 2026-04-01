@@ -4,9 +4,9 @@ import { useAuthStore } from "@/entities/auth";
 const router = useRouter();
 const authStore = useAuthStore();
 
-const handleLogout = () => {
-  authStore.logout();
-  router.push({ name: "WelcomePage" });
+const handleLogout = async () => {
+  await authStore.logout();
+  router.replace({ name: "WelcomePage" });
 };
 </script>
 

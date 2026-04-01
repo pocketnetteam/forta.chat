@@ -648,60 +648,59 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   );
 
   const logout = async () => {
-    // ── Clean up all account data ──
+    // ── 0. Immediately clear auth credentials ──
+    // This must happen FIRST (before any async work) so that:
+    //   - isAuthenticated becomes false synchronously
+    //   - route guards redirect to login if navigation happens mid-cleanup
+    setAuthData({ address: null, privateKey: null });
+    userInfo.value = undefined;
 
-    // 1. Reset Pinia stores (in-memory state)
+    // ── 1. Reset Pinia stores (in-memory state) ──
     useChatStore().cleanup();
     useUserStore().cleanup();
     useCallStore().clearCall();
     useChannelStore().cleanup();
 
-    // 2. Delete Dexie local-first database (await to prevent race with re-login)
-    await deleteChatDb().catch(() => {});
-
-    // 3. Clear localStorage account data
-    clearAllDrafts();
-    clearQueue();
-    clearAccountLocalStorage();
-
-    // 4. Delete legacy IndexedDB cache
-    deleteLegacyCache();
-
-    // Destroy cross-tab call lock
-    import("@/features/video-calls/model/call-tab-lock").then(({ destroyCallTabLock }) => {
-      destroyCallTabLock();
-    }).catch(() => { /* ignore */ });
-
-    // Revoke cached blob URLs from file downloads
-    import("@/features/messaging/model/use-file-download").then(({ revokeAllFileUrls }) => {
-      revokeAllFileUrls();
-    }).catch(() => { /* ignore */ });
-
-    // Clean up window online/offline listeners
-    if (typeof window !== "undefined") {
-      if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-      if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-    }
-
-    // Clear block height polling interval
-    if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
-
-    // Tear down Matrix
+    // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
     matrixReady.value = false;
     matrixError.value = null;
     matrixKit.value = null;
 
     if (pcrypto.value) {
-      // Destroy all room crypto instances
       for (const room of Object.values(pcrypto.value.rooms)) {
         room.destroy();
       }
       pcrypto.value = null;
     }
 
-    setAuthData({ address: null, privateKey: null });
-    userInfo.value = undefined;
+    // ── 3. Clean up window listeners & intervals ──
+    if (typeof window !== "undefined") {
+      if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
+      if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
+    }
+    if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
+
+    // ── 4. Clear localStorage account data ──
+    clearAllDrafts();
+    clearQueue();
+    clearAccountLocalStorage();
+
+    // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
+    await deleteChatDb().catch(() => {});
+
+    // ── 6. Delete legacy IndexedDB cache ──
+    deleteLegacyCache();
+
+    // ── 7. Fire-and-forget cleanup ──
+    import("@/features/video-calls/model/call-tab-lock").then(({ destroyCallTabLock }) => {
+      destroyCallTabLock();
+    }).catch(() => { /* ignore */ });
+
+    import("@/features/messaging/model/use-file-download").then(({ revokeAllFileUrls }) => {
+      revokeAllFileUrls();
+    }).catch(() => { /* ignore */ });
+
     setRegistrationPending(false);
     setPendingRegProfile(null);
     stopRegistrationPoll();
