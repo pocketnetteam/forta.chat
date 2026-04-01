@@ -520,4 +520,30 @@ describe("chat-store", () => {
       }
     });
   });
+
+  // ─── acceptInvite reactivity ────────────────────────────────────
+
+  describe("acceptInvite", () => {
+    it("replaces room object so activeRoom reference changes (Vue reactivity)", async () => {
+      // Setup: add a room with membership "invite"
+      const room = makeRoom({ id: "!inv:s", membership: "invite" });
+      store.rooms.push(room);
+
+      // Mock joinRoom on the matrix service
+      (mockMatrixService as any).joinRoom = vi.fn(async () => {});
+
+      // Grab reference before accept
+      const beforeRef = store.rooms.find(r => r.id === "!inv:s");
+      expect(beforeRef?.membership).toBe("invite");
+
+      await store.acceptInvite("!inv:s");
+
+      // After accept, the room object should be a NEW reference (shallow copy)
+      const afterRef = store.rooms.find(r => r.id === "!inv:s");
+      expect(afterRef).toBeDefined();
+      expect(afterRef?.membership).toBe("join");
+      // Critical: must be a different object to trigger Vue computed change propagation
+      expect(afterRef).not.toBe(beforeRef);
+    });
+  });
 });

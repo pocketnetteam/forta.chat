@@ -2373,10 +2373,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await matrixService.joinRoom(roomId);
 
       // Update local membership to "join" and trigger Vue reactivity.
-      // rooms is a shallowRef — property mutations don't trigger dependents,
-      // so we must call triggerRef to notify computed props (e.g. isInvite).
+      // rooms is a shallowRef and activeRoom computed returns the room object
+      // by reference. In-place mutation (room.membership = "join") wouldn't
+      // propagate: activeRoom would return the same reference, Vue would see
+      // no change (Object.is), and isInvite would stay stale.
+      // Fix: replace with a shallow copy so activeRoom returns a new reference.
       const room = getRoomById(roomId);
-      if (room) room.membership = "join";
+      if (room) {
+        const updated = { ...room, membership: "join" as const };
+        const idx = rooms.value.indexOf(room);
+        if (idx !== -1) rooms.value[idx] = updated;
+        roomsMap.set(roomId, updated);
+      }
       triggerRef(rooms);
 
       // Mark room as changed so the debounced refresh picks it up for Dexie sync
