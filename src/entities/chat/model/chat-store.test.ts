@@ -546,4 +546,57 @@ describe("chat-store", () => {
       expect(afterRef).not.toBe(beforeRef);
     });
   });
+
+  // ─── call event handling (regression) ─────────────────────────
+
+  describe("call events", () => {
+    it("addMessage stores system call event with empty content", () => {
+      const room = makeRoom({ id: "!call:s" });
+      store.rooms.push(room);
+      const callMsg = makeMsg({
+        roomId: "!call:s",
+        content: "",
+        type: MessageType.system,
+        callInfo: { callType: "voice", missed: false, duration: 42 },
+        systemMeta: { template: "system.voiceCall", senderAddr: "alice" },
+      });
+      store.addMessage("!call:s", callMsg);
+      expect(store.messages["!call:s"]).toHaveLength(1);
+      expect(store.messages["!call:s"][0].callInfo?.callType).toBe("voice");
+      expect(store.messages["!call:s"][0].callInfo?.duration).toBe(42);
+    });
+
+    it("addMessage stores missed call event", () => {
+      const room = makeRoom({ id: "!call2:s" });
+      store.rooms.push(room);
+      const missedCallMsg = makeMsg({
+        roomId: "!call2:s",
+        content: "",
+        type: MessageType.system,
+        callInfo: { callType: "video", missed: true },
+        systemMeta: { template: "system.missedVideoCall", senderAddr: "bob" },
+      });
+      store.addMessage("!call2:s", missedCallMsg);
+      expect(store.messages["!call2:s"]).toHaveLength(1);
+      expect(store.messages["!call2:s"][0].callInfo?.missed).toBe(true);
+    });
+
+    it("updates room lastMessage for call events", () => {
+      const room = makeRoom({ id: "!call3:s" });
+      store.rooms.push(room);
+      const callMsg = makeMsg({
+        roomId: "!call3:s",
+        content: "",
+        type: MessageType.system,
+        timestamp: 5000,
+        callInfo: { callType: "voice", missed: false, duration: 120 },
+        systemMeta: { template: "system.voiceCall", senderAddr: "alice" },
+      });
+      store.addMessage("!call3:s", callMsg);
+      const updated = store.rooms.find(r => r.id === "!call3:s");
+      expect(updated?.lastMessage).toBeDefined();
+      expect(updated?.lastMessage?.callInfo?.callType).toBe("voice");
+      expect(updated?.updatedAt).toBe(5000);
+    });
+  });
 });

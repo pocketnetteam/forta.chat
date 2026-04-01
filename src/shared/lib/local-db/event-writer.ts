@@ -564,6 +564,8 @@ export class EventWriter {
       msg.senderId,
       msg.type,
       msg.eventId ?? undefined,
+      msg.callInfo,
+      msg.systemMeta,
     );
   }
 
