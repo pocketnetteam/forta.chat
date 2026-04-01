@@ -89,10 +89,18 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     debouncedCacheUsers(users.value);
   };
 
+  /** How long an empty-name profile stays before we retry (30 seconds) */
+  const EMPTY_NAME_RETRY_MS = 30_000;
+
   /** Load a single user profile. Deduplicated via PromisePool — 140 concurrent
-   *  calls for the same address produce exactly 1 network request. */
+   *  calls for the same address produce exactly 1 network request.
+   *  Re-fetches if cached profile has an empty name (e.g. fetched before
+   *  blockchain confirmation during registration). */
   const loadUserIfMissing = (address: string): void => {
-    if (!address || users.value[address]) return;
+    if (!address) return;
+    const cached = users.value[address];
+    if (cached && cached.name) return; // has real name — skip
+    if (cached && cached.cachedAt && Date.now() - cached.cachedAt < EMPTY_NAME_RETRY_MS) return; // empty but recently tried
     if (profilePool.has(address)) return;
 
     profilePool.dedupe(address, async () => {
@@ -123,7 +131,14 @@ export const useUserStore = defineStore(NAMESPACE, () => {
    *  all addresses SYNCHRONOUSLY before any await — closing the race window
    *  that existed between filter() and pendingLoads.set() in the old code. */
   const loadUsersBatch = async (addresses: string[]): Promise<void> => {
-    const toLoad = addresses.filter(a => a && !users.value[a]);
+    const now = Date.now();
+    const toLoad = addresses.filter(a => {
+      if (!a) return false;
+      const cached = users.value[a];
+      if (!cached) return true; // not cached at all
+      if (!cached.name && (!cached.cachedAt || now - cached.cachedAt >= EMPTY_NAME_RETRY_MS)) return true; // empty name, stale
+      return false;
+    });
     if (toLoad.length === 0) return;
 
     await profilePool.dedupeBatch(toLoad, async (uncached) => {

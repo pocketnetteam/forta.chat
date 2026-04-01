@@ -529,6 +529,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
           createKeyPair(privateKey.value!)
         );
+        // Sync own profile to userStore so Avatar components show correct name/initial
+        if (userData.name) {
+          useUserStore().setUser(address.value!, {
+            address: address.value!,
+            name: userData.name ?? "",
+            about: userData.about ?? "",
+            image: userData.image ?? "",
+            site: userData.site ?? "",
+            language: userData.language ?? "",
+          });
+        }
       }
     );
   };
@@ -856,7 +867,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     async function onRegistrationConfirmed() {
       await appInitializer.initializeAndFetchUserData(
         address.value!,
-        (data: UserData) => setUserInfo(data)
+        (data: UserData) => {
+          setUserInfo(data);
+          // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+          useUserStore().setUser(address.value!, {
+            address: address.value!,
+            name: data.name ?? "",
+            about: data.about ?? "",
+            image: data.image ?? "",
+            site: data.site ?? "",
+            language: data.language ?? "",
+          });
+        }
       );
       setRegistrationPending(false);
       stopRegistrationPoll();

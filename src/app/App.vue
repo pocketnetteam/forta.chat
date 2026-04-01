@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
 import { useChatStore } from "@/entities/chat";
+import { useUserStore } from "@/entities/user/model";
 import { useContacts } from "@/features/contacts";
 import { useToast } from "@/shared/lib/use-toast";
 import Toast from "@/shared/ui/toast/Toast.vue";
@@ -59,6 +60,9 @@ const processReferral = async () => {
   if (ref === authStore.address) return;
 
   try {
+    // Eagerly load inviter's profile so name/avatar appear immediately in chat list
+    useUserStore().loadUserIfMissing(ref);
+
     const { getOrCreateRoom } = useContacts();
     const roomId = await getOrCreateRoom(ref);
     if (roomId) {
