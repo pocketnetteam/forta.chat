@@ -190,7 +190,9 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
           || (callContent as any).version === 1;
         const durationMs = typeof callContent.duration === "number" ? callContent.duration : 0;
         const sender = matrixIdToAddress(raw.sender as string);
-        const callTemplateKey = reason === "invite_timeout" ? "system.missedCallFrom" : "system.callWith";
+        const callTemplateKey = reason === "invite_timeout"
+          ? (isVideo ? "system.missedVideoCall" : "system.missedVoiceCall")
+          : (isVideo ? "system.videoCall" : "system.voiceCall");
         lastSystemMessage = {
           id: raw.event_id as string, roomId, senderId: sender,
           content: "", timestamp: (raw.origin_server_ts as number) ?? 0,
@@ -3389,7 +3391,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       messageEvents.map((event) => parseSingleEvent(event, roomId, roomCrypto).catch(() => null))
     );
 
-    const msgs = results.filter((m): m is Message => m !== null && (m.content !== "" || m.deleted === true));
+    const msgs = results.filter((m): m is Message => m !== null && (m.content !== "" || m.deleted === true || m.type === MessageType.system));
 
     // Apply edits to messages (decrypt if needed)
     const msgMap = new Map(msgs.map(m => [m.id, m]));
