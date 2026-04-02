@@ -41,7 +41,7 @@ const fileDownload = useFileDownload();
 playback.setOnEnded(async (endedMessageId: string, roomId: string) => {
   const messages = chatStore.activeMessages;
   const voiceMessages = messages.filter((m) => m.type === MessageType.audio);
-  const endedIdx = voiceMessages.findIndex((m) => m.id === endedMessageId);
+  const endedIdx = voiceMessages.findIndex((m) => (m._key || m.id) === endedMessageId);
   if (endedIdx === -1) return;
 
   const db = getChatDb();
@@ -61,7 +61,7 @@ playback.setOnEnded(async (endedMessageId: string, roomId: string) => {
     if (!objectUrl) break;
 
     playback.play({
-      messageId: next.id,
+      messageId: next._key || next.id,
       roomId: next.roomId,
       objectUrl,
       duration: next.fileInfo.duration ?? 0,

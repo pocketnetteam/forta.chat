@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from "vue";
 import type { Message } from "@/entities/chat";
+import { MessageStatus } from "@/entities/chat/model/types";
 import { useFileDownload } from "../model/use-file-download";
 import { useAudioPlayback } from "../model/use-audio-playback";
 import { getChatDb } from "@/shared/lib/local-db";
@@ -12,26 +13,50 @@ interface Props {
 
 const props = defineProps<Props>();
 
-const { getState, download } = useFileDownload();
+const { getState, download, seedLocalUrl } = useFileDownload();
 const fileCacheKey = computed(() => props.message._key || props.message.id);
 const fileState = computed(() => getState(fileCacheKey.value));
 
 const playback = useAudioPlayback();
 
-const active = playback.isActive(props.message.id);
-const playing = playback.isPlaying(props.message.id);
+// Use _key (stable clientId) for playback tracking — id changes from clientId to eventId after send confirmation
+const stableId = computed(() => props.message._key || props.message.id);
+const active = computed(() => playback.isActive(stableId.value).value);
+const playing = computed(() => playback.isPlaying(stableId.value).value);
 
 const hasListened = ref(false);
 
-// Check persistent listened state on mount
+// For pending messages with a local blob URL, seed the download cache directly
+// instead of fetching through the download pipeline.
+const isPending = computed(() =>
+  props.message.status === MessageStatus.sending || props.message.status === undefined,
+);
+
 onMounted(async () => {
-  if (props.message.fileInfo?.url) {
-    download(props.message);
+  const url = props.message.fileInfo?.url;
+  if (url) {
+    if (isPending.value && url.startsWith("blob:")) {
+      // Pending message — use the local blob URL directly, skip download pipeline
+      seedLocalUrl(fileCacheKey.value, url);
+    } else {
+      download(props.message);
+    }
   }
   try {
     hasListened.value = await getChatDb().listened.isListened(props.message.id);
   } catch { /* DB not ready — treat as not listened */ }
 });
+
+// When message transitions from pending to synced, the URL changes from blob: to http:.
+// Trigger download of the server file so the player can use the decrypted version.
+watch(
+  () => props.message.fileInfo?.url,
+  (newUrl, oldUrl) => {
+    if (newUrl && newUrl !== oldUrl && !newUrl.startsWith("blob:")) {
+      download(props.message);
+    }
+  },
+);
 
 // Mark as listened when playback starts for this message
 watch(playing, (isPlaying) => {
@@ -54,8 +79,18 @@ const displayTime = computed(() => {
   return `${formatTime(playback.currentTime.value)} / ${formatTime(totalDuration.value)}`;
 });
 
-// Waveform
+// Waveform — reactive to prop changes
 const waveform = ref<number[]>(props.message.fileInfo?.waveform ?? []);
+
+watch(
+  () => props.message.fileInfo?.waveform,
+  (newWaveform) => {
+    if (newWaveform && newWaveform.length > 0 && waveform.value.length === 0) {
+      waveform.value = newWaveform;
+    }
+  },
+);
+
 const BARS = 40;
 
 const normalizedWaveform = computed(() => {
@@ -105,20 +140,26 @@ const generateWaveform = async (url: string) => {
 
 // Toggle playback — MUST be synchronous from click to .play() to preserve
 // the user gesture chain on mobile WebViews. The file is preloaded on mount
-// (line 27-29), so objectUrl should be available by the time user taps play.
+// (line 38-48), so objectUrl should be available by the time user taps play.
 // If not yet ready, we kick off the download and return — user taps again.
-const handleTogglePlay = () => {
-  const url = fileState.value.objectUrl;
+const handleTogglePlay = async () => {
+  // If playback previously failed, reset error state on retry
+  if (playback.state.value === "failed" && playback.currentMessageId.value === stableId.value) {
+    playback.stop();
+  }
+
+  let url = fileState.value.objectUrl;
+
   if (!url) {
-    // File not yet downloaded — trigger download (already started on mount,
-    // this handles edge cases where mount download failed or was slow)
-    download(props.message);
-    return;
+    // File not yet downloaded — trigger download and auto-play when done
+    const downloadedUrl = await download(props.message);
+    if (!downloadedUrl) return; // Download failed — error state is shown via fileState.error
+    url = downloadedUrl;
   }
 
   // Synchronous call — no await between click event and .play()
   playback.togglePlay({
-    messageId: props.message.id,
+    messageId: stableId.value,
     roomId: props.message.roomId,
     objectUrl: url,
     duration: totalDuration.value,
@@ -127,6 +168,15 @@ const handleTogglePlay = () => {
   // Generate waveform in background (non-blocking)
   generateWaveform(url);
 };
+
+// Error state: download failed or playback failed
+const hasError = computed(() => {
+  const downloadError = fileState.value.error;
+  const playbackFailed = playback.state.value === "failed" && playback.currentMessageId.value === stableId.value;
+  return !!(downloadError || playbackFailed);
+});
+
+const isLoading = computed(() => fileState.value.loading);
 
 // Drag-seek via pointer events
 const isDragging = ref(false);
@@ -203,8 +253,15 @@ const handleCycleSpeed = () => {
       :class="props.isOwn ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-color-bg-ac/10 text-color-bg-ac hover:bg-color-bg-ac/20'"
       @click="handleTogglePlay"
     >
-      <div v-if="fileState.loading" class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+      <!-- Loading spinner -->
+      <div v-if="isLoading" class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+      <!-- Error icon — retry on click -->
+      <svg v-else-if="hasError" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="opacity-70">
+        <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <!-- Play icon -->
       <svg v-else-if="!playing" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+      <!-- Pause icon -->
       <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
     </button>
 

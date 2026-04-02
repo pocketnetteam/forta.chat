@@ -680,7 +680,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             && reactionsShallowEqual(prev.reactions, local.reactions)
             && pollInfoShallowEqual(prev.pollInfo, local.pollInfo)
             && prev.deleted === local.deleted
-            && prev.edited === local.edited) {
+            && prev.edited === local.edited
+            && prev.status === localStatusToMessageStatus(local.status)
+            && prev.uploadProgress === local.uploadProgress
+            && prev.fileInfo?.url === (local.localBlobUrl || local.fileInfo?.url)) {
           return prev;
         }
         return localToMessages([local], watermark, myAddr)[0];

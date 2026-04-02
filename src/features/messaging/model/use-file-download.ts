@@ -158,6 +158,17 @@ export function useFileDownload() {
     }
   };
 
+  /** Seed the cache with a local blob URL (e.g. for pending voice messages).
+   *  This avoids the full download+decrypt pipeline for files we already have locally. */
+  const seedLocalUrl = (cacheKey: string, blobUrl: string) => {
+    if (cache.has(cacheKey)) return;
+    cache.set(cacheKey, blobUrl);
+    const state = getState(cacheKey);
+    state.objectUrl = blobUrl;
+    state.loading = false;
+    state.error = null;
+  };
+
   /** Trigger browser download for a file */
   const saveFile = (objectUrl: string, fileName: string) => {
     const a = document.createElement("a");
@@ -180,6 +191,7 @@ export function useFileDownload() {
     states: states as Ref<Record<string, FileDownloadState>>,
     getState,
     download,
+    seedLocalUrl,
     saveFile,
     formatSize,
   };
