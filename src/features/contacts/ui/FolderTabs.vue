@@ -7,6 +7,7 @@ type FilterValue = "all" | "personal" | "groups" | "invites" | "channels";
 
 interface Props {
   modelValue: FilterValue;
+  scrollProgress?: number;
 }
 
 const props = defineProps<Props>();
@@ -48,9 +49,38 @@ const updateIndicator = () => {
   }
 };
 
+const interpolatedStyle = computed(() => {
+  if (props.scrollProgress == null) return null;
+  const tabs = visibleTabs.value;
+  const idx = Math.floor(props.scrollProgress);
+  const frac = props.scrollProgress - idx;
+  const leftEl = tabRefs.value[idx];
+  const rightEl = tabRefs.value[Math.min(idx + 1, tabs.length - 1)];
+  if (!leftEl || !rightEl) return null;
+
+  const leftCenter = leftEl.offsetLeft + leftEl.offsetWidth * 0.25;
+  const rightCenter = rightEl.offsetLeft + rightEl.offsetWidth * 0.25;
+  const leftWidth = leftEl.offsetWidth * 0.5;
+  const rightWidth = rightEl.offsetWidth * 0.5;
+
+  return {
+    left: `${leftCenter + (rightCenter - leftCenter) * frac}px`,
+    width: `${leftWidth + (rightWidth - leftWidth) * frac}px`,
+  };
+});
+
+const activeIndicatorStyle = computed(() => interpolatedStyle.value ?? indicatorStyle.value);
+
 watch(() => props.modelValue, () => nextTick(updateIndicator));
 watch(visibleTabs, () => nextTick(updateIndicator));
 onMounted(() => nextTick(updateIndicator));
+
+watch(() => props.scrollProgress, () => {
+  if (props.scrollProgress == null) return;
+  const idx = Math.round(props.scrollProgress);
+  const el = tabRefs.value[idx];
+  if (el) el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+});
 </script>
 
 <template>
@@ -74,7 +104,7 @@ onMounted(() => nextTick(updateIndicator));
     <!-- Sliding indicator -->
     <div
       class="absolute bottom-0 h-0.5 rounded-full bg-color-bg-ac transition-all duration-200 ease-out"
-      :style="indicatorStyle"
+      :style="activeIndicatorStyle"
     />
   </div>
 </template>
