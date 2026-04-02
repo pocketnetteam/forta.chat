@@ -37,11 +37,6 @@ export const en = {
   "contactList.cancel": "Cancel",
   "contactList.draft": "Draft",
 
-  // ── Selection (multi-select) ──
-  "selection.selected": "Selected: {count}",
-  "selection.deleteTitle": "Delete chats",
-  "selection.deleteConfirm": "Delete {count} selected chats? This cannot be undone.",
-
   // ── Contact search ──
   "contactSearch.placeholder": "Search chats or users...",
   "contactSearch.placeholderShort": "Search",
@@ -263,10 +258,12 @@ export const en = {
   "drop.subtitle": "Images and videos will open in preview",
 
   // ── Selection bar ──
-  "selection.selected": "{count} selected",
+  "selection.selected": "Selected: {count}",
   "selection.forward": "Forward",
   "selection.copy": "Copy",
   "selection.delete": "Delete",
+  "selection.deleteTitle": "Delete chats",
+  "selection.deleteConfirm": "Delete {count} selected chats? This cannot be undone.",
 
   // ── Group creation ──
   "group.newGroup": "New Group",

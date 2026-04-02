@@ -39,11 +39,6 @@ export const ru: Record<TranslationKey, string> = {
   "contactList.cancel": "Отмена",
   "contactList.draft": "Черновик",
 
-  // ── Selection (multi-select) ──
-  "selection.selected": "Выбрано: {count}",
-  "selection.deleteTitle": "Удалить чаты",
-  "selection.deleteConfirm": "Удалить {count} выбранных чатов? Это действие нельзя отменить.",
-
   // ── Contact search ──
   "contactSearch.placeholder": "Поиск чатов или пользователей...",
   "contactSearch.placeholderShort": "Поиск",
@@ -265,10 +260,12 @@ export const ru: Record<TranslationKey, string> = {
   "drop.subtitle": "Изображения и видео откроются в превью",
 
   // ── Selection bar ──
-  "selection.selected": "{count} выбрано",
+  "selection.selected": "Выбрано: {count}",
   "selection.forward": "Переслать",
   "selection.copy": "Копировать",
   "selection.delete": "Удалить",
+  "selection.deleteTitle": "Удалить чаты",
+  "selection.deleteConfirm": "Удалить {count} выбранных чатов? Это действие нельзя отменить.",
 
   // ── Group creation ──
   "group.newGroup": "Новая группа",
