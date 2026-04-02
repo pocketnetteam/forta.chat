@@ -4,6 +4,7 @@ import { useUserStore } from "@/entities/user/model";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import { RecycleScroller } from "vue-virtual-scroller";
 
 const chatStore = useChatStore();
 const userStore = useUserStore();
@@ -14,7 +15,15 @@ const { t } = useI18n();
 const searchQuery = ref("");
 const searchOpen = ref(false);
 
-const contacts = computed(() => {
+interface ContactItem {
+  id: string;
+  _key: string;
+  name: string;
+  address: string | undefined;
+  image: string | undefined;
+}
+
+const contacts = computed<ContactItem[]>(() => {
   const list = chatStore.sortedRooms
     .filter((r) => !r.isGroup && r.membership !== "invite")
     .map((room) => {
@@ -25,6 +34,7 @@ const contacts = computed(() => {
       const resolved = resolveRoomName(room);
       return {
         id: room.id,
+        _key: room.id,
         name: user?.name || (isUnresolvedName(resolved) ? "" : resolved),
         address,
         image: user?.image,
@@ -41,16 +51,79 @@ const contacts = computed(() => {
   );
 });
 
-// Eagerly load user profiles for all contacts
-watch(
-  contacts,
-  (list) => {
-    for (const c of list) {
-      if (c.address) userStore.loadUserIfMissing(c.address);
-    }
-  },
-  { immediate: true },
-);
+// --- Viewport-based lazy profile loading ---
+const ITEM_HEIGHT = 56;
+const scrollerRef = ref<InstanceType<typeof RecycleScroller>>();
+
+/** Load profiles only for contacts currently visible in the viewport.
+ *  Uses the same mechanism as ContactList.vue: loadProfilesForRoomIds resolves
+ *  member addresses from Matrix SDK data or hex-encoded room members, then
+ *  loadMembersForRooms fetches members from server for rooms with unresolved names. */
+const loadVisibleContacts = () => {
+  const el = scrollerRef.value?.$el as HTMLElement | undefined;
+  if (!el) return;
+  const { scrollTop, clientHeight } = el;
+  if (clientHeight === 0) return;
+
+  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 2);
+  const lastIdx = Math.min(
+    contacts.value.length - 1,
+    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + 3,
+  );
+
+  const visibleRoomIds: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const c = contacts.value[i];
+    if (c) visibleRoomIds.push(c.id);
+  }
+  if (visibleRoomIds.length === 0) return;
+
+  // Load profiles via room member resolution (same as chat list)
+  chatStore.loadProfilesForRoomIds(visibleRoomIds);
+
+  // For contacts with unresolved names, eagerly load members from Matrix server
+  // (loadMembersForRooms calls loadMembersIfNeeded → updateDisplayNames → re-triggers loadProfilesForRoomIds)
+  const needMembers: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const c = contacts.value[i];
+    if (c && (!c.name || isUnresolvedName(c.name))) needMembers.push(c.id);
+  }
+  if (needMembers.length > 0) chatStore.loadMembersForRooms(needMembers);
+};
+
+let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const onScrollerScroll = () => {
+  if (scrollDebounceTimer) clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(loadVisibleContacts, 100);
+};
+
+// Attach native scroll listener to RecycleScroller's root element
+let scrollEl: HTMLElement | null = null;
+const attachScrollListener = () => {
+  if (scrollEl) scrollEl.removeEventListener("scroll", onScrollerScroll);
+  scrollEl = (scrollerRef.value?.$el as HTMLElement) ?? null;
+  scrollEl?.addEventListener("scroll", onScrollerScroll, { passive: true });
+};
+
+watch(scrollerRef, (val) => {
+  if (val) {
+    nextTick(() => {
+      attachScrollListener();
+      loadVisibleContacts();
+    });
+  }
+});
+
+onMounted(() => {
+  nextTick(loadVisibleContacts);
+  // Retry after layout settles (tab transition)
+  setTimeout(loadVisibleContacts, 350);
+});
+
+onBeforeUnmount(() => {
+  if (scrollEl) scrollEl.removeEventListener("scroll", onScrollerScroll);
+  if (scrollDebounceTimer) clearTimeout(scrollDebounceTimer);
+});
 
 const handleSelect = (roomId: string) => {
   chatStore.setActiveRoom(roomId);
@@ -113,7 +186,7 @@ const toggleSearch = () => {
     </div>
 
     <!-- List -->
-    <div class="flex-1 overflow-y-auto">
+    <div class="flex-1 overflow-hidden">
       <!-- Skeleton while rooms haven't loaded yet -->
       <div v-if="contacts.length === 0 && !chatStore.roomsInitialized" class="space-y-1 p-2">
         <div v-for="i in 5" :key="i" class="flex items-center gap-3 px-4 py-2.5">
@@ -127,23 +200,32 @@ const toggleSearch = () => {
       >
         {{ searchQuery.trim() ? t("contacts.noFound") : t("contacts.noYet") }}
       </div>
-      <button
-        v-for="contact in contacts"
-        :key="contact.id"
-        class="btn-press flex w-full items-center gap-3 px-4 py-2.5 transition-colors hover:bg-neutral-grad-0"
-        @click="handleSelect(contact.id)"
+      <RecycleScroller
+        v-else
+        ref="scrollerRef"
+        :items="contacts"
+        :item-size="ITEM_HEIGHT"
+        key-field="_key"
+        class="h-full"
       >
-        <Avatar
-          :src="contact.image"
-          :name="contact.name || contact.address || '?'"
-          size="md"
-        />
-        <span v-if="!contact.name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
-        <span v-else class="truncate text-[15px] font-medium text-text-color">
-          {{ contact.name }}
-        </span>
-      </button>
+        <template #default="{ item }">
+          <button
+            class="btn-press flex w-full items-center gap-3 px-4 py-2.5 transition-colors hover:bg-neutral-grad-0"
+            :style="{ height: ITEM_HEIGHT + 'px' }"
+            @click="handleSelect((item as ContactItem).id)"
+          >
+            <Avatar
+              :src="(item as ContactItem).image"
+              :name="(item as ContactItem).name || (item as ContactItem).address || '?'"
+              size="md"
+            />
+            <span v-if="!(item as ContactItem).name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <span v-else class="truncate text-[15px] font-medium text-text-color">
+              {{ (item as ContactItem).name }}
+            </span>
+          </button>
+        </template>
+      </RecycleScroller>
     </div>
   </div>
 </template>
-

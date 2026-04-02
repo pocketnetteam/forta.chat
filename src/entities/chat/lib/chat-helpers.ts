@@ -186,6 +186,7 @@ export function isUnresolvedName(name: string): boolean {
   if (!name || name.length < 2) return true;
   if (/^#?[a-f0-9]{16,}$/i.test(name)) return true; // hex hash or #hex alias
   if (/^#[a-f0-9]{6,}(:.+)?$/i.test(name)) return true; // hex-encoded room alias #hex or #hex:server
+  if (/^#[a-f0-9]{6,}\u2026/i.test(name)) return true; // truncated hex with # prefix (#aefd725b…)
   if (/^[a-f0-9]{8}\u2026/i.test(name)) return true; // truncated hex (8chars…)
   if (/^[A-Za-z0-9]{8}\u2026/i.test(name)) return true; // truncated address (8chars…)
   if (/^@[a-f0-9]{20,}:/i.test(name)) return true; // raw Matrix ID @hexid:server

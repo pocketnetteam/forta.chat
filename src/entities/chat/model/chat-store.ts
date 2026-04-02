@@ -3747,6 +3747,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Load timeline events for a room and convert to Messages */
   const loadRoomMessages = async (roomId: string, { waitForSdk = false } = {}) => {
     try {
+      // Capture whether this room is the active room RIGHT NOW.
+      // The activeRoomId early-exit optimization only applies when the user
+      // navigated TO this room and then switched away (stale scrollback).
+      // Viewport-fetch rooms are never the active room — they must not bail.
+      const wasActiveRoom = activeRoomId.value === roomId;
+
       const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let matrixRoom = matrixService.getRoom(roomId) as any;
@@ -3790,8 +3796,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Keep scrolling back until we have enough messages or hit the beginning.
         // Check activeRoomId between iterations — if user switched rooms, bail
         // early to avoid piling up stale scrollback/crypto work.
+        // Only applies when the room WAS active (user opened it, then navigated away).
+        // Viewport-fetch rooms were never active — they must complete to provide previews.
         for (let attempt = 0; attempt < MAX_SCROLLBACK_ATTEMPTS && msgCount < MIN_MESSAGES; attempt++) {
-          if (activeRoomId.value !== roomId) return;
+          if (wasActiveRoom && activeRoomId.value !== roomId) return;
           const prevCount = timelineEvents.length;
           try {
             await matrixService.scrollback(roomId, 50);
@@ -3809,7 +3817,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Bail if user already switched to another room — no point parsing/writing
       // stale data that will saturate Dexie transactions and block the active room.
-      if (activeRoomId.value !== roomId) return;
+      // Only applies when the room WAS active (viewport-fetch rooms were never active).
+      if (wasActiveRoom && activeRoomId.value !== roomId) return;
 
       const msgs = await parseTimelineEvents(timelineEvents, roomId);
 
