@@ -75,11 +75,14 @@ watch(() => props.modelValue, () => nextTick(updateIndicator));
 watch(visibleTabs, () => nextTick(updateIndicator));
 onMounted(() => nextTick(updateIndicator));
 
-watch(() => props.scrollProgress, () => {
-  if (props.scrollProgress == null) return;
-  const idx = Math.round(props.scrollProgress);
-  const el = tabRefs.value[idx];
-  if (el) el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+// Only scroll tab strip into view when near a snap point (avoid competing smooth-scrolls)
+watch(() => props.scrollProgress, (val) => {
+  if (val == null) return;
+  const rounded = Math.round(val);
+  if (Math.abs(val - rounded) < 0.05) {
+    const el = tabRefs.value[rounded];
+    if (el) el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+  }
 });
 </script>
 

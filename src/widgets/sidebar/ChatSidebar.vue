@@ -48,7 +48,6 @@ const searchPlaceholder = computed(() => {
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
 const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels">("all");
-const tabOrder = ["all", "personal", "groups", "invites", "channels"] as const;
 
 const bulkDeleteConfirm = ref(false);
 

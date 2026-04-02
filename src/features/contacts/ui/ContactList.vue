@@ -565,7 +565,10 @@ watch(scrollerRef, (val) => {
   attachScrollListener();
   if (val) nextTick(loadVisibleRooms);
 });
-onUnmounted(() => { scrollEl?.removeEventListener("scroll", onScrollerScroll); });
+onUnmounted(() => {
+  scrollEl?.removeEventListener("scroll", onScrollerScroll);
+  longPressCache.clear();
+});
 
 // Context menu
 const ctxMenu = ref<{ show: boolean; x: number; y: number; roomId: string | null }>({
@@ -634,7 +637,7 @@ const getRoomLongPress = (room: ChatRoom) => {
       onTrigger: (e) => {
         if (selectionStore.isSelectionMode) return;
         selectionStore.activate(room.id);
-        hapticImpact("MEDIUM");
+        hapticImpact("MEDIUM").catch(() => {});
       },
     });
     longPressCache.set(room.id, handlers);

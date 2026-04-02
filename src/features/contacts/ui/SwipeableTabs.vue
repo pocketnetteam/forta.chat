@@ -14,6 +14,12 @@ const emit = defineEmits<{
 const containerRef = ref<HTMLElement | null>(null);
 let programmaticScroll = false;
 let scrollEndTimer: ReturnType<typeof setTimeout> | null = null;
+let programmaticTimer: ReturnType<typeof setTimeout> | null = null;
+
+onBeforeUnmount(() => {
+  if (scrollEndTimer) clearTimeout(scrollEndTimer);
+  if (programmaticTimer) clearTimeout(programmaticTimer);
+});
 
 const onScroll = () => {
   const el = containerRef.value;
@@ -46,7 +52,8 @@ watch(
 
     programmaticScroll = true;
     el.scrollTo({ left: targetLeft, behavior: "smooth" });
-    setTimeout(() => {
+    if (programmaticTimer) clearTimeout(programmaticTimer);
+    programmaticTimer = setTimeout(() => {
       programmaticScroll = false;
     }, 400);
   },
