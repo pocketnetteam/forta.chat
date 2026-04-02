@@ -620,6 +620,13 @@ export const ru: Record<TranslationKey, string> = {
   "tor.disable": "Отключить Tor",
   "register.registrationFailed": "Ошибка регистрации",
   "register.captchaLoadFailed": "Не удалось загрузить капчу",
+  "register.nameTaken": "Это имя уже занято",
+  "register.nameInvalidChars": "Имя содержит недопустимые символы. Допустимы: буквы, цифры, пробелы, . - _ @ # &",
+  "register.nameTooLong": "Имя должно быть не длиннее {max} символов",
+  "register.nameReserved": "Имя не может содержать \"{name}\"",
+  "register.usernameRejected": "Имя недоступно",
+  "register.usernameRejectedHint": "Выбранное имя было отклонено сетью. Пожалуйста, выберите другое имя.",
+  "register.retryWithNewName": "Попробовать с новым именем",
   "invite.shareText": "Присоединяйтесь ко мне в Forta Chat!",
 
   // ── Language names ──

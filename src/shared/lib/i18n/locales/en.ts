@@ -618,6 +618,13 @@ export const en = {
   "tor.disable": "Disable Tor",
   "register.registrationFailed": "Registration failed",
   "register.captchaLoadFailed": "Failed to load captcha",
+  "register.nameTaken": "This name is already taken",
+  "register.nameInvalidChars": "Name contains invalid characters. Allowed: letters, digits, spaces, . - _ @ # &",
+  "register.nameTooLong": "Name must be {max} characters or less",
+  "register.nameReserved": "Name cannot contain \"{name}\"",
+  "register.usernameRejected": "Username unavailable",
+  "register.usernameRejectedHint": "The chosen display name was rejected by the network. Please choose a different name.",
+  "register.retryWithNewName": "Try with new name",
   "invite.shareText": "Join me on Forta Chat!",
 
   // ── Language names ──

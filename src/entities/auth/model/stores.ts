@@ -98,6 +98,24 @@ function generateEncryptionKeys(privateKeyHex: string) {
 
 let _onSyncStatusCallback: ((state: string) => void) | null = null;
 
+/** Extract a numeric error code from various error shapes returned by the SDK/RPC layer.
+ *  The Actions system wraps errors differently — this covers common patterns:
+ *  - Direct code property: { code: 18 }
+ *  - Nested: { error: { code: 18 } }
+ *  - String error code: "18" */
+function extractErrorCode(err: unknown): number | null {
+  if (err == null) return null;
+  if (typeof err === "number") return err;
+  if (typeof err === "string") { const n = parseInt(err, 10); return isNaN(n) ? null : n; }
+  if (typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    if (typeof e.code === "number") return e.code;
+    if (typeof e.code === "string") { const n = parseInt(e.code, 10); return isNaN(n) ? null : n; }
+    if (e.error && typeof e.error === "object") return extractErrorCode(e.error);
+  }
+  return null;
+}
+
 // Store-level references for cleanup on logout
 let _onlineHandler: (() => void) | null = null;
 let _offlineHandler: (() => void) | null = null;
@@ -132,6 +150,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSRegProfile, value: LSRegProfile } =
     useLocalStorage<PendingRegProfile | null>("registration_profile", null);
   const pendingRegProfile = ref(LSRegProfile);
+
+  // Registration error: when UserInfo broadcast fails with code 18 (username taken/invalid)
+  const registrationUsernameError = ref(false);
 
   const setPendingRegProfile = (val: PendingRegProfile | null) => {
     pendingRegProfile.value = val;
@@ -761,6 +782,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     return result;
   };
 
+  /** Check if a username is already taken on the blockchain.
+   *  Returns the owning address if taken, null if available. */
+  const checkUsername = async (name: string): Promise<string | null> => {
+    return appInitializer.checkUsernameExists(name);
+  };
+
   const register = async (profile: { name: string; language: string; about: string; image?: string }) => {
     if (!regAddress.value || !regCaptchaId.value || !regProxyId.value || !regMnemonic.value) {
       throw new Error("Registration state incomplete");
@@ -786,6 +813,26 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     await login(mnemonic);
 
     // 5. Start polling — will broadcast UserInfo when PKOIN arrives, then wait for confirmation
+    startRegistrationPoll();
+  };
+
+  /** Retry registration with a new username after code 18 error.
+   *  Re-uses existing PKOIN and encryption keys — only changes the display name. */
+  const retryRegistrationWithNewName = async (newName: string) => {
+    if (!address.value || !privateKey.value) throw new Error("Not authenticated");
+    registrationUsernameError.value = false;
+
+    // Re-derive encryption keys (same as original registration)
+    const encKeys = generateEncryptionKeys(privateKey.value);
+    const encPublicKeys = encKeys.map(k => k.public);
+
+    // Re-build pending profile with new name
+    const language = pendingRegProfile.value?.language ?? "en";
+    const about = pendingRegProfile.value?.about ?? "";
+    const image = pendingRegProfile.value?.image;
+
+    setPendingRegProfile({ name: newName, language, about, image, encPublicKeys });
+    setRegistrationPending(true);
     startRegistrationPoll();
   };
 
@@ -817,14 +864,28 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           const hasUnspents = await appInitializer.checkUnspents(address.value);
           if (hasUnspents) {
             console.log("[auth] PKOIN received, broadcasting UserInfo...");
-            await appInitializer.syncNodeTime();
-            const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
-            await appInitializer.initializeAndFetchUserData(address.value);
-            await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
-            console.log("[auth] UserInfo broadcast requested, moving to phase 2");
-            setPendingRegProfile(null);
-            pollInterval = 3000;
-            attempt = 0;
+            try {
+              await appInitializer.syncNodeTime();
+              const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
+              await appInitializer.initializeAndFetchUserData(address.value);
+              await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
+              console.log("[auth] UserInfo broadcast requested, moving to phase 2");
+              setPendingRegProfile(null);
+              pollInterval = 3000;
+              attempt = 0;
+            } catch (broadcastErr: unknown) {
+              // Check for error code 18 (username taken/invalid) — stop polling and surface error
+              const errCode = extractErrorCode(broadcastErr);
+              if (errCode === 18) {
+                console.error("[auth] UserInfo broadcast rejected: username taken/invalid (code 18)");
+                registrationUsernameError.value = true;
+                setRegistrationPending(false);
+                stopRegistrationPoll();
+                return;
+              }
+              // Other broadcast errors — rethrow to be caught by outer catch and retried
+              throw broadcastErr;
+            }
           } else {
             console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
           }
@@ -1009,9 +1070,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     regCaptchaDone,
     regMnemonic,
     regProxyId,
+    checkUsername,
     register,
     registrationPending,
+    registrationUsernameError,
     resumeRegistrationPoll,
+    retryRegistrationWithNewName,
     setSyncStatusCallback,
     submitCaptcha,
     submitComment,

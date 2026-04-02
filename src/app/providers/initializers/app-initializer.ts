@@ -484,6 +484,24 @@ export class AppInitializer {
     }
   }
 
+  /** Check if a username is already taken via getuseraddress RPC.
+   *  Returns the address that owns the name, or null if the name is free. */
+  async checkUsernameExists(name: string): Promise<string | null> {
+    if (!this.api) return null;
+    try {
+      await this.initApi();
+      await this.waitForApiReady();
+      const result = await this.api.rpc("getuseraddress", [name]);
+      if (result && Array.isArray(result) && result.length > 0 && result[0]?.address) {
+        return result[0].address as string;
+      }
+      return null;
+    } catch {
+      // RPC error (e.g. name not found) means the name is available
+      return null;
+    }
+  }
+
   /** Check if address has unspent outputs (PKOIN balance) via txunspent RPC.
    *  Used to verify that free registration PKOIN has arrived before broadcasting UserInfo. */
   async checkUnspents(address: string): Promise<boolean> {

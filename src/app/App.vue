@@ -14,10 +14,12 @@ import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { useI18n } from "@/shared/lib/i18n";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 
 const isElectron = !!(window as any).electronAPI?.isElectron;
+const { t } = useI18n();
 
 const { message: toastMessage, type: toastType, show: toastShow, close: toastClose } = useToast();
 
@@ -28,6 +30,32 @@ const authStore = useAuthStore();
 authStore.setSyncStatusCallback(handleSdkSync);
 const chatStore = useChatStore();
 const router = useRouter();
+
+// Registration username error retry form
+const retryName = ref("");
+const retryLoading = ref(false);
+const retryError = ref("");
+
+const handleRetryUsername = async () => {
+  const trimmed = retryName.value.trim();
+  if (!trimmed) return;
+  retryLoading.value = true;
+  retryError.value = "";
+  try {
+    const owner = await authStore.checkUsername(trimmed);
+    if (owner) {
+      retryError.value = t("register.nameTaken");
+      retryLoading.value = false;
+      return;
+    }
+    await authStore.retryRegistrationWithNewName(trimmed);
+    retryName.value = "";
+  } catch (e) {
+    retryError.value = e instanceof Error ? e.message : t("register.registrationFailed");
+  } finally {
+    retryLoading.value = false;
+  }
+};
 
 const processJoinRoom = async () => {
   if (!authStore.isAuthenticated || !authStore.matrixReady) return;
@@ -224,12 +252,43 @@ onUnmounted(() => {
 
 <template>
   <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh">
+    <!-- Registration username error overlay — prompt user to choose a new name -->
+    <div v-if="authStore.registrationUsernameError" class="fixed inset-0 z-50 flex items-center justify-center bg-white dark:bg-gray-900">
+      <div class="flex w-full max-w-sm flex-col items-center gap-4 px-8 text-center">
+        <div class="flex h-14 w-14 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-red-500">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="15" y1="9" x2="9" y2="15" />
+            <line x1="9" y1="9" x2="15" y2="15" />
+          </svg>
+        </div>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t("register.usernameRejected") }}</h2>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ t("register.usernameRejectedHint") }}</p>
+        <input
+          v-model="retryName"
+          type="text"
+          :placeholder="t('register.namePlaceholder')"
+          maxlength="20"
+          class="h-11 w-full rounded-xl border border-neutral-grad-1 bg-background-total-theme px-3.5 text-sm text-text-color outline-none transition-colors placeholder:text-neutral-grad-2 focus:border-color-bg-ac"
+          :disabled="retryLoading"
+          @keyup.enter="handleRetryUsername"
+        />
+        <p v-if="retryError" class="text-xs text-color-bad">{{ retryError }}</p>
+        <button
+          :disabled="!retryName.trim() || retryLoading"
+          class="flex h-11 w-full cursor-pointer items-center justify-center rounded-xl bg-color-bg-ac text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1 disabled:cursor-default disabled:opacity-50"
+          @click="handleRetryUsername"
+        >
+          {{ retryLoading ? t("register.preparingAccount") : t("register.retryWithNewName") }}
+        </button>
+      </div>
+    </div>
     <!-- Registration pending overlay — blocks chat until keys are published -->
-    <div v-if="authStore.registrationPending" class="fixed inset-0 z-50 flex items-center justify-center bg-white dark:bg-gray-900">
+    <div v-else-if="authStore.registrationPending" class="fixed inset-0 z-50 flex items-center justify-center bg-white dark:bg-gray-900">
       <div class="flex flex-col items-center gap-4 text-center px-8">
         <div class="h-12 w-12 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />
-        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Publishing encryption keys...</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400">This may take a few minutes. Please wait while your profile is being registered on the blockchain.</p>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t("register.accountPending") }}</h2>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ t("register.accountPendingDescription") }}</p>
       </div>
     </div>
     <TitleBar v-if="isElectron" />

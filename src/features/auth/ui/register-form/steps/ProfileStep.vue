@@ -17,11 +17,88 @@ const about = ref("");
 const loading = ref(false);
 const error = ref("");
 
+// Username validation state
+const nameError = ref("");
+const nameChecking = ref(false);
+let nameCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
 // Avatar
 const avatarPreview = ref("");
 const avatarUrl = ref("");
 const avatarUploading = ref(false);
 const avatarFileInput = ref<HTMLInputElement>();
+
+// Username format validation (matches pocketnet rules)
+// Allowed: latin letters, digits, space, dot, hyphen, underscore, @, #, &
+// Cyrillic is NOT allowed — blockchain rejects it at sendrawtransaction
+const USERNAME_REGEX = /^[a-zA-Z0-9 .\-_@#&]+$/;
+const USERNAME_MAX_LENGTH = 20;
+const RESERVED_NAMES = ["pocketnet", "bastyon"];
+
+const validateNameFormat = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (!trimmed) return null; // empty is handled by required
+  if (trimmed.length > USERNAME_MAX_LENGTH) {
+    return t("register.nameTooLong", { max: USERNAME_MAX_LENGTH });
+  }
+  if (!USERNAME_REGEX.test(trimmed)) {
+    return t("register.nameInvalidChars");
+  }
+  // Check reserved names (case-insensitive, after stripping non-alpha)
+  const normalized = trimmed.toLowerCase().replace(/[^a-z]/g, "");
+  for (const reserved of RESERVED_NAMES) {
+    if (normalized.includes(reserved)) {
+      return t("register.nameReserved", { name: reserved });
+    }
+  }
+  return null;
+};
+
+const checkNameAvailability = () => {
+  if (nameCheckTimer) clearTimeout(nameCheckTimer);
+  nameError.value = "";
+  nameChecking.value = false;
+
+  const trimmed = name.value.trim();
+  if (!trimmed) return;
+
+  // First validate format synchronously
+  const formatErr = validateNameFormat(trimmed);
+  if (formatErr) {
+    nameError.value = formatErr;
+    return;
+  }
+
+  // Then check uniqueness with debounce
+  nameChecking.value = true;
+  nameCheckTimer = setTimeout(async () => {
+    try {
+      const ownerAddress = await authStore.checkUsername(trimmed);
+      // Only update if name hasn't changed while we were checking
+      if (name.value.trim() !== trimmed) return;
+      if (ownerAddress) {
+        nameError.value = t("register.nameTaken");
+      } else {
+        nameError.value = "";
+      }
+    } catch {
+      // Network error — don't block, let server-side catch it
+      nameError.value = "";
+    } finally {
+      if (name.value.trim() === trimmed) {
+        nameChecking.value = false;
+      }
+    }
+  }, 500);
+};
+
+watch(name, () => {
+  checkNameAvailability();
+});
+
+const canSubmit = computed(() => {
+  return name.value.trim().length > 0 && !nameError.value && !nameChecking.value && !loading.value;
+});
 
 const handleAvatarClick = () => avatarFileInput.value?.click();
 const handleAvatarChange = async (e: Event) => {
@@ -43,10 +120,26 @@ const handleAvatarChange = async (e: Event) => {
 };
 
 const handleSubmit = async () => {
-  if (!name.value.trim()) return;
+  if (!canSubmit.value) return;
+
+  // Final format validation before submit
+  const formatErr = validateNameFormat(name.value.trim());
+  if (formatErr) {
+    nameError.value = formatErr;
+    return;
+  }
+
   loading.value = true;
   error.value = "";
   try {
+    // Final uniqueness check (non-debounced)
+    const ownerAddress = await authStore.checkUsername(name.value.trim());
+    if (ownerAddress) {
+      nameError.value = t("register.nameTaken");
+      loading.value = false;
+      return;
+    }
+
     // Generate keys and find proxy silently
     authStore.generateRegistrationKeys();
     await authStore.findRegistrationProxy();
@@ -100,15 +193,22 @@ const handleSubmit = async () => {
         <label class="mb-1 block text-[13px] font-medium text-text-on-main-bg-color">
           {{ t("register.displayName") }}
         </label>
-        <input
-          v-model="name"
-          type="text"
-          :placeholder="t('register.namePlaceholder')"
-          class="h-11 w-full rounded-xl border border-neutral-grad-1 bg-background-total-theme px-3.5 text-sm text-text-color outline-none transition-colors placeholder:text-neutral-grad-2 focus:border-color-bg-ac"
-          maxlength="20"
-          required
-          :disabled="loading"
-        />
+        <div class="relative">
+          <input
+            v-model="name"
+            type="text"
+            :placeholder="t('register.namePlaceholder')"
+            class="h-11 w-full rounded-xl border bg-background-total-theme px-3.5 text-sm text-text-color outline-none transition-colors placeholder:text-neutral-grad-2 focus:border-color-bg-ac"
+            :class="nameError ? 'border-color-bad' : 'border-neutral-grad-1'"
+            :maxlength="USERNAME_MAX_LENGTH"
+            required
+            :disabled="loading"
+          />
+          <div v-if="nameChecking" class="absolute right-3 top-1/2 -translate-y-1/2">
+            <Spinner size="xs" />
+          </div>
+        </div>
+        <p v-if="nameError" class="mt-1 text-xs text-color-bad">{{ nameError }}</p>
       </div>
 
       <div>
@@ -130,7 +230,7 @@ const handleSubmit = async () => {
     <!-- Submit -->
     <button
       type="submit"
-      :disabled="!name.trim() || loading"
+      :disabled="!canSubmit"
       class="mt-5 flex h-11 w-full cursor-pointer items-center justify-center rounded-xl bg-color-bg-ac text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1 disabled:cursor-default disabled:opacity-50"
     >
       <Spinner v-if="loading" size="sm" class="mr-2" />
