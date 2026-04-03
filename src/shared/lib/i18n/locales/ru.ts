@@ -433,6 +433,7 @@ export const ru: Record<TranslationKey, string> = {
   "auth.howToFindKey": "Как найти приватный ключ?",
   "auth.enterKeyOrMnemonic": "Введите приватный ключ или мнемоническую фразу",
   "auth.keyPlaceholder": "Приватный ключ или 12 слов...",
+  "auth.login": "Войти",
 
   // ── Welcome ──
   "welcome.title": "Forta Chat",
@@ -585,6 +586,7 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Common ──
   "common.cancel": "Отмена",
+  "common.loading": "Загрузка...",
   "common.unknownUser": "Пользователь",
   "common.encryptedChat": "Чат",
   "message.notDecrypted": "Сообщение не расшифровано",

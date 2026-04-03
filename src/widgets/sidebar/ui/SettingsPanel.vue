@@ -443,7 +443,7 @@ const handleLogout = () => {
     </Teleport>
 
     <AddAccountModal
-      v-if="showAddModal"
+      :show="showAddModal"
       @close="showAddModal = false"
     />
   </div>
