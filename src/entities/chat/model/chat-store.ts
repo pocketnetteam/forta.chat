@@ -1782,6 +1782,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     // Determine best lastMessage: prefer decrypted over "[encrypted]", newer over older.
+    // Clear-history guard: discard candidates older than the clear marker.
+    const roomClearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(chatRoom.id);
     const candidates: Array<Message | undefined> = [chatRoom.lastMessage];
     const loadedMsgs = messages.value[chatRoom.id];
     if (loadedMsgs?.length) candidates.push(loadedMsgs[loadedMsgs.length - 1]);
@@ -1791,6 +1793,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     let best: Message | undefined;
     for (const c of candidates) {
       if (!c) continue;
+      if (roomClearedAtTs && c.timestamp <= roomClearedAtTs) continue;
       const cEncrypted = c.content === "[encrypted]";
       const bestEncrypted = best ? best.content === "[encrypted]" : true;
       if (!best || (bestEncrypted && !cEncrypted) || (bestEncrypted === cEncrypted && c.timestamp > best.timestamp)) {
@@ -3904,7 +3907,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // and mark all own messages up to that point as "read".
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
 
-      setMessages(roomId, msgs);
+      // Filter out messages before the clear-history marker so they never
+      // pollute messages.value (used as a lastMessage candidate in buildChatRoom).
+      const clearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(roomId);
+      const filteredMsgs = clearedAtTs ? msgs.filter(m => m.timestamp > clearedAtTs) : msgs;
+      setMessages(roomId, filteredMsgs);
 
       // Dual-write: persist all parsed messages to Dexie.
       // For the active room: awaited so data reaches IndexedDB before a potential F5.

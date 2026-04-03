@@ -276,6 +276,40 @@ describe("clear-history", () => {
     });
   });
 
+  describe("bulkSyncRooms clearedAtTs guard", () => {
+    it("does not restore lastMessageTimestamp when <= clearedAtTs", async () => {
+      const room = makeRoom({ id: ROOM_ID });
+      await db.rooms.put(room);
+      await roomRepo.clearHistory(ROOM_ID, 5000);
+
+      // Simulate fullRoomRefresh writing old timestamp via bulkSyncRooms
+      await roomRepo.bulkSyncRooms([{
+        id: ROOM_ID,
+        lastMessageTimestamp: 4000, // before clearedAtTs
+        updatedAt: 4000,
+      }]);
+
+      const updated = await db.rooms.get(ROOM_ID);
+      // lastMessageTimestamp should NOT be restored to 4000
+      expect(updated!.lastMessageTimestamp).not.toBe(4000);
+    });
+
+    it("allows lastMessageTimestamp when > clearedAtTs", async () => {
+      const room = makeRoom({ id: ROOM_ID });
+      await db.rooms.put(room);
+      await roomRepo.clearHistory(ROOM_ID, 5000);
+
+      await roomRepo.bulkSyncRooms([{
+        id: ROOM_ID,
+        lastMessageTimestamp: 6000, // after clearedAtTs
+        updatedAt: 6000,
+      }]);
+
+      const updated = await db.rooms.get(ROOM_ID);
+      expect(updated!.lastMessageTimestamp).toBe(6000);
+    });
+  });
+
   describe("RoomRepository.getClearedAtTs", () => {
     it("returns undefined when no clear-history marker set", async () => {
       await db.rooms.put(makeRoom());

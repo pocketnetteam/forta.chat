@@ -277,13 +277,14 @@ export class EventWriter {
     if (messages.length === 0) return;
 
     const localMessages = messages.map((m) => this.toLocalMessage(m));
-    const clearedAtTs = localMessages.length > 0 ? this.clearedAtTsCache.get(localMessages[0].roomId) : undefined;
+    const roomId = localMessages[0]?.roomId;
+    const clearedAtTs = roomId ? this.clearedAtTsCache.get(roomId) : undefined;
     await this.messageRepo.bulkInsert(localMessages, clearedAtTs);
 
-    // Update room preview with the latest message
+    // Update room preview with the latest message (skip if all messages were before clear marker)
     const sorted = [...messages].sort((a, b) => b.timestamp - a.timestamp);
     const latest = sorted[0];
-    if (latest) {
+    if (latest && !(clearedAtTs && latest.timestamp <= clearedAtTs)) {
       await this.updateRoomPreview(latest);
     }
   }

@@ -162,9 +162,13 @@ export class RoomRepository {
             patched.updatedAt = Math.max(prev.updatedAt ?? 0, update.updatedAt);
           }
           if (update.lastMessageTimestamp !== undefined) {
+            // Clear-history guard: never restore a timestamp that predates the clear marker
+            const effectiveTs = prev.clearedAtTs && update.lastMessageTimestamp <= prev.clearedAtTs
+              ? prev.lastMessageTimestamp ?? 0
+              : update.lastMessageTimestamp;
             patched.lastMessageTimestamp = Math.max(
               prev.lastMessageTimestamp ?? 0,
-              update.lastMessageTimestamp,
+              effectiveTs,
             );
           }
 
