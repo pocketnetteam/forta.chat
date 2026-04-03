@@ -34,7 +34,12 @@ export function useMessages() {
     });
   };
 
-  const sendMessage = async (content: string, linkPreview?: LinkPreview) => {
+  /**
+   * Send a text message. Returns true if the optimistic insert succeeded
+   * (message is visible in UI), false if the message was silently dropped
+   * before any UI update (caller should restore input text).
+   */
+  const sendMessage = async (content: string, linkPreview?: LinkPreview): Promise<boolean> => {
     const MAX_MESSAGE_LENGTH = 65536;
     if (content.length > MAX_MESSAGE_LENGTH) {
       console.warn('[sendMessage] Message exceeds max length, truncating');
@@ -42,25 +47,36 @@ export function useMessages() {
     }
 
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !content.trim()) return;
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!roomId || !content.trim()) return false;
 
     const trimmed = truncateMessage(content.trim());
 
-    // New path: Dexie createLocal → liveQuery shows instantly → SyncEngine sends
+    // ── Dexie path: optimistic insert FIRST, then validate & enqueue ──
     if (isChatDbReady()) {
+      let localClientId: string | undefined;
       try {
         const dbKit = getChatDb();
+
+        // 1. Optimistic insert — message appears in UI immediately via liveQuery
         const localMsg = await dbKit.messages.createLocal({
           roomId,
           senderId: authStore.address ?? "",
           content: trimmed,
           type: MessageType.text,
         });
+        localClientId = localMsg.clientId;
 
-        // Enqueue for background sync (SyncEngine will encrypt + send via Matrix API)
+        // 2. Validate readiness AFTER insert — if not ready, mark as failed
+        const matrixService = getMatrixClientService();
+        if (!matrixService.isReady()) {
+          console.error("[sendMessage] Matrix client not ready — message saved locally as failed", {
+            roomId, clientId: localClientId,
+          });
+          await dbKit.messages.markFailed(localClientId);
+          return true; // message IS visible (as failed)
+        }
+
+        // 3. Enqueue for background sync
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -80,14 +96,26 @@ export function useMessages() {
           },
           localMsg.clientId,
         );
-        return;
+        return true;
       } catch (e) {
-        console.warn("[use-messages] Dexie sendMessage failed, falling back to legacy:", e);
-        // Fall through to legacy path
+        console.error("[sendMessage] Dexie path failed:", {
+          roomId, clientId: localClientId, error: (e as Error).message, stack: (e as Error).stack,
+        });
+        // If optimistic insert succeeded but enqueue failed — mark as failed so user sees error
+        if (localClientId) {
+          try {
+            const dbKit = getChatDb();
+            await dbKit.messages.markFailed(localClientId);
+          } catch { /* already logging above */ }
+          return true; // message IS visible (as failed)
+        }
+        // Optimistic insert itself failed — fall through to legacy path
+        console.warn("[sendMessage] Falling back to legacy path");
       }
     }
 
-    // Legacy path: optimistic addMessage + direct Matrix API call
+    // ── Legacy path: optimistic addMessage + direct Matrix API call ──
+    const matrixService = getMatrixClientService();
     const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     const message: Message = {
       id: tempId,
@@ -99,12 +127,20 @@ export function useMessages() {
       type: MessageType.text,
       ...(linkPreview ? { linkPreview } : {}),
     };
+
+    // Optimistic insert FIRST — even if we can't send, user sees their message
     chatStore.addMessage(roomId, message);
+
+    if (!matrixService.isReady()) {
+      console.error("[sendMessage] Matrix client not ready (legacy path)", { roomId, tempId });
+      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
+      return true; // message IS visible (as failed)
+    }
 
     if (!isOnline.value) {
       enqueue({ id: tempId, roomId, content: trimmed, timestamp: Date.now() });
       chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
-      return;
+      return true;
     }
 
     try {
@@ -150,9 +186,12 @@ export function useMessages() {
         chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
       }
     } catch (e) {
-      console.error("Failed to send message:", e);
+      console.error("[sendMessage] Failed to send (legacy):", {
+        roomId, tempId, error: (e as Error).message, stack: (e as Error).stack,
+      });
       chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
     }
+    return true;
   };
 
   /** Drain queued messages when coming back online */
@@ -964,35 +1003,48 @@ export function useMessages() {
     }
   };
 
-  /** Send message with reply context */
-  const sendReply = async (content: string, linkPreview?: LinkPreview) => {
+  /** Send message with reply context. Returns true if optimistic insert succeeded. */
+  const sendReply = async (content: string, linkPreview?: LinkPreview): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     const replyTo = chatStore.replyingTo;
-    if (!roomId || !content.trim() || !replyTo) return;
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!roomId || !content.trim() || !replyTo) return false;
 
     const trimmed = content.trim();
+    const replyToData = {
+      id: replyTo.id,
+      senderId: replyTo.senderId,
+      content: replyTo.content,
+      type: replyTo.type,
+    };
 
-    // New path: Dexie createLocal with replyTo → SyncEngine sends
+    // ── Dexie path: optimistic insert FIRST ──
     if (isChatDbReady()) {
+      let localClientId: string | undefined;
       try {
         const dbKit = getChatDb();
+
+        // 1. Optimistic insert
         const localMsg = await dbKit.messages.createLocal({
           roomId,
           senderId: authStore.address ?? "",
           content: trimmed,
           type: MessageType.text,
-          replyTo: {
-            id: replyTo.id,
-            senderId: replyTo.senderId,
-            content: replyTo.content,
-            type: replyTo.type,
-          },
+          replyTo: replyToData,
         });
+        localClientId = localMsg.clientId;
         chatStore.replyingTo = null;
 
+        // 2. Validate readiness AFTER insert
+        const matrixService = getMatrixClientService();
+        if (!matrixService.isReady()) {
+          console.error("[sendReply] Matrix client not ready — message saved locally as failed", {
+            roomId, clientId: localClientId,
+          });
+          await dbKit.messages.markFailed(localClientId);
+          return true;
+        }
+
+        // 3. Enqueue for background sync
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -1013,13 +1065,24 @@ export function useMessages() {
           },
           localMsg.clientId,
         );
-        return;
+        return true;
       } catch (e) {
-        console.warn("[use-messages] Dexie sendReply failed, falling back:", e);
+        console.error("[sendReply] Dexie path failed:", {
+          roomId, clientId: localClientId, error: (e as Error).message, stack: (e as Error).stack,
+        });
+        if (localClientId) {
+          try {
+            const dbKit = getChatDb();
+            await dbKit.messages.markFailed(localClientId);
+          } catch { /* already logging above */ }
+          return true;
+        }
+        console.warn("[sendReply] Falling back to legacy path");
       }
     }
 
-    // Optimistic message
+    // ── Legacy path ──
+    const matrixService = getMatrixClientService();
     const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     const message: Message = {
       id: tempId,
@@ -1029,16 +1092,19 @@ export function useMessages() {
       timestamp: Date.now(),
       status: MessageStatus.sending,
       type: MessageType.text,
-      replyTo: {
-        id: replyTo.id,
-        senderId: replyTo.senderId,
-        content: replyTo.content,
-        type: replyTo.type,
-      },
+      replyTo: replyToData,
       ...(linkPreview ? { linkPreview } : {}),
     };
+
+    // Optimistic insert FIRST
     chatStore.addMessage(roomId, message);
     chatStore.replyingTo = null;
+
+    if (!matrixService.isReady()) {
+      console.error("[sendReply] Matrix client not ready (legacy path)", { roomId, tempId });
+      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
+      return true;
+    }
 
     try {
       const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
@@ -1068,7 +1134,6 @@ export function useMessages() {
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
-        // Merge reply relation and url_preview into encrypted content
         const encContent: Record<string, unknown> = { ...encrypted, "m.relates_to": msgContent["m.relates_to"] };
         if (msgContent.url_preview) encContent.url_preview = msgContent.url_preview;
         serverEventId = await matrixService.sendEncryptedText(roomId, encContent);
@@ -1082,9 +1147,12 @@ export function useMessages() {
         chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
       }
     } catch (e) {
-      console.error("Failed to send reply:", e);
+      console.error("[sendReply] Failed to send (legacy):", {
+        roomId, tempId, error: (e as Error).message, stack: (e as Error).stack,
+      });
       chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
     }
+    return true;
   };
 
   /** Edit an existing message (Matrix m.replace relation) */
@@ -1834,6 +1902,59 @@ export function useMessages() {
     }
   };
 
+  /** Retry a failed text message by re-enqueuing it in SyncEngine */
+  const retryMessage = async (message: Message) => {
+    if (message.status !== MessageStatus.failed) return;
+    if (!isChatDbReady()) return;
+
+    const roomId = message.roomId;
+    const mKey = (message as Message & { _key?: string })._key;
+    if (!mKey) {
+      console.warn("[retryMessage] No _key (clientId) — legacy-path message, retry not supported", { messageId: message.id });
+      return;
+    }
+
+    const dbKit = getChatDb();
+    const localMsg = await dbKit.messages.getByClientId(mKey);
+    if (!localMsg) return;
+
+    // Reset status to pending
+    await dbKit.messages.updateStatus({ clientId: mKey }, "pending");
+
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) {
+      console.error("[retryMessage] Matrix client still not ready", { roomId, clientId: mKey });
+      await dbKit.messages.markFailed(mKey);
+      return;
+    }
+
+    try {
+      await dbKit.syncEngine.enqueue(
+        "send_message",
+        roomId,
+        {
+          content: localMsg.content,
+          ...(localMsg.replyTo ? { replyToEventId: localMsg.replyTo.id } : {}),
+          ...(localMsg.linkPreview ? {
+            linkPreview: {
+              url: localMsg.linkPreview.url,
+              site_name: localMsg.linkPreview.siteName,
+              title: localMsg.linkPreview.title,
+              description: localMsg.linkPreview.description,
+              image_url: localMsg.linkPreview.imageUrl,
+              image_width: localMsg.linkPreview.imageWidth,
+              image_height: localMsg.linkPreview.imageHeight,
+            },
+          } : {}),
+        },
+        mKey,
+      );
+    } catch (e) {
+      console.error("[retryMessage] Failed to enqueue:", e);
+      await dbKit.messages.markFailed(mKey);
+    }
+  };
+
   return {
     deleteMessage,
     drainOfflineQueue,
@@ -1842,6 +1963,7 @@ export function useMessages() {
     forwardMessage,
     loadMessages,
     retryMediaUpload,
+    retryMessage,
     sendAudio,
     sendFile,
     sendGif,

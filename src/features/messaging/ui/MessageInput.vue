@@ -144,18 +144,41 @@ const autoResize = autoGrow;
 
 const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
 
-const handleSend = () => {
+const handleSend = async () => {
   if (!text.value.trim() || !peerKeysOk.value) return;
   const rawText = mention.resolveText();
-  if (isEditing.value) { editMessage(chatStore.editingMessage!.id, rawText); chatStore.editingMessage = null; }
-  else if (chatStore.replyingTo) { sendReply(rawText, linkPreview.activePreview.value ?? undefined); }
-  else { sendMessage(rawText, linkPreview.activePreview.value ?? undefined); }
+  const savedText = text.value;
+
+  // Clear input optimistically — restore if send completely fails before UI insert
   text.value = "";
   mention.clearMentions();
   const roomId = chatStore.activeRoomId;
   if (roomId) clearDraft(roomId);
   setTyping(false);
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
+
+  let inserted: boolean | undefined;
+  try {
+    if (isEditing.value) {
+      editMessage(chatStore.editingMessage!.id, rawText);
+      chatStore.editingMessage = null;
+      inserted = true;
+    } else if (chatStore.replyingTo) {
+      inserted = await sendReply(rawText, linkPreview.activePreview.value ?? undefined);
+    } else {
+      inserted = await sendMessage(rawText, linkPreview.activePreview.value ?? undefined);
+    }
+  } catch (e) {
+    console.error("[handleSend] Unexpected error:", e);
+    inserted = false;
+  }
+
+  // If message was NOT inserted into UI at all, restore the text so the user doesn't lose it
+  if (inserted === false) {
+    text.value = savedText;
+    if (roomId) saveDraft(roomId, savedText);
+    nextTick(() => autoGrow());
+  }
 };
 
 const handleKeydown = (e: KeyboardEvent) => {

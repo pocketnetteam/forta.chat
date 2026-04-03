@@ -56,6 +56,7 @@ const emit = defineEmits<{
   forward: [message: Message];
   resize: [];
   retryMedia: [message: Message];
+  retryMessage: [message: Message];
 }>();
 
 const handleToggleReaction = (emoji: string) => {
@@ -801,6 +802,18 @@ const replyPreviewSender = computed(() => {
             {{ time }}
             <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
           </span>
+        </div>
+
+        <!-- Failed text message: retry bar -->
+        <div
+          v-if="isFailed && props.isOwn && !hasFileInfo"
+          class="mt-1 flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-[#FF4444] cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          @click.stop="emit('retryMessage', message)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+          {{ t('message.retrySend', 'Tap to retry') }}
         </div>
 
         <!-- Reactions row -->

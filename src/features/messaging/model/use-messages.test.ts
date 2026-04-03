@@ -25,10 +25,11 @@ const mockSendText = vi.fn(() => "$server_event_1");
 const mockSendPollStart = vi.fn(() => "$poll_event_1");
 const mockSendPollResponse = vi.fn();
 const mockSendPollEnd = vi.fn();
+const mockIsReady = vi.fn(() => true);
 
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
-    isReady: () => true,
+    isReady: () => mockIsReady(),
     getUserId: () => "@mockuser:server",
     sendText: mockSendText,
     sendEncryptedText: mockSendEncryptedText,
@@ -204,6 +205,91 @@ describe("useMessages", () => {
       const content = (mockSendEncryptedText.mock.calls[0] as any[])[1];
       expect(content.forwarded_from.sender_id).toBe("OriginalAuthor");
       expect(content.forwarded_from.sender_name).toBe("Alice");
+    });
+  });
+
+  // ─── sendMessage (optimistic UI guarantee) ────────────────────
+
+  describe("sendMessage", () => {
+    it("returns false when roomId is empty", async () => {
+      chatStore.activeRoomId = null as unknown as string;
+      const result = await messaging.sendMessage("hello");
+      expect(result).toBe(false);
+    });
+
+    it("returns false when content is empty", async () => {
+      const result = await messaging.sendMessage("   ");
+      expect(result).toBe(false);
+    });
+
+    it("creates optimistic message and sends via legacy path", async () => {
+      const result = await messaging.sendMessage("Hello world");
+      expect(result).toBe(true);
+      const msgs = chatStore.messages["!room:server"];
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].content).toBe("Hello world");
+      expect(msgs[0].status).toBe(MessageStatus.sent);
+      expect(mockSendText).toHaveBeenCalled();
+    });
+
+    it("shows optimistic message as failed when matrixService is not ready (legacy path)", async () => {
+      mockIsReady.mockReturnValue(false);
+      const result = await messaging.sendMessage("I should still appear");
+      expect(result).toBe(true);
+      const msgs = chatStore.messages["!room:server"];
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].content).toBe("I should still appear");
+      expect(msgs[0].status).toBe(MessageStatus.failed);
+      expect(mockSendText).not.toHaveBeenCalled();
+    });
+
+    it("marks message as failed when sendText throws", async () => {
+      mockSendText.mockRejectedValueOnce(new Error("Network error"));
+      const result = await messaging.sendMessage("Will fail on send");
+      expect(result).toBe(true);
+      const msgs = chatStore.messages["!room:server"];
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].status).toBe(MessageStatus.failed);
+    });
+  });
+
+  // ─── sendReply (optimistic UI guarantee) ──────────────────────
+
+  describe("sendReply", () => {
+    it("returns false when no replyTo is set", async () => {
+      chatStore.replyingTo = null;
+      const result = await messaging.sendReply("reply text");
+      expect(result).toBe(false);
+    });
+
+    it("creates optimistic reply and sends via legacy path", async () => {
+      const replyTarget = makeMsg({ roomId: "!room:server", content: "original" });
+      chatStore.addMessage("!room:server", replyTarget);
+      chatStore.replyingTo = replyTarget;
+
+      const result = await messaging.sendReply("my reply");
+      expect(result).toBe(true);
+      const msgs = chatStore.messages["!room:server"];
+      // original + reply
+      expect(msgs).toHaveLength(2);
+      const reply = msgs[1];
+      expect(reply.content).toBe("my reply");
+      expect(reply.replyTo).toBeDefined();
+      expect(chatStore.replyingTo).toBeNull();
+    });
+
+    it("shows optimistic reply as failed when matrixService not ready (legacy path)", async () => {
+      mockIsReady.mockReturnValue(false);
+      const replyTarget = makeMsg({ roomId: "!room:server" });
+      chatStore.addMessage("!room:server", replyTarget);
+      chatStore.replyingTo = replyTarget;
+
+      const result = await messaging.sendReply("reply when offline");
+      expect(result).toBe(true);
+      const msgs = chatStore.messages["!room:server"];
+      const reply = msgs[1];
+      expect(reply.content).toBe("reply when offline");
+      expect(reply.status).toBe(MessageStatus.failed);
     });
   });
 });

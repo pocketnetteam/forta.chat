@@ -365,6 +365,14 @@ export class MessageRepository {
     }
   }
 
+  /** Mark a pending message as failed (e.g. Matrix client not ready, enqueue error) */
+  async markFailed(clientId: string): Promise<void> {
+    await this.db.messages
+      .where("clientId")
+      .equals(clientId)
+      .modify({ status: "failed" as LocalMessageStatus });
+  }
+
   /** Update the eventId on a pending message (after server confirms) */
   async confirmSent(clientId: string, eventId: string): Promise<void> {
     await this.db.messages
