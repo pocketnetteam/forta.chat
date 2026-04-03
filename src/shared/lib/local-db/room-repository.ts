@@ -250,6 +250,10 @@ export class RoomRepository {
     if (existing?.lastMessageTimestamp && timestamp < existing.lastMessageTimestamp) {
       return;
     }
+    // Clear-history guard — never show preview for messages before the clear marker
+    if (existing?.clearedAtTs && timestamp <= existing.clearedAtTs) {
+      return;
+    }
 
     const changes: Partial<import("./schema").LocalRoom> = {
       lastMessagePreview: preview.slice(0, 200),

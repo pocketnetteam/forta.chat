@@ -551,16 +551,21 @@ watch(
         if (isStale()) return;
 
         if (chatStore.activeMessages.length === 0) {
-          const SYNC_WAIT_MS = 8_000;
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, SYNC_WAIT_MS);
-            const stopWatch = watch(
-              () => chatStore.activeMessages.length,
-              (len) => { if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); } },
-            );
-            setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
-          });
-          if (isStale()) return;
+          // Skip waiting for messages if history was cleared — no messages will arrive
+          const dbKit = getChatDb();
+          const hasClearedHistory = dbKit?.eventWriter.getClearedAtTs(roomId);
+          if (!hasClearedHistory) {
+            const SYNC_WAIT_MS = 8_000;
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, SYNC_WAIT_MS);
+              const stopWatch = watch(
+                () => chatStore.activeMessages.length,
+                (len) => { if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); } },
+              );
+              setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
+            });
+            if (isStale()) return;
+          }
         }
         loading.value = false;
       } else if (cacheAge > STALE_THRESHOLD) {

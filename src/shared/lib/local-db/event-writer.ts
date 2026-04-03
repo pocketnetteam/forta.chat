@@ -100,9 +100,20 @@ export class EventWriter {
     this.clearedAtTsCache.set(roomId, ts);
   }
 
-  /** Get cached clearedAtTs for a room */
+  /** Get cached clearedAtTs for a room (sync — returns only what's in memory) */
   getClearedAtTs(roomId: string): number | undefined {
     return this.clearedAtTsCache.get(roomId);
+  }
+
+  /** Get clearedAtTs with lazy-load from Dexie on cache miss.
+   *  Used by write paths to ensure the guard works even before initDexieRooms. */
+  private async getOrLoadClearedAtTs(roomId: string): Promise<number | undefined> {
+    const cached = this.clearedAtTsCache.get(roomId);
+    if (cached !== undefined) return cached;
+    // Cache miss — load from Dexie (happens once per room per session)
+    const ts = await this.roomRepo.getClearedAtTs(roomId);
+    if (ts) this.clearedAtTsCache.set(roomId, ts);
+    return ts;
   }
 
   /** Load clearedAtTs from Dexie for a room (on room open) */
@@ -194,9 +205,16 @@ export class EventWriter {
     perfMark("flush-batch:start");
     const changedRooms = new Set<string>();
 
+    // Pre-load clearedAtTs for all rooms in batch BEFORE transaction
+    const roomIds = new Set(items.map(i => i.roomId));
+    const clearedMap = new Map<string, number | undefined>();
+    for (const rid of roomIds) {
+      clearedMap.set(rid, await this.getOrLoadClearedAtTs(rid));
+    }
+
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
       for (const item of items) {
-        const result = await this.messageRepo.upsertFromServer(item.localMsg, this.clearedAtTsCache.get(item.roomId));
+        const result = await this.messageRepo.upsertFromServer(item.localMsg, clearedMap.get(item.roomId));
 
         if (result === "inserted" || result === "updated") {
           await this.ensureRoomExists(item.roomId);
@@ -243,8 +261,11 @@ export class EventWriter {
     const localMsg = this.toLocalMessage(parsed);
     const out = { result: "duplicate" as "inserted" | "updated" | "duplicate" };
 
+    // Lazy-load clearedAtTs BEFORE transaction to ensure write-guard works on first sync
+    const clearedAtTs = await this.getOrLoadClearedAtTs(localMsg.roomId);
+
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
-      out.result = await this.messageRepo.upsertFromServer(localMsg, this.clearedAtTsCache.get(localMsg.roomId));
+      out.result = await this.messageRepo.upsertFromServer(localMsg, clearedAtTs);
 
       if (out.result === "inserted" || out.result === "updated") {
         // Ensure room exists in Dexie before updating preview
@@ -277,7 +298,8 @@ export class EventWriter {
     if (messages.length === 0) return;
 
     const localMessages = messages.map((m) => this.toLocalMessage(m));
-    const clearedAtTs = localMessages.length > 0 ? this.clearedAtTsCache.get(localMessages[0].roomId) : undefined;
+    const roomId = localMessages[0]?.roomId;
+    const clearedAtTs = roomId ? await this.getOrLoadClearedAtTs(roomId) : undefined;
     await this.messageRepo.bulkInsert(localMessages, clearedAtTs);
 
     // Update room preview with the latest message
