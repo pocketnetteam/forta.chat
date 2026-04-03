@@ -92,6 +92,26 @@ type OnChangeCallback = (roomId: string) => void;
 export class EventWriter {
   private onChange?: OnChangeCallback;
 
+  /** In-memory cache: roomId → clearedAtTs (avoids Dexie read on every message) */
+  private clearedAtTsCache = new Map<string, number>();
+
+  /** Set the cleared-at timestamp for a room (called from chat-store on clear) */
+  setClearedAtTs(roomId: string, ts: number): void {
+    this.clearedAtTsCache.set(roomId, ts);
+  }
+
+  /** Get cached clearedAtTs for a room (sync — returns only what's in memory) */
+  getClearedAtTs(roomId: string): number | undefined {
+    return this.clearedAtTsCache.get(roomId);
+  }
+
+  /** Load clearedAtTs from Dexie for a room (on room open) */
+  async loadClearedAtTs(roomId: string): Promise<number | undefined> {
+    const ts = await this.roomRepo.getClearedAtTs(roomId);
+    if (ts) this.clearedAtTsCache.set(roomId, ts);
+    return ts;
+  }
+
   constructor(
     private db: ChatDatabase,
     private messageRepo: MessageRepository,
@@ -176,7 +196,7 @@ export class EventWriter {
 
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
       for (const item of items) {
-        const result = await this.messageRepo.upsertFromServer(item.localMsg);
+        const result = await this.messageRepo.upsertFromServer(item.localMsg, this.clearedAtTsCache.get(item.roomId));
 
         if (result === "inserted" || result === "updated") {
           await this.ensureRoomExists(item.roomId);
@@ -224,7 +244,7 @@ export class EventWriter {
     const out = { result: "duplicate" as "inserted" | "updated" | "duplicate" };
 
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
-      out.result = await this.messageRepo.upsertFromServer(localMsg);
+      out.result = await this.messageRepo.upsertFromServer(localMsg, this.clearedAtTsCache.get(localMsg.roomId));
 
       if (out.result === "inserted" || out.result === "updated") {
         // Ensure room exists in Dexie before updating preview
@@ -257,12 +277,14 @@ export class EventWriter {
     if (messages.length === 0) return;
 
     const localMessages = messages.map((m) => this.toLocalMessage(m));
-    await this.messageRepo.bulkInsert(localMessages);
+    const roomId = localMessages[0]?.roomId;
+    const clearedAtTs = roomId ? this.clearedAtTsCache.get(roomId) : undefined;
+    await this.messageRepo.bulkInsert(localMessages, clearedAtTs);
 
-    // Update room preview with the latest message
+    // Update room preview with the latest message (skip if all messages were before clear marker)
     const sorted = [...messages].sort((a, b) => b.timestamp - a.timestamp);
     const latest = sorted[0];
-    if (latest) {
+    if (latest && !(clearedAtTs && latest.timestamp <= clearedAtTs)) {
       await this.updateRoomPreview(latest);
     }
   }
@@ -400,7 +422,8 @@ export class EventWriter {
     await this.messageRepo.markReplyDeleted(redaction.redactedEventId);
 
     // Always update room preview after deletion
-    const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId);
+    const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
+    const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
     if (prevMsg) {
       await this.updateRoomPreviewFromLocal(prevMsg);
     } else {

@@ -476,13 +476,14 @@ watch(
 
       const watermarkTs = room?.lastReadInboundTs ?? 0;
       const myAddr = authStore.address ?? "";
+      const clearedAtTs = dbKit.eventWriter.getClearedAtTs(roomId);
 
       if (import.meta.env.DEV) {
         console.log("[unread-banner] roomId=%s watermarkTs=%d myAddr=%s", roomId, watermarkTs, myAddr);
       }
 
       if (watermarkTs > 0) {
-        const unreadCount = await dbKit.messages.countInboundAfter(roomId, watermarkTs, myAddr);
+        const unreadCount = await dbKit.messages.countInboundAfter(roomId, watermarkTs, myAddr, clearedAtTs);
         if (isStale()) return;
 
         if (import.meta.env.DEV) {
@@ -490,7 +491,7 @@ watch(
         }
 
         if (unreadCount > 0) {
-          const lastReadMsg = await dbKit.messages.getLastMessageAtOrBefore(roomId, watermarkTs);
+          const lastReadMsg = await dbKit.messages.getLastMessageAtOrBefore(roomId, watermarkTs, clearedAtTs);
           if (isStale()) return;
 
           const lastReadId = lastReadMsg?.eventId ?? lastReadMsg?.clientId ?? null;
@@ -513,7 +514,7 @@ watch(
       } else {
         // Bootstrap watermark for legacy rooms (first visit after feature was added).
         // Set the watermark to the latest message so future visits can detect unread.
-        const latestMsg = await dbKit.messages.getLastNonDeleted(roomId);
+        const latestMsg = await dbKit.messages.getLastNonDeleted(roomId, clearedAtTs);
         if (isStale()) return;
         if (latestMsg && latestMsg.timestamp > 0) {
           await dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
@@ -550,16 +551,21 @@ watch(
         if (isStale()) return;
 
         if (chatStore.activeMessages.length === 0) {
-          const SYNC_WAIT_MS = 8_000;
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, SYNC_WAIT_MS);
-            const stopWatch = watch(
-              () => chatStore.activeMessages.length,
-              (len) => { if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); } },
-            );
-            setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
-          });
-          if (isStale()) return;
+          // Skip waiting for messages if history was cleared — no messages will arrive
+          const dbKit = getChatDb();
+          const hasClearedHistory = dbKit?.eventWriter.getClearedAtTs(roomId);
+          if (!hasClearedHistory) {
+            const SYNC_WAIT_MS = 8_000;
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, SYNC_WAIT_MS);
+              const stopWatch = watch(
+                () => chatStore.activeMessages.length,
+                (len) => { if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); } },
+              );
+              setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
+            });
+            if (isStale()) return;
+          }
         }
         loading.value = false;
       } else if (cacheAge > STALE_THRESHOLD) {
@@ -844,8 +850,9 @@ const doLoadNewer = async (roomId: string) => {
     if (msgs.length === 0) return;
 
     const lastTimestamp = msgs[msgs.length - 1].timestamp;
-    const { messages: msgRepo } = getChatDb();
-    const newer = await msgRepo.getMessagesAfter(roomId, lastTimestamp, 50);
+    const dbKit = getChatDb();
+    const clearedAtTs = dbKit.eventWriter.getClearedAtTs(roomId);
+    const newer = await dbKit.messages.getMessagesAfter(roomId, lastTimestamp, 50, clearedAtTs);
 
     if (newer.length === 0) {
       await chatStore.exitDetachedMode(roomId);

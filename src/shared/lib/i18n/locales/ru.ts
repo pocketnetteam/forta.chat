@@ -340,6 +340,7 @@ export const ru: Record<TranslationKey, string> = {
   "chatInfo.deleteGroup": "Удалить группу",
   "chatInfo.deleteChat": "Удалить чат",
   "chatInfo.clearHistory": "Очистить историю",
+  "chatInfo.clearConfirmButton": "Очистить",
   "chatInfo.blockUser": "Заблокировать",
   "chatInfo.unblockUser": "Разблокировать",
   "chatInfo.searchInChat": "Поиск в чате",

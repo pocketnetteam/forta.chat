@@ -284,6 +284,13 @@ const handleDeleteChat = () => {
   emit("close");
 };
 
+const handleClearHistory = () => {
+  if (!room.value) return;
+  chatStore.clearHistory(room.value.id);
+  confirmAction.value = null;
+  emit("close");
+};
+
 // ── Call initiation ──
 const startCall = (type: "voice" | "video") => {
   if (!room.value) return;
@@ -824,9 +831,9 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                     </button>
                     <button
                       class="flex-1 rounded-lg bg-color-bad px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
-                      @click="confirmAction === 'delete' ? handleDeleteChat() : (confirmAction === 'leave' && room?.isGroup ? handleLeaveGroup() : handleDeleteChat())"
+                      @click="confirmAction === 'delete' ? handleDeleteChat() : confirmAction === 'clear' ? handleClearHistory() : (confirmAction === 'leave' && room?.isGroup ? handleLeaveGroup() : handleDeleteChat())"
                     >
-                      {{ confirmAction === 'delete' ? t("info.delete") : (confirmAction === 'leave' && room.isGroup ? t("info.leave") : t("info.delete")) }}
+                      {{ confirmAction === 'delete' ? t("info.delete") : confirmAction === 'clear' ? t("chatInfo.clearConfirmButton") : (confirmAction === 'leave' && room?.isGroup ? t("info.leave") : t("info.delete")) }}
                     </button>
                   </div>
                 </div>

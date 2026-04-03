@@ -338,6 +338,7 @@ export const en = {
   "chatInfo.deleteGroup": "Delete group",
   "chatInfo.deleteChat": "Delete chat",
   "chatInfo.clearHistory": "Clear history",
+  "chatInfo.clearConfirmButton": "Clear",
   "chatInfo.blockUser": "Block user",
   "chatInfo.unblockUser": "Unblock user",
   "chatInfo.searchInChat": "Search in chat",

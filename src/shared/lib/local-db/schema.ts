@@ -84,6 +84,9 @@ export interface LocalRoom {
   syncedAt: number;              // last sync from server
   paginationToken?: string;      // Matrix backwards pagination token
   hasMoreHistory: boolean;       // false = we reached the beginning
+
+  /** Timestamp (ms) when user cleared chat history. Events before this are hidden/purged. */
+  clearedAtTs?: number;
 }
 
 /** Local message — extended with sync & local-first fields */
@@ -486,6 +489,18 @@ export class ChatDatabase extends Dexie {
 
     // Version 8: add listenedMessages table for persisting voice message listened state
     this.version(8).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+    });
+
+    // Version 9: add clearedAtTs to LocalRoom (no index changes needed)
+    this.version(9).stores({
       rooms: "id, updatedAt, membership, isDeleted",
       messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
       users: "address, updatedAt",

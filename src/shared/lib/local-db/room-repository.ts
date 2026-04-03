@@ -162,9 +162,13 @@ export class RoomRepository {
             patched.updatedAt = Math.max(prev.updatedAt ?? 0, update.updatedAt);
           }
           if (update.lastMessageTimestamp !== undefined) {
+            // Clear-history guard: never restore a timestamp that predates the clear marker
+            const effectiveTs = prev.clearedAtTs && update.lastMessageTimestamp <= prev.clearedAtTs
+              ? prev.lastMessageTimestamp ?? 0
+              : update.lastMessageTimestamp;
             patched.lastMessageTimestamp = Math.max(
               prev.lastMessageTimestamp ?? 0,
-              update.lastMessageTimestamp,
+              effectiveTs,
             );
           }
 
@@ -248,6 +252,10 @@ export class RoomRepository {
     // Monotonic guard — never roll back to an older preview
     const existing = await this.db.rooms.get(roomId);
     if (existing?.lastMessageTimestamp && timestamp < existing.lastMessageTimestamp) {
+      return;
+    }
+    // Clear-history guard — never show preview for messages before the clear marker
+    if (existing?.clearedAtTs && timestamp <= existing.clearedAtTs) {
       return;
     }
 
@@ -366,6 +374,33 @@ export class RoomRepository {
     if (updated === 0) {
       console.warn(`[RoomRepo] tombstoneRoom: room ${roomId} not found in Dexie`);
     }
+  }
+
+  /** Clear chat history: set clearedAtTs marker and reset preview/pagination.
+   *  Uses null (not undefined) because Dexie.update() silently ignores undefined values. */
+  async clearHistory(roomId: string, clearedAtTs: number): Promise<void> {
+    await this.db.rooms.update(roomId, {
+      clearedAtTs,
+      lastMessagePreview: null as unknown as undefined,
+      lastMessageTimestamp: null as unknown as undefined,
+      lastMessageSenderId: null as unknown as undefined,
+      lastMessageType: null as unknown as undefined,
+      lastMessageEventId: null as unknown as undefined,
+      lastMessageReaction: null,
+      lastMessageLocalStatus: null as unknown as undefined,
+      lastMessageDecryptionStatus: null as unknown as undefined,
+      lastMessageCallInfo: null as unknown as undefined,
+      lastMessageSystemMeta: null as unknown as undefined,
+      unreadCount: 0,
+      paginationToken: null as unknown as undefined,
+      hasMoreHistory: false,
+    });
+  }
+
+  /** Get clearedAtTs for a room */
+  async getClearedAtTs(roomId: string): Promise<number | undefined> {
+    const room = await this.db.rooms.get(roomId);
+    return room?.clearedAtTs;
   }
 
   /** Revive a tombstoned room (e.g. user re-joined the room) */

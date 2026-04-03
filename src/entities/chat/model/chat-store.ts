@@ -575,7 +575,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Dexie-first path: query the DB for the last inbound timestamp
     if (chatDbKitRef.value && myAddr) {
-      chatDbKitRef.value.messages.getLastInboundTimestamp(roomId, myAddr)
+      const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(roomId);
+      chatDbKitRef.value.messages.getLastInboundTimestamp(roomId, myAddr, clearedAtTs)
         .then((lastInboundTs) => {
           if (lastInboundTs > 0) {
             return commitReadWatermark(roomId, lastInboundTs);
@@ -619,9 +620,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const { data: dexieMessages, isReady: dexieMessagesReady } = useLiveQuery(
     () => {
       if (!activeRoomId.value || !chatDbKitRef.value) return [] as import("@/shared/lib/local-db").LocalMessage[];
+      const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(activeRoomId.value);
       return chatDbKitRef.value.messages.getMessages(
         activeRoomId.value,
         messageWindowSize.value,
+        undefined,
+        clearedAtTs,
       );
     },
     () => [activeRoomId.value, messageWindowSize.value, chatDbKitRef.value] as const,
@@ -969,6 +973,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const r of allRooms) dexieRoomMap.set(r.id, r);
     _dexieRoomMapVersion.value++;
     dexieRooms.value = allRooms;
+    // Warm clearedAtTs cache from Dexie so write-guards work for all rooms on sync
+    for (const r of allRooms) {
+      if (r.clearedAtTs) dbKit.eventWriter.setClearedAtTs(r.id, r.clearedAtTs);
+    }
     dexieRoomsReady.value = true;
     dexieChangesUnsub?.();
     dexieChangesUnsub = dbKit.rooms.observeRoomChanges((changes) => {
@@ -1785,6 +1793,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     // Determine best lastMessage: prefer decrypted over "[encrypted]", newer over older.
+    // Clear-history guard: discard candidates older than the clear marker.
+    const roomClearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(chatRoom.id);
     const candidates: Array<Message | undefined> = [chatRoom.lastMessage];
     const loadedMsgs = messages.value[chatRoom.id];
     if (loadedMsgs?.length) candidates.push(loadedMsgs[loadedMsgs.length - 1]);
@@ -1794,6 +1804,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     let best: Message | undefined;
     for (const c of candidates) {
       if (!c) continue;
+      if (roomClearedAtTs && c.timestamp <= roomClearedAtTs) continue;
       const cEncrypted = c.content === "[encrypted]";
       const bestEncrypted = best ? best.content === "[encrypted]" : true;
       if (!best || (bestEncrypted && !cEncrypted) || (bestEncrypted === cEncrypted && c.timestamp > best.timestamp)) {
@@ -2279,6 +2290,34 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Matrix service not ready yet — members will load on next sync
       }
 
+      // Bootstrap clearedAtTs from Matrix account_data (cross-device sync)
+      if (chatDbKitRef.value) {
+        try {
+          const matrixService = getMatrixClientService();
+          const data = matrixService.getRoomAccountData(roomId, "m.bastyon.clear_history");
+          if (data?.cleared_at_ts && typeof data.cleared_at_ts === "number") {
+            const existingTs = chatDbKitRef.value.eventWriter.getClearedAtTs(roomId);
+            if (!existingTs || data.cleared_at_ts > existingTs) {
+              chatDbKitRef.value.eventWriter.setClearedAtTs(roomId, data.cleared_at_ts as number);
+              // Fire-and-forget: purge stale messages in background
+              (async () => {
+                try {
+                  const localRoom = await chatDbKitRef.value!.rooms.getRoom(roomId);
+                  if (!localRoom?.clearedAtTs || localRoom.clearedAtTs < (data.cleared_at_ts as number)) {
+                    await chatDbKitRef.value!.rooms.clearHistory(roomId, data.cleared_at_ts as number);
+                    await chatDbKitRef.value!.messages.purgeBeforeTimestamp(roomId, data.cleared_at_ts as number);
+                  }
+                } catch (e) {
+                  console.warn("[chat-store] Failed to bootstrap clearedAtTs:", e);
+                }
+              })();
+            }
+          }
+        } catch {
+          // Matrix service not ready yet — will sync via Room.accountData event later
+        }
+      }
+
       // Self-healing: check if we still have access to this room via Matrix SDK.
       // If the room was left/forgotten on another device but our local Dexie
       // cache still has it, tombstone it and clear the active room.
@@ -2527,6 +2566,46 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await matrixService.forgetRoom(roomId);
     } catch (e) {
       console.warn("[chat-store] removeRoom leave/forget error:", e);
+    }
+  };
+
+  /** Clear chat history for current user only. Room membership is NOT affected.
+   *  1. Save marker to Matrix room account_data (cross-device sync)
+   *  2. Save marker to Dexie LocalRoom.clearedAtTs
+   *  3. Purge old timeline events from Dexie
+   *  4. Reset room preview and pagination state
+   *  5. Clear in-memory messages */
+  const clearHistory = async (roomId: string) => {
+    const now = Date.now();
+
+    // 1. Save marker to Matrix account_data (cross-device)
+    try {
+      const matrixService = getMatrixClientService();
+      await matrixService.setRoomAccountData(roomId, "m.bastyon.clear_history", {
+        cleared_at_ts: now,
+      });
+    } catch (e) {
+      console.warn("[chat-store] clearHistory: failed to set account_data, continuing with local-only clear:", e);
+    }
+
+    // 2-4. Dexie: set marker + purge messages + reset preview/pagination
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.eventWriter.setClearedAtTs(roomId, now);
+      await chatDbKitRef.value.rooms.clearHistory(roomId, now);
+      await chatDbKitRef.value.messages.purgeBeforeTimestamp(roomId, now);
+    }
+
+    // 5. Invalidate caches so room list rebuilds from fresh Dexie data
+    decryptedPreviewCache.delete(roomId);
+    _chatRoomFromDexieCache.delete(roomId);
+
+    // 6. Clear in-memory messages for this room
+    messages.value[roomId] = [];
+    triggerRef(messages);
+
+    // Reset message window so liveQuery re-fires with empty result
+    if (activeRoomId.value === roomId) {
+      messageWindowSize.value = 50;
     }
   };
 
@@ -3638,7 +3717,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const db = chatDbKitRef.value;
 
     // Step 1: Find unresolved replies in Dexie (source of truth for UI)
-    const roomMsgs = await db.messages.getMessages(roomId, 200);
+    const clearedAtTs = db.eventWriter.getClearedAtTs(roomId);
+    const roomMsgs = await db.messages.getMessages(roomId, 200, undefined, clearedAtTs);
     const unresolved = roomMsgs.filter(
       m => m.replyTo && !m.replyTo.deleted && !m.replyTo.senderId && !m.replyTo.content,
     );
@@ -3838,7 +3918,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // and mark all own messages up to that point as "read".
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
 
-      setMessages(roomId, msgs);
+      // Filter out messages before the clear-history marker so they never
+      // pollute messages.value (used as a lastMessage candidate in buildChatRoom).
+      const clearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(roomId);
+      const filteredMsgs = clearedAtTs ? msgs.filter(m => m.timestamp > clearedAtTs) : msgs;
+      setMessages(roomId, filteredMsgs);
 
       // Dual-write: persist all parsed messages to Dexie.
       // For the active room: awaited so data reaches IndexedDB before a potential F5.
@@ -4982,6 +5066,39 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     optimisticRemoveRoom(roomId);
   };
 
+  /** Handle Room.accountData events — cross-device sync for clear-history markers */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleRoomAccountData = async (event: any, room: any) => {
+    if (event.getType?.() !== "m.bastyon.clear_history") return;
+    const content = event.getContent?.();
+    const clearedAtTs = content?.cleared_at_ts;
+    if (!clearedAtTs || typeof clearedAtTs !== "number") return;
+
+    const roomId = room?.roomId ?? room?.getId?.();
+    if (!roomId) return;
+
+    // Check if this is newer than what we have locally
+    if (chatDbKitRef.value) {
+      const existingTs = chatDbKitRef.value.eventWriter.getClearedAtTs(roomId);
+      if (existingTs && existingTs >= clearedAtTs) return;
+
+      chatDbKitRef.value.eventWriter.setClearedAtTs(roomId, clearedAtTs);
+      await chatDbKitRef.value.rooms.clearHistory(roomId, clearedAtTs);
+      await chatDbKitRef.value.messages.purgeBeforeTimestamp(roomId, clearedAtTs);
+
+      // Invalidate caches
+      decryptedPreviewCache.delete(roomId);
+      _chatRoomFromDexieCache.delete(roomId);
+
+      // Clear in-memory messages if this room is active
+      if (activeRoomId.value === roomId) {
+        messages.value[roomId] = [];
+        triggerRef(messages);
+        messageWindowSize.value = 50;
+      }
+    }
+  };
+
   /** Revive a tombstoned room (used when rejoining a previously-deleted room) */
   const clearDeletedRoom = (roomId: string) => {
     if (chatDbKitRef.value) {
@@ -5083,7 +5200,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Primary path: read from Dexie (local-first source of truth)
     if (chatDbKitRef.value) {
       try {
-        const localMsgs = await chatDbKitRef.value.messages.getMessages(roomId, 50);
+        const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(roomId);
+        const localMsgs = await chatDbKitRef.value.messages.getMessages(roomId, 50, undefined, clearedAtTs);
         if (localMsgs.length > 0) {
           // Dexie data will arrive via liveQuery → activeMessages computed.
           // No need to write to messages.value — just signal that cache exists.
@@ -5196,6 +5314,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getRoomPowerLevels,
     getTypingUsers,
     handleKicked,
+    handleRoomAccountData,
     handleReceiptEvent,
     handleRedactionEvent,
     handleTimelineEvent,
@@ -5209,6 +5328,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getBannedMembers,
     isMemberMuted,
     kickMember,
+    clearHistory,
     leaveGroup,
     loadCachedMessages,
     loadCachedRooms,

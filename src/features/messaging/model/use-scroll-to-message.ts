@@ -156,9 +156,12 @@ export function useScrollToMessage(
         // Try Dexie first
         if (isChatDbReady()) {
           const db = getChatDb();
+          const clearedAtTs = db.eventWriter.getClearedAtTs(chatStore.activeRoomId!);
           const ctx = await db.messages.getMessageContext(
             chatStore.activeRoomId!,
             messageId,
+            25,
+            clearedAtTs,
           );
           if (ctx) {
             contextMessages = ctx.messages;
@@ -193,7 +196,8 @@ export function useScrollToMessage(
             // If still not in virtualItems, try Dexie context (loadRoomMessages wrote to Dexie)
             if (isChatDbReady()) {
               const db = getChatDb();
-              const ctx = await db.messages.getMessageContext(roomId, messageId);
+              const clearedAtTs2 = db.eventWriter.getClearedAtTs(roomId);
+              const ctx = await db.messages.getMessageContext(roomId, messageId, 25, clearedAtTs2);
               if (ctx) {
                 contextMessages = ctx.messages;
                 targetIndex = ctx.targetIndex;

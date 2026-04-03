@@ -27,6 +27,7 @@ export type ReceiptCallback = (event: unknown, room: unknown) => void;
 export type RedactionCallback = (event: unknown, room: unknown) => void;
 export type MyMembershipCallback = (room: unknown, membership: string, prevMembership: string | undefined) => void;
 export type IncomingCallCallback = (call: unknown) => void;
+export type RoomAccountDataCallback = (event: unknown, room: unknown) => void;
 
 export class MatrixClientService {
   private baseUrl: string;
@@ -55,6 +56,7 @@ export class MatrixClientService {
   private onMyMembership: MyMembershipCallback | null = null;
   private onIncomingCall: IncomingCallCallback | null = null;
   private onRoom: ((room: unknown) => void) | null = null;
+  private onRoomAccountData: RoomAccountDataCallback | null = null;
 
   constructor(domain?: string) {
     this.baseUrl = `https://${domain ?? MATRIX_SERVER}`;
@@ -75,6 +77,7 @@ export class MatrixClientService {
     onMyMembership?: MyMembershipCallback;
     onIncomingCall?: IncomingCallCallback;
     onRoom?: (room: unknown) => void;
+    onRoomAccountData?: RoomAccountDataCallback;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
     if (handlers.onTimeline) this.onTimeline = handlers.onTimeline;
@@ -85,6 +88,7 @@ export class MatrixClientService {
     if (handlers.onMyMembership) this.onMyMembership = handlers.onMyMembership;
     if (handlers.onIncomingCall) this.onIncomingCall = handlers.onIncomingCall;
     if (handlers.onRoom) this.onRoom = handlers.onRoom;
+    if (handlers.onRoomAccountData) this.onRoomAccountData = handlers.onRoomAccountData;
   }
 
   /** Custom request function using axios (matching bastyon-chat pattern) */
@@ -244,14 +248,14 @@ export class MatrixClientService {
             types: ["m.receipt", "m.typing"],
           },
           account_data: {
-            types: ["m.fully_read", "m.tag"],
+            types: ["m.fully_read", "m.tag", "m.bastyon.clear_history"],
           },
         },
         presence: {
           types: [],
         },
         account_data: {
-          types: ["m.fully_read", "m.tag"],
+          types: ["m.fully_read", "m.tag", "m.bastyon.clear_history"],
         },
       };
       syncFilter = await userClient.createFilter(filterDefinition);
@@ -385,6 +389,12 @@ export class MatrixClientService {
     this.client.on("Room" as string, (room: unknown) => {
       if (!this.chatsReady) return;
       this.onRoom?.(room);
+    });
+
+    // Room account_data changes (e.g. clear-history markers from other devices)
+    this.client.on("Room.accountData" as string, (event: unknown, room: unknown) => {
+      if (!this.chatsReady) return;
+      this.onRoomAccountData?.(event, room);
     });
 
     this.client.on("sync", (state: string) => {
@@ -698,6 +708,21 @@ export class MatrixClientService {
   async forgetRoom(roomId: string): Promise<void> {
     if (!this.client) throw new Error("Client not initialized");
     await this.client.forget(roomId, true);
+  }
+
+  /** Set per-user per-room account data (syncs across devices via /sync) */
+  async setRoomAccountData(roomId: string, eventType: string, content: Record<string, unknown>): Promise<void> {
+    if (!this.client) throw new Error("Client not initialized");
+    await this.client.setRoomAccountData(roomId, eventType, content);
+  }
+
+  /** Get per-user per-room account data */
+  getRoomAccountData(roomId: string, eventType: string): Record<string, unknown> | null {
+    if (!this.client) return null;
+    const room = this.client.getRoom(roomId);
+    if (!room) return null;
+    const event = room.getAccountData(eventType);
+    return event?.getContent() ?? null;
   }
 
   /** Kick a user from a room (requires admin power level) */
