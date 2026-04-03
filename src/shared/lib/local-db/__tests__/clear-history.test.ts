@@ -126,18 +126,15 @@ describe("clear-history", () => {
       );
       await db.messages.bulkAdd(msgs);
 
-      // purgeBeforeTimestamp uses between(..., false) so upper bound is exclusive
-      // The implementation: between([roomId, minKey], [roomId, timestamp], true, false)
-      // This means it deletes messages with timestamp < 300, not <= 300
       const deleted = await msgRepo.purgeBeforeTimestamp(ROOM_ID, 300);
 
       const remaining = await db.messages.toArray();
       const timestamps = remaining
         .map((m) => m.timestamp)
         .sort((a, b) => a - b);
-      // Upper bound exclusive: timestamps 100, 200 deleted; 300, 400, 500 remain
-      expect(timestamps).toEqual([300, 400, 500]);
-      expect(deleted).toBe(2);
+      // Upper bound inclusive: timestamps 100, 200, 300 deleted; 400, 500 remain
+      expect(timestamps).toEqual([400, 500]);
+      expect(deleted).toBe(3);
     });
 
     it("leaves messages in other rooms untouched", async () => {

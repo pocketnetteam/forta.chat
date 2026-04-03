@@ -451,7 +451,7 @@ export class MessageRepository {
   async purgeBeforeTimestamp(roomId: string, timestamp: number): Promise<number> {
     return this.db.messages
       .where("[roomId+timestamp]")
-      .between([roomId, Dexie.minKey], [roomId, timestamp], true, false)
+      .between([roomId, Dexie.minKey], [roomId, timestamp], true, true)
       .delete();
   }
 

@@ -962,6 +962,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const r of allRooms) dexieRoomMap.set(r.id, r);
     _dexieRoomMapVersion.value++;
     dexieRooms.value = allRooms;
+    // Warm clearedAtTs cache from Dexie so write-guards work for all rooms on sync
+    for (const r of allRooms) {
+      if (r.clearedAtTs) dbKit.eventWriter.setClearedAtTs(r.id, r.clearedAtTs);
+    }
     dexieRoomsReady.value = true;
     dexieChangesUnsub?.();
     dexieChangesUnsub = dbKit.rooms.observeRoomChanges((changes) => {

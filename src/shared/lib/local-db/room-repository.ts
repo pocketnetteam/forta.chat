@@ -382,6 +382,7 @@ export class RoomRepository {
       lastMessageDecryptionStatus: undefined,
       lastMessageCallInfo: undefined,
       lastMessageSystemMeta: undefined,
+      unreadCount: 0,
       paginationToken: undefined,
       hasMoreHistory: true,
     });
