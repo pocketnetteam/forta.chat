@@ -145,7 +145,12 @@ export class MessageRepository {
 
   /** Insert or update a message from the server (incoming sync).
    *  Returns "inserted" | "updated" | "duplicate". */
-  async upsertFromServer(msg: LocalMessage): Promise<"inserted" | "updated" | "duplicate"> {
+  async upsertFromServer(msg: LocalMessage, clearedAtTs?: number): Promise<"inserted" | "updated" | "duplicate"> {
+    // Write-guard: skip events that predate the clear-history marker
+    if (clearedAtTs && msg.timestamp <= clearedAtTs) {
+      return "duplicate";
+    }
+
     // 1. Check if this is our own message echo (match by clientId)
     if (msg.clientId) {
       const existing = await this.getByClientId(msg.clientId);
@@ -182,7 +187,13 @@ export class MessageRepository {
   }
 
   /** Bulk insert messages (e.g., initial room load / pagination) */
-  async bulkInsert(messages: LocalMessage[]): Promise<void> {
+  async bulkInsert(messages: LocalMessage[], clearedAtTs?: number): Promise<void> {
+    // Write-guard: skip events that predate the clear-history marker
+    if (clearedAtTs) {
+      messages = messages.filter(m => m.timestamp > clearedAtTs);
+    }
+    if (messages.length === 0) return;
+
     const eventIds = messages
       .map((m) => m.eventId)
       .filter((id): id is string => id !== null);
@@ -430,6 +441,15 @@ export class MessageRepository {
       .where("[roomId+timestamp]")
       .between([roomId, Dexie.minKey], [roomId, Dexie.maxKey])
       .count();
+  }
+
+  /** Delete all timeline messages in a room at or before a given timestamp.
+   *  Returns count of deleted messages. */
+  async purgeBeforeTimestamp(roomId: string, timestamp: number): Promise<number> {
+    return this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, Dexie.minKey], [roomId, timestamp], true, true)
+      .delete();
   }
 
   // ---------------------------------------------------------------------------

@@ -244,14 +244,14 @@ export class MatrixClientService {
             types: ["m.receipt", "m.typing"],
           },
           account_data: {
-            types: ["m.fully_read", "m.tag"],
+            types: ["m.fully_read", "m.tag", "m.bastyon.clear_history"],
           },
         },
         presence: {
           types: [],
         },
         account_data: {
-          types: ["m.fully_read", "m.tag"],
+          types: ["m.fully_read", "m.tag", "m.bastyon.clear_history"],
         },
       };
       syncFilter = await userClient.createFilter(filterDefinition);
@@ -698,6 +698,21 @@ export class MatrixClientService {
   async forgetRoom(roomId: string): Promise<void> {
     if (!this.client) throw new Error("Client not initialized");
     await this.client.forget(roomId, true);
+  }
+
+  /** Set per-user per-room account data (syncs across devices via /sync) */
+  async setRoomAccountData(roomId: string, eventType: string, content: Record<string, unknown>): Promise<void> {
+    if (!this.client) throw new Error("Client not initialized");
+    await this.client.setRoomAccountData(roomId, eventType, content);
+  }
+
+  /** Get per-user per-room account data */
+  getRoomAccountData(roomId: string, eventType: string): Record<string, unknown> | null {
+    if (!this.client) return null;
+    const room = this.client.getRoom(roomId);
+    if (!room) return null;
+    const event = room.getAccountData(eventType);
+    return event?.getContent() ?? null;
   }
 
   /** Kick a user from a room (requires admin power level) */

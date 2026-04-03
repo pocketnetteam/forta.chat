@@ -368,6 +368,31 @@ export class RoomRepository {
     }
   }
 
+  /** Clear chat history: set clearedAtTs marker and reset preview/pagination */
+  async clearHistory(roomId: string, clearedAtTs: number): Promise<void> {
+    await this.db.rooms.update(roomId, {
+      clearedAtTs,
+      lastMessagePreview: undefined,
+      lastMessageTimestamp: undefined,
+      lastMessageSenderId: undefined,
+      lastMessageType: undefined,
+      lastMessageEventId: undefined,
+      lastMessageReaction: null,
+      lastMessageLocalStatus: undefined,
+      lastMessageDecryptionStatus: undefined,
+      lastMessageCallInfo: undefined,
+      lastMessageSystemMeta: undefined,
+      paginationToken: undefined,
+      hasMoreHistory: true,
+    });
+  }
+
+  /** Get clearedAtTs for a room */
+  async getClearedAtTs(roomId: string): Promise<number | undefined> {
+    const room = await this.db.rooms.get(roomId);
+    return room?.clearedAtTs;
+  }
+
   /** Revive a tombstoned room (e.g. user re-joined the room) */
   async reviveRoom(roomId: string): Promise<void> {
     await this.db.rooms.update(roomId, {
