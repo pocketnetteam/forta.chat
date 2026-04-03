@@ -33,6 +33,7 @@ import { computed, ref, shallowRef } from "vue";
 
 import type { AuthData, UserData } from "./types";
 import { SessionManager, type StoredSession } from "./session-manager";
+import { BackgroundSyncManager } from "./background-sync";
 
 import { getAddressFromPubKey } from "../lib";
 import { createKeyPair } from "./key-pair";
@@ -124,6 +125,7 @@ let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
 
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
+  const backgroundSyncManager = new BackgroundSyncManager();
 
   // Reactive session list + active account
   const sessions = ref<StoredSession[]>(sessionManager.getSessions());
@@ -360,6 +362,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
           if (state === "PREPARED" || state === "SYNCING") {
             chatStore.refreshRooms(state);
+            // Save sync token for background polling
+            if (address.value) {
+              const token = matrixService.client?.getSyncToken?.() ?? "";
+              if (token) sessionManager.updateSyncToken(address.value, token);
+            }
             // Sync room names to native for push notification display
             if (isNative && state === "PREPARED") {
               import('@/shared/lib/push').then(({ pushService }) => {
@@ -457,6 +464,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         matrixReady.value = true;
         matrixError.value = null;
 
+        // Cache connection info for background sync
+        const client = matrixService.client;
+        if (client && address.value) {
+          const accessToken = client.getAccessToken?.() ?? "";
+          const homeserverUrl = client.getHomeserverUrl?.() ?? "";
+          if (accessToken && homeserverUrl) {
+            sessionManager.updateConnectionInfo(address.value, accessToken, homeserverUrl);
+          }
+        }
+
+        // Start background pollers for all inactive accounts
+        for (const s of sessionManager.getSessions()) {
+          if (s.address === activeAddress.value) continue;
+          if (s.accessToken && s.homeserverUrl && s.syncToken) {
+            backgroundSyncManager.demote({
+              address: s.address,
+              accessToken: s.accessToken,
+              homeserverUrl: s.homeserverUrl,
+              syncToken: s.syncToken,
+            });
+          }
+        }
+
         // Fetch blockchain block height and update Pcrypto (critical for encryption key derivation).
         // In legacy code this was provided by the parent app via pcrypto.set.block().
         appInitializer.getBlockHeight().then((height) => {
@@ -548,6 +578,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           } catch (err) {
             console.warn("[auth] Failed to init native call bridge:", err);
           }
+
+          // Switch background sync interval when app goes to background
+          import("@capacitor/app").then(({ App: CapApp }) => {
+            CapApp.addListener("appStateChange", ({ isActive }) => {
+              backgroundSyncManager.setAppState(isActive);
+            });
+          }).catch(() => {});
         }
 
         // Note: rooms are loaded by the onSync("PREPARED") callback which
@@ -763,7 +800,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setPendingRegProfile(null);
     stopRegistrationPoll();
 
-    // ── 8. Remove session from manager ──
+    // ── 8. Stop all background pollers ──
+    backgroundSyncManager.stopAll();
+
+    // ── 9. Remove session from manager ──
     if (logoutAddress) {
       sessionManager.removeSession(logoutAddress);
     }
@@ -1103,6 +1143,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
     // Remove non-active account
+    backgroundSyncManager.stop(targetAddress);
     sessionManager.removeSession(targetAddress);
     syncSessionsFromStorage();
   };
@@ -1134,6 +1175,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           if (syncToken) {
             sessionManager.updateSyncToken(currentAddr, syncToken);
           }
+        }
+
+        // Start lightweight poller for the account being demoted
+        const savedSession = sessionManager.getSession(currentAddr);
+        if (savedSession?.accessToken && savedSession?.homeserverUrl && savedSession?.syncToken) {
+          backgroundSyncManager.demote({
+            address: currentAddr,
+            accessToken: savedSession.accessToken,
+            homeserverUrl: savedSession.homeserverUrl,
+            syncToken: savedSession.syncToken,
+          });
         }
       }
 
@@ -1175,6 +1227,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // 5. Bind per-account localStorage keys (pinned/muted rooms)
       useChatStore().bindAccountKeys(targetAddress);
 
+      // Stop lightweight poller for the newly active account
+      backgroundSyncManager.promote(targetAddress);
+
     } catch (e) {
       console.error("[auth] switchAccount failed:", e);
       matrixError.value = String(e);
@@ -1193,6 +1248,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     removeAccount,
     switchAccount,
     sessionManager,
+    backgroundSyncManager,
     clearRegistrationState,
     editUserData,
     fetchCaptcha,
