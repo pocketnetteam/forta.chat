@@ -70,8 +70,9 @@ const formatTime = (ts: number) => {
     <div v-else class="flex max-h-64 flex-col gap-2.5 overflow-y-auto">
       <div
         v-for="comment in comments"
+        :id="`comment-${comment.id}`"
         :key="comment.id"
-        class="flex gap-2 rounded-lg bg-neutral-grad-0/50 p-2.5"
+        class="flex gap-2 rounded-lg bg-neutral-grad-0/50 p-2.5 transition-colors"
       >
         <img
           v-if="authorAvatars[comment.address]"

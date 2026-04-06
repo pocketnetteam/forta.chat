@@ -55,6 +55,7 @@ const hasBlockSegments = computed(() => segments.value.some(s => s.type === "bas
         v-else-if="seg.type === 'bastyonLink'"
         :txid="seg.txid"
         :is-own="props.isOwn"
+        :initial-comment-id="seg.commentId"
       />
     </template>
     <LinkPreviewCard v-if="props.linkPreview" :preview="props.linkPreview" :is-own="props.isOwn" />
