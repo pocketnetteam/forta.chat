@@ -42,6 +42,11 @@
     "@babel/helper-string-parser" "^7.27.1"
     "@babel/helper-validator-identifier" "^7.28.5"
 
+"@capacitor-community/file-opener@^8.0.0":
+  version "8.0.0"
+  resolved "https://registry.npmjs.org/@capacitor-community/file-opener/-/file-opener-8.0.0.tgz"
+  integrity sha512-kbVNxt4G45RHHeOqrE1Z0nT5iOOzmZ3WwQytpUtaIPzDTlmZxVEA3nJYEiOfGFp6msZO6QWHK3k0Qbv7hnBx+w==
+
 "@capacitor/android@^8.2.0":
   version "8.2.0"
   resolved "https://registry.npmjs.org/@capacitor/android/-/android-8.2.0.tgz"

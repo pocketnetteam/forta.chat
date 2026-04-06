@@ -1,5 +1,6 @@
-const { app, BrowserWindow, shell, ipcMain, protocol, net, session } = require("electron");
+const { app, BrowserWindow, shell, ipcMain, protocol, net, session, dialog } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const { initTor } = require("./tor/index.cjs");
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -58,6 +59,17 @@ function createWindow() {
     else win.maximize();
   });
   ipcMain.on("win:close", () => win.close());
+
+  // Save file via native dialog and open after save
+  ipcMain.handle("file:save", async (_event, fileName, buffer) => {
+    const { filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: fileName,
+    });
+    if (!filePath) return null;
+    fs.writeFileSync(filePath, Buffer.from(buffer));
+    shell.openPath(filePath);
+    return filePath;
+  });
 
   // Open external links in the default browser
   win.webContents.setWindowOpenHandler(({ url }) => {

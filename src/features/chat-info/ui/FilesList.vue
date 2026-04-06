@@ -58,11 +58,11 @@ const grouped = computed<MonthGroup[]>(() => {
 const handleClick = async (msg: Message) => {
   const state = getState(msg._key || msg.id);
   if (state.objectUrl) {
-    saveFile(state.objectUrl, msg.fileInfo?.name ?? "file");
+    await saveFile(state.objectUrl, msg.fileInfo?.name ?? "file", msg.fileInfo?.type);
     return;
   }
   const url = await download(msg);
-  if (url) saveFile(url, msg.fileInfo?.name ?? "file");
+  if (url) await saveFile(url, msg.fileInfo?.name ?? "file", msg.fileInfo?.type);
 };
 </script>
 

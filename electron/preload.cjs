@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   torSetMode: (mode) => ipcRenderer.invoke("tor:set-mode", mode),
   torGetStatus: () => ipcRenderer.invoke("tor:get-status"),
   onTorStatus: (cb) => ipcRenderer.on("tor:status-changed", (_e, data) => cb(data)),
+  saveFile: (fileName, buffer) => ipcRenderer.invoke("file:save", fileName, buffer),
 });
 
 // Scoped IPC bridge for Service Worker ↔ Main process fetch proxy (Tor transport)

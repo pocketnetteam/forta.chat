@@ -3,6 +3,7 @@ import { useAuthStore } from "@/entities/auth";
 import type { FileInfo, Message } from "@/entities/chat";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
+import { isNative, isElectron } from "@/shared/lib/platform";
 
 interface FileDownloadState {
   loading: boolean;
@@ -91,6 +92,82 @@ async function downloadAndDecrypt(
   throw lastError;
 }
 
+/** Convert Blob to base64 data string (without the data:...;base64, prefix) */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      resolve(result.split(",")[1]);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  zip: "application/zip",
+  rar: "application/x-rar-compressed",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  txt: "text/plain",
+  csv: "text/csv",
+  mp4: "video/mp4",
+  mp3: "audio/mpeg",
+  ogg: "audio/ogg",
+  wav: "audio/wav",
+};
+
+function guessMime(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  return MIME_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+/** Write file to device cache and open with system viewer (Android/iOS). */
+async function saveFileNative(objectUrl: string, fileName: string, mimeType?: string) {
+  const { Filesystem, Directory } = await import("@capacitor/filesystem");
+  const { FileOpener } = await import("@capacitor-community/file-opener");
+
+  const response = await fetch(objectUrl);
+  const blob = await response.blob();
+  const base64 = await blobToBase64(blob);
+
+  const result = await Filesystem.writeFile({
+    path: fileName,
+    data: base64,
+    directory: Directory.Cache,
+  });
+
+  const contentType = mimeType || guessMime(fileName);
+
+  try {
+    await FileOpener.open({
+      filePath: result.uri,
+      contentType,
+      openWithDefault: true,
+    });
+  } catch (openError) {
+    console.warn("[saveFile] native open failed, trying share:", openError);
+    // Fallback: offer system share sheet
+    const { Share } = await import("@capacitor/share");
+    await Share.share({
+      title: fileName,
+      url: result.uri,
+      dialogTitle: fileName,
+    });
+  }
+}
+
 /** Composable for downloading and decrypting files/images */
 export function useFileDownload() {
   const states = ref<Record<string, FileDownloadState>>({});
@@ -169,8 +246,29 @@ export function useFileDownload() {
     state.error = null;
   };
 
-  /** Trigger browser download for a file */
-  const saveFile = (objectUrl: string, fileName: string) => {
+  /** Download file to device and open with native viewer (Android/iOS)
+   *  or trigger browser/Electron save dialog. */
+  const saveFile = async (objectUrl: string, fileName: string, mimeType?: string) => {
+    if (isNative) {
+      await saveFileNative(objectUrl, fileName, mimeType);
+      return;
+    }
+
+    if (isElectron) {
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI?.saveFile) {
+        try {
+          const response = await fetch(objectUrl);
+          const buffer = await response.arrayBuffer();
+          await electronAPI.saveFile(fileName, buffer);
+          return;
+        } catch (e) {
+          console.warn("[saveFile] electron IPC failed, falling back to <a>:", e);
+        }
+      }
+    }
+
+    // Web / Electron fallback
     const a = document.createElement("a");
     a.href = objectUrl;
     a.download = fileName;

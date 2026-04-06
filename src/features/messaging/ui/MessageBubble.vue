@@ -231,7 +231,7 @@ const handleMediaClick = () => {
 const handleFileDownload = async () => {
   if (!props.message.fileInfo) return;
   const url = fileState.value.objectUrl ?? await download(props.message);
-  if (url) saveFile(url, props.message.fileInfo.name);
+  if (url) await saveFile(url, props.message.fileInfo.name, props.message.fileInfo.type);
 };
 
 const retryDownload = () => {
