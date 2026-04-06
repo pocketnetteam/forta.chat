@@ -94,7 +94,15 @@ onBeforeUnmount(() => {
 watch(() => chatStore.editingMessage, (editing) => {
   if (editing) {
     text.value = editing.content;
-    nextTick(() => { textareaRef.value?.focus(); autoGrowSync(); });
+    nextTick(() => {
+      autoGrowSync();
+      textareaRef.value?.focus();
+      // Scroll input container into view after keyboard settles (~400ms).
+      // Uses block:"end" to keep input at bottom, not center.
+      setTimeout(() => {
+        inputRootRef.value?.scrollIntoView({ block: "end", behavior: "smooth" });
+      }, 400);
+    });
   }
 }, { immediate: true });
 
@@ -595,7 +603,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
           ref="textareaRef" v-model="text" :placeholder="t('message.placeholder')" rows="1"
           class="flex-1 resize-none rounded-2xl bg-chat-input-bg px-4 py-2.5 text-base leading-[24px] text-text-color outline-none transition-shadow duration-200 placeholder:text-neutral-grad-2 focus:ring-2 focus:ring-color-bg-ac/30"
           :style="{ maxHeight: maxTextareaHeight + 'px', fontSize: '16px' }"
-          :disabled="sending"
+          :disabled="sending" data-keyboard-aware
           @keydown="handleKeydown" @input="handleInput" @blur="saveDraftOnBlur"
           @compositionupdate="handleInput" @compositionend="handleInput"
           @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()"

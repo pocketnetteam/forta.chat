@@ -16,6 +16,7 @@ import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
+import { computeKeyboardHeight, shouldScrollIntoView } from "@/shared/lib/keyboard-height";
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
@@ -217,19 +218,13 @@ onMounted(async () => {
     const vv = window.visualViewport;
     const webKbh = vv ? Math.max(0, window.innerHeight - vv.height) : 0;
 
-    // Native event is authoritative; for visualViewport events use max of both sources.
-    let kbh = isNativeEvent ? nativeKbh : Math.max(webKbh, nativeKbh);
+    const result = computeKeyboardHeight(
+      { baseInnerHeight },
+      { isNativeEvent, nativeKbh, webKbh, innerHeight: window.innerHeight },
+    );
+    baseInnerHeight = result.baseInnerHeight;
 
-    if (kbh === 0) {
-      // No keyboard visible — update baseline (handles orientation changes)
-      baseInnerHeight = window.innerHeight;
-    } else if (window.innerHeight < baseInnerHeight - 50) {
-      // Anti-double-push: Android itself shrank innerHeight (adjustResize working),
-      // skip our programmatic padding — the system already handled it.
-      kbh = 0;
-    }
-
-    document.documentElement.style.setProperty("--keyboardheight", `${kbh}px`);
+    document.documentElement.style.setProperty("--keyboardheight", `${result.kbh}px`);
   };
 
   if (window.visualViewport) {
@@ -254,11 +249,7 @@ onMounted(async () => {
   if (isNative) {
     const handleFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement;
-      if (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable
-      ) {
+      if (shouldScrollIntoView(target)) {
         const scrollIt = () => target.scrollIntoView({ block: "center", behavior: "smooth" });
         setTimeout(scrollIt, 300);
         setTimeout(scrollIt, 600);
