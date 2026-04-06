@@ -24,15 +24,15 @@ const { t } = useI18n();
 const authStore = useAuthStore();
 const userStore = useUserStore();
 
-// Eagerly load profiles for all sessions
+// Eagerly load profiles for all sessions (shallow: only react to address list changes)
 watch(
-  () => authStore.sessions,
-  (sessions) => {
-    for (const s of sessions) {
-      userStore.loadUserIfMissing(s.address);
+  () => authStore.sessions.map((s) => s.address),
+  (addresses) => {
+    for (const addr of addresses) {
+      userStore.loadUserIfMissing(addr);
     }
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 );
 
 const visibleAccounts = computed(() => {

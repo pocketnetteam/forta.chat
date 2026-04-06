@@ -315,6 +315,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const activeRoomId = ref<string | null>(null);
   // Message window size for pagination (increases on scroll-up, resets on room switch)
   const messageWindowSize = ref(50);
+  // Debounced version for liveQuery deps — prevents re-subscription storms during scroll.
+  // Resets synchronously when value decreases (room switch resets to 50).
+  let _msgWindowDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const debouncedMessageWindowSize = ref(50);
+  watch(messageWindowSize, (val, oldVal) => {
+    if (_msgWindowDebounceTimer) clearTimeout(_msgWindowDebounceTimer);
+    if (val <= (oldVal ?? 50)) {
+      // Immediate update on reset (room switch) — no debounce needed
+      debouncedMessageWindowSize.value = val;
+      return;
+    }
+    _msgWindowDebounceTimer = setTimeout(() => {
+      debouncedMessageWindowSize.value = val;
+      _msgWindowDebounceTimer = null;
+    }, 200);
+  });
   const messages = shallowRef<Record<string, Message[]>>({});
   const typing = ref<Record<string, string[]>>({});
   const replyingTo = ref<ReplyTo | null>(null);
@@ -623,12 +639,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(activeRoomId.value);
       return chatDbKitRef.value.messages.getMessages(
         activeRoomId.value,
-        messageWindowSize.value,
+        debouncedMessageWindowSize.value,
         undefined,
         clearedAtTs,
       );
     },
-    () => [activeRoomId.value, messageWindowSize.value, chatDbKitRef.value] as const,
+    () => [activeRoomId.value, debouncedMessageWindowSize.value, chatDbKitRef.value] as const,
     [] as import("@/shared/lib/local-db").LocalMessage[],
   );
 
