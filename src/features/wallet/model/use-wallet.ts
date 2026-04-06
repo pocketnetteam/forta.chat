@@ -1,6 +1,8 @@
+import { computed, toRef } from "vue";
+import { storeToRefs } from "pinia";
 import { getPocketnetInstance } from "@/shared/api/sdk-bridge";
-import { createAppInitializer } from "@/app/providers/initializers/app-initializer";
 import { useAuthStore } from "@/entities/auth";
+import { useWalletStore, getApi } from "./wallet-store";
 
 export interface UTXO {
   txid: string;
@@ -15,23 +17,6 @@ export interface UTXO {
 export const SATOSHI = 100_000_000;
 const MAX_FEE = 0.0999;
 export const DUST_LIMIT = 700; // satoshis
-
-let _api: InstanceType<typeof Api> | null = null;
-
-async function getApi() {
-  if (_api) return _api;
-  const inst = getPocketnetInstance();
-  _api = new Api(inst);
-  await _api.initIf();
-  await _api.wait.ready("use", 5000);
-  return _api;
-}
-
-function getAddress(): string {
-  const addr = getPocketnetInstance().user.address.value;
-  if (!addr) throw new Error("No user address");
-  return addr;
-}
 
 function getKeyPair() {
   const inst = getPocketnetInstance();
@@ -90,24 +75,13 @@ function buildTx(
 
 export function useWallet() {
   const authStore = useAuthStore();
-  // Fully reactive: authStore fields are Vue refs, so the button
-  // appears as soon as the user is authenticated + platform globals exist.
-  const isAvailable = computed(() => {
-    if (!authStore.address || !authStore.isAuthenticated) return false;
-    try {
-      return typeof bitcoin !== "undefined" && typeof Api !== "undefined";
-    } catch {
-      return false;
-    }
-  });
+  const walletStore = useWalletStore();
 
-  /** Get current balance */
-  const getBalance = async (): Promise<number> => {
-    const api = await getApi();
-    const address = getAddress();
-    const info = await api.rpc("getaddressinfo", [address]);
-    return (info as { balance: number }).balance;
-  };
+  function requireAddress(): string {
+    const addr = authStore.address;
+    if (!addr) throw new Error("No user address");
+    return addr;
+  }
 
   /** Estimate fees for a transfer */
   const estimateFees = async (
@@ -116,7 +90,7 @@ export function useWallet() {
     feeDirection: "include" | "exclude",
   ): Promise<number> => {
     const api = await getApi();
-    const address = getAddress();
+    const address = requireAddress();
 
     // Get fee rate
     const feeResult = await api.rpc("estimatesmartfee", [6]) as { feerate: number };
@@ -148,7 +122,7 @@ export function useWallet() {
     _message?: string,
   ): Promise<string> => {
     const api = await getApi();
-    const address = getAddress();
+    const address = requireAddress();
 
     // Get fee rate + UTXOs + balance in parallel
     const [feeResult, utxos, balanceInfo] = await Promise.all([
@@ -187,8 +161,20 @@ export function useWallet() {
     // Broadcast
     await api.rpc("sendrawtransaction", [hex]);
 
+    // Refresh wallet balance after successful broadcast
+    walletStore.refresh();
+
     return txId;
   };
 
-  return { isAvailable, getBalance, estimateFees, sendTransfer };
+  const { isAvailable, balance, status } = storeToRefs(walletStore);
+
+  return {
+    isAvailable,
+    balance,
+    status,
+    refresh: walletStore.refresh,
+    estimateFees,
+    sendTransfer,
+  };
 }
