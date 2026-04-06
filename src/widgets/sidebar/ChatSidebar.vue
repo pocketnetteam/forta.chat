@@ -3,7 +3,7 @@ import { ContactList, ContactSearch, FolderTabs } from "@/features/contacts";
 import { ChannelList } from "@/features/channels";
 import { useChannelStore } from "@/entities/channel";
 import { InviteModal } from "@/features/invite";
-import { useWalletStore } from "@/features/wallet/model/wallet-store";
+import { useWalletStore } from "@/features/wallet";
 import { useChatStore } from "@/entities/chat";
 import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";

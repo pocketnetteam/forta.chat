@@ -9,13 +9,12 @@ const STALE_MS = 60_000;
 let _api: InstanceType<typeof Api> | null = null;
 let _apiAddress: string | null = null;
 
-export async function getApi(): Promise<InstanceType<typeof Api>> {
-  const currentAddress = getPocketnetInstance().user.address.value;
-  if (_api && _apiAddress === currentAddress) return _api;
+export async function getApi(address?: string | null): Promise<InstanceType<typeof Api>> {
+  if (_api && _apiAddress === (address ?? null)) return _api;
 
   const inst = getPocketnetInstance();
   _api = new Api(inst);
-  _apiAddress = currentAddress;
+  _apiAddress = address ?? null;
   await _api.initIf();
   await _api.wait.ready("use", 5000);
   return _api;
@@ -62,7 +61,7 @@ export const useWalletStore = defineStore("wallet", () => {
     error.value = null;
 
     try {
-      const api = await getApi();
+      const api = await getApi(authStore.address);
       if (gen !== fetchGeneration) return;
 
       const address = authStore.address!;

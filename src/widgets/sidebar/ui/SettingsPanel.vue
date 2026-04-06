@@ -4,7 +4,7 @@ import { useThemeStore } from "@/entities/theme";
 import { useTorStore } from "@/entities/tor";
 import { useUserStore } from "@/entities/user/model";
 import { AccountList, AddAccountModal } from "@/features/account-switcher";
-import { useWalletStore } from "@/features/wallet/model/wallet-store";
+import { useWalletStore } from "@/features/wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
 import { isNative, isAndroid } from "@/shared/lib/platform";

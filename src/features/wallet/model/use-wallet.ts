@@ -88,8 +88,8 @@ export function useWallet() {
     amount: number,
     feeDirection: "include" | "exclude",
   ): Promise<number> => {
-    const api = await getApi();
     const address = requireAddress();
+    const api = await getApi(address);
 
     // Get fee rate
     const feeResult = await api.rpc("estimatesmartfee", [6]) as { feerate: number };
@@ -120,8 +120,8 @@ export function useWallet() {
     feeDirection: "include" | "exclude",
     _message?: string,
   ): Promise<string> => {
-    const api = await getApi();
     const address = requireAddress();
+    const api = await getApi(address);
 
     // Get fee rate + UTXOs + balance in parallel
     const [feeResult, utxos, balanceInfo] = await Promise.all([
