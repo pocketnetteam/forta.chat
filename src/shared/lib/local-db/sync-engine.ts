@@ -100,8 +100,7 @@ export class SyncEngine {
         const op = await this.db.pendingOps
           .where("status")
           .equals("pending")
-          .sortBy("createdAt")
-          .then((ops) => ops[0]);
+          .first();
 
         if (!op) break;
 

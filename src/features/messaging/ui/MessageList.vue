@@ -943,22 +943,28 @@ const onScrollThrottled = () => {
 // Content resize observer: when near bottom, auto-scroll to keep newest visible
 // (images loading, reactions expanding, etc.)
 let contentResizeObserver: ResizeObserver | null = null;
+let contentResizeRaf: number | null = null;
 
 const attachContentObserver = () => {
   contentResizeObserver?.disconnect();
+  if (contentResizeRaf !== null) { cancelAnimationFrame(contentResizeRaf); contentResizeRaf = null; }
   const el = getScrollContainer();
   if (!el) return;
 
   contentResizeObserver = new ResizeObserver(() => {
-    if (switching.value || loadingMore.value) return;
-    // In column-reverse, near bottom = scrollTop ≈ 0.
-    // When content resizes and we're near bottom, keep at bottom.
-    // Skip during loadingMore to prevent scroll reset on history prepend.
-    if (pendingScrollToBottom || isNearBottom.value) {
-      const scrollEl = getScrollContainer();
-      if (scrollEl) scrollEl.scrollTop = 0;
-      if (pendingScrollToBottom) resetStableTimer();
-    }
+    if (contentResizeRaf !== null) return; // throttle: max one callback per frame
+    contentResizeRaf = requestAnimationFrame(() => {
+      contentResizeRaf = null;
+      if (switching.value || loadingMore.value) return;
+      // In column-reverse, near bottom = scrollTop ≈ 0.
+      // When content resizes and we're near bottom, keep at bottom.
+      // Skip during loadingMore to prevent scroll reset on history prepend.
+      if (pendingScrollToBottom || isNearBottom.value) {
+        const scrollEl = getScrollContainer();
+        if (scrollEl) scrollEl.scrollTop = 0;
+        if (pendingScrollToBottom) resetStableTimer();
+      }
+    });
   });
   // Observe the scroll container's first child (content wrapper)
   const contentEl = el.firstElementChild as HTMLElement | null;
