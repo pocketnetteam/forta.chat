@@ -17,6 +17,7 @@ interface Props {
   post: BastyonPostData;
   authorName: string;
   authorAvatarUrl: string;
+  initialCommentId?: string;
 }
 
 const props = defineProps<Props>();
@@ -81,6 +82,22 @@ const handleCommentSubmit = async (message: string) => {
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key === "Escape") emit("close");
 };
+
+// Scroll to target comment after comments load
+if (props.initialCommentId) {
+  watch(comments, (list) => {
+    if (list.length > 0) {
+      nextTick(() => {
+        const el = document.getElementById(`comment-${props.initialCommentId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.classList.add("ring-2", "ring-color-bg-ac", "ring-offset-1");
+          setTimeout(() => el.classList.remove("ring-2", "ring-color-bg-ac", "ring-offset-1"), 3000);
+        }
+      });
+    }
+  }, { once: true });
+}
 
 onMounted(() => {
   loadScores();

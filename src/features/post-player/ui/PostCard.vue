@@ -14,6 +14,7 @@ import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 interface Props {
   txid: string;
   isOwn: boolean;
+  initialCommentId?: string;
 }
 
 const props = defineProps<Props>();
@@ -340,6 +341,7 @@ onMounted(async () => {
     :post="post"
     :author-name="authorName"
     :author-avatar-url="authorAvatarUrl"
+    :initial-comment-id="props.initialCommentId"
     @close="showModal = false"
   />
 

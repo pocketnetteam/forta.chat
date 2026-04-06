@@ -1,3 +1,5 @@
+import { BASTYON_LINK_RE, parseBasytonLink } from "./bastyon-link";
+
 /**
  * Maximum allowed message body length (bytes).
  * Messages exceeding this limit are truncated before sending.
@@ -58,11 +60,9 @@ export type Segment =
   | { type: "text"; content: string }
   | { type: "link"; content: string; href: string }
   | { type: "mention"; content: string; userId: string }
-  | { type: "bastyonLink"; content: string; txid: string; isVideo: boolean };
+  | { type: "bastyonLink"; content: string; txid: string; commentId?: string; isVideo: boolean };
 
 const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
-
-const BASTYON_RE = /(?:bastyon:\/\/|https?:\/\/(?:bastyon\.com|pocketnet\.app)\/)(?:index|post)\?[vs]=([a-f0-9]{64})(?:[&\w=]*)/gi;
 // Bastyon mention format: @<34-68 hex-char address>:<display_name>
 // Display name may contain unicode (Cyrillic etc.), underscores, digits
 const MENTION_RE = /@(\w{34,68}):([\p{L}\p{N}_]{1,50})/gu;
@@ -83,10 +83,7 @@ export function stripMentionAddresses(text: string): string {
  */
 export function stripBastyonLinks(text: string): string {
   if (!text) return "";
-  return text.replace(
-    /(?:bastyon:\/\/|https?:\/\/(?:bastyon\.com|pocketnet\.app)\/)(?:index|post)\?[vs]=[a-f0-9]{64}(?:[&\w=]*)/gi,
-    "📝 Bastyon post",
-  );
+  return text.replace(BASTYON_LINK_RE, "📝 Bastyon post");
 }
 
 /**
@@ -101,15 +98,22 @@ export function parseMessage(text: string): Segment[] {
 
   // Bastyon post links (check before generic URLs so they take priority)
   const bastyonRanges: [number, number][] = [];
-  for (const m of text.matchAll(BASTYON_RE)) {
+  for (const m of text.matchAll(BASTYON_LINK_RE)) {
     const start = m.index!;
     const end = start + m[0].length;
-    const isVideo = /index\?v=/.test(m[0]) || /[&?]video=1/.test(m[0]);
+    const target = parseBasytonLink(m[0]);
+    if (!target) continue; // regex matched but URL is malformed
     bastyonRanges.push([start, end]);
     matches.push({
       start,
       end,
-      segment: { type: "bastyonLink", content: m[0], txid: m[1], isVideo },
+      segment: {
+        type: "bastyonLink",
+        content: m[0],
+        txid: target.txid,
+        commentId: target.commentId,
+        isVideo: target.isVideo,
+      },
     });
   }
 
