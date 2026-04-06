@@ -74,6 +74,14 @@ watch(() => chatStore.activeRoomId, (roomId) => {
   if (roomId) channelStore.clearActiveChannel();
 });
 
+// Stop audio when switching rooms — prevents invisible playback
+// where audio continues but VoiceMessage UI is unmounted
+watch(() => chatStore.activeRoomId, (_newId, oldId) => {
+  if (oldId && playback.currentRoomId.value === oldId) {
+    playback.stop();
+  }
+});
+
 const peerKeysMissing = computed(() => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return false;

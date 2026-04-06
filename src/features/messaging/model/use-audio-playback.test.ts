@@ -283,6 +283,50 @@ describe("useAudioPlayback", () => {
       expect(playback.currentMessageId.value).toBeNull();
       expect(playback.currentTime.value).toBe(0);
     });
+
+    it("should clear roomId — enables room-change detection for invisible playback prevention", async () => {
+      await playback.play(baseInfo);
+      expect(playback.currentRoomId.value).toBe("room-1");
+
+      playback.stop();
+
+      expect(playback.currentRoomId.value).toBeNull();
+      expect(mockPause).toHaveBeenCalled();
+      expect(mockRemoveAttribute).toHaveBeenCalledWith("src");
+    });
+
+    it("should not trigger onEnded callback after stop", async () => {
+      const cb = vi.fn();
+      playback.setOnEnded(cb);
+
+      await playback.play(baseInfo);
+      playback.stop();
+
+      // After stop, audio element is nulled — onended can't fire
+      expect(cb).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("isActive / isPlaying computed", () => {
+    it("isActive should return true only for the playing message", async () => {
+      const active1 = playback.isActive("msg-1");
+      const active2 = playback.isActive("msg-2");
+
+      await playback.play(baseInfo);
+
+      expect(active1.value).toBe(true);
+      expect(active2.value).toBe(false);
+    });
+
+    it("isPlaying should return false after stop", async () => {
+      const playing1 = playback.isPlaying("msg-1");
+
+      await playback.play(baseInfo);
+      expect(playing1.value).toBe(true);
+
+      playback.stop();
+      expect(playing1.value).toBe(false);
+    });
   });
 });
 

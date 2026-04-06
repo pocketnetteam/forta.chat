@@ -8,6 +8,7 @@ import { useAuthStore } from "@/entities/auth";
 import { useI18n } from "@/shared/lib/i18n";
 import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -30,9 +31,12 @@ onMounted(() => {
   window.addEventListener("resize", checkMobile);
 });
 
+const playback = useAudioPlayback();
+
 onUnmounted(() => {
   window.removeEventListener("resize", checkMobile);
   clearTimeout(resizeTimer);
+  playback.stop();
 });
 
 const onSelectRoom = () => {
