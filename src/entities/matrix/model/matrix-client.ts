@@ -57,6 +57,7 @@ export class MatrixClientService {
   private onIncomingCall: IncomingCallCallback | null = null;
   private onRoom: ((room: unknown) => void) | null = null;
   private onRoomAccountData: RoomAccountDataCallback | null = null;
+  private onEncryptionKeyArrived: ((roomId: string) => void) | null = null;
 
   constructor(domain?: string) {
     this.baseUrl = `https://${domain ?? MATRIX_SERVER}`;
@@ -78,6 +79,7 @@ export class MatrixClientService {
     onIncomingCall?: IncomingCallCallback;
     onRoom?: (room: unknown) => void;
     onRoomAccountData?: RoomAccountDataCallback;
+    onEncryptionKeyArrived?: (roomId: string) => void;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
     if (handlers.onTimeline) this.onTimeline = handlers.onTimeline;
@@ -89,6 +91,7 @@ export class MatrixClientService {
     if (handlers.onIncomingCall) this.onIncomingCall = handlers.onIncomingCall;
     if (handlers.onRoom) this.onRoom = handlers.onRoom;
     if (handlers.onRoomAccountData) this.onRoomAccountData = handlers.onRoomAccountData;
+    if (handlers.onEncryptionKeyArrived) this.onEncryptionKeyArrived = handlers.onEncryptionKeyArrived;
   }
 
   /** Custom request function using axios (matching bastyon-chat pattern) */
@@ -395,6 +398,17 @@ export class MatrixClientService {
     this.client.on("Room.accountData" as string, (event: unknown, room: unknown) => {
       if (!this.chatsReady) return;
       this.onRoomAccountData?.(event, room);
+    });
+
+    // Listen for encryption state events — triggers decryption retry for room
+    this.client.on("RoomState.events" as string, (event: unknown) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ev = event as any;
+      const type = ev?.getType?.();
+      const roomId = ev?.getRoomId?.();
+      if (type === "m.room.encryption" && roomId) {
+        this.onEncryptionKeyArrived?.(roomId);
+      }
     });
 
     this.client.on("sync", (state: string) => {
