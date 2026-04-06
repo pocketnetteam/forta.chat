@@ -59,6 +59,10 @@ export interface ChatDbKit {
   eventWriter: EventWriter;
   decryptionWorker: DecryptionWorker;
   listened: ListenedRepository;
+  /** Debounced retry for a room — wire to key-arrival callbacks */
+  retryRoomDecryption?: (roomId: string) => void;
+  /** Cleanup event listeners. Called on user switch / logout. */
+  dispose?: () => void;
 }
 
 let currentKit: ChatDbKit | null = null;
@@ -86,6 +90,7 @@ export function initChatDb(
 
   // Close previous DB if switching users
   if (currentKit) {
+    currentKit.dispose?.();
     currentKit.db.close();
     currentKit = null;
     currentUserId = null;
@@ -103,6 +108,29 @@ export function initChatDb(
     if (!crypto) return undefined;
     return { decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>) };
   }, rooms);
+
+  // --- Event-driven decryption retry triggers ---
+  const debouncedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const retryRoomDebounced = (roomId: string) => {
+    const existing = debouncedRetryTimers.get(roomId);
+    if (existing) clearTimeout(existing);
+    debouncedRetryTimers.set(roomId, setTimeout(() => {
+      debouncedRetryTimers.delete(roomId);
+      decryptionWorker.retryForRoom(roomId);
+    }, 500));
+  };
+
+  // Trigger: online transition — retry all waiting jobs
+  const onOnline = () => decryptionWorker.retryAllWaiting();
+  window.addEventListener("online", onOnline);
+
+  // Cleanup function for user switch / logout
+  const disposeRetryTriggers = () => {
+    window.removeEventListener("online", onOnline);
+    for (const timer of debouncedRetryTimers.values()) clearTimeout(timer);
+    debouncedRetryTimers.clear();
+    decryptionWorker.dispose();
+  };
 
   // Recover operations stranded in "syncing" state after app crash, then start queue
   syncEngine.recoverStrandedOps().then(() => syncEngine.processQueue()).catch(() => {});
@@ -127,7 +155,7 @@ export function initChatDb(
     console.warn("[local-db] Tombstone GC failed:", e);
   });
 
-  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened };
+  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
   currentUserId = userId;
 
   return currentKit;
