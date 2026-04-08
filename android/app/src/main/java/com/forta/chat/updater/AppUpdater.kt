@@ -38,7 +38,7 @@ object AppUpdater {
 
     private const val TAG = "AppUpdater"
 
-    private const val GITHUB_OWNER = "greenShirtMystery"
+    private const val GITHUB_OWNER = "pocketnetteam"
     private const val GITHUB_REPO = "forta.chat"
     private const val RELEASES_URL =
         "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
