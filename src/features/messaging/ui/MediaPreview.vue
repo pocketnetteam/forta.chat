@@ -40,7 +40,7 @@ const toggleCaptionPosition = () => {
 <template>
   <Teleport to="body">
     <transition name="media-preview">
-      <div v-if="props.show && files.length > 0" class="fixed inset-0 z-50 flex flex-col bg-black/95">
+      <div v-if="props.show && files.length > 0" class="fixed inset-0 z-50 flex flex-col bg-black/95" style="padding-top: var(--safe-area-inset-top, 0px)">
         <!-- Top bar -->
         <div class="flex shrink-0 items-center justify-between px-4 py-3">
           <button
@@ -98,7 +98,7 @@ const toggleCaptionPosition = () => {
         </div>
 
         <!-- Caption input + send -->
-        <div class="shrink-0 border-t border-white/10 px-4 py-3">
+        <div class="shrink-0 border-t border-white/10 px-4 py-3" style="padding-bottom: calc(max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px)) + 12px)">
           <div class="flex items-end gap-3">
             <input
               :value="props.caption"
