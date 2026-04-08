@@ -12,6 +12,12 @@ import {
 import { WriteBuffer, type BufferedWrite } from "./write-buffer";
 import { perfMark, perfMeasure } from "@/shared/lib/perf-markers";
 import { tRaw } from "@/shared/lib/i18n";
+import type { LinkPreview } from "@/entities/chat/model/types";
+
+const URL_RE = /https?:\/\/[^\s<>]+/;
+
+/** Callback type for fetching OG link preview metadata */
+export type FetchPreviewFn = (url: string) => Promise<LinkPreview | null>;
 
 // ---------------------------------------------------------------------------
 // Types for parsed events coming from chat-store / Matrix SDK layer
@@ -34,6 +40,8 @@ export interface ParsedMessage {
   /** Present when the message is our own echo (matched by clientId) */
   clientId?: string;
   linkPreview?: import("@/entities/chat/model/types").LinkPreview;
+  /** Sender explicitly dismissed link preview — receiver should not generate one */
+  noPreview?: boolean;
   deleted?: boolean;
   systemMeta?: { template: string; senderAddr: string; targetAddr?: string };
   /** Raw encrypted event JSON — stored for decryption retry when content is "[encrypted]" */
@@ -120,6 +128,7 @@ export class EventWriter {
     private roomRepo: RoomRepository,
     private userRepo: UserRepository,
     onChange?: OnChangeCallback,
+    private fetchPreviewFn?: FetchPreviewFn,
   ) {
     this.onChange = onChange;
   }
@@ -275,6 +284,14 @@ export class EventWriter {
         await this.applyPendingEdit(parsed.eventId, parsed.roomId);
       }
       this.onChange?.(parsed.roomId);
+
+      // Async link preview for incoming messages — skip if sender dismissed preview.
+      if (!parsed.linkPreview && !parsed.noPreview && parsed.type === MessageType.text && this.fetchPreviewFn) {
+        const url = parsed.content.match(URL_RE)?.[0];
+        if (url) {
+          this.fetchAndStoreLinkPreview(url, localMsg);
+        }
+      }
     }
 
     return out.result;
@@ -571,6 +588,22 @@ export class EventWriter {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /** Fire-and-forget: fetch OG preview for a URL and patch the Dexie record. */
+  private fetchAndStoreLinkPreview(url: string, localMsg: LocalMessage): void {
+    if (!this.fetchPreviewFn) return;
+    this.fetchPreviewFn(url).then(preview => {
+      if (!preview) return;
+      const key = localMsg.eventId
+        ? this.messageRepo.getByEventId(localMsg.eventId).then(m => m?.localId)
+        : Promise.resolve(localMsg.localId);
+
+      return key.then(localId => {
+        if (!localId) return;
+        return this.db.messages.update(localId, { linkPreview: preview });
+      });
+    }).catch(() => { /* preview fetch failed — non-critical */ });
+  }
 
   /** Convert a ParsedMessage to a LocalMessage for DB insertion */
   private toLocalMessage(parsed: ParsedMessage): LocalMessage {

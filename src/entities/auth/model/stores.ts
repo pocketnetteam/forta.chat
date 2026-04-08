@@ -352,6 +352,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       const chatDbKit = initChatDb(
         address.value!,
         async (roomId: string) => pcrypto.value?.rooms[roomId],
+        undefined,
+        async (url: string) => {
+          const { fetchPreview } = await import("@/features/messaging/model/use-link-preview");
+          return fetchPreview(url);
+        },
       );
       chatStore.setChatDbKit(chatDbKit);
 

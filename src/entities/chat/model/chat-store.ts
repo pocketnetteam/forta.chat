@@ -4623,6 +4623,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       pollInfo: msg.pollInfo,
       transferInfo: msg.transferInfo,
       linkPreview: msg.linkPreview,
+      noPreview: !!(raw.content as any)?.no_preview,
       deleted: msg.deleted,
       systemMeta: msg.systemMeta,
       // Preserve raw event for decryption retry

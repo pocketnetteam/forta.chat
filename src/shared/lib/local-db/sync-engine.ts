@@ -179,6 +179,7 @@ export class SyncEngine {
       content: string;
       replyToEventId?: string;
       forwardedFrom?: { senderId: string; senderName?: string };
+      noPreview?: boolean;
     };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
@@ -200,6 +201,10 @@ export class SyncEngine {
           sender_name: payload.forwardedFrom.senderName,
         };
       }
+      // Signal that sender explicitly dismissed the preview
+      if (payload.noPreview) {
+        (encrypted as Record<string, unknown>).no_preview = true;
+      }
 
       serverEventId = await matrixService.sendEncryptedText(op.roomId, encrypted, op.clientId);
     } else {
@@ -217,6 +222,9 @@ export class SyncEngine {
           sender_id: payload.forwardedFrom.senderId,
           sender_name: payload.forwardedFrom.senderName,
         };
+      }
+      if (payload.noPreview) {
+        content.no_preview = true;
       }
       serverEventId = await matrixService.sendEncryptedText(op.roomId, content, op.clientId);
     }

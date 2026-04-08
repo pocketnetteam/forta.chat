@@ -10,6 +10,7 @@ import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
+import { detectUrl, fetchPreview } from "./use-link-preview";
 import { invalidateDownloadCache } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
 import { withTimeout } from "@/shared/lib/with-timeout";
@@ -80,7 +81,7 @@ export function useMessages() {
    * (message is visible in UI), false if the message was silently dropped
    * before any UI update (caller should restore input text).
    */
-  const sendMessage = async (content: string, linkPreview?: LinkPreview): Promise<boolean> => {
+  const sendMessage = async (content: string, previewDismissed?: boolean): Promise<boolean> => {
     const MAX_MESSAGE_LENGTH = 65536;
     if (content.length > MAX_MESSAGE_LENGTH) {
       console.warn('[sendMessage] Message exceeds max length, truncating');
@@ -117,26 +118,29 @@ export function useMessages() {
           return true; // message IS visible (as failed)
         }
 
-        // 3. Enqueue for background sync
+        // 3. Enqueue for background sync (no linkPreview in payload — always async)
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
-          {
-            content: trimmed,
-            ...(linkPreview ? {
-              linkPreview: {
-                url: linkPreview.url,
-                site_name: linkPreview.siteName,
-                title: linkPreview.title,
-                description: linkPreview.description,
-                image_url: linkPreview.imageUrl,
-                image_width: linkPreview.imageWidth,
-                image_height: linkPreview.imageHeight,
-              },
-            } : {}),
-          },
+          { content: trimmed, ...(previewDismissed ? { noPreview: true } : {}) },
           localMsg.clientId,
         );
+
+        // 4. Async preview fetch — fire-and-forget, skip if user dismissed preview
+        if (!previewDismissed) {
+          const url = detectUrl(trimmed);
+          if (url) {
+            fetchPreview(url).then(preview => {
+              if (!preview) return;
+              dbKit.messages.getByClientId(localMsg.clientId).then(msg => {
+                if (msg?.localId) {
+                  dbKit.db.messages.update(msg.localId, { linkPreview: preview });
+                }
+              });
+            }).catch(() => {});
+          }
+        }
+
         return true;
       } catch (e) {
         console.error("[sendMessage] Dexie path failed:", {
@@ -166,7 +170,6 @@ export function useMessages() {
       timestamp: Date.now(),
       status: MessageStatus.sending,
       type: MessageType.text,
-      ...(linkPreview ? { linkPreview } : {}),
     };
 
     // Optimistic insert FIRST — even if we can't send, user sees their message
@@ -189,37 +192,9 @@ export function useMessages() {
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
-        if (linkPreview) {
-          (encrypted as Record<string, unknown>).url_preview = {
-            url: linkPreview.url,
-            site_name: linkPreview.siteName,
-            title: linkPreview.title,
-            description: linkPreview.description,
-            image_url: linkPreview.imageUrl,
-            image_width: linkPreview.imageWidth,
-            image_height: linkPreview.imageHeight,
-          };
-        }
         serverEventId = await matrixService.sendEncryptedText(roomId, encrypted);
       } else {
-        if (linkPreview) {
-          const content: Record<string, unknown> = {
-            body: trimmed,
-            msgtype: "m.text",
-            url_preview: {
-              url: linkPreview.url,
-              site_name: linkPreview.siteName,
-              title: linkPreview.title,
-              description: linkPreview.description,
-              image_url: linkPreview.imageUrl,
-              image_width: linkPreview.imageWidth,
-              image_height: linkPreview.imageHeight,
-            },
-          };
-          serverEventId = await matrixService.sendEncryptedText(roomId, content);
-        } else {
-          serverEventId = await matrixService.sendText(roomId, trimmed);
-        }
+        serverEventId = await matrixService.sendText(roomId, trimmed);
       }
       if (serverEventId) {
         chatStore.updateMessageIdAndStatus(roomId, tempId, serverEventId, MessageStatus.sent);
@@ -1164,7 +1139,7 @@ export function useMessages() {
   };
 
   /** Send message with reply context. Returns true if optimistic insert succeeded. */
-  const sendReply = async (content: string, linkPreview?: LinkPreview): Promise<boolean> => {
+  const sendReply = async (content: string, previewDismissed?: boolean): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     const replyTo = chatStore.replyingTo;
     if (!roomId || !content.trim() || !replyTo) return false;
@@ -1204,27 +1179,29 @@ export function useMessages() {
           return true;
         }
 
-        // 3. Enqueue for background sync
+        // 3. Enqueue for background sync (no linkPreview — always async)
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
-          {
-            content: trimmed,
-            replyToEventId: replyTo.id,
-            ...(linkPreview ? {
-              linkPreview: {
-                url: linkPreview.url,
-                site_name: linkPreview.siteName,
-                title: linkPreview.title,
-                description: linkPreview.description,
-                image_url: linkPreview.imageUrl,
-                image_width: linkPreview.imageWidth,
-                image_height: linkPreview.imageHeight,
-              },
-            } : {}),
-          },
+          { content: trimmed, replyToEventId: replyTo.id, ...(previewDismissed ? { noPreview: true } : {}) },
           localMsg.clientId,
         );
+
+        // 4. Async preview fetch — fire-and-forget, skip if user dismissed preview
+        if (!previewDismissed) {
+          const url = detectUrl(trimmed);
+          if (url) {
+            fetchPreview(url).then(preview => {
+              if (!preview) return;
+              dbKit.messages.getByClientId(localMsg.clientId).then(msg => {
+                if (msg?.localId) {
+                  dbKit.db.messages.update(msg.localId, { linkPreview: preview });
+                }
+              });
+            }).catch(() => {});
+          }
+        }
+
         return true;
       } catch (e) {
         console.error("[sendReply] Dexie path failed:", {
@@ -1253,7 +1230,6 @@ export function useMessages() {
       status: MessageStatus.sending,
       type: MessageType.text,
       replyTo: replyToData,
-      ...(linkPreview ? { linkPreview } : {}),
     };
 
     // Optimistic insert FIRST
@@ -1279,23 +1255,10 @@ export function useMessages() {
         },
       };
 
-      if (linkPreview) {
-        msgContent.url_preview = {
-          url: linkPreview.url,
-          site_name: linkPreview.siteName,
-          title: linkPreview.title,
-          description: linkPreview.description,
-          image_url: linkPreview.imageUrl,
-          image_width: linkPreview.imageWidth,
-          image_height: linkPreview.imageHeight,
-        };
-      }
-
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
         const encContent: Record<string, unknown> = { ...encrypted, "m.relates_to": msgContent["m.relates_to"] };
-        if (msgContent.url_preview) encContent.url_preview = msgContent.url_preview;
         serverEventId = await matrixService.sendEncryptedText(roomId, encContent);
       } else {
         serverEventId = await matrixService.sendEncryptedText(roomId, msgContent);

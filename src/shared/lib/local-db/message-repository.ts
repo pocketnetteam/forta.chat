@@ -88,6 +88,7 @@ export class MessageRepository {
     transferInfo?: LocalMessage["transferInfo"];
     pollInfo?: LocalMessage["pollInfo"];
     fileInfo?: LocalMessage["fileInfo"];
+    linkPreview?: LocalMessage["linkPreview"];
     localBlobUrl?: string;
     uploadProgress?: number;
   }): Promise<LocalMessage> {
@@ -111,6 +112,7 @@ export class MessageRepository {
       transferInfo: params.transferInfo,
       pollInfo: params.pollInfo,
       fileInfo: params.fileInfo,
+      linkPreview: params.linkPreview,
       localBlobUrl: params.localBlobUrl,
       uploadProgress: params.uploadProgress,
     };
@@ -166,12 +168,18 @@ export class MessageRepository {
           await this.db.messages.update(existing.localId!, {
             eventId: msg.eventId,
             serverTs: msg.serverTs ?? msg.timestamp,
+            // Merge local-only fields that the server echo may lack
+            linkPreview: existing.linkPreview ?? msg.linkPreview,
           });
         } else {
           await this.db.messages.update(existing.localId!, {
             eventId: msg.eventId,
             status: "synced" as LocalMessageStatus,
             serverTs: msg.serverTs ?? msg.timestamp,
+            // Merge local-only fields: prefer local (set during optimistic insert),
+            // fall back to server (parsed from url_preview in event content)
+            linkPreview: existing.linkPreview ?? msg.linkPreview,
+            localBlobUrl: existing.localBlobUrl ?? msg.localBlobUrl,
           });
         }
         return "updated";

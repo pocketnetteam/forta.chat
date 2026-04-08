@@ -174,9 +174,9 @@ const handleSend = async () => {
       chatStore.editingMessage = null;
       inserted = true;
     } else if (chatStore.replyingTo) {
-      inserted = await sendReply(rawText, linkPreview.activePreview.value ?? undefined);
+      inserted = await sendReply(rawText, linkPreview.dismissed.value);
     } else {
-      inserted = await sendMessage(rawText, linkPreview.activePreview.value ?? undefined);
+      inserted = await sendMessage(rawText, linkPreview.dismissed.value);
     }
   } catch (e) {
     console.error("[handleSend] Unexpected error:", e);

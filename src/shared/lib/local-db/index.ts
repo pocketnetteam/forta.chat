@@ -82,6 +82,7 @@ export function initChatDb(
   userId: string,
   getRoomCrypto: (roomId: string) => Promise<PcryptoRoomInstance | undefined>,
   onChange?: (roomId: string) => void,
+  fetchPreviewFn?: (url: string) => Promise<import("@/entities/chat/model/types").LinkPreview | null>,
 ): ChatDbKit {
   // If same user, return existing kit
   if (currentKit && currentUserId === userId) {
@@ -102,7 +103,7 @@ export function initChatDb(
   const users = new UserRepository(db);
   const listened = new ListenedRepository(db);
   const syncEngine = new SyncEngine(db, messages, rooms, getRoomCrypto, onChange);
-  const eventWriter = new EventWriter(db, messages, rooms, users, onChange);
+  const eventWriter = new EventWriter(db, messages, rooms, users, onChange, fetchPreviewFn);
   const decryptionWorker = new DecryptionWorker(db, async (roomId: string) => {
     const crypto = await getRoomCrypto(roomId);
     if (!crypto) return undefined;
