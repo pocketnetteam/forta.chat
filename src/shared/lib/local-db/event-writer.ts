@@ -636,34 +636,52 @@ export class EventWriter {
       preview = "[message]";
     }
 
-    // Encrypted message awaiting decryption: clear preview to trigger skeleton in sidebar.
-    // DecryptionWorker will call updateRoomPreview again once decrypted.
+    // Encrypted message awaiting decryption: keep the old sidebar preview text
+    // (or show a placeholder) instead of blanking it. DecryptionWorker will
+    // call updateRoomPreview again once decrypted with the real content.
     const isEncryptedPending = parsed.content === "[encrypted]" && parsed.encryptedRaw;
-    if (isEncryptedPending) {
-      preview = "";
+
+    // Guard: never store an empty/whitespace-only preview.
+    if (!preview || !preview.trim()) {
+      preview = isEncryptedPending ? "[encrypted]" : "[message]";
     }
 
-    // Guard: never store an empty/whitespace-only preview for NON-encrypted messages.
-    if (!isEncryptedPending && (!preview || !preview.trim())) {
-      preview = "[message]";
-    }
-
-    await this.roomRepo.updateLastMessage(
-      parsed.roomId,
-      preview,
-      parsed.timestamp,
-      parsed.senderId,
-      parsed.type,
-      parsed.eventId,
-      parsed.callInfo,
-      parsed.systemMeta,
-    );
-
-    // Set decryption status on room preview for encrypted messages
+    // For encrypted pending: update room metadata (timestamp, sender, etc.)
+    // but preserve the existing preview text if it was meaningful.
     if (isEncryptedPending) {
+      const existingRoom = await this.db.rooms.get(parsed.roomId);
+      const hasGoodPreview = existingRoom?.lastMessagePreview
+        && existingRoom.lastMessagePreview.trim()
+        && existingRoom.lastMessagePreview !== "[encrypted]";
+
+      // Keep the old preview text if it exists, otherwise use placeholder
+      const finalPreview = hasGoodPreview ? existingRoom!.lastMessagePreview! : preview;
+
+      await this.roomRepo.updateLastMessage(
+        parsed.roomId,
+        finalPreview,
+        parsed.timestamp,
+        parsed.senderId,
+        parsed.type,
+        parsed.eventId,
+        parsed.callInfo,
+        parsed.systemMeta,
+      );
+
       await this.db.rooms.update(parsed.roomId, {
         lastMessageDecryptionStatus: "pending",
       });
+    } else {
+      await this.roomRepo.updateLastMessage(
+        parsed.roomId,
+        preview,
+        parsed.timestamp,
+        parsed.senderId,
+        parsed.type,
+        parsed.eventId,
+        parsed.callInfo,
+        parsed.systemMeta,
+      );
     }
   }
 

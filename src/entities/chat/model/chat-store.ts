@@ -2580,20 +2580,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         selfHealZombieRoom(roomId);
       }
 
-      // Self-healing: unconditionally clear unread badge on room open.
-      // IntersectionObserver (useReadTracker) still advances the watermark
-      // for correct cross-device sync, but the badge clears instantly.
-      // This heals poisoned counts from EventWriter inflation during initial sync.
-      // Use lastMessage timestamp (not Date.now()) so the watermark doesn't
-      // leapfrog messages that arrive between room-open and actual scroll.
+      // Clear unread badge on room open WITHOUT advancing the read watermark.
+      // The watermark (lastReadInboundTs) must stay at its original value so that
+      // useUnreadBanner can still see unread messages and show the banner.
+      // The actual watermark advancement happens via useReadTracker (IntersectionObserver)
+      // when the user scrolls through and actually sees the messages.
       if (chatDbKitRef.value) {
-        const lastMsgTs = getRoomById(roomId)?.lastMessage?.timestamp
-          ?? dexieRoomMap.get(roomId)?.lastMessageTimestamp
-          ?? Date.now();
-        chatDbKitRef.value.rooms.markAsRead(
-          roomId,
-          lastMsgTs,
-        ).catch(() => {});
+        chatDbKitRef.value.eventWriter.clearUnread(roomId);
       }
       // Also clear in-memory immediately so sidebar updates without waiting for Dexie delta
       const inMemRoom = getRoomById(roomId);
