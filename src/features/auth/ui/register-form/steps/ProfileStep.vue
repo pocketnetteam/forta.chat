@@ -4,6 +4,7 @@ import { useI18n } from "@/shared/lib/i18n";
 import { useLocaleStore } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
+import { isNative } from "@/shared/lib/platform";
 
 const emit = defineEmits<{
   done: [data: { name: string; language: string; about: string; image?: string }]
@@ -11,6 +12,14 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const authStore = useAuthStore();
 const localeStore = useLocaleStore();
+
+const openLegal = (page: "terms" | "privacy") => {
+  const path = `/${page}.html`;
+  const url = isNative
+    ? `https://forta.chat${path}`
+    : `${window.location.origin}${path}`;
+  window.open(url, "_blank");
+};
 
 const name = ref("");
 const about = ref("");
@@ -237,15 +246,15 @@ const handleSubmit = async () => {
         :disabled="loading"
       />
       <span>
-        {{ t("register.acceptTerms").split("{terms}")[0] }}<router-link
-          to="/legal/terms"
+        {{ t("register.acceptTerms").split("{terms}")[0] }}<a
+          href="#"
           class="font-medium text-color-txt-ac hover:underline"
-          @click.stop
-        >{{ t("register.termsOfService") }}</router-link>{{ t("register.acceptTerms").split("{terms}")[1].split("{privacy}")[0] }}<router-link
-          to="/legal/privacy"
+          @click.stop.prevent="openLegal('terms')"
+        >{{ t("register.termsOfService") }}</a>{{ t("register.acceptTerms").split("{terms}")[1].split("{privacy}")[0] }}<a
+          href="#"
           class="font-medium text-color-txt-ac hover:underline"
-          @click.stop
-        >{{ t("register.privacyPolicy") }}</router-link>{{ t("register.acceptTerms").split("{privacy}")[1] }}
+          @click.stop.prevent="openLegal('privacy')"
+        >{{ t("register.privacyPolicy") }}</a>{{ t("register.acceptTerms").split("{privacy}")[1] }}
       </span>
     </label>
 
