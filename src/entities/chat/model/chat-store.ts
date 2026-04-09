@@ -515,6 +515,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     };
   };
 
+  /** Initialize forwarding a channel post link. Opens ForwardPicker. */
+  const initPostForward = (postLink: string, channelName?: string) => {
+    forwardPickerRequested.value = true;
+    forwardingMessage.value = {
+      id: `__post_share_${Date.now()}`,
+      roomId: "__post_share__",
+      senderId: "",
+      senderName: channelName,
+      content: postLink,
+      type: MessageType.text,
+      withSenderInfo: false,
+    };
+  };
+
   const cancelForward = () => {
     // Also remove from drafts so it doesn't resurrect on room switch
     const roomId = activeRoomId.value;
@@ -5745,6 +5759,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     forwardPickerRequested,
     initForward,
     initExternalShare,
+    initPostForward,
     cancelForward,
     saveForwardDraft,
     restoreForwardDraft,

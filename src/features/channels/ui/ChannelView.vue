@@ -6,7 +6,7 @@ import { useToast } from "@/shared/lib/use-toast";
 import { formatDate } from "@/shared/lib/format";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { PostCard } from "@/features/post-player";
-import SharePostPicker from "@/features/post-player/ui/SharePostPicker.vue";
+import { useChatStore } from "@/entities/chat";
 import ContextMenu from "@/shared/ui/context-menu/ContextMenu.vue";
 import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
 import ChannelInfoPanel from "./ChannelInfoPanel.vue";
@@ -15,6 +15,7 @@ const emit = defineEmits<{ back: [] }>();
 const { t } = useI18n();
 
 const channelStore = useChannelStore();
+const chatStore = useChatStore();
 const authStore = useAuthStore();
 const { toast } = useToast();
 
@@ -165,8 +166,6 @@ onUnmounted(() => {
 
 /* ── Context menu (same icon style as MessageContextMenu) ── */
 const ctxMenu = ref({ show: false, x: 0, y: 0, txid: "" });
-const showSharePicker = ref(false);
-const sharePostTxid = ref("");
 
 const svg = (d: string) =>
   `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
@@ -193,8 +192,10 @@ function onCtxMenuSelect(action: string) {
   ctxMenu.value.show = false;
 
   if (action === "forward") {
-    sharePostTxid.value = txid;
-    showSharePicker.value = true;
+    chatStore.initPostForward(
+      `bastyon://post?s=${txid}`,
+      activeChannel.value?.name,
+    );
   } else if (action === "copy") {
     authStore.loadPost(txid).then((p) => {
       if (p) {
@@ -334,13 +335,6 @@ function onCtxMenuSelect(action: string) {
       :items="ctxMenuItems"
       @close="ctxMenu.show = false"
       @select="onCtxMenuSelect"
-    />
-
-    <!-- Share post picker -->
-    <SharePostPicker
-      :show="showSharePicker"
-      :post-link="`bastyon://post?s=${sharePostTxid}`"
-      @close="showSharePicker = false"
     />
 
     <!-- Scroll-to-bottom FAB -->

@@ -541,12 +541,13 @@ onUnmounted(() => {
           :show-donate="!chatStore.activeRoom?.isGroup && walletStore.isAvailable"
           @donate="showDonateModal = true"
         />
-        <ForwardPicker
-          :show="showForwardPicker"
-          @close="showForwardPicker = false"
-        />
       </template>
     </template>
+
+    <ForwardPicker
+      :show="showForwardPicker"
+      @close="showForwardPicker = false"
+    />
 
     <ChatInfoPanel :show="showInfoPanel" @close="showInfoPanel = false" @open-search="showSearch = true" @go-to-message="(id) => { showInfoPanel = false; messageListRef?.scrollToMessage(id); }" />
     <UserProfilePanel

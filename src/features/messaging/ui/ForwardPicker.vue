@@ -104,7 +104,7 @@ const handleClose = () => {
     <transition name="fp-fade">
       <div
         v-if="props.show"
-        class="fixed inset-0 z-50 flex justify-center"
+        class="fixed inset-0 z-[60] flex justify-center"
         :class="isMobile ? 'items-end' : 'items-center bg-black/40'"
         @click.self="handleClose"
       >

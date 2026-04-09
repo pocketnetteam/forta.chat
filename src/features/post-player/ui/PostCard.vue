@@ -8,7 +8,7 @@ import { useToast } from "@/shared/lib/use-toast";
 import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
-import SharePostPicker from "./SharePostPicker.vue";
+import { useChatStore } from "@/entities/chat";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 
 interface Props {
@@ -39,8 +39,8 @@ const error = ref(false);
 const authorName = ref("");
 const authorImage = ref("");
 const authorReputation = ref<number | null>(null);
+const chatStore = useChatStore();
 const showModal = ref(false);
-const showSharePicker = ref(false);
 
 const videoInfo = computed(() => post.value?.url ? parseVideoUrl(post.value.url) : null);
 const isArticle = computed(() => post.value?.settings?.v === "a");
@@ -87,7 +87,6 @@ const visibleTags = computed(() => {
 });
 
 const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
-const postLink = computed(() => `https://bastyon.com/post?s=${props.txid}`);
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
 async function loadAuthor(data: BastyonPostData) {
@@ -110,7 +109,10 @@ function onVote(value: number) {
 }
 
 function onShare() {
-  showSharePicker.value = true;
+  chatStore.initPostForward(
+    `bastyon://post?s=${props.txid}`,
+    authorName.value || undefined,
+  );
 }
 
 function onBoost() {
@@ -355,15 +357,6 @@ onMounted(async () => {
     :author-avatar-url="authorAvatarUrl"
     :initial-comment-id="props.initialCommentId"
     @close="showModal = false"
-  />
-
-  <!-- Share picker -->
-  <SharePostPicker
-    v-if="showSharePicker"
-    :show="showSharePicker"
-    :post-link="postLink"
-    :post-title="post?.caption || ''"
-    @close="showSharePicker = false"
   />
 
   <!-- Donate modal for boost -->

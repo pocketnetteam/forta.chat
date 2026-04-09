@@ -10,7 +10,7 @@ import PostAuthor from "./PostAuthor.vue";
 import PostActions from "./PostActions.vue";
 import PostComments from "./PostComments.vue";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
-import SharePostPicker from "./SharePostPicker.vue";
+import { useChatStore } from "@/entities/chat";
 import { parseVideoUrl } from "@/shared/lib/video-embed";
 
 interface Props {
@@ -39,6 +39,7 @@ const {
 
 const { showDonateModal, boostAddress, openBoost, closeBoost } = usePostBoost();
 
+const chatStore = useChatStore();
 const openUserProfile = inject<((address: string) => void) | null>("openUserProfile", null);
 
 const onAuthorClick = () => {
@@ -65,10 +66,11 @@ const handleBoost = () => {
   openBoost(props.post.address);
 };
 
-const showSharePicker = ref(false);
-
 const handleShare = () => {
-  showSharePicker.value = true;
+  chatStore.initPostForward(
+    `bastyon://post?s=${props.post.txid}`,
+    props.authorName || undefined,
+  );
 };
 
 const scrollToComments = () => {
@@ -224,13 +226,6 @@ onUnmounted(() => {
         @close="closeBoost"
       />
 
-      <!-- Share to chat picker -->
-      <SharePostPicker
-        :show="showSharePicker"
-        :post-link="`bastyon://post?s=${post.txid}`"
-        :post-title="post.caption"
-        @close="showSharePicker = false"
-      />
     </div>
   </Teleport>
 </template>
