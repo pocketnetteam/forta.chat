@@ -171,7 +171,7 @@ const autoResize = autoGrow;
 const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
 
 const handleSend = async () => {
-  if ((!text.value.trim() && !chatStore.forwardingMessage) || !peerKeysOk.value) return;
+  if ((!text.value.trim() && !showForwardPreview.value) || !peerKeysOk.value) return;
   const rawText = mention.resolveText();
   const savedText = text.value;
 
@@ -307,6 +307,14 @@ const replyInputPreviewText = computed(() => {
   if (reply.type === MessageType.file) return reply.content || "File";
   const t = stripBastyonLinks(stripMentionAddresses(reply.content));
   return (t.length > 100 ? t.slice(0, 100) + "\u2026" : t) || "...";
+});
+
+/** Show forward preview only after user picked a target (not while still in source room with picker open) */
+const showForwardPreview = computed(() => {
+  const fwd = chatStore.forwardingMessage;
+  if (!fwd) return false;
+  // Hide in source room — preview only shows in the target room
+  return chatStore.activeRoomId !== fwd.roomId;
 });
 
 const forwardPreviewText = computed(() => {
@@ -642,7 +650,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
     <!-- Forward preview bar -->
     <transition name="input-bar">
-      <div v-if="!isEditing && !chatStore.replyingTo && chatStore.forwardingMessage" class="relative mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
+      <div v-if="!isEditing && !chatStore.replyingTo && showForwardPreview" class="relative mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
         <button class="flex h-8 w-8 items-center justify-center text-color-bg-ac" @click="openForwardOptions">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
@@ -812,9 +820,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
         <!-- Send OR record button -->
         <transition name="btn-morph" mode="out-in">
-          <button v-if="text.trim() || sending || chatStore.forwardingMessage" key="send"
+          <button v-if="text.trim() || sending || showForwardPreview" key="send"
             class="send-btn flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
-            :disabled="(!text.trim() && !chatStore.forwardingMessage) || sending || !peerKeysOk" @click="handleSend">
+            :disabled="(!text.trim() && !showForwardPreview) || sending || !peerKeysOk" @click="handleSend">
             <svg v-if="sending" class="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
             <svg v-else-if="isEditing" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
             <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>
