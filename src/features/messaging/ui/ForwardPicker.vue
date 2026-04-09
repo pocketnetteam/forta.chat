@@ -104,11 +104,11 @@ const handleClose = () => {
     <transition name="fp-fade">
       <div
         v-if="props.show"
-        class="fixed inset-0 z-50 flex items-end justify-center"
-        :class="isMobile ? '' : 'bg-black/40'"
+        class="fixed inset-0 z-50 flex justify-center"
+        :class="isMobile ? 'items-end' : 'items-center bg-black/40'"
         @click.self="handleClose"
       >
-        <transition name="fp-slide" appear>
+        <transition :name="isMobile ? 'fp-slide' : 'fp-scale'" appear>
           <div
             v-if="props.show"
             class="flex flex-col bg-background-total-theme"
@@ -212,4 +212,8 @@ const handleClose = () => {
 .fp-slide-enter-active { transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1); }
 .fp-slide-leave-active { transition: transform 0.2s ease-in; }
 .fp-slide-enter-from, .fp-slide-leave-to { transform: translateY(100%); }
+
+.fp-scale-enter-active { transition: transform 0.2s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.2s ease-out; }
+.fp-scale-leave-active { transition: transform 0.15s ease-in, opacity 0.15s ease-in; }
+.fp-scale-enter-from, .fp-scale-leave-to { transform: scale(0.95); opacity: 0; }
 </style>
