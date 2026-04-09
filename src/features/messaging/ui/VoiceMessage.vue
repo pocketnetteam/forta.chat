@@ -66,7 +66,15 @@ watch(playing, (isPlaying) => {
   }
 });
 
-const totalDuration = computed(() => props.message.fileInfo?.duration ?? 0);
+// Prefer stored metadata duration; fall back to audio element duration once loaded
+const totalDuration = computed(() => {
+  const meta = props.message.fileInfo?.duration;
+  if (meta && meta > 0) return meta;
+  if (active.value && Number.isFinite(playback.duration.value) && playback.duration.value > 0) {
+    return playback.duration.value;
+  }
+  return 0;
+});
 
 const formatTime = (seconds: number) => {
   const m = Math.floor(seconds / 60);

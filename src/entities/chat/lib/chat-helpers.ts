@@ -79,13 +79,21 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   }
 
   if (msgtype === "m.audio" && info) {
+    // Waveform arrives as integers 0-1024 (MSC3245), normalize to 0-1 floats
+    const rawWaveform = info.waveform as number[] | undefined;
+    const normalizedWaveform = rawWaveform?.length
+      ? rawWaveform.map((v: number) => v > 1 ? v / 1024 : v)
+      : undefined;
+
     return {
       name: (content.body as string) ?? "Audio",
       type: info.mimetype ?? "audio/mpeg",
       size: info.size ?? 0,
       url: info.url ?? (content.url as string) ?? "",
-      duration: info.duration ? Math.round(info.duration / 1000) : undefined,
-      waveform: info.waveform,
+      duration: typeof info.duration === "number" && info.duration > 0
+        ? Math.round(info.duration / 1000)
+        : undefined,
+      waveform: normalizedWaveform,
       secrets: info.secrets ? {
         block: info.secrets.block,
         keys: info.secrets.keys,

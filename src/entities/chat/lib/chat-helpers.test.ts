@@ -279,7 +279,8 @@ describe("parseFileInfo", () => {
     const info = parseFileInfo(content, "m.audio");
     expect(info).toBeDefined();
     expect(info!.duration).toBe(45);
-    expect(info!.waveform).toEqual([100, 200, 300, 400]);
+    // Waveform values >1 are normalized from 0-1024 to 0-1
+    expect(info!.waveform).toEqual([100 / 1024, 200 / 1024, 300 / 1024, 400 / 1024]);
     expect(info!.secrets).toEqual({ block: 10, keys: "audiokeys", v: 1 });
   });
 

@@ -147,7 +147,10 @@ function setupAudioListeners(el: HTMLAudioElement) {
     state.value = "failed";
   };
   el.onloadedmetadata = () => {
-    duration.value = el.duration;
+    // Only update if finite — Chromium reports Infinity for webm blobs
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      duration.value = el.duration;
+    }
   };
 
   // Diagnostic listeners (mobile debugging)
