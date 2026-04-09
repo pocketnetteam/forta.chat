@@ -340,6 +340,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const typing = ref<Record<string, string[]>>({});
   const replyingTo = ref<ReplyTo | null>(null);
   const forwardingMessage = ref<ForwardingMessage | null>(null);
+  /** True only when initForward is called (context menu) — NOT on draft restore */
+  const forwardPickerRequested = ref(false);
   const forwardDrafts = new Map<string, ForwardingMessage>();
   const isDetachedFromLatest = ref(false);
 
@@ -472,6 +474,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   const initForward = (message: Message) => {
+    forwardPickerRequested.value = true;
     forwardingMessage.value = {
       id: message.id,
       roomId: message.roomId,
@@ -5713,6 +5716,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     enterSelectionMode,
     exitSelectionMode,
     forwardingMessage,
+    forwardPickerRequested,
     initForward,
     cancelForward,
     saveForwardDraft,

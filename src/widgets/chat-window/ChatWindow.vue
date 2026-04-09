@@ -228,9 +228,12 @@ const handleScrollToMessage = (messageId: string) => {
   messageListRef.value?.scrollToMessage(messageId);
 };
 
-// Auto-open ForwardPicker when "forward" is selected from context menu
-watch(() => chatStore.forwardingMessage, (v) => {
-  if (v) showForwardPicker.value = true;
+// Auto-open ForwardPicker when "forward" is selected from context menu (not on draft restore)
+watch(() => chatStore.forwardPickerRequested, (v) => {
+  if (v) {
+    showForwardPicker.value = true;
+    chatStore.forwardPickerRequested = false;
+  }
 });
 
 const handleSelectionCopy = () => {

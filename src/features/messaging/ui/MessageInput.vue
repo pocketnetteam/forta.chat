@@ -365,12 +365,7 @@ const toggleSenderInfo = () => {
 
 const changeForwardTarget = () => {
   showForwardOptions.value = false;
-  // Re-open the ForwardPicker by emitting — ChatWindow watches forwardingMessage
-  // We need to trigger the picker again. Set a flag to re-open it.
-  // Simplest: just re-assign forwardingMessage to trigger the watcher
-  if (chatStore.forwardingMessage) {
-    chatStore.forwardingMessage = { ...chatStore.forwardingMessage };
-  }
+  chatStore.forwardPickerRequested = true;
 };
 
 // --- Recording handlers ---

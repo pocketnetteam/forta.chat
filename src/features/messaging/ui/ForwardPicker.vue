@@ -85,6 +85,8 @@ const getRoomSubtitle = (room: ChatRoom): string => {
 };
 
 const selectRoom = (roomId: string) => {
+  // Pre-save forward draft to TARGET room so it survives the room-switch watcher
+  chatStore.saveForwardDraft(roomId);
   chatStore.setActiveRoom(roomId);
   search.value = "";
   emit("close");
