@@ -468,7 +468,11 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 <h2 v-if="isUnresolvedName(roomDisplayName)" class="mx-auto h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
                 <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
                 <p class="text-sm text-text-on-main-bg-color">
-                  {{ room.isGroup ? t("info.members", { count: room.members.length }) : t("info.directMessage") }}
+                  {{ room.isGroup ? t("info.members", { count: chatStore.getRoomMemberCount(room.id) }) : t("info.directMessage") }}
+                </p>
+                <p v-if="room.isGroup && chatStore.peerKeysStatus.get(room.id) === 'not-encrypted'" class="mt-1 flex items-center justify-center gap-1 text-xs text-text-on-main-bg-color/60">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+                  {{ t("chat.unencryptedRoom") }}
                 </p>
 
                 <!-- Topic / Description -->
@@ -668,7 +672,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
             <div v-if="room.isGroup" class="border-t border-neutral-grad-0 px-4 py-3">
               <div class="mb-2 flex items-center justify-between">
                 <span class="text-xs font-medium uppercase text-text-on-main-bg-color">
-                  {{ t("chatInfo.members") }} ({{ room.members.length }})
+                  {{ t("chatInfo.members") }} ({{ chatStore.getRoomMemberCount(room.id) }})
                 </span>
                 <!-- Add member button (admin only) -->
                 <button

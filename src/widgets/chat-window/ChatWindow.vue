@@ -281,7 +281,7 @@ const subtitle = computed(() => {
   if (typingText.value) return typingText.value;
   const room = chatStore.activeRoom;
   if (!room) return "";
-  if (room.isGroup) return t("chat.members", { count: room.members.length });
+  if (room.isGroup) return t("chat.members", { count: chatStore.getRoomMemberCount(room.id) });
   return "";
 });
 
@@ -487,7 +487,7 @@ onUnmounted(() => {
             <template v-if="chatStore.activeRoom?.isGroup">
               {{ t("chat.inviteGroup", { name: activeRoomTitle.text }) }}
               <br />
-              <span class="text-xs">{{ t("chat.members", { count: chatStore.activeRoom.members.length }) }}</span>
+              <span class="text-xs">{{ t("chat.members", { count: chatStore.getRoomMemberCount(chatStore.activeRoom.id) }) }}</span>
             </template>
             <template v-else>
               {{ t("chat.invitePersonal", { name: activeRoomTitle.text }) }}

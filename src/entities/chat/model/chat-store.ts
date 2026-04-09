@@ -3080,6 +3080,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Get actual member count from Matrix server summary.
+   *  Falls back to local room.members.length if server data unavailable.
+   *  Unlike room.members (which may be partially loaded with lazyLoadMembers),
+   *  getJoinedMemberCount() uses the room summary from /sync. */
+  const getRoomMemberCount = (roomId: string): number => {
+    try {
+      const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+      const serverCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
+      if (serverCount > 0) return serverCount;
+    } catch { /* fallback below */ }
+    const room = getRoomById(roomId);
+    return room?.members.length ?? 0;
+  };
+
   /** Check if room has public join rules */
   const isRoomPublic = (roomId: string): boolean => {
     try {
@@ -5661,6 +5677,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     exitSelectionMode,
     forwardingMessages,
     getDisplayName,
+    getRoomMemberCount,
     getRoomPowerLevels,
     getTypingUsers,
     handleKicked,
