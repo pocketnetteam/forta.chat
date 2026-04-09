@@ -125,8 +125,7 @@ const handleCtxAction = (action: string) => {
 
   switch (action) {
     case "forward":
-      chatStore.enterSelectionMode(msg.id);
-      chatStore.forwardingMessages = true;
+      chatStore.initForward(msg);
       break;
     case "goToMessage":
       emit("goToMessage", msg.id);

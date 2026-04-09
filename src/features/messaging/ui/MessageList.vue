@@ -106,8 +106,7 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
       chatStore.enterSelectionMode(message.id);
       break;
     case "forward":
-      chatStore.enterSelectionMode(message.id);
-      chatStore.forwardingMessages = true;
+      chatStore.initForward(message);
       break;
     case "pin":
       chatStore.pinMessage(message.id);
