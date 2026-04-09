@@ -245,6 +245,7 @@ export const en = {
   "forward.showSender": "Show sender name",
   "forward.hideSender": "Hide sender name",
   "forward.changeChat": "Forward to another chat",
+  "forward.members": "{count} members",
 
   // ── Pinned bar ──
   "pinned.message": "Pinned Message",

@@ -247,6 +247,7 @@ export const ru: Record<TranslationKey, string> = {
   "forward.showSender": "Показать имя отправителя",
   "forward.hideSender": "Скрыть имя отправителя",
   "forward.changeChat": "Переслать в другой чат",
+  "forward.members": "{count} участн.",
 
   // ── Pinned bar ──
   "pinned.message": "Закреплённое сообщение",

@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
-import { useChatStore } from "@/entities/chat";
+import { ref, computed, watch, nextTick } from "vue";
+import { useChatStore, type ChatRoom } from "@/entities/chat";
 import { BottomSheet } from "@/shared/ui/bottom-sheet";
+import Modal from "@/shared/ui/modal/Modal.vue";
 import { UserAvatar } from "@/entities/user";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import FolderTabs from "@/features/contacts/ui/FolderTabs.vue";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+
+type FilterValue = "all" | "personal" | "groups" | "invites" | "channels";
 
 interface Props {
   show: boolean;
@@ -16,20 +21,51 @@ const emit = defineEmits<{ close: [] }>();
 const chatStore = useChatStore();
 const { t } = useI18n();
 const { resolve: resolveRoomName } = useResolvedRoomName();
+const isMobile = useMobile();
 
 const search = ref("");
+const activeFilter = ref<FilterValue>("all");
+const searchInputRef = ref<HTMLInputElement>();
 
-const filteredRooms = computed(() => {
-  const q = search.value.toLowerCase();
-  if (!q) return chatStore.sortedRooms;
-  return chatStore.sortedRooms.filter(r => {
-    const name = resolveRoomName(r);
-    return name.toLowerCase().includes(q);
-  });
+// Focus search on open
+watch(() => props.show, (v) => {
+  if (v) {
+    search.value = "";
+    activeFilter.value = "all";
+    nextTick(() => searchInputRef.value?.focus());
+  }
 });
 
+const filteredRooms = computed(() => {
+  let rooms = chatStore.sortedRooms;
+
+  // Apply folder filter
+  if (activeFilter.value === "personal") rooms = rooms.filter(r => !r.isGroup && r.membership !== "invite");
+  else if (activeFilter.value === "groups") rooms = rooms.filter(r => r.isGroup && r.membership !== "invite");
+  else if (activeFilter.value === "invites") rooms = rooms.filter(r => r.membership === "invite");
+
+  // Apply search
+  const q = search.value.toLowerCase();
+  if (q) {
+    rooms = rooms.filter(r => {
+      const name = resolveRoomName(r);
+      return name.toLowerCase().includes(q);
+    });
+  }
+
+  return rooms;
+});
+
+const getRoomSubtitle = (room: ChatRoom): string => {
+  if (room.isGroup) {
+    const count = room.members.length;
+    if (count > 0) return t("forward.members", { count });
+    return t("tabs.groups");
+  }
+  return "";
+};
+
 const selectRoom = (roomId: string) => {
-  // Navigate to selected chat — forwardingMessage stays in store
   chatStore.setActiveRoom(roomId);
   search.value = "";
   emit("close");
@@ -43,46 +79,148 @@ const handleClose = () => {
 </script>
 
 <template>
-  <BottomSheet :show="props.show" @close="handleClose">
-    <div class="mb-3 flex items-center justify-between">
-      <span class="text-base font-semibold text-text-color">{{ t("forward.title") }}</span>
-    </div>
+  <!-- Mobile: tall BottomSheet -->
+  <BottomSheet v-if="isMobile" :show="props.show" height="92vh" :drag-dismiss="true" @close="handleClose">
+    <div class="flex h-full flex-col">
+      <!-- Header -->
+      <div class="flex items-center justify-between px-1 pb-2">
+        <button class="flex h-8 w-8 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="handleClose">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+        </button>
+        <span class="text-base font-semibold text-text-color">{{ t("forward.title") }}</span>
+        <div class="w-8" />
+      </div>
 
-    <input
-      v-model="search"
-      type="text"
-      :placeholder="t('forward.searchPlaceholder')"
-      class="mb-3 w-full rounded-lg bg-chat-input-bg px-3 py-2 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
-    />
+      <!-- Search -->
+      <div class="px-1 pb-2">
+        <div class="flex items-center gap-2 rounded-lg bg-chat-input-bg px-3 py-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-neutral-grad-2">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            ref="searchInputRef"
+            v-model="search"
+            type="text"
+            :placeholder="t('forward.searchPlaceholder')"
+            class="w-full bg-transparent text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+          />
+        </div>
+      </div>
 
-    <div class="max-h-[40vh] overflow-y-auto">
-      <button
-        v-for="room in filteredRooms"
-        :key="room.id"
-        class="flex w-full items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-neutral-grad-0"
-        @click="selectRoom(room.id)"
-      >
-        <UserAvatar
-          v-if="room.avatar?.startsWith('__pocketnet__:')"
-          :address="room.avatar.replace('__pocketnet__:', '')"
-          size="sm"
-        />
-        <div
-          v-else
-          class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-xs font-medium text-white"
+      <!-- Folder tabs -->
+      <FolderTabs v-model="activeFilter" />
+
+      <!-- Room list -->
+      <div class="min-h-0 flex-1 overflow-y-auto">
+        <button
+          v-for="room in filteredRooms"
+          :key="room.id"
+          class="flex w-full items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
+          @click="selectRoom(room.id)"
         >
-          {{ (resolveRoomName(room) || '?')[0].toUpperCase() }}
-        </div>
+          <div class="relative shrink-0">
+            <UserAvatar
+              v-if="room.avatar?.startsWith('__pocketnet__:')"
+              :address="room.avatar.replace('__pocketnet__:', '')"
+              size="md"
+            />
+            <Avatar v-else :src="room.avatar" :name="resolveRoomName(room) || ''" size="md" />
+            <!-- Group badge -->
+            <div
+              v-if="room.isGroup"
+              class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background-total-theme"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
+                <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+              </svg>
+            </div>
+          </div>
 
-        <div class="min-w-0 flex-1 text-left">
-          <span v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
-          <span v-else class="truncate text-sm text-text-color">{{ resolveRoomName(room) }}</span>
-        </div>
-      </button>
+          <div class="min-w-0 flex-1 text-left">
+            <div v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <template v-else>
+              <div class="truncate text-[15px] font-medium text-text-color">{{ resolveRoomName(room) }}</div>
+              <div v-if="getRoomSubtitle(room)" class="truncate text-xs text-text-on-main-bg-color">{{ getRoomSubtitle(room) }}</div>
+            </template>
+          </div>
+        </button>
 
-      <div v-if="filteredRooms.length === 0" class="p-4 text-center text-sm text-text-on-main-bg-color">
-        {{ t("forward.noChats") }}
+        <div v-if="filteredRooms.length === 0" class="p-8 text-center text-sm text-text-on-main-bg-color">
+          {{ t("forward.noChats") }}
+        </div>
       </div>
     </div>
   </BottomSheet>
+
+  <!-- Desktop: Modal -->
+  <Modal v-else :show="props.show" :aria-label="t('forward.title')" @close="handleClose">
+    <div class="flex max-h-[70vh] flex-col">
+      <!-- Header -->
+      <div class="flex items-center justify-between pb-3">
+        <button class="flex h-8 w-8 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="handleClose">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+        </button>
+        <span class="text-base font-semibold text-text-color">{{ t("forward.title") }}</span>
+        <div class="w-8" />
+      </div>
+
+      <!-- Search -->
+      <div class="pb-2">
+        <div class="flex items-center gap-2 rounded-lg bg-chat-input-bg px-3 py-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-neutral-grad-2">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            ref="searchInputRef"
+            v-model="search"
+            type="text"
+            :placeholder="t('forward.searchPlaceholder')"
+            class="w-full bg-transparent text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+          />
+        </div>
+      </div>
+
+      <!-- Folder tabs -->
+      <FolderTabs v-model="activeFilter" />
+
+      <!-- Room list -->
+      <div class="min-h-0 flex-1 overflow-y-auto">
+        <button
+          v-for="room in filteredRooms"
+          :key="room.id"
+          class="flex w-full items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
+          @click="selectRoom(room.id)"
+        >
+          <div class="relative shrink-0">
+            <UserAvatar
+              v-if="room.avatar?.startsWith('__pocketnet__:')"
+              :address="room.avatar.replace('__pocketnet__:', '')"
+              size="md"
+            />
+            <Avatar v-else :src="room.avatar" :name="resolveRoomName(room) || ''" size="md" />
+            <div
+              v-if="room.isGroup"
+              class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background-total-theme"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
+                <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+              </svg>
+            </div>
+          </div>
+
+          <div class="min-w-0 flex-1 text-left">
+            <div v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <template v-else>
+              <div class="truncate text-[15px] font-medium text-text-color">{{ resolveRoomName(room) }}</div>
+              <div v-if="getRoomSubtitle(room)" class="truncate text-xs text-text-on-main-bg-color">{{ getRoomSubtitle(room) }}</div>
+            </template>
+          </div>
+        </button>
+
+        <div v-if="filteredRooms.length === 0" class="p-8 text-center text-sm text-text-on-main-bg-color">
+          {{ t("forward.noChats") }}
+        </div>
+      </div>
+    </div>
+  </Modal>
 </template>
