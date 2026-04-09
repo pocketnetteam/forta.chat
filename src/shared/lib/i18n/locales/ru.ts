@@ -242,6 +242,7 @@ export const ru: Record<TranslationKey, string> = {
   "forward.title": "Переслать в...",
   "forward.searchPlaceholder": "Поиск чатов...",
   "forward.noChats": "Чаты не найдены",
+  "forward.sending": "Отправка...",
   "forward.message": "Пересланное сообщение",
 
   // ── Pinned bar ──

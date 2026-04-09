@@ -240,6 +240,7 @@ export const en = {
   "forward.title": "Forward to...",
   "forward.searchPlaceholder": "Search chats...",
   "forward.noChats": "No chats found",
+  "forward.sending": "Sending...",
   "forward.message": "Forwarded message",
 
   // ── Pinned bar ──
