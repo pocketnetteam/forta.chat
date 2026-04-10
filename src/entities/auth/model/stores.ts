@@ -269,67 +269,96 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         private: encKeys,
       };
       cryptoInstance.init(cryptoUser);
+      // Per-address cache for crypto profile lookups (7-day TTL).
+      // Prevents repeated getuserprofile RPC calls when decrypting room previews.
+      const _cryptoProfileCache = new Map<string, { result: { id: string; keys: string[]; source: Record<string, unknown> }; ts: number }>();
+      const CRYPTO_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+
+      /** Build a single getUsersInfo result entry from raw + SDK data */
+      const _buildUserInfoEntry = (hexId: string, rawAddr: string, rawProfile: Record<string, unknown> | undefined) => {
+        const sdkUser = appInitializer.getUserData(rawAddr);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let keys: string[] = (sdkUser as any)?.keys ?? [];
+        const sdkPath = keys.length > 0;
+
+        if (keys.length === 0 && rawProfile) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
+          if (Array.isArray(rawKeys)) {
+            keys = rawKeys.filter((k: string) => k);
+          } else if (typeof rawKeys === "string" && rawKeys) {
+            keys = rawKeys.split(",").filter((k: string) => k);
+          }
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawSource: Record<string, unknown> = rawProfile
+          ? rawProfile
+          : (sdkUser ? { ...(sdkUser as any), address: rawAddr } : { address: rawAddr });
+        const source: Record<string, unknown> = rawSource;
+        if (source.id == null && sdkUser && (sdkUser as any).id != null) {
+          source.id = (sdkUser as any).id;
+        }
+
+        console.error("[getUsersInfo] id=" + hexId.slice(0, 10) + " sdkPath=" + sdkPath + " sdkKeys=" + ((sdkUser as any)?.keys?.length ?? 0) + " finalKeys=" + keys.length + " k0=" + (keys[0]?.slice(0, 10) ?? "none") + " sdkUser=" + (sdkUser ? "yes" : "no") + " sourceId=" + ((source as any)?.id ?? "none"));
+
+        return { id: hexId, keys, source };
+      };
+
       cryptoInstance.setHelpers({
         getUsersInfo: async (ids: string[]) => {
-          // ids are hex-encoded addresses; decode to raw for Pocketnet API
           try {
+            const now = Date.now();
             const rawAddresses = ids.map((id) => hexDecode(id));
+            const isRegPending = registrationPending.value;
+            const myRawAddr = address.value;
 
-            // Load SDK profiles and raw profiles in PARALLEL
-            const [, rawProfiles] = await Promise.all([
-              appInitializer.loadUsersInfo(rawAddresses).catch((e) => { console.warn("[pcrypto] loadUsersInfo failed:", e); }),
-              appInitializer.loadUsersInfoRaw(rawAddresses).catch(() => [] as Record<string, unknown>[]),
-            ]);
+            // Split into cached vs uncached
+            const results: Array<{ id: string; keys: string[]; source: Record<string, unknown> } | null> = new Array(ids.length).fill(null);
+            const uncachedIndices: number[] = [];
 
-            // Build lookup map for raw profiles (O(1) instead of O(n) per user)
-            const rawProfileMap = new Map<string, Record<string, unknown>>();
-            for (const p of rawProfiles) {
-              if (p && (p as any).address) {
-                rawProfileMap.set((p as any).address, p);
+            for (let i = 0; i < rawAddresses.length; i++) {
+              // Never use cache for own address during registration
+              if (isRegPending && rawAddresses[i] === myRawAddr) {
+                uncachedIndices.push(i);
+                continue;
+              }
+              const entry = _cryptoProfileCache.get(rawAddresses[i]);
+              if (entry && now - entry.ts < CRYPTO_CACHE_TTL) {
+                results[i] = entry.result;
+              } else {
+                uncachedIndices.push(i);
               }
             }
 
-            return ids.map((hexId, idx) => {
-              const rawAddr = rawAddresses[idx];
-              const sdkUser = appInitializer.getUserData(rawAddr);
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              let keys: string[] = (sdkUser as any)?.keys ?? [];
-              const rawProfile = rawProfileMap.get(rawAddr);
-              const sdkPath = keys.length > 0;
+            // Fetch uncached addresses
+            if (uncachedIndices.length > 0) {
+              const uncachedAddrs = uncachedIndices.map(i => rawAddresses[i]);
 
-              // Fallback: if SDK keys empty (e.g. filterXSS error in cleanData),
-              // extract keys directly from raw RPC response (k or keys field)
-              if (keys.length === 0 && rawProfile) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
-                if (Array.isArray(rawKeys)) {
-                  keys = rawKeys.filter((k: string) => k);
-                } else if (typeof rawKeys === "string" && rawKeys) {
-                  keys = rawKeys.split(",").filter((k: string) => k);
+              const [, rawProfiles] = await Promise.all([
+                appInitializer.loadUsersInfo(uncachedAddrs).catch((e) => { console.warn("[pcrypto] loadUsersInfo failed:", e); }),
+                appInitializer.loadUsersInfoRaw(uncachedAddrs).catch(() => [] as Record<string, unknown>[]),
+              ]);
+
+              const rawProfileMap = new Map<string, Record<string, unknown>>();
+              for (const p of rawProfiles) {
+                if (p && (p as any).address) {
+                  rawProfileMap.set((p as any).address, p);
                 }
               }
 
-              // Ensure source always has a numeric `id` field for deterministic
-              // sort order in preparedUsers (must match lodash _.sortBy(u => u.source.id)
-              // used by the old bastyon-chat client).
-              // Priority: rawProfile (has Pocketnet numeric id) > sdkUser > empty.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const rawSource: Record<string, unknown> = rawProfile
-                ? rawProfile
-                : (sdkUser ? { ...(sdkUser as any), address: rawAddr } : { address: rawAddr });
-
-              // If source still has no `id`, try to extract from SDK user data.
-              // Without a numeric id the sort order diverges from the old client
-              // (lodash _.sortBy places undefined at end; missing id would break ECDH).
-              const source: Record<string, unknown> = rawSource;
-              if (source.id == null && sdkUser && (sdkUser as any).id != null) {
-                source.id = (sdkUser as any).id;
+              for (const i of uncachedIndices) {
+                const rawAddr = rawAddresses[i];
+                const entry = _buildUserInfoEntry(ids[i], rawAddr, rawProfileMap.get(rawAddr));
+                results[i] = entry;
+                // Cache unless this is own address during registration
+                if (!(isRegPending && rawAddr === myRawAddr)) {
+                  _cryptoProfileCache.set(rawAddr, { result: entry, ts: now });
+                }
               }
+            }
 
-              console.error("[getUsersInfo] id=" + hexId.slice(0,10) + " sdkPath=" + sdkPath + " sdkKeys=" + ((sdkUser as any)?.keys?.length ?? 0) + " finalKeys=" + keys.length + " k0=" + (keys[0]?.slice(0,10) ?? "none") + " sdkUser=" + (sdkUser ? "yes" : "no") + " sourceId=" + ((source as any)?.id ?? "none"));
-
-              return { id: hexId, keys, source };
-            });
+            return results as Array<{ id: string; keys: string[]; source: Record<string, unknown> }>;
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
             return ids.map((id) => ({ id, keys: [] as string[] }));
@@ -530,14 +559,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }
         }).catch((e) => console.warn("[auth] Failed to fetch block height:", e));
 
-        // Periodically update block height (every 60s) — store ref for cleanup on logout
+        // Periodically update block height (every 10 min) — store ref for cleanup on logout.
+        // getBlockHeight() is itself throttled to 10min, so this just drives the poll cadence.
         if (_blockHeightInterval) clearInterval(_blockHeightInterval);
         _blockHeightInterval = setInterval(() => {
           if (!pcrypto.value) { clearInterval(_blockHeightInterval!); _blockHeightInterval = null; return; }
           appInitializer.getBlockHeight().then((height) => {
             if (height > 0) pcrypto.value!.setBlock({ height });
           }).catch(() => {});
-        }, 60_000);
+        }, 10 * 60 * 1000);
 
         import("@/features/video-calls/model/call-tab-lock").then(({ initCallTabLock }) => {
           initCallTabLock();
@@ -652,41 +682,72 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    await appInitializer.initializeAndFetchUserData(
-      address.value,
-      (userData: UserData) => {
-        setUserInfo(userData);
-        PocketnetInstanceConfigurator.setUserAddress(address.value!);
-        PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-          createKeyPair(privateKey.value!)
-        );
-        // Sync own profile to userStore so Avatar components show correct name/initial
-        if (userData.name) {
-          useUserStore().setUser(address.value!, {
-            address: address.value!,
-            name: userData.name ?? "",
-            about: userData.about ?? "",
-            image: userData.image ?? "",
-            site: userData.site ?? "",
-            language: userData.language ?? "",
-          });
-        }
+    const applyUserData = (userData: UserData) => {
+      setUserInfo(userData);
+      PocketnetInstanceConfigurator.setUserAddress(address.value!);
+      PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
+        createKeyPair(privateKey.value!)
+      );
+      if (userData.name) {
+        useUserStore().setUser(address.value!, {
+          address: address.value!,
+          name: userData.name ?? "",
+          about: userData.about ?? "",
+          image: userData.image ?? "",
+          site: userData.site ?? "",
+          language: userData.language ?? "",
+        });
       }
-    );
+    };
+
+    // Fast path: if user-store has a fresh cached profile (survives app restart via
+    // localStorage), skip the network call entirely. During registration the profile
+    // may change at any moment, so always fetch from network.
+    if (!registrationPending.value) {
+      const uStore = useUserStore();
+      const cached = uStore.getUser(address.value);
+      if (cached?.name && cached.cachedAt && Date.now() - cached.cachedAt < 7 * 24 * 60 * 60 * 1000) {
+        console.log("[auth] fetchUserInfo: using cached profile for", address.value);
+        applyUserData({
+          name: cached.name,
+          about: cached.about,
+          image: cached.image,
+          site: cached.site,
+          language: cached.language,
+        } as UserData);
+        // Still initialize pSDK in background so getUserData() works for later callers
+        appInitializer.initializeAndFetchUserData(address.value).catch(() => {});
+        return;
+      }
+    }
+
+    await appInitializer.initializeAndFetchUserData(address.value, applyUserData);
   };
+
+  const KEY_VERIFY_LS_PREFIX = "bastyon-chat-key-verified-";
+  const KEY_VERIFY_TTL = 7 * 24 * 60 * 60 * 1000;
 
   /** Verify user has 12 published encryption keys; re-publish if missing.
    *  Called on every login to catch users stuck in broken state.
-   *  Uses blockchain RPC (not local SDK cache) to avoid false negatives.
+   *  Result cached in localStorage — skips RPC if verified within 7 days.
    *  Skips if registration is already in progress (register() handles it). */
   const verifyAndRepublishKeys = async () => {
     if (!address.value || !privateKey.value) return;
 
-    // Don't interfere with active registration — register() manages its own poll
     if (registrationPending.value || pendingRegProfile.value) {
       console.log("[auth] Key verification skipped — registration in progress");
       return;
     }
+
+    // Fast path: localStorage remembers the last successful verification
+    try {
+      const lsKey = KEY_VERIFY_LS_PREFIX + address.value;
+      const lastVerified = Number(localStorage.getItem(lsKey) || "0");
+      if (lastVerified && Date.now() - lastVerified < KEY_VERIFY_TTL) {
+        console.log("[auth] Key verification skipped — verified", Math.round((Date.now() - lastVerified) / 3600000), "h ago");
+        return;
+      }
+    } catch { /* localStorage unavailable — continue with network check */ }
 
     // Step 1: Quick check via local SDK cache
     const userData = appInitializer.getUserData(address.value);
@@ -695,6 +756,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     if (cachedKeys.length >= 12) {
       console.log("[auth] Key verification OK (cache):", cachedKeys.length, "keys");
+      try { localStorage.setItem(KEY_VERIFY_LS_PREFIX + address.value, String(Date.now())); } catch {}
       return;
     }
 
@@ -715,6 +777,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
         if (blockchainKeys.length >= 12) {
           console.log("[auth] Key verification OK (blockchain):", blockchainKeys.length, "keys");
+          try { localStorage.setItem(KEY_VERIFY_LS_PREFIX + address.value, String(Date.now())); } catch {}
           return;
         }
         console.warn("[auth] Blockchain confirms only", blockchainKeys.length, "keys. Re-publishing...");
@@ -723,7 +786,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
     } catch (e) {
       console.warn("[auth] RPC key check failed, skipping re-publish:", e);
-      // Don't block login if RPC fails — keys might be fine, cache just didn't load
       return;
     }
 

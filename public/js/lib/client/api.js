@@ -441,7 +441,7 @@ var Proxy16 = function(meta, app, api){
 
                 var rdate = new Date()
 
-                self.ping = rdate.addSeconds(120)
+                self.ping = rdate.addSeconds(600)
                 self.successping = true
                 self.session = r.session
                 delete self.pingerror
@@ -461,7 +461,7 @@ var Proxy16 = function(meta, app, api){
 
                 var rdate = new Date()
 
-                self.ping = rdate.addSeconds(30)
+                self.ping = rdate.addSeconds(120)
                 self.pingerror = true
                 
                 return Promise.reject(e)

@@ -1321,10 +1321,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Fetch room data for viewport preview: cache first, then network (loadRoomMessages).
-   *  Checks generation between async steps — if the user scrolled away, aborts early. */
+  /** Fetch room data for viewport preview: cache-only (no network scrollback).
+   *  Room list previews come from Dexie rows + decryptedPreviewCache (fed by sync),
+   *  so scrollback is unnecessary here. Full scrollback runs when the user actually
+   *  opens a room (loadRoomMessages in MessageList). */
   const fetchRoomPreview = async (roomId: string, generation: number): Promise<void> => {
-    // Stale generation — user scrolled away, abort
     if (generation !== currentViewportGeneration) return;
 
     const prev = roomFetchStates.get(roomId);
@@ -1339,15 +1340,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     try {
       if (generation !== currentViewportGeneration) return;
 
-      // Phase 1: cache (fast, from Dexie/localStorage)
+      // Cache preload only — warm Dexie / messages.value from local storage
       if (!messages.value[roomId]?.length) {
         await loadCachedMessages(roomId).catch(() => {});
       }
-
-      if (generation !== currentViewportGeneration) return;
-
-      // Phase 2: network — loadRoomMessages fetches from Matrix SDK (scrollback)
-      await loadRoomMessages(roomId);
 
       if (generation !== currentViewportGeneration) return;
 
@@ -1357,7 +1353,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         lastAttemptAt: Date.now(),
       });
     } catch (e) {
-      // Don't mark error if generation is stale
       if (generation !== currentViewportGeneration) return;
 
       console.warn(`[viewport-fetch] Room ${roomId} failed (attempt ${retryCount + 1}):`, e);
@@ -1507,7 +1502,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Priority: active room + N neighbors (immediate network preload)
+    // Priority: active room neighbors — track via ensureRoomsLoaded so
+    // roomFetchStates prevents duplicate work when ContactList scrolls.
+    // fetchRoomPreview is now cache-only (no network scrollback).
     const activeIdx = activeId ? sorted.findIndex(r => r.id === activeId) : -1;
     const priorityRooms: typeof sorted = [];
     if (activeIdx >= 0) {
@@ -1519,13 +1516,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const priorityFiltered = priorityRooms.filter(
       r => r.id !== activeId && r.membership !== "invite",
     );
-
-    // Phase 1: cache + network for priority rooms via ensureRoomsLoaded
     ensureRoomsLoaded(priorityFiltered.map(r => r.id), "high");
 
-    // Phase 2: cache-only preload for remaining viewport rooms via idle callback.
-    // These rooms are NOT added to roomFetchStates — intentionally allowing
-    // ensureRoomsLoaded to trigger a full network fetch when the user scrolls to them.
+    // Remaining viewport rooms: cache-only preload via idle callback.
     const remaining = sorted
       .slice(0, PRELOAD_COUNT)
       .filter(r => r.id !== activeId && r.membership !== "invite" &&

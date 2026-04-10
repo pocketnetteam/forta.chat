@@ -337,6 +337,27 @@ onMounted(async () => {
   // Process referral / join links after Matrix is ready
   await processReferral();
   await processJoinRoom();
+
+  // Refresh node time on tab focus / app resume (throttled to 10 min in AppInitializer)
+  const { createAppInitializer } = await import("@/app/providers/initializers/app-initializer");
+  const appInit = createAppInitializer();
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && authStore.isAuthenticated) {
+        appInit.syncNodeTime();
+      }
+    });
+  }
+  if (isNative) {
+    import("@capacitor/app").then(({ App: CapApp }) => {
+      CapApp.addListener("appStateChange", ({ isActive }) => {
+        if (isActive && authStore.isAuthenticated) {
+          appInit.syncNodeTime();
+        }
+      });
+    }).catch(() => {});
+  }
 });
 
 onUnmounted(() => {

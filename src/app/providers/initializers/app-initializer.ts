@@ -65,22 +65,60 @@ export class AppInitializer {
     this._available = true;
   }
 
+  private _lastNodeInfo: { data: Record<string, unknown>; ts: number } | null = null;
+  private _nodeInfoPromise: Promise<Record<string, unknown>> | null = null;
+  static readonly NODE_INFO_TTL = 10 * 60 * 1000; // 10 minutes
+
+  /** Throttled getnodeinfo — at most one RPC per 10 minutes.
+   *  Concurrent callers share the same in-flight promise. */
+  private _getNodeInfoThrottled(force = false): Promise<Record<string, unknown>> {
+    if (!this.api) return Promise.resolve({});
+    const now = Date.now();
+    if (!force && this._lastNodeInfo && now - this._lastNodeInfo.ts < AppInitializer.NODE_INFO_TTL) {
+      return Promise.resolve(this._lastNodeInfo.data);
+    }
+    if (this._nodeInfoPromise) return this._nodeInfoPromise;
+    this._nodeInfoPromise = this.api.rpc("getnodeinfo")
+      .then((info: Record<string, unknown>) => {
+        this._lastNodeInfo = { data: info, ts: Date.now() };
+        this._nodeInfoPromise = null;
+        return info;
+      })
+      .catch((e: unknown) => {
+        this._nodeInfoPromise = null;
+        throw e;
+      });
+    return this._nodeInfoPromise;
+  }
+
   syncNodeTime() {
     if (!this.api || !this.actions) return Promise.resolve();
-    return this.api.rpc("getnodeinfo").then(getnodeinfoResult => {
+    return this._getNodeInfoThrottled().then(getnodeinfoResult => {
       const timeDifference =
-        getnodeinfoResult.time - Math.floor(new Date().getTime() / 1000);
+        (getnodeinfoResult as any).time - Math.floor(new Date().getTime() / 1000);
       PocketnetInstanceConfigurator.setTimeDifference(timeDifference);
       this.actions!.prepare();
     });
   }
 
-  /** Fetch current blockchain block height via getnodeinfo RPC */
+  /** Force a fresh getnodeinfo RPC (bypasses 10-min throttle).
+   *  Used on app resume / tab focus to ensure time + proxy are current. */
+  syncNodeTimeForced() {
+    if (!this.api || !this.actions) return Promise.resolve();
+    return this._getNodeInfoThrottled(true).then(getnodeinfoResult => {
+      const timeDifference =
+        (getnodeinfoResult as any).time - Math.floor(new Date().getTime() / 1000);
+      PocketnetInstanceConfigurator.setTimeDifference(timeDifference);
+      this.actions!.prepare();
+    });
+  }
+
+  /** Fetch current blockchain block height via getnodeinfo RPC (throttled) */
   async getBlockHeight(): Promise<number> {
     if (!this.api) return 0;
     try {
-      const info = await this.api.rpc("getnodeinfo");
-      return info?.height ?? 0;
+      const info = await this._getNodeInfoThrottled();
+      return (info as any)?.height ?? 0;
     } catch (e) {
       console.error("[appInit] getBlockHeight error:", e);
       return 0;
@@ -222,7 +260,7 @@ export class AppInitializer {
     onLoad?: OnLoadUserData
   ): Promise<UserData | null> {
     if (!this.psdk || !stateAddresses.length) return Promise.resolve(null);
-    return this.psdk.userInfo.load(stateAddresses).then(() => {
+    return this.psdk.userInfo.load(stateAddresses, true).then(() => {
       const userData = this.psdk!.userInfo.get(stateAddresses[0]) as UserData;
       if (onLoad) {
         onLoad(userData);
@@ -240,11 +278,13 @@ export class AppInitializer {
     await this.psdk.userInfo.load(addresses, true);
   }
 
-  /** Load user info for multiple addresses into full (non-light) cache.
-   *  After this call, getUserData(address) will return the profile data. */
+  /** Load user info for multiple addresses into light cache.
+   *  Always uses light mode ("1" param) — larger batches (70 vs 10), queue-based.
+   *  After this call, getUserData(address) will return the profile data
+   *  (psdk.userInfo.get checks userInfoFull || userInfoLight). */
   async loadUsersBatch(addresses: string[]): Promise<void> {
     if (!this.psdk || !addresses.length) return;
-    await this.psdk.userInfo.load(addresses);
+    await this.psdk.userInfo.load(addresses, true);
   }
 
   /** Get cached user data by raw address */

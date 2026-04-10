@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { shallowRef, triggerRef } from "vue";
 import { createAppInitializer } from "@/app/providers/initializers/app-initializer";
+import { useAuthStore } from "@/entities/auth/model/stores";
 import { ProfileLoader, PROFILE_LOADER_BATCH_ACTIVE } from "@/shared/lib/profile-loader";
 import { PromisePool } from "@/shared/lib/promise-pool";
 
@@ -9,8 +10,9 @@ import type { User } from "./types";
 const NAMESPACE = "user";
 const LS_KEY = "bastyon-chat-users";
 
-/** How long a cached profile stays fresh (6 hours) */
-const USER_TTL_MS = 6 * 60 * 60 * 1000;
+/** How long a cached profile stays fresh (7 days).
+ *  Stale-while-revalidate ensures the UI never blocks — revalidation is background-only. */
+const USER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Shared app initializer instance for loading user profiles on demand */
 let _appInit: ReturnType<typeof createAppInitializer> | null = null;
@@ -135,67 +137,111 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     }).catch(() => {});
   };
 
+  /** Helper: fetch addresses via pSDK and write results to users.value.
+   *  @param setCachedAt  When false the profile is stored without cachedAt,
+   *                      forcing a re-fetch on next load (used during registration). */
+  const _fetchAndStore = async (addrs: string[], setCachedAt = true): Promise<void> => {
+    const appInit = getAppInit();
+    await appInit.initApi();
+    await appInit.loadUsersBatch(addrs);
+    let updated = false;
+    for (const addr of addrs) {
+      const userData = appInit.getUserData(addr);
+      if (userData) {
+        users.value[addr] = {
+          address: addr,
+          name: userData.name ?? "",
+          about: userData.about ?? "",
+          image: userData.image ?? "",
+          site: userData.site ?? "",
+          language: userData.language ?? "",
+          cachedAt: setCachedAt ? Date.now() : undefined,
+        };
+        updated = true;
+      }
+    }
+    if (updated) {
+      debouncedTrigger();
+      debouncedCacheUsers(users.value);
+    }
+  };
+
   /** Batch-load user profiles. Uses PromisePool.dedupeBatch to register
    *  all addresses SYNCHRONOUSLY before any await — closing the race window
    *  that existed between filter() and pendingLoads.set() in the old code.
+   *
+   *  Own address is always batched separately so it never inflates other batches.
+   *  During registration, own address bypasses the cache entirely.
    *
    *  STALE-WHILE-REVALIDATE: profiles with a name are returned from cache
    *  immediately (no blocking). If they're older than USER_TTL_MS, a background
    *  revalidation is queued — but the UI never sees a blank/loading state. */
   const loadUsersBatch = async (addresses: string[]): Promise<void> => {
     const now = Date.now();
+
+    // Separate own address — always batched independently
+    let myAddr: string | undefined;
+    let isRegistering = false;
+    try {
+      const authStore = useAuthStore();
+      myAddr = authStore.address || undefined;
+      isRegistering = !!authStore.registrationPending;
+    } catch { /* auth store not ready yet — treat all as "other" */ }
+
     const toLoad: string[] = [];
     const toRevalidate: string[] = [];
+    let loadSelf = false;
 
     for (const a of addresses) {
       if (!a) continue;
+      if (a === myAddr) {
+        // Own address: always separate; during registration always force-fetch
+        if (isRegistering) {
+          loadSelf = true;
+        } else {
+          const cached = users.value[a];
+          if (!cached || (!cached.name && (!cached.cachedAt || now - cached.cachedAt >= EMPTY_NAME_RETRY_MS))) {
+            loadSelf = true;
+          } else if (cached.name && cached.cachedAt && now - cached.cachedAt > USER_TTL_MS) {
+            toRevalidate.push(a);
+          }
+        }
+        continue;
+      }
       const cached = users.value[a];
       if (!cached) {
-        toLoad.push(a); // not cached at all — must fetch
+        toLoad.push(a);
       } else if (!cached.name && (!cached.cachedAt || now - cached.cachedAt >= EMPTY_NAME_RETRY_MS)) {
-        toLoad.push(a); // empty name, stale — must fetch
+        toLoad.push(a);
       } else if (cached.name && cached.cachedAt && now - cached.cachedAt > USER_TTL_MS) {
-        toRevalidate.push(a); // has data but stale — revalidate in background
+        toRevalidate.push(a);
       }
     }
 
     // Background revalidation: fire-and-forget, never blocks UI.
-    // _scheduleBackgroundRevalidation applies its own REVALIDATE_CAP internally.
     if (toRevalidate.length > 0) {
       _scheduleBackgroundRevalidation(toRevalidate);
     }
 
-    if (toLoad.length === 0) return;
+    // Load own address in a separate batch (never mixed with others)
+    const selfPromise = loadSelf && myAddr
+      ? profilePool.dedupeBatch([myAddr], async (addrs) => {
+          try {
+            await _fetchAndStore(addrs, !isRegistering);
+          } catch { /* silently fail */ }
+        })
+      : undefined;
 
-    await profilePool.dedupeBatch(toLoad, async (uncached) => {
-      try {
-        const appInit = getAppInit();
-        await appInit.initApi();
-        await appInit.loadUsersBatch(uncached);
-        let updated = false;
-        for (const addr of uncached) {
-          const userData = appInit.getUserData(addr);
-          if (userData) {
-            users.value[addr] = {
-              address: addr,
-              name: userData.name ?? "",
-              about: userData.about ?? "",
-              image: userData.image ?? "",
-              site: userData.site ?? "",
-              language: userData.language ?? "",
-              cachedAt: Date.now(),
-            };
-            updated = true;
-          }
-        }
-        if (updated) {
-          debouncedTrigger();
-          debouncedCacheUsers(users.value);
-        }
-      } catch {
-        // Silently fail
-      }
-    });
+    // Load other addresses
+    const othersPromise = toLoad.length > 0
+      ? profilePool.dedupeBatch(toLoad, async (uncached) => {
+          try {
+            await _fetchAndStore(uncached);
+          } catch { /* silently fail */ }
+        })
+      : undefined;
+
+    await Promise.all([selfPromise, othersPromise].filter(Boolean));
   };
 
   /** Max stale addresses to revalidate in one cycle.
@@ -226,34 +272,11 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       _revalidateQueue = new Set();
       if (batch.length === 0) return;
 
-      // Process in chunks of 10 with yielding — same as refreshStaleUsers
       const BATCH = 10;
       for (let i = 0; i < batch.length; i += BATCH) {
         const chunk = batch.slice(i, i + BATCH);
         try {
-          const appInit = getAppInit();
-          await appInit.initApi();
-          await appInit.loadUsersBatch(chunk);
-          let updated = false;
-          for (const addr of chunk) {
-            const userData = appInit.getUserData(addr);
-            if (userData) {
-              users.value[addr] = {
-                address: addr,
-                name: userData.name ?? "",
-                about: userData.about ?? "",
-                image: userData.image ?? "",
-                site: userData.site ?? "",
-                language: userData.language ?? "",
-                cachedAt: Date.now(),
-              };
-              updated = true;
-            }
-          }
-          if (updated) {
-            debouncedTrigger();
-            debouncedCacheUsers(users.value);
-          }
+          await _fetchAndStore(chunk);
         } catch {
           // Network issue — stale profiles remain visible, retry on next cycle
         }
@@ -293,33 +316,10 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     for (let i = 0; i < stale.length; i += BATCH) {
       const batch = stale.slice(i, i + BATCH);
       try {
-        const appInit = getAppInit();
-        await appInit.initApi();
-        await appInit.loadUsersBatch(batch);
-        let updated = false;
-        for (const addr of batch) {
-          const userData = appInit.getUserData(addr);
-          if (userData) {
-            users.value[addr] = {
-              address: addr,
-              name: userData.name ?? "",
-              about: userData.about ?? "",
-              image: userData.image ?? "",
-              site: userData.site ?? "",
-              language: userData.language ?? "",
-              cachedAt: now,
-            };
-            updated = true;
-          }
-        }
-        if (updated) {
-          debouncedTrigger();
-          debouncedCacheUsers(users.value);
-        }
+        await _fetchAndStore(batch);
       } catch {
         // Network issue — skip, will retry next cycle
       }
-      // Yield between batches so we don't block anything
       if (i + BATCH < stale.length) {
         await new Promise(r => setTimeout(r, 1000));
       }
