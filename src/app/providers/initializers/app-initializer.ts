@@ -65,30 +65,38 @@ export class AppInitializer {
     this._available = true;
   }
 
-  private _lastNodeInfo: { data: Record<string, unknown>; ts: number } | null = null;
-  private _nodeInfoPromise: Promise<Record<string, unknown>> | null = null;
+  private static _lastNodeInfo: { data: Record<string, unknown>; ts: number } | null = null;
+  private static _nodeInfoPromise: Promise<Record<string, unknown>> | null = null;
   static readonly NODE_INFO_TTL = 10 * 60 * 1000; // 10 minutes
 
   /** Throttled getnodeinfo — at most one RPC per 10 minutes.
-   *  Concurrent callers share the same in-flight promise. */
+   *  Concurrent callers share the same in-flight promise.
+   *  Static cache is shared across all AppInitializer instances. */
   private _getNodeInfoThrottled(force = false): Promise<Record<string, unknown>> {
     if (!this.api) return Promise.resolve({});
     const now = Date.now();
-    if (!force && this._lastNodeInfo && now - this._lastNodeInfo.ts < AppInitializer.NODE_INFO_TTL) {
-      return Promise.resolve(this._lastNodeInfo.data);
+    if (!force && AppInitializer._lastNodeInfo && now - AppInitializer._lastNodeInfo.ts < AppInitializer.NODE_INFO_TTL) {
+      return Promise.resolve(AppInitializer._lastNodeInfo.data);
     }
-    if (this._nodeInfoPromise) return this._nodeInfoPromise;
-    this._nodeInfoPromise = this.api.rpc("getnodeinfo")
+    if (AppInitializer._nodeInfoPromise) return AppInitializer._nodeInfoPromise;
+    AppInitializer._nodeInfoPromise = this.api.rpc("getnodeinfo")
       .then((info: Record<string, unknown>) => {
-        this._lastNodeInfo = { data: info, ts: Date.now() };
-        this._nodeInfoPromise = null;
+        AppInitializer._lastNodeInfo = { data: info, ts: Date.now() };
+        AppInitializer._nodeInfoPromise = null;
         return info;
       })
       .catch((e: unknown) => {
-        this._nodeInfoPromise = null;
+        AppInitializer._nodeInfoPromise = null;
+        // Return stale cache instead of throwing — stale data is better than no data.
+        // Prevents cascade: failed getnodeinfo → syncNodeTime fails → actions.prepare()
+        // not called → proxy state stale → subsequent RPCs fail → emptykey.
+        if (AppInitializer._lastNodeInfo) {
+          console.warn("[appInit] getnodeinfo RPC failed, returning stale cache:", e);
+          return AppInitializer._lastNodeInfo.data;
+        }
         throw e;
       });
-    return this._nodeInfoPromise;
+    return AppInitializer._nodeInfoPromise;
   }
 
   syncNodeTime() {

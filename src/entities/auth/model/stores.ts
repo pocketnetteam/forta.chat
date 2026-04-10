@@ -350,10 +350,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               for (const i of uncachedIndices) {
                 const rawAddr = rawAddresses[i];
                 const entry = _buildUserInfoEntry(ids[i], rawAddr, rawProfileMap.get(rawAddr));
-                results[i] = entry;
-                // Cache unless this is own address during registration
-                if (!(isRegPending && rawAddr === myRawAddr)) {
-                  _cryptoProfileCache.set(rawAddr, { result: entry, ts: now });
+
+                if (entry.keys.length >= 12) {
+                  results[i] = entry;
+                  if (!(isRegPending && rawAddr === myRawAddr)) {
+                    _cryptoProfileCache.set(rawAddr, { result: entry, ts: now });
+                  }
+                } else {
+                  // RPC likely failed — prefer stale cache over empty keys
+                  const stale = _cryptoProfileCache.get(rawAddr);
+                  if (stale && stale.result.keys.length >= 12) {
+                    results[i] = stale.result;
+                  } else {
+                    results[i] = entry;
+                  }
                 }
               }
             }
@@ -361,7 +371,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             return results as Array<{ id: string; keys: string[]; source: Record<string, unknown> }>;
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
-            return ids.map((id) => ({ id, keys: [] as string[] }));
+            // Prefer stale cache over empty keys — empty keys cause emptykey errors
+            const rawAddrs = ids.map((id) => hexDecode(id));
+            return ids.map((id, idx) => {
+              const stale = _cryptoProfileCache.get(rawAddrs[idx]);
+              if (stale && stale.result.keys.length >= 12) return stale.result;
+              return { id, keys: [] as string[], source: {} as Record<string, unknown> };
+            });
           }
         },
         isTetatetChat: (room: unknown) =>

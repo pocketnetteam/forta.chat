@@ -66,6 +66,77 @@ describe("app-initializer light mode", () => {
   });
 });
 
+describe("pCrypto getUsersInfo empty-key protection", () => {
+  it("should only cache entries with keys.length >= 12", () => {
+    const source = getSource();
+    const callbackSection = source.slice(
+      source.indexOf("getUsersInfo: async (ids"),
+      source.indexOf("isTetatetChat"),
+    );
+    expect(callbackSection).toContain("entry.keys.length >= 12");
+    expect(callbackSection).toContain("_cryptoProfileCache.set(rawAddr, { result: entry, ts: now })");
+  });
+
+  it("should prefer stale cache when new fetch returns empty keys", () => {
+    const source = getSource();
+    const callbackSection = source.slice(
+      source.indexOf("getUsersInfo: async (ids"),
+      source.indexOf("isTetatetChat"),
+    );
+    expect(callbackSection).toContain("stale.result.keys.length >= 12");
+    expect(callbackSection).toContain("results[i] = stale.result");
+  });
+
+  it("should prefer stale cache in outer catch block", () => {
+    const source = getSource();
+    const catchSection = source.slice(
+      source.indexOf("[pcrypto] getUsersInfo error"),
+      source.indexOf("[pcrypto] getUsersInfo error") + 400,
+    );
+    expect(catchSection).toContain("_cryptoProfileCache.get");
+    expect(catchSection).toContain("stale.result.keys.length >= 12");
+  });
+});
+
+describe("app-initializer nodeinfo static cache and fallback", () => {
+  const getAppInitSource = () => readFileSync(
+    resolve(__dirname, "../../../../app/providers/initializers/app-initializer.ts"),
+    "utf-8",
+  );
+
+  it("_lastNodeInfo and _nodeInfoPromise should be static fields", () => {
+    const source = getAppInitSource();
+    expect(source).toContain("private static _lastNodeInfo");
+    expect(source).toContain("private static _nodeInfoPromise");
+  });
+
+  it("_getNodeInfoThrottled should reference AppInitializer._lastNodeInfo (static)", () => {
+    const source = getAppInitSource();
+    const fn = source.slice(
+      source.indexOf("_getNodeInfoThrottled"),
+      source.indexOf("syncNodeTime"),
+    );
+    expect(fn).toContain("AppInitializer._lastNodeInfo");
+    expect(fn).toContain("AppInitializer._nodeInfoPromise");
+  });
+
+  it("should return stale _lastNodeInfo on RPC failure instead of throwing", () => {
+    const source = getAppInitSource();
+    const catchSection = source.slice(
+      source.indexOf("getnodeinfo RPC failed"),
+      source.indexOf("getnodeinfo RPC failed") + 200,
+    );
+    expect(catchSection).toContain("AppInitializer._lastNodeInfo.data");
+  });
+
+  it("should still throw if no stale cache is available", () => {
+    const source = getAppInitSource();
+    const catchStart = source.indexOf("getnodeinfo RPC failed");
+    const fn = source.slice(catchStart, catchStart + 300);
+    expect(fn).toContain("throw e;");
+  });
+});
+
 describe("fetchUserInfo own-address cache", () => {
   it("should check user-store cache before calling initializeAndFetchUserData", () => {
     const source = getSource();
