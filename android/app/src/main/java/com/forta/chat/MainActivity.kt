@@ -91,6 +91,7 @@ class MainActivity : BridgeActivity() {
                 s.setProperty('--safe-area-inset-bottom', '${insetBottom}px');
                 s.setProperty('--safe-area-inset-left', '${insetLeft}px');
                 s.setProperty('--safe-area-inset-right', '${insetRight}px');
+                s.setProperty('--native-safe-area-inset-bottom', '${insetBottom}px');
             })();
         """.trimIndent()
         webView.post { webView.evaluateJavascript(js, null) }
