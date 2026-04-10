@@ -64,8 +64,17 @@ export default defineConfig({
       stream: "stream-browserify",
     }
   },
+  esbuild: {
+    // Allow BigInt literals through — Chrome 60 lacks native BigInt but real
+    // Android devices receive WebView updates via Play Store (Chrome 100+).
+    // @noble/secp256k1 relies on BigInt; blocking it breaks the build.
+    supported: { bigint: true },
+  },
   build: {
-    target: "es2020",
+    // Chrome 60 target matches Android minSdk 24 baseline WebView.
+    // Downlevels optional chaining, nullish coalescing, logical assignment
+    // so old WebView can parse the bundle without SyntaxError.
+    target: "chrome60",
     minify: "terser",
     terserOptions: {
       compress: { drop_console: false, passes: 2 },
