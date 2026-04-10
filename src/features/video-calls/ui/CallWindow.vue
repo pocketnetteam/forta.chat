@@ -15,7 +15,9 @@ const { t } = useI18n();
 
 const isMobile = ref(window.innerWidth < 640);
 function onResize() { isMobile.value = window.innerWidth < 640; }
-onMounted(() => window.addEventListener('resize', onResize));
+onMounted(() => {
+  window.addEventListener('resize', onResize);
+});
 onUnmounted(() => window.removeEventListener('resize', onResize));
 
 // Hidden audio element ref — always in DOM so remote audio plays
@@ -279,6 +281,36 @@ const dragOffset = ref({ x: 0, y: 0 });
 const pipPos = ref({ x: 0, y: 0 }); // only used while dragging
 const pipRef = ref<HTMLElement | null>(null);
 const callContainerRef = ref<HTMLElement | null>(null);
+const containerSize = ref({ w: 0, h: 0 });
+
+// Attach ResizeObserver via watch because callContainerRef is null until v-if="show" renders
+let resizeObserver: ResizeObserver | null = null;
+
+watch(callContainerRef, (el, _oldEl, onCleanup) => {
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+  if (el) {
+    resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) {
+        containerSize.value = {
+          w: entry.contentRect.width,
+          h: entry.contentRect.height,
+        };
+      }
+    });
+    resizeObserver.observe(el);
+    onCleanup(() => {
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+    });
+  } else {
+    // Element removed (v-if toggled off) — reset container size
+    containerSize.value = { w: 0, h: 0 };
+  }
+});
 
 const PIP_W = computed(() => isMobile.value ? 110 : 160);
 const PIP_H = computed(() => isMobile.value ? 82 : 120);
@@ -289,28 +321,59 @@ const pipCornerStyle = computed(() => {
   const base = {
     width: `${PIP_W.value}px`,
     height: `${PIP_H.value}px`,
+    position: 'absolute' as const,
+    top: '0px',
+    left: '0px',
   };
+
   if (isDragging.value) {
     return {
       ...base,
-      top: `${pipPos.value.y}px`,
-      left: `${pipPos.value.x}px`,
-      transition: "none",
+      transform: `translate(${pipPos.value.x}px, ${pipPos.value.y}px)`,
+      transition: 'none',
     };
   }
+
   const m = PIP_MARGIN.value;
   const bottom = PIP_BOTTOM_OFFSET.value;
-  switch (pipCorner.value) {
-    case "top-left":
-      return { ...base, top: `${64 + m}px`, left: `${m}px` };
-    case "top-right":
-      return { ...base, top: `${64 + m}px`, right: `${m}px` };
-    case "bottom-left":
-      return { ...base, bottom: `${bottom + m}px`, left: `${m}px` };
-    case "bottom-right":
-    default:
-      return { ...base, bottom: `${bottom + m}px`, right: `${m}px` };
+  const cw = containerSize.value.w;
+  const ch = containerSize.value.h;
+
+  if (cw === 0 || ch === 0) {
+    return {
+      ...base,
+      opacity: '0',
+      transform: 'translate(0, 0)',
+    };
   }
+
+  let tx: number;
+  let ty: number;
+
+  switch (pipCorner.value) {
+    case 'top-left':
+      tx = m;
+      ty = 64 + m;
+      break;
+    case 'top-right':
+      tx = cw - PIP_W.value - m;
+      ty = 64 + m;
+      break;
+    case 'bottom-left':
+      tx = m;
+      ty = ch - PIP_H.value - bottom - m;
+      break;
+    case 'bottom-right':
+    default:
+      tx = cw - PIP_W.value - m;
+      ty = ch - PIP_H.value - bottom - m;
+      break;
+  }
+
+  return {
+    ...base,
+    transform: `translate(${tx}px, ${ty}px)`,
+  };
 });
 
 function onPipPointerDown(e: PointerEvent) {
@@ -722,10 +785,7 @@ const isAnyScreenSharing = computed(
   overflow: hidden;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1.5px rgba(255, 255, 255, 0.12);
   cursor: grab;
-  transition: top 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
-              bottom 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
-              left 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
-              right 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
   touch-action: none;
   user-select: none;
 }
