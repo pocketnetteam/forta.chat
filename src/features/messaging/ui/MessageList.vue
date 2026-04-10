@@ -573,7 +573,7 @@ watch(
       } else if (cacheAge > STALE_THRESHOLD) {
         refreshingStaleCache.value = true;
         loadMessages(roomId).catch(() => {}).finally(() => { refreshingStaleCache.value = false; });
-      } else {
+      } else if (!chatStore.isRoomTimelineLoaded(roomId)) {
         loadMessages(roomId).catch(() => {});
       }
     }

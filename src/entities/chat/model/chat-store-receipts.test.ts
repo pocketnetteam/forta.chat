@@ -129,6 +129,19 @@ describe("receipt throttling", () => {
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(2);
   });
 
+  it("does not re-send receipt for same watermark after cooldown expires", async () => {
+    await store.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(3100);
+
+    // Same timestamp — watermark hasn't advanced, no server call
+    await store.advanceInboundWatermark("!r1:s", 1000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+  });
+
   it("sends receipt on native even when document.visibilityState is hidden", async () => {
     // Simulate native platform where visibilityState is unreliable
     (globalThis as any).__TEST_IS_NATIVE = true;
