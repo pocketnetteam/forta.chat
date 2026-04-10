@@ -8,9 +8,20 @@ import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
+import com.getcapacitor.PermissionState
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 
-@CapacitorPlugin(name = "NativeCall")
+@CapacitorPlugin(
+    name = "NativeCall",
+    permissions = [
+        Permission(
+            strings = [android.Manifest.permission.RECORD_AUDIO],
+            alias = "microphone"
+        )
+    ]
+)
 class CallPlugin : Plugin() {
 
     companion object {
@@ -153,13 +164,18 @@ class CallPlugin : Plugin() {
 
     @PluginMethod
     fun requestAudioPermission(call: PluginCall) {
-        if (activity.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
-            == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        if (getPermissionState("microphone") == PermissionState.GRANTED) {
             call.resolve(JSObject().apply { put("granted", true) })
             return
         }
-        activity.requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), 1001)
-        call.resolve(JSObject().apply { put("granted", false) })
+        requestPermissionForAlias("microphone", call, "audioPermissionCallback")
+    }
+
+    @PermissionCallback
+    private fun audioPermissionCallback(call: PluginCall) {
+        val granted = getPermissionState("microphone") == PermissionState.GRANTED
+        Log.d(TAG, "[WebRTCAudio] requestAudioPermission callback: granted=$granted")
+        call.resolve(JSObject().apply { put("granted", granted) })
     }
 
     @PluginMethod

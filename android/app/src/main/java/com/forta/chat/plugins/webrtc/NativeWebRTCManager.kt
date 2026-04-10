@@ -22,6 +22,9 @@ class NativeWebRTCManager(private val context: Context) {
         private const val VIDEO_WIDTH = 1280
         private const val VIDEO_HEIGHT = 720
         private const val VIDEO_FPS = 30
+
+        /** Callback for audio creation failures — wired by WebRTCPlugin to emit onAudioError events to JS */
+        var onAudioError: ((type: String, message: String) -> Unit)? = null
     }
 
     interface Listener {
@@ -289,14 +292,23 @@ class NativeWebRTCManager(private val context: Context) {
     // -----------------------------------------------------------------------
 
     fun startLocalAudio(peerId: String) {
+        Log.d("WebRTCAudio", "startLocalAudio: begin, peerId=$peerId")
+
         if (localAudioTrack != null) {
-            // Already started — add to specific PC if provided
+            Log.d("WebRTCAudio", "startLocalAudio: track already exists, reusing for peerId=$peerId")
             if (peerId.isNotEmpty()) {
-                peerConnections[peerId]?.addTrack(localAudioTrack, listOf("stream0"))
+                val pc = peerConnections[peerId]
+                if (pc != null) {
+                    pc.addTrack(localAudioTrack, listOf("stream0"))
+                    Log.d("WebRTCAudio", "startLocalAudio: existing track added to PC peerId=$peerId")
+                } else {
+                    Log.w("WebRTCAudio", "startLocalAudio: no PeerConnection for peerId=$peerId — track not added")
+                }
             }
             return
         }
 
+        Log.d("WebRTCAudio", "startLocalAudio: creating AudioSource with constraints")
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
@@ -304,18 +316,38 @@ class NativeWebRTCManager(private val context: Context) {
         }
 
         localAudioSource = factory?.createAudioSource(audioConstraints)
+        if (localAudioSource == null) {
+            Log.e("WebRTCAudio", "startLocalAudio: AudioSource creation FAILED — factory=$factory")
+            onAudioError?.invoke("audio_source_failed", "AudioSource creation failed")
+            return
+        }
+        Log.d("WebRTCAudio", "startLocalAudio: AudioSource created OK")
+
         localAudioTrack = factory?.createAudioTrack("audio0", localAudioSource)
+        if (localAudioTrack == null) {
+            Log.e("WebRTCAudio", "startLocalAudio: AudioTrack creation FAILED")
+            onAudioError?.invoke("audio_source_failed", "AudioTrack creation failed")
+            return
+        }
         localAudioTrack?.setEnabled(true)
+        Log.d("WebRTCAudio", "startLocalAudio: AudioTrack created and enabled")
 
         // Add to specific PC or all active PCs
         if (peerId.isNotEmpty()) {
-            peerConnections[peerId]?.addTrack(localAudioTrack, listOf("stream0"))
-        } else {
-            for ((_, pc) in peerConnections) {
+            val pc = peerConnections[peerId]
+            if (pc != null) {
                 pc.addTrack(localAudioTrack, listOf("stream0"))
+                Log.d("WebRTCAudio", "startLocalAudio: track added to PC peerId=$peerId")
+            } else {
+                Log.w("WebRTCAudio", "startLocalAudio: no PeerConnection for peerId=$peerId — track not added")
+            }
+        } else {
+            for ((id, pc) in peerConnections) {
+                pc.addTrack(localAudioTrack, listOf("stream0"))
+                Log.d("WebRTCAudio", "startLocalAudio: track added to PC id=$id")
             }
         }
-        Log.d(TAG, "Local audio started (peerId=$peerId, pcs=${peerConnections.size})")
+        Log.d("WebRTCAudio", "startLocalAudio: complete, pcs=${peerConnections.size}")
     }
 
     fun startLocalVideo(peerId: String, renderer: SurfaceViewRenderer? = null) {

@@ -9,7 +9,10 @@ import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
+import com.getcapacitor.PermissionState
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 import org.webrtc.*
 
 /**
@@ -18,7 +21,15 @@ import org.webrtc.*
  * All methods accept a peerId to route to the correct native PeerConnection.
  * The SDK creates multiple PCs during call setup (glare, renegotiation).
  */
-@CapacitorPlugin(name = "NativeWebRTC")
+@CapacitorPlugin(
+    name = "NativeWebRTC",
+    permissions = [
+        Permission(
+            strings = [android.Manifest.permission.RECORD_AUDIO],
+            alias = "microphone"
+        )
+    ]
+)
 class WebRTCPlugin : Plugin() {
 
     companion object {
@@ -47,7 +58,36 @@ class WebRTCPlugin : Plugin() {
             })
         }
 
+        // Wire audio error callback to forward native audio failures to JS
+        NativeWebRTCManager.onAudioError = { type, message ->
+            Log.e("WebRTCAudio", "Audio error: type=$type, message=$message")
+            notifyListeners("onAudioError", JSObject().apply {
+                put("type", type)
+                put("message", message)
+            })
+        }
+
         Log.d(TAG, "WebRTCPlugin loaded, manager initialized")
+    }
+
+    /**
+     * D-07: One-time AudioManager state dump at call start.
+     * Logs mode, speaker state, mic mute, voice call volume, and output devices.
+     * Filterable via: adb logcat WebRTCAudio:* *:S
+     */
+    private fun logAudioManagerState() {
+        val am = context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+        val sb = StringBuilder("[WebRTCAudio] AudioManager state: ")
+        sb.append("mode=").append(am.mode).append(" ")
+        sb.append("speakerOn=").append(am.isSpeakerphoneOn).append(" ")
+        sb.append("micMute=").append(am.isMicrophoneMute).append(" ")
+        sb.append("voiceVol=").append(am.getStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL))
+        sb.append("/").append(am.getStreamMaxVolume(android.media.AudioManager.STREAM_VOICE_CALL))
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val devices = am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
+            sb.append(" outputDevices=").append(devices.map { it.type })
+        }
+        Log.d("WebRTCAudio", sb.toString())
     }
 
     // -----------------------------------------------------------------------
@@ -282,14 +322,40 @@ class WebRTCPlugin : Plugin() {
             call.reject("Manager not initialized")
             return
         }
+        // Safety net permission guard (D-01: Kotlin side)
+        if (getPermissionState("microphone") != PermissionState.GRANTED) {
+            requestPermissionForAlias("microphone", call, "micPermissionCallback")
+            return
+        }
+        doStartLocalMedia(call, mgr)
+    }
+
+    private fun doStartLocalMedia(call: PluginCall, mgr: NativeWebRTCManager) {
+        logAudioManagerState()  // D-07: one-time AudioManager state dump before audio start
         val peerId = call.getString("peerId") ?: ""
         val hasVideo = call.getBoolean("hasVideo", true) ?: true
-
         mgr.startLocalAudio(peerId)
+        Log.d("WebRTCAudio", "doStartLocalMedia: audio started for peerId=$peerId, hasVideo=$hasVideo")
+
         if (hasVideo) {
             mgr.startLocalVideo(peerId)
         }
         call.resolve()
+    }
+
+    @PermissionCallback
+    private fun micPermissionCallback(call: PluginCall) {
+        if (getPermissionState("microphone") != PermissionState.GRANTED) {
+            Log.w(TAG, "[WebRTCAudio] RECORD_AUDIO denied — cannot start audio")
+            notifyListeners("onAudioError", JSObject().apply {
+                put("type", "permission_denied")
+                put("message", "Microphone permission denied")
+            })
+            call.reject("RECORD_AUDIO permission denied")
+            return
+        }
+        val mgr = manager ?: run { call.reject("Manager not initialized"); return }
+        doStartLocalMedia(call, mgr)
     }
 
     @PluginMethod
