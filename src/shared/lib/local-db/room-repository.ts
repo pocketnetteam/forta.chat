@@ -488,12 +488,14 @@ export class RoomRepository {
   }
 
   /** Clear chat history: set clearedAtTs marker and reset preview/pagination.
+   *  Preserves lastMessageTimestamp so the room's sort position stays stable —
+   *  nullifying it causes getSortKey to fall through to updatedAt (which drifts
+   *  upward over syncs), making the room jump up in the list.
    *  Uses null (not undefined) because Dexie.update() silently ignores undefined values. */
   async clearHistory(roomId: string, clearedAtTs: number): Promise<void> {
     await this.db.rooms.update(roomId, {
       clearedAtTs,
       lastMessagePreview: null as unknown as undefined,
-      lastMessageTimestamp: null as unknown as undefined,
       lastMessageSenderId: null as unknown as undefined,
       lastMessageType: null as unknown as undefined,
       lastMessageEventId: null as unknown as undefined,

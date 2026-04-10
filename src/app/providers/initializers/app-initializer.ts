@@ -2,6 +2,7 @@ import type { UserData } from "./types";
 
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
+import { RpcBatcher } from "@/shared/lib/rpc-batcher";
 
 export interface BastyonPostData {
   txid: string;
@@ -46,6 +47,7 @@ export class AppInitializer {
   private psdk: InstanceType<typeof pSDK> | null = null;
   private _available = false;
   private postCache = new Map<string, BastyonPostData>();
+  private scoresBatcher: RpcBatcher<string, any> | null = null;
 
   constructor(pocketnetInstance: PocketnetInstanceType) {
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
@@ -65,22 +67,68 @@ export class AppInitializer {
     this._available = true;
   }
 
+  private static _lastNodeInfo: { data: Record<string, unknown>; ts: number } | null = null;
+  private static _nodeInfoPromise: Promise<Record<string, unknown>> | null = null;
+  static readonly NODE_INFO_TTL = 10 * 60 * 1000; // 10 minutes
+
+  /** Throttled getnodeinfo — at most one RPC per 10 minutes.
+   *  Concurrent callers share the same in-flight promise.
+   *  Static cache is shared across all AppInitializer instances. */
+  private _getNodeInfoThrottled(force = false): Promise<Record<string, unknown>> {
+    if (!this.api) return Promise.resolve({});
+    const now = Date.now();
+    if (!force && AppInitializer._lastNodeInfo && now - AppInitializer._lastNodeInfo.ts < AppInitializer.NODE_INFO_TTL) {
+      return Promise.resolve(AppInitializer._lastNodeInfo.data);
+    }
+    if (AppInitializer._nodeInfoPromise) return AppInitializer._nodeInfoPromise;
+    AppInitializer._nodeInfoPromise = this.api.rpc("getnodeinfo")
+      .then((info: Record<string, unknown>) => {
+        AppInitializer._lastNodeInfo = { data: info, ts: Date.now() };
+        AppInitializer._nodeInfoPromise = null;
+        return info;
+      })
+      .catch((e: unknown) => {
+        AppInitializer._nodeInfoPromise = null;
+        // Return stale cache instead of throwing — stale data is better than no data.
+        // Prevents cascade: failed getnodeinfo → syncNodeTime fails → actions.prepare()
+        // not called → proxy state stale → subsequent RPCs fail → emptykey.
+        if (AppInitializer._lastNodeInfo) {
+          console.warn("[appInit] getnodeinfo RPC failed, returning stale cache:", e);
+          return AppInitializer._lastNodeInfo.data;
+        }
+        throw e;
+      });
+    return AppInitializer._nodeInfoPromise;
+  }
+
   syncNodeTime() {
     if (!this.api || !this.actions) return Promise.resolve();
-    return this.api.rpc("getnodeinfo").then(getnodeinfoResult => {
+    return this._getNodeInfoThrottled().then(getnodeinfoResult => {
       const timeDifference =
-        getnodeinfoResult.time - Math.floor(new Date().getTime() / 1000);
+        (getnodeinfoResult as any).time - Math.floor(new Date().getTime() / 1000);
       PocketnetInstanceConfigurator.setTimeDifference(timeDifference);
       this.actions!.prepare();
     });
   }
 
-  /** Fetch current blockchain block height via getnodeinfo RPC */
+  /** Force a fresh getnodeinfo RPC (bypasses 10-min throttle).
+   *  Used on app resume / tab focus to ensure time + proxy are current. */
+  syncNodeTimeForced() {
+    if (!this.api || !this.actions) return Promise.resolve();
+    return this._getNodeInfoThrottled(true).then(getnodeinfoResult => {
+      const timeDifference =
+        (getnodeinfoResult as any).time - Math.floor(new Date().getTime() / 1000);
+      PocketnetInstanceConfigurator.setTimeDifference(timeDifference);
+      this.actions!.prepare();
+    });
+  }
+
+  /** Fetch current blockchain block height via getnodeinfo RPC (throttled) */
   async getBlockHeight(): Promise<number> {
     if (!this.api) return 0;
     try {
-      const info = await this.api.rpc("getnodeinfo");
-      return info?.height ?? 0;
+      const info = await this._getNodeInfoThrottled();
+      return (info as any)?.height ?? 0;
     } catch (e) {
       console.error("[appInit] getBlockHeight error:", e);
       return 0;
@@ -222,7 +270,7 @@ export class AppInitializer {
     onLoad?: OnLoadUserData
   ): Promise<UserData | null> {
     if (!this.psdk || !stateAddresses.length) return Promise.resolve(null);
-    return this.psdk.userInfo.load(stateAddresses).then(() => {
+    return this.psdk.userInfo.load(stateAddresses, true).then(() => {
       const userData = this.psdk!.userInfo.get(stateAddresses[0]) as UserData;
       if (onLoad) {
         onLoad(userData);
@@ -240,11 +288,13 @@ export class AppInitializer {
     await this.psdk.userInfo.load(addresses, true);
   }
 
-  /** Load user info for multiple addresses into full (non-light) cache.
-   *  After this call, getUserData(address) will return the profile data. */
+  /** Load user info for multiple addresses into light cache.
+   *  Always uses light mode ("1" param) — larger batches (70 vs 10), queue-based.
+   *  After this call, getUserData(address) will return the profile data
+   *  (psdk.userInfo.get checks userInfoFull || userInfoLight). */
   async loadUsersBatch(addresses: string[]): Promise<void> {
     if (!this.psdk || !addresses.length) return;
-    await this.psdk.userInfo.load(addresses);
+    await this.psdk.userInfo.load(addresses, true);
   }
 
   /** Get cached user data by raw address */
@@ -423,11 +473,15 @@ export class AppInitializer {
 
   async loadPostScores(txid: string): Promise<PostScore[]> {
     if (!this.api) return [];
+    if (!this.scoresBatcher) {
+      this.scoresBatcher = new RpcBatcher({
+        execute: (txids) => this.api!.rpc("getpostscores", txids),
+        keyOf: (item: any) => item.posttxid,
+      });
+    }
     try {
-      const data = await this.api.rpc("getpostscores", [txid]);
-      console.log("[appInit] loadPostScores raw response:", data);
-      if (!Array.isArray(data)) return [];
-      return data.map((s: any) => ({
+      const raw = await this.scoresBatcher.load(txid);
+      return raw.map((s: any) => ({
         address: s.address ?? "",
         value: Number(s.value ?? 0),
         posttxid: s.posttxid ?? txid,
@@ -690,7 +744,7 @@ export class AppInitializer {
   async getProfileFeed(
     authorAddress: string,
     options?: { height?: number; startTxid?: string; count?: number }
-  ): Promise<any[]> {
+  ): Promise<{ posts: any[]; height: number }> {
     try {
       const opts = options ?? {};
       const response = await fetch(
@@ -719,18 +773,20 @@ export class AppInitializer {
       );
       if (!response.ok) {
         console.error("[appInit] getProfileFeed HTTP error:", response.status);
-        return [];
+        return { posts: [], height: 0 };
       }
       const json = await response.json();
       if (json.error) {
         console.error("[appInit] getProfileFeed RPC error:", json.error);
-        return [];
+        return { posts: [], height: 0 };
       }
       const result = json.data ?? json.result ?? json;
-      return Array.isArray(result) ? result : result?.contents ?? [];
+      const posts = Array.isArray(result) ? result : result?.contents ?? [];
+      const height = Number(result?.height ?? json.data?.height ?? 0);
+      return { posts, height };
     } catch (e) {
       console.error("[appInit] getProfileFeed error:", e);
-      return [];
+      return { posts: [], height: 0 };
     }
   }
 

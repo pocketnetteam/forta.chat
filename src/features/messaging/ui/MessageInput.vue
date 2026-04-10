@@ -175,12 +175,19 @@ const handleSend = async () => {
   const rawText = mention.resolveText();
   const savedText = text.value;
 
-  // Clear input optimistically — restore if send completely fails before UI insert
+  // Clear text + forward state synchronously so a rapid second invocation
+  // hits the empty-text guard above and exits without a duplicate send.
+  // (reply/edit state is also protected: once text is "" the guard returns early)
   text.value = "";
   mention.clearMentions();
   const roomId = chatStore.activeRoomId;
   if (roomId) clearDraft(roomId);
   setTyping(false);
+
+  // Capture forward data before clearing — sendForward takes params, not store
+  const fwd = chatStore.forwardingMessage;
+  if (fwd) chatStore.cancelForward();
+
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
 
   let inserted: boolean | undefined;
@@ -189,9 +196,7 @@ const handleSend = async () => {
       editMessage(chatStore.editingMessage!.id, rawText);
       chatStore.editingMessage = null;
       inserted = true;
-    } else if (chatStore.forwardingMessage) {
-      const fwd = chatStore.forwardingMessage;
-
+    } else if (fwd) {
       // External share with file: send file directly instead of text forward
       if (fwd.isExternalShare && fwd.fileInfo?.url) {
         try {
@@ -209,14 +214,12 @@ const handleSend = async () => {
           console.error("[MessageInput] Failed to send external share file:", e);
           inserted = false;
         }
-        if (inserted !== false) chatStore.cancelForward();
       } else {
         const forwardMeta = fwd.withSenderInfo
           ? { senderId: fwd.senderId, senderName: fwd.senderName }
           : undefined;
         const forwardContent = rawText || fwd.content || forwardPreviewText.value;
         inserted = await sendForward(forwardContent, forwardMeta);
-        if (inserted !== false) chatStore.cancelForward();
       }
     } else if (chatStore.replyingTo) {
       inserted = await sendReply(rawText, linkPreview.dismissed.value);
@@ -228,12 +231,14 @@ const handleSend = async () => {
     inserted = false;
   }
 
-  // If message was NOT inserted into UI at all, restore the text so the user doesn't lose it
   if (inserted === false) {
     text.value = savedText;
     if (roomId) saveDraft(roomId, savedText);
+    if (fwd) chatStore.forwardingMessage = fwd;
     nextTick(() => autoGrow());
   }
+
+  nextTick(() => textareaRef.value?.focus());
 };
 
 const handleKeydown = (e: KeyboardEvent) => {

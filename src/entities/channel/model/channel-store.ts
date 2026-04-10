@@ -56,7 +56,8 @@ export const useChannelStore = defineStore("channel", () => {
   const hasMoreChannels = ref(true);
   const postsStartTxid = ref(new Map<string, string>());
   const hasMorePosts = ref(new Map<string, boolean>());
-  const blockHeight = ref(0);
+  /** Per-channel session height: 0 until first getProfileFeed response, then the server-returned height */
+  const sessionHeight = ref(new Map<string, number>());
   const channelError = ref<string | null>(null);
   const postsError = ref<string | null>(null);
 
@@ -85,7 +86,6 @@ export const useChannelStore = defineStore("channel", () => {
       channelsPage.value = 0;
       hasMoreChannels.value = true;
       channels.value = [];
-      blockHeight.value = 4675546;
     }
 
     if (!hasMoreChannels.value) return;
@@ -96,7 +96,7 @@ export const useChannelStore = defineStore("channel", () => {
     try {
       const result = await authStore.getSubscribesChannels(
         addr,
-        blockHeight.value,
+        0,
         channelsPage.value,
         20
       );
@@ -106,7 +106,7 @@ export const useChannelStore = defineStore("channel", () => {
         return;
       }
 
-      blockHeight.value = result.height ?? blockHeight.value;
+      // height from channels response is not used; getProfileFeed manages its own session height
       const parsed = (result.channels ?? []).map((raw: any) => parseChannel(raw));
 
       if (reset) {
@@ -132,6 +132,7 @@ export const useChannelStore = defineStore("channel", () => {
       postsStartTxid.value.delete(channelAddress);
       hasMorePosts.value.set(channelAddress, true);
       posts.value.set(channelAddress, []);
+      sessionHeight.value.delete(channelAddress);
     }
 
     if (hasMorePosts.value.get(channelAddress) === false) return;
@@ -142,22 +143,26 @@ export const useChannelStore = defineStore("channel", () => {
     try {
       const startTxid = postsStartTxid.value.get(channelAddress) ?? "";
       const count = 10;
+      const height = sessionHeight.value.get(channelAddress) ?? 0;
 
-      const rawPosts = await authStore.getProfileFeed(channelAddress, {
-        height: blockHeight.value,
+      const feedResult = await authStore.getProfileFeed(channelAddress, {
+        height,
         startTxid,
         count,
       });
 
-      if (!rawPosts || !Array.isArray(rawPosts)) {
+      if (!feedResult || !Array.isArray(feedResult.posts)) {
         postsError.value = "Failed to load posts";
         return;
       }
 
-      // Cache raw posts so PostCard can find them without a separate API call
-      rawPosts.forEach((raw: any) => authStore.cachePost(raw));
+      if (feedResult.height && !sessionHeight.value.has(channelAddress)) {
+        sessionHeight.value.set(channelAddress, feedResult.height);
+      }
 
-      const parsed = rawPosts.map((raw: any) => parsePost(raw));
+      feedResult.posts.forEach((raw: any) => authStore.cachePost(raw));
+
+      const parsed = feedResult.posts.map((raw: any) => parsePost(raw));
       const existing = posts.value.get(channelAddress) ?? [];
 
       if (reset) {
@@ -181,9 +186,7 @@ export const useChannelStore = defineStore("channel", () => {
 
   function setActiveChannel(address: string) {
     activeChannelAddress.value = address;
-    if (!posts.value.has(address)) {
-      fetchPosts(address, true);
-    }
+    fetchPosts(address, true);
   }
 
   function clearActiveChannel() {
@@ -200,7 +203,7 @@ export const useChannelStore = defineStore("channel", () => {
     hasMoreChannels.value = true;
     postsStartTxid.value = new Map();
     hasMorePosts.value = new Map();
-    blockHeight.value = 0;
+    sessionHeight.value = new Map();
     channelError.value = null;
     postsError.value = null;
   };
@@ -215,7 +218,7 @@ export const useChannelStore = defineStore("channel", () => {
     hasMoreChannels,
     postsStartTxid,
     hasMorePosts,
-    blockHeight,
+    sessionHeight,
     channelError,
     postsError,
     activeChannel,

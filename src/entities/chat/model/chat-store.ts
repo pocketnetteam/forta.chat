@@ -280,30 +280,27 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     members: memberIds,
     isGroup,
     updatedAt: lastTs || (() => {
-      // For invites, try to extract origin_server_ts from the invite event itself
-      // instead of using Date.now() which inflates sort position
+      // No timeline events — fall back to state event timestamps so the room
+      // sorts by creation/invite date instead of ending up with updatedAt=0.
       if (membership === "invite") {
         try {
-          // Primary: getMember().event (not always populated by SDK for invites)
           const memberObj = room.currentState?.getMember?.(myUserId);
           const inviteTs = memberObj?.event?.origin_server_ts;
           if (inviteTs && typeof inviteTs === "number") return inviteTs;
         } catch { /* ignore */ }
         try {
-          // Fallback: getStateEvents('m.room.member', myUserId) — always has origin_server_ts
           const stateEvent = room.currentState?.getStateEvents?.("m.room.member", myUserId);
           const stateTs = stateEvent?.event?.origin_server_ts;
           if (stateTs && typeof stateTs === "number") return stateTs;
         } catch { /* ignore */ }
-        try {
-          // Last fallback: room creation event
-          const createEvent = room.currentState?.getStateEvents?.("m.room.create", "");
-          const createTs = createEvent?.event?.origin_server_ts;
-          if (createTs && typeof createTs === "number") return createTs;
-        } catch { /* ignore */ }
-        return 1; // last resort: use minimal timestamp (never Date.now() — inflates sort)
       }
-      return 0;
+      // For ALL rooms (including joined with cleared history): use room creation date
+      try {
+        const createEvent = room.currentState?.getStateEvents?.("m.room.create", "");
+        const createTs = createEvent?.event?.origin_server_ts;
+        if (createTs && typeof createTs === "number") return createTs;
+      } catch { /* ignore */ }
+      return membership === "invite" ? 1 : 0;
     })(),
     membership: membership === "invite" ? "invite" : "join",
     topic,
@@ -1321,10 +1318,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Fetch room data for viewport preview: cache first, then network (loadRoomMessages).
-   *  Checks generation between async steps — if the user scrolled away, aborts early. */
+  /** Fetch room data for viewport preview: cache-only (no network scrollback).
+   *  Room list previews come from Dexie rows + decryptedPreviewCache (fed by sync),
+   *  so scrollback is unnecessary here. Full scrollback runs when the user actually
+   *  opens a room (loadRoomMessages in MessageList). */
   const fetchRoomPreview = async (roomId: string, generation: number): Promise<void> => {
-    // Stale generation — user scrolled away, abort
     if (generation !== currentViewportGeneration) return;
 
     const prev = roomFetchStates.get(roomId);
@@ -1339,15 +1337,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     try {
       if (generation !== currentViewportGeneration) return;
 
-      // Phase 1: cache (fast, from Dexie/localStorage)
+      // Cache preload only — warm Dexie / messages.value from local storage
       if (!messages.value[roomId]?.length) {
         await loadCachedMessages(roomId).catch(() => {});
       }
-
-      if (generation !== currentViewportGeneration) return;
-
-      // Phase 2: network — loadRoomMessages fetches from Matrix SDK (scrollback)
-      await loadRoomMessages(roomId);
 
       if (generation !== currentViewportGeneration) return;
 
@@ -1357,7 +1350,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         lastAttemptAt: Date.now(),
       });
     } catch (e) {
-      // Don't mark error if generation is stale
       if (generation !== currentViewportGeneration) return;
 
       console.warn(`[viewport-fetch] Room ${roomId} failed (attempt ${retryCount + 1}):`, e);
@@ -1507,7 +1499,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Priority: active room + N neighbors (immediate network preload)
+    // Priority: active room neighbors — track via ensureRoomsLoaded so
+    // roomFetchStates prevents duplicate work when ContactList scrolls.
+    // fetchRoomPreview is now cache-only (no network scrollback).
     const activeIdx = activeId ? sorted.findIndex(r => r.id === activeId) : -1;
     const priorityRooms: typeof sorted = [];
     if (activeIdx >= 0) {
@@ -1519,13 +1513,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const priorityFiltered = priorityRooms.filter(
       r => r.id !== activeId && r.membership !== "invite",
     );
-
-    // Phase 1: cache + network for priority rooms via ensureRoomsLoaded
     ensureRoomsLoaded(priorityFiltered.map(r => r.id), "high");
 
-    // Phase 2: cache-only preload for remaining viewport rooms via idle callback.
-    // These rooms are NOT added to roomFetchStates — intentionally allowing
-    // ensureRoomsLoaded to trigger a full network fetch when the user scrolls to them.
+    // Remaining viewport rooms: cache-only preload via idle callback.
     const remaining = sorted
       .slice(0, PRELOAD_COUNT)
       .filter(r => r.id !== activeId && r.membership !== "invite" &&
@@ -2181,6 +2171,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (state) {
       lastSyncState = state;
       syncState.value = state;
+      if (state === "PREPARED") clearTimelineSessionGuards();
     }
     if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
     refreshDebounceTimer = setTimeout(() => {
@@ -2194,6 +2185,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Update sync state for non-refresh states (ERROR, RECONNECTING, STOPPED) */
   const setSyncState = (state: "ERROR" | "STOPPED" | "RECONNECTING") => {
     syncState.value = state;
+    if (state === "RECONNECTING" || state === "STOPPED") {
+      clearTimelineSessionGuards();
+    }
   };
 
   /** Force immediate refresh (used after init when first load must be instant) */
@@ -2504,6 +2498,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const RECEIPT_COOLDOWN_MS = 3000;
   const receiptCooldowns = new Map<string, number>();
 
+  // Tracks the last message timestamp for which a receipt was actually sent to the server.
+  // Prevents redundant /read_markers calls when re-entering an already-read room.
+  // Analogous to bastyon-chat's `getUnreadNotificationCount() !== 0` guard.
+  const _lastCommittedReceiptTs = new Map<string, number>();
+
+  /** Seed the receipt dedup map from Dexie so existing watermarks don't re-send on first visit. */
+  const initReceiptWatermark = async (roomId: string) => {
+    if (_lastCommittedReceiptTs.has(roomId)) return;
+    if (!chatDbKitRef.value) return;
+    try {
+      const room = await chatDbKitRef.value.rooms.getRoom(roomId);
+      if (room?.lastReadInboundTs && room.lastReadInboundTs > 0) {
+        _lastCommittedReceiptTs.set(roomId, room.lastReadInboundTs);
+      }
+    } catch { /* ignore */ }
+  };
+
   /** Atomically commit a read watermark: update Dexie (instant UI) + send
    *  Matrix receipt (server sync) with per-room throttling.
    *  Local commit is always immediate; network send is throttled to max 1/3s per room. */
@@ -2512,6 +2523,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (chatDbKitRef.value) {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
     }
+
+    // Skip server send if watermark hasn't actually advanced
+    if (timestamp <= (_lastCommittedReceiptTs.get(roomId) ?? 0)) return;
 
     // 2. SERVER SYNC — throttled per room
     const now = Date.now();
@@ -2527,6 +2541,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       receiptCooldowns.set(roomId, now);
       const success = await sendReadReceiptIfVisible(roomId, event);
       if (success) {
+        _lastCommittedReceiptTs.set(roomId, timestamp);
         pendingReadWatermarks.delete(roomId);
         watermarkQueuedAt.delete(roomId);
       }
@@ -2561,11 +2576,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Snapshot entries to avoid mutation-during-iteration
     const entries = [...pendingReadWatermarks];
     for (const [roomId, timestamp] of entries) {
+      if (timestamp <= (_lastCommittedReceiptTs.get(roomId) ?? 0)) {
+        pendingReadWatermarks.delete(roomId);
+        watermarkQueuedAt.delete(roomId);
+        continue;
+      }
       const event = findMatrixEventForTimestamp(roomId, timestamp);
       if (event) {
         receiptCooldowns.set(roomId, now);
         sendReadReceiptIfVisible(roomId, event).then((success) => {
           if (success) {
+            _lastCommittedReceiptTs.set(roomId, timestamp);
             pendingReadWatermarks.delete(roomId);
             watermarkQueuedAt.delete(roomId);
           }
@@ -2595,6 +2616,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }).catch(() => {});
     }
     if (roomId) {
+      initReceiptWatermark(roomId);
+
       // Load profiles only if not already loaded (removed unconditional delete
       // that caused re-fetching already-cached profiles on every room open)
       if (!profilesRequestedForRooms.has(roomId)) {
@@ -4211,6 +4234,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  // Per-room session guards: prevent redundant /messages API calls on room re-entry.
+  // Analogous to bastyon-chat's TimelineWindow.canPaginate() — once loaded, skip scrollback.
+  const _roomsWithLoadedTimeline = new Set<string>();
+  const _roomsPrefetched = new Set<string>();
+
+  const isRoomTimelineLoaded = (roomId: string): boolean => _roomsWithLoadedTimeline.has(roomId);
+
+  const clearTimelineSessionGuards = () => {
+    _roomsWithLoadedTimeline.clear();
+    _roomsPrefetched.clear();
+  };
+
   /** Load timeline events for a room and convert to Messages */
   const loadRoomMessages = async (roomId: string, { waitForSdk = false } = {}) => {
     try {
@@ -4219,6 +4254,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // navigated TO this room and then switched away (stale scrollback).
       // Viewport-fetch rooms are never the active room — they must not bail.
       const wasActiveRoom = activeRoomId.value === roomId;
+      const alreadyLoaded = _roomsWithLoadedTimeline.has(roomId);
 
       const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4252,7 +4288,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       let msgCount = countMessages(timelineEvents);
 
-      if (msgCount < MIN_MESSAGES) {
+      // Skip scrollback if this room was already loaded this session —
+      // the SDK timeline + Dexie already have the data. New sync events
+      // are still parsed below so nothing is lost.
+      if (!alreadyLoaded && msgCount < MIN_MESSAGES) {
         // Brief yield if timeline is empty — sync may not have populated it yet
         if (timelineEvents.length === 0) {
           await new Promise(r => setTimeout(r, 300));
@@ -4371,6 +4410,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         await loadPinnedMessages(roomId);
       }
 
+      _roomsWithLoadedTimeline.add(roomId);
+
     } catch (e) {
       console.error("[chat-store] loadRoomMessages fatal error for room %s:", roomId, e);
       // Set empty messages so UI doesn't hang
@@ -4450,6 +4491,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let prefetchInFlight = false;
   const prefetchNextBatch = async (roomId: string): Promise<boolean> => {
     if (prefetchInFlight) return true;
+    if (_roomsPrefetched.has(roomId)) return true;
     prefetchInFlight = true;
     try {
       const matrixService = getMatrixClientService();
@@ -4496,6 +4538,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         await chatDbKitRef.value.eventWriter.writeMessages(parsedMessages);
       }
 
+      _roomsPrefetched.add(roomId);
       return true;
     } catch (e) {
       console.warn("[chat-store] prefetchNextBatch error:", e);
@@ -5791,6 +5834,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     loadPinnedMessages,
     loadMoreMessages,
     loadRoomMessages,
+    isRoomTimelineLoaded,
+    clearTimelineSessionGuards,
     prefetchNextBatch,
     markRoomAsRead,
     markRoomChanged,

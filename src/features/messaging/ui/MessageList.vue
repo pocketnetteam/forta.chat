@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, nextTick, onUnmounted, provide } from "vue";
 import { useChatStore, MessageType } from "@/entities/chat";
+import { useUserStore } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { useThemeStore } from "@/entities/theme";
 import { isConsecutiveMessage } from "@/entities/chat/lib/message-utils";
-import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
+import { cleanMatrixIds, resolveSystemText, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { formatDate } from "@/shared/lib/format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
@@ -34,14 +35,19 @@ const { t } = useI18n();
 
 const { bannerState, freezeBanner, dismissBanner, forceDismiss, hasBanner } = useUnreadBanner();
 
-/** Resolve system message text dynamically using current display names + i18n */
+/** Resolve system message text dynamically using current display names + i18n.
+ *  Uses isUnresolvedName to filter truncated addresses / raw hashes — matches
+ *  the same guard used in format-preview.ts for the contact list previews. */
 const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: string; senderAddr: string; targetAddr?: string; extra?: Record<string, string> } }): string => {
   if (msg.systemMeta?.template) {
     const text = resolveSystemText(
       msg.systemMeta.template, msg.systemMeta.senderAddr, msg.systemMeta.targetAddr,
-      (addr) => chatStore.getDisplayName(addr), t, msg.systemMeta.extra,
+      (addr) => {
+        const name = chatStore.getDisplayName(addr);
+        return isUnresolvedName(name) ? t("common.unknownUser") : name;
+      },
+      t, msg.systemMeta.extra,
     );
-    // Guard: never render hex/address strings — show safe fallback
     if (/[a-f0-9]{16,}/i.test(text)) return t("system.unknownEvent");
     return text;
   }
@@ -50,6 +56,20 @@ const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: strin
   if (/[a-f0-9]{16,}/i.test(cleaned)) return t("system.unknownEvent");
   return cleaned;
 };
+
+// When active messages change, load profiles for addresses in system messages.
+// System messages reference senders/targets who may no longer be room members,
+// so loadProfilesForRoomIds (member-based) misses them.
+const userStore = useUserStore();
+watch(() => chatStore.activeMessages, (msgs) => {
+  const addrs: string[] = [];
+  for (const m of msgs) {
+    if (m.type !== MessageType.system || !m.systemMeta) continue;
+    if (m.systemMeta.senderAddr && !userStore.users[m.systemMeta.senderAddr]) addrs.push(m.systemMeta.senderAddr);
+    if (m.systemMeta.targetAddr && !userStore.users[m.systemMeta.targetAddr]) addrs.push(m.systemMeta.targetAddr);
+  }
+  if (addrs.length > 0) userStore.enqueueProfiles([...new Set(addrs)]);
+}, { immediate: true });
 
 // Provide search query for MessageContent highlighting
 const searchQuery = ref("");
@@ -573,7 +593,7 @@ watch(
       } else if (cacheAge > STALE_THRESHOLD) {
         refreshingStaleCache.value = true;
         loadMessages(roomId).catch(() => {}).finally(() => { refreshingStaleCache.value = false; });
-      } else {
+      } else if (!chatStore.isRoomTimelineLoaded(roomId)) {
         loadMessages(roomId).catch(() => {});
       }
     }

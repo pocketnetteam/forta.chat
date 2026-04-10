@@ -695,6 +695,14 @@ export class Pcrypto {
           body: {} as Record<string, unknown>,
         };
 
+        if (_users.length === 0) {
+          console.error("[pcrypto] encryptEvent: preparedUsers returned EMPTY!",
+            "block=" + pcrypto.currentblock.height,
+            "allMembers=" + allMembers.length,
+            "usersinfo keys:", Object.keys(usersinfo).map(k => k.slice(0, 10) + ":" + (usersinfo[k]?.keys?.length ?? 0)),
+          );
+        }
+
         const body: Record<string, unknown> = {};
         for (let i = 0; i < _users.length; i++) {
           const user = _users[i];
@@ -1006,6 +1014,15 @@ export class Pcrypto {
         const workerUsers = prepareWorkerUsers(null, v || version);
         const myId = pcrypto.user!.userinfo!.id;
         const privateKeys = getPrivateKeysHex();
+
+        if (!workerUsers.find(u => u.id === userid)) {
+          console.error("[pcrypto] _encrypt: targetUserId not in workerUsers!",
+            "target=" + userid.slice(0, 10),
+            "workerIds=" + workerUsers.map(u => u.id.slice(0, 10)).join(","),
+            "block=" + _block,
+            "allUsersinfo=" + Object.keys(usersinfo).map(k => k.slice(0, 10) + ":" + (usersinfo[k]?.keys?.length ?? 0)).join(","),
+          );
+        }
 
         return workerEncrypt({
           users: workerUsers,

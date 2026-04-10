@@ -16,7 +16,13 @@ import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
-import { computeKeyboardHeight, shouldScrollIntoView } from "@/shared/lib/keyboard-height";
+import {
+  KeyboardHeightManager,
+  shouldScrollIntoView,
+  isOccludedByKeyboard,
+  kbDebug,
+  kbDebugScroll,
+} from "@/shared/lib/keyboard-height";
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
@@ -229,52 +235,86 @@ onMounted(async () => {
     }
   }
 
-  // Keyboard height detection: native IME insets (primary) + visualViewport (fallback).
-  // With adjustNothing, the OS does NOT resize the WebView — our CSS padding is the sole
-  // mechanism that lifts content above the keyboard. No anti-double-push needed.
-  const updateKeyboardHeight = (e?: Event) => {
-    const isNativeEvent = e?.type === "native-keyboard-change";
-    const nativeKbh = isNativeEvent
-      ? (e as CustomEvent).detail?.height ?? 0
-      : parseInt(
-          getComputedStyle(document.documentElement).getPropertyValue("--native-keyboard-height") || "0",
-          10,
-        );
+  // ── Keyboard height detection ──
+  // Source priority: native (WindowInsetsCompat) > VirtualKeyboard API > visualViewport.
+  // After a native update, web-derived updates are ignored for a short lock window
+  // to prevent jitter from overlapping event sources.
+  const kbManager = new KeyboardHeightManager();
 
-    const vv = window.visualViewport;
-    const webKbh = vv ? Math.max(0, window.innerHeight - vv.height) : 0;
-
-    const kbh = computeKeyboardHeight({ isNativeEvent, nativeKbh, webKbh });
-    document.documentElement.style.setProperty("--keyboardheight", `${kbh}px`);
+  const applyHeight = (height: number) => {
+    document.documentElement.style.setProperty("--keyboardheight", `${height}px`);
   };
 
+  const readNativeKbhFromCss = (): number =>
+    parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--native-keyboard-height") || "0",
+      10,
+    );
+
+  const handleNativeKbChange = (e: Event) => {
+    const nativeKbh = (e as CustomEvent).detail?.height ?? 0;
+    const vv = window.visualViewport;
+    const webKbh = vv ? Math.max(0, window.innerHeight - vv.height) : 0;
+    const h = kbManager.update("native", { isNativeEvent: true, nativeKbh, webKbh });
+    if (h !== null) applyHeight(h);
+  };
+
+  const handleWebKbChange = (source: "visualViewport" | "virtualKeyboard", webKbh: number) => {
+    const nativeKbh = readNativeKbhFromCss();
+    const h = kbManager.update(source, { isNativeEvent: false, nativeKbh, webKbh });
+    if (h !== null) applyHeight(h);
+  };
+
+  // 1. Native events — PRIMARY source (from MainActivity.kt WindowInsetsCompat)
+  window.addEventListener("native-keyboard-change", handleNativeKbChange);
+  onUnmounted(() => window.removeEventListener("native-keyboard-change", handleNativeKbChange));
+
+  // 2. VirtualKeyboard API — optional enhancement (experimental, not available everywhere)
+  const vkb = (navigator as any).virtualKeyboard;
+  if (vkb && typeof vkb.addEventListener === "function") {
+    kbDebug("VirtualKeyboard API detected");
+    const handleVkbChange = () => {
+      const rect = vkb.boundingRect;
+      const density = window.devicePixelRatio || 1;
+      const kbhPx = rect ? Math.round(rect.height / density) : 0;
+      handleWebKbChange("virtualKeyboard", kbhPx);
+    };
+    vkb.addEventListener("geometrychange", handleVkbChange);
+    onUnmounted(() => vkb.removeEventListener("geometrychange", handleVkbChange));
+  }
+
+  // 3. visualViewport — baseline web fallback
   if (window.visualViewport) {
     const vv = window.visualViewport;
-    vv.addEventListener("resize", updateKeyboardHeight);
-    // Some Android WebViews (Samsung) fire scroll instead of resize when keyboard toolbar changes
-    vv.addEventListener("scroll", updateKeyboardHeight);
+    const handleVVChange = () => {
+      const webKbh = Math.max(0, window.innerHeight - vv.height);
+      handleWebKbChange("visualViewport", webKbh);
+    };
+    vv.addEventListener("resize", handleVVChange);
+    vv.addEventListener("scroll", handleVVChange);
     onUnmounted(() => {
-      vv.removeEventListener("resize", updateKeyboardHeight);
-      vv.removeEventListener("scroll", updateKeyboardHeight);
+      vv.removeEventListener("resize", handleVVChange);
+      vv.removeEventListener("scroll", handleVVChange);
     });
   }
 
-  // Listen for native keyboard height changes dispatched by MainActivity.kt.
-  // This is the PRIMARY trigger — visualViewport events may not fire on all Android
-  // devices when keyboard is dismissed via Back button or gesture navigation.
-  window.addEventListener("native-keyboard-change", updateKeyboardHeight);
-  onUnmounted(() => window.removeEventListener("native-keyboard-change", updateKeyboardHeight));
-
-  // On native platforms, scroll focused inputs into view when keyboard opens.
-  // Two passes: 300ms (keyboard appearing) and 600ms (delayed toolbar expansion on some keyboards).
+  // ── Conditional scrollIntoView on focus ──
+  // Only scrolls the element into view if it is actually occluded by the keyboard.
+  // Waits 350ms for the keyboard open animation to settle before measuring.
   if (isNative) {
     const handleFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement;
-      if (shouldScrollIntoView(target)) {
-        const scrollIt = () => target.scrollIntoView({ block: "center", behavior: "smooth" });
-        setTimeout(scrollIt, 300);
-        setTimeout(scrollIt, 600);
-      }
+      if (!shouldScrollIntoView(target)) return;
+
+      setTimeout(() => {
+        const kbh = kbManager.currentHeight;
+        if (isOccludedByKeyboard(target, kbh)) {
+          kbDebugScroll(target, kbh, "scroll");
+          target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        } else {
+          kbDebugScroll(target, kbh, "skip");
+        }
+      }, 350);
     };
     document.addEventListener("focusin", handleFocusIn);
     onUnmounted(() => document.removeEventListener("focusin", handleFocusIn));
@@ -297,6 +337,27 @@ onMounted(async () => {
   // Process referral / join links after Matrix is ready
   await processReferral();
   await processJoinRoom();
+
+  // Refresh node time on tab focus / app resume (throttled to 10 min in AppInitializer)
+  const { createAppInitializer } = await import("@/app/providers/initializers/app-initializer");
+  const appInit = createAppInitializer();
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && authStore.isAuthenticated) {
+        appInit.syncNodeTime();
+      }
+    });
+  }
+  if (isNative) {
+    import("@capacitor/app").then(({ App: CapApp }) => {
+      CapApp.addListener("appStateChange", ({ isActive }) => {
+        if (isActive && authStore.isAuthenticated) {
+          appInit.syncNodeTime();
+        }
+      });
+    }).catch(() => {});
+  }
 });
 
 onUnmounted(() => {
