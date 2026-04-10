@@ -20,7 +20,8 @@
     "electron:build:linux": "vite build && electron-builder --config electron-builder.json --linux",
     "cap:build": "vite build && cap sync android",
     "cap:open": "cap open android",
-    "cap:run": "cap run android"
+    "cap:run": "cap run android",
+    "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\""
   },
   "dependencies": {
     "@capacitor-community/file-opener": "^8.0.0",
