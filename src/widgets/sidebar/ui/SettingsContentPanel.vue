@@ -16,10 +16,49 @@ import { Toggle } from "@/shared/ui/toggle";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import EmojiPicker from "@/features/messaging/ui/EmojiPicker.vue";
 import { UserEditForm } from "@/features/user-management";
+import { useLiveQuery, isChatDbReady, getChatDb } from "@/shared/lib/local-db";
+import type { TelemetrySnapshot } from "@/shared/lib/telemetry";
+import { isNative, isAndroid } from "@/shared/lib/platform";
+import { App } from "@capacitor/app";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 import type { SettingsSubView } from "../model/use-sidebar-tab";
 
 const { settingsSubView, closeSettingsContent } = useSidebarTab();
+
+// ─── About section logic ───
+
+const appVersion = ref("");
+const aboutLoading = ref(true);
+
+onMounted(async () => {
+  if (isNative) {
+    try {
+      const info = await App.getInfo();
+      appVersion.value = info.version;
+    } catch {
+      appVersion.value = "";
+    }
+  }
+  aboutLoading.value = false;
+});
+
+const telemetryQuery = isNative
+  ? useLiveQuery(
+      () => isChatDbReady() ? getChatDb().db.syncState.get('device_telemetry') : undefined,
+      undefined,
+      undefined,
+    )
+  : null;
+
+const parsedTelemetry = computed<TelemetrySnapshot | null>(() => {
+  const entry = telemetryQuery?.data.value;
+  if (!entry || typeof entry.value !== 'string') return null;
+  try {
+    return JSON.parse(entry.value) as TelemetrySnapshot;
+  } catch {
+    return null;
+  }
+});
 
 // ─── Appearance logic (only active when view === 'appearance') ───
 
@@ -119,6 +158,7 @@ const title = computed(() => {
   switch (settingsSubView.value) {
     case "profile": return t("settings.editProfile");
     case "appearance": return t("settings.appearance");
+    case "about": return t("settings.about");
     default: return "";
   }
 });
@@ -468,6 +508,95 @@ const title = computed(() => {
           </div>
         </div>
       </Modal>
+    </div>
+
+    <!-- ════════ About ════════ -->
+    <div v-else-if="settingsSubView === 'about'" class="flex-1 overflow-y-auto">
+      <div class="p-4">
+        <!-- App logo & name -->
+        <div class="flex flex-col items-center pb-6 pt-4">
+          <div class="flex h-20 w-20 items-center justify-center rounded-2xl bg-color-bg-ac/10">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-color-bg-ac">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </div>
+          <h2 class="mt-3 text-lg font-semibold text-text-color">Forta Chat</h2>
+          <p v-if="appVersion" class="mt-0.5 text-sm text-text-on-main-bg-color">v{{ appVersion }}</p>
+        </div>
+
+        <!-- Loading skeleton -->
+        <template v-if="aboutLoading && isNative">
+          <div class="space-y-3">
+            <div v-for="i in 5" :key="i" class="flex items-center justify-between rounded-lg bg-background-secondary-theme px-4 py-3">
+              <div class="h-4 w-24 animate-pulse rounded bg-neutral-grad-0" />
+              <div class="h-4 w-20 animate-pulse rounded bg-neutral-grad-0" />
+            </div>
+          </div>
+        </template>
+
+        <!-- Device info (native only) -->
+        <template v-else-if="isNative">
+          <div class="space-y-0.5 rounded-xl bg-background-secondary-theme">
+            <div class="flex items-center justify-between px-4 py-3">
+              <span class="text-sm text-text-on-main-bg-color">{{ t("about.version") }}</span>
+              <span class="font-mono text-sm font-medium text-text-color">{{ appVersion || t("about.unavailable") }}</span>
+            </div>
+            <div class="mx-4 border-t border-neutral-grad-0" />
+
+            <template v-if="parsedTelemetry">
+              <div class="flex items-center justify-between px-4 py-3">
+                <span class="text-sm text-text-on-main-bg-color">{{ t("about.webviewVersion") }}</span>
+                <span class="font-mono text-sm font-medium text-text-color">{{ parsedTelemetry.webViewVersion ?? t("about.unavailable") }}</span>
+              </div>
+              <div class="mx-4 border-t border-neutral-grad-0" />
+
+              <div class="flex items-center justify-between px-4 py-3">
+                <span class="text-sm text-text-on-main-bg-color">{{ t("about.androidVersion") }}</span>
+                <span class="text-sm font-medium text-text-color">{{ parsedTelemetry.androidVersion ?? t("about.unavailable") }}</span>
+              </div>
+              <div class="mx-4 border-t border-neutral-grad-0" />
+
+              <div class="flex items-center justify-between px-4 py-3">
+                <span class="text-sm text-text-on-main-bg-color">{{ t("about.androidSdk") }}</span>
+                <span class="text-sm font-medium text-text-color">{{ parsedTelemetry.androidSdk ?? t("about.unavailable") }}</span>
+              </div>
+              <div class="mx-4 border-t border-neutral-grad-0" />
+
+              <div class="flex items-center justify-between px-4 py-3">
+                <span class="text-sm text-text-on-main-bg-color">{{ t("about.device") }}</span>
+                <span class="text-sm font-medium text-text-color">{{ parsedTelemetry.deviceManufacturer }} {{ parsedTelemetry.deviceModel }}</span>
+              </div>
+              <div class="mx-4 border-t border-neutral-grad-0" />
+
+              <div class="flex items-center justify-between px-4 py-3">
+                <span class="text-sm text-text-on-main-bg-color">{{ t("about.screen") }}</span>
+                <span class="font-mono text-sm font-medium text-text-color">{{ parsedTelemetry.screenWidth }}×{{ parsedTelemetry.screenHeight }} @{{ parsedTelemetry.screenDpr }}x</span>
+              </div>
+            </template>
+
+            <!-- Telemetry not yet available -->
+            <template v-else>
+              <div v-for="i in 5" :key="i">
+                <div class="flex items-center justify-between px-4 py-3">
+                  <div class="h-4 w-24 animate-pulse rounded bg-neutral-grad-0" />
+                  <div class="h-4 w-20 animate-pulse rounded bg-neutral-grad-0" />
+                </div>
+                <div v-if="i < 5" class="mx-4 border-t border-neutral-grad-0" />
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Non-native: just show version -->
+        <template v-else>
+          <div class="rounded-xl bg-background-secondary-theme">
+            <div class="flex items-center justify-between px-4 py-3">
+              <span class="text-sm text-text-on-main-bg-color">{{ t("about.platform") }}</span>
+              <span class="text-sm font-medium text-text-color">Web</span>
+            </div>
+          </div>
+        </template>
+      </div>
     </div>
   </div>
 </template>

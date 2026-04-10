@@ -28,9 +28,6 @@ export class AppRoutes {
     return getRoute(AppPages.welcome, {});
   }
 
-  static getSettings() {
-    return getRoute(AppPages.settings, {});
-  }
 }
 
 function getRoute<T extends object = object>(name: string, params?: T): Route<T> {

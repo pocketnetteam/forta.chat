@@ -229,9 +229,10 @@ const walletStore = useWalletStore();
               <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
-              v-model="sidebarSearchQuery"
+              :value="sidebarSearchQuery"
               :placeholder="searchPlaceholder"
               class="w-full rounded-lg bg-chat-input-bg py-2 pl-8 pr-8 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+              @input="sidebarSearchQuery = ($event.target as HTMLInputElement).value"
             />
             <button
               v-if="sidebarSearchQuery"

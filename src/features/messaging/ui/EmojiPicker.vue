@@ -333,13 +333,26 @@ const setSectionRef = (el: any, idx: number) => {
 }
 
 .emoji-btn {
-  transition: transform 0.1s ease, background-color 0.15s ease;
+  transition: transform 0.1s ease;
   cursor: pointer;
   border-radius: 8px;
+  position: relative;
+}
+.emoji-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-color: rgba(var(--neutral-grad-0), 0.5);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
 }
 .emoji-btn:hover {
-  background-color: rgba(var(--neutral-grad-0), 0.5);
   transform: scale(1.15);
+}
+.emoji-btn:hover::before {
+  opacity: 1;
 }
 .emoji-btn:active {
   transform: scale(0.95);
