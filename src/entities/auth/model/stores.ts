@@ -1245,7 +1245,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const getCachedPost = (txid: string) => appInitializer.getCachedPost(txid);
   const cachePost = (raw: Record<string, unknown>) => appInitializer.cachePost(raw);
 
-  const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }) =>
+  const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }): Promise<{ posts: any[]; height: number }> =>
     appInitializer.getProfileFeed(authorAddress, options);
 
   function setSyncStatusCallback(cb: (state: string) => void) {

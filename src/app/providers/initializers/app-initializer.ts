@@ -2,6 +2,7 @@ import type { UserData } from "./types";
 
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
+import { RpcBatcher } from "@/shared/lib/rpc-batcher";
 
 export interface BastyonPostData {
   txid: string;
@@ -46,6 +47,7 @@ export class AppInitializer {
   private psdk: InstanceType<typeof pSDK> | null = null;
   private _available = false;
   private postCache = new Map<string, BastyonPostData>();
+  private scoresBatcher: RpcBatcher<string, any> | null = null;
 
   constructor(pocketnetInstance: PocketnetInstanceType) {
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
@@ -471,11 +473,15 @@ export class AppInitializer {
 
   async loadPostScores(txid: string): Promise<PostScore[]> {
     if (!this.api) return [];
+    if (!this.scoresBatcher) {
+      this.scoresBatcher = new RpcBatcher({
+        execute: (txids) => this.api!.rpc("getpostscores", txids),
+        keyOf: (item: any) => item.posttxid,
+      });
+    }
     try {
-      const data = await this.api.rpc("getpostscores", [txid]);
-      console.log("[appInit] loadPostScores raw response:", data);
-      if (!Array.isArray(data)) return [];
-      return data.map((s: any) => ({
+      const raw = await this.scoresBatcher.load(txid);
+      return raw.map((s: any) => ({
         address: s.address ?? "",
         value: Number(s.value ?? 0),
         posttxid: s.posttxid ?? txid,
@@ -738,7 +744,7 @@ export class AppInitializer {
   async getProfileFeed(
     authorAddress: string,
     options?: { height?: number; startTxid?: string; count?: number }
-  ): Promise<any[]> {
+  ): Promise<{ posts: any[]; height: number }> {
     try {
       const opts = options ?? {};
       const response = await fetch(
@@ -767,18 +773,20 @@ export class AppInitializer {
       );
       if (!response.ok) {
         console.error("[appInit] getProfileFeed HTTP error:", response.status);
-        return [];
+        return { posts: [], height: 0 };
       }
       const json = await response.json();
       if (json.error) {
         console.error("[appInit] getProfileFeed RPC error:", json.error);
-        return [];
+        return { posts: [], height: 0 };
       }
       const result = json.data ?? json.result ?? json;
-      return Array.isArray(result) ? result : result?.contents ?? [];
+      const posts = Array.isArray(result) ? result : result?.contents ?? [];
+      const height = Number(result?.height ?? json.data?.height ?? 0);
+      return { posts, height };
     } catch (e) {
       console.error("[appInit] getProfileFeed error:", e);
-      return [];
+      return { posts: [], height: 0 };
     }
   }
 

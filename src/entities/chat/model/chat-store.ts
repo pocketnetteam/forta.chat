@@ -280,30 +280,27 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     members: memberIds,
     isGroup,
     updatedAt: lastTs || (() => {
-      // For invites, try to extract origin_server_ts from the invite event itself
-      // instead of using Date.now() which inflates sort position
+      // No timeline events — fall back to state event timestamps so the room
+      // sorts by creation/invite date instead of ending up with updatedAt=0.
       if (membership === "invite") {
         try {
-          // Primary: getMember().event (not always populated by SDK for invites)
           const memberObj = room.currentState?.getMember?.(myUserId);
           const inviteTs = memberObj?.event?.origin_server_ts;
           if (inviteTs && typeof inviteTs === "number") return inviteTs;
         } catch { /* ignore */ }
         try {
-          // Fallback: getStateEvents('m.room.member', myUserId) — always has origin_server_ts
           const stateEvent = room.currentState?.getStateEvents?.("m.room.member", myUserId);
           const stateTs = stateEvent?.event?.origin_server_ts;
           if (stateTs && typeof stateTs === "number") return stateTs;
         } catch { /* ignore */ }
-        try {
-          // Last fallback: room creation event
-          const createEvent = room.currentState?.getStateEvents?.("m.room.create", "");
-          const createTs = createEvent?.event?.origin_server_ts;
-          if (createTs && typeof createTs === "number") return createTs;
-        } catch { /* ignore */ }
-        return 1; // last resort: use minimal timestamp (never Date.now() — inflates sort)
       }
-      return 0;
+      // For ALL rooms (including joined with cleared history): use room creation date
+      try {
+        const createEvent = room.currentState?.getStateEvents?.("m.room.create", "");
+        const createTs = createEvent?.event?.origin_server_ts;
+        if (createTs && typeof createTs === "number") return createTs;
+      } catch { /* ignore */ }
+      return membership === "invite" ? 1 : 0;
     })(),
     membership: membership === "invite" ? "invite" : "join",
     topic,
