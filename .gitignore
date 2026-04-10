@@ -58,3 +58,6 @@ auto-imports.d.ts
 
 # Git worktrees
 .worktrees/
+
+# Planning artifacts
+.planning/

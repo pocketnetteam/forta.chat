@@ -101,6 +101,8 @@ const handleCheckUpdates = async () => {
   }
 };
 
+
+
 const showAddModal = ref(false);
 const showRemoveConfirm = ref(false);
 const removeTargetAddress = ref("");
@@ -141,20 +143,28 @@ const handleLogout = () => {
     <div class="flex-1 overflow-y-auto">
       <!-- Profile header -->
       <div class="flex flex-col items-center px-4 pb-4 pt-6">
-        <Avatar
-          :src="currentUser?.image"
-          :name="currentUser?.name || authStore.address || t('settings.anonymous')"
-          size="xl"
-        />
-        <p class="mt-3 text-lg font-semibold text-text-color">
-          {{ authStore.userInfo?.name || t("settings.anonymous") }}
-        </p>
-        <p
-          v-if="authStore.address"
-          class="mt-0.5 break-all text-center text-xs text-text-on-main-bg-color"
-        >
-          {{ authStore.address }}
-        </p>
+        <!-- Skeleton while user data not yet loaded -->
+        <template v-if="!currentUser && !authStore.userInfo?.name">
+          <div class="h-16 w-16 animate-pulse rounded-full bg-neutral-grad-0" />
+          <div class="mt-3 h-5 w-32 animate-pulse rounded bg-neutral-grad-0" />
+          <div v-if="authStore.address" class="mt-1.5 h-3 w-48 animate-pulse rounded bg-neutral-grad-0" />
+        </template>
+        <template v-else>
+          <Avatar
+            :src="currentUser?.image"
+            :name="currentUser?.name || authStore.userInfo?.name || authStore.address || t('settings.anonymous')"
+            size="xl"
+          />
+          <p class="mt-3 text-lg font-semibold text-text-color">
+            {{ currentUser?.name || authStore.userInfo?.name || t("settings.anonymous") }}
+          </p>
+          <p
+            v-if="authStore.address"
+            class="mt-0.5 break-all text-center text-xs text-text-on-main-bg-color"
+          >
+            {{ authStore.address }}
+          </p>
+        </template>
       </div>
 
       <!-- Multi-account list (shown between profile header and menu items) -->
@@ -364,6 +374,38 @@ const handleLogout = () => {
           >
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        </button>
+
+        <!-- About -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('about')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="16" x2="12" y2="12" />
+            <line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.about") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
           </svg>
         </button>
 

@@ -113,7 +113,7 @@ const handleClose = () => {
             v-if="props.show"
             class="flex flex-col bg-background-total-theme"
             :class="isMobile
-              ? 'h-full w-full pt-safe'
+              ? 'h-full w-full safe-y'
               : 'my-auto max-h-[75vh] w-full max-w-md rounded-xl shadow-xl'"
           >
             <!-- Header -->

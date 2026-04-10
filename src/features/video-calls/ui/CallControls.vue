@@ -304,8 +304,7 @@ watch(
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  transition: background-color 0.18s ease,
-              transform 0.12s ease,
+  transition: transform 0.12s ease,
               box-shadow 0.18s ease;
   outline: none;
   position: relative;
@@ -372,10 +371,19 @@ watch(
 }
 
 .device-item {
-  transition: background-color 0.15s ease;
+  position: relative;
 }
-.device-item:hover {
+.device-item::before {
+  content: '';
+  position: absolute;
+  inset: 0;
   background: rgba(255, 255, 255, 0.06);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.device-item:hover::before {
+  opacity: 1;
 }
 .device-item--active {
   background: rgba(255, 255, 255, 0.1);

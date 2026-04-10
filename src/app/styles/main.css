@@ -179,6 +179,7 @@ html {
   overflow-y: hidden;
   overflow-x: hidden;
   background: rgb(var(--background-total-theme));
+  overscroll-behavior: none;
 }
 
 body {
@@ -187,10 +188,13 @@ body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
+  overscroll-behavior: none;
 }
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 a {

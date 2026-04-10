@@ -4,6 +4,7 @@ import { useAuthStore } from "@/entities/auth";
 import { UserAvatar } from "@/entities/user";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { useCallService } from "@/features/video-calls/model/call-service";
+import { openBastyonProfile } from "@/shared/lib/open-profile-url";
 
 interface Props {
   show: boolean;
@@ -178,16 +179,16 @@ const startCall = (type: "voice" | "video") => {
               </div>
               <!-- Profile link -->
               <div v-if="props.address" class="mt-3">
-                <a
-                  :href="`bastyon://user?address=${props.address}`"
+                <button
                   class="inline-flex items-center gap-2 text-sm text-color-txt-ac hover:underline"
+                  @click="openBastyonProfile(props.address)"
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                     <circle cx="12" cy="7" r="4" />
                   </svg>
                   {{ t("chatInfo.viewProfile") }}
-                </a>
+                </button>
               </div>
             </div>
           </div>

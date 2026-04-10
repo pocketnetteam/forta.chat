@@ -56,6 +56,24 @@ export const setupProviders = async (app: App) => {
     syncStatusBar();
     watch(() => themeStore.isDarkMode, syncStatusBar);
 
+    // Collect device telemetry (non-blocking) and persist to Dexie
+    import('@/shared/lib/telemetry').then(({ collectTelemetry }) => {
+      collectTelemetry().then(async (snapshot) => {
+        const { isChatDbReady, getChatDb } = await import('@/shared/lib/local-db');
+        // Wait for DB to be ready (up to 10s)
+        for (let i = 0; i < 20 && !isChatDbReady(); i++) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (isChatDbReady()) {
+          const kit = getChatDb();
+          await kit.db.syncState.put({
+            key: 'device_telemetry',
+            value: JSON.stringify(snapshot),
+          });
+        }
+      }).catch((e) => console.warn('[Telemetry] Collection failed:', e));
+    }).catch((e) => console.warn('[Telemetry] Module load failed:', e));
+
     // Start Tor daemon in background — does NOT block boot.
     // App loads with direct connections; switches to Tor when ready.
     bootStatus.setStep("tor");

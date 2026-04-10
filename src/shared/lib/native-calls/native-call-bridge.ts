@@ -113,6 +113,11 @@ class NativeCallBridge {
     if (!isNative) return;
     await NativeCall.reportCallEnded({ callId });
   }
+
+  async requestAudioPermission(): Promise<{ granted: boolean }> {
+    if (!isNative) return { granted: true };
+    return NativeCall.requestAudioPermission();
+  }
 }
 
 export const nativeCallBridge = new NativeCallBridge();

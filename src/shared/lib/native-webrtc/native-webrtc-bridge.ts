@@ -105,6 +105,14 @@ export interface NativeWebRTCPlugin {
     event: "onNativeVideoToggle",
     handler: (data: { enabled: boolean }) => void
   ): Promise<PluginListenerHandle>;
+
+  addListener(
+    event: "onAudioError",
+    handler: (data: {
+      type: 'permission_denied' | 'audio_source_failed' | 'focus_lost';
+      message: string;
+    }) => void
+  ): Promise<PluginListenerHandle>;
 }
 
 export const NativeWebRTC =

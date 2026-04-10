@@ -13,6 +13,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -269,6 +270,15 @@ class CallActivity : Activity(), SensorEventListener {
             proximityWakeLock?.let {
                 if (!it.isHeld) it.acquire()
             }
+        }
+
+        // D-10: Restore audio context when returning to active call
+        val hasActiveCall = WebRTCPlugin.manager != null
+        if (hasActiveCall) {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            Log.d("WebRTCAudio", "onResume: restored MODE_IN_COMMUNICATION, re-requesting audio focus")
+            CallForegroundService.reRequestAudioFocus(this)
         }
     }
 

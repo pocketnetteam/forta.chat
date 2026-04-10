@@ -17,6 +17,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.forta.chat.R
 import com.forta.chat.plugins.locale.LocaleHelper
+import com.forta.chat.plugins.webrtc.WebRTCPlugin
 
 /**
  * Foreground service that keeps the call alive when the app is backgrounded.
@@ -73,11 +74,20 @@ class CallForegroundService : Service() {
             }
             context.startService(intent)
         }
+
+        // D-10: Re-request audio focus from CallActivity.onResume
+        private var instance: CallForegroundService? = null
+
+        fun reRequestAudioFocus(context: Context) {
+            instance?.requestAudioFocus()
+                ?: Log.w("WebRTCAudio", "reRequestAudioFocus: service not running")
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var savedVoiceCallVolume: Int = -1
     private var callerName = ""
     private var callType = ""
 
@@ -92,6 +102,7 @@ class CallForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        instance = this
         createNotificationChannel()
     }
 
@@ -130,6 +141,7 @@ class CallForegroundService : Service() {
     override fun onDestroy() {
         releaseWakeLock()
         abandonAudioFocus()
+        instance = null
         super.onDestroy()
     }
 
@@ -216,7 +228,54 @@ class CallForegroundService : Service() {
     // Audio Focus
     // -----------------------------------------------------------------------
 
+    // D-09: Full audio focus change listener with duck/mute/restore
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // D-09: Lower volume to ~30%
+                Log.d("WebRTCAudio", "Focus: DUCK — lowering volume")
+                audioManager?.let { am ->
+                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+                    am.setStreamVolume(
+                        AudioManager.STREAM_VOICE_CALL,
+                        (maxVol * 0.3).toInt().coerceAtLeast(1),
+                        0
+                    )
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                // D-09: Mute local mic
+                Log.d("WebRTCAudio", "Focus: TRANSIENT_LOSS — muting mic")
+                WebRTCPlugin.manager?.setAudioEnabled(false)
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                // D-09: Restore volume + unmute
+                Log.d("WebRTCAudio", "Focus: GAIN — restoring audio")
+                if (savedVoiceCallVolume >= 0) {
+                    audioManager?.setStreamVolume(
+                        AudioManager.STREAM_VOICE_CALL,
+                        savedVoiceCallVolume,
+                        0
+                    )
+                }
+                WebRTCPlugin.manager?.setAudioEnabled(true)
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                // D-09: Permanent loss — log warning, don't drop the call
+                Log.w("WebRTCAudio", "Focus: PERMANENT_LOSS — warning only, call continues")
+            }
+            else -> {
+                Log.d("WebRTCAudio", "Focus: unknown change=$focusChange")
+            }
+        }
+    }
+
     private fun requestAudioFocus() {
+        val am = audioManager ?: return
+
+        // Save current volume for restore (D-09)
+        savedVoiceCallVolume = am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+
         val attrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -225,13 +284,11 @@ class CallForegroundService : Service() {
         audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(attrs)
             .setAcceptsDelayedFocusGain(false)
-            .setOnAudioFocusChangeListener { focusChange ->
-                Log.d(TAG, "Audio focus changed: $focusChange")
-            }
+            .setOnAudioFocusChangeListener(audioFocusChangeListener)
             .build()
 
-        audioManager?.requestAudioFocus(audioFocusRequest!!)
-        Log.d(TAG, "Audio focus requested")
+        val result = am.requestAudioFocus(audioFocusRequest!!)
+        Log.d("WebRTCAudio", "Audio focus requested, result=$result")
     }
 
     private fun abandonAudioFocus() {

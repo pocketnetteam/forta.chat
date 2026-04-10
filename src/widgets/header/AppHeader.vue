@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
+import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 
 const router = useRouter();
 const authStore = useAuthStore();
+const { setTab } = useSidebarTab();
 
 const navigate = (name: string) => {
   router.push({ name });
@@ -32,7 +34,7 @@ const navigate = (name: string) => {
       </button>
       <button
         class="rounded-lg px-3 py-1.5 text-sm text-text-on-main-bg-color hover:bg-neutral-grad-0"
-        @click="navigate('SettingsPage')"
+        @click="navigate('ChatPage'); setTab('settings')"
       >
         Settings
       </button>

@@ -249,6 +249,7 @@ onUnmounted(() => {
 @media (max-width: 640px) {
   .post-modal {
     max-height: 100vh;
+    max-height: 100dvh;
     height: 100%;
     max-width: 100%;
     border-radius: 0;

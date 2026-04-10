@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
 import { useTorStore } from "@/entities/tor";
+import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 
 const authStore = useAuthStore();
 const torStore = useTorStore();
+const { setTab } = useSidebarTab();
 const { t } = useI18n();
 const router = useRouter();
 
@@ -62,7 +64,7 @@ const torDotColor = computed(() => {
         v-if="torDotColor"
         class="tor-badge"
         :title="torStore.info || torStatusText"
-        @click="router.push({ name: 'SettingsPage' })"
+        @click="router.push({ name: 'ChatPage' }); setTab('settings')"
       >
         <span
           class="tor-dot"
@@ -122,10 +124,20 @@ const torDotColor = computed(() => {
   background: rgba(255, 255, 255, 0.06);
   -webkit-app-region: no-drag;
   cursor: pointer;
-  transition: background 0.15s;
+  position: relative;
 }
-.tor-badge:hover {
-  background: rgba(255, 255, 255, 0.12);
+.tor-badge::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.06);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.tor-badge:hover::before {
+  opacity: 1;
 }
 
 .tor-dot {
@@ -158,6 +170,18 @@ const torDotColor = computed(() => {
   height: 32px;
   color: rgb(var(--text-on-main-bg-color));
   -webkit-app-region: no-drag;
-  transition: background-color 0.1s;
+  position: relative;
+}
+.win-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.1);
+  opacity: 0;
+  transition: opacity 0.1s;
+  pointer-events: none;
+}
+.win-btn:hover::before {
+  opacity: 1;
 }
 </style>

@@ -9,9 +9,6 @@
  *   - Appending older messages (history) = adding at the END of the array,
  *     which is the visual TOP — far from the viewport. Zero scroll correction.
  *
- * All items are rendered (no windowing). messageWindowSize in the store
- * already limits the count to 50-200 items — well within DOM budget.
- *
  * PAGINATION STRATEGY:
  * Dexie-level pagination is handled by chat-store:
  *   1. messageWindowSize starts at 50 (reset on room switch)
@@ -23,12 +20,15 @@
  *
  * This means this component never receives more than ~200 items.
  * No progressive rendering or windowing needed here.
+ *
+ * PERF-02: ResizeObserver height cache eliminates synchronous reflow in checkAnchor.
+ * PERF-02: will-change lifecycle promotes GPU layer only during active scroll.
+ * D-02: scrollTop emission normalised via Math.abs for cross-WebView compatibility.
  */
 import {
   ref,
   onMounted,
   onBeforeUnmount,
-  nextTick,
 } from "vue";
 
 // ───────────────── Props / Emits ─────────────────
@@ -54,11 +54,34 @@ const emit = defineEmits<{
 
 const containerRef = ref<HTMLElement | null>(null);
 
+// ───────────────── Height Cache (ResizeObserver) ─────────────────
+const heightCache = new Map<string, number>();
+let resizeObs: ResizeObserver | null = null;
+
+// ───────────────── will-change lifecycle ─────────────────
+const WILL_CHANGE_RELEASE_MS = 150;
+let willChangeTimer: ReturnType<typeof setTimeout> | null = null;
+
 // ───────────────── Scroll handling ─────────────────
 
 const onScroll = () => {
-  if (!containerRef.value) return;
-  emit("scroll", containerRef.value.scrollTop);
+  const el = containerRef.value;
+  if (!el) return;
+
+  // will-change lifecycle: promote layer on scroll start, release after idle
+  if (!willChangeTimer) {
+    el.style.willChange = "transform";
+  }
+  if (willChangeTimer !== null) clearTimeout(willChangeTimer);
+  willChangeTimer = setTimeout(() => {
+    willChangeTimer = null;
+    if (containerRef.value) {
+      containerRef.value.style.willChange = "auto";
+    }
+  }, WILL_CHANGE_RELEASE_MS);
+
+  // Emit normalised scrollTop (D-02: Math.abs for cross-WebView compatibility)
+  emit("scroll", Math.abs(el.scrollTop));
 };
 
 // ───────────────── Public API ─────────────────
@@ -71,7 +94,6 @@ const scrollToIndex = (index: number, opts?: { align?: "start" | "center" | "end
   const el = containerRef.value;
   if (!el || index < 0 || index >= props.items.length) return;
 
-  // Find the DOM element for this item
   const itemEl = el.querySelector(`[data-virtual-id="${CSS.escape(props.items[index].id)}"]`) as HTMLElement | null;
   if (!itemEl) return;
 
@@ -79,30 +101,32 @@ const scrollToIndex = (index: number, opts?: { align?: "start" | "center" | "end
   const itemRect = itemEl.getBoundingClientRect();
   const align = opts?.align ?? "center";
 
-  // Calculate how much to scroll from current position
-  // In column-reverse, items are laid out bottom-to-top
   const itemRelTop = itemRect.top - containerRect.top;
   const itemRelBottom = itemRect.bottom - containerRect.top;
 
   switch (align) {
     case "start":
-      // Align item's top edge with viewport top
       el.scrollTop += itemRelTop;
       break;
     case "center":
-      // Center the item in the viewport
       el.scrollTop += itemRelTop - (containerRect.height - itemRect.height) / 2;
       break;
     case "end":
-      // Align item's bottom edge with viewport bottom
       el.scrollTop += itemRelBottom - containerRect.height;
       break;
   }
 };
 
+/** Check if user is near the bottom (newest messages). Works across WebView scrollTop sign conventions. */
+const isNearBottom = (threshold = 50): boolean => {
+  const el = containerRef.value;
+  if (!el) return true;
+  return Math.abs(el.scrollTop) <= threshold;
+};
+
 /** Expose container element as a getter so the parent always gets the raw HTMLElement. */
 const getContainerEl = () => containerRef.value;
-defineExpose({ scrollToBottom, scrollToIndex, getContainerEl });
+defineExpose({ scrollToBottom, scrollToIndex, getContainerEl, isNearBottom });
 
 // ───────────────── New-message scroll anchoring ─────────────────
 // When a new message arrives at index 0 (visual bottom) while the user
@@ -123,16 +147,22 @@ const checkAnchor = () => {
   const st = el.scrollTop;
   // Chrome returns negative scrollTop for column-reverse
   if (Math.abs(st) > 50) {
-    // Find how many new items were prepended at the bottom
     const oldIdx = props.items.findIndex((it) => it.id === prevFirstId);
     if (oldIdx > 0) {
-      // Measure the actual height of new items
       let addedHeight = 0;
       for (let i = 0; i < oldIdx; i++) {
-        const itemEl = el.querySelector(`[data-virtual-id="${CSS.escape(props.items[i].id)}"]`) as HTMLElement | null;
-        addedHeight += itemEl?.offsetHeight ?? 80;
+        const id = props.items[i].id;
+        // PERF-02: read from cache first, fall back to DOM query
+        const cached = heightCache.get(id);
+        if (cached !== undefined) {
+          addedHeight += cached;
+        } else {
+          const itemEl = el.querySelector(
+            `[data-virtual-id="${CSS.escape(id)}"]`
+          ) as HTMLElement | null;
+          addedHeight += itemEl?.offsetHeight ?? 80;
+        }
       }
-      // Negative scrollTop: subtract height to move further from bottom
       el.scrollTop = st - addedHeight;
     }
   }
@@ -148,7 +178,42 @@ onMounted(() => {
 
   prevFirstId = props.items[0]?.id;
 
-  mutationObserver = new MutationObserver(() => {
+  // ResizeObserver height cache (Chrome 64+; graceful no-op on older WebViews)
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObs = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const target = entry.target as HTMLElement;
+        const vid = target.dataset.virtualId;
+        if (vid) {
+          const h = entry.borderBoxSize?.[0]?.blockSize ?? target.offsetHeight;
+          heightCache.set(vid, h);
+        }
+      }
+    });
+
+    // Observe existing children
+    el.querySelectorAll<HTMLElement>("[data-virtual-id]").forEach((child) => {
+      resizeObs!.observe(child);
+    });
+  }
+
+  mutationObserver = new MutationObserver((mutations) => {
+    // Bridge: keep ResizeObserver in sync with DOM changes
+    for (const mut of mutations) {
+      for (const node of mut.addedNodes) {
+        if (node instanceof HTMLElement && node.dataset.virtualId) {
+          resizeObs?.observe(node);
+        }
+      }
+      for (const node of mut.removedNodes) {
+        if (node instanceof HTMLElement && node.dataset.virtualId) {
+          resizeObs?.unobserve(node);
+          heightCache.delete(node.dataset.virtualId);
+        }
+      }
+    }
+
+    // Existing anchoring logic — unchanged
     if (anchoringRaf !== null) return;
     anchoringRaf = requestAnimationFrame(() => {
       anchoringRaf = null;
@@ -160,7 +225,14 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   mutationObserver?.disconnect();
+  resizeObs?.disconnect();
+  resizeObs = null;
+  heightCache.clear();
   if (anchoringRaf !== null) cancelAnimationFrame(anchoringRaf);
+  if (willChangeTimer !== null) {
+    clearTimeout(willChangeTimer);
+    willChangeTimer = null;
+  }
 });
 </script>
 

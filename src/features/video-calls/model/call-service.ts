@@ -10,12 +10,22 @@ import { playRingtone, playDialtone, playEndTone, stopAllSounds } from "./call-s
 import { checkOtherTabHasCall } from "./call-tab-lock";
 import { isNative } from "@/shared/lib/platform";
 import { installNativeWebRTCProxy, NativeWebRTC } from "@/shared/lib/native-webrtc";
+import { nativeCallBridge } from "@/shared/lib/native-calls";
 
 // Install native WebRTC proxy on mobile — must run before any call is placed.
 // This replaces window.RTCPeerConnection so that the Matrix SDK transparently
 // uses the native Android/iOS WebRTC engine instead of the browser's.
 if (isNative) {
   installNativeWebRTCProxy();
+  // D-11: Listen for native audio errors
+  NativeWebRTC.addListener("onAudioError", (data) => {
+    console.warn(`[call-service] Native audio error: ${data.type} — ${data.message}`);
+    const callStore = useCallStore();
+    if (data.type === "permission_denied") {
+      callStore.updateStatus(CallStatus.failed);
+      callStore.scheduleClearCall(1500);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +416,24 @@ export function useCallService() {
 
     callStore.cancelScheduledClear();
 
+    // D-01: JS-side permission check before call start
+    if (isNative) {
+      try {
+        const { granted } = await nativeCallBridge.requestAudioPermission();
+        if (!granted) {
+          // D-03: reject call on denial, D-04: toast shown via onAudioError event
+          callStore.updateStatus(CallStatus.failed);
+          callStore.scheduleClearCall(1500);
+          return;
+        }
+      } catch (e) {
+        console.error("[call-service] requestAudioPermission failed:", e);
+        callStore.updateStatus(CallStatus.failed);
+        callStore.scheduleClearCall(1500);
+        return;
+      }
+    }
+
     const matrixService = getMatrixClientService();
     const client = matrixService.client;
     if (!client) {
@@ -561,6 +589,24 @@ export function useCallService() {
 
     clearIncomingTimeout();
     stopAllSounds();
+
+    // D-01: JS-side permission check before answering
+    if (isNative) {
+      try {
+        const { granted } = await nativeCallBridge.requestAudioPermission();
+        if (!granted) {
+          callStore.updateStatus(CallStatus.failed);
+          callStore.scheduleClearCall(1500);
+          return;
+        }
+      } catch (e) {
+        console.error("[call-service] requestAudioPermission failed:", e);
+        callStore.updateStatus(CallStatus.failed);
+        callStore.scheduleClearCall(1500);
+        return;
+      }
+    }
+
     callStore.updateStatus(CallStatus.connecting);
 
     // Hint stored device IDs (lightweight, sync) — real fix is post-connect

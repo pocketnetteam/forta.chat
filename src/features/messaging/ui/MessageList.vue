@@ -1400,6 +1400,5 @@ defineExpose({ scrollToMessage, setSearchQuery });
 /* Context menu highlight — full-width background */
 .context-highlight {
   background-color: rgba(var(--color-bg-ac-rgb, 59, 130, 246), 0.08);
-  transition: background-color 0.15s ease;
 }
 </style>
