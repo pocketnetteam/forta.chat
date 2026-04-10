@@ -181,18 +181,20 @@ watch(() => props.show, (v) => {
       </div>
 
       <!-- Fee summary (appears after calculation) -->
-      <transition name="fee-reveal">
-        <div v-if="fees !== null" class="rounded-xl bg-neutral-grad-0/40 px-4 py-3">
-          <div class="flex justify-between text-sm">
-            <span class="text-text-on-main-bg-color">{{ t("wallet.fees") }}</span>
-            <span class="font-medium text-text-color">{{ fees.toFixed(4) }} PKOIN</span>
-          </div>
-          <div class="mt-2 flex justify-between border-t border-neutral-grad-0 pt-2 text-sm">
-            <span class="font-medium text-text-on-main-bg-color">{{ t("wallet.total") }}</span>
-            <span class="text-base font-bold text-text-color">{{ total.toFixed(4) }} PKOIN</span>
+      <div class="fee-reveal-grid" :class="{ 'fee-reveal-grid--open': fees !== null }">
+        <div class="fee-reveal-grid-inner">
+          <div class="rounded-xl bg-neutral-grad-0/40 px-4 py-3">
+            <div class="flex justify-between text-sm">
+              <span class="text-text-on-main-bg-color">{{ t("wallet.fees") }}</span>
+              <span class="font-medium text-text-color">{{ fees?.toFixed(4) }} PKOIN</span>
+            </div>
+            <div class="mt-2 flex justify-between border-t border-neutral-grad-0 pt-2 text-sm">
+              <span class="font-medium text-text-on-main-bg-color">{{ t("wallet.total") }}</span>
+              <span class="text-base font-bold text-text-color">{{ total.toFixed(4) }} PKOIN</span>
+            </div>
           </div>
         </div>
-      </transition>
+      </div>
 
       <!-- Error -->
       <p v-if="error" class="rounded-lg bg-color-bad/10 px-3 py-2 text-xs font-medium text-color-bad">{{ error }}</p>
@@ -244,21 +246,18 @@ watch(() => props.show, (v) => {
 </template>
 
 <style scoped>
-.fee-reveal-enter-active {
-  transition: max-height 0.25s ease, opacity 0.25s ease;
-}
-.fee-reveal-leave-active {
-  transition: max-height 0.15s ease, opacity 0.15s ease;
-}
-.fee-reveal-enter-from,
-.fee-reveal-leave-to {
-  max-height: 0;
+.fee-reveal-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease, opacity 0.25s ease;
   opacity: 0;
-  overflow: hidden;
 }
-.fee-reveal-enter-to,
-.fee-reveal-leave-from {
-  max-height: 100px;
+.fee-reveal-grid--open {
+  grid-template-rows: 1fr;
   opacity: 1;
+}
+.fee-reveal-grid-inner {
+  min-height: 0;
+  overflow: hidden;
 }
 </style>

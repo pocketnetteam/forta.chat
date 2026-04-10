@@ -636,90 +636,99 @@ const handleKitchenSelect = async (imageUrl: string) => {
 <template>
   <div ref="inputRootRef" class="relative border-t border-neutral-grad-0 bg-background-total-theme">
     <!-- Editing bar -->
-    <transition name="input-bar">
-      <div v-if="isEditing" class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
-        <div class="flex h-8 w-8 items-center justify-center text-color-bg-ac">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-          </svg>
+    <div class="input-bar-grid" :class="{ 'input-bar-grid--open': isEditing }">
+      <div class="input-bar-grid-inner">
+        <div class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
+          <div class="flex h-8 w-8 items-center justify-center text-color-bg-ac">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="text-xs font-medium text-color-bg-ac">{{ t("message.editing") }}</div>
+            <div class="truncate text-xs text-text-on-main-bg-color">{{ chatStore.editingMessage?.content }}</div>
+          </div>
+          <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelEdit">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+          </button>
         </div>
-        <div class="min-w-0 flex-1">
-          <div class="text-xs font-medium text-color-bg-ac">{{ t("message.editing") }}</div>
-          <div class="truncate text-xs text-text-on-main-bg-color">{{ chatStore.editingMessage?.content }}</div>
-        </div>
-        <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelEdit">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
-        </button>
       </div>
-    </transition>
+    </div>
 
     <!-- Reply preview bar -->
-    <transition name="input-bar">
-      <div v-if="!isEditing && chatStore.replyingTo" class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
-        <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
-        <div class="min-w-0 flex-1">
-          <div class="truncate text-xs font-medium text-color-bg-ac">{{ chatStore.getDisplayName(chatStore.replyingTo.senderId) }}</div>
-          <div class="truncate text-xs text-text-on-main-bg-color">{{ replyInputPreviewText }}</div>
+    <div class="input-bar-grid" :class="{ 'input-bar-grid--open': !isEditing && chatStore.replyingTo }">
+      <div class="input-bar-grid-inner">
+        <div class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
+          <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-xs font-medium text-color-bg-ac">{{ chatStore.getDisplayName(chatStore.replyingTo?.senderId ?? '') }}</div>
+            <div class="truncate text-xs text-text-on-main-bg-color">{{ replyInputPreviewText }}</div>
+          </div>
+          <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelReply">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+          </button>
         </div>
-        <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelReply">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
-        </button>
       </div>
-    </transition>
+    </div>
 
     <!-- Forward preview bar -->
-    <transition name="input-bar">
-      <div v-if="!isEditing && !chatStore.replyingTo && showForwardPreview" class="relative mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
-        <button class="flex h-8 w-8 items-center justify-center text-color-bg-ac" @click="openForwardOptions">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
-          </svg>
-        </button>
-        <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
-        <div class="min-w-0 flex-1 cursor-pointer" @click="openForwardOptions">
-          <div class="truncate text-xs font-medium text-color-bg-ac">
-            {{ chatStore.forwardingMessage.withSenderInfo ? (chatStore.forwardingMessage.senderName || t("forward.message")) : t("forward.message") }}
+    <div class="input-bar-grid" :class="{ 'input-bar-grid--open': !isEditing && !chatStore.replyingTo && showForwardPreview }">
+      <div class="input-bar-grid-inner">
+        <div class="relative mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
+          <button class="flex h-8 w-8 items-center justify-center text-color-bg-ac" @click="openForwardOptions">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+            </svg>
+          </button>
+          <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
+          <div class="min-w-0 flex-1 cursor-pointer" @click="openForwardOptions">
+            <div class="truncate text-xs font-medium text-color-bg-ac">
+              {{ chatStore.forwardingMessage?.withSenderInfo ? (chatStore.forwardingMessage?.senderName || t("forward.message")) : t("forward.message") }}
+            </div>
+            <div class="truncate text-xs text-text-on-main-bg-color">{{ forwardPreviewText }}</div>
           </div>
-          <div class="truncate text-xs text-text-on-main-bg-color">{{ forwardPreviewText }}</div>
-        </div>
-        <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelForward">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
-        </button>
+          <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelForward">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+          </button>
 
-        <!-- Forward options popup -->
-        <transition name="input-bar">
-          <div v-if="showForwardOptions" class="absolute bottom-full left-2 z-50 mb-1 min-w-[220px] rounded-xl bg-background-total-theme py-1 shadow-lg ring-1 ring-neutral-grad-0">
-            <button
-              class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
-              @click="toggleSenderInfo"
-            >
-              <svg v-if="chatStore.forwardingMessage.withSenderInfo" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
-              <span v-else class="inline-block h-4 w-4" />
-              {{ t("forward.showSender") }}
-            </button>
-            <button
-              class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
-              @click="toggleSenderInfo"
-            >
-              <svg v-if="!chatStore.forwardingMessage.withSenderInfo" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
-              <span v-else class="inline-block h-4 w-4" />
-              {{ t("forward.hideSender") }}
-            </button>
-            <div class="my-1 border-t border-neutral-grad-0" />
-            <button
-              class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
-              @click="changeForwardTarget"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" />
-              </svg>
-              {{ t("forward.changeChat") }}
-            </button>
-          </div>
-        </transition>
+        </div>
       </div>
-    </transition>
+    </div>
+
+    <!-- Forward options popup (outside grid to avoid overflow:hidden clipping) -->
+    <div v-if="showForwardPreview" class="relative">
+      <div class="absolute bottom-full left-2 z-50 mb-1" :class="showForwardOptions ? 'visible opacity-100' : 'invisible opacity-0'" style="transition: opacity 0.2s ease, visibility 0.2s ease;">
+        <div class="min-w-[220px] rounded-xl bg-background-total-theme py-1 shadow-lg ring-1 ring-neutral-grad-0">
+          <button
+            class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
+            @click="toggleSenderInfo"
+          >
+            <svg v-if="chatStore.forwardingMessage?.withSenderInfo" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
+            <span v-else class="inline-block h-4 w-4" />
+            {{ t("forward.showSender") }}
+          </button>
+          <button
+            class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
+            @click="toggleSenderInfo"
+          >
+            <svg v-if="!chatStore.forwardingMessage?.withSenderInfo" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
+            <span v-else class="inline-block h-4 w-4" />
+            {{ t("forward.hideSender") }}
+          </button>
+          <div class="my-1 border-t border-neutral-grad-0" />
+          <button
+            class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
+            @click="changeForwardTarget"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" />
+            </svg>
+            {{ t("forward.changeChat") }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- Forward cancel confirmation modal -->
     <Teleport to="body">
@@ -754,8 +763,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
     </Teleport>
 
     <!-- Link preview bar -->
-    <transition name="input-bar">
-      <div v-if="!isEditing && !chatStore.replyingTo && (linkPreview.loading.value || linkPreview.activePreview.value)" class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
+    <div class="input-bar-grid" :class="{ 'input-bar-grid--open': !isEditing && !chatStore.replyingTo && (linkPreview.loading.value || linkPreview.activePreview.value) }">
+      <div class="input-bar-grid-inner">
+        <div class="mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
         <div class="flex h-8 w-8 shrink-0 items-center justify-center text-text-on-main-bg-color/40">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
@@ -776,8 +786,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
         <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="linkPreview.dismiss()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
         </button>
+        </div>
       </div>
-    </transition>
+    </div>
 
     <!-- === MAIN INPUT ROW — always same height/width, content changes by state === -->
     <div class="relative mx-auto flex max-w-6xl items-center gap-1.5 px-2 py-2">
@@ -971,8 +982,8 @@ const handleKitchenSelect = async (imageUrl: string) => {
     <transition name="circle-fade">
       <div
         v-if="isVideoMode && (videoRecorder.state.value === 'recording' || videoRecorder.state.value === 'locked')"
-        class="absolute bottom-full left-0 right-0 z-40 flex items-center justify-center backdrop-blur-md"
-        style="background: rgba(0, 0, 0, 0.35); top: -100vh;"
+        class="absolute bottom-full left-0 right-0 z-40 flex items-center justify-center backdrop-blur-md video-overlay-pos"
+        style="background: rgba(0, 0, 0, 0.35);"
         @click.self="videoRecorder.state.value === 'locked' ? cancelRec() : undefined"
       >
         <div class="relative flex items-center justify-center" style="width: 250px; height: 250px;">
@@ -1018,9 +1029,20 @@ const handleKitchenSelect = async (imageUrl: string) => {
 .fp-fade-enter-active { transition: opacity 0.25s ease-out; }
 .fp-fade-leave-active { transition: opacity 0.2s ease-in; }
 .fp-fade-enter-from, .fp-fade-leave-to { opacity: 0; }
-.input-bar-enter-active, .input-bar-leave-active { transition: max-height 0.2s ease, opacity 0.2s ease; overflow: hidden; }
-.input-bar-enter-from, .input-bar-leave-to { max-height: 0; opacity: 0; }
-.input-bar-enter-to, .input-bar-leave-from { max-height: 80px; opacity: 1; }
+.input-bar-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease, opacity 0.2s ease;
+  opacity: 0;
+}
+.input-bar-grid--open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.input-bar-grid-inner {
+  min-height: 0;
+  overflow: hidden;
+}
 
 .btn-morph-enter-active { transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.15s ease; }
 .btn-morph-leave-active { transition: transform 0.1s ease-in, opacity 0.1s ease-in; }
@@ -1035,4 +1057,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
 .circle-fade-enter-active { transition: opacity 0.25s ease; }
 .circle-fade-leave-active { transition: opacity 0.2s ease; }
 .circle-fade-enter-from, .circle-fade-leave-to { opacity: 0; }
+
+.video-overlay-pos {
+  top: -100vh;
+  top: -100dvh;
+}
 </style>
