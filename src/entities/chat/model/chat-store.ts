@@ -1134,20 +1134,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     }
     if (relevantChanges.length === 0) return;
-    _dexieRoomMapVersion.value++;
 
     if (_suppressDexieRecompute) {
+      _dexieRoomMapVersion.value++;
       // Accumulate for deferred application — will be applied incrementally in finally block
       _deferredChanges.push(...relevantChanges);
       return;
     }
 
+    // Update all three reactive refs in one synchronous block so Vue batches them
+    // into a single flush. Version counter goes last — computeds that depend on
+    // multiple refs invalidate together.
     dexieRooms.value = Array.from(dexieRoomMap.values());
     if (relevantChanges.length > 100) {
       scheduleFullSortedRebuild();
     } else {
       patchSortedRooms(relevantChanges);
     }
+    _dexieRoomMapVersion.value++;
 
     // Check if any changed rooms just got their preview — stop polling for them
     for (const c of relevantChanges) {
@@ -2336,14 +2340,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Persist decrypted previews to Dexie so the sidebar (sortedRooms) updates
       // and the result survives page reloads. The Dexie write triggers
       // observeRoomChanges → applyDexieDeltas → patchSortedRooms → UI refresh.
+      // Wrapped in a single transaction so all writes produce one batched observer callback.
       const dbKit = chatDbKitRef.value;
       if (dbKit) {
-        for (const { roomId, body } of decryptedResults) {
-          dbKit.db.rooms.update(roomId, {
-            lastMessagePreview: body,
-            lastMessageDecryptionStatus: undefined,
-          }).catch(() => {});
-        }
+        dbKit.db.transaction("rw", dbKit.db.rooms, async () => {
+          for (const { roomId, body } of decryptedResults) {
+            await dbKit.db.rooms.update(roomId, {
+              lastMessagePreview: body,
+              lastMessageDecryptionStatus: undefined,
+            });
+          }
+        }).catch(() => {});
       }
     }
   };
@@ -2419,15 +2426,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       console.log(`[chat-store] synced unreadCount from Matrix for ${updates.length} room(s)`);
 
-      // Force delta propagation so UI updates immediately
-      _dexieRoomMapVersion.value++;
+      // Batch all changes into a single patchSortedRooms call (one array copy + one reactive trigger)
+      const changes: RoomChange[] = [];
       for (const { id, count } of updates) {
         const lr = dexieRoomMap.get(id);
         if (lr) {
           lr.unreadCount = count;
-          patchSortedRooms([{ type: "upsert", room: lr }]);
+          changes.push({ type: "upsert", room: lr });
         }
       }
+      _dexieRoomMapVersion.value++;
+      if (changes.length > 0) patchSortedRooms(changes);
     } catch (e) {
       console.warn("[chat-store] syncAllUnreadFromMatrix failed:", e);
     }
@@ -2465,15 +2474,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       });
 
-      // Update in-memory map + trigger re-sort
+      // Batch all changes into a single patchSortedRooms call
+      const changes: RoomChange[] = [];
       for (const { id, ts } of fixes) {
         const lr = dexieRoomMap.get(id);
         if (lr) {
           lr.lastMessageTimestamp = ts;
           lr.updatedAt = Math.max(lr.updatedAt ?? 0, ts);
-          patchSortedRooms([{ type: "upsert", room: lr }]);
+          changes.push({ type: "upsert", room: lr });
         }
       }
+      if (changes.length > 0) patchSortedRooms(changes);
       _dexieRoomMapVersion.value++;
       console.log(`[chat-store] fixed timestamps for ${fixes.length} room(s)`);
     } catch (e) {
