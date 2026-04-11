@@ -2280,6 +2280,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       }
       triggerRef(rooms);
+
+      // Persist decrypted previews to Dexie so the sidebar (sortedRooms) updates
+      // and the result survives page reloads. The Dexie write triggers
+      // observeRoomChanges → applyDexieDeltas → patchSortedRooms → UI refresh.
+      const dbKit = chatDbKitRef.value;
+      if (dbKit) {
+        for (const { roomId, body } of decryptedResults) {
+          dbKit.db.rooms.update(roomId, {
+            lastMessagePreview: body,
+            lastMessageDecryptionStatus: undefined,
+          }).catch(() => {});
+        }
+      }
     }
   };
 

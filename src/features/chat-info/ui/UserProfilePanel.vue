@@ -2,6 +2,7 @@
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { UserAvatar } from "@/entities/user";
+import { useUserStore } from "@/entities/user/model";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { useCallService } from "@/features/video-calls/model/call-service";
 
@@ -18,6 +19,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const userStore = useUserStore();
 const callService = useCallService();
 
 const userData = ref<{ name: string; about: string; site: string; image: string } | null>(null);
@@ -44,9 +46,11 @@ watch(
   },
 );
 
+const isDeleted = computed(() => userStore.getUser(props.address)?.deleted === true);
+
 const displayName = computed(() => {
+  if (isDeleted.value) return t("profile.deletedAccount");
   if (userData.value?.name) return userData.value.name;
-  // Fall back to address if no name loaded
   return props.address;
 });
 
@@ -115,7 +119,7 @@ const startCall = (type: "voice" | "video") => {
             <div class="flex flex-col items-center gap-3 p-6">
               <UserAvatar :address="props.address" size="xl" />
               <div class="text-center">
-                <h2 class="text-lg font-semibold text-text-color">{{ displayName }}</h2>
+                <h2 :class="isDeleted ? 'text-lg italic text-text-on-main-bg-color' : 'text-lg font-semibold text-text-color'">{{ displayName }}</h2>
               </div>
             </div>
 

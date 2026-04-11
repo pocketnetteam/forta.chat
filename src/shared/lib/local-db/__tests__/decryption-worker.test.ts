@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { DecryptionWorker } from "../decryption-worker";
+import { RoomRepository } from "../room-repository";
 import type { DecryptionJob } from "../schema";
 
 // Minimal in-memory Dexie for tests
@@ -15,7 +16,7 @@ class TestDb extends Dexie {
     this.version(1).stores({
       decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
       messages: "++localId, eventId",
-      rooms: "id",
+      rooms: "id, membership",
     });
   }
 }
@@ -23,10 +24,12 @@ class TestDb extends Dexie {
 function makeWorker(
   db: TestDb,
   decryptFn: (raw: unknown) => Promise<{ body: string }> = async () => ({ body: "decrypted" }),
+  opts?: { withRoomRepo?: boolean },
 ) {
   const getRoomCrypto = vi.fn().mockResolvedValue({ decryptEvent: decryptFn });
-  const worker = new DecryptionWorker(db as any, getRoomCrypto);
-  return { worker, getRoomCrypto };
+  const roomRepo = opts?.withRoomRepo ? new RoomRepository(db as any) : undefined;
+  const worker = new DecryptionWorker(db as any, getRoomCrypto, roomRepo);
+  return { worker, getRoomCrypto, roomRepo };
 }
 
 describe("DecryptionWorker", () => {
@@ -205,6 +208,44 @@ describe("DecryptionWorker", () => {
     const msg = await db.messages.where("eventId").equals("$ev1").first();
     expect(msg?.content).toBe("hello world");
     expect(msg?.decryptionStatus).toBe("ok");
+
+    worker.dispose();
+  });
+
+  it("successful decryption updates room preview and clears decryption status", async () => {
+    const { worker } = makeWorker(db, async () => ({ body: "Hello from DM" }), { withRoomRepo: true });
+
+    await db.rooms.add({
+      id: "!room1",
+      name: "DM Room",
+      membership: "join",
+      isGroup: false,
+      members: [],
+      unreadCount: 0,
+      lastMessagePreview: "[encrypted]",
+      lastMessageTimestamp: 1000,
+      lastMessageSenderId: "@alice:server",
+      lastMessageEventId: "$ev1",
+      lastMessageDecryptionStatus: "pending",
+    } as any);
+
+    await db.messages.add({
+      eventId: "$ev1",
+      roomId: "!room1",
+      senderId: "@alice:server",
+      content: "[encrypted]",
+      timestamp: 1000,
+      type: "text",
+      decryptionStatus: "pending",
+    } as any);
+
+    await worker.enqueue("$ev1", "!room1", '{"type":"m.room.message"}');
+    await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+    await worker.tick();
+
+    const room = await db.rooms.get("!room1");
+    expect(room?.lastMessagePreview).toBe("Hello from DM");
+    expect(room?.lastMessageDecryptionStatus).toBeUndefined();
 
     worker.dispose();
   });

@@ -164,6 +164,7 @@ export const en = {
   "profile.saving": "Saving...",
   "profile.avatarUploading": "Uploading...",
   "profile.avatarError": "Failed to upload avatar",
+  "profile.deletedAccount": "Deleted account",
 
   // ── Message input ──
   "message.editing": "Editing",

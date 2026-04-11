@@ -7,4 +7,6 @@ export interface User {
   language: string;
   /** Timestamp (ms) when this profile was last fetched from the server */
   cachedAt?: number;
+  /** Account was removed from the blockchain */
+  deleted?: boolean;
 }

@@ -215,6 +215,11 @@ const otherMemberAddress = computed(() => {
   return hexAddr ? hexDecode(hexAddr) : "";
 });
 
+const otherMemberDeleted = computed(() => {
+  if (!otherMemberAddress.value) return false;
+  return userStore.getUser(otherMemberAddress.value)?.deleted === true;
+});
+
 const otherMemberName = computed(() =>
   otherMemberAddress.value ? chatStore.getDisplayName(otherMemberAddress.value) : "",
 );
@@ -380,7 +385,11 @@ onUnmounted(() => {
         <Avatar v-else :src="chatStore.activeRoom.avatar" :name="activeRoomTitle.text" size="sm" />
         <div class="min-w-0 flex-1">
           <div v-if="activeRoomTitle.state === 'resolving'" class="h-4 w-28 animate-pulse rounded bg-neutral-grad-2" />
-          <div v-else class="truncate text-[15px] font-medium text-text-color">
+          <div
+            v-else
+            class="truncate text-[15px]"
+            :class="otherMemberDeleted ? 'italic text-text-on-main-bg-color' : 'font-medium text-text-color'"
+          >
             {{ activeRoomTitle.text }}
           </div>
           <div

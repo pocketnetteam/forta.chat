@@ -166,6 +166,7 @@ export const ru: Record<TranslationKey, string> = {
   "profile.saving": "Сохранение...",
   "profile.avatarUploading": "Загрузка...",
   "profile.avatarError": "Не удалось загрузить аватар",
+  "profile.deletedAccount": "Аккаунт удалён",
 
   // ── Message input ──
   "message.editing": "Редактирование",

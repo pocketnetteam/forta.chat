@@ -21,6 +21,7 @@ interface ContactItem {
   name: string;
   address: string | undefined;
   image: string | undefined;
+  deleted: boolean;
 }
 
 const contacts = computed<ContactItem[]>(() => {
@@ -32,12 +33,14 @@ const contacts = computed<ContactItem[]>(() => {
         : undefined;
       const user = address ? userStore.getUser(address) : undefined;
       const resolved = resolveRoomName(room);
+      const deleted = user?.deleted === true;
       return {
         id: room.id,
         _key: room.id,
-        name: user?.name || (isUnresolvedName(resolved) ? "" : resolved),
+        name: deleted ? t("profile.deletedAccount") : (user?.name || (isUnresolvedName(resolved) ? "" : resolved)),
         address,
         image: user?.image,
+        deleted,
       };
     });
 
@@ -214,12 +217,21 @@ const toggleSearch = () => {
             :style="{ height: ITEM_HEIGHT + 'px' }"
             @click="handleSelect((item as ContactItem).id)"
           >
+            <div v-if="(item as ContactItem).deleted" class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-grad-2">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-text-on-main-bg-color">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="17" y1="8" x2="23" y2="14" /><line x1="23" y1="8" x2="17" y2="14" />
+              </svg>
+            </div>
             <Avatar
+              v-else
               :src="(item as ContactItem).image"
               :name="(item as ContactItem).name || (item as ContactItem).address || '?'"
               size="md"
             />
-            <span v-if="!(item as ContactItem).name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <span v-if="(item as ContactItem).deleted" class="truncate text-[15px] italic text-text-on-main-bg-color">
+              {{ (item as ContactItem).name }}
+            </span>
+            <span v-else-if="!(item as ContactItem).name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
             <span v-else class="truncate text-[15px] font-medium text-text-color">
               {{ (item as ContactItem).name }}
             </span>

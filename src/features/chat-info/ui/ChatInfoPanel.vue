@@ -2,6 +2,7 @@
 import { useChatStore } from "@/entities/chat";
 import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
+import { useUserStore } from "@/entities/user/model";
 import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER, APP_PUBLIC_URL } from "@/shared/config";
@@ -29,10 +30,21 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const userStore = useUserStore();
 const callService = useCallService();
 const room = computed(() => chatStore.activeRoom);
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const roomDisplayName = computed(() => resolveRoomName(room.value));
+
+const otherMemberDeleted = computed(() => {
+  const r = room.value;
+  if (!r || r.isGroup) return false;
+  const myHex = authStore.address ? hexEncode(authStore.address) : "";
+  const hexAddr = r.members.find(m => m !== myHex) ?? "";
+  if (!hexAddr) return false;
+  const addr = hexDecode(hexAddr);
+  return userStore.getUser(addr)?.deleted === true;
+});
 
 // ── Screen navigation ──
 const screen = ref<"main" | "gallery">("main");
@@ -471,7 +483,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               </div>
               <div class="text-center">
                 <h2 v-if="isUnresolvedName(roomDisplayName)" class="mx-auto h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
-                <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
+                <h2 v-else :class="otherMemberDeleted ? 'text-lg italic text-text-on-main-bg-color' : 'text-lg font-semibold text-text-color'">{{ roomDisplayName }}</h2>
                 <p class="text-sm text-text-on-main-bg-color">
                   {{ room.isGroup ? t("info.members", { count: chatStore.getRoomMemberCount(room.id) }) : t("info.directMessage") }}
                 </p>

@@ -4,6 +4,7 @@ import { cleanMatrixIds, isUnresolvedName } from "./chat-helpers";
 import { useChatStore } from "../model/chat-store";
 import { useUserStore } from "@/entities/user/model";
 import { useAuthStore } from "@/entities/auth";
+import { tRaw } from "@/shared/lib/i18n";
 import type { ChatRoom } from "../model/types";
 
 // Cache hexDecode results to avoid repeated computation
@@ -25,6 +26,7 @@ function resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHex
     const addr = cachedHexDecode(hexId);
     if (/^[A-Za-z0-9]+$/.test(addr)) {
       const user = allUsers[addr];
+      if (user?.deleted) { names.push(tRaw("profile.deletedAccount")); continue; }
       if (user?.name) { names.push(user.name); continue; }
     }
   }
@@ -32,7 +34,8 @@ function resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHex
   if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
     const avatarAddr = room.avatar.slice("__pocketnet__:".length);
     const user = allUsers[avatarAddr];
-    if (user?.name && user.name !== avatarAddr) names.push(user.name);
+    if (user?.deleted) { names.push(tRaw("profile.deletedAccount")); }
+    else if (user?.name && user.name !== avatarAddr) names.push(user.name);
   }
   return names;
 }

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { getCachedAvatarUrl, isAvatarCached, prefetchAvatar } from "@/shared/lib/avatar-cache";
+
 interface Props {
   src?: string;
   name?: string;
@@ -60,6 +62,21 @@ const fixedSrc = computed(() => {
   return props.src.replace("bastyon.com:8092", "pocketnet.app:8092");
 });
 
+const resolvedSrc = ref("");
+
+watch(fixedSrc, (url) => {
+  imgError.value = false;
+  if (!url) { resolvedSrc.value = ""; return; }
+
+  resolvedSrc.value = getCachedAvatarUrl(url);
+
+  if (!isAvatarCached(url)) {
+    prefetchAvatar(url).then((blobUrl) => {
+      if (fixedSrc.value === url) resolvedSrc.value = blobUrl;
+    });
+  }
+}, { immediate: true });
+
 const showFallback = computed(() => !props.src || imgError.value);
 </script>
 
@@ -73,7 +90,7 @@ const showFallback = computed(() => !props.src || imgError.value);
   >
     <img
       v-if="!showFallback"
-      :src="fixedSrc"
+      :src="resolvedSrc"
       :alt="props.name"
       class="h-full w-full object-cover"
       @error="imgError = true"

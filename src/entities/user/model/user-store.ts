@@ -103,14 +103,14 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   const loadUserIfMissing = (address: string): void => {
     if (!address) return;
     const cached = users.value[address];
+    if (cached?.deleted) return;
     if (cached && cached.name) {
-      // Has real name — check if stale and schedule background revalidation
       if (cached.cachedAt && Date.now() - cached.cachedAt > USER_TTL_MS) {
         _scheduleBackgroundRevalidation([address]);
       }
       return;
     }
-    if (cached && cached.cachedAt && Date.now() - cached.cachedAt < EMPTY_NAME_RETRY_MS) return; // empty but recently tried
+    if (cached && cached.cachedAt && Date.now() - cached.cachedAt < EMPTY_NAME_RETRY_MS) return;
     if (profilePool.has(address)) return;
 
     profilePool.dedupe(address, async () => {
@@ -119,6 +119,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         await appInit.initApi();
         const userData = await appInit.loadUserData([address]);
         if (userData) {
+          const isDeleted = (userData as any).deleted === true;
           users.value[address] = {
             address,
             name: userData.name ?? "",
@@ -127,6 +128,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
             site: userData.site ?? "",
             language: userData.language ?? "",
             cachedAt: Date.now(),
+            ...(isDeleted && { deleted: true }),
           };
           debouncedTrigger();
           debouncedCacheUsers(users.value);
@@ -148,6 +150,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     for (const addr of addrs) {
       const userData = appInit.getUserData(addr);
       if (userData) {
+        const isDeleted = (userData as any).deleted === true;
         users.value[addr] = {
           address: addr,
           name: userData.name ?? "",
@@ -156,6 +159,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           site: userData.site ?? "",
           language: userData.language ?? "",
           cachedAt: setCachedAt ? Date.now() : undefined,
+          ...(isDeleted && { deleted: true }),
         };
         updated = true;
       }
@@ -209,6 +213,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         continue;
       }
       const cached = users.value[a];
+      if (cached?.deleted) continue;
       if (!cached) {
         toLoad.push(a);
       } else if (!cached.name && (!cached.cachedAt || now - cached.cachedAt >= EMPTY_NAME_RETRY_MS)) {

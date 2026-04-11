@@ -23,6 +23,7 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { getDraft } from "@/shared/lib/drafts";
 import { useSelectionStore } from "@/features/selection";
 import { hapticImpact } from "@/shared/lib/haptics";
+import { tRaw } from "@/shared/lib/i18n";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
@@ -123,12 +124,11 @@ function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHe
   for (const hexId of otherMembers) {
     const addr = cachedHexDecode(hexId);
     if (/^[A-Za-z0-9]+$/.test(addr)) {
-      // Priority 1: Pocketnet profile (richest data)
       const user = allUsers[addr];
+      if (user?.deleted) { names.push(tRaw("profile.deletedAccount")); continue; }
       if (user?.name && !isUnresolvedName(user.name) && user.name !== addr) {
         names.push(user.name); continue;
       }
-      // Priority 2: Matrix m.room.member displayname (free, from sync)
       const matrixName = chatStore.getDisplayName(addr);
       if (matrixName && matrixName !== addr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
         names.push(matrixName); continue;
@@ -140,7 +140,9 @@ function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHe
   if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
     const avatarAddr = room.avatar.slice("__pocketnet__:".length);
     const user = allUsers[avatarAddr];
-    if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
+    if (user?.deleted) {
+      names.push(tRaw("profile.deletedAccount"));
+    } else if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
       names.push(user.name);
     } else {
       const matrixName = chatStore.getDisplayName(avatarAddr);
