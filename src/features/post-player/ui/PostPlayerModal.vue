@@ -4,6 +4,7 @@ import type { BastyonPostData } from "@/app/providers/initializers";
 import { usePostScores } from "../model/use-post-scores";
 import { usePostComments } from "../model/use-post-comments";
 import { usePostBoost } from "../model/use-post-boost";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostAuthor from "./PostAuthor.vue";
@@ -53,9 +54,7 @@ const isOwnPost = computed(() => props.post.address === authStore.address);
 const isArticle = computed(() => props.post.settings?.v === "a");
 
 const images = computed(() =>
-  (props.post.images || []).map((img) =>
-    img.startsWith("http") ? img : `https://bastyon.com/images/${img}`
-  )
+  (props.post.images || []).map((img) => normalizePocketnetImageUrl(img))
 );
 
 const handleRate = async (value: number) => {

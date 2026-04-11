@@ -30,6 +30,12 @@ import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
 import { useI18n } from "@/shared/lib/i18n";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
+import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
+import { PROXY_NODES } from "@/shared/config/constants";
+
+// Fire-and-forget: load archived peertube servers list for image URL rewriting.
+// Non-critical — if it fails, images just keep their original URLs.
+loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].port}`);
 
 const isElectron = !!(window as any).electronAPI?.isElectron;
 const { t } = useI18n();

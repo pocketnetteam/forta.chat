@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { getCachedAvatarUrl, isAvatarCached, invalidateCachedAvatar, prefetchAvatar } from "@/shared/lib/avatar-cache";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 
 interface Props {
   src?: string;
@@ -56,11 +57,7 @@ const sizeClass = computed(() => ({
 
 const imgError = ref(false);
 
-/** Fix bastyon.com:8092 → pocketnet.app:8092 (SSL cert mismatch) */
-const fixedSrc = computed(() => {
-  if (!props.src) return "";
-  return props.src.replace("bastyon.com:8092", "pocketnet.app:8092");
-});
+const fixedSrc = computed(() => normalizePocketnetImageUrl(props.src));
 
 const resolvedSrc = ref("");
 
