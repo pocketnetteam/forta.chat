@@ -1,29 +1,22 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
 import { useChatStore } from "@/entities/chat";
-import type { ChatRoom, Message } from "@/entities/chat";
-import { MessageType, MessageStatus } from "@/entities/chat";
-import MessageStatusIcon from "@/features/messaging/ui/MessageStatusIcon.vue";
+import type { ChatRoom } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useChannelStore } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
-import { formatRelativeTime } from "@/shared/lib/format";
-import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
-import { cleanMatrixIds, resolveSystemText, isUnresolvedName, formatGroupMemberNames } from "@/entities/chat/lib/chat-helpers";
-import { useFormatPreview } from "@/shared/lib/utils/format-preview";
-import { getRoomTitleForUI, getMessagePreviewForUI, type DisplayResult } from "@/entities/chat";
-import { useLongPress } from "@/shared/lib/gestures";
+import { cleanMatrixIds, isUnresolvedName, formatGroupMemberNames } from "@/entities/chat/lib/chat-helpers";
+import { getRoomTitleForUI, type DisplayResult } from "@/entities/chat";
 import { ContextMenu } from "@/shared/ui/context-menu";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
-import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
-import { getDraft } from "@/shared/lib/drafts";
 import { useSelectionStore } from "@/features/selection";
-import { hapticImpact } from "@/shared/lib/haptics";
 import { tRaw } from "@/shared/lib/i18n";
+import ChatRoomRow from "./ChatRoomRow.vue";
+import ChannelRow from "./ChannelRow.vue";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
@@ -36,7 +29,6 @@ const authStore = useAuthStore();
 const channelStore = useChannelStore();
 const userStore = useUserStore();
 const { t } = useI18n();
-const { formatPreview } = useFormatPreview();
 const selectionStore = useSelectionStore();
 const emit = defineEmits<{ selectRoom: [roomId: string]; selectChannel: [address: string] }>();
 
@@ -206,77 +198,6 @@ function getRoomTitle(room: ChatRoom): DisplayResult {
   );
 }
 
-/** Unified display state for message preview: resolving → skeleton, failed → fallback, ready → text */
-function getPreview(room: ChatRoom): DisplayResult {
-  // Primary: use room.lastMessage from Dexie LiveRoom
-  if (room.lastMessage) {
-    // Deleted message — show explicit "deleted" text
-    if (room.lastMessage.deleted || (!room.lastMessage.content && room.lastMessage.type === MessageType.text)) {
-      return { state: "ready", text: `🚫 ${t("message.deleted")}` };
-    }
-    // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)
-    const content = room.lastMessage.content;
-    const cleaned = (content && !content.startsWith("[encrypted"))
-      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content)))
-      : content;
-    return getMessagePreviewForUI(
-      cleaned,
-      room.lastMessage.decryptionStatus,
-      t("message.notDecrypted"),
-    );
-  }
-  // Fallback: if Dexie doesn't have lastMessage but messages[] does (loaded via viewport-fetch),
-  // use the last message from the in-memory array
-  const msgs = chatStore.messages[room.id];
-  if (msgs?.length) {
-    const last = msgs[msgs.length - 1];
-    // Deleted message
-    if (last.deleted || (!last.content && last.type === MessageType.text)) {
-      return { state: "ready", text: `🚫 ${t("message.deleted")}` };
-    }
-    // For group chats: if sender name isn't resolved yet, show skeleton instead of raw ID
-    if (room.isGroup && last.senderId) {
-      const senderName = chatStore.getDisplayName(last.senderId);
-      if (isUnresolvedName(senderName)) return { state: "resolving", text: "" };
-    }
-    // System messages: resolve via formatPreview (handles i18n + name resolution)
-    if (last.type === MessageType.system) {
-      return { state: "ready", text: formatPreview(last, room) };
-    }
-    // Strip bastyon links and matrix IDs from fallback preview (same as formatPreview does)
-    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content)));
-    return getMessagePreviewForUI(
-      cleaned,
-      last.decryptionStatus,
-      t("message.notDecrypted"),
-    );
-  }
-  // No lastMessage and no in-memory messages.
-  // Determine skeleton vs "No messages" from Dexie ground truth:
-  //   - lastMessageEventId EXISTS → data is in transit (decrypt/fetch) → skeleton
-  //   - lastMessageEventId ABSENT → truly empty chat → "No messages"
-  const dexieRoom = chatStore.dexieRoomMap.get(room.id);
-  if (dexieRoom?.lastMessageEventId) {
-    return { state: "resolving", text: "" };
-  }
-  return { state: "ready", text: t("contactList.noMessages") };
-}
-
-/** Get the best available timestamp for a room (for sidebar display).
- *  Falls back to Dexie lastMessageTimestamp → updatedAt when ChatRoom.lastMessage is absent. */
-function getRoomTimestamp(room: ChatRoom): number | null {
-  if (room.lastMessage?.timestamp) return room.lastMessage.timestamp;
-  // Fallback: Dexie knows the timestamp even when ChatRoom.lastMessage hasn't been built
-  const lr = chatStore.dexieRoomMap.get(room.id);
-  const ts = lr?.lastMessageTimestamp || lr?.updatedAt || room.updatedAt;
-  return ts && ts > 0 ? ts : null;
-}
-
-/** Check if room data fetch is in error state (for retry UI) */
-function isRoomFetchError(roomId: string): boolean {
-  const state = chatStore.roomFetchStates.get(roomId);
-  return state?.status === "error";
-}
 
 // RecycleScroller ref + item height — needed by both retry watcher and scroll handler
 const scrollerRef = ref<InstanceType<typeof RecycleScroller>>();
@@ -365,55 +286,14 @@ watch(() => userStore.users, () => {
   }
 }, { deep: false });
 
-/** Format last message preview — delegated to shared composable */
-
-/** Get typing users for a room (excluding self) */
-const getTypingText = (roomId: string): string => {
-  const typingUsers = chatStore.getTypingUsers(roomId);
-  const myAddr = authStore.address ?? "";
-  const others = typingUsers.filter(id => id !== myAddr);
-  if (others.length === 0) return "";
-
-  const room = chatStore.rooms.find(r => r.id === roomId);
-  if (!room?.isGroup) {
-    return t("contactList.typing");
-  }
-
-  const names = others.map(id => chatStore.getDisplayName(id));
-  if (names.length === 1) {
-    return t("contactList.typingNamed", { name: names[0] });
-  }
-  if (names.length === 2) {
-    return t("contactList.typingTwo", { name1: names[0], name2: names[1] });
-  }
-  return t("contactList.typingMany", { name: names[0], count: names.length - 1 });
-};
-
-// --- Drafts: reactive map of roomId → draft text ---
-// Bump version when user switches rooms (draft may have changed)
-const draftsVersion = ref(0);
-watch(() => chatStore.activeRoomId, () => { draftsVersion.value++; });
-
-/** Get draft text for a room (reactive via draftsVersion) */
-const getRoomDraft = (roomId: string): string => {
-  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-  draftsVersion.value; // reactive dependency
-  return getDraft(roomId);
-};
-
-/** Channel preview text for "All" tab */
-const getChannelPreview = (channel: Channel): string => {
-  if (!channel.lastContent) return "";
-  const text = channel.lastContent.caption || channel.lastContent.message || "";
-  return text.length > 80 ? text.slice(0, 80) + "..." : text;
-};
 
 const PAGE_SIZE = 50;
 const displayLimit = ref(PAGE_SIZE);
 
 /** Unified list item with a stable `_key` for RecycleScroller.
+ *  _type enables separate view pools (rooms vs channels) to avoid cross-type DOM diffing.
  *  _title is pre-computed to avoid reactive lookup flash during recycling. */
-type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult };
+type UnifiedItem = (ChatRoom | Channel) & { _key: string; _type: "room" | "channel"; _title?: DisplayResult };
 
 // Cache UnifiedItem objects by room id + version to reduce GC pressure.
 // Only create a new object when the room's display-affecting fields change.
@@ -421,6 +301,7 @@ type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult
 // loading (triggerRef on userStore.users → roomNameMap recompute) invalidates
 // stale titles that were computed before profiles arrived.
 const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; preview: string; resolvedName: string; decryptionStatus: string; senderId: string; avatar: string; item: UnifiedItem }>();
+const _channelItemCache = new Map<string, { lastTime: number; name: string; avatar: string; item: UnifiedItem }>();
 
 const allFilteredRooms = computed<UnifiedItem[]>(() => {
   const rooms = chatStore.sortedRooms;
@@ -445,7 +326,7 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
         && cached.avatar === avatar) {
       return cached.item;
     }
-    const item: UnifiedItem = { ...r, _key: r.id, _title: getRoomTitle(r) };
+    const item: UnifiedItem = { ...r, _key: r.id, _type: "room", _title: getRoomTitle(r) };
     _unifiedItemCache.set(r.id, { ts, unread: r.unreadCount, name: r.name, membership: r.membership ?? "join", msgStatus, preview, resolvedName, decryptionStatus, senderId, avatar, item });
     return item;
   };
@@ -453,12 +334,35 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
   if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite").map(toItem);
   if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite").map(toItem);
   if (props.filter === "invites") return rooms.filter(r => r.membership === "invite").map(toItem);
+  if (props.filter === "channels") {
+    return channelStore.channels
+      .map(c => {
+        const lastTime = c.lastContent ? c.lastContent.time : 0;
+        const cached = _channelItemCache.get(c.address);
+        if (cached && cached.lastTime === lastTime && cached.name === c.name && cached.avatar === c.avatar) {
+          return cached.item;
+        }
+        const item: UnifiedItem = { ...c, _key: `ch:${c.address}`, _type: "channel" };
+        _channelItemCache.set(c.address, { lastTime, name: c.name, avatar: c.avatar, item });
+        return item;
+      })
+      .sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
+  }
 
   // "all": merge-sort rooms + channels (both already sorted by time desc).
   // O(n+m) instead of O((n+m) log(n+m)).
   const roomItems: UnifiedItem[] = rooms.map(toItem);
   const channelItems: UnifiedItem[] = channelStore.channels
-    .map(c => ({ ...c, _key: `ch:${c.address}` }))
+    .map(c => {
+      const lastTime = c.lastContent ? c.lastContent.time : 0;
+      const cached = _channelItemCache.get(c.address);
+      if (cached && cached.lastTime === lastTime && cached.name === c.name && cached.avatar === c.avatar) {
+        return cached.item;
+      }
+      const item: UnifiedItem = { ...c, _key: `ch:${c.address}`, _type: "channel" };
+      _channelItemCache.set(c.address, { lastTime, name: c.name, avatar: c.avatar, item });
+      return item;
+    })
     .sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
 
   // Membership rank for tie-breaking: joined rooms > invites > channels
@@ -665,7 +569,6 @@ watch(
 );
 onUnmounted(() => {
   scrollEl?.removeEventListener("scroll", onScrollerScroll);
-  longPressCache.clear();
 });
 
 // Context menu
@@ -725,31 +628,7 @@ const confirmDeleteRoom = () => {
   deleteConfirm.value = { show: false, roomId: null };
 };
 
-// Per-room long press: cache a single useLongPress instance per room
-const longPressCache = new Map<string, ReturnType<typeof useLongPress>>();
-// Suppress contextmenu right after selection activation (same gesture)
-let suppressContextMenu = false;
-
-const getRoomLongPress = (room: ChatRoom) => {
-  let handlers = longPressCache.get(room.id);
-  if (!handlers) {
-    handlers = useLongPress({
-      onTrigger: () => {
-        if (selectionStore.isSelectionMode) return;
-        suppressContextMenu = true;
-        selectionStore.activate(room.id);
-        hapticImpact("MEDIUM").catch(() => {});
-        // Reset after contextmenu event has had a chance to fire
-        setTimeout(() => { suppressContextMenu = false; }, 50);
-      },
-    });
-    longPressCache.set(room.id, handlers);
-  }
-  return handlers;
-};
-
 const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
-  if (suppressContextMenu || selectionStore.isSelectionMode) return;
   ctxMenu.value = { show: true, x: e.clientX, y: e.clientY, roomId: room.id };
 };
 </script>
@@ -785,213 +664,21 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
       :items="filteredRooms"
       :item-size="68"
       key-field="_key"
+      type-field="_type"
       class="h-full"
     >
       <template #default="{ item }">
-        <!-- Channel item (same layout as chat room) -->
-        <button
+        <ChannelRow
           v-if="isChannel(item)"
-          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
-          :class="(item as Channel).address === channelStore.activeChannelAddress ? 'bg-color-bg-ac/10' : ''"
-          @click="handleSelectChannel(item as Channel)"
-        >
-          <div class="relative shrink-0">
-            <Avatar :src="(item as Channel).avatar" :name="(item as Channel).name" size="md" />
-            <!-- Channel (megaphone) badge -->
-            <div class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background-total-theme">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
-                <path d="M3 10v4a1 1 0 0 0 1 1h2l5 4V5L6 9H4a1 1 0 0 0-1 1zm16 2a6 6 0 0 0-3-5.2v10.4A6 6 0 0 0 19 12z" />
-              </svg>
-            </div>
-          </div>
-          <div class="min-w-0 flex-1">
-            <!-- Name row -->
-            <div class="flex items-center justify-between gap-2">
-              <span class="truncate text-[15px] font-medium text-text-color">{{ (item as Channel).name }}</span>
-              <span
-                v-if="(item as Channel).lastContent"
-                class="flex shrink-0 items-center gap-0.5 text-xs text-text-on-main-bg-color"
-              >
-                {{ formatRelativeTime(new Date((item as Channel).lastContent!.time * 1000)) }}
-              </span>
-            </div>
-            <!-- Preview row -->
-            <div class="mt-0.5 flex items-center justify-between gap-2">
-              <span class="truncate text-sm text-text-on-main-bg-color">
-                {{ getChannelPreview(item as Channel) }}
-              </span>
-            </div>
-          </div>
-        </button>
-
-        <!-- Chat room item -->
-        <button
+          :channel="(item as Channel)"
+          @select="handleSelectChannel"
+        />
+        <ChatRoomRow
           v-else
-          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
-          :class="[
-            selectionStore.isSelected((item as ChatRoom).id) ? 'bg-color-bg-ac/8' :
-            (item as ChatRoom).id === chatStore.activeRoomId ? 'bg-color-bg-ac/10' : ''
-          ]"
-          :aria-label="`${item._title?.text || ''}${(item as ChatRoom).unreadCount ? `, ${(item as ChatRoom).unreadCount} unread` : ''}`"
-          @click="handleSelect(item as ChatRoom)"
-          @contextmenu.prevent="(e: MouseEvent) => onRoomContextMenu(e, item as ChatRoom)"
-          @pointerdown="(e: PointerEvent) => getRoomLongPress(item as ChatRoom).onPointerdown(e)"
-          @pointermove="(e: PointerEvent) => getRoomLongPress(item as ChatRoom).onPointermove(e)"
-          @pointerup="() => getRoomLongPress(item as ChatRoom).onPointerup()"
-          @pointerleave="() => getRoomLongPress(item as ChatRoom).onPointerleave()"
-        >
-          <!-- Avatar — always rendered, decoupled from name resolution to avoid
-               remounting (which re-requests images on every fullRoomRefresh cycle) -->
-          <div class="relative shrink-0">
-            <transition name="check-pop">
-              <div
-                v-if="selectionStore.isSelectionMode"
-                class="absolute inset-0 z-10 flex items-center justify-center rounded-full"
-                :class="selectionStore.isSelected((item as ChatRoom).id)
-                  ? 'bg-color-bg-ac'
-                  : 'bg-black/30'"
-              >
-                <svg
-                  v-if="selectionStore.isSelected((item as ChatRoom).id)"
-                  width="22" height="22" viewBox="0 0 24 24"
-                  fill="none" stroke="white" stroke-width="3"
-                  stroke-linecap="round" stroke-linejoin="round"
-                >
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              </div>
-            </transition>
-            <UserAvatar
-              v-if="(item as ChatRoom).avatar?.startsWith('__pocketnet__:')"
-              :address="(item as ChatRoom).avatar!.replace('__pocketnet__:', '')"
-              size="md"
-            />
-            <Avatar v-else :src="(item as ChatRoom).avatar" :name="item._title?.text || ''" size="md" />
-            <!-- Invite badge (hidden in selection mode) -->
-            <div
-              v-if="!selectionStore.isSelectionMode && (item as ChatRoom).membership === 'invite'"
-              class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-color-bg-ac"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-white">
-                <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z" />
-              </svg>
-            </div>
-            <!-- Group indicator (hidden in selection mode) -->
-            <div
-              v-else-if="!selectionStore.isSelectionMode && (item as ChatRoom).isGroup"
-              class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background-total-theme"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
-                <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
-              </svg>
-            </div>
-          </div>
-
-          <div class="min-w-0 flex-1">
-            <!-- Name row: name + timestamp + pin/mute icons -->
-            <div class="flex items-center justify-between gap-2">
-              <span v-if="item._title?.state === 'resolving'" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
-              <span v-else class="flex items-center gap-1 truncate text-[15px] font-medium text-text-color">
-                {{ item._title?.text }}
-                <svg v-if="chatStore.pinnedRoomIds.has((item as ChatRoom).id)" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-text-on-main-bg-color">
-                  <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
-                </svg>
-                <svg v-if="chatStore.mutedRoomIds.has((item as ChatRoom).id)" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-text-on-main-bg-color">
-                  <path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
-                </svg>
-              </span>
-              <span
-                v-if="getRoomTimestamp(item as ChatRoom)"
-                class="flex shrink-0 items-center gap-0.5 text-xs"
-                :class="(item as ChatRoom).unreadCount > 0 ? 'text-color-bg-ac' : 'text-text-on-main-bg-color'"
-              >
-                <MessageStatusIcon
-                  v-if="(item as ChatRoom).lastMessage?.senderId === authStore.address && (item as ChatRoom).lastMessage!.type !== MessageType.system && (item as ChatRoom).lastMessage!.content !== ''"
-                  :status="(item as ChatRoom).lastMessage!.status"
-                />
-                {{ formatRelativeTime(new Date(getRoomTimestamp(item as ChatRoom)!)) }}
-              </span>
-            </div>
-
-            <!-- Preview row: draft / typing / last message + unread badge -->
-            <div class="mt-0.5 flex items-center justify-between gap-2">
-              <span
-                v-if="getTypingText((item as ChatRoom).id)"
-                class="truncate text-sm text-color-bg-ac"
-              >
-                <span class="inline-flex gap-0.5 align-middle">
-                  <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac [animation-delay:-0.3s]" />
-                  <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac [animation-delay:-0.15s]" />
-                  <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac" />
-                </span>
-                {{ getTypingText((item as ChatRoom).id) }}
-              </span>
-              <span
-                v-else-if="getRoomDraft((item as ChatRoom).id) && (item as ChatRoom).id !== chatStore.activeRoomId"
-                class="truncate text-sm"
-              ><span class="font-medium text-color-bad">{{ t("contactList.draft") }}:</span> <span class="text-text-on-main-bg-color">{{ getRoomDraft((item as ChatRoom).id) }}</span></span>
-              <span v-else-if="(item as ChatRoom).membership === 'invite'" class="truncate text-sm italic text-color-bg-ac">
-                {{ t("contactList.inviteToChat") }}
-              </span>
-              <!-- Fetch error — show retry button -->
-              <span
-                v-else-if="isRoomFetchError((item as ChatRoom).id) && !getPreview(item as ChatRoom).text"
-                class="flex items-center gap-1 truncate text-sm text-text-on-main-bg-color"
-              >
-                <span class="italic opacity-60">{{ t("contactList.loadError") }}</span>
-                <button
-                  class="ml-1 rounded p-0.5 text-xs text-color-bg-ac hover:bg-neutral-grad-2"
-                  @click.stop="chatStore.retryRoomFetch((item as ChatRoom).id)"
-                >↻</button>
-              </span>
-              <!-- Skeleton while encrypted message is being decrypted -->
-              <span
-                v-else-if="getPreview(item as ChatRoom).state === 'resolving'"
-                class="inline-block h-3 w-32 animate-pulse rounded bg-neutral-grad-2"
-              />
-              <!-- Decryption permanently failed — show human-readable fallback -->
-              <span
-                v-else-if="getPreview(item as ChatRoom).state === 'failed'"
-                class="truncate text-sm italic text-text-on-main-bg-color"
-              >
-                {{ getPreview(item as ChatRoom).text }}
-              </span>
-              <span
-                v-else-if="(item as ChatRoom).lastMessage?.callInfo"
-                class="truncate text-sm"
-                :class="(item as ChatRoom).lastMessage!.callInfo!.missed ? 'text-color-bad' : 'italic text-text-on-main-bg-color'"
-              >
-                {{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
-              </span>
-              <span
-                v-else-if="(item as ChatRoom).lastMessage?.type === MessageType.system"
-                class="truncate text-sm italic text-text-on-main-bg-color"
-              >
-                {{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
-              </span>
-              <!-- Fallback: Dexie lastMessage is null but viewport-fetch loaded messages into store -->
-              <span
-                v-else-if="!(item as ChatRoom).lastMessage && getPreview(item as ChatRoom).text"
-                class="truncate text-sm text-text-on-main-bg-color"
-              >
-                {{ getPreview(item as ChatRoom).text }}
-              </span>
-              <span v-else class="truncate text-sm text-text-on-main-bg-color">
-                <span v-if="(item as ChatRoom).lastMessageReaction" class="mr-0.5">{{ (item as ChatRoom).lastMessageReaction!.emoji }}</span>{{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
-              </span>
-              <transition name="badge-pop">
-                <span
-                  v-if="(item as ChatRoom).unreadCount > 0"
-                  class="flex h-[20px] min-w-[20px] shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium text-white"
-                  :class="chatStore.mutedRoomIds.has((item as ChatRoom).id) ? 'bg-neutral-grad-2' : 'bg-color-bg-ac'"
-                  :aria-label="`${(item as ChatRoom).unreadCount} unread messages`"
-                >
-                  {{ (item as ChatRoom).unreadCount > 99 ? "99+" : (item as ChatRoom).unreadCount }}
-                </span>
-              </transition>
-            </div>
-          </div>
-        </button>
+          :room="(item as any)"
+          @select="handleSelect"
+          @contextmenu="onRoomContextMenu"
+        />
       </template>
     </RecycleScroller>
 
@@ -1038,27 +725,14 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
 </template>
 
 <style scoped>
-.badge-pop-enter-active {
-  animation: badge-bounce-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+.fade-enter-active,
+.fade-leave-active { transition: opacity 0.15s ease; }
+.fade-enter-from,
+.fade-leave-to { opacity: 0; }
+
+:deep(.vue-recycle-scroller__item-view) {
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 68px;
 }
-.badge-pop-leave-active {
-  transition: transform 0.15s ease-in, opacity 0.15s ease-in;
-}
-.badge-pop-leave-to {
-  opacity: 0;
-  transform: scale(0);
-}
-@keyframes badge-bounce-in {
-  0%   { transform: scale(0); }
-  60%  { transform: scale(1.2); }
-  100% { transform: scale(1); }
-}
-.check-pop-enter-active {
-  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.1s ease;
-}
-.check-pop-enter-from { transform: scale(0); opacity: 0; }
-.check-pop-leave-active {
-  transition: transform 0.1s ease-in, opacity 0.1s ease-in;
-}
-.check-pop-leave-to { transform: scale(0); opacity: 0; }
 </style>
