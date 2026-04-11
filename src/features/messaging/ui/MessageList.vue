@@ -1182,7 +1182,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
             :class="item.message.senderId === authStore.address ? 'flex-row-reverse' : 'flex-row'"
           >
             <div v-if="item.message.senderId !== authStore.address && themeStore.showAvatarsInChat" class="shrink-0 self-end">
-              <UserAvatar :address="item.message.senderId" size="sm" />
+              <UserAvatar :address="item.message.senderId" size="sm" eager />
             </div>
             <div class="min-w-0 max-w-[80%]">
               <CallEventCard
@@ -1238,7 +1238,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
             @cancel-upload="cancelMediaUpload"
           >
             <template #avatar>
-              <UserAvatar :address="item.message.senderId" size="sm" />
+              <UserAvatar :address="item.message.senderId" size="sm" eager />
             </template>
           </MessageBubble>
           </div>

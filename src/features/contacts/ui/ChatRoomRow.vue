@@ -161,6 +161,7 @@ const handleContextMenu = (e: MouseEvent) => {
         v-if="room.avatar?.startsWith('__pocketnet__:')"
         :address="room.avatar!.replace('__pocketnet__:', '')"
         size="md"
+        eager
       />
       <Avatar v-else :src="room.avatar" :name="room._title?.text || ''" size="md" />
       <!-- Invite badge -->

@@ -11,17 +11,26 @@ const blobCache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
 
 const MAX_ENTRIES = 500;
+const REVOKE_DELAY_MS = 10_000;
 
-/**
- * Return a cached blob URL if available, otherwise the original URL.
- * Always call `prefetchAvatar` first (or in parallel) to start caching.
- */
 export function getCachedAvatarUrl(url: string): string {
   return blobCache.get(url) ?? url;
 }
 
 export function isAvatarCached(url: string): boolean {
   return blobCache.has(url);
+}
+
+/**
+ * Remove a stale cache entry (e.g. when a blob URL was revoked externally
+ * or the `<img>` fired an error on it).  Allows `prefetchAvatar` to re-fetch.
+ */
+export function invalidateCachedAvatar(url: string): void {
+  const blob = blobCache.get(url);
+  if (blob) {
+    blobCache.delete(url);
+    setTimeout(() => URL.revokeObjectURL(blob), REVOKE_DELAY_MS);
+  }
 }
 
 /**
@@ -42,8 +51,8 @@ export function prefetchAvatar(url: string): Promise<string> {
       if (blobCache.size >= MAX_ENTRIES) {
         const oldest = blobCache.keys().next().value!;
         const oldBlob = blobCache.get(oldest);
-        if (oldBlob) URL.revokeObjectURL(oldBlob);
         blobCache.delete(oldest);
+        if (oldBlob) setTimeout(() => URL.revokeObjectURL(oldBlob), REVOKE_DELAY_MS);
       }
       const blobUrl = URL.createObjectURL(blob);
       blobCache.set(url, blobUrl);

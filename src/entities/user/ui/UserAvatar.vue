@@ -6,13 +6,17 @@ import { useLazyLoad } from "@/shared/lib/use-lazy-load";
 interface Props {
   address: string;
   size?: "sm" | "md" | "lg" | "xl";
+  /** Skip IntersectionObserver and render immediately.
+   *  Use inside RecycleScroller where virtualization is already handled. */
+  eager?: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), { size: "md" });
+const props = withDefaults(defineProps<Props>(), { size: "md", eager: false });
 
 const userStore = useUserStore();
 const rootRef = ref<HTMLElement>();
-const { isVisible } = useLazyLoad(rootRef);
+const { isVisible: lazyVisible } = useLazyLoad(rootRef);
+const isVisible = computed(() => props.eager || lazyVisible.value);
 
 const user = computed(() => userStore.getUser(props.address));
 
@@ -30,10 +34,9 @@ const iconSize = computed(() => ({
   xl: 36,
 }[props.size]));
 
-// Only load profile when element is visible
 watch(isVisible, (visible) => {
   if (visible) userStore.loadUserIfMissing(props.address);
-});
+}, { immediate: true });
 
 watch(() => props.address, (addr) => {
   if (isVisible.value) userStore.loadUserIfMissing(addr);

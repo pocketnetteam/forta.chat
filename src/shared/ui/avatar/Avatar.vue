@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCachedAvatarUrl, isAvatarCached, prefetchAvatar } from "@/shared/lib/avatar-cache";
+import { getCachedAvatarUrl, isAvatarCached, invalidateCachedAvatar, prefetchAvatar } from "@/shared/lib/avatar-cache";
 
 interface Props {
   src?: string;
@@ -72,10 +72,30 @@ watch(fixedSrc, (url) => {
 
   if (!isAvatarCached(url)) {
     prefetchAvatar(url).then((blobUrl) => {
-      if (fixedSrc.value === url) resolvedSrc.value = blobUrl;
+      if (fixedSrc.value === url) {
+        resolvedSrc.value = blobUrl;
+        if (blobUrl.startsWith("blob:")) imgError.value = false;
+      }
     });
   }
 }, { immediate: true });
+
+function onImgError() {
+  if (resolvedSrc.value.startsWith("blob:")) {
+    const url = fixedSrc.value;
+    if (!url) return;
+    invalidateCachedAvatar(url);
+    resolvedSrc.value = url;
+    prefetchAvatar(url).then((blobUrl) => {
+      if (fixedSrc.value === url) {
+        resolvedSrc.value = blobUrl;
+        if (blobUrl.startsWith("blob:")) imgError.value = false;
+      }
+    });
+    return;
+  }
+  imgError.value = true;
+}
 
 const showFallback = computed(() => !props.src || imgError.value);
 </script>
@@ -89,12 +109,14 @@ const showFallback = computed(() => !props.src || imgError.value);
     :aria-label="props.name || 'User avatar'"
   >
     <img
-      v-if="!showFallback"
+      v-if="resolvedSrc"
+      v-show="!showFallback"
       :src="resolvedSrc"
       :alt="props.name"
       class="h-full w-full object-cover"
-      @error="imgError = true"
+      @error="onImgError"
+      @load="imgError = false"
     />
-    <span v-else class="font-medium text-white">{{ initials }}</span>
+    <span v-if="showFallback" class="font-medium text-white">{{ initials }}</span>
   </div>
 </template>
