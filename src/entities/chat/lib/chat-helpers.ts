@@ -208,6 +208,15 @@ export function isUnresolvedName(name: string): boolean {
   return false;
 }
 
+const MAX_GROUP_NAME_MEMBERS = 5;
+
+/** Join member names for a group chat display name (max 5 names, "…" if truncated). */
+export function formatGroupMemberNames(names: string[]): string {
+  if (names.length === 0) return "";
+  const shown = names.slice(0, MAX_GROUP_NAME_MEMBERS);
+  return shown.join(", ") + (names.length > MAX_GROUP_NAME_MEMBERS ? ", …" : "");
+}
+
 /** Check if a string looks like a proper human-readable name (not a hash, hex ID, or raw address) */
 export function looksLikeProperName(name: string, rawAddress?: string): boolean {
   if (!name || name.length < 2) return false;

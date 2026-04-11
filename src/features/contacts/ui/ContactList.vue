@@ -10,7 +10,7 @@ import type { Channel } from "@/entities/channel";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
-import { cleanMatrixIds, resolveSystemText, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import { cleanMatrixIds, resolveSystemText, isUnresolvedName, formatGroupMemberNames } from "@/entities/chat/lib/chat-helpers";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 import { getRoomTitleForUI, getMessagePreviewForUI, type DisplayResult } from "@/entities/chat";
 import { useLongPress } from "@/shared/lib/gestures";
@@ -181,7 +181,16 @@ function _resolveRoomName(room: ChatRoom, allUsers: Record<string, any>, myHexId
   if (room.name?.startsWith("@")) return room.name.slice(1);
   if (!isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
   const names = _resolveMemberNames(room, allUsers, myHexId);
-  if (names.length > 0) return names.join(", ");
+  if (names.length > 0) return formatGroupMemberNames(names);
+  // Fallback for groups (including mis-flagged 1:1): try avatar address, then member address
+  if (room.avatar?.startsWith("__pocketnet__:")) {
+    return room.avatar.slice("__pocketnet__:".length);
+  }
+  const otherMembers = room.members.filter(m => m !== myHexId);
+  if (otherMembers.length > 0) {
+    const addr = cachedHexDecode(otherMembers[0]);
+    if (/^[A-Za-z0-9]+$/.test(addr)) return addr;
+  }
   return cleanMatrixIds(room.name);
 }
 
@@ -278,8 +287,8 @@ const ITEM_HEIGHT = 68;
 // Retry only fires for rooms still unresolved AND currently visible.
 let nameRetryCount = 0;
 let nameRetryTimer: ReturnType<typeof setTimeout> | undefined;
-const MAX_NAME_RETRIES = 3;
-const NAME_RETRY_BASE_MS = 3_000; // 3s, 6s, 12s
+const MAX_NAME_RETRIES = 6;
+const NAME_RETRY_BASE_MS = 2_000; // 2s, 4s, 8s, 16s, 32s, 64s
 
 /** Get room IDs currently in the viewport (or all if scroller not mounted) */
 const getVisibleRoomIds = (): Set<string> => {
@@ -323,6 +332,20 @@ watch(unresolvedRoomSet, (set) => {
     if (toRetry.length === 0) return;
     chatStore.clearProfileCache(toRetry);
     chatStore.loadMembersForRooms(toRetry);
+    // Directly enqueue member profiles — loadMembersForRooms loads Matrix members,
+    // but we also need to ensure Pocketnet profiles are requested
+    const myHex = authStore.address ? hexEncode(authStore.address) : "";
+    const addrs: string[] = [];
+    for (const roomId of toRetry) {
+      const room = chatStore.sortedRooms.find(r => r.id === roomId);
+      if (!room) continue;
+      for (const hexId of room.members) {
+        if (hexId === myHex) continue;
+        const addr = cachedHexDecode(hexId);
+        if (/^[A-Za-z0-9]+$/.test(addr) && !userStore.users[addr]?.name) addrs.push(addr);
+      }
+    }
+    if (addrs.length > 0) userStore.enqueueProfiles(addrs);
   }, delay);
 }, { immediate: true });
 
@@ -594,15 +617,34 @@ watch(scrollerRef, (val) => {
 // This replaces the scroll-dependent loadVisibleRooms for profile loading —
 // profiles are cheap (user data lookups) and loadProfilesForRoomIds deduplicates
 // via profilesRequestedForRooms. This ensures names resolve without scrolling.
+// Also loads profiles for system message sender/target addresses (they may no
+// longer be room members, e.g. the user who left the chat).
+const _enqueuedSysMeta = new Set<string>();
 watch(
   filteredRooms,
   (rooms) => {
     const roomIds: string[] = [];
+    const sysAddrs: string[] = [];
     for (const r of rooms) {
-      if (!isChannel(r)) roomIds.push(r.id);
+      if (isChannel(r)) continue;
+      roomIds.push(r.id);
+      const meta = (r as ChatRoom).lastMessage?.systemMeta;
+      if (meta) {
+        if (meta.senderAddr && !_enqueuedSysMeta.has(meta.senderAddr) && !userStore.users[meta.senderAddr]) {
+          sysAddrs.push(meta.senderAddr);
+          _enqueuedSysMeta.add(meta.senderAddr);
+        }
+        if (meta.targetAddr && !_enqueuedSysMeta.has(meta.targetAddr) && !userStore.users[meta.targetAddr]) {
+          sysAddrs.push(meta.targetAddr);
+          _enqueuedSysMeta.add(meta.targetAddr);
+        }
+      }
     }
     if (roomIds.length > 0) {
       chatStore.loadProfilesForRoomIds(roomIds);
+    }
+    if (sysAddrs.length > 0) {
+      userStore.enqueueProfiles(sysAddrs);
     }
   },
   { immediate: true },

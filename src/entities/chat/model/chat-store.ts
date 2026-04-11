@@ -2,7 +2,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, formatGroupMemberNames, isUnresolvedName } from "../lib/chat-helpers";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
@@ -229,13 +229,22 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
       // If room name is a Matrix ID like @hexid:domain, extract and decode the address
       || (name.startsWith("@") ? matrixIdToAddress(name) : null)
       || name;
-  } else if (name.startsWith("#") && name.length > 20) {
-    // Group with auto-generated hash name: build from member display names
-    const memberNames = members
-      .filter((m: Record<string, unknown>) => getmatrixid(m.userId as string) !== getmatrixid(myUserId))
-      .map((m: Record<string, unknown>) => (m.rawDisplayName as string) || (m.name as string) || "?")
-      .slice(0, 3);
-    displayName = memberNames.join(", ") + (members.length > 4 ? "..." : "");
+  } else if (isUnresolvedName(name) || (name.startsWith("#") && name.length > 20)) {
+    // Group with auto-generated hash name or any unresolved name: build from member display names
+    const otherMembers = members
+      .filter((m: Record<string, unknown>) => getmatrixid(m.userId as string) !== getmatrixid(myUserId));
+    const memberNames = otherMembers
+      .map((m: Record<string, unknown>) => (m.rawDisplayName as string) || (m.name as string) || "")
+      .filter(n => n && n !== "?");
+    if (memberNames.length > 0) {
+      displayName = formatGroupMemberNames(memberNames);
+    } else if (otherMembers.length === 1) {
+      // Single other member — likely a 1:1 incorrectly flagged as group
+      const addr = matrixIdToAddress(otherMembers[0].userId as string);
+      if (addr) {
+        displayName = (nameHints?.[addr]) || addr;
+      }
+    }
   }
 
   // Resolve avatar URL
@@ -1634,6 +1643,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           || (r.lastMessage?.timestamp ?? 0) !== (prev.lastMessageTimestamp ?? 0)
           || prev.membership !== (r.membership ?? "join")
           || prev.avatar !== r.avatar
+          || prev.isGroup !== r.isGroup
+          || (prev.members?.length ?? 0) !== r.members.length
         ) {
           changedForDexie.push(r);
         }
@@ -1774,7 +1785,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     // Phase 2: Apply room member updates from loaded rooms
-    const roomUpdates: Array<{ room: ChatRoom; memberIds: string[]; avatar?: string }> = [];
+    const roomUpdates: Array<{ room: ChatRoom; memberIds: string[]; isGroup?: boolean; avatar?: string; name?: string }> = [];
     for (const mr of toLoad) {
       const roomId = mr.roomId as string;
       const room = getRoomById(roomId);
@@ -1790,27 +1801,68 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       if (addrs.length > 0) matrixRoomAddresses.set(roomId, addrs);
 
-      if (memberIds.length <= room.members.length) continue;
+      // Re-evaluate isGroup now that we have full member data.
+      // Clear stale tetatet cache so isTetatetChat recomputes with correct members.
+      delete (mr as any).tetatet;
+      const freshIsGroup = !kit.isTetatetChat(mr);
+      const isGroupChanged = room.isGroup !== freshIsGroup;
+
+      if (memberIds.length <= room.members.length && !isGroupChanged) continue;
+
       let avatar: string | undefined;
-      if (!room.isGroup) {
-        const otherHex = memberIds.find(id => id !== myHexId);
-        if (otherHex) {
+      let name: string | undefined;
+      if (!freshIsGroup) {
+        // Room is actually a 1:1 — resolve avatar and display name from other member
+        const otherMember = members.find(
+          (m: Record<string, unknown>) => getmatrixid(m.userId as string) !== myHexId,
+        );
+        if (otherMember) {
+          const otherHex = getmatrixid(otherMember.userId as string);
           const decoded = hexDecode(otherHex);
           if (/^[A-Za-z0-9]+$/.test(decoded)) {
             avatar = `__pocketnet__:${decoded}`;
           }
+          // Fix display name for newly-detected 1:1
+          if (isGroupChanged) {
+            const rawDN = (otherMember.rawDisplayName as string) || "";
+            const memberName = (otherMember.name as string) || "";
+            const isHumanName = (s: string) => !!s && !/^[a-f0-9]{20,}$/i.test(s) && !s.startsWith("@");
+            const otherAddr = matrixIdToAddress(otherMember.userId as string);
+            name = (isHumanName(rawDN) ? rawDN : null)
+              || (isHumanName(memberName) ? memberName : null)
+              || (otherAddr && userDisplayNames.value[otherAddr])
+              || otherAddr
+              || undefined;
+          }
         }
       }
-      roomUpdates.push({ room, memberIds, avatar });
+      roomUpdates.push({ room, memberIds, isGroup: isGroupChanged ? freshIsGroup : undefined, avatar, name });
     }
 
     // Single reactive update
-    for (const { room, memberIds, avatar } of roomUpdates) {
+    for (const { room, memberIds, isGroup, avatar, name } of roomUpdates) {
       room.members = memberIds;
+      if (isGroup !== undefined) room.isGroup = isGroup;
       if (avatar) room.avatar = avatar;
+      if (name) room.name = name;
     }
     if (roomUpdates.length > 0) {
       triggerRef(rooms);
+    }
+
+    // Persist isGroup/members/name changes to Dexie
+    if (roomUpdates.length > 0) {
+      const dbKit = chatDbKitRef.value;
+      if (dbKit) {
+        const dexieUpdates = roomUpdates.map(({ room }) => ({
+          id: room.id,
+          name: room.name,
+          avatar: room.avatar,
+          isGroup: room.isGroup,
+          members: room.members,
+        }));
+        dbKit.rooms.bulkSyncRooms(dexieUpdates).catch(() => {});
+      }
     }
 
     // Re-request profiles for ALL rooms that were loaded (not just updated)
@@ -2648,10 +2700,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const matrixRoom = matrixService.getRoom(roomId);
         if (matrixRoom && typeof (matrixRoom as any).loadMembersIfNeeded === "function") {
           (matrixRoom as any).loadMembersIfNeeded().then(() => {
-            // After members load, ensure profiles are fetched for new members
-            if (!profilesRequestedForRooms.has(roomId)) {
-              loadProfilesForRoomIds([roomId]);
+            // Rebuild room from SDK with fresh member data and correct isGroup flag
+            const kit = matrixKitRef.value;
+            if (kit && activeRoomId.value === roomId) {
+              delete (matrixRoom as any).tetatet;
+              const myUid = matrixService.getUserId() ?? "";
+              const rebuilt = buildChatRoom(matrixRoom, kit, myUid);
+              const existing = getRoomById(roomId);
+              if (existing) {
+                if (existing.members.length > rebuilt.members.length) {
+                  rebuilt.members = existing.members;
+                }
+                Object.assign(existing, rebuilt);
+                triggerRef(rooms);
+              }
             }
+            profilesRequestedForRooms.delete(roomId);
+            loadProfilesForRoomIds([roomId]);
           }).catch(() => {});
         }
       } catch {

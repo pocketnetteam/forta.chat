@@ -11,7 +11,7 @@
  *   A bug here breaks: encrypted file decryption, image/video rendering.
  */
 import { describe, it, expect } from "vitest";
-import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds } from "./chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, formatGroupMemberNames } from "./chat-helpers";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MessageType } from "../model/types";
 
@@ -425,6 +425,31 @@ describe("resolveSystemText", () => {
     const result = resolveSystemText("system.nonexistent", "alice_addr", undefined, resolveName, mockT);
     expect(result).toBe("system.nonexistent");
   });
+
+  it("resolver can show 'Unknown User' for short addresses without profile", () => {
+    // Simulates the format-preview resolver pattern: if getDisplayName returns
+    // the raw address AND no profile is loaded, show "Unknown User".
+    const profileCache: Record<string, string> = {};
+    const resolveWithProfileCheck = (addr: string) => {
+      const name = addr === "alice_addr" ? "Alice" : addr; // getDisplayName fallback
+      if (isUnresolvedName(name)) return "Unknown User";
+      if (name === addr && !profileCache[addr]) return "Unknown User";
+      return name;
+    };
+
+    // Known user — resolved from Matrix SDK
+    const result1 = resolveSystemText("system.joined", "alice_addr", undefined, resolveWithProfileCheck, mockT);
+    expect(result1).toBe("Alice joined the chat");
+
+    // Short address, no profile — should show "Unknown User"
+    const result2 = resolveSystemText("system.joined", "maxgr", undefined, resolveWithProfileCheck, mockT);
+    expect(result2).toBe("Unknown User joined the chat");
+
+    // Short address, profile loaded — should show profile name (even if same as addr)
+    profileCache["maxgr"] = "maxgr";
+    const result3 = resolveSystemText("system.joined", "maxgr", undefined, resolveWithProfileCheck, mockT);
+    expect(result3).toBe("maxgr joined the chat");
+  });
 });
 
 // ─── isUnresolvedName ───────────────────────────────────────────
@@ -456,6 +481,15 @@ describe("isUnresolvedName", () => {
     expect(isUnresolvedName("Боб")).toBe(false);
     expect(isUnresolvedName("John_Doe")).toBe(false);
     expect(isUnresolvedName("Perehvat_Upravleniya")).toBe(false);
+  });
+
+  it("does NOT detect short Bastyon usernames as unresolved (pattern-based only)", () => {
+    // Short alphanumeric addresses like "maxgr" or "alice" pass isUnresolvedName.
+    // The caller (format-preview) must apply an additional check (name === addr
+    // && no profile loaded) to correctly handle this case.
+    expect(isUnresolvedName("maxgr")).toBe(false);
+    expect(isUnresolvedName("alice")).toBe(false);
+    expect(isUnresolvedName("bob123")).toBe(false);
   });
 });
 
@@ -505,5 +539,37 @@ describe("matrixIdToAddress — non-printable character validation", () => {
     const addr = "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu";
     const hex = hexEncode(addr).toLowerCase();
     expect(matrixIdToAddress(`@${hex}:server`)).toBe(addr);
+  });
+});
+
+// ─── formatGroupMemberNames ─────────────────────────────────────
+
+describe("formatGroupMemberNames", () => {
+  it("returns empty string for empty array", () => {
+    expect(formatGroupMemberNames([])).toBe("");
+  });
+
+  it("returns single name without ellipsis", () => {
+    expect(formatGroupMemberNames(["Alice"])).toBe("Alice");
+  });
+
+  it("joins up to 5 names with commas", () => {
+    const names = ["Alice", "Bob", "Carol", "Dave", "Eve"];
+    expect(formatGroupMemberNames(names)).toBe("Alice, Bob, Carol, Dave, Eve");
+  });
+
+  it("truncates at 5 names and appends ellipsis", () => {
+    const names = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"];
+    expect(formatGroupMemberNames(names)).toBe("Alice, Bob, Carol, Dave, Eve, …");
+  });
+
+  it("truncates many names at 5", () => {
+    const names = Array.from({ length: 20 }, (_, i) => `User${i + 1}`);
+    expect(formatGroupMemberNames(names)).toBe("User1, User2, User3, User4, User5, …");
+  });
+
+  it("handles exactly 5 names without ellipsis", () => {
+    const names = ["A", "B", "C", "D", "E"];
+    expect(formatGroupMemberNames(names)).toBe("A, B, C, D, E");
   });
 });

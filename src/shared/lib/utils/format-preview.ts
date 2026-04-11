@@ -2,6 +2,7 @@ import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
+import { useUserStore } from "@/entities/user/model";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { cleanMatrixIds, resolveSystemText, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { isEncryptedPlaceholder } from "./is-encrypted-placeholder";
@@ -13,6 +14,7 @@ import { isEncryptedPlaceholder } from "./is-encrypted-placeholder";
 export function useFormatPreview() {
   const chatStore = useChatStore();
   const authStore = useAuthStore();
+  const userStore = useUserStore();
   const { t } = useI18n();
 
   const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
@@ -53,7 +55,13 @@ export function useFormatPreview() {
             msg.systemMeta.targetAddr,
             (addr) => {
               const name = chatStore.getDisplayName(addr);
-              return isUnresolvedName(name) ? t("common.unknownUser") : name;
+              if (isUnresolvedName(name) || (name === addr && !userStore.users[addr]?.name)) {
+                if (!userStore.users[addr]?.name) {
+                  queueMicrotask(() => userStore.enqueueProfiles([addr]));
+                }
+                return t("common.unknownUser");
+              }
+              return name;
             },
             t,
             msg.systemMeta.extra,
@@ -81,9 +89,14 @@ export function useFormatPreview() {
     if (room.isGroup && msg.senderId) {
       const myAddr = authStore.address ?? "";
       const rawName = chatStore.getDisplayName(msg.senderId);
+      const isRawAddr = rawName === msg.senderId && !userStore.users[msg.senderId]?.name;
+      const nameUnresolved = isUnresolvedName(rawName) || isRawAddr;
+      if (nameUnresolved && msg.senderId !== myAddr && !userStore.users[msg.senderId]?.name) {
+        queueMicrotask(() => userStore.enqueueProfiles([msg.senderId]));
+      }
       const senderName = msg.senderId === myAddr
         ? t("contactList.you")
-        : (isUnresolvedName(rawName) ? t("common.unknownUser") : rawName);
+        : (nameUnresolved ? t("common.unknownUser") : rawName);
       preview = `${senderName}: ${preview}`;
     }
     return preview;
