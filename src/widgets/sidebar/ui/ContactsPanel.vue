@@ -117,15 +117,17 @@ watch(scrollerRef, (val) => {
   }
 });
 
+let _initialLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
 onMounted(() => {
   nextTick(loadVisibleContacts);
-  // Retry after layout settles (tab transition)
-  setTimeout(loadVisibleContacts, 350);
+  _initialLoadTimer = setTimeout(() => { _initialLoadTimer = null; loadVisibleContacts(); }, 350);
 });
 
 onBeforeUnmount(() => {
   if (scrollEl) scrollEl.removeEventListener("scroll", onScrollerScroll);
   if (scrollDebounceTimer) clearTimeout(scrollDebounceTimer);
+  if (_initialLoadTimer) { clearTimeout(_initialLoadTimer); _initialLoadTimer = null; }
 });
 
 const handleSelect = (roomId: string) => {

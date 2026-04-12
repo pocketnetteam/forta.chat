@@ -569,6 +569,7 @@ watch(
 );
 onUnmounted(() => {
   scrollEl?.removeEventListener("scroll", onScrollerScroll);
+  if (scrollDebounceTimer) { clearTimeout(scrollDebounceTimer); scrollDebounceTimer = null; }
 });
 
 // Context menu

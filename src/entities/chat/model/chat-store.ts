@@ -795,9 +795,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   });
 
   const activeRoom = computed(() => {
-    // Track in-memory room mutations (triggerRef(rooms)) and Dexie-path updates
-    void rooms.value;
     void _dexieRoomMapVersion.value;
+    // In fallback (non-Dexie) mode, room mutations are signalled via triggerRef(rooms),
+    // so we must track rooms.value to pick up changes.
+    // In Dexie mode, _dexieRoomMapVersion already provides reactivity for room updates,
+    // so we skip the broad rooms.value dependency to avoid invalidation from unrelated
+    // room mutations (e.g. lastMessage updates in OTHER rooms, member loads, preview decryption).
+    if (!chatDbKitRef.value) void rooms.value;
     return activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
   });
 
@@ -844,6 +848,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               && pollInfoShallowEqual(prev.pollInfo, local.pollInfo)
               && prev.deleted === local.deleted
               && prev.edited === local.edited
+              && prev.content === (local.deleted || local.softDeleted ? "" : local.content)
+              && prev.decryptionStatus === ((local.decryptionStatus === "pending" || local.decryptionStatus === "failed") ? local.decryptionStatus : undefined)
               && prev.status === localStatusToMessageStatus(local.status)
               && prev.uploadProgress === local.uploadProgress
               && prev.fileInfo?.url === (local.localBlobUrl || local.fileInfo?.url)) {
@@ -5500,11 +5506,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             // Own receipt from another device → advance inbound read watermark.
             // This is the key cross-device sync path: when desktop reads a message,
             // mobile receives our own receipt via /sync and clears unread here.
-            // Also clear in-memory unread for immediate reactivity
             const inMemRoom = getRoomById(roomId);
             if (inMemRoom && inMemRoom.unreadCount > 0) {
               inMemRoom.unreadCount = 0;
-              triggerRef(rooms);
+              // In Dexie mode, markAsRead below updates dexieRoomMap → _dexieRoomMapVersion++,
+              // which drives sidebar and activeRoom reactivity. triggerRef(rooms) is only
+              // needed in fallback mode where the sidebar reads from rooms.value directly.
+              if (!chatDbKitRef.value) triggerRef(rooms);
             }
 
             // Async: resolve precise timestamp, then commit watermark to Dexie

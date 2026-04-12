@@ -56,6 +56,7 @@ const sending = ref(false);
 let typingTimeout: ReturnType<typeof setTimeout> | null = null;
 let lastTypingSent = 0;
 const TYPING_THROTTLE_MS = 3000;
+let _editScrollTimer: ReturnType<typeof setTimeout> | null = null;
 
 // --- Drafts ---
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -102,6 +103,7 @@ onBeforeUnmount(() => {
   clearTimeout(draftTimer);
   if (typingTimeout) { clearTimeout(typingTimeout); typingTimeout = null; }
   if (recHintTimer) { clearTimeout(recHintTimer); recHintTimer = null; }
+  if (_editScrollTimer) { clearTimeout(_editScrollTimer); _editScrollTimer = null; }
   clearHoldTimer();
   cancelAnimationFrame(resizeRaf);
 });
@@ -113,9 +115,9 @@ watch(() => chatStore.editingMessage, (editing) => {
     nextTick(() => {
       autoGrowSync();
       textareaRef.value?.focus();
-      // Scroll input container into view after keyboard settles (~400ms).
-      // Uses block:"end" to keep input at bottom, not center.
-      setTimeout(() => {
+      if (_editScrollTimer) clearTimeout(_editScrollTimer);
+      _editScrollTimer = setTimeout(() => {
+        _editScrollTimer = null;
         inputRootRef.value?.scrollIntoView({ block: "end", behavior: "smooth" });
       }, 400);
     });

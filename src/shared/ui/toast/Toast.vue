@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed, watch, onBeforeUnmount } from "vue";
+
 interface Props {
   message: string;
   type?: "info" | "success" | "error";
@@ -14,10 +16,17 @@ const typeClasses = computed(() => ({
   error: "bg-color-bad text-white"
 }[props.type]));
 
+let _toastTimer: ReturnType<typeof setTimeout> | null = null;
+
 watch(() => props.show, (val) => {
+  if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
   if (val) {
-    setTimeout(() => emit("close"), 3000);
+    _toastTimer = setTimeout(() => { _toastTimer = null; emit("close"); }, 3000);
   }
+});
+
+onBeforeUnmount(() => {
+  if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
 });
 </script>
 

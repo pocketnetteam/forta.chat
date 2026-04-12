@@ -146,11 +146,14 @@ const handlePollEnd = (messageId: string) => {
   endPoll(messageId);
 };
 
+let _reactionTimer: ReturnType<typeof setTimeout> | null = null;
+
 const handleToggleReactionWithEffect = (messageId: string, emoji: string) => {
   toggleReaction(messageId, emoji);
   if (themeStore.animatedReactions) {
     lastReactionEmoji.value = emoji;
-    setTimeout(() => { lastReactionEmoji.value = null; }, 100);
+    if (_reactionTimer) clearTimeout(_reactionTimer);
+    _reactionTimer = setTimeout(() => { _reactionTimer = null; lastReactionEmoji.value = null; }, 100);
   }
 };
 
@@ -159,7 +162,8 @@ const handleContextReaction = (emoji: string, message: import("@/entities/chat")
   themeStore.addRecentEmoji(emoji);
   if (themeStore.animatedReactions) {
     lastReactionEmoji.value = emoji;
-    setTimeout(() => { lastReactionEmoji.value = null; }, 100);
+    if (_reactionTimer) clearTimeout(_reactionTimer);
+    _reactionTimer = setTimeout(() => { _reactionTimer = null; lastReactionEmoji.value = null; }, 100);
   }
 };
 
@@ -189,6 +193,7 @@ const handleEmojiSelect = (emoji: string) => {
 };
 
 const lastReactionEmoji = ref<string | null>(null);
+const _recentMsgTimers = new Set<ReturnType<typeof setTimeout>>();
 
 const listRef = ref<HTMLElement>();
 const scrollerRef = ref<{ scrollToBottom: () => void; scrollToIndex: (idx: number, opts?: { align?: "start" | "center" | "end" }) => void; getContainerEl: () => HTMLElement | null }>();
@@ -225,6 +230,8 @@ interface VirtualItem {
   index?: number;
   unreadCount?: number;
 }
+
+let _prevVirtualItems: VirtualItem[] = [];
 
 const virtualItems = computed<VirtualItem[]>(() => {
   const msgs = chatStore.activeMessages;
@@ -292,6 +299,21 @@ const virtualItems = computed<VirtualItem[]>(() => {
     }
   }
 
+  // Stabilize: return previous array reference when items are structurally identical.
+  // This prevents reversedItems recomputation and v-for diff when nothing actually changed
+  // (e.g. Dexie liveQuery re-emitted the same data, or a watermark bump had no status effect).
+  if (items.length === _prevVirtualItems.length) {
+    let same = true;
+    for (let i = 0; i < items.length; i++) {
+      const a = items[i], b = _prevVirtualItems[i];
+      if (a.id !== b.id || a.type !== b.type || a.message !== b.message || a.label !== b.label || a.unreadCount !== b.unreadCount) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return _prevVirtualItems;
+  }
+  _prevVirtualItems = items;
   return items;
 });
 
@@ -740,9 +762,11 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
   if (!loading.value) {
     recentMessageIds.value.add(lastMsg.id);
     const capturedId = lastMsg.id;
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      _recentMsgTimers.delete(timer);
       recentMessageIds.value.delete(capturedId);
     }, 350);
+    _recentMsgTimers.add(timer);
   }
 });
 
@@ -1016,9 +1040,13 @@ onUnmounted(() => {
   if (scrollThrottleRaf !== null) cancelAnimationFrame(scrollThrottleRaf);
   if (pendingSettledTimeout !== null) { clearTimeout(pendingSettledTimeout); pendingSettledTimeout = null; }
   if (contentResizeRaf !== null) { cancelAnimationFrame(contentResizeRaf); contentResizeRaf = null; }
+  if (_reactionTimer) { clearTimeout(_reactionTimer); _reactionTimer = null; }
+  for (const t of _recentMsgTimers) clearTimeout(t);
+  _recentMsgTimers.clear();
   clearTimeout(dateHideTimer);
   clearTimeout(scrollStableTimer);
   pendingScrollToBottom = false;
+  _prevVirtualItems = [];
 });
 
 const getDateLabel = (
@@ -1206,7 +1234,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
         <div
           v-else-if="item.type === 'message' && item.message"
           v-track-read
-          v-memo="[item.id, item.message.timestamp, item.message.deleted, item.message.reactions, item.message.pollInfo, item.message.edited, item.message.status, contextMenu.show && contextMenu.message?.id === item.message.id]"
+          v-memo="[item.id, item.message.timestamp, item.message.deleted, item.message.reactions, item.message.pollInfo, item.message.edited, item.message.status, item.message.content, item.message.uploadProgress, item.message.decryptionStatus, item.message.fileInfo?.url, contextMenu.show && contextMenu.message?.id === item.message.id]"
           :class="[getMsgEnterClass(item.message), { 'context-highlight': contextMenu.show && contextMenu.message?.id === item.message.id }]"
           :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
           :data-message-id="item.message.id"
