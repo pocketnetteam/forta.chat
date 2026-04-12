@@ -49,6 +49,9 @@ const searchPlaceholder = computed(() => {
 });
 const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels">("all");
 
+const visitedTabs = ref(new Set<string>(["all"]));
+watch(activeFilter, (tab) => { visitedTabs.value.add(tab); });
+
 const bulkDeleteConfirm = ref(false);
 
 const handleSelectionAction = (type: "delete" | "read" | "pin" | "mute") => {
@@ -278,6 +281,7 @@ const walletStore = useWalletStore();
               </template>
               <template #personal>
                 <ContactList
+                  v-if="visitedTabs.has('personal')"
                   filter="personal"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
@@ -285,6 +289,7 @@ const walletStore = useWalletStore();
               </template>
               <template #groups>
                 <ContactList
+                  v-if="visitedTabs.has('groups')"
                   filter="groups"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
@@ -292,6 +297,7 @@ const walletStore = useWalletStore();
               </template>
               <template #invites>
                 <ContactList
+                  v-if="visitedTabs.has('invites')"
                   filter="invites"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
@@ -299,6 +305,7 @@ const walletStore = useWalletStore();
               </template>
               <template #channels>
                 <ChannelList
+                  v-if="visitedTabs.has('channels')"
                   class="h-full overflow-y-auto"
                   @select-channel="handleSelectRoom"
                 />

@@ -44,6 +44,7 @@ const props = defineProps<{
 
 defineSlots<{
   default(props: { item: T; index: number }): any;
+  bottom?(): any;
 }>();
 
 const emit = defineEmits<{
@@ -171,13 +172,22 @@ onBeforeUnmount(() => {
     class="overflow-y-auto overflow-x-hidden"
     @scroll.passive="onScroll"
   >
+    <!-- #bottom slot: renders at visual bottom (before v-for in DOM = bottom in column-reverse) -->
+    <slot name="bottom" />
     <div
       v-for="(item, i) in items"
       :key="item.id"
       :data-virtual-id="item.id"
-      style="flex-shrink: 0"
+      class="virtual-item"
     >
       <slot :item="item" :index="i" />
     </div>
   </div>
 </template>
+
+<style scoped>
+.virtual-item {
+  flex-shrink: 0;
+  contain: content;
+}
+</style>

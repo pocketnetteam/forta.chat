@@ -332,14 +332,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               }
             }
 
-            // Fetch uncached addresses
+            // Fetch uncached addresses via batched RPC (single getuserprofile call
+            // shared with all concurrent callers — profile loader, other rooms, etc.)
             if (uncachedIndices.length > 0) {
               const uncachedAddrs = uncachedIndices.map(i => rawAddresses[i]);
 
-              const [, rawProfiles] = await Promise.all([
-                appInitializer.loadUsersInfo(uncachedAddrs).catch((e) => { console.warn("[pcrypto] loadUsersInfo failed:", e); }),
-                appInitializer.loadUsersInfoRaw(uncachedAddrs).catch(() => [] as Record<string, unknown>[]),
-              ]);
+              const rawProfiles = await appInitializer.loadUsersInfoRaw(uncachedAddrs).catch(() => [] as Record<string, unknown>[]);
 
               const rawProfileMap = new Map<string, Record<string, unknown>>();
               for (const p of rawProfiles) {

@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { computed, watch, onMounted, onBeforeUnmount } from "vue";
 import type { RecorderState } from "../model/use-voice-recorder";
+import { useViewportWidth, mountViewportListener, unmountViewportListener } from "@/shared/lib/composables/use-viewport-width";
 
 const { t } = useI18n();
 
-// Responsive: track viewport width for adaptive waveform bar count
-const viewportWidth = ref(typeof window !== "undefined" ? window.innerWidth : 400);
-const onResize = () => { viewportWidth.value = window.innerWidth; };
-onMounted(() => window.addEventListener("resize", onResize));
-onBeforeUnmount(() => window.removeEventListener("resize", onResize));
+const viewportWidth = useViewportWidth();
+onMounted(mountViewportListener);
+onBeforeUnmount(unmountViewportListener);
 const barCount = computed(() => viewportWidth.value < 380 ? 12 : viewportWidth.value < 480 ? 20 : 30);
 
 interface Props {
@@ -143,7 +142,7 @@ const waveformBars = computed(() => {
       <div
         v-for="(v, i) in waveformBars"
         :key="i"
-        class="w-1 shrink-0 rounded-full bg-color-bg-ac transition-all"
+        class="w-1 shrink-0 rounded-full bg-color-bg-ac"
         :style="{ height: `${Math.max(3, v * 32)}px` }"
       />
     </div>

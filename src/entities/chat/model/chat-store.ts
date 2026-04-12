@@ -795,8 +795,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   });
 
   const activeRoom = computed(() => {
-    // Access rooms.value to register Vue reactive dependency
+    // Track in-memory room mutations (triggerRef(rooms)) and Dexie-path updates
     void rooms.value;
+    void _dexieRoomMapVersion.value;
     return activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
   });
 
@@ -832,11 +833,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const prev = id ? prevById.get(id) : undefined;
           const isOwnMessage = myAddr && local.senderId === myAddr;
           // Reuse if content unchanged AND status wouldn't change.
-          // Own messages must be re-derived when watermark changes (read receipt arrived).
+          // Own messages: only re-derive when the watermark change actually flips
+          // the derived status (e.g. "sent" → "read"), not on every watermark bump.
           // Also invalidate when reactions or poll votes change — these update the LocalMessage
           // in Dexie without changing its timestamp.
           if (prev && prev.timestamp === local.timestamp
-              && !(watermarkChanged && isOwnMessage)
+              && !(watermarkChanged && isOwnMessage
+                   && prev.status !== deriveOutboundStatus(local.status, local.timestamp, watermark))
               && reactionsShallowEqual(prev.reactions, local.reactions)
               && pollInfoShallowEqual(prev.pollInfo, local.pollInfo)
               && prev.deleted === local.deleted
@@ -1235,7 +1238,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
       }
     },
-    { immediate: true, flush: "sync" },
+    { immediate: true, flush: "pre" },
   );
 
   // Watch for chatDbKit initialization
@@ -2347,6 +2350,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Cap at 20 rooms per cycle to avoid blocking
     const capped = toDecrypt.slice(0, 20);
 
+    // Pre-fetch all member profiles in one batched RPC so that individual room
+    // prepare() calls find addresses in the shared cache (zero additional RPCs).
+    // Without this, each room's crypto prepare sends a separate getuserprofile.
+    const allMemberAddrs = new Set<string>();
+    for (const { matrixRoom: mr } of capped) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const members = (mr as any).getJoinedMembers?.() ?? (mr as any).currentState?.getMembers?.() ?? [];
+        for (const m of members) {
+          const uid = (m.userId ?? m) as string;
+          if (uid) {
+            const addr = matrixIdToAddress(uid);
+            if (addr) allMemberAddrs.add(addr);
+          }
+        }
+      } catch { /* ignore — member extraction is best-effort */ }
+    }
+    if (allMemberAddrs.size > 0) {
+      try {
+        await useUserStore().warmProfileCache([...allMemberAddrs]);
+      } catch { /* non-critical — individual rooms will fetch on demand */ }
+    }
+
     // Decrypt sequentially with yield between each room to keep UI responsive.
     // Previously used Promise.all(batch of 5) which ran 5 heavy ECDH+pbkdf2
     // computations without yielding — causing 370ms+ long tasks.
@@ -3011,10 +3037,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Count of rooms with pending invitations.
-   *  Reads from sortedRooms (Dexie-backed) to stay in sync with the displayed list. */
-  const inviteCount = computed(() =>
-    sortedRooms.value.filter((r) => r.membership === "invite").length
-  );
+   *  Reads from dexieRoomMap via version counter (avoids O(n) sortedRooms dependency).
+   *  Falls back to rooms array for non-Dexie path. */
+  const inviteCount = computed(() => {
+    if (chatDbKitRef.value && dexieRoomMap.size > 0) {
+      void _dexieRoomMapVersion.value;
+      let count = 0;
+      for (const lr of dexieRoomMap.values()) {
+        if (lr.membership === "invite") count++;
+      }
+      return count;
+    }
+    return rooms.value.filter((r) => r.membership === "invite").length;
+  });
 
   const addRoom = (room: ChatRoom) => {
     const existing = getRoomById(room.id);
@@ -5467,7 +5502,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             // mobile receives our own receipt via /sync and clears unread here.
             // Also clear in-memory unread for immediate reactivity
             const inMemRoom = getRoomById(roomId);
-            if (inMemRoom) inMemRoom.unreadCount = 0;
+            if (inMemRoom && inMemRoom.unreadCount > 0) {
+              inMemRoom.unreadCount = 0;
+              triggerRef(rooms);
+            }
 
             // Async: resolve precise timestamp, then commit watermark to Dexie
             resolveReceiptTimestamp(roomId, eventId, receiptTs).then(timestamp => {
@@ -5478,7 +5516,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             continue;
           }
 
-          // Other user's receipt → advance outbound watermark (they read our messages)
+          // Other user's receipt → advance outbound watermark (they read our messages).
+          // Dexie path (writeReceipt → room hooks → applyDexieDeltas → _dexieRoomMapVersion++)
+          // handles reactivity for activeRoomOutboundWatermark and sidebar — no triggerRef needed.
           if (chatDbKitRef.value) {
             resolveReceiptTimestamp(roomId, eventId, receiptTs).then(timestamp => {
               if (timestamp > 0 && chatDbKitRef.value) {
@@ -5493,9 +5533,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
         }
       }
-
-      // Trigger reactivity for in-memory path
-      triggerRef(rooms);
     } catch (e) {
       console.warn("[chat-store] handleReceiptEvent error:", e);
     }

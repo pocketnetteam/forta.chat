@@ -244,7 +244,7 @@ const setSectionRef = (el: any, idx: number) => {
           </div>
 
           <!-- Emoji grid — continuous scroll of all categories -->
-          <div v-if="activeTab === 'emoji'" ref="gridRef" class="min-h-0 flex-1 overflow-y-auto px-2 py-2" @scroll="onGridScroll">
+          <div v-if="activeTab === 'emoji'" ref="gridRef" class="min-h-0 flex-1 overflow-y-auto px-2 py-2" @scroll.passive="onGridScroll">
             <!-- Search results -->
             <template v-if="search">
               <template v-if="filteredEmojis">

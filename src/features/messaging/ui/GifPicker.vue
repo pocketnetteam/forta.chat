@@ -196,7 +196,7 @@ function onTouchMove() {
     <div
       ref="scrollContainerRef"
       class="min-h-0 flex-1 overflow-y-auto px-2 py-1"
-      @scroll="onScroll"
+      @scroll.passive="onScroll"
     >
       <!-- Loading state (only when no results yet) -->
       <div v-if="loading && gifs.length === 0" class="flex h-40 items-center justify-center">

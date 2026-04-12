@@ -50,6 +50,12 @@ export class AppInitializer {
   private _available = false;
   private postCache = new Map<string, BastyonPostData>();
   private scoresBatcher: RpcBatcher<string, any> | null = null;
+  /** Shared across ALL AppInitializer instances — singleton batcher + cache so
+   *  crypto (auth store), profile loader (user store), and contacts store all
+   *  converge into a single getuserprofile RPC. */
+  private static profileBatcher: RpcBatcher<string, Record<string, unknown>> | null = null;
+  private static profileRpcCache = new Map<string, { data: Record<string, unknown>; ts: number }>();
+  private static PROFILE_RPC_CACHE_TTL = 5 * 60 * 1000; // 5 min
 
   constructor(pocketnetInstance: PocketnetInstanceType) {
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
@@ -282,21 +288,33 @@ export class AppInitializer {
   }
 
   /** Load user info for multiple addresses (for encryption key resolution).
-   *  Original bastyon-chat uses light=true: psdk.userInfo.load(addresses, true, reload)
-   *  This uses userInfoLight storage, queue-based processing, and maxcount=70. */
+   *  Routes through the shared getuserprofile batcher and populates the SDK cache
+   *  so getUserData() still returns results. */
   async loadUsersInfo(addresses: string[]): Promise<void> {
-    if (!this.psdk || !addresses.length) return;
-    // Must pass light=true to match original bastyon-chat behavior
-    await this.psdk.userInfo.load(addresses, true);
+    if (!this.api || !addresses.length) return;
+    const raw = await this.loadUsersInfoRaw(addresses);
+    this._insertIntoSdkCache(raw);
   }
 
-  /** Load user info for multiple addresses into light cache.
-   *  Always uses light mode ("1" param) — larger batches (70 vs 10), queue-based.
-   *  After this call, getUserData(address) will return the profile data
-   *  (psdk.userInfo.get checks userInfoFull || userInfoLight). */
+  /** Load user info for multiple addresses into SDK cache.
+   *  Routes through the shared getuserprofile batcher — all concurrent callers
+   *  within 80ms produce a single RPC call. */
   async loadUsersBatch(addresses: string[]): Promise<void> {
-    if (!this.psdk || !addresses.length) return;
-    await this.psdk.userInfo.load(addresses, true);
+    if (!this.api || !addresses.length) return;
+    const raw = await this.loadUsersInfoRaw(addresses);
+    this._insertIntoSdkCache(raw);
+  }
+
+  /** Populate the pSDK userInfoLight cache from raw RPC results so that
+   *  getUserData() returns the data without an extra network call. */
+  private _insertIntoSdkCache(profiles: Record<string, unknown>[]): void {
+    if (!this.psdk || profiles.length === 0) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this.psdk.userInfo as any).insertFromResponseSmall(profiles, true);
+    } catch {
+      // SDK not ready or method unavailable — non-critical
+    }
   }
 
   /** Get cached user data by raw address */
@@ -309,14 +327,56 @@ export class AppInitializer {
     }
   }
 
-  /** Get RAW user profiles via RPC — preserves all fields including numeric `id`.
-   *  Must pass '1' as second param (light mode) to match SDK behavior. */
+  /** Get the shared getuserprofile batcher (static singleton). All AppInitializer
+   *  instances (auth store, user store, contacts) converge here so concurrent
+   *  callers produce at most one RPC per batching window. */
+  private getProfileBatcher(): RpcBatcher<string, Record<string, unknown>> {
+    if (!AppInitializer.profileBatcher) {
+      const api = this.api;
+      AppInitializer.profileBatcher = new RpcBatcher<string, Record<string, unknown>>({
+        execute: (addrs) => api!.rpc("getuserprofile", [addrs, "1"]) as Promise<Record<string, unknown>[]>,
+        keyOf: (item) => (item as Record<string, string>).address,
+        delayMs: 80,
+      });
+    }
+    return AppInitializer.profileBatcher;
+  }
+
+  /** Get RAW user profiles — checks shared in-memory cache first, then uses the
+   *  batched RPC batcher for uncached addresses. All concurrent callers within 80ms
+   *  produce a single getuserprofile RPC. Results are cached for 5 minutes.
+   *  Cache + batcher are static — shared across all AppInitializer instances. */
   async loadUsersInfoRaw(addresses: string[]): Promise<Record<string, unknown>[]> {
     if (!this.api || !addresses.length) return [];
     try {
-      // Match SDK: api.rpc('getuserprofile', [addresses, '1'])
-      const data = await this.api.rpc("getuserprofile", [addresses, "1"]);
-      return (data as Record<string, unknown>[]) || [];
+      const now = Date.now();
+      const cache = AppInitializer.profileRpcCache;
+      const ttl = AppInitializer.PROFILE_RPC_CACHE_TTL;
+      const results: Record<string, unknown>[] = [];
+      const uncached: string[] = [];
+
+      for (const addr of addresses) {
+        const entry = cache.get(addr);
+        if (entry && now - entry.ts < ttl) {
+          results.push(entry.data);
+        } else {
+          uncached.push(addr);
+        }
+      }
+
+      if (uncached.length > 0) {
+        const batcher = this.getProfileBatcher();
+        const perAddr = await Promise.all(uncached.map(a => batcher.load(a)));
+        for (const items of perAddr) {
+          if (items[0]) {
+            results.push(items[0]);
+            const addr = (items[0] as Record<string, string>).address;
+            if (addr) cache.set(addr, { data: items[0], ts: now });
+          }
+        }
+      }
+
+      return results;
     } catch (e) {
       console.error("[appInit] loadUsersInfoRaw error:", e);
       return [];

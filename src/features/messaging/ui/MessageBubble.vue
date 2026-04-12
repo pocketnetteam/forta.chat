@@ -11,17 +11,16 @@ import TransferCard from "./TransferCard.vue";
 import ReactionRow from "./ReactionRow.vue";
 import VoiceMessage from "./VoiceMessage.vue";
 import VideoCirclePlayer from "./VideoCirclePlayer.vue";
-import { ref, inject, onMounted, onBeforeUnmount } from "vue";
+import { inject, onMounted, onBeforeUnmount } from "vue";
 import { useLongPress, useSwipeGesture } from "@/shared/lib/gestures";
 import { useThemeStore } from "@/entities/theme";
 import { hexDecode } from "@/shared/lib/matrix/functions";
 import { getUserDisplayNameForUI } from "@/entities/chat";
+import { useViewportWidth, mountViewportListener, unmountViewportListener } from "@/shared/lib/composables/use-viewport-width";
 
-// Responsive max image width: clamp to ~78% of viewport on small screens
-const viewportW = ref(typeof window !== "undefined" ? window.innerWidth : 800);
-const onResizeBubble = () => { viewportW.value = window.innerWidth; };
-onMounted(() => window.addEventListener("resize", onResizeBubble));
-onBeforeUnmount(() => window.removeEventListener("resize", onResizeBubble));
+const viewportW = useViewportWidth();
+onMounted(mountViewportListener);
+onBeforeUnmount(unmountViewportListener);
 const imageMaxW = computed(() => Math.min(420, Math.round(viewportW.value * 0.78)));
 
 const { t } = useI18n();

@@ -94,10 +94,9 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   /** How long an empty-name profile stays before we retry (30 seconds) */
   const EMPTY_NAME_RETRY_MS = 30_000;
 
-  /** Load a single user profile. Deduplicated via PromisePool — 140 concurrent
-   *  calls for the same address produce exactly 1 network request.
-   *  Re-fetches if cached profile has an empty name (e.g. fetched before
-   *  blockchain confirmation during registration).
+  /** Load a single user profile via batched ProfileLoader.
+   *  All calls within a microtick are collected into one batch (up to 30 addresses),
+   *  producing a single getuserprofile RPC instead of N individual calls.
    *  STALE-WHILE-REVALIDATE: stale profiles with a name trigger background
    *  revalidation without blocking — the UI always has data to show. */
   const loadUserIfMissing = (address: string): void => {
@@ -112,31 +111,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     }
     if (cached && cached.cachedAt && Date.now() - cached.cachedAt < EMPTY_NAME_RETRY_MS) return;
     if (profilePool.has(address)) return;
-
-    profilePool.dedupe(address, async () => {
-      try {
-        const appInit = getAppInit();
-        await appInit.initApi();
-        const userData = await appInit.loadUserData([address]);
-        if (userData) {
-          const isDeleted = (userData as any).deleted === true;
-          users.value[address] = {
-            address,
-            name: userData.name ?? "",
-            about: userData.about ?? "",
-            image: userData.image ?? "",
-            site: userData.site ?? "",
-            language: userData.language ?? "",
-            cachedAt: Date.now(),
-            ...(isDeleted && { deleted: true }),
-          };
-          debouncedTrigger();
-          debouncedCacheUsers(users.value);
-        }
-      } catch {
-        // Silently fail — user will see address as fallback
-      }
-    }).catch(() => {});
+    enqueueProfiles([address]);
   };
 
   /** Helper: fetch addresses via pSDK and write results to users.value.
@@ -363,6 +338,15 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     loadUsersBatch,
     setUser,
     setUsers,
-    users
+    users,
+    /** Pre-warm the shared getuserprofile RPC cache for the given addresses.
+     *  Call before sequential loops (e.g. decrypt previews) so that all addresses
+     *  are fetched in a single batched RPC and subsequent calls hit the cache. */
+    async warmProfileCache(addresses: string[]): Promise<void> {
+      if (!addresses.length) return;
+      const appInit = getAppInit();
+      await appInit.initApi();
+      await appInit.loadUsersInfoRaw(addresses);
+    },
   };
 });

@@ -1,4 +1,4 @@
-import { ref } from "vue";
+import { ref, triggerRef } from "vue";
 import { isNative } from "@/shared/lib/platform";
 import { getRealGetUserMedia } from "@/shared/lib/native-webrtc";
 
@@ -92,15 +92,18 @@ export function useVoiceRecorder() {
         duration.value++;
       }, 1000);
 
-      // Waveform sampling (every 50ms, keep last 50 samples)
+      // Waveform sampling (every 100ms, keep last 50 samples, mutate in-place)
       const freqData = new Uint8Array(analyser.frequencyBinCount);
       waveformTimer = setInterval(() => {
         if (analyser) {
           analyser.getByteFrequencyData(freqData);
           const rms = computeRms(freqData);
-          waveformData.value = [...waveformData.value.slice(-49), rms];
+          const arr = waveformData.value;
+          if (arr.length >= 50) arr.shift();
+          arr.push(rms);
+          triggerRef(waveformData);
         }
-      }, 50);
+      }, 100);
     } catch (e) {
       console.error("Failed to start recording:", e);
       cleanup();

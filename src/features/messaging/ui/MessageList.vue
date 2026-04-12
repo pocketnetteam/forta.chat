@@ -219,7 +219,7 @@ let scrollVelocity = 0; // px per second (positive = scrolling toward older)
 /** Flatten messages + date separators into a single virtual list */
 interface VirtualItem {
   id: string;
-  type: "message" | "date-separator" | "typing" | "unread-banner";
+  type: "message" | "date-separator" | "unread-banner";
   message?: import("@/entities/chat").Message;
   label?: string;
   index?: number;
@@ -290,11 +290,6 @@ const virtualItems = computed<VirtualItem[]>(() => {
         bannerPending = true;
       }
     }
-  }
-
-  // Typing indicator
-  if (typingText.value) {
-    items.push({ id: "typing-indicator", type: "typing" });
   }
 
   return items;
@@ -1019,6 +1014,8 @@ onUnmounted(() => {
   readTracker.stopTracking();
   contentResizeObserver?.disconnect();
   if (scrollThrottleRaf !== null) cancelAnimationFrame(scrollThrottleRaf);
+  if (pendingSettledTimeout !== null) { clearTimeout(pendingSettledTimeout); pendingSettledTimeout = null; }
+  if (contentResizeRaf !== null) { cancelAnimationFrame(contentResizeRaf); contentResizeRaf = null; }
   clearTimeout(dateHideTimer);
   clearTimeout(scrollStableTimer);
   pendingScrollToBottom = false;
@@ -1244,8 +1241,9 @@ defineExpose({ scrollToMessage, setSearchQuery });
           </div>
         </div>
 
-        <!-- Typing bubble -->
-        <div v-else-if="item.type === 'typing'" class="mx-auto max-w-6xl py-1">
+      </template>
+      <template #bottom>
+        <div v-if="typingText" class="mx-auto max-w-6xl px-0 py-1" style="flex-shrink: 0">
           <div class="flex gap-2">
             <div v-if="themeStore.showAvatarsInChat" class="w-8 shrink-0" />
             <TypingBubble :names="typingNames" />
@@ -1362,7 +1360,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
 <style scoped>
 .fab-enter-active,
 .fab-leave-active {
-  transition: all 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 .fab-enter-from,
 .fab-leave-to {
