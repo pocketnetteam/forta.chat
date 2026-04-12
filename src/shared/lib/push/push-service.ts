@@ -15,6 +15,8 @@ class PushService {
   /** Callback to optimistically update room preview in Dexie when push arrives.
    *  Wired from auth store after ChatDbKit is initialized. */
   private optimisticRoomUpdate: ((roomId: string, preview: string, timestamp: number, senderId?: string) => Promise<boolean>) | null = null;
+  /** Check if a room should be hidden (e.g. broadcast/stream rooms) — suppress push. */
+  private isRoomHidden: ((roomId: string) => boolean) | null = null;
 
   setCallHandler(handler: typeof this.onCallPush) {
     this.onCallPush = handler;
@@ -40,6 +42,10 @@ class PushService {
    *  Called from auth store once ChatDbKit is ready. */
   setOptimisticRoomUpdater(updater: typeof this.optimisticRoomUpdate) {
     this.optimisticRoomUpdate = updater;
+  }
+
+  setRoomHiddenChecker(checker: (roomId: string) => boolean) {
+    this.isRoomHidden = checker;
   }
 
   /** Push all known room names to native SharedPreferences for offline display */
@@ -295,7 +301,11 @@ class PushService {
     const roomId = data.room_id;
     if (!roomId) return;
 
-    // handle push forwarded from native
+    // Suppress push for hidden rooms (broadcast/stream groups)
+    if (this.isRoomHidden?.(roomId)) {
+      PushData.cancelNotification({ roomId }).catch(() => {});
+      return;
+    }
 
     // Handle calls
     if (data.msg_type === 'm.call.invite') {

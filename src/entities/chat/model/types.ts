@@ -11,6 +11,8 @@ export interface ChatRoom {
   membership?: "join" | "invite";
   /** Room topic / description (from m.room.topic state event) */
   topic?: string;
+  /** True for public rooms (join_rule === "public"). Broadcast/stream rooms are isGroup + isPublic. */
+  isPublic?: boolean;
   /** Last reaction on the last message (for chat list preview) */
   lastMessageReaction?: {
     emoji: string;

@@ -3,6 +3,8 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { RpcBatcher } from "@/shared/lib/rpc-batcher";
+import { blockchainWs } from "@/shared/api/blockchain-ws";
+import type { BlockchainWsCredentials } from "@/shared/api/blockchain-ws";
 
 export interface BastyonPostData {
   txid: string;
@@ -795,6 +797,69 @@ export class AppInitializer {
     return this.api.wait.ready("use", 1000).then(() => {
       return this.api!.ready.use;
     });
+  }
+
+  // --- Blockchain WebSocket integration ---
+
+  private wsCleanups: Array<() => void> = [];
+
+  /**
+   * Connect blockchain WebSocket after login + actions.init().
+   * Bridges WS events to the legacy actions.ws pipeline.
+   * Safe to call multiple times — no-ops if already connected.
+   */
+  connectBlockchainWs(credentials: BlockchainWsCredentials) {
+    if (!this._available) return;
+
+    // Provide the getmissedinfo RPC callback
+    blockchainWs.setGetMissedInfoFn(async (address, fromBlock, count) => {
+      if (!this.api) return null;
+      try {
+        const result = await this.api.rpc("getmissedinfo", [address, fromBlock, count]);
+        return Array.isArray(result) ? result : null;
+      } catch (e) {
+        console.warn("[appInit] getmissedinfo RPC error:", e);
+        return null;
+      }
+    });
+
+    // Bridge WS 'transaction' events to actions.ws.transaction()
+    const txUnsub = blockchainWs.on("transaction", (data: any) => {
+      try {
+        if (this.actions && (this.actions as any).ws?.transaction) {
+          (this.actions as any).ws.transaction(data);
+        }
+      } catch (e) {
+        console.warn("[appInit] WS transaction bridge error:", e);
+      }
+    });
+    this.wsCleanups.push(txUnsub);
+
+    // Bridge WS 'block' events to actions.ws.block()
+    const blockUnsub = blockchainWs.on("block", (data: any) => {
+      try {
+        if (this.actions && (this.actions as any).ws?.block) {
+          (this.actions as any).ws.block(data);
+        }
+      } catch (e) {
+        console.warn("[appInit] WS block bridge error:", e);
+      }
+    });
+    this.wsCleanups.push(blockUnsub);
+
+    blockchainWs.connect(credentials);
+  }
+
+  /** Disconnect blockchain WebSocket — call on logout */
+  disconnectBlockchainWs() {
+    for (const fn of this.wsCleanups) fn();
+    this.wsCleanups = [];
+    blockchainWs.disconnect();
+  }
+
+  /** Get the blockchainWs singleton (for stores.ts to subscribe to events) */
+  getBlockchainWs() {
+    return blockchainWs;
   }
 }
 

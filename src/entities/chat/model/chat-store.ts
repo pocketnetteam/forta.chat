@@ -71,6 +71,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   const roomId = room.roomId as string;
   const name = (room.name as string) ?? roomId;
   const isGroup = !kit.isTetatetChat(room);
+  const isPublic = kit.chatIsPublic(room);
   const membership = (room.selfMembership ?? room.getMyMembership?.()) as "join" | "invite" | undefined;
 
   // Get members
@@ -313,7 +314,14 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     })(),
     membership: membership === "invite" ? "invite" : "join",
     topic,
+    isPublic: isPublic || undefined,
   };
+}
+
+/** Broadcast/stream rooms: public groups created by Bastyon for video chat support.
+ *  These should be hidden from forta.chat UI entirely. */
+function isBroadcastRoom(room: { isGroup: boolean; isPublic?: boolean }): boolean {
+  return room.isGroup && !!room.isPublic;
 }
 
 export const useChatStore = defineStore(NAMESPACE, () => {
@@ -910,6 +918,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       name: lr.name,
       avatar: lr.avatar,
       isGroup: lr.isGroup,
+      isPublic: lr.isPublic || undefined,
       members: lr.members,
       membership: lr.membership as "join" | "invite",
       unreadCount: lr.unreadCount,
@@ -1098,7 +1107,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const initDexieRooms = async (dbKit: ChatDbKit) => {
     const allRooms = await dbKit.rooms.getAllRooms();
     dexieRoomMap.clear();
-    for (const r of allRooms) dexieRoomMap.set(r.id, r);
+    for (const r of allRooms) {
+      if (isBroadcastRoom(r)) continue;
+      dexieRoomMap.set(r.id, r);
+    }
     _dexieRoomMapVersion.value++;
     dexieRooms.value = allRooms;
     // Warm clearedAtTs cache from Dexie so write-guards work for all rooms on sync
@@ -1123,7 +1135,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       } else {
         const r = c.room;
-        if ((r.membership === "join" || r.membership === "invite") && !r.isDeleted) {
+        const isInteractive = (r.membership === "join" || r.membership === "invite")
+          && !r.isDeleted
+          && !isBroadcastRoom(r);
+        if (isInteractive) {
           if (!r.updatedAt) r.updatedAt = r.lastMessageTimestamp || 1;
           dexieRoomMap.set(r.id, r);
           relevantChanges.push(c);
@@ -1212,10 +1227,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (chatDbKitRef.value && dexieRoomMap.size > 0) {
       void dexieRooms.value; // register reactive dependency
       let sum = 0;
-      for (const r of dexieRoomMap.values()) sum += r.unreadCount;
+      for (const r of dexieRoomMap.values()) {
+        if (!isBroadcastRoom(r)) sum += r.unreadCount;
+      }
       return sum;
     }
-    return rooms.value.reduce((sum, r) => sum + r.unreadCount, 0);
+    return rooms.value.reduce((sum, r) => sum + (isBroadcastRoom(r) ? 0 : r.unreadCount), 0);
   });
 
   /** Set helper references from auth store */
@@ -1593,6 +1610,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const ROOM_CHUNK = 50;
     const newRooms: ChatRoom[] = [];
 
+    const allBuiltRooms: ChatRoom[] = [];
     for (let i = 0; i < interactiveRooms.length; i += ROOM_CHUNK) {
       const slice = interactiveRooms.slice(i, i + ROOM_CHUNK);
       for (const r of slice) {
@@ -1603,7 +1621,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const prevAvatar = prevAvatarMap.get(room.id);
           if (prevAvatar) room.avatar = prevAvatar;
         }
-        newRooms.push(room);
+        allBuiltRooms.push(room);
+        if (!isBroadcastRoom(room)) newRooms.push(room);
       }
 
       // Yield between chunks to keep UI responsive, but do NOT publish
@@ -1634,8 +1653,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const dbKit = chatDbKitRef.value;
       const now = Date.now();
       const dexieSourceRooms = prevActiveIsExternal
-        ? newRooms.filter(r => r.id !== prevActiveRoom!.id)
-        : newRooms;
+        ? allBuiltRooms.filter(r => r.id !== prevActiveRoom!.id)
+        : allBuiltRooms;
 
       // OPTIMIZATION: Only write rooms with display-relevant changes to Dexie
       const changedForDexie: ChatRoom[] = [];
@@ -1648,6 +1667,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           || prev.membership !== (r.membership ?? "join")
           || prev.avatar !== r.avatar
           || prev.isGroup !== r.isGroup
+          || prev.isPublic !== r.isPublic
           || (prev.members?.length ?? 0) !== r.members.length
         ) {
           changedForDexie.push(r);
@@ -1663,6 +1683,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         name: r.name,
         avatar: r.avatar,
         isGroup: r.isGroup,
+        isPublic: r.isPublic,
         members: r.members,
         membership: (r.membership ?? "join") as "join" | "invite" | "leave",
         topic: r.topic || "",
@@ -1955,6 +1976,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           name: r.name,
           avatar: r.avatar,
           isGroup: r.isGroup,
+          isPublic: r.isPublic,
           members: r.members,
           membership: (r.membership ?? "join") as "join" | "invite" | "leave",
           topic: r.topic || "",
@@ -3286,6 +3308,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     } catch { /* fallback below */ }
     const room = getRoomById(roomId);
     return room?.members.length ?? 0;
+  };
+
+  /** Check if a room is a hidden broadcast/stream room (public group).
+   *  Uses Dexie data first (available even when Matrix SDK room is filtered out). */
+  const isRoomBroadcast = (roomId: string): boolean => {
+    const lr = dexieRoomMap.get(roomId);
+    if (lr) return isBroadcastRoom(lr);
+    const cr = roomsMap.get(roomId);
+    if (cr) return isBroadcastRoom(cr);
+    return false;
   };
 
   /** Check if room has public join rules */
@@ -5673,7 +5705,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const localRooms = await db.rooms
         .where("membership")
         .anyOf(["join", "invite"])
-        .and((r: LocalRoom) => !r.isDeleted)
+        .and((r: LocalRoom) => !r.isDeleted && !isBroadcastRoom(r))
         .toArray();
       db.close();
 
@@ -5907,6 +5939,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     exitDetachedMode,
     inviteMember,
     isDetachedFromLatest,
+    isRoomBroadcast,
     isRoomPublic,
     joinRoomById,
     bindAccountKeys,

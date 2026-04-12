@@ -91,6 +91,7 @@ export class RoomRepository {
       name?: string;
       avatar?: string;
       isGroup?: boolean;
+      isPublic?: boolean;
       members?: string[];
       membership?: "join" | "invite" | "leave";
       topic?: string;
@@ -138,7 +139,8 @@ export class RoomRepository {
           const metaChanged = (update.name !== undefined && update.name !== prev.name)
             || (update.avatar !== undefined && update.avatar !== prev.avatar)
             || (update.membership !== undefined && update.membership !== prev.membership)
-            || (update.topic !== undefined && update.topic !== prev.topic);
+            || (update.topic !== undefined && update.topic !== prev.topic)
+            || (update.isPublic !== undefined && update.isPublic !== prev.isPublic);
           // Unread reconciliation: Matrix SDK is the single source of truth.
           // EventWriter does NOT touch unreadCount — so serverUnreadCount is always authoritative.
           const unreadChanged = update.serverUnreadCount !== undefined
@@ -155,6 +157,7 @@ export class RoomRepository {
           if (update.name !== undefined) patched.name = update.name;
           if (update.avatar !== undefined) patched.avatar = update.avatar;
           if (update.isGroup !== undefined) patched.isGroup = update.isGroup;
+          if (update.isPublic !== undefined) patched.isPublic = update.isPublic;
           if (update.members !== undefined) patched.members = update.members;
           if (update.membership !== undefined) patched.membership = update.membership;
           if (update.topic !== undefined) patched.topic = update.topic;
@@ -203,6 +206,7 @@ export class RoomRepository {
             name: update.name ?? "",
             avatar: update.avatar,
             isGroup: update.isGroup ?? false,
+            isPublic: update.isPublic,
             members: update.members ?? [],
             membership: update.membership ?? "join",
             unreadCount: update.unreadCount ?? 0,

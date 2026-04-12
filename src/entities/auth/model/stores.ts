@@ -125,6 +125,7 @@ let _onlineHandler: (() => void) | null = null;
 let _offlineHandler: (() => void) | null = null;
 let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
+let _wsBlockUnsub: (() => void) | null = null;
 
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
@@ -585,6 +586,32 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }).catch(() => {});
         }, 10 * 60 * 1000);
 
+        // Connect blockchain WebSocket for real-time block/transaction events.
+        // This is purely additive — all polling remains active as fallback.
+        try {
+          const pni = window.POCKETNETINSTANCE;
+          if (pni?.user?.signature && address.value) {
+            const sig = pni.user.signature();
+            appInitializer.connectBlockchainWs({
+              address: address.value,
+              signature: sig,
+              device: "web",
+              block: cryptoInstance?.currentblock?.height ?? 0,
+            });
+
+            // Subscribe to block events for real-time pcrypto.setBlock updates
+            const bws = appInitializer.getBlockchainWs();
+            _wsBlockUnsub = bws.on("block", (data: any) => {
+              const h = data?.height;
+              if (h > 0 && pcrypto.value) {
+                pcrypto.value.setBlock({ height: h });
+              }
+            });
+          }
+        } catch (e) {
+          console.warn("[auth] Blockchain WS connect failed (non-critical):", e);
+        }
+
         import("@/features/video-calls/model/call-tab-lock").then(({ initCallTabLock }) => {
           initCallTabLock();
         }).catch((err) => {
@@ -597,6 +624,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             const { pushService } = await import('@/shared/lib/push');
 
             pushService.setActiveRoomGetter(() => chatStore.activeRoomId);
+
+            pushService.setRoomHiddenChecker((roomId) => chatStore.isRoomBroadcast(roomId));
 
             // Wire optimistic room preview update from push notifications.
             // Uses chatDbKit.rooms (RoomRepository) which is already initialized above.
@@ -903,6 +932,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
     }
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
+    if (_wsBlockUnsub) { _wsBlockUnsub(); _wsBlockUnsub = null; }
+    appInitializer.disconnectBlockchainWs();
 
     // ── 4. Clear localStorage account data ──
     clearAllDrafts();
@@ -1046,12 +1077,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Poll blockchain with exponential backoff. Two phases:
    *  Phase 1: Wait for PKOIN (unspents) to arrive, then broadcast UserInfo.
    *  Phase 2: Wait for UserInfo to be confirmed on-chain (getuserstate + Actions status).
-   *  NO TIMEOUT — polls indefinitely until confirmed or user logs out. */
+   *  NO TIMEOUT — polls indefinitely until confirmed or user logs out.
+   *
+   *  WS acceleration: subscribes to blockchain WS events to trigger immediate poll()
+   *  calls. The polling timer and backoff logic remain unchanged — WS just calls poll()
+   *  sooner. If WS is not connected, behavior is identical to before. */
   const startRegistrationPoll = () => {
     if (registrationPollTimer) clearTimeout(registrationPollTimer);
     let pollInterval = 3000;
     const MAX_POLL_INTERVAL = 60000;
     let attempt = 0;
+    let polling = false;
     console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
     // Set initial phase based on current state (handles reload resume)
     if (pendingRegProfile.value) {
@@ -1061,7 +1097,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
 
     const poll = async () => {
+      if (polling) return;
+      polling = true;
       if (!address.value) {
+        polling = false;
         stopRegistrationPoll();
         return;
       }
@@ -1084,22 +1123,22 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               pollInterval = 3000;
               attempt = 0;
             } catch (broadcastErr: unknown) {
-              // Check for error code 18 (username taken/invalid) — stop polling and surface error
               const errCode = extractErrorCode(broadcastErr);
               if (errCode === 18) {
                 console.error("[auth] UserInfo broadcast rejected: username taken/invalid (code 18)");
                 setRegistrationPhase('error');
                 registrationUsernameError.value = true;
                 setRegistrationPending(false);
+                polling = false;
                 stopRegistrationPoll();
                 return;
               }
-              // Other broadcast errors — rethrow to be caught by outer catch and retried
               throw broadcastErr;
             }
           } else {
             console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
           }
+          polling = false;
           schedulePoll();
           return;
         }
@@ -1110,6 +1149,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
         if (actionsStatus === 'registered') {
           console.log("[auth] Registration confirmed via Actions system!");
+          polling = false;
           await onRegistrationConfirmed();
           return;
         }
@@ -1117,6 +1157,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         const confirmed = await appInitializer.checkUserRegistered(address.value);
         if (confirmed) {
           console.log("[auth] Registration confirmed on blockchain!");
+          polling = false;
           await onRegistrationConfirmed();
           return;
         }
@@ -1125,25 +1166,52 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       } catch (e) {
         console.warn("[auth] Registration poll error (attempt", attempt, "):", e);
       }
+      polling = false;
       schedulePoll();
     };
 
     const schedulePoll = () => {
+      if (registrationPollTimer) clearTimeout(registrationPollTimer);
       registrationPollTimer = setTimeout(poll, pollInterval);
       pollInterval = Math.min(pollInterval * 2, MAX_POLL_INTERVAL);
     };
+
+    // WS acceleration: trigger immediate poll on relevant events.
+    // Subscriptions are cleaned up by stopRegistrationPoll().
+    const bws = appInitializer.getBlockchainWs();
+    const wsTxUnsub = bws.on("transaction", (data: any) => {
+      // Phase 1: incoming tx to our address may be the PKOIN
+      if (pendingRegProfile.value && data?.addr === address.value) {
+        console.log("[auth] WS: transaction for our address, triggering immediate poll");
+        pollInterval = 3000;
+        if (registrationPollTimer) clearTimeout(registrationPollTimer);
+        registrationPollTimer = null;
+        poll();
+      }
+    });
+    _regWsCleanups.push(wsTxUnsub);
+
+    const wsBlockUnsub = bws.on("block", () => {
+      // Phase 2: new block may contain our UserInfo confirmation
+      if (!pendingRegProfile.value) {
+        console.log("[auth] WS: new block, triggering immediate confirmation check");
+        pollInterval = 3000;
+        if (registrationPollTimer) clearTimeout(registrationPollTimer);
+        registrationPollTimer = null;
+        poll();
+      }
+    });
+    _regWsCleanups.push(wsBlockUnsub);
 
     poll();
 
     async function onRegistrationConfirmed() {
       setRegistrationPhase('done');
-      // Keep overlay visible for 1.5s to show success step
       await new Promise(resolve => setTimeout(resolve, 1500));
       await appInitializer.initializeAndFetchUserData(
         address.value!,
         (data: UserData) => {
           setUserInfo(data);
-          // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
           useUserStore().setUser(address.value!, {
             address: address.value!,
             name: data.name ?? "",
@@ -1155,7 +1223,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         }
       );
       setRegistrationPending(false);
-      setRegistrationPhase('init'); // Reset phase for clean localStorage state
+      setRegistrationPhase('init');
       stopRegistrationPoll();
       if (!matrixReady.value) {
         PocketnetInstanceConfigurator.setUserAddress(address.value!);
@@ -1167,11 +1235,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** WS event subscriptions created by startRegistrationPoll, cleaned up on stop */
+  const _regWsCleanups: Array<() => void> = [];
+
   const stopRegistrationPoll = () => {
     if (registrationPollTimer) {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
+    for (const fn of _regWsCleanups) fn();
+    _regWsCleanups.length = 0;
   };
 
   /** Resume polling on page reload if registration was pending.
@@ -1354,6 +1427,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
       }
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
+      if (_wsBlockUnsub) { _wsBlockUnsub(); _wsBlockUnsub = null; }
+      appInitializer.disconnectBlockchainWs();
 
       // Close Dexie without deleting
       closeChatDb();

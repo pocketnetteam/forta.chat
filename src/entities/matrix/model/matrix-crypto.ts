@@ -2,7 +2,7 @@
  * Custom E2E encryption — DIRECT PORT from bastyon-chat/src/application/pcrypto.js
  *
  * Uses secp256k1 elliptic curves + AES-SIV (miscreant) for message encryption.
- * Uses AES-CBC with PBKDF2 for file encryption.
+ * Uses -CBC with PBKDF2 for file encryption.
  */
 
 import * as miscreant from "miscreant";
