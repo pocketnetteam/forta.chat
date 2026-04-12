@@ -252,6 +252,7 @@ const walletStore = useWalletStore();
             class="flex-1 overflow-y-auto"
             @room-created="handleRoomCreated"
             @select-message="handleSelectMessage"
+            @select-channel="sidebarSearchQuery = ''"
             @clear="sidebarSearchQuery = ''"
           />
         </template>

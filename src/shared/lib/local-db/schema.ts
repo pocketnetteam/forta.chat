@@ -89,8 +89,11 @@ export interface LocalRoom {
   /** Timestamp (ms) when user cleared chat history. Events before this are hidden/purged. */
   clearedAtTs?: number;
 
-  /** True for public rooms (join_rule === "public"). Used to hide broadcast/stream rooms. */
+  /** True for public rooms (join_rule === "public"). */
   isPublic?: boolean;
+  /** True when history_visibility === "world_readable" (stream/broadcast rooms).
+   *  These rooms are hidden from the chat list, matching old bastyon-chat behavior. */
+  isWorldReadable?: boolean;
 }
 
 /** Local message — extended with sync & local-first fields */
@@ -537,6 +540,18 @@ export class ChatDatabase extends Dexie {
 
     // Version 11: add isPublic to LocalRoom (no index changes — field-only)
     this.version(11).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+    });
+
+    // Version 12: add isWorldReadable to LocalRoom (no index changes — field-only)
+    this.version(12).stores({
       rooms: "id, updatedAt, membership, isDeleted",
       messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
       users: "address, updatedAt",

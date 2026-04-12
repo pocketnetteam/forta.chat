@@ -94,6 +94,23 @@ describe("cleanupStaleRooms", () => {
     expect(ctx._deletedIds).toEqual([]);
   });
 
+  it("uses stored isWorldReadable flag instead of SDK lookup", async () => {
+    const rooms = [
+      makeLocalRoom({
+        id: "!wr:s",
+        lastMessageTimestamp: FOUR_DAYS_AGO,
+        isWorldReadable: true,
+      }),
+    ];
+    // No historyVisibility in SDK — should still detect via stored field
+    const ctx = makeContext(rooms, new Set(["!wr:s"]), {}) as CleanupContext & { _deletedIds: string[] };
+
+    const count = await cleanupStaleRooms(ctx);
+
+    expect(count).toBe(1);
+    expect(ctx._deletedIds).toEqual(["!wr:s"]);
+  });
+
   it("keeps normal joined rooms", async () => {
     const rooms = [
       makeLocalRoom({ id: "!normal:s", membership: "join" }),

@@ -720,6 +720,13 @@ export class MatrixClientService {
     }
   }
 
+  /** Check if a user is on the ignore list (m.ignored_user_list account data).
+   *  Matches old bastyon-chat's client.isUserIgnored(). */
+  isUserIgnored(userId: string): boolean {
+    if (!this.client) return false;
+    return !!this.client.isUserIgnored?.(userId);
+  }
+
   /** Leave a room (Matrix leave API) */
   async leaveRoom(roomId: string): Promise<void> {
     if (!this.client) throw new Error("Client not initialized");

@@ -4,8 +4,9 @@ import { resolve } from "path";
 
 /**
  * Tests for broadcast/stream room filtering.
- * Public groups (isGroup + isPublic) created by Bastyon for video broadcast
- * support should be hidden from forta.chat: no display, no notifications.
+ * Rooms with history_visibility === "world_readable" (stream rooms) should be
+ * hidden from forta.chat: no display, no notifications.
+ * This matches old bastyon-chat behavior exactly.
  */
 
 const chatStoreSource = readFileSync(resolve(__dirname, "../chat-store.ts"), "utf-8");
@@ -19,57 +20,63 @@ describe("isBroadcastRoom helper", () => {
     expect(chatStoreSource).toContain("function isBroadcastRoom(");
   });
 
-  it("returns true for public groups (isGroup && isPublic)", () => {
-    expect(chatStoreSource).toContain("room.isGroup && !!room.isPublic");
+  it("uses isWorldReadable for detection (matches old bastyon-chat history_visibility check)", () => {
+    expect(chatStoreSource).toContain("!!room.isWorldReadable");
   });
 });
 
-describe("isPublic field in types", () => {
-  it("ChatRoom has isPublic optional field", () => {
+describe("isWorldReadable field in types", () => {
+  it("ChatRoom has isWorldReadable optional field", () => {
+    expect(typesSource).toContain("isWorldReadable?: boolean");
+  });
+
+  it("LocalRoom has isWorldReadable optional field", () => {
+    expect(schemaSource).toContain("isWorldReadable?: boolean");
+  });
+
+  it("ChatRoom still has isPublic for other uses", () => {
     expect(typesSource).toContain("isPublic?: boolean");
   });
+});
 
-  it("LocalRoom has isPublic optional field", () => {
-    expect(schemaSource).toContain("isPublic?: boolean");
+describe("isWorldReadable detection in matrixRoomToChatRoom", () => {
+  it("reads m.room.history_visibility state event", () => {
+    expect(chatStoreSource).toContain("m.room.history_visibility");
+  });
+
+  it("checks for world_readable value", () => {
+    expect(chatStoreSource).toContain('hv === "world_readable"');
+  });
+
+  it("includes isWorldReadable in the returned ChatRoom", () => {
+    expect(chatStoreSource).toContain("isWorldReadable: isWorldReadable || undefined,");
   });
 });
 
-describe("isPublic detection in matrixRoomToChatRoom", () => {
-  it("detects public rooms via kit.chatIsPublic", () => {
-    expect(chatStoreSource).toContain("const isPublic = kit.chatIsPublic(room)");
+describe("isWorldReadable persistence in Dexie", () => {
+  it("bulkSyncRooms accepts isWorldReadable field", () => {
+    expect(roomRepoSource).toContain("isWorldReadable?: boolean");
   });
 
-  it("includes isPublic in the returned ChatRoom", () => {
-    expect(chatStoreSource).toContain("isPublic: isPublic || undefined,");
-  });
-});
-
-describe("isPublic persistence in Dexie", () => {
-  it("bulkSyncRooms accepts isPublic field", () => {
-    expect(roomRepoSource).toContain("isPublic?: boolean");
+  it("persists isWorldReadable on existing room update", () => {
+    expect(roomRepoSource).toContain("if (update.isWorldReadable !== undefined) patched.isWorldReadable = update.isWorldReadable;");
   });
 
-  it("persists isPublic on existing room update", () => {
-    expect(roomRepoSource).toContain("if (update.isPublic !== undefined) patched.isPublic = update.isPublic;");
+  it("sets isWorldReadable on new room insert", () => {
+    expect(roomRepoSource).toContain("isWorldReadable: update.isWorldReadable,");
   });
 
-  it("sets isPublic on new room insert", () => {
-    expect(roomRepoSource).toContain("isPublic: update.isPublic,");
+  it("detects isWorldReadable changes in skip-if-unchanged check", () => {
+    expect(roomRepoSource).toContain("update.isWorldReadable !== prev.isWorldReadable");
   });
 
-  it("detects isPublic changes in skip-if-unchanged check", () => {
-    expect(roomRepoSource).toContain("update.isPublic !== prev.isPublic");
-  });
-
-  it("Dexie version 11 is defined for isPublic migration", () => {
-    expect(schemaSource).toContain("this.version(11)");
+  it("Dexie version 12 is defined for isWorldReadable migration", () => {
+    expect(schemaSource).toContain("this.version(12)");
   });
 });
 
 describe("broadcast room filtering in display layer", () => {
   it("filterInteractiveRooms still allows broadcast rooms through for Dexie sync", () => {
-    // Broadcast rooms must sync to Dexie so isPublic flag gets persisted.
-    // Filtering happens at the display layer, not at filterInteractiveRooms.
     expect(chatStoreSource).toContain("const filterInteractiveRooms");
   });
 
@@ -109,6 +116,36 @@ describe("isRoomBroadcast store method", () => {
 
   it("is exported from the store", () => {
     expect(chatStoreSource).toContain("isRoomBroadcast,");
+  });
+});
+
+describe("blocked/ignored user filtering", () => {
+  it("isIgnoredUserRoom helper is defined", () => {
+    expect(chatStoreSource).toContain("function isIgnoredUserRoom(");
+  });
+
+  it("checks isGroup to only filter 1:1 rooms", () => {
+    expect(chatStoreSource).toContain("if (room.isGroup) return false;");
+  });
+
+  it("checks for single other member", () => {
+    expect(chatStoreSource).toContain("if (otherMembers.length !== 1) return false;");
+  });
+
+  it("calls matrixService.isUserIgnored", () => {
+    expect(chatStoreSource).toContain("matrixService.isUserIgnored(fullMatrixId)");
+  });
+
+  it("is applied in fullRebuildSortedRoomsAsync", () => {
+    expect(chatStoreSource).toContain("if (myHex && isIgnoredUserRoom(cr, myHex)) continue;");
+  });
+
+  it("is applied in computeSortedRoomsFallback", () => {
+    expect(chatStoreSource).toContain(".filter(r => !myHex || !isIgnoredUserRoom(r, myHex))");
+  });
+
+  it("is applied in patchSortedRooms", () => {
+    expect(chatStoreSource).toContain("if (myHex && isIgnoredUserRoom(chatRoom, myHex)) continue;");
   });
 });
 

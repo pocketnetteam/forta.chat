@@ -30,8 +30,10 @@ export async function cleanupStaleRooms(ctx: CleanupContext): Promise<number> {
       toRemove.push(room.id);
       continue;
     }
-    const histVis = ctx.getRoomHistoryVisibility(room.id);
-    if (histVis === "world_readable") {
+    // Use stored isWorldReadable first; fall back to SDK lookup for rooms
+    // that haven't been re-synced since the field was introduced.
+    const isWR = room.isWorldReadable ?? (ctx.getRoomHistoryVisibility(room.id) === "world_readable");
+    if (isWR) {
       const lastActive = room.lastMessageTimestamp ?? room.updatedAt ?? 0;
       if (now - lastActive > THREE_DAYS_MS) {
         toRemove.push(room.id);

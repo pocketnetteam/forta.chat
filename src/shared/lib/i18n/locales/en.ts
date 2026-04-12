@@ -45,6 +45,7 @@ export const en = {
   "contactSearch.chats": "Chats",
   "contactSearch.users": "Users",
   "contactSearch.noResults": "No chats or users found",
+  "contactSearch.channels": "Channels",
   "contactSearch.messages": "Messages",
   "contactSearch.showMore": "Show more",
   "contactSearch.clearSearch": "Clear search",

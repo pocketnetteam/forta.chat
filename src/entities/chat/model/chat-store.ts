@@ -74,6 +74,14 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   const isPublic = kit.chatIsPublic(room);
   const membership = (room.selfMembership ?? room.getMyMembership?.()) as "join" | "invite" | undefined;
 
+  // Detect stream/broadcast rooms by history_visibility (matches old bastyon-chat exactly)
+  let isWorldReadable = false;
+  try {
+    const hvEvent = room.currentState?.getStateEvents?.("m.room.history_visibility", "");
+    const hv = hvEvent?.event?.content?.history_visibility ?? hvEvent?.getContent?.()?.history_visibility;
+    isWorldReadable = hv === "world_readable";
+  } catch { /* ignore */ }
+
   // Get members
   const members = kit.getRoomMembers(room);
   const memberIds = members.map((m: Record<string, unknown>) => getmatrixid(m.userId as string));
@@ -315,13 +323,30 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     membership: membership === "invite" ? "invite" : "join",
     topic,
     isPublic: isPublic || undefined,
+    isWorldReadable: isWorldReadable || undefined,
   };
 }
 
-/** Broadcast/stream rooms: public groups created by Bastyon for video chat support.
- *  These should be hidden from forta.chat UI entirely. */
-function isBroadcastRoom(room: { isGroup: boolean; isPublic?: boolean }): boolean {
-  return room.isGroup && !!room.isPublic;
+/** Broadcast/stream rooms: rooms with history_visibility === "world_readable".
+ *  Matches old bastyon-chat filtering: these are video stream chat rooms
+ *  and should be hidden from the chat list entirely. */
+function isBroadcastRoom(room: { isWorldReadable?: boolean }): boolean {
+  return !!room.isWorldReadable;
+}
+
+/** Check if a 1:1 room should be hidden because the only other member is ignored.
+ *  Matches old bastyon-chat: if users.length === 1 && isUserIgnored(user) → skip.
+ *  Requires the Matrix client to be ready — returns false if unavailable. */
+function isIgnoredUserRoom(room: { isGroup: boolean; members: string[] }, myHexId: string): boolean {
+  if (room.isGroup) return false;
+  const otherMembers = room.members.filter(m => m !== myHexId);
+  if (otherMembers.length !== 1) return false;
+  try {
+    const matrixService = getMatrixClientService();
+    if (!matrixService.client) return false;
+    const fullMatrixId = matrixService.matrixId(otherMembers[0]);
+    return matrixService.isUserIgnored(fullMatrixId);
+  } catch { return false; }
 }
 
 export const useChatStore = defineStore(NAMESPACE, () => {
@@ -919,6 +944,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       avatar: lr.avatar,
       isGroup: lr.isGroup,
       isPublic: lr.isPublic || undefined,
+      isWorldReadable: lr.isWorldReadable || undefined,
       members: lr.members,
       membership: lr.membership as "join" | "invite",
       unreadCount: lr.unreadCount,
@@ -985,19 +1011,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // intermediate re-sorts while bulkSyncRooms writes are landing.
   let _suppressDexieRecompute = false;
 
+  /** Resolve current user's hex ID for ignored-user filtering. */
+  const getMyHexId = (): string => {
+    const addr = useAuthStore().address;
+    return addr ? hexEncode(addr).toLowerCase() : "";
+  };
+
   const computeSortedRoomsFallback = (source: ChatRoom[], pinned: ReadonlySet<string>): ChatRoom[] => {
-    return [...source].sort((a, b) => {
-      const aPinned = pinned.has(a.id) ? 1 : 0;
-      const bPinned = pinned.has(b.id) ? 1 : 0;
-      if (aPinned !== bPinned) return bPinned - aPinned;
-      return getSortKey(b) - getSortKey(a);
-    });
+    const myHex = getMyHexId();
+    return [...source]
+      .filter(r => !myHex || !isIgnoredUserRoom(r, myHex))
+      .sort((a, b) => {
+        const aPinned = pinned.has(a.id) ? 1 : 0;
+        const bPinned = pinned.has(b.id) ? 1 : 0;
+        if (aPinned !== bPinned) return bPinned - aPinned;
+        return getSortKey(b) - getSortKey(a);
+      });
   };
 
   const patchSortedRooms = (changes: RoomChange[]) => {
     perfCount("sortedRooms:patch");
     const arr = [..._sortedRoomsRef.value];
     const pinned = pinnedRoomIds.value;
+    const myHex = getMyHexId();
     for (const change of changes) {
       if (change.type === "delete") {
         const idx = arr.findIndex(r => r.id === change.roomId);
@@ -1007,6 +1043,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const chatRoom = mapLocalRoomToChatRoom(change.room);
         const oldIdx = arr.findIndex(r => r.id === change.room.id);
         if (oldIdx !== -1) arr.splice(oldIdx, 1);
+        if (myHex && isIgnoredUserRoom(chatRoom, myHex)) continue;
         const key = getSortKey(chatRoom);
         const isPinned = pinned.has(change.room.id);
         const newIdx = binarySearchDesc(arr, key, pinned, isPinned);
@@ -1027,12 +1064,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
       return;
     }
+    const myHex = getMyHexId();
     const CHUNK = 5000;
     const mapped: ChatRoom[] = [];
     for (let i = 0; i < allRooms.length; i += CHUNK) {
       const end = Math.min(i + CHUNK, allRooms.length);
       for (let j = i; j < end; j++) {
-        mapped.push(mapLocalRoomToChatRoom(allRooms[j]));
+        const cr = mapLocalRoomToChatRoom(allRooms[j]);
+        if (myHex && isIgnoredUserRoom(cr, myHex)) continue;
+        mapped.push(cr);
       }
       if (end < allRooms.length) await yieldToMain();
     }
@@ -1668,6 +1708,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           || prev.avatar !== r.avatar
           || prev.isGroup !== r.isGroup
           || prev.isPublic !== r.isPublic
+          || prev.isWorldReadable !== r.isWorldReadable
           || (prev.members?.length ?? 0) !== r.members.length
         ) {
           changedForDexie.push(r);
@@ -1684,6 +1725,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         avatar: r.avatar,
         isGroup: r.isGroup,
         isPublic: r.isPublic,
+        isWorldReadable: r.isWorldReadable,
         members: r.members,
         membership: (r.membership ?? "join") as "join" | "invite" | "leave",
         topic: r.topic || "",
@@ -1977,6 +2019,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           avatar: r.avatar,
           isGroup: r.isGroup,
           isPublic: r.isPublic,
+          isWorldReadable: r.isWorldReadable,
           members: r.members,
           membership: (r.membership ?? "join") as "join" | "invite" | "leave",
           topic: r.topic || "",

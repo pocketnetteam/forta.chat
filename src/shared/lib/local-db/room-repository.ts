@@ -92,6 +92,7 @@ export class RoomRepository {
       avatar?: string;
       isGroup?: boolean;
       isPublic?: boolean;
+      isWorldReadable?: boolean;
       members?: string[];
       membership?: "join" | "invite" | "leave";
       topic?: string;
@@ -140,7 +141,8 @@ export class RoomRepository {
             || (update.avatar !== undefined && update.avatar !== prev.avatar)
             || (update.membership !== undefined && update.membership !== prev.membership)
             || (update.topic !== undefined && update.topic !== prev.topic)
-            || (update.isPublic !== undefined && update.isPublic !== prev.isPublic);
+            || (update.isPublic !== undefined && update.isPublic !== prev.isPublic)
+            || (update.isWorldReadable !== undefined && update.isWorldReadable !== prev.isWorldReadable);
           // Unread reconciliation: Matrix SDK is the single source of truth.
           // EventWriter does NOT touch unreadCount — so serverUnreadCount is always authoritative.
           const unreadChanged = update.serverUnreadCount !== undefined
@@ -158,6 +160,7 @@ export class RoomRepository {
           if (update.avatar !== undefined) patched.avatar = update.avatar;
           if (update.isGroup !== undefined) patched.isGroup = update.isGroup;
           if (update.isPublic !== undefined) patched.isPublic = update.isPublic;
+          if (update.isWorldReadable !== undefined) patched.isWorldReadable = update.isWorldReadable;
           if (update.members !== undefined) patched.members = update.members;
           if (update.membership !== undefined) patched.membership = update.membership;
           if (update.topic !== undefined) patched.topic = update.topic;
@@ -207,6 +210,7 @@ export class RoomRepository {
             avatar: update.avatar,
             isGroup: update.isGroup ?? false,
             isPublic: update.isPublic,
+            isWorldReadable: update.isWorldReadable,
             members: update.members ?? [],
             membership: update.membership ?? "join",
             unreadCount: update.unreadCount ?? 0,

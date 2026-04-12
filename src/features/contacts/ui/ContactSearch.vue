@@ -2,6 +2,8 @@
 import { useContacts } from "../model/use-contacts";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom } from "@/entities/chat";
+import { useChannelStore } from "@/entities/channel";
+import type { Channel } from "@/entities/channel";
 import { UserAvatar } from "@/entities/user";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { splitByQuery } from "@/shared/lib/utils/highlight";
@@ -16,11 +18,13 @@ const props = defineProps<{ query: string }>();
 const emit = defineEmits<{
   roomCreated: [roomId: string];
   selectMessage: [payload: { roomId: string; messageId: string }];
+  selectChannel: [address: string];
   clear: [];
 }>();
 
 const { searchResults, isSearching, isCreatingRoom, debouncedSearch, getOrCreateRoom } = useContacts();
 const chatStore = useChatStore();
+const channelStore = useChannelStore();
 const { t } = useI18n();
 const { formatPreview } = useFormatPreview();
 const { resolve: resolveRoomName } = useResolvedRoomName();
@@ -38,12 +42,14 @@ watch(() => props.query, (q) => {
 const showAllChats = ref(false);
 const showAllUsers = ref(false);
 const showAllMessages = ref(false);
+const showAllChannels = ref(false);
 
 // Reset expansion when query changes
 watch(() => props.query, () => {
   showAllChats.value = false;
   showAllUsers.value = false;
   showAllMessages.value = false;
+  showAllChannels.value = false;
 });
 
 const visibleChats = computed(() =>
@@ -56,6 +62,10 @@ const visibleUsers = computed(() =>
 
 const visibleMessages = computed(() =>
   showAllMessages.value ? search.messageResults.value : search.messageResults.value.slice(0, 5)
+);
+
+const visibleChannels = computed(() =>
+  showAllChannels.value ? search.channelResults.value : search.channelResults.value.slice(0, 5)
 );
 
 const handleSelectRoom = (room: ChatRoom) => {
@@ -72,6 +82,12 @@ const handleSelectUser = async (address: string) => {
 
 const handleSelectMessage = (result: MessageSearchResult) => {
   emit("selectMessage", { roomId: result.room.id, messageId: result.message.id });
+};
+
+const handleSelectChannel = (channel: Channel) => {
+  channelStore.setActiveChannel(channel.address);
+  chatStore.setActiveRoom(null);
+  emit("selectChannel", channel.address);
 };
 </script>
 
@@ -167,6 +183,39 @@ const handleSelectMessage = (result: MessageSearchResult) => {
       </button>
     </div>
 
+    <!-- CHANNELS section -->
+    <div v-if="visibleChannels.length">
+      <div class="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-on-main-bg-color">
+        {{ t("contactSearch.channels") }}
+      </div>
+      <button
+        v-for="ch in visibleChannels"
+        :key="ch.address"
+        class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-all hover:bg-neutral-grad-0 active:scale-[0.98]"
+        @click="handleSelectChannel(ch)"
+      >
+        <Avatar :src="ch.avatar" :name="ch.name" size="sm" />
+        <div class="min-w-0 flex-1">
+          <div class="truncate text-sm font-medium text-text-color">
+            <template v-for="(part, j) in splitByQuery(ch.name, query.trim())" :key="j">
+              <mark v-if="part.highlight" class="rounded-sm bg-color-txt-ac/20 font-semibold text-color-txt-ac">{{ part.text }}</mark>
+              <span v-else>{{ part.text }}</span>
+            </template>
+          </div>
+          <div v-if="ch.lastContent" class="truncate text-xs text-text-on-main-bg-color">
+            {{ ch.lastContent.caption || ch.lastContent.message || '' }}
+          </div>
+        </div>
+      </button>
+      <button
+        v-if="search.channelResults.value.length > 5 && !showAllChannels"
+        class="w-full px-3 py-1.5 text-left text-xs font-medium text-color-txt-ac hover:underline"
+        @click="showAllChannels = true"
+      >
+        {{ t("contactSearch.showMore") }}
+      </button>
+    </div>
+
     <!-- MESSAGES section -->
     <div v-if="visibleMessages.length">
       <div class="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-on-main-bg-color">
@@ -209,7 +258,7 @@ const handleSelectMessage = (result: MessageSearchResult) => {
 
     <!-- No results -->
     <div
-      v-if="!visibleChats.length && !visibleUsers.length && !visibleMessages.length && !isSearching"
+      v-if="!visibleChats.length && !visibleUsers.length && !visibleChannels.length && !visibleMessages.length && !isSearching"
       class="flex flex-col items-center gap-2 py-8 text-sm text-text-on-main-bg-color"
     >
       <span>{{ t("contactSearch.noResults") }}</span>
