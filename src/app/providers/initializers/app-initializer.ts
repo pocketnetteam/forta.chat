@@ -55,7 +55,7 @@ export class AppInitializer {
    *  converge into a single getuserprofile RPC. */
   private static profileBatcher: RpcBatcher<string, Record<string, unknown>> | null = null;
   private static profileRpcCache = new Map<string, { data: Record<string, unknown>; ts: number }>();
-  private static PROFILE_RPC_CACHE_TTL = 5 * 60 * 1000; // 5 min
+  private static PROFILE_RPC_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days — matches user-store TTL
 
   constructor(pocketnetInstance: PocketnetInstanceType) {
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
