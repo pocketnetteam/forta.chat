@@ -5,9 +5,11 @@
  */
 import { readFile, writeFile } from "fs/promises";
 import { resolve, relative } from "path";
-import pkg from "glob";
-const { glob } = pkg;
+import { promisify } from "util";
+import globCb from "glob";
 import { minify } from "terser";
+
+const glob = promisify(globCb);
 
 const DIST_JS = resolve("dist/js");
 
