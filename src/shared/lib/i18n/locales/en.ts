@@ -665,6 +665,11 @@ export const en = {
   "register.mustAcceptTerms": "You must accept the terms to continue",
   "invite.shareText": "Join me on Forta Chat!",
 
+  // ── App download banner ──
+  "appBanner.subtitle": "Get the app for a better experience",
+  "appBanner.download": "Download",
+  "appBanner.close": "Close",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",
