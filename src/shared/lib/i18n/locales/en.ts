@@ -710,7 +710,7 @@ export const en = {
   "download.availableNow": "Available Now",
   "download.getOnAndroid": "Get FortaChat on Android",
   "download.getOnAndroidDesc": "Download the APK and start communicating securely in minutes.",
-  "download.versionInfo": "Version 1.9.3 — Checksum verified",
+  "download.versionInfo": "Latest version — GitHub Releases",
 
   "download.footerPkoin": "PKOIN Network",
   "download.footerRights": "© {year} Forta Chat",

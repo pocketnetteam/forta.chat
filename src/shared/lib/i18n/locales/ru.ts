@@ -712,7 +712,7 @@ export const ru: Record<TranslationKey, string> = {
   "download.availableNow": "Доступно сейчас",
   "download.getOnAndroid": "Скачайте FortaChat на Android",
   "download.getOnAndroidDesc": "Загрузите APK и начните безопасное общение за считанные минуты.",
-  "download.versionInfo": "Версия 1.9.3 — Контрольная сумма верифицирована",
+  "download.versionInfo": "Последняя версия — GitHub Releases",
 
   "download.footerPkoin": "PKOIN Network",
   "download.footerRights": "© {year} Forta Chat",
