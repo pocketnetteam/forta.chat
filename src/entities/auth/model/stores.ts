@@ -176,6 +176,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Registration error: when UserInfo broadcast fails with code 18 (username taken/invalid)
   const registrationUsernameError = ref(false);
 
+  // Node that processed the sendrawtransaction during registration —
+  // used as fnode for getuserstate to avoid stale cache on a different node
+  let registrationFnode: string | null = null;
+
   // Registration phase for stepper UI (persisted in LS for reload resilience)
   const { setLSValue: setLSRegPhase, value: LSRegPhase } =
     useLocalStorage<RegistrationPhase>('registration_phase', 'init');
@@ -750,8 +754,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     try {
       await appInitializer.syncNodeTime();
-      await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
-      console.log("[auth] Key re-publish broadcast sent. Starting confirmation poll.");
+      const { registrationNode } = await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
+      registrationFnode = registrationNode;
+      console.log("[auth] Key re-publish broadcast sent (fnode:", registrationFnode, "). Starting confirmation poll.");
       setRegistrationPending(true);
       startRegistrationPoll();
     } catch (e) {
@@ -999,8 +1004,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               await appInitializer.syncNodeTime();
               const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
               await appInitializer.initializeAndFetchUserData(address.value);
-              await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
-              console.log("[auth] UserInfo broadcast requested, moving to phase 2");
+              const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
+              registrationFnode = registrationNode;
+              console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
               setRegistrationPhase('confirming');
               setPendingRegProfile(null);
               pollInterval = 3000;
@@ -1036,9 +1042,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           return;
         }
 
-        const confirmed = await appInitializer.checkUserRegistered(address.value);
+        const confirmed = await appInitializer.checkUserRegistered(address.value, registrationFnode);
         if (confirmed) {
-          console.log("[auth] Registration confirmed on blockchain!");
+          console.log("[auth] Registration confirmed on blockchain! (fnode:", registrationFnode, ")");
           await onRegistrationConfirmed();
           return;
         }
@@ -1147,6 +1153,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     regProxyId.value = null;
     regCaptchaId.value = null;
     regCaptchaDone.value = false;
+    registrationFnode = null;
   };
 
   /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */

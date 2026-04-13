@@ -157,14 +157,16 @@ export class AppInitializer {
   }
 
   /** Broadcast a UserInfo transaction for a newly registered account.
-   *  Includes encryption public keys so other users can encrypt messages for this account. */
+   *  Includes encryption public keys so other users can encrypt messages for this account.
+   *  Returns { action, registrationNode } where registrationNode is the node that processed
+   *  the sendrawtransaction — use it as fnode for subsequent getuserstate calls. */
   async registerUserProfile(
     address: string,
     profile: { name: string; language: string; about: string },
     encryptionPublicKeys?: string[],
     image?: string
-  ) {
-    if (!this.actions) return null;
+  ): Promise<{ action: unknown; registrationNode: string | null }> {
+    if (!this.actions) return { action: null, registrationNode: null };
     const userInfo = new UserInfo();
     userInfo.name.set(superXSS(profile.name));
     userInfo.language.set(superXSS(profile.language));
@@ -174,7 +176,25 @@ export class AppInitializer {
     userInfo.addresses.set([]);
     userInfo.ref.set(null);
     userInfo.keys.set(encryptionPublicKeys ?? null);
-    return this.actions.addActionAndSendIfCan(userInfo, null, address);
+    const action = await this.actions.addActionAndSendIfCan(userInfo, null, address);
+
+    // Extract the node that processed the transaction from the global txidnodestorage
+    const registrationNode = this.extractNodeFromAction(action);
+    console.log("[appInit] registerUserProfile: registrationNode =", registrationNode);
+    return { action, registrationNode };
+  }
+
+  /** Extract the node address from a completed action's transaction via global txidnodestorage.
+   *  txidnodestorage is populated by api.js after every sendrawtransaction. */
+  private extractNodeFromAction(action: unknown): string | null {
+    try {
+      const txid = (action as Record<string, unknown>)?.transaction as string | undefined;
+      if (!txid) return null;
+      const storage = (window as unknown as Record<string, unknown>).txidnodestorage as Record<string, string> | undefined;
+      return storage?.[txid] ?? null;
+    } catch {
+      return null;
+    }
   }
 
   async editUserData({
@@ -627,12 +647,18 @@ export class AppInitializer {
 
   /** Check if user account exists on the blockchain via getuserstate RPC.
    *  Fallback check — works regardless of Actions system state.
+   *  When fnode is provided, the request is pinned to that specific node —
+   *  this avoids stale cache on a different node after registration broadcast.
    *  Returns true if the account is confirmed, false if still pending. */
-  async checkUserRegistered(address: string): Promise<boolean> {
+  async checkUserRegistered(address: string, fnode?: string | null): Promise<boolean> {
     if (!this.api) return false;
     try {
       await this.initApi();
-      const result = await this.api.rpc("getuserstate", [address]);
+      const rpcOptions = fnode ? { fnode } : undefined;
+      if (fnode) {
+        console.log("[appInit] checkUserRegistered: pinning getuserstate to fnode =", fnode);
+      }
+      const result = await this.api.rpc("getuserstate", [address], rpcOptions);
       if (!result) return false;
       // getuserstate may return an object {address: ...} or an array [{address: ...}]
       if (Array.isArray(result)) {
