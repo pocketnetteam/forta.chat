@@ -20,6 +20,7 @@ import { computeKeyboardHeight, shouldScrollIntoView } from "@/shared/lib/keyboa
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
+import { AppDownloadBanner } from "@/features/app-download-banner";
 import { useI18n } from "@/shared/lib/i18n";
 
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
@@ -273,6 +274,7 @@ onUnmounted(() => {
 
 <template>
   <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh">
+    <AppDownloadBanner />
     <!-- Registration stepper overlay — shows progress during blockchain registration -->
     <RegistrationStepper
       v-if="authStore.registrationPending || authStore.registrationPhase === 'done' || authStore.registrationUsernameError"

@@ -648,6 +648,11 @@ export const ru: Record<TranslationKey, string> = {
   "register.backToName": "Назад к вводу имени",
   "invite.shareText": "Присоединяйтесь ко мне в Forta Chat!",
 
+  // ── App download banner ──
+  "appBanner.subtitle": "Скачайте приложение для лучшего опыта",
+  "appBanner.download": "Скачать",
+  "appBanner.close": "Закрыть",
+
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",
