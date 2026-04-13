@@ -670,4 +670,55 @@ export const ru: Record<TranslationKey, string> = {
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",
+
+  // ── Download / Landing page ──
+  "download.privacyFirst": "Приватность — прежде всего",
+  "download.heroTitle": "Ваша крепость приватного общения",
+  "download.heroSubtitle": "Мессенджер, где приватность — не функция, а основа. Без номеров телефонов. Без привязки к личности. Только чистая зашифрованная свобода.",
+  "download.register": "Открыть веб-приложение",
+  "download.downloadApk": "Скачать для Android",
+
+  "download.zeroKnowledge": "Архитектура нулевого знания",
+  "download.zeroKnowledgeDesc": "Спроектирован для абсолютной операционной безопасности.",
+  "download.identityAgnostic": "Независимость от личности",
+  "download.identityAgnosticDesc": "Без номеров телефонов, без email, без логирования IP. Ваш аккаунт полностью отвязан от реальной личности.",
+  "download.cryptoKeys": "Криптографические ключи",
+  "download.cryptoKeysDesc": "Генерация ключей на уровне устройства гарантирует, что даже серверы FortaChat не могут расшифровать ваши сообщения.",
+
+  "download.featuresHeading": "Новый стандарт",
+  "download.featuresDesc": "Бескомпромиссные возможности для суверенного пользователя.",
+  "download.featureAnonymity": "Полная анонимность",
+  "download.featureAnonymityDesc": "Номер телефона или удостоверение личности не требуются. Ваши разговоры принадлежат только вам.",
+  "download.featureEncryption": "Открытое шифрование",
+  "download.featureEncryptionDesc": "Полное сквозное шифрование с публично проверяемым открытым кодом.",
+  "download.featureWallet": "Криптокошелёк PKOIN",
+  "download.featureWalletDesc": "Встроенный криптовалютный кошелёк. Отправляйте PKOIN любому контакту в мире.",
+  "download.featureChannels": "Каналы Bastyon",
+  "download.featureChannelsDesc": "Подписывайтесь на любимых авторов Bastyon и читайте их контент как каналы в чате.",
+  "download.featureCalls": "Видео- и аудиозвонки",
+  "download.featureCallsDesc": "Кристально чистые видео- и аудиозвонки со сквозным шифрованием.",
+
+  "download.borderless": "Без границ по замыслу",
+  "download.borderlessDesc": "FortaChat работает по всему миру без ограничений. Отправляйте зашифрованные сообщения и PKOIN мгновенно кому угодно на Земле, без контроля центральных властей.",
+  "download.statUptime": "Время работы",
+  "download.statUptimeVal": "99.9%",
+  "download.statEncryption": "Шифрование",
+  "download.statEncryptionVal": "4096 бит",
+  "download.statServers": "Серверы",
+  "download.statServersVal": "Децентрализ.",
+  "download.statCost": "Стоимость",
+  "download.statCostVal": "Бесплатно",
+
+  "download.availableNow": "Доступно сейчас",
+  "download.getOnAndroid": "Скачайте FortaChat на Android",
+  "download.getOnAndroidDesc": "Загрузите APK и начните безопасное общение за считанные минуты.",
+  "download.versionInfo": "Версия 1.9.3 — Контрольная сумма верифицирована",
+
+  "download.footerPkoin": "PKOIN Network",
+  "download.footerRights": "© {year} Forta Chat",
+
+  // ── Android download banner ──
+  "banner.androidTitle": "Forta Chat доступен как Android-приложение",
+  "banner.androidCta": "Скачать APK",
+  "banner.androidDismiss": "Продолжить в браузере",
 };

@@ -668,6 +668,57 @@ export const en = {
   // ── Language names ──
   "locale.en": "English",
   "locale.ru": "Русский",
+
+  // ── Download / Landing page ──
+  "download.privacyFirst": "Privacy-First Protocol",
+  "download.heroTitle": "Your Fortress of Private Communication",
+  "download.heroSubtitle": "The messenger where privacy isn't a feature — it's the foundation. No phone numbers. No identity. Just pure, encrypted freedom.",
+  "download.register": "Open Web App",
+  "download.downloadApk": "Download for Android",
+
+  "download.zeroKnowledge": "Zero-Knowledge Architecture",
+  "download.zeroKnowledgeDesc": "Designed for absolute operational security.",
+  "download.identityAgnostic": "Identity Agnostic",
+  "download.identityAgnosticDesc": "No phone numbers, no emails, no IP logging. Your account exists entirely decoupled from your real-world identity.",
+  "download.cryptoKeys": "Cryptographic Keys",
+  "download.cryptoKeysDesc": "Device-level key generation ensures not even FortaChat servers can decrypt your communications.",
+
+  "download.featuresHeading": "A New Standard",
+  "download.featuresDesc": "Uncompromising features built for the sovereign individual.",
+  "download.featureAnonymity": "Complete Anonymity",
+  "download.featureAnonymityDesc": "No phone number or personal identity required. Your conversations belong to you alone.",
+  "download.featureEncryption": "Open-Source Encryption",
+  "download.featureEncryptionDesc": "Fully end-to-end encrypted with publicly auditable open-source code.",
+  "download.featureWallet": "PKOIN Crypto Wallet",
+  "download.featureWalletDesc": "Built-in cryptocurrency wallet. Send PKOIN to any contact anywhere in the world.",
+  "download.featureChannels": "Bastyon Channels",
+  "download.featureChannelsDesc": "Subscribe to your favorite Bastyon authors and see their content as channels in your chat.",
+  "download.featureCalls": "Video & Audio Calls",
+  "download.featureCallsDesc": "Crystal-clear video and audio calls, fully encrypted end-to-end.",
+
+  "download.borderless": "Borderless by Design",
+  "download.borderlessDesc": "FortaChat operates globally without restrictions. Send encrypted messages and PKOIN instantly to anyone on Earth, free from central authority oversight.",
+  "download.statUptime": "Uptime",
+  "download.statUptimeVal": "99.9%",
+  "download.statEncryption": "Encryption",
+  "download.statEncryptionVal": "4096-bit",
+  "download.statServers": "Servers",
+  "download.statServersVal": "Decentralized",
+  "download.statCost": "Cost",
+  "download.statCostVal": "Free",
+
+  "download.availableNow": "Available Now",
+  "download.getOnAndroid": "Get FortaChat on Android",
+  "download.getOnAndroidDesc": "Download the APK and start communicating securely in minutes.",
+  "download.versionInfo": "Version 1.9.3 — Checksum verified",
+
+  "download.footerPkoin": "PKOIN Network",
+  "download.footerRights": "© {year} Forta Chat",
+
+  // ── Android download banner ──
+  "banner.androidTitle": "Forta Chat is available as an Android app",
+  "banner.androidCta": "Download APK",
+  "banner.androidDismiss": "Continue in browser",
 } as const;
 
 export type TranslationKey = keyof typeof en;

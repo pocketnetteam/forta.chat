@@ -8,6 +8,7 @@ import { route as profileRoute } from "./profile";
 import { route as profileEditRoute } from "./profile-edit";
 import { route as appearanceRoute } from "./appearance";
 import { route as registerRoute } from "./register";
+import { route as downloadRoute } from "./download";
 import { route as welcomeRoute } from "./welcome";
 
 export const routes: RouteRecordRaw[] = [
@@ -15,6 +16,7 @@ export const routes: RouteRecordRaw[] = [
   joinRoute,
   loginRoute,
   chatRoute,
+  downloadRoute,
   registerRoute,
   welcomeRoute,
   profileRoute,

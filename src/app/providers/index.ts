@@ -101,9 +101,18 @@ export const setupProviders = async (app: App) => {
     );
   }
 
-  // Scripts must finish before router mounts the app — components
-  // need API globals (sdk, actions, etc.) available in onMounted.
-  await withTimeout(scriptsReady, 30_000, "Chat scripts loading");
+  // Static pages (e.g. /download landing) don't need chat scripts —
+  // skip blocking wait so they render instantly.
+  const isStaticRoute = location.hash === "#/download"
+    || location.hash.startsWith("#/download?")
+    || location.hash.startsWith("#/download/");
+
+  if (!isStaticRoute) {
+    // Scripts must finish before router mounts the app — components
+    // need API globals (sdk, actions, etc.) available in onMounted.
+    await withTimeout(scriptsReady, 30_000, "Chat scripts loading");
+  }
+
   bootStatus.setStep("auth");
   await setupRouter(app);
 };

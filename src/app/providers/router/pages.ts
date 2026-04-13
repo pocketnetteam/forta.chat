@@ -5,11 +5,13 @@ import { routeName as login } from "./routes/login";
 import { routeName as profile } from "./routes/profile";
 import { routeName as profileEdit } from "./routes/profile-edit";
 import { routeName as appearance } from "./routes/appearance";
+import { routeName as download } from "./routes/download";
 import { routeName as welcome } from "./routes/welcome";
 
 export const pages = {
   appearance,
   chat,
+  download,
   invite,
   joinRoom,
   login,
