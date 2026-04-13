@@ -107,5 +107,8 @@ class MainActivity : BridgeActivity() {
             })();
         """.trimIndent()
         webView.post { webView.evaluateJavascript(js, null) }
+        // Second injection at +100ms covers devices where the IME inset fires before
+        // the keyboard animation settles (1-3 frame latency on slow Android 7 hardware).
+        webView.postDelayed({ webView.evaluateJavascript(js, null) }, 100)
     }
 }

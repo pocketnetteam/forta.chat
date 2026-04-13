@@ -13,15 +13,39 @@ export interface KeyboardHeightInput {
   webKbh: number;
 }
 
+// Tracks the last keyboard height reported by a native event.
+// Used for Samsung hysteresis: when visualViewport fires a stale near-zero
+// scroll event before the native-keyboard-change height=0 arrives, we hold
+// the prior native value to prevent a visible blank-space flash.
+let lastNativeKbh = 0;
+
 /**
  * Compute the effective keyboard height.
  *
  * - Native events (from WindowInsets via MainActivity.kt) are authoritative.
- * - For visualViewport events (web fallback), take the larger of web/native.
+ * - For visualViewport events (web fallback), take the larger of web/native,
+ *   but guard against Samsung's scroll-vs-resize race: if the last native
+ *   event reported a large keyboard height (>50px) and the current candidate
+ *   is near-zero (<50px), hold the prior native value until the native event
+ *   explicitly zeroes it.
  */
 export function computeKeyboardHeight(input: KeyboardHeightInput): number {
-  if (input.isNativeEvent) return input.nativeKbh;
-  return Math.max(input.webKbh, input.nativeKbh);
+  if (input.isNativeEvent) {
+    lastNativeKbh = input.nativeKbh;
+    return input.nativeKbh;
+  }
+
+  const candidate = Math.max(input.webKbh, input.nativeKbh);
+
+  // Hysteresis guard: prevent false-zero from Samsung stale visualViewport scroll.
+  // Only holds when native already confirmed a large keyboard AND candidate drops
+  // near-zero. Once the native event fires with 0, lastNativeKbh is reset and
+  // this guard no longer applies.
+  if (lastNativeKbh > 50 && candidate < 50) {
+    return lastNativeKbh;
+  }
+
+  return candidate;
 }
 
 /**
