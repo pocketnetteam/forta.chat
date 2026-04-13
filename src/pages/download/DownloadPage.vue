@@ -8,6 +8,25 @@ const { t } = useI18n();
 const localeStore = useLocaleStore();
 const currentYear = new Date().getFullYear();
 
+const apkUrl = ref(downloadLinks.androidApk);
+const latestVersion = ref("");
+
+onMounted(async () => {
+  try {
+    const res = await fetch("https://api.github.com/repos/pocketnetteam/forta.chat/releases/latest");
+    if (!res.ok) return;
+    const data = await res.json();
+    latestVersion.value = (data.tag_name as string)?.replace(/^v/, "") ?? "";
+    const apkAsset = (data.assets as Array<{ name: string; browser_download_url: string }>)
+      ?.find(a => a.name.endsWith(".apk"));
+    if (apkAsset) {
+      apkUrl.value = apkAsset.browser_download_url;
+    }
+  } catch {
+    // Fallback to releases/latest page — already set
+  }
+});
+
 const stats = computed(() => [
   { label: t("download.statUptime"), value: t("download.statUptimeVal") },
   { label: t("download.statEncryption"), value: t("download.statEncryptionVal") },
@@ -66,7 +85,7 @@ const features = computed(() => [
           {{ t("download.register") }}
         </a>
         <a
-          :href="downloadLinks.androidApk"
+          :href="apkUrl"
           class="flex h-12 cursor-pointer items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/5 px-8 text-sm font-semibold text-white transition-all duration-200 hover:border-white/25 hover:bg-white/10"
         >
           <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
@@ -164,13 +183,15 @@ const features = computed(() => [
         <h2 class="mb-3 text-xl font-bold sm:text-2xl">{{ t("download.getOnAndroid") }}</h2>
         <p class="mb-7 text-sm text-white/40">{{ t("download.getOnAndroidDesc") }}</p>
         <a
-          :href="downloadLinks.androidApk"
+          :href="apkUrl"
           class="mx-auto flex h-12 w-full max-w-xs cursor-pointer items-center justify-center gap-2 rounded-lg bg-white px-7 text-sm font-semibold text-black transition-all duration-200 hover:bg-white/90 hover:shadow-[0_0_24px_rgba(255,255,255,0.12)]"
         >
           <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
           {{ t("download.downloadApk") }}
         </a>
-        <p class="mt-4 text-[11px] text-white/25">{{ t("download.versionInfo") }}</p>
+        <p class="mt-4 text-[11px] text-white/25">
+          {{ latestVersion ? `v${latestVersion}` : t("download.versionInfo") }}
+        </p>
       </div>
     </section>
 
