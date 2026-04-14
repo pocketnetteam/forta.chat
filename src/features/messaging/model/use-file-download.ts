@@ -4,6 +4,8 @@ import type { FileInfo, Message } from "@/entities/chat";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { isNative, isElectron } from "@/shared/lib/platform";
+import { useBugReport } from "@/features/bug-report";
+import { tRaw } from "@/shared/lib/i18n";
 
 interface FileDownloadState {
   loading: boolean;
@@ -228,6 +230,7 @@ export function useFileDownload() {
       return url;
     } catch (e) {
       console.error("[use-file-download] download error:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.fileDownload"), error: e });
       state.error = String(e);
       return null;
     } finally {

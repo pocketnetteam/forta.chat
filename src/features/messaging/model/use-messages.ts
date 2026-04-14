@@ -15,6 +15,8 @@ import { invalidateDownloadCache } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
+import { useBugReport } from "@/features/bug-report";
+import { tRaw } from "@/shared/lib/i18n";
 
 /** Max time for the entire media pipeline (encrypt + upload + send event + confirm) */
 const MEDIA_PIPELINE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
@@ -1134,6 +1136,7 @@ export function useMessages() {
       }
     } catch (e) {
       console.error("[Reaction] Failed to toggle reaction:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.toggleReaction"), error: e });
       await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
     }
   };
@@ -1422,6 +1425,7 @@ export function useMessages() {
       chatStore.updateMessageContent(roomId, messageId, trimmed);
     } catch (e) {
       console.error("Failed to edit message:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.editMessage"), error: e });
     }
   };
 
@@ -1456,6 +1460,7 @@ export function useMessages() {
       chatStore.removeMessage(roomId, messageId);
     } catch (e) {
       console.error("Failed to delete message:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.deleteMessage"), error: e });
     }
   };
 
@@ -1606,6 +1611,7 @@ export function useMessages() {
       });
     } catch (e) {
       console.error("Failed to send poll:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.sendPoll"), error: e });
     }
   };
 
@@ -1649,6 +1655,7 @@ export function useMessages() {
       }
     } catch (e) {
       console.error("Failed to vote on poll:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.votePoll"), error: e });
     }
   };
 
@@ -1686,6 +1693,7 @@ export function useMessages() {
       }
     } catch (e) {
       console.error("Failed to end poll:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.endPoll"), error: e });
     }
   };
 

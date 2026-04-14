@@ -1,6 +1,8 @@
 import { ref } from "vue";
 import { isNative } from "@/shared/lib/platform";
 import { getRealGetUserMedia } from "@/shared/lib/native-webrtc";
+import { useBugReport } from "@/features/bug-report";
+import { tRaw } from "@/shared/lib/i18n";
 
 export type RecorderState = "idle" | "recording" | "locked" | "preview";
 
@@ -103,6 +105,7 @@ export function useVoiceRecorder() {
       }, 50);
     } catch (e) {
       console.error("Failed to start recording:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.voiceRecord"), error: e });
       cleanup();
     }
   };

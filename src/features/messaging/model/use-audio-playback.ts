@@ -1,5 +1,7 @@
 import { ref, computed, shallowRef } from "vue";
 import { isNative } from "@/shared/lib/platform";
+import { useBugReport } from "@/features/bug-report";
+import { tRaw } from "@/shared/lib/i18n";
 
 export type PlaybackState = "idle" | "loading" | "playing" | "paused" | "ended" | "failed";
 
@@ -216,6 +218,7 @@ export function useAudioPlayback() {
         console.error("[audio] User gesture likely expired before play(). " +
           "Ensure no async operations between click and play().");
       }
+      useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
       state.value = "failed";
     }
   }

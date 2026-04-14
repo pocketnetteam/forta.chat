@@ -10,6 +10,8 @@ import { playRingtone, playDialtone, playEndTone, stopAllSounds } from "./call-s
 import { checkOtherTabHasCall } from "./call-tab-lock";
 import { webrtcDiagnostics } from "./webrtc-diagnostics";
 import { isNative } from "@/shared/lib/platform";
+import { useBugReport } from "@/features/bug-report";
+import { tRaw } from "@/shared/lib/i18n";
 import { installNativeWebRTCProxy, NativeWebRTC } from "@/shared/lib/native-webrtc";
 import { nativeCallBridge } from "@/shared/lib/native-calls";
 
@@ -508,6 +510,7 @@ export function useCallService() {
       }
     } catch (e) {
       console.error("[call-service] Failed to place call:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.placeCall"), error: e });
       stopAllSounds();
       unwireCallEvents(call);
       callStore.updateStatus(CallStatus.failed);
@@ -627,6 +630,7 @@ export function useCallService() {
       await call.answer(true, isVideo);
     } catch (e) {
       console.error("[call-service] Failed to answer call:", e);
+      useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });
       unwireCallEvents(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
