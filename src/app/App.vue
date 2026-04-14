@@ -255,7 +255,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: 100vh; height: 100dvh">
+  <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: calc(100vh - var(--app-bottom-inset, 0px)); height: calc(100dvh - var(--app-bottom-inset, 0px))">
     <AppDownloadBanner />
     <!-- Registration stepper overlay — shows progress during blockchain registration -->
     <RegistrationStepper
