@@ -140,7 +140,9 @@ class WebRTCPlugin : Plugin() {
                 }
             }
 
-            mgr.createPeerConnection(peerId, iceServers, object : NativeWebRTCManager.Listener {
+            val iceTransportPolicy = call.getString("iceTransportPolicy") ?: "all"
+
+            mgr.createPeerConnection(peerId, iceServers, iceTransportPolicy, object : NativeWebRTCManager.Listener {
                 override fun onIceCandidate(peerId: String, candidate: IceCandidate) {
                     val data = JSObject().apply {
                         put("peerId", peerId)

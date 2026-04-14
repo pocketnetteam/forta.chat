@@ -233,4 +233,13 @@ class CallPlugin : Plugin() {
         audioRouter?.stop()
         call.resolve()
     }
+
+    @PluginMethod
+    fun getPendingAnswer(call: PluginCall) {
+        val pendingCallId = CallConnection.pendingAnswerCallId
+        CallConnection.pendingAnswerCallId = null
+        val ret = com.getcapacitor.JSObject()
+        ret.put("callId", pendingCallId)
+        call.resolve(ret)
+    }
 }

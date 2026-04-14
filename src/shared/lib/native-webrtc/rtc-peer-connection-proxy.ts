@@ -119,6 +119,7 @@ class NativeRTCPeerConnection extends EventTarget {
       await NativeWebRTC.createPeerConnection({
         peerId: this._peerId,
         iceServers,
+        iceTransportPolicy: config?.iceTransportPolicy ?? "all",
       });
 
       // Wire native events BEFORE resolving ready

@@ -14,6 +14,7 @@ export interface NativeWebRTCPlugin {
       username?: string;
       credential?: string;
     }>;
+    iceTransportPolicy?: string;
   }): Promise<void>;
 
   createOffer(options: { peerId: string }): Promise<{ sdp: string; type: string }>;

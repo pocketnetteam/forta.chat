@@ -9,6 +9,8 @@ interface NativeCallNativePlugin {
     roomId: string;
     hasVideo: boolean;
   }): Promise<void>;
+  /** Check if user tapped Answer before JS was ready */
+  getPendingAnswer(): Promise<{ callId: string | null }>;
   reportOutgoingCall(options: {
     callId: string;
     callerName: string;
@@ -63,6 +65,17 @@ class NativeCallBridge {
       console.log('[NativeCallBridge] Call ended natively:', callId);
       this.callService?.hangup();
     });
+
+    // Replay queued answer if user tapped Answer before JS was ready
+    try {
+      const { callId: pendingCallId } = await NativeCall.getPendingAnswer();
+      if (pendingCallId) {
+        console.log('[NativeCallBridge] Replaying pending answer:', pendingCallId);
+        this.callService?.answerCall();
+      }
+    } catch (e) {
+      console.warn('[NativeCallBridge] getPendingAnswer failed:', e);
+    }
 
     // Native CallActivity hangup button → proper SDK hangup
     await NativeWebRTC.addListener('onNativeHangup', () => {

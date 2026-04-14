@@ -214,13 +214,25 @@ class CallConnection(
         var onAnswered: ((String) -> Unit)? = null
         var onRejected: ((String) -> Unit)? = null
         var onEnded: ((String) -> Unit)? = null
+
+        /**
+         * Queued answer callId — set when user taps "Answer" before JS listener
+         * is wired. JS side checks and replays this on wire().
+         */
+        var pendingAnswerCallId: String? = null
     }
 
     override fun onAnswer() {
         Log.d("CallConnection", "onAnswer: $callId")
         setActive()
         CallConnectionService.dismissIncomingCallNotification(context)
-        onAnswered?.invoke(callId)
+        if (onAnswered != null) {
+            onAnswered?.invoke(callId)
+        } else {
+            // JS not ready yet — queue for replay
+            Log.w("CallConnection", "onAnswer: JS listener not wired, queuing callId=$callId")
+            pendingAnswerCallId = callId
+        }
     }
 
     override fun onReject() {

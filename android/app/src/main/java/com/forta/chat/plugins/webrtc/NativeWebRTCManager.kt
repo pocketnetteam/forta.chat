@@ -2,6 +2,7 @@ package com.forta.chat.plugins.webrtc
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.media.projection.MediaProjection
 import android.util.Log
 import org.webrtc.*
@@ -105,7 +106,7 @@ class NativeWebRTCManager(private val context: Context) {
     // Peer Connection
     // -----------------------------------------------------------------------
 
-    fun createPeerConnection(peerId: String, iceServers: List<PeerConnection.IceServer>, listener: Listener) {
+    fun createPeerConnection(peerId: String, iceServers: List<PeerConnection.IceServer>, iceTransportPolicy: String, listener: Listener) {
         this.listener = listener
 
         // Close existing PC with same ID if any
@@ -118,6 +119,11 @@ class NativeWebRTCManager(private val context: Context) {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             iceCandidatePoolSize = 10
+            iceTransportsType = if (iceTransportPolicy == "relay") {
+                PeerConnection.IceTransportsType.RELAY
+            } else {
+                PeerConnection.IceTransportsType.ALL
+            }
         }
 
         val pc = factory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
@@ -293,6 +299,16 @@ class NativeWebRTCManager(private val context: Context) {
 
     fun startLocalAudio(peerId: String) {
         Log.d("WebRTCAudio", "startLocalAudio: begin, peerId=$peerId")
+
+        // Ensure AudioManager is in voice call mode for proper routing
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
+            Log.d("WebRTCAudio", "startLocalAudio: AudioManager set to MODE_IN_COMMUNICATION")
+        } catch (e: Exception) {
+            Log.w("WebRTCAudio", "startLocalAudio: failed to set audio mode", e)
+        }
 
         if (localAudioTrack != null) {
             Log.d("WebRTCAudio", "startLocalAudio: track already exists, reusing for peerId=$peerId")

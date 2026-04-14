@@ -8,6 +8,7 @@ import { useUserStore } from "@/entities/user";
 import type { CallFeed } from "matrix-js-sdk-bastyon/lib/webrtc/callFeed";
 import { playRingtone, playDialtone, playEndTone, stopAllSounds } from "./call-sounds";
 import { checkOtherTabHasCall } from "./call-tab-lock";
+import { webrtcDiagnostics } from "./webrtc-diagnostics";
 import { isNative } from "@/shared/lib/platform";
 import { installNativeWebRTCProxy, NativeWebRTC } from "@/shared/lib/native-webrtc";
 import { nativeCallBridge } from "@/shared/lib/native-calls";
@@ -146,6 +147,7 @@ let boundHandlers: {
 } | null = null;
 
 function unwireCallEvents(call: MatrixCall) {
+  webrtcDiagnostics.detach();
   cleanupRemoteFeedListener();
   if (!boundHandlers) return;
   try {
@@ -272,13 +274,9 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   call.on(CallEvent.Hangup, onHangup);
   call.on(CallEvent.Error, onError);
 
-  // Log ICE failure only (for TURN/NAT debugging)
+  // Attach WebRTC diagnostics (getStats polling, ICE/audio monitoring)
   const onPeerConnectionCreated = (pc: RTCPeerConnection) => {
-    pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
-        console.warn("[call-service] ICE failed/disconnected — TURN may be needed when both sides are behind NAT");
-      }
-    };
+    webrtcDiagnostics.attach(pc);
   };
   if (typeof (call as any).on === "function" && (CallEvent as any).PeerConnectionCreated) {
     call.on((CallEvent as any).PeerConnectionCreated, onPeerConnectionCreated);
@@ -286,8 +284,8 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // Fallback: if SDK doesn't emit PeerConnectionCreated, attach once peerConn is set
   const pcCheck = setInterval(() => {
     const pc: RTCPeerConnection | undefined = (call as any).peerConn;
-    if (pc && !(pc as any).__callServiceIceLogged) {
-      (pc as any).__callServiceIceLogged = true;
+    if (pc && !(pc as any).__callServiceDiagAttached) {
+      (pc as any).__callServiceDiagAttached = true;
       clearInterval(pcCheck);
       onPeerConnectionCreated(pc);
     }
