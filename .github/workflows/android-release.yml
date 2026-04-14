@@ -27,6 +27,9 @@ jobs:
 
       - name: Build web assets
         run: npx vite build
+        env:
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
 
       - name: Sync Capacitor Android
         run: npx cap sync android

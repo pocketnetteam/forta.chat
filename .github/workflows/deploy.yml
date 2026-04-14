@@ -27,6 +27,7 @@ jobs:
         run: npx vite build && node scripts/minify-public-js.mjs
         env:
           VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
 
       - name: Deploy to server via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
