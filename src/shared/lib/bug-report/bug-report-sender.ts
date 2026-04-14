@@ -191,10 +191,9 @@ export async function sendBugReport(
 
   const results: ScreenshotResult[] = [];
   if (input.screenshots?.length) {
-    const uploads = input.screenshots.map((data, i) =>
-      uploadScreenshot(token, data, i),
-    );
-    results.push(...(await Promise.all(uploads)));
+    for (let i = 0; i < input.screenshots.length; i++) {
+      results.push(await uploadScreenshot(token, input.screenshots[i], i));
+    }
   }
 
   const res = await fetch(`${API_BASE}/repos/${REPO}/issues`, {
