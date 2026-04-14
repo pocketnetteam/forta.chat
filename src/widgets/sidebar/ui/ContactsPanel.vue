@@ -195,8 +195,8 @@ const toggleSearch = () => {
       <!-- Skeleton while rooms haven't loaded yet -->
       <div v-if="contacts.length === 0 && !chatStore.roomsInitialized" class="space-y-1 p-2">
         <div v-for="i in 5" :key="i" class="flex items-center gap-3 px-4 py-2.5">
-          <div class="h-10 w-10 shrink-0 animate-pulse rounded-full bg-neutral-grad-2" />
-          <div class="h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+          <div class="h-10 w-10 shrink-0 contain-strict animate-pulse rounded-full bg-neutral-grad-2" />
+          <div class="h-4 w-24 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
         </div>
       </div>
       <div
@@ -233,7 +233,7 @@ const toggleSearch = () => {
             <span v-if="(item as ContactItem).deleted" class="truncate text-[15px] italic text-text-on-main-bg-color">
               {{ (item as ContactItem).name }}
             </span>
-            <span v-else-if="!(item as ContactItem).name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <span v-else-if="!(item as ContactItem).name" class="inline-block h-4 w-24 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
             <span v-else class="truncate text-[15px] font-medium text-text-color">
               {{ (item as ContactItem).name }}
             </span>

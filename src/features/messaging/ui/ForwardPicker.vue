@@ -185,10 +185,12 @@ const handleClose = () => {
                 </div>
 
                 <div class="min-w-0 flex-1 text-left">
-                  <div v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+                  <div v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-3.5 w-24 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
                   <template v-else>
                     <div class="truncate text-[15px] font-medium text-text-color">{{ resolveRoomName(room) }}</div>
-                    <div v-if="getRoomSubtitle(room)" class="truncate text-xs text-text-on-main-bg-color">{{ getRoomSubtitle(room) }}</div>
+                    <div v-if="getRoomSubtitle(room)" class="mt-0.5 flex h-5 min-w-0 items-center contain-strict">
+                      <div class="truncate text-xs text-text-on-main-bg-color">{{ getRoomSubtitle(room) }}</div>
+                    </div>
                   </template>
                 </div>
               </button>

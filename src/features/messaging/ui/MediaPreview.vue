@@ -117,7 +117,7 @@ const toggleCaptionPosition = () => {
                 @click="handleSend"
                 @contextmenu.prevent="showCaptionMenu = !showCaptionMenu"
               >
-                <div v-if="props.sending" class="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                <div v-if="props.sending" class="h-5 w-5 shrink-0 contain-strict animate-spin rounded-full border-2 border-white border-t-transparent" />
                 <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
                 </svg>

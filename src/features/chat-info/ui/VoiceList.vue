@@ -95,7 +95,7 @@ const togglePlay = async (msg: Message) => {
           <!-- Loading -->
           <div
             v-if="getState(msg._key || msg.id).loading"
-            class="h-5 w-5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent"
+            class="h-5 w-5 shrink-0 contain-strict animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent"
           />
           <!-- Pause icon -->
           <svg v-else-if="playback.isPlaying(msg.id).value" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">

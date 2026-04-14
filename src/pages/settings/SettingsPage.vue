@@ -132,7 +132,7 @@ const confirmDisableTor = () => {
             </button>
             <svg
               v-if="torSubtitle.spin"
-              class="ml-auto h-3.5 w-3.5 shrink-0 animate-spin text-text-on-main-bg-color"
+              class="ml-auto h-3.5 w-3.5 shrink-0 contain-strict animate-spin text-text-on-main-bg-color"
               viewBox="0 0 24 24" fill="none"
             >
               <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25" />

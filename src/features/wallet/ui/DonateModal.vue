@@ -210,7 +210,7 @@ watch(() => props.show, (v) => {
           @click="calculateFees"
         >
           <span v-if="feesLoading" class="inline-flex items-center gap-2">
-            <span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            <span class="inline-block h-4 w-4 shrink-0 contain-strict animate-spin rounded-full border-2 border-current border-t-transparent" />
             {{ t("wallet.calculateFees") }}
           </span>
           <span v-else>{{ t("wallet.calculateFees") }}</span>
@@ -228,7 +228,7 @@ watch(() => props.show, (v) => {
           @click="handleSend"
         >
           <span v-if="sending" class="inline-flex items-center gap-2">
-            <span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            <span class="inline-block h-4 w-4 shrink-0 contain-strict animate-spin rounded-full border-2 border-white border-t-transparent" />
             {{ t("wallet.send") }}
           </span>
           <span v-else>{{ t("wallet.send") }} {{ numericAmount > 0 && fees !== null ? `${numericAmount} PKOIN` : '' }}</span>

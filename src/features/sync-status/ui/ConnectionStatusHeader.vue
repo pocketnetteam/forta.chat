@@ -55,7 +55,7 @@ const toggleTooltip = () => {
         <!-- Spinning loader -->
         <svg
           v-if="showSpinner"
-          class="h-3.5 w-3.5 animate-spin cursor-pointer"
+          class="h-3.5 w-3.5 shrink-0 contain-strict animate-spin cursor-pointer"
           :class="colorClass"
           viewBox="0 0 16 16"
           fill="none"

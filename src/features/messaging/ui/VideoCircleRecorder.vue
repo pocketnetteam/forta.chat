@@ -109,7 +109,7 @@ const handleOverlayClick = () => {
   <!-- Locked bar (hands-free) — Telegram style -->
   <div v-else-if="state === 'locked'" class="mx-auto flex max-w-6xl items-center gap-3 px-3 py-2.5">
     <div class="flex items-center gap-2">
-      <span class="h-2.5 w-2.5 animate-pulse rounded-full bg-color-bad" />
+      <span class="h-2.5 w-2.5 shrink-0 contain-strict animate-pulse rounded-full bg-color-bad" />
       <span class="text-sm tabular-nums font-medium text-text-color">{{ formatDuration(duration) }}</span>
     </div>
     <span class="flex-1 text-center text-xs text-text-on-main-bg-color/50">Press outside to cancel</span>

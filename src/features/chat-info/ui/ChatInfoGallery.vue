@@ -210,7 +210,7 @@ const underlineStyle = computed(() => {
     <div class="flex-1 overflow-y-auto">
       <!-- Loading indicator while fetching all messages -->
       <div v-if="loadingAll" class="flex flex-col items-center justify-center py-16">
-        <div class="h-6 w-6 animate-spin rounded-full border-2 border-neutral-grad-0 border-t-color-bg-ac" />
+        <div class="h-6 w-6 shrink-0 contain-strict animate-spin rounded-full border-2 border-neutral-grad-0 border-t-color-bg-ac" />
         <span class="mt-3 text-sm text-text-on-main-bg-color">{{ t("chatInfo.loadingMessages") }}</span>
       </div>
 

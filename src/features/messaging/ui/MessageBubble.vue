@@ -407,7 +407,7 @@ const replyPreviewSender = computed(() => {
             class="flex items-center justify-center bg-neutral-grad-0"
             :style="imagePlaceholderStyle"
           >
-            <div class="h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+            <div class="h-8 w-8 shrink-0 contain-strict animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
           </div>
           <div
             v-else-if="fileState.error"
@@ -435,7 +435,7 @@ const replyPreviewSender = computed(() => {
           </div>
           <!-- Sending spinner (no progress info, legacy fallback) -->
           <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center bg-black/30">
-            <div class="h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
+            <div class="h-8 w-8 shrink-0 contain-strict animate-spin rounded-full border-3 border-white border-t-transparent" />
           </div>
           <!-- Failed overlay with retry -->
           <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center bg-black/40">
@@ -502,7 +502,7 @@ const replyPreviewSender = computed(() => {
           </button>
         </div>
         <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center rounded-full bg-black/30">
-          <div class="h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
+          <div class="h-8 w-8 shrink-0 contain-strict animate-spin rounded-full border-3 border-white border-t-transparent" />
         </div>
         <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center rounded-full bg-black/40">
           <button class="flex flex-col items-center gap-1 text-white" @click.stop="emit('retryMedia', message)">
@@ -553,7 +553,7 @@ const replyPreviewSender = computed(() => {
         <div class="relative">
           <video v-if="fileState.objectUrl" :src="fileState.objectUrl" controls class="block max-h-[360px] max-w-full" preload="metadata" />
           <div v-else-if="fileState.loading" class="flex h-48 w-64 items-center justify-center bg-neutral-grad-0">
-            <div class="h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+            <div class="h-8 w-8 shrink-0 contain-strict animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
           </div>
           <button v-else class="flex h-48 w-64 items-center justify-center bg-neutral-grad-0 transition-colors hover:bg-neutral-grad-2" @click="handleVideoAudioLoad">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" class="text-color-bg-ac"><polygon points="5 3 19 12 5 21 5 3" /></svg>
@@ -573,7 +573,7 @@ const replyPreviewSender = computed(() => {
             </button>
           </div>
           <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center bg-black/30">
-            <div class="h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
+            <div class="h-8 w-8 shrink-0 contain-strict animate-spin rounded-full border-3 border-white border-t-transparent" />
           </div>
           <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center bg-black/40">
             <button class="flex flex-col items-center gap-1 text-white" @click.stop="emit('retryMedia', message)">
@@ -700,7 +700,7 @@ const replyPreviewSender = computed(() => {
         </div>
         <button class="flex w-full items-center gap-3 text-left" @click="handleFileDownload">
           <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" :class="props.isOwn ? 'bg-white/20' : 'bg-color-bg-ac/10'">
-            <svg v-if="fileState.loading" class="h-5 w-5 animate-spin" :class="props.isOwn ? 'text-white' : 'text-color-bg-ac'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4 31.4" /></svg>
+            <svg v-if="fileState.loading" class="h-5 w-5 shrink-0 contain-strict animate-spin" :class="props.isOwn ? 'text-white' : 'text-color-bg-ac'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4 31.4" /></svg>
             <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" :class="props.isOwn ? 'text-white' : 'text-color-bg-ac'">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
             </svg>

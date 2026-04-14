@@ -48,9 +48,11 @@ const handleClick = () => emit("select", props.channel);
         </span>
       </div>
       <div class="mt-0.5 flex items-center justify-between gap-2">
-        <span class="truncate text-sm text-text-on-main-bg-color">
-          {{ previewText }}
-        </span>
+        <div class="min-w-0 flex-1 h-5 flex items-center contain-strict">
+          <span class="truncate text-sm text-text-on-main-bg-color">
+            {{ previewText }}
+          </span>
+        </div>
       </div>
     </div>
   </button>

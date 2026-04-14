@@ -462,7 +462,7 @@ const isAnyScreenSharing = computed(
                 class="absolute right-4 flex items-center gap-1.5 rounded-full bg-green-500/90 px-3 py-1 text-xs font-medium text-white shadow-lg"
                 style="top: calc(var(--safe-area-inset-top, 0px) + 16px)"
               >
-                <span class="h-2 w-2 rounded-full bg-white animate-pulse" />
+                <span class="h-2 w-2 shrink-0 contain-strict rounded-full bg-white animate-pulse" />
                 {{ callStore.screenSharing ? t('call.screenShare') : t('call.screen') }}
               </div>
             </Transition>

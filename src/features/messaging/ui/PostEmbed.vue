@@ -92,7 +92,7 @@ const openVideo = (e: Event) => {
     class="my-1 flex w-full max-w-md items-center gap-3 rounded-xl p-3"
     :class="isOwn ? 'bg-white/10' : 'bg-neutral-grad-0/60'"
   >
-    <div class="h-4 w-4 animate-pulse rounded-full bg-current opacity-20" />
+    <div class="h-4 w-4 shrink-0 contain-strict animate-pulse rounded-full bg-current opacity-20" />
     <span class="text-xs opacity-50">{{ t("post.loading") }}</span>
   </div>
 

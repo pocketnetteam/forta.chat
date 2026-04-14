@@ -148,10 +148,10 @@ onMounted(async () => {
   >
     <!-- Author skeleton -->
     <div class="flex items-center gap-2 p-3 pb-2 sm:gap-3 sm:p-4 sm:pb-3">
-      <div class="h-10 w-10 shrink-0 animate-pulse rounded-full bg-neutral-grad-2 sm:h-12 sm:w-12" />
+      <div class="h-10 w-10 shrink-0 contain-strict animate-pulse rounded-full bg-neutral-grad-2 sm:h-12 sm:w-12" />
       <div class="flex min-w-0 flex-col gap-1.5">
-        <div class="h-4 w-24 animate-pulse rounded bg-neutral-grad-2 sm:w-28" />
-        <div class="h-3 w-16 animate-pulse rounded bg-neutral-grad-2 sm:w-20" />
+        <div class="h-4 w-24 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2 sm:w-28" />
+        <div class="h-3 w-16 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2 sm:w-20" />
       </div>
     </div>
     <!-- Media skeleton — h-64 matches max-h-64 on loaded images -->
@@ -165,9 +165,9 @@ onMounted(async () => {
     <!-- Rating skeleton -->
     <div class="flex items-center gap-2 px-3 py-3 sm:gap-3 sm:px-4 sm:py-4">
       <div class="flex gap-0.5">
-        <div v-for="i in 5" :key="i" class="h-4 w-4 animate-pulse rounded bg-neutral-grad-2 sm:h-5 sm:w-5" />
+        <div v-for="i in 5" :key="i" class="h-4 w-4 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2 sm:h-5 sm:w-5" />
       </div>
-      <div class="h-3 w-8 animate-pulse rounded bg-neutral-grad-2" />
+      <div class="h-3 w-8 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
     </div>
     <!-- Button skeleton -->
     <div class="px-3 pb-3 sm:px-4 sm:pb-4">

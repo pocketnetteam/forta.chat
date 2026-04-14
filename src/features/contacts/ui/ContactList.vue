@@ -638,7 +638,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
   <div class="flex flex-col">
     <!-- Skeleton placeholder during initial sync -->
     <div v-if="filteredRooms.length === 0 && chatStore.isSyncing" class="flex flex-col">
-      <div v-for="i in 6" :key="i" class="flex h-[68px] w-full items-center gap-3 px-3 py-2.5 animate-pulse">
+      <div v-for="i in 6" :key="i" class="flex h-[68px] w-full shrink-0 items-center gap-3 px-3 py-2.5 contain-strict animate-pulse">
         <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-grad-0" />
         <div class="flex min-w-0 flex-1 flex-col gap-1.5">
           <div class="h-3.5 w-2/5 rounded bg-neutral-grad-0" />

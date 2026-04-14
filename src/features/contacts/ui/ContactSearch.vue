@@ -95,7 +95,7 @@ const handleSelectChannel = (channel: Channel) => {
   <div class="flex flex-col gap-1 overflow-y-auto px-1">
     <!-- Loading -->
     <div v-if="isSearching" class="flex items-center justify-center gap-2 p-3 text-sm text-text-on-main-bg-color">
-      <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg class="h-4 w-4 shrink-0 contain-strict animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>
       {{ t("contactSearch.searching") }}
@@ -103,7 +103,7 @@ const handleSelectChannel = (channel: Channel) => {
 
     <!-- Creating room -->
     <div v-if="isCreatingRoom" class="flex items-center justify-center gap-2 p-3 text-sm text-text-on-main-bg-color">
-      <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg class="h-4 w-4 shrink-0 contain-strict animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>
       {{ t("contactSearch.openingChat") }}
@@ -128,14 +128,16 @@ const handleSelectChannel = (channel: Channel) => {
         <Avatar v-else :src="room.avatar" :name="resolveRoomName(room)" size="sm" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-[15px] font-medium text-text-color">
-            <span v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
+            <span v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-4 w-24 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
             <template v-else v-for="(part, j) in splitByQuery(resolveRoomName(room), query.trim())" :key="j">
               <mark v-if="part.highlight" class="rounded-sm bg-color-txt-ac/20 font-semibold text-color-txt-ac">{{ part.text }}</mark>
               <span v-else>{{ part.text }}</span>
             </template>
           </div>
-          <div class="truncate text-xs text-text-on-main-bg-color">
-            {{ formatPreview(room.lastMessage, room) }}
+          <div class="mt-0.5 flex h-5 min-w-0 items-center contain-strict">
+            <div class="truncate text-xs text-text-on-main-bg-color">
+              {{ formatPreview(room.lastMessage, room) }}
+            </div>
           </div>
         </div>
         <span v-if="room.lastMessage" class="shrink-0 text-xs text-text-on-main-bg-color">
@@ -234,7 +236,7 @@ const handleSelectChannel = (channel: Channel) => {
         />
         <Avatar v-else :src="result.room.avatar" :name="resolveRoomName(result.room)" size="sm" />
         <div class="min-w-0 flex-1">
-          <div v-if="isUnresolvedName(resolveRoomName(result.room))" class="h-3 w-20 animate-pulse rounded bg-neutral-grad-2" />
+          <div v-if="isUnresolvedName(resolveRoomName(result.room))" class="h-3 w-20 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
           <div v-else class="truncate text-xs font-medium text-text-on-main-bg-color">{{ resolveRoomName(result.room) }}</div>
           <div class="truncate text-sm text-text-color">
             <template v-for="(part, j) in splitByQuery(result.message.content, query.trim())" :key="j">

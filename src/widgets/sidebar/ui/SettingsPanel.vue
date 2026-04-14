@@ -358,7 +358,7 @@ const handleLogout = () => {
           </span>
           <svg
             v-if="updateChecking"
-            class="h-4 w-4 shrink-0 animate-spin text-text-on-main-bg-color"
+            class="h-4 w-4 shrink-0 contain-strict animate-spin text-text-on-main-bg-color"
             viewBox="0 0 24 24"
             fill="none"
           >

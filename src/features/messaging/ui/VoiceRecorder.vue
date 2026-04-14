@@ -135,7 +135,7 @@ const waveformBars = computed(() => {
       </svg>
     </button>
     <div class="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
-      <span class="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-color-bad" />
+      <span class="h-2.5 w-2.5 shrink-0 contain-strict animate-pulse rounded-full bg-color-bad" />
       <span class="shrink-0 text-sm tabular-nums font-medium text-text-color">{{ formatDuration(duration) }}</span>
     </div>
     <div class="flex h-8 min-w-0 shrink items-end gap-px overflow-hidden">

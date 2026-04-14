@@ -384,7 +384,7 @@ onUnmounted(() => {
         />
         <Avatar v-else :src="chatStore.activeRoom.avatar" :name="activeRoomTitle.text" size="sm" />
         <div class="min-w-0 flex-1">
-          <div v-if="activeRoomTitle.state === 'resolving'" class="h-4 w-28 animate-pulse rounded bg-neutral-grad-2" />
+          <div v-if="activeRoomTitle.state === 'resolving'" class="h-4 w-28 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
           <div
             v-else
             class="truncate text-[15px]"
@@ -515,7 +515,7 @@ onUnmounted(() => {
             :disabled="inviteLoading"
             @click="handleAcceptInvite"
           >
-            <span v-if="inviteLoading" class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            <span v-if="inviteLoading" class="inline-block h-4 w-4 shrink-0 contain-strict animate-spin rounded-full border-2 border-white border-t-transparent" />
             <span v-else>{{ t("chat.accept") }}</span>
           </button>
         </div>

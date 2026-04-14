@@ -187,7 +187,7 @@ const handleContextMenu = (e: MouseEvent) => {
     <div class="min-w-0 flex-1">
       <!-- Name row -->
       <div class="flex items-center justify-between gap-2">
-        <span v-if="room._title?.state === 'resolving'" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+        <span v-if="room._title?.state === 'resolving'" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2 contain-strict shrink-0" />
         <span v-else class="flex items-center gap-1 truncate text-[15px] font-medium text-text-color">
           {{ room._title?.text }}
           <svg v-if="isPinned" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 text-text-on-main-bg-color">
@@ -212,11 +212,12 @@ const handleContextMenu = (e: MouseEvent) => {
 
       <!-- Preview row -->
       <div class="mt-0.5 flex items-center justify-between gap-2">
+        <div class="min-w-0 flex-1 h-5 flex items-center contain-strict">
         <span v-if="typingText" class="truncate text-sm text-color-bg-ac">
           <span class="inline-flex gap-0.5 align-middle">
-            <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac [animation-delay:-0.3s]" />
-            <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac [animation-delay:-0.15s]" />
-            <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac" />
+            <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac contain-strict [animation-delay:-0.3s]" />
+            <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac contain-strict [animation-delay:-0.15s]" />
+            <span class="inline-block h-1 w-1 animate-bounce rounded-full bg-color-bg-ac contain-strict" />
           </span>
           {{ typingText }}
         </span>
@@ -239,7 +240,7 @@ const handleContextMenu = (e: MouseEvent) => {
         </span>
         <span
           v-else-if="preview.state === 'resolving'"
-          class="inline-block h-3 w-32 animate-pulse rounded bg-neutral-grad-2"
+          class="inline-block h-3 w-32 animate-pulse rounded bg-neutral-grad-2 contain-strict shrink-0"
         />
         <span
           v-else-if="preview.state === 'failed'"
@@ -269,10 +270,11 @@ const handleContextMenu = (e: MouseEvent) => {
         <span v-else class="truncate text-sm text-text-on-main-bg-color">
           <span v-if="room.lastMessageReaction" class="mr-0.5">{{ room.lastMessageReaction!.emoji }}</span>{{ formatPreview(room.lastMessage, room) }}
         </span>
+        </div>
         <transition name="badge-pop">
           <span
             v-if="room.unreadCount > 0"
-            class="flex h-[20px] min-w-[20px] shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium text-white"
+            class="flex h-[20px] min-w-[20px] shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium text-white contain-strict"
             :class="isMuted ? 'bg-neutral-grad-2' : 'bg-color-bg-ac'"
             :aria-label="`${room.unreadCount} unread messages`"
           >

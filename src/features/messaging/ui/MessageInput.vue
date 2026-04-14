@@ -854,7 +854,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
           <button v-if="text.trim() || sending || showForwardPreview" key="send"
             class="send-btn flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
             :disabled="(!text.trim() && !showForwardPreview) || sending || !peerKeysOk" @click="handleSend">
-            <svg v-if="sending" class="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
+            <svg v-if="sending" class="h-5 w-5 shrink-0 contain-strict animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
             <svg v-else-if="isEditing" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
             <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>
           </button>
@@ -888,7 +888,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
       <!-- ======= RECORDING state (mobile hold-to-record) ======= -->
       <template v-else-if="recState === 'recording'">
-        <span class="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-color-bad" />
+        <span class="h-2.5 w-2.5 shrink-0 contain-strict animate-pulse rounded-full bg-color-bad" />
         <span class="shrink-0 text-sm tabular-nums font-medium text-text-color">{{ formatDuration(recDuration) }}</span>
         <span class="flex-1 text-center text-sm text-text-on-main-bg-color/50">{{ t('voice.slideCancel') }}</span>
         <!-- Record button + lock pill above -->
@@ -905,7 +905,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
             </div>
           </div>
           <!-- Big record circle (same style as idle but pulsing) -->
-          <div class="flex h-12 w-12 items-center justify-center rounded-full bg-color-bg-ac text-white shadow-lg animate-pulse">
+          <div class="flex h-12 w-12 shrink-0 contain-strict items-center justify-center rounded-full bg-color-bg-ac text-white shadow-lg animate-pulse">
             <svg v-if="isVideoMode" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M23 7l-7 5 7 5V7z" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
             </svg>
@@ -919,7 +919,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
       <!-- ======= LOCKED state (hands-free recording) — Telegram style ======= -->
       <template v-else-if="recState === 'locked'">
-        <span class="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-color-bad" />
+        <span class="h-2.5 w-2.5 shrink-0 contain-strict animate-pulse rounded-full bg-color-bad" />
         <span class="shrink-0 text-sm tabular-nums font-medium text-text-color">{{ formatDuration(recDuration) }}</span>
         <!-- Cancel text in center -->
         <button class="flex-1 text-center text-sm text-text-on-main-bg-color/60 transition-colors hover:text-color-bad" @click="cancelRec">

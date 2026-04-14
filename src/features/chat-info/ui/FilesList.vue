@@ -122,7 +122,7 @@ const handleClick = async (msg: Message) => {
         <!-- Loading indicator -->
         <div
           v-if="getState(msg._key || msg.id).loading"
-          class="h-4 w-4 animate-spin rounded-full border-2 border-neutral-grad-0 border-t-color-bg-ac"
+          class="h-4 w-4 shrink-0 contain-strict animate-spin rounded-full border-2 border-neutral-grad-0 border-t-color-bg-ac"
         />
       </button>
     </div>

@@ -26,6 +26,7 @@ RifTicker = function(){
         if (ql && !rif){
             rif = requestAnimationFrame(() => {
 
+
                 while(qlength()){
                     queue.forEach((f, i) => {
                         if (f){
