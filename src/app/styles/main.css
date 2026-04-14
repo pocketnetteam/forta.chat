@@ -8,20 +8,20 @@
   .safe-top {
     padding-top: var(--safe-area-inset-top, 0px);
   }
-  /* Bottom padding: keyboard OR safe-area, whichever is larger */
+  /* Bottom safe-area padding (status bar / nav bar) */
   .safe-bottom {
-    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
+    padding-bottom: var(--safe-area-inset-bottom, 0px);
   }
   /* Both top + bottom — for full-screen overlays/panels */
   .safe-y {
     padding-top: var(--safe-area-inset-top, 0px);
-    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
+    padding-bottom: var(--safe-area-inset-bottom, 0px);
   }
   /* All four sides — for modals teleported to body */
   .safe-all {
     padding-top: var(--safe-area-inset-top, 0px);
     padding-right: var(--safe-area-inset-right, 0px);
-    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
+    padding-bottom: var(--safe-area-inset-bottom, 0px);
     padding-left: var(--safe-area-inset-left, 0px);
   }
   /* Bottom-only padding for safe area (no keyboard) — for bottom sheets */
@@ -34,7 +34,6 @@
   --app-margin-top-default: 0px;
   --app-margin-top: max(env(safe-area-inset-top), var(--app-margin-top-default));
   --app-margin-bottom-default: 0px;
-  --native-keyboard-height: 0px;
   --keyboardheight: 0px;
   --app-margin-bottom: max(env(safe-area-inset-bottom), var(--app-margin-bottom-default));
 }

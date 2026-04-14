@@ -16,7 +16,6 @@ import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
-import { computeKeyboardHeight, shouldScrollIntoView } from "@/shared/lib/keyboard-height";
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
@@ -228,57 +227,6 @@ onMounted(async () => {
     if ((window as any).electronAPI?.platform === "darwin") {
       document.documentElement.classList.add("is-electron-mac");
     }
-  }
-
-  // Keyboard height detection: native IME insets (primary) + visualViewport (fallback).
-  // With adjustNothing, the OS does NOT resize the WebView — our CSS padding is the sole
-  // mechanism that lifts content above the keyboard. No anti-double-push needed.
-  const updateKeyboardHeight = (e?: Event) => {
-    const isNativeEvent = e?.type === "native-keyboard-change";
-    const nativeKbh = isNativeEvent
-      ? (e as CustomEvent).detail?.height ?? 0
-      : parseInt(
-          getComputedStyle(document.documentElement).getPropertyValue("--native-keyboard-height") || "0",
-          10,
-        );
-
-    const vv = window.visualViewport;
-    const webKbh = vv ? Math.max(0, window.innerHeight - vv.height) : 0;
-
-    const kbh = computeKeyboardHeight({ isNativeEvent, nativeKbh, webKbh });
-    document.documentElement.style.setProperty("--keyboardheight", `${kbh}px`);
-  };
-
-  if (window.visualViewport) {
-    const vv = window.visualViewport;
-    vv.addEventListener("resize", updateKeyboardHeight);
-    // Some Android WebViews (Samsung) fire scroll instead of resize when keyboard toolbar changes
-    vv.addEventListener("scroll", updateKeyboardHeight);
-    onUnmounted(() => {
-      vv.removeEventListener("resize", updateKeyboardHeight);
-      vv.removeEventListener("scroll", updateKeyboardHeight);
-    });
-  }
-
-  // Listen for native keyboard height changes dispatched by MainActivity.kt.
-  // This is the PRIMARY trigger — visualViewport events may not fire on all Android
-  // devices when keyboard is dismissed via Back button or gesture navigation.
-  window.addEventListener("native-keyboard-change", updateKeyboardHeight);
-  onUnmounted(() => window.removeEventListener("native-keyboard-change", updateKeyboardHeight));
-
-  // On native platforms, scroll focused inputs into view when keyboard opens.
-  // Two passes: 300ms (keyboard appearing) and 600ms (delayed toolbar expansion on some keyboards).
-  if (isNative) {
-    const handleFocusIn = (e: FocusEvent) => {
-      const target = e.target as HTMLElement;
-      if (shouldScrollIntoView(target)) {
-        const scrollIt = () => target.scrollIntoView({ block: "center", behavior: "smooth" });
-        setTimeout(scrollIt, 300);
-        setTimeout(scrollIt, 600);
-      }
-    };
-    document.addEventListener("focusin", handleFocusIn);
-    onUnmounted(() => document.removeEventListener("focusin", handleFocusIn));
   }
 
   try {

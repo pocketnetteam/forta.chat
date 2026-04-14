@@ -102,24 +102,6 @@ onBeforeUnmount(() => {
   document.removeEventListener("mousemove", handleGlobalMouseMove);
 });
 
-// On Android: when the keyboard opens, scroll the input container into view.
-// The textarea has `data-keyboard-aware` which intentionally skips the global
-// App.vue focusin handler (which uses block:"center"). Here we use block:"end"
-// so the input sits at the bottom of the viewport directly above the keyboard.
-if (isNative) {
-  const handleKeyboardOpen = (e: Event) => {
-    const height = (e as CustomEvent).detail?.height as number | undefined;
-    if ((height ?? 0) > 0) {
-      // Wait one animation frame so safe-bottom padding-bottom has expanded first
-      requestAnimationFrame(() => {
-        inputRootRef.value?.scrollIntoView({ block: "end", behavior: "smooth" });
-      });
-    }
-  };
-  window.addEventListener("native-keyboard-change", handleKeyboardOpen);
-  onBeforeUnmount(() => window.removeEventListener("native-keyboard-change", handleKeyboardOpen));
-}
-
 // --- Edit/reply ---
 watch(() => chatStore.editingMessage, (editing) => {
   if (editing) {
