@@ -688,7 +688,7 @@ export class AppInitializer {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             method: "getsubscribeschannels",
-            parameters: [address, blockNumber, page, pageSize, 1],
+            parameters: [address, blockNumber, page, pageSize],
             options: { node: AppInitializer.NODE_ID },
           }),
         }
