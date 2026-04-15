@@ -90,6 +90,15 @@ class AudioRouter(private val context: Context) {
         activeDevice = if (callType == "video") Device.SPEAKER else Device.EARPIECE
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
 
+        // OEM fix: Some Chinese ROMs (MIUI, RealmeUI, XOS) reset audio mode
+        // asynchronously after init. Re-apply after a short delay to catch resets.
+        mainHandler.postDelayed({
+            if (isActive && audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
+                Log.w(TAG, "Audio mode was reset by system — re-applying MODE_IN_COMMUNICATION")
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            }
+        }, 500)
+
         audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {

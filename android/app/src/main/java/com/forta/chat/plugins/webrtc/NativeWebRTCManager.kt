@@ -300,12 +300,28 @@ class NativeWebRTCManager(private val context: Context) {
     fun startLocalAudio(peerId: String) {
         Log.d("WebRTCAudio", "startLocalAudio: begin, peerId=$peerId")
 
-        // Ensure AudioManager is in voice call mode for proper routing
+        // === OEM audio fix (Xiaomi MIUI / Realme UI / INFINIX XOS) ===
+        // Must configure AudioManager BEFORE creating AudioTrack.
+        // Chinese OEM firmwares aggressively mute the mic if VoIP mode
+        // isn't established before the first audio capture starts.
         try {
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+            // 1. Force VoIP mode — must happen before AudioTrack creation
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+            // 2. Ensure mic is not muted at system level (some ROMs persist mute)
+            if (audioManager.isMicrophoneMute) {
+                audioManager.isMicrophoneMute = false
+                Log.w("WebRTCAudio", "startLocalAudio: system mic was muted — force-unmuted")
+            }
+
+            // 3. Disable speakerphone initially (AudioRouter sets correct device later)
+            @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = false
-            Log.d("WebRTCAudio", "startLocalAudio: AudioManager set to MODE_IN_COMMUNICATION")
+
+            Log.d("WebRTCAudio", "startLocalAudio: AudioManager configured " +
+                "(mode=${audioManager.mode}, micMute=${audioManager.isMicrophoneMute})")
         } catch (e: Exception) {
             Log.w("WebRTCAudio", "startLocalAudio: failed to set audio mode", e)
         }

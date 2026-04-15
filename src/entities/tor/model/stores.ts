@@ -8,9 +8,9 @@ const NAMESPACE = "tor";
 
 export const useTorStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSMode, value: lsMode } =
-    useLocalStorage<TorMode>("tor_mode", "auto");
+    useLocalStorage<TorMode>("tor_mode", "neveruse");
 
-  const mode = ref<TorMode>(lsMode || "auto");
+  const mode = ref<TorMode>(lsMode || "neveruse");
   const status = ref<TorStatus>("stopped");
   const info = ref("");
 
