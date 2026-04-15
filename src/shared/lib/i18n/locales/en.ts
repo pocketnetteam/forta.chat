@@ -693,6 +693,11 @@ export const en = {
   "register.termsOfService": "Terms of Service",
   "register.privacyPolicy": "Privacy Policy",
   "register.mustAcceptTerms": "You must accept the terms to continue",
+  "register.timeoutErrorTitle": "Registration timed out",
+  "register.timeoutErrorHint": "The blockchain hasn't confirmed your account in time. This can happen during high network load. Please try again.",
+  "register.networkErrorTitle": "Connection problem",
+  "register.networkErrorHint": "Unable to reach the network. Please check your internet connection and try again.",
+  "register.retry": "Try Again",
   "invite.shareText": "Join me on Forta Chat!",
 
   // ── App download banner ──

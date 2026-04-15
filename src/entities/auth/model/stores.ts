@@ -176,6 +176,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Registration error: when UserInfo broadcast fails with code 18 (username taken/invalid)
   const registrationUsernameError = ref(false);
 
+  // Generic registration error message: 'timeout' | 'network' | null
+  const registrationErrorMessage = ref<string | null>(null);
+
+  // Safety bounds for registration polling
+  const REGISTRATION_POLL_TIMEOUT = 30 * 60 * 1000;  // 30 minutes total
+  const RPC_CALL_TIMEOUT = 15_000;                    // 15s per RPC call
+  const MAX_CONSECUTIVE_ERRORS = 5;                   // show error after 5 failures in a row
+
   // Node that processed the sendrawtransaction during registration —
   // used as fnode for getuserstate to avoid stale cache on a different node
   let registrationFnode: string | null = null;
@@ -644,10 +652,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       } else {
         console.error("[auth] Matrix client NOT ready, error:", matrixService.error);
         matrixError.value = matrixService.error || "Matrix init failed";
+        if (bootStatus.state.value === 'booting') {
+          bootStatus.setError(matrixError.value);
+        }
       }
     } catch (e) {
       console.error("[auth] Matrix init error:", e);
       matrixError.value = String(e);
+      if (bootStatus.state.value === 'booting') {
+        bootStatus.setError(`Matrix initialization failed: ${matrixError.value}`);
+      }
     }
   };
 
@@ -938,7 +952,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setRegistrationPending(true);
     setRegistrationPhase('init');
 
-    await login(mnemonic);
+    const loginResult = await login(mnemonic);
+    if (!loginResult?.data) {
+      setRegistrationPending(false);
+      setRegistrationPhase('init');
+      throw new Error(loginResult?.error ?? 'Login failed after registration');
+    }
 
     // 5. Start polling — will broadcast UserInfo when PKOIN arrives, then wait for confirmation
     startRegistrationPoll();
@@ -973,12 +992,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Poll blockchain with exponential backoff. Two phases:
    *  Phase 1: Wait for PKOIN (unspents) to arrive, then broadcast UserInfo.
    *  Phase 2: Wait for UserInfo to be confirmed on-chain (getuserstate + Actions status).
-   *  NO TIMEOUT — polls indefinitely until confirmed or user logs out. */
+   *  Safety bounds: 30-min total timeout, 15s per-RPC timeout, 5 consecutive errors → stop. */
   const startRegistrationPoll = () => {
     if (registrationPollTimer) clearTimeout(registrationPollTimer);
     let pollInterval = 3000;
     const MAX_POLL_INTERVAL = 60000;
     let attempt = 0;
+    const pollStartedAt = Date.now();
+    let consecutiveErrors = 0;
     console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
     // Set initial phase based on current state (handles reload resume)
     if (pendingRegProfile.value) {
@@ -992,11 +1013,25 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         stopRegistrationPoll();
         return;
       }
+
+      // Total timeout check
+      if (Date.now() - pollStartedAt > REGISTRATION_POLL_TIMEOUT) {
+        console.error("[auth] Registration poll timed out after", REGISTRATION_POLL_TIMEOUT / 1000, "s");
+        registrationErrorMessage.value = 'timeout';
+        setRegistrationPhase('error');
+        stopRegistrationPoll();
+        return;
+      }
+
       attempt++;
       try {
         // Phase 1: Broadcast UserInfo once PKOIN arrives
         if (pendingRegProfile.value) {
-          const hasUnspents = await appInitializer.checkUnspents(address.value);
+          const hasUnspents = await withTimeout(
+            appInitializer.checkUnspents(address.value),
+            RPC_CALL_TIMEOUT,
+            "checkUnspents",
+          );
           if (hasUnspents) {
             console.log("[auth] PKOIN received, broadcasting UserInfo...");
             setRegistrationPhase('broadcasting');
@@ -1028,6 +1063,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           } else {
             console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
           }
+          consecutiveErrors = 0;
           schedulePoll();
           return;
         }
@@ -1042,16 +1078,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           return;
         }
 
-        const confirmed = await appInitializer.checkUserRegistered(address.value, registrationFnode);
+        const confirmed = await withTimeout(
+          appInitializer.checkUserRegistered(address.value, registrationFnode),
+          RPC_CALL_TIMEOUT,
+          "checkUserRegistered",
+        );
         if (confirmed) {
           console.log("[auth] Registration confirmed on blockchain! (fnode:", registrationFnode, ")");
           await onRegistrationConfirmed();
           return;
         }
 
+        consecutiveErrors = 0;
         console.log("[auth] Waiting for blockchain confirmation... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
       } catch (e) {
-        console.warn("[auth] Registration poll error (attempt", attempt, "):", e);
+        consecutiveErrors++;
+        console.warn("[auth] Registration poll error (attempt", attempt, ", consecutive:", consecutiveErrors, "):", e);
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          console.error("[auth] Too many consecutive poll errors, showing error UI");
+          registrationErrorMessage.value = 'network';
+          setRegistrationPhase('error');
+          stopRegistrationPoll();
+          return;
+        }
       }
       schedulePoll();
     };
@@ -1067,30 +1116,44 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       setRegistrationPhase('done');
       // Keep overlay visible for 1.5s to show success step
       await new Promise(resolve => setTimeout(resolve, 1500));
-      await appInitializer.initializeAndFetchUserData(
-        address.value!,
-        (data: UserData) => {
-          setUserInfo(data);
-          // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
-          useUserStore().setUser(address.value!, {
-            address: address.value!,
-            name: data.name ?? "",
-            about: data.about ?? "",
-            image: data.image ?? "",
-            site: data.site ?? "",
-            language: data.language ?? "",
-          });
-        }
-      );
+
+      try {
+        await appInitializer.initializeAndFetchUserData(
+          address.value!,
+          (data: UserData) => {
+            setUserInfo(data);
+            // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+            useUserStore().setUser(address.value!, {
+              address: address.value!,
+              name: data.name ?? "",
+              about: data.about ?? "",
+              image: data.image ?? "",
+              site: data.site ?? "",
+              language: data.language ?? "",
+            });
+          }
+        );
+      } catch (e) {
+        console.warn("[auth] initializeAndFetchUserData failed after confirmation, continuing:", e);
+        // Non-fatal: user data will be fetched on next sync
+      }
+
+      // State cleanup ALWAYS runs, regardless of initializeAndFetchUserData outcome
       setRegistrationPending(false);
       setRegistrationPhase('init'); // Reset phase for clean localStorage state
       stopRegistrationPoll();
+
       if (!matrixReady.value) {
         PocketnetInstanceConfigurator.setUserAddress(address.value!);
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
           createKeyPair(privateKey.value!)
         );
-        await initMatrix();
+        try {
+          await initMatrix();
+        } catch (e) {
+          console.warn("[auth] Matrix init failed after registration confirmation:", e);
+          // Non-fatal: Matrix will retry on next app interaction or reload
+        }
       }
     }
   };
@@ -1100,6 +1163,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
+  };
+
+  /** Retry registration after a timeout or network error.
+   *  Clears error state and restarts the blockchain poll. */
+  const retryRegistration = () => {
+    registrationErrorMessage.value = null;
+    registrationUsernameError.value = false;
+    setRegistrationPhase('init');
+    setRegistrationPending(true);
+    startRegistrationPoll();
   };
 
   /** Resume polling on page reload if registration was pending.
@@ -1354,10 +1427,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     regProxyId,
     checkUsername,
     register,
+    registrationErrorMessage,
     registrationPending,
     registrationPhase,
     registrationUsernameError,
     resumeRegistrationPoll,
+    retryRegistration,
     retryRegistrationWithNewName,
     setSyncStatusCallback,
     submitCaptcha,

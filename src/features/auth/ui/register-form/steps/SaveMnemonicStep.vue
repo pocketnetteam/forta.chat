@@ -81,7 +81,16 @@ const handleRegister = async () => {
       {{ t("register.confirmSaved") }}
     </label>
 
-    <p v-if="error" class="mb-3 text-xs text-color-bad">{{ error }}</p>
+    <div v-if="error" class="mb-3">
+      <p class="text-xs text-color-bad">{{ error }}</p>
+      <button
+        type="button"
+        class="mt-2 text-xs font-medium text-color-txt-ac underline"
+        @click="handleRegister"
+      >
+        {{ t("register.retry") }}
+      </button>
+    </div>
 
     <!-- Register button -->
     <button

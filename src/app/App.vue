@@ -41,6 +41,18 @@ const router = useRouter();
 
 const retryError = ref("");
 
+const registrationErrorType = computed<'username' | 'timeout' | 'network' | null>(() => {
+  if (authStore.registrationUsernameError) return 'username';
+  if (authStore.registrationErrorMessage === 'timeout') return 'timeout';
+  if (authStore.registrationErrorMessage === 'network') return 'network';
+  return null;
+});
+
+const handleRetryRegistration = () => {
+  retryError.value = "";
+  authStore.retryRegistration();
+};
+
 const handleRetryUsername = async (newName: string) => {
   const trimmed = newName.trim();
   if (!trimmed) return;
@@ -263,10 +275,12 @@ onUnmounted(() => {
     <AppDownloadBanner />
     <!-- Registration stepper overlay — shows progress during blockchain registration -->
     <RegistrationStepper
-      v-if="authStore.registrationPending || authStore.registrationPhase === 'done' || authStore.registrationUsernameError"
+      v-if="authStore.registrationPending || authStore.registrationPhase === 'done' || authStore.registrationUsernameError || authStore.registrationErrorMessage"
       :phase="authStore.registrationPhase"
       :error-message="retryError"
+      :error-type="registrationErrorType"
       @back-to-name="handleRetryUsername"
+      @retry="handleRetryRegistration"
     />
     <TitleBar v-if="isElectron" />
     <div class="relative min-h-0 flex-1 overflow-hidden">

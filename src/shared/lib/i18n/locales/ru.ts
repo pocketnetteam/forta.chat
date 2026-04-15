@@ -695,6 +695,11 @@ export const ru: Record<TranslationKey, string> = {
   "register.termsOfService": "Условия использования",
   "register.privacyPolicy": "Политику конфиденциальности",
   "register.mustAcceptTerms": "Необходимо принять условия для продолжения",
+  "register.timeoutErrorTitle": "Время регистрации истекло",
+  "register.timeoutErrorHint": "Блокчейн не подтвердил ваш аккаунт вовремя. Это может происходить при высокой нагрузке сети. Попробуйте снова.",
+  "register.networkErrorTitle": "Проблема с подключением",
+  "register.networkErrorHint": "Не удалось связаться с сетью. Проверьте подключение к интернету и попробуйте снова.",
+  "register.retry": "Попробовать снова",
   "invite.shareText": "Присоединяйтесь ко мне в Forta Chat!",
 
   // ── App download banner ──

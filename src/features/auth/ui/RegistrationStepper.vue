@@ -6,10 +6,12 @@ import type { RegistrationPhase } from "@/entities/auth/model/stores";
 const props = defineProps<{
   phase: RegistrationPhase;
   errorMessage?: string;
+  errorType?: 'username' | 'timeout' | 'network' | null;
 }>();
 
 const emit = defineEmits<{
   "back-to-name": [newName: string];
+  "retry": [];
 }>();
 
 const { t } = useI18n();
@@ -31,7 +33,11 @@ const isError = computed(() => props.phase === "error");
 
 // Step content
 const stepTitle = computed(() => {
-  if (isError.value) return t("register.errorTitle");
+  if (isError.value) {
+    if (props.errorType === 'timeout') return t("register.timeoutErrorTitle");
+    if (props.errorType === 'network') return t("register.networkErrorTitle");
+    return t("register.errorTitle");
+  }
   switch (currentStep.value) {
     case 1: return t("register.step1Title");
     case 2: return t("register.step2Title");
@@ -41,7 +47,11 @@ const stepTitle = computed(() => {
 });
 
 const stepText = computed(() => {
-  if (isError.value) return props.errorMessage || t("register.usernameRejectedHint");
+  if (isError.value) {
+    if (props.errorType === 'timeout') return t("register.timeoutErrorHint");
+    if (props.errorType === 'network') return t("register.networkErrorHint");
+    return props.errorMessage || t("register.usernameRejectedHint");
+  }
   switch (currentStep.value) {
     case 1: return t("register.step1Text");
     case 2: return t("register.step2Text");
@@ -154,8 +164,8 @@ const handleRetry = () => {
             {{ stepText }}
           </p>
 
-          <!-- Error: retry form -->
-          <template v-if="isError">
+          <!-- Error: username retry form -->
+          <template v-if="isError && errorType === 'username'">
             <input
               v-model="retryName"
               type="text"
@@ -171,6 +181,16 @@ const handleRetry = () => {
               @click="handleRetry"
             >
               {{ t("register.backToName") }}
+            </button>
+          </template>
+
+          <!-- Error: timeout / network — generic retry -->
+          <template v-else-if="isError">
+            <button
+              class="mt-4 flex h-11 w-full cursor-pointer items-center justify-center rounded-xl bg-color-bg-ac text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1"
+              @click="emit('retry')"
+            >
+              {{ t("register.retry") }}
             </button>
           </template>
         </div>
