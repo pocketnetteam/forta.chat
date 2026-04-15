@@ -171,6 +171,18 @@
   --bubble-radius-small: 4px;
 }
 
+/*
+ * BUG-03 fix: Force LTR text direction globally.
+ * Android WebView + supportsRtl can inherit system RTL layout direction
+ * in portrait orientation on certain OEM firmware (Xiaomi/MIUI, OnePlus).
+ * This triple-layer defense prevents any direction flip.
+ */
+html,
+html[dir="rtl"] {
+  direction: ltr !important;
+  unicode-bidi: isolate;
+}
+
 html {
   font-size: 1em;
   line-height: 1.5;
@@ -180,6 +192,16 @@ html {
   overflow-x: hidden;
   background: rgb(var(--background-total-theme));
   overscroll-behavior: none;
+}
+
+/* BUG-03: Force LTR on all text inputs and contenteditable areas */
+input,
+textarea,
+[contenteditable="true"],
+[contenteditable=""] {
+  direction: ltr !important;
+  unicode-bidi: plaintext;
+  text-align: left;
 }
 
 body {

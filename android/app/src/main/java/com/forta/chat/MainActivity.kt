@@ -5,6 +5,7 @@ import android.view.View
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import android.view.View.LAYOUT_DIRECTION_LTR
 import com.getcapacitor.BridgeActivity
 import com.forta.chat.plugins.tor.TorPlugin
 import com.forta.chat.plugins.calls.CallPlugin
@@ -44,6 +45,11 @@ class MainActivity : BridgeActivity() {
         registerPlugin(PushDataPlugin::class.java)
         registerPlugin(LocalePlugin::class.java)
         super.onCreate(savedInstanceState)
+
+        // BUG-03: Force LTR layout direction on the root view.
+        // Prevents Android WebView from inheriting system RTL direction
+        // which causes reversed text in portrait on some OEM firmware.
+        window.decorView.layoutDirection = LAYOUT_DIRECTION_LTR
 
         // Edge-to-edge: content draws behind system bars, insets are non-zero
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -116,13 +122,15 @@ class MainActivity : BridgeActivity() {
 
         val js = """
             (function() {
-                var s = document.documentElement.style;
+                var d = document.documentElement;
+                var s = d.style;
                 s.setProperty('--safe-area-inset-top',    '${insetTop}px');
                 s.setProperty('--safe-area-inset-bottom', '${effectiveBottom}px');
                 s.setProperty('--safe-area-inset-left',   '${insetLeft}px');
                 s.setProperty('--safe-area-inset-right',  '${insetRight}px');
                 s.setProperty('--keyboardheight',         '${keyboardHeight}px');
                 s.setProperty('--app-bottom-inset',       '${appBottomInset}px');
+                if (d.getAttribute('dir') !== 'ltr') d.setAttribute('dir', 'ltr');
             })();
         """.trimIndent()
 

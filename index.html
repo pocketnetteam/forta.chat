@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html dir="ltr" lang="en">
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
@@ -35,6 +35,27 @@
     <div id="app">
       <div id="appLoading"></div>
     </div>
+    <!--
+      BUG-03: Prevent Android WebView from flipping text direction to RTL.
+      Must run before any framework code — inline script, not module.
+    -->
+    <script>
+      (function() {
+        var html = document.documentElement;
+        // Force LTR immediately
+        html.setAttribute('dir', 'ltr');
+
+        // Watch for any runtime injection of dir="rtl" by WebView or plugins
+        var observer = new MutationObserver(function(mutations) {
+          for (var i = 0; i < mutations.length; i++) {
+            if (mutations[i].attributeName === 'dir' && html.getAttribute('dir') !== 'ltr') {
+              html.setAttribute('dir', 'ltr');
+            }
+          }
+        });
+        observer.observe(html, { attributes: true, attributeFilter: ['dir'] });
+      })();
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
