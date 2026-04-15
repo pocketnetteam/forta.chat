@@ -281,14 +281,17 @@ class CallForegroundService : Service() {
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
 
-        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        // Use AUDIOFOCUS_GAIN (not TRANSIENT) — Chinese OEM firmwares (MIUI,
+        // RealmeUI, XOS) may return audio focus prematurely with transient mode,
+        // causing zero-way audio. Full gain properly displaces media players.
+        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(attrs)
-            .setAcceptsDelayedFocusGain(false)
+            .setAcceptsDelayedFocusGain(true)
             .setOnAudioFocusChangeListener(audioFocusChangeListener)
             .build()
 
         val result = am.requestAudioFocus(audioFocusRequest!!)
-        Log.d("WebRTCAudio", "Audio focus requested, result=$result")
+        Log.d("WebRTCAudio", "Audio focus requested (GAIN), result=$result")
     }
 
     private fun abandonAudioFocus() {

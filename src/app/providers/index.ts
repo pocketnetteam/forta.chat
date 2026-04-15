@@ -74,31 +74,35 @@ export const setupProviders = async (app: App) => {
       }).catch((e) => console.warn('[Telemetry] Collection failed:', e));
     }).catch((e) => console.warn('[Telemetry] Module load failed:', e));
 
-    // Start Tor daemon in background — does NOT block boot.
-    // App loads with direct connections; switches to Tor when ready.
-    bootStatus.setStep("tor");
-    const { torService } = await import('@/shared/lib/tor');
-    torService.initBackground();
-    // Wire store to native torService reactive state
-    useTorStore().init();
+    // Wire store to native torService reactive state (always — for settings UI)
+    const torStore = useTorStore();
+    torStore.init();
 
-    // Notify user if Tor fails to start (after app is mounted)
-    const torWatch = watch(
-      () => torService.initFailed.value,
-      (failed) => {
-        if (failed) {
-          import('@/shared/lib/use-toast').then(({ useToast }) => {
-            const { toast } = useToast();
-            toast(
-              'Secure connection unavailable. You can enable Tor in Settings.',
-              'error',
-              8000,
-            );
-          });
-          torWatch(); // stop watching
-        }
-      },
-    );
+    // Only start Tor daemon if user previously opted in.
+    // Default is "neveruse" (opt-in) — app boots instantly via clearnet.
+    if (torStore.isEnabled) {
+      bootStatus.setStep("tor");
+      const { torService } = await import('@/shared/lib/tor');
+      torService.initBackground();
+
+      // Notify user if Tor fails to start
+      const torWatch = watch(
+        () => torService.initFailed.value,
+        (failed) => {
+          if (failed) {
+            import('@/shared/lib/use-toast').then(({ useToast }) => {
+              const { toast } = useToast();
+              toast(
+                'Secure connection unavailable. You can enable Tor in Settings.',
+                'error',
+                8000,
+              );
+            });
+            torWatch(); // stop watching
+          }
+        },
+      );
+    }
   }
 
   // Static pages (e.g. /download landing) don't need chat scripts —
