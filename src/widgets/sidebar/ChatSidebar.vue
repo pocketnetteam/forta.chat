@@ -327,7 +327,7 @@ const walletStore = useWalletStore();
 
     <!-- Invite banner -->
     <button
-      class="invite-fab btn-press mx-2 mb-1.5 flex shrink-0 items-center justify-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-bold text-text-on-bg-ac-color shadow-lg transition-all active:scale-[0.97]"
+      class="invite-fab hide-on-keyboard btn-press mx-2 mb-1.5 flex shrink-0 items-center justify-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-bold text-text-on-bg-ac-color shadow-lg transition-all active:scale-[0.97]"
       :title="t('invite.fab')"
       @click="showInviteModal = true"
     >

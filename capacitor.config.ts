@@ -13,6 +13,12 @@ const config: CapacitorConfig = {
       keystoreAlias: undefined,
     },
   },
+  plugins: {
+    Keyboard: {
+      resize: "none",
+      scrollPadding: false,
+    },
+  },
 };
 
 export default config;

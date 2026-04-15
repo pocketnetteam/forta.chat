@@ -108,22 +108,21 @@ watch(() => chatStore.editingMessage, (editing) => {
     text.value = editing.content;
     nextTick(() => {
       autoGrowSync();
-      textareaRef.value?.focus();
-      // Scroll input container into view after keyboard settles (~400ms).
-      // Uses block:"end" to keep input at bottom, not center.
-      setTimeout(() => {
-        inputRootRef.value?.scrollIntoView({ block: "end", behavior: "smooth" });
-      }, 400);
+      // Use preventScroll to avoid WebView auto-scrolling the page
+      // (which pushes the chat header off-screen on Android).
+      // The CSS-driven layout (app-shell + --app-bottom-inset) handles
+      // keyboard avoidance — no manual scrollIntoView needed.
+      textareaRef.value?.focus({ preventScroll: true });
     });
   }
 }, { immediate: true });
 
 watch(() => chatStore.replyingTo, (reply) => {
-  if (reply) nextTick(() => textareaRef.value?.focus());
+  if (reply) nextTick(() => textareaRef.value?.focus({ preventScroll: true }));
 });
 
 watch(() => chatStore.forwardingMessage, (fwd) => {
-  if (fwd) nextTick(() => textareaRef.value?.focus());
+  if (fwd) nextTick(() => textareaRef.value?.focus({ preventScroll: true }));
 });
 
 const peerKeysOk = computed(() => {
@@ -612,7 +611,7 @@ const insertEmoji = (emoji: string) => {
     const start = el.selectionStart ?? text.value.length;
     const end = el.selectionEnd ?? text.value.length;
     text.value = text.value.slice(0, start) + emoji + text.value.slice(end);
-    nextTick(() => { el.selectionStart = el.selectionEnd = start + emoji.length; el.focus(); autoResize(); });
+    nextTick(() => { el.selectionStart = el.selectionEnd = start + emoji.length; el.focus({ preventScroll: true }); autoResize(); });
   } else { text.value += emoji; }
   themeStore.addRecentEmoji(emoji);
 };

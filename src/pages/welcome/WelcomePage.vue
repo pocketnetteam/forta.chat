@@ -18,7 +18,7 @@ const goToRegister = () => {
 
 <template>
   <div
-    class="flex min-h-screen items-center justify-center bg-background-main px-4 py-8"
+    class="flex h-full items-center justify-center bg-background-main px-4 py-8"
   >
     <div class="w-full max-w-[360px] flex flex-col items-center">
       <!-- Logo -->

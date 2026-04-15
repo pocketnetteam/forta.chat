@@ -6,8 +6,8 @@ const localeStore = useLocaleStore();
 </script>
 
 <template>
-  <div class="safe-bottom flex h-full items-center justify-center overflow-y-auto bg-background-main px-4 py-8">
-    <div class="flex w-full max-w-[360px] flex-col items-center gap-4">
+  <div class="safe-bottom flex h-full flex-col items-center overflow-y-auto bg-background-main px-4 py-8">
+    <div class="my-auto flex w-full max-w-[360px] flex-col items-center gap-4">
       <div
         class="w-full rounded-2xl bg-background-total-theme px-6 pb-8 pt-10 shadow-sm"
       >

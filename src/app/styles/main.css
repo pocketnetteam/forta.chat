@@ -28,6 +28,24 @@
   .pb-safe {
     padding-bottom: var(--safe-area-inset-bottom, 0px);
   }
+  /* Hide element when soft keyboard shrinks the viewport (FAB etc.) */
+  .hide-on-keyboard {
+    transition: opacity 0.15s ease, max-height 0.15s ease;
+    max-height: 100px;
+    opacity: 1;
+  }
+}
+
+@media (max-height: 500px) {
+  .hide-on-keyboard {
+    max-height: 0 !important;
+    opacity: 0 !important;
+    overflow: hidden !important;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
 }
 
 :root {

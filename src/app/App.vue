@@ -23,6 +23,7 @@ import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
 import { AppDownloadBanner } from "@/features/app-download-banner";
 import { useI18n } from "@/shared/lib/i18n";
 
+import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 
 const isElectron = !!(window as any).electronAPI?.isElectron;
@@ -218,6 +219,9 @@ onMounted(async () => {
   // Initialize Android hardware back button handler
   initAndroidBackListener();
 
+  // Android keyboard: auto-scroll to focused input + inset cross-check
+  useKeyboardFallback();
+
   // Initialize Android Share Target listener
   initShareTargetListener((data) => processExternalShare(data));
 
@@ -255,7 +259,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="safe-top relative flex flex-col bg-background-total-theme text-text-color" style="height: calc(100vh - var(--app-bottom-inset, 0px)); height: calc(100dvh - var(--app-bottom-inset, 0px))">
+  <div class="safe-top fixed inset-0 flex flex-col overflow-hidden bg-background-total-theme text-text-color">
     <AppDownloadBanner />
     <!-- Registration stepper overlay — shows progress during blockchain registration -->
     <RegistrationStepper

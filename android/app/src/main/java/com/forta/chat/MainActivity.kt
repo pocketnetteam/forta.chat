@@ -48,6 +48,11 @@ class MainActivity : BridgeActivity() {
         // Edge-to-edge: content draws behind system bars, insets are non-zero
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
+        // With position:fixed on the root app-shell, document-level scroll
+        // does NOT move fixed elements. The browser's native focus-scroll
+        // safely reveals inputs within overflow containers while the shell
+        // stays put. No scroll prevention needed.
+
         // Auto-check for updates (respects 1-hour cache)
         activityScope.launch {
             AppUpdater.checkForUpdateIfNeeded(this@MainActivity, isManual = false)
@@ -76,7 +81,11 @@ class MainActivity : BridgeActivity() {
 
             // Total bottom inset: whichever is bigger — IME or nav bar.
             // Used by CSS to shrink the root container above the keyboard/nav bar.
+            // Clamp to 60% of screen height to guard against OEM firmware anomalies
+            // (MIUI extra padding, Huawei double-reporting of IME insets).
+            val maxBottomInset = (resources.displayMetrics.heightPixels / density * 0.6).toInt()
             appBottomInset = (maxOf(ime.bottom, systemBars.bottom) / density).toInt()
+                .coerceAtMost(maxBottomInset)
 
             injectAllCssVars()
 
