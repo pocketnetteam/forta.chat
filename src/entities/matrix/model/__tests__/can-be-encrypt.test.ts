@@ -9,7 +9,7 @@ describe("canBeEncrypt peer key check", () => {
     const source = getSource();
     const start = source.indexOf("canBeEncrypt(): boolean {");
     expect(start).toBeGreaterThan(-1);
-    const section = source.slice(start, start + 800);
+    const section = source.slice(start, start + 1200);
     expect(section).toContain(".every(");
     expect(section).toContain("keys.length >= m");
   });
@@ -18,7 +18,7 @@ describe("canBeEncrypt peer key check", () => {
     const source = getSource();
     const start = source.indexOf("canBeEncrypt(): boolean {");
     expect(start).toBeGreaterThan(-1);
-    const section = source.slice(start, start + 800);
+    const section = source.slice(start, start + 1200);
     // Should NOT have the old pattern: just return length > 1 && length < 50
     expect(section).not.toMatch(/return usersinfoArray\.length > 1 && usersinfoArray\.length < 50;/);
   });
