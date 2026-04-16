@@ -11,36 +11,56 @@ const userStore = useUserStore();
 const localeStore = useLocaleStore();
 const { t } = useI18n();
 
+// Start empty — we sync from userInfo via watch below. Initializing from
+// authStore.userInfo at mount captures a snapshot that never updates when
+// userInfo loads asynchronously (regression #19/#30/#63).
 const form = ref({
-  name: authStore.userInfo?.name ?? "",
-  about: authStore.userInfo?.about ?? "",
-  site: authStore.userInfo?.site ?? "",
-  language: authStore.userInfo?.language ?? "",
+  name: "",
+  about: "",
+  site: "",
+  language: "",
 });
 
-const avatarUrl = ref(authStore.userInfo?.image ?? "");
+const avatarUrl = ref("");
 const avatarUploading = ref(false);
 const avatarError = ref("");
 const saveError = ref("");
+const saveSuccess = ref(false);
 
-// Re-sync the form fields when userInfo resolves (right after registration
-// userInfo is initially undefined and arrives async). Without this watch the
-// form stays empty while authStore.userInfo is set, and hasChanges compares
-// typed input to undefined fields, blocking Save forever.
+// Tracks whether the user has started editing. When true, we MUST NOT
+// overwrite `form` from a late-arriving userInfo — user input wins.
+const userDirty = ref(false);
+const onFormInput = () => {
+  userDirty.value = true;
+};
+
+// Reactive sync: when userInfo arrives (or changes) after mount, populate
+// the form — but only if the user hasn't started editing yet.
 watch(
   () => authStore.userInfo,
   (info) => {
     if (!info) return;
-    // Only overwrite fields the user hasn't edited yet (still empty).
-    // Initial population fills from info; subsequent changes preserve
-    // the user's edits while letting delayed fields populate.
-    if (!form.value.name) form.value.name = info.name ?? "";
-    if (!form.value.about) form.value.about = info.about ?? "";
-    if (!form.value.site) form.value.site = info.site ?? "";
-    if (!form.value.language) form.value.language = info.language ?? "";
-    if (!avatarUrl.value) avatarUrl.value = info.image ?? "";
+    if (userDirty.value) return;
+    form.value = {
+      name: info.name ?? "",
+      about: info.about ?? "",
+      site: info.site ?? "",
+      language: info.language ?? "",
+    };
+    avatarUrl.value = info.image ?? "";
   },
-  { immediate: true, deep: true },
+  { immediate: true },
+);
+
+// After a successful save (editing flag toggled off with no error), drop
+// the dirty flag so the next userInfo refresh can re-populate.
+watch(
+  () => authStore.isEditingUserData,
+  (now, prev) => {
+    if (prev && !now && !saveError.value) {
+      userDirty.value = false;
+    }
+  },
 );
 
 const aboutMaxLength = 140;
@@ -48,15 +68,14 @@ const aboutCount = computed(() => form.value.about.length);
 
 const hasChanges = computed(() => {
   const info = authStore.userInfo;
+  // When userInfo is not yet loaded (or broken registration) any non-empty
+  // user input should count as a change so the user can actually save.
   if (!info) {
-    // userInfo not loaded yet (e.g. right after fresh registration).
-    // Treat any user input as a change so Save becomes enabled instead of
-    // the old buggy `return false` that left Save disabled forever.
     return (
-      (form.value.name ?? "").trim().length > 0 ||
-      (form.value.about ?? "").trim().length > 0 ||
-      (form.value.site ?? "").trim().length > 0 ||
-      (form.value.language ?? "").trim().length > 0 ||
+      form.value.name.trim().length > 0 ||
+      form.value.about.trim().length > 0 ||
+      form.value.site.trim().length > 0 ||
+      form.value.language.trim().length > 0 ||
       avatarUrl.value.length > 0
     );
   }
@@ -69,11 +88,18 @@ const hasChanges = computed(() => {
   );
 });
 
-const saveSuccess = ref(false);
-
 const handleSave = async () => {
   saveError.value = "";
+  // Safeguard: never send a base64 data URL to the blockchain — huge payload,
+  // likely to bloat tx or fail. Wait for upload to finish or block the save.
+  if (avatarUrl.value.startsWith("data:")) {
+    saveError.value = t("profile.avatarError");
+    return;
+  }
   try {
+    // When userInfo has not loaded yet (fresh registration / broken reg),
+    // fall back to an empty profile shell so the user can still save — this
+    // is the recovery path for users who would otherwise be stuck forever.
     const result = await authStore.editUserData({
       ...(authStore.userInfo ?? {
         address: authStore.address ?? "",
@@ -95,7 +121,12 @@ const handleSave = async () => {
 
     // editUserData may return a structured { success, reason } envelope from
     // app-initializer; surface a user-visible error if it did.
-    if (result && typeof result === "object" && "success" in result && (result as { success: boolean }).success === false) {
+    if (
+      result &&
+      typeof result === "object" &&
+      "success" in result &&
+      (result as { success: boolean }).success === false
+    ) {
       saveError.value = t("profile.saveFailed");
       return;
     }
@@ -133,6 +164,7 @@ const handleAvatarChange = async (e: Event) => {
     avatarUploading.value = true;
     const url = await uploadImage(base64);
     avatarUrl.value = url;
+    userDirty.value = true;
   } catch (err) {
     avatarError.value = err instanceof Error ? err.message : t("profile.avatarError");
     avatarUrl.value = authStore.userInfo?.image ?? "";
@@ -201,6 +233,7 @@ watch(
               type="text"
               :placeholder="t('profile.displayName')"
               class="block w-full bg-transparent text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+              @input="onFormInput"
             />
           </div>
         </div>
@@ -222,6 +255,7 @@ watch(
               rows="2"
               :maxlength="aboutMaxLength"
               class="block w-full resize-none bg-transparent text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+              @input="onFormInput"
             />
           </div>
         </div>
@@ -241,6 +275,7 @@ watch(
               type="text"
               placeholder="https://..."
               class="block w-full bg-transparent text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+              @input="onFormInput"
             />
           </div>
         </div>
@@ -276,13 +311,13 @@ watch(
         </div>
       </div>
 
-      <!-- Save error (structured error from editUserData: timeout / network / rejected) -->
+      <!-- Save error (structured error from editUserData: timeout / network / rejected, or base64 guard) -->
       <p v-if="saveError" class="text-center text-xs text-color-bad">{{ saveError }}</p>
 
       <!-- Save button -->
       <button
         type="submit"
-        :disabled="authStore.isEditingUserData || !hasChanges || avatarUploading"
+        :disabled="authStore.isEditingUserData || avatarUploading || !hasChanges"
         class="mx-auto flex h-11 w-full max-w-xs items-center justify-center rounded-xl text-sm font-semibold transition-all disabled:opacity-40"
         :class="saveSuccess
           ? 'bg-color-good text-white'
