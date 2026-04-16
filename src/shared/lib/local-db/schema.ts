@@ -165,6 +165,12 @@ export interface PendingOperation {
   lastAttemptAt?: number;
   errorMessage?: string;
   clientId: string;              // Links to LocalMessage.clientId for dedup
+  /**
+   * Epoch-ms at which this op becomes eligible for execution again.
+   * 0 (or undefined) = due immediately. Used by the non-blocking
+   * backoff scheduler so that a delayed op does not hold up the queue.
+   */
+  nextAttemptAt?: number;
 }
 
 /** Key-value store for sync metadata */
@@ -560,6 +566,26 @@ export class ChatDatabase extends Dexie {
       // primary key by default; no `&` prefix needed (that marks a unique
       // index on a non-PK field). Index: expiresAt (GC scan).
       searchCache: "query, expiresAt",
+    });
+
+    // Version 12: add clientId + [status+nextAttemptAt] index to pendingOps so
+    // the non-blocking SyncEngine scheduler can query due ops in O(log n)
+    // and so migrations can look up ops by clientId. Backfill nextAttemptAt=0
+    // (immediately due) for all existing pendingOps.
+    this.version(12).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+    }).upgrade(tx => {
+      return tx.table("pendingOps").toCollection().modify(op => {
+        if (op.nextAttemptAt === undefined) op.nextAttemptAt = 0;
+      });
     });
   }
 }

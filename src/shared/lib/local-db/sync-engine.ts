@@ -8,9 +8,11 @@ type GetRoomCryptoFn = (roomId: string) => Promise<PcryptoRoomInstance | undefin
 type OnChangeCallback = (roomId: string) => void;
 
 const MAX_BACKOFF_MS = 30_000;
+const MIN_BACKOFF_MS = 1_000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function computeBackoff(retries: number): number {
+  const base = Math.min(MIN_BACKOFF_MS * 2 ** retries, MAX_BACKOFF_MS);
+  return base + Math.random() * Math.min(base * 0.5, 5_000);
 }
 
 /**
@@ -28,6 +30,9 @@ function sleep(ms: number): Promise<void> {
 export class SyncEngine {
   private processing = false;
   private online = true;
+  private scheduled = false;
+  private disposed = false;
+  private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
   /** Becomes true the first time setOnline() is called with `true`.
    *  Guards against the "app started offline from a previous session and
    *  wakes up online without ever seeing setOnline(false)" case, where
@@ -113,58 +118,157 @@ export class SyncEngine {
   // Queue processing
   // ---------------------------------------------------------------------------
 
-  /** Process pending operations in FIFO order. Re-entrant safe. */
+  /**
+   * Process one op from the queue per tick, then yield to the event loop.
+   * Re-schedules itself via setTimeout until the queue is empty or a retry
+   * is not yet due. This prevents head-of-line blocking: a single failing op
+   * cannot hold the queue for its 30s backoff.
+   *
+   * External callers use the public `processQueue()` which is a thin wrapper
+   * kicking off the first tick without double-scheduling.
+   */
   async processQueue(): Promise<void> {
-    if (this.processing || !this.online) return;
+    this.kickScheduler(0);
+  }
+
+  /**
+   * Fully stop the engine: clear scheduled wake-up timers and refuse further
+   * ticks. Intended for shutdown and tests.
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.online = false;
+    if (this.scheduledTimer !== null) {
+      clearTimeout(this.scheduledTimer);
+      this.scheduledTimer = null;
+    }
+    this.scheduled = false;
+  }
+
+  /** Schedule processTick after `delayMs` unless a tick is already pending. */
+  private kickScheduler(delayMs: number): void {
+    if (this.disposed || this.scheduled || this.processing || !this.online) return;
+    this.scheduled = true;
+    this.scheduledTimer = setTimeout(() => {
+      this.scheduledTimer = null;
+      this.processTick();
+    }, Math.max(0, delayMs));
+  }
+
+  private async processTick(): Promise<void> {
+    this.scheduled = false;
+    if (this.disposed || this.processing || !this.online) return;
     this.processing = true;
 
+    let op: PendingOperation | null = null;
+    let nextRetryDelay: number | null = null; // smallest remaining wait
+
     try {
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        if (!this.online) break;
+      // Claim one due pending op transactionally so concurrent engines
+      // (multi-tab) can't both pick the same record.
+      op = await this.claimDueOp();
 
-        const op = await this.db.pendingOps
-          .where("status")
-          .equals("pending")
-          .first();
+      if (!op) {
+        // Nothing due right now — check whether an op is scheduled for later
+        // so we can set a wake-up timer and then stop this tick cleanly.
+        nextRetryDelay = await this.findNextRetryDelay();
+        return;
+      }
 
-        if (!op) break;
-
-        await this.db.pendingOps.update(op.id!, { status: "syncing" });
-
-        try {
-          await this.executeOperation(op);
-          // Success — remove from queue
-          await this.db.pendingOps.delete(op.id!);
+      try {
+        await this.executeOperation(op);
+        // If dispose() was called while the send was in flight, skip writing
+        // to a DB we no longer own. The send itself already landed server-side;
+        // the next engine instance will reconcile via Matrix sync.
+        if (this.disposed) return;
+        await this.db.pendingOps.delete(op.id!);
+        this.onChange?.(op.roomId);
+      } catch (e) {
+        if (this.disposed) return;
+        const retries = op.retries + 1;
+        if (retries >= op.maxRetries) {
+          await this.db.pendingOps.update(op.id!, {
+            status: "failed",
+            retries,
+            errorMessage: String(e),
+            lastAttemptAt: Date.now(),
+          });
+          await this.markMessageFailed(op);
           this.onChange?.(op.roomId);
-        } catch (e) {
-          const retries = op.retries + 1;
-          if (retries >= op.maxRetries) {
-            await this.db.pendingOps.update(op.id!, {
-              status: "failed",
-              retries,
-              errorMessage: String(e),
-              lastAttemptAt: Date.now(),
-            });
-            await this.markMessageFailed(op);
-            this.onChange?.(op.roomId);
-          } else {
-            // Put back as pending for retry
-            await this.db.pendingOps.update(op.id!, {
-              status: "pending",
-              retries,
-              lastAttemptAt: Date.now(),
-            });
-            // Exponential backoff with jitter before next attempt
-            const base = Math.min(1000 * 2 ** retries, MAX_BACKOFF_MS);
-            const delay = base + Math.random() * Math.min(base * 0.5, 5000);
-            await sleep(delay);
-          }
+        } else {
+          const delay = computeBackoff(retries);
+          await this.db.pendingOps.update(op.id!, {
+            status: "pending",
+            retries,
+            lastAttemptAt: Date.now(),
+            nextAttemptAt: Date.now() + delay,
+          });
+          // We don't `await sleep(delay)` here — other due ops must proceed
+          // immediately. The delay is tracked via nextAttemptAt in the DB,
+          // and a wake-up timer is scheduled in the finally block below.
         }
       }
     } finally {
       this.processing = false;
+      if (this.online) {
+        if (op) {
+          // We just processed one op. Immediately yield and check for the
+          // next due op. claimDueOp will skip any op whose nextAttemptAt is
+          // still in the future.
+          this.kickScheduler(0);
+        } else if (nextRetryDelay !== null) {
+          // Queue is empty of due ops but a retry is scheduled for later.
+          // Set a single wake-up timer so that retry is actually attempted.
+          this.scheduleWake(nextRetryDelay);
+        }
+      }
     }
+  }
+
+  /**
+   * Atomically claim the next due pending op (status = "pending"
+   * and nextAttemptAt <= now). Returns null if nothing is due.
+   *
+   * Uses the [status+nextAttemptAt] compound index added in v11 so this is
+   * O(log n) even with thousands of queued ops. Freshly-enqueued ops get
+   * nextAttemptAt=0 and are naturally prioritised over retry-scheduled ops
+   * (which have larger nextAttemptAt values). Within the same nextAttemptAt
+   * bucket Dexie falls back to the primary key order, which is creation
+   * order for `++id` — preserving FIFO for fresh sends.
+   */
+  private async claimDueOp(): Promise<PendingOperation | null> {
+    return this.db.transaction("rw", this.db.pendingOps, async () => {
+      const now = Date.now();
+      const due = await this.db.pendingOps
+        .where("[status+nextAttemptAt]")
+        .between(["pending", -Infinity], ["pending", now], true, true)
+        .first();
+      if (!due) return null;
+      await this.db.pendingOps.update(due.id!, { status: "syncing" });
+      return { ...due, status: "syncing" };
+    });
+  }
+
+  /**
+   * Look at pending ops scheduled for the future and return the smallest
+   * remaining wait (in ms). Used to set a wake-up timer when the queue has
+   * no immediately-due work but will have work later. O(log n) via the
+   * [status+nextAttemptAt] compound index — only reads the first future op.
+   */
+  private async findNextRetryDelay(): Promise<number | null> {
+    const now = Date.now();
+    const soonest = await this.db.pendingOps
+      .where("[status+nextAttemptAt]")
+      .above(["pending", now])
+      .first();
+    if (!soonest) return null;
+    const delay = (soonest.nextAttemptAt ?? 0) - now;
+    return delay > 0 ? delay : null;
+  }
+
+  /** Schedule a future tick to pick up retry-scheduled ops. */
+  private scheduleWake(delayMs: number): void {
+    this.kickScheduler(delayMs);
   }
 
   // ---------------------------------------------------------------------------
@@ -491,6 +595,7 @@ export class SyncEngine {
       maxRetries,
       createdAt: Date.now(),
       clientId: clientId ?? crypto.randomUUID(),
+      nextAttemptAt: 0, // due immediately
     });
 
     // Kick off processing (non-blocking)
@@ -504,6 +609,7 @@ export class SyncEngine {
       status: "pending",
       retries: 0,
       errorMessage: undefined,
+      nextAttemptAt: 0,
     });
     // Also reset the associated message status
     const op = await this.db.pendingOps.get(opId);
@@ -518,7 +624,7 @@ export class SyncEngine {
     await this.db.pendingOps
       .where("status")
       .equals("failed")
-      .modify({ status: "pending", retries: 0, errorMessage: undefined });
+      .modify({ status: "pending", retries: 0, errorMessage: undefined, nextAttemptAt: 0 });
     this.processQueue();
   }
 
