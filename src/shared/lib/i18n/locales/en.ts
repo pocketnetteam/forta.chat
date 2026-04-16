@@ -49,6 +49,10 @@ export const en = {
   "contactSearch.showMore": "Show more",
   "contactSearch.clearSearch": "Clear search",
 
+  // ── Search errors ──
+  "search.userNotFound": "User not found",
+  "search.serviceUnavailable": "Search service is temporarily unavailable",
+
   // ── Folder tabs ──
   "tabs.all": "All",
   "tabs.personal": "Personal",

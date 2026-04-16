@@ -831,6 +831,24 @@ export class MatrixClientService {
     }
   }
 
+  /** Search the Matrix user directory (/_matrix/client/v3/user_directory/search).
+   *  Used as a fallback when Bastyon RPC searchusers is unavailable (e.g. CORS on web).
+   *  Returns an array of { user_id, display_name, avatar_url } entries. */
+  async searchUserDirectory(
+    term: string,
+    limit = 20,
+  ): Promise<{ limited: boolean; results: Array<{ user_id: string; display_name?: string; avatar_url?: string }> }> {
+    if (!this.client) throw new Error("Client not initialized");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = this.client as any;
+    // matrix-js-sdk exposes searchUserDirectory({ term, limit })
+    const res = await client.searchUserDirectory({ term, limit });
+    return {
+      limited: Boolean(res?.limited),
+      results: (res?.results ?? []) as Array<{ user_id: string; display_name?: string; avatar_url?: string }>,
+    };
+  }
+
   /** Destroy the client */
   destroy() {
     if (this.client) {

@@ -19,7 +19,7 @@ const emit = defineEmits<{
   clear: [];
 }>();
 
-const { searchResults, isSearching, isCreatingRoom, debouncedSearch, getOrCreateRoom } = useContacts();
+const { searchResults, searchError, isSearching, isCreatingRoom, debouncedSearch, getOrCreateRoom } = useContacts();
 const chatStore = useChatStore();
 const { t } = useI18n();
 const { formatPreview } = useFormatPreview();
@@ -207,12 +207,12 @@ const handleSelectMessage = (result: MessageSearchResult) => {
       </button>
     </div>
 
-    <!-- No results -->
+    <!-- No results / service error -->
     <div
       v-if="!visibleChats.length && !visibleUsers.length && !visibleMessages.length && !isSearching"
       class="flex flex-col items-center gap-2 py-8 text-sm text-text-on-main-bg-color"
     >
-      <span>{{ t("contactSearch.noResults") }}</span>
+      <span>{{ searchError ? t(searchError) : t("contactSearch.noResults") }}</span>
       <button
         class="text-color-txt-ac hover:underline"
         @click="emit('clear')"

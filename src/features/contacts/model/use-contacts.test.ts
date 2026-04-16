@@ -22,9 +22,10 @@ vi.mock("@/entities/user", () => ({
 }));
 
 // Mock app initializer
+const mockRpcSearchUsers = vi.fn<(query: string) => Promise<Array<{ address: string; name: string; image: string }>>>();
 vi.mock("@/app/providers/initializers/app-initializer", () => ({
   createAppInitializer: vi.fn(() => ({
-    searchUsers: vi.fn(() => []),
+    searchUsers: (q: string) => mockRpcSearchUsers(q),
   })),
 }));
 
@@ -34,10 +35,12 @@ const mockJoinRoom = vi.fn();
 const mockGetRooms = vi.fn((): any[] => []);
 const mockGetRoom = vi.fn(() => ({ selfMembership: "join" }));
 const mockSetPowerLevel = vi.fn();
+const mockSearchUserDirectory = vi.fn<(term: string, limit?: number) => Promise<{ limited: boolean; results: Array<{ user_id: string; display_name?: string; avatar_url?: string }> }>>();
+const mockIsReady = vi.fn(() => true);
 
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
-    isReady: () => true,
+    isReady: () => mockIsReady(),
     getUserId: () => "@" + hexEncode("PMyAddress123456789012345678901234").toLowerCase() + ":matrix.pocketnet.app",
     createRoom: mockCreateRoom,
     joinRoom: mockJoinRoom,
@@ -45,10 +48,29 @@ vi.mock("@/entities/matrix", () => ({
     getRoom: mockGetRoom,
     setPowerLevel: mockSetPowerLevel,
     sendText: vi.fn(),
+    searchUserDirectory: (term: string, limit?: number) => mockSearchUserDirectory(term, limit),
   })),
   resetMatrixClientService: vi.fn(),
   MatrixClientService: vi.fn(),
 }));
+
+// Mock local-db: simulate cache miss by default. Use partial mock so that
+// chat-store and other consumers still see the real useLiveQuery / repositories.
+const mockCacheGet = vi.fn<(q: string) => Promise<any[] | null>>(() => Promise.resolve(null));
+const mockCachePut = vi.fn<(q: string, results: any[]) => Promise<void>>(() => Promise.resolve());
+vi.mock("@/shared/lib/local-db", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    isChatDbReady: () => true,
+    getChatDb: () => ({
+      searchCache: {
+        get: (q: string) => mockCacheGet(q),
+        put: (q: string, r: any[]) => mockCachePut(q, r),
+      },
+    }),
+  };
+});
 
 // Mock connectivity
 vi.mock("@/shared/lib/connectivity", () => ({
@@ -149,6 +171,120 @@ describe("useContacts", () => {
 
       expect(roomId).toBe("!rejoined:matrix.pocketnet.app");
       expect(mockJoinRoom).toHaveBeenCalled();
+    });
+  });
+
+  // ─── searchUsers — multi-tier fallback ──────────────────────
+
+  describe("searchUsers — multi-tier fallback", () => {
+    beforeEach(() => {
+      mockRpcSearchUsers.mockReset();
+      mockSearchUserDirectory.mockReset();
+      mockCacheGet.mockReset().mockResolvedValue(null);
+      mockCachePut.mockReset().mockResolvedValue(undefined);
+      mockIsReady.mockReturnValue(true);
+    });
+
+    it("returns RPC results directly when Bastyon RPC works", async () => {
+      mockRpcSearchUsers.mockResolvedValue([
+        { address: "PBob1111111111111111111111111111AA", name: "Bob", image: "" },
+      ]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      await contacts.searchUsers("bob");
+
+      expect(contacts.searchResults.value.length).toBe(1);
+      expect(contacts.searchResults.value[0].name).toBe("Bob");
+      expect(contacts.searchError.value).toBeNull();
+    });
+
+    it("falls back to Matrix user_directory when Bastyon RPC fails (CORS on web)", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("Failed to fetch"));
+      const targetHex = hexEncode("PAlice22222222222222222222222222AB").toLowerCase();
+      mockSearchUserDirectory.mockResolvedValue({
+        limited: false,
+        results: [{ user_id: `@${targetHex}:matrix.pocketnet.app`, display_name: "Alice", avatar_url: "" }],
+      });
+
+      await contacts.searchUsers("alice");
+
+      expect(mockSearchUserDirectory).toHaveBeenCalledWith("alice", 20);
+      expect(contacts.searchResults.value.length).toBeGreaterThan(0);
+      expect(contacts.searchResults.value[0].address).toBe("PAlice22222222222222222222222222AB");
+      expect(contacts.searchError.value).toBeNull();
+    });
+
+    it("surfaces localized search.userNotFound when all tiers return nothing", async () => {
+      mockRpcSearchUsers.mockResolvedValue([]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      await contacts.searchUsers("nonexistent_xyz");
+
+      expect(contacts.searchResults.value.length).toBe(0);
+      // Must never be the raw SDK string — only an i18n key.
+      expect(contacts.searchError.value).toBe("search.userNotFound");
+    });
+
+    it("never exposes raw SDK error strings to searchError", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("Невозможно разыскать идентификатор"));
+      mockSearchUserDirectory.mockRejectedValue(new Error("Невозможно разыскать идентификатор"));
+      mockIsReady.mockReturnValue(true);
+
+      await contacts.searchUsers("badquery");
+
+      // searchError is either null (local results found) or an i18n key — never
+      // the raw Russian phrase that was previously leaking from the SDK.
+      expect(contacts.searchError.value).not.toContain("Невозможно");
+      if (contacts.searchError.value) {
+        expect(contacts.searchError.value).toMatch(/^search\./);
+      }
+    });
+
+    it("uses Dexie TTL cache on cache hit", async () => {
+      mockCacheGet.mockResolvedValue([
+        { address: "PCached11111111111111111111111111AB", name: "Cached", image: "" },
+      ]);
+      mockRpcSearchUsers.mockResolvedValue([]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      await contacts.searchUsers("cached");
+
+      expect(mockCacheGet).toHaveBeenCalledWith("cached");
+      // Cached result should appear immediately (prior to tier 2/3).
+      expect(contacts.searchResults.value.find(u => u.address === "PCached11111111111111111111111111AB")).toBeTruthy();
+    });
+
+    it("persists merged results to Dexie cache after tiers complete", async () => {
+      mockRpcSearchUsers.mockResolvedValue([
+        { address: "PWriteCache11111111111111111111AB", name: "WriteCache", image: "" },
+      ]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      await contacts.searchUsers("writecache");
+
+      expect(mockCachePut).toHaveBeenCalled();
+      const call = mockCachePut.mock.calls[0];
+      expect(call[0]).toBe("writecache");
+      expect(call[1]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ address: "PWriteCache11111111111111111111AB" }),
+        ]),
+      );
+    });
+
+    it("filters out own address from Matrix fallback results", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("Failed to fetch"));
+      const myHex = hexEncode(MY_ADDR).toLowerCase();
+      mockSearchUserDirectory.mockResolvedValue({
+        limited: false,
+        results: [
+          { user_id: `@${myHex}:matrix.pocketnet.app`, display_name: "Me", avatar_url: "" },
+        ],
+      });
+
+      await contacts.searchUsers("me");
+
+      expect(contacts.searchResults.value.find(u => u.address === MY_ADDR)).toBeUndefined();
     });
   });
 });
