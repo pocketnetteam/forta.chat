@@ -132,6 +132,8 @@ let _onlineHandler: (() => void) | null = null;
 let _offlineHandler: (() => void) | null = null;
 let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
+// Per-room debounce timers for peer-keys recheck after member events.
+const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
@@ -404,10 +406,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
-      // Wire Pcrypto key-load → decryption retry
+      // Wire Pcrypto key-load → decryption retry + peer-keys banner refresh.
+      // Without the checkPeerKeys() call the "peer hasn't published encryption
+      // keys" banner stayed stuck on screen even after the keys arrived,
+      // forcing users to switch chats to clear it.
       if (cryptoInstance) {
         cryptoInstance.onKeysLoaded = (roomId: string) => {
           chatDbKit.retryRoomDecryption?.(roomId);
+          chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
         };
       }
 
@@ -456,7 +462,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         },
         onMembership: (_event: unknown, member: unknown) => {
           const roomId = (member as any)?.roomId as string;
-          if (roomId) chatStore.markRoomChanged(roomId);
+          if (roomId) {
+            chatStore.markRoomChanged(roomId);
+            // Re-evaluate peer-keys after a member event (debounced) — fixes the
+            // stuck "peer hasn't published encryption keys" banner that used to
+            // wait until the next chat switch to clear.
+            const prev = _peerKeysRecheckTimers.get(roomId);
+            if (prev) clearTimeout(prev);
+            const t = setTimeout(() => {
+              _peerKeysRecheckTimers.delete(roomId);
+              chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
+            }, 500);
+            _peerKeysRecheckTimers.set(roomId, t);
+          }
           chatStore.refreshRooms();
         },
         onMyMembership: (_room: unknown, membership: string, prevMembership: string | undefined) => {
@@ -872,6 +890,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
     }
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
+    for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
+    _peerKeysRecheckTimers.clear();
 
     // ── 4. Clear localStorage account data ──
     clearAllDrafts();
@@ -1462,6 +1482,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
       }
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
+      for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
+      _peerKeysRecheckTimers.clear();
 
       // Close Dexie without deleting
       closeChatDb();
