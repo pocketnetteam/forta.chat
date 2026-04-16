@@ -1,10 +1,12 @@
 package com.forta.chat
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.View
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import android.view.View.LAYOUT_DIRECTION_LTR
 import com.getcapacitor.BridgeActivity
 import com.forta.chat.plugins.tor.TorPlugin
@@ -33,9 +35,6 @@ class MainActivity : BridgeActivity() {
     private var keyboardHeight = 0
     private var appBottomInset = 0
 
-    // Named Runnable reference — removable in onDestroy
-    private val reinjectAll: Runnable = Runnable { injectAllCssVars() }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(TorPlugin::class.java)
         registerPlugin(CallPlugin::class.java)
@@ -54,6 +53,10 @@ class MainActivity : BridgeActivity() {
         // Edge-to-edge: content draws behind system bars, insets are non-zero
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
+        // Status bar icon color based on current theme (fixes invisible dark
+        // icons on dark theme under Android 15+ mandatory edge-to-edge).
+        applyStatusBarAppearance()
+
         // With position:fixed on the root app-shell, document-level scroll
         // does NOT move fixed elements. The browser's native focus-scroll
         // safely reveals inputs within overflow containers while the shell
@@ -70,13 +73,20 @@ class MainActivity : BridgeActivity() {
         val rootView = findViewById<View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { _, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val displayCutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             val density = resources.displayMetrics.density
 
-            insetTop    = (systemBars.top    / density).toInt()
+            // Android 16 (Pixel 9/10) with notch/cutout: top inset must equal
+            // the max of system bars and display cutout so content clears both.
+            val topPx   = maxOf(systemBars.top, displayCutout.top)
+            val leftPx  = maxOf(systemBars.left, displayCutout.left)
+            val rightPx = maxOf(systemBars.right, displayCutout.right)
+
+            insetTop    = (topPx            / density).toInt()
             insetBottom = (systemBars.bottom / density).toInt()
-            insetLeft   = (systemBars.left   / density).toInt()
-            insetRight  = (systemBars.right  / density).toInt()
+            insetLeft   = (leftPx           / density).toInt()
+            insetRight  = (rightPx          / density).toInt()
 
             // Pure keyboard height (IME minus nav bar).
             // Clamp to 0..60% screen to guard against OEM firmware anomalies.
@@ -108,10 +118,34 @@ class MainActivity : BridgeActivity() {
         injectAllCssVars()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Theme flipped (dark <-> light) or orientation changed:
+        // re-apply status bar icon color and re-inject CSS vars.
+        applyStatusBarAppearance()
+        injectAllCssVars()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         activityScope.cancel()
-        bridge?.webView?.removeCallbacks(reinjectAll)
+    }
+
+    /**
+     * Flip status bar / navigation bar icon color to match current theme.
+     *
+     * Night mode -> icons light (we are on a dark background).
+     * Day mode   -> icons dark  (we are on a light background).
+     *
+     * Without this, Android 15+ leaves icons at their system default
+     * (typically dark), which makes them invisible on a dark app background.
+     */
+    private fun applyStatusBarAppearance() {
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        val nightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+        val isNight = nightMode == Configuration.UI_MODE_NIGHT_YES
+        controller.isAppearanceLightStatusBars = !isNight
+        controller.isAppearanceLightNavigationBars = !isNight
     }
 
     /**
@@ -144,7 +178,8 @@ class MainActivity : BridgeActivity() {
         """.trimIndent()
 
         webView.post { if (!isFinishing && !isDestroyed) webView.evaluateJavascript(js, null) }
-        webView.removeCallbacks(reinjectAll)
-        webView.postDelayed(reinjectAll, 500)
+        // No postDelayed re-inject loop: CSS vars are updated live through
+        // setOnApplyWindowInsetsListener + onResume + onConfigurationChanged.
+        // First paint is covered by inline env() fallbacks in index.html.
     }
 }
