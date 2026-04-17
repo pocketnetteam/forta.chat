@@ -67,7 +67,7 @@ function _base64ToArrayBuffer(base64: string): ArrayBuffer {
 
 // ---- PcryptoFile: AES-CBC file encryption (unchanged) ----
 
-class PcryptoFile {
+export class PcryptoFile {
   private iv = new Uint8Array([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]);
 
   async randomKey(): Promise<string> {
@@ -107,13 +107,22 @@ class PcryptoFile {
   async encryptFile(file: Blob, secret: string): Promise<File> {
     const buffer = await readFile(file);
     const encrypted = await this.encrypt(buffer, secret);
-    return new File([encrypted], "encrypted", { type: "encrypted/" + file.type });
+    // Use a valid RFC 2045 MIME for the ciphertext. The previous value
+    // "encrypted/<original>" is not a real MIME and caused some
+    // homeserver proxies (nginx/cloudflare) to reject the upload with 415.
+    // The original MIME is carried separately in the event's fileInfo.mimetype.
+    return new File([encrypted], "encrypted", { type: "application/octet-stream" });
   }
 
   async decryptFile(file: Blob, secret: string): Promise<File> {
     const buffer = await readFile(file);
     const decrypted = await this.decrypt(buffer, secret);
-    return new File([decrypted], "decrypted", { type: file.type.replace("encrypted/", "") });
+    // Strip the legacy "encrypted/" prefix if the ciphertext was produced by
+    // an older client version; fall back to generic binary otherwise.
+    const type = file.type.startsWith("encrypted/")
+      ? file.type.replace("encrypted/", "")
+      : "application/octet-stream";
+    return new File([decrypted], "decrypted", { type });
   }
 }
 
