@@ -119,8 +119,14 @@ async function formatBody(
   const lines: string[] = [];
 
   if (input.reporterAddress) {
-    const hash = await computeReporterHash(input.reporterAddress);
-    lines.push(buildReporterMarker(hash), '');
+    try {
+      const hash = await computeReporterHash(input.reporterAddress);
+      lines.push(buildReporterMarker(hash), '');
+    } catch (e) {
+      // Marker is a nice-to-have for status tracking — never let it block
+      // the bug report itself. Log so we can diagnose if it ever happens.
+      console.warn('[bug-report] reporter hash failed, sending without marker:', e);
+    }
   }
 
   lines.push(

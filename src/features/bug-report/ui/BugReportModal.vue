@@ -109,7 +109,8 @@ const handleSend = async () => {
       errorMsg.value = `${t("bugReport.screenshotUploadFailed")} (${result.uploadError ?? "unknown"})`;
     }
     setTimeout(() => close(), 2500);
-  } catch {
+  } catch (e) {
+    console.error("[BugReport] send failed:", e);
     errorMsg.value = t("bugReport.error");
   } finally {
     sending.value = false;
