@@ -220,6 +220,7 @@ export const en = {
   "profile.saving": "Saving...",
   "profile.avatarUploading": "Uploading...",
   "profile.avatarError": "Failed to upload avatar",
+  "profile.saveFailed": "Failed to save profile. Check your connection and try again.",
 
   // ── Message input ──
   "message.editing": "Editing",
@@ -714,6 +715,8 @@ export const en = {
   "register.networkErrorTitle": "Connection problem",
   "register.networkErrorHint": "Unable to reach the network. Please check your internet connection and try again.",
   "register.retry": "Try Again",
+  "register.pollAttempt": "Attempt {n}",
+  "register.accountAddress": "Account",
   "invite.shareText": "Join me on Forta Chat!",
 
   // ── App download banner ──

@@ -2,6 +2,11 @@ import type { UserData } from "./types";
 
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
+import { withTimeout } from "@/shared/lib/with-timeout";
+
+export type EditUserDataResult =
+  | { success: true; action: unknown }
+  | { success: false; reason: "timeout" | "rejected" | "network"; error: string };
 
 export interface BastyonPostData {
   txid: string;
@@ -203,8 +208,10 @@ export class AppInitializer {
   }: {
     address: string;
     userData: UserData;
-  }) {
-    if (!this.actions) return null;
+  }): Promise<EditUserDataResult> {
+    if (!this.actions) {
+      return { success: false, reason: "network", error: "Actions not available" };
+    }
     const userInfo = new UserInfo();
     userInfo.name.set(superXSS(userData.name));
     userInfo.language.set(superXSS(userData.language));
@@ -215,7 +222,23 @@ export class AppInitializer {
     userInfo.ref.set(userData.ref);
     userInfo.keys.set(userData.keys);
 
-    return this.actions.addActionAndSendIfCan(userInfo, null, address);
+    try {
+      // 30s timeout: UserInfo broadcast may queue on proxy; without a timeout
+      // the UI silently hangs ("Save Changes" stuck on "Saving..." forever).
+      const action = await withTimeout(
+        this.actions.addActionAndSendIfCan(userInfo, null, address),
+        30_000,
+        "editUserData",
+      );
+      return { success: true, action };
+    } catch (e: unknown) {
+      const errMessage = e instanceof Error ? e.message : String(e);
+      let reason: "timeout" | "rejected" | "network" = "network";
+      if (errMessage.includes("timed out")) reason = "timeout";
+      else if (/rejected|invalid|code\s*1\d/i.test(errMessage)) reason = "rejected";
+      console.error("[appInit] editUserData failed:", errMessage);
+      return { success: false, reason, error: errMessage };
+    }
   }
 
   initApi() {
@@ -243,8 +266,15 @@ export class AppInitializer {
   ): Promise<UserData | null> {
     if (!this.psdk || !stateAddresses.length) return Promise.resolve(null);
     return this.psdk.userInfo.load(stateAddresses).then(() => {
-      const userData = this.psdk!.userInfo.get(stateAddresses[0]) as UserData;
-      if (onLoad) {
+      // `psdk.userInfo.get()` returns undefined for addresses without an
+      // on-chain UserInfo yet (e.g. right after register(), before the
+      // blockchain confirms). The `as UserData` cast hides that — callers
+      // used to dereference undefined and crash with "Invalid private key
+      // or mnemonic" in the login flow. Guard the callback and the return
+      // so downstream code can safely handle the absence.
+      const raw = this.psdk!.userInfo.get(stateAddresses[0]);
+      const userData = (raw ?? null) as UserData | null;
+      if (onLoad && userData) {
         onLoad(userData);
       }
       return userData;
