@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.media.projection.MediaProjection
+import android.os.Build
 import android.util.Log
 import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -26,6 +27,32 @@ class NativeWebRTCManager(private val context: Context) {
 
         /** Callback for audio creation failures — wired by WebRTCPlugin to emit onAudioError events to JS */
         var onAudioError: ((type: String, message: String) -> Unit)? = null
+
+        /**
+         * OEMs with broken hardware AEC/NS implementations — using HW AEC on these
+         * devices mutes the microphone or locks the audio session. Fall back to
+         * WebRTC software AEC/NS (works everywhere).
+         *
+         * Evidence from user reports: Xiaomi/MIUI, Realme/RealmeUI, Oppo/ColorOS,
+         * Infinix/XOS, Tecno/HiOS, Huawei/EMUI, ZTE. Samsung/Pixel/OnePlus ship
+         * working HW AEC and benefit from it (lower CPU, better quality).
+         */
+        private val BROKEN_HW_AEC_VENDORS = setOf(
+            "xiaomi", "redmi", "poco",
+            "realme",
+            "oppo",
+            "infinix", "itel",
+            "tecno",
+            "huawei", "honor",
+            "zte"
+        )
+
+        /** Detect vendors with known broken hardware AEC/NS. */
+        fun hasBrokenHardwareAudioProcessing(): Boolean {
+            val vendor = Build.MANUFACTURER?.lowercase() ?: return false
+            val brand = Build.BRAND?.lowercase() ?: ""
+            return BROKEN_HW_AEC_VENDORS.any { v -> v == vendor || v == brand }
+        }
     }
 
     interface Listener {
@@ -85,9 +112,18 @@ class NativeWebRTCManager(private val context: Context) {
         )
         val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
 
+        // Hardware AEC/NS is broken on Xiaomi/MIUI, Realme, Oppo, Infinix, Tecno,
+        // Huawei, ZTE — enabling it mutes the mic. Fall back to software AEC/NS
+        // (shipped with libwebrtc) on these vendors; keep HW path on Samsung/Pixel/OnePlus.
+        val useHardwareAudioProcessing = !hasBrokenHardwareAudioProcessing()
+        Log.d(
+            TAG,
+            "Audio processing: vendor=${Build.MANUFACTURER} brand=${Build.BRAND} " +
+                "hardwareAEC=$useHardwareAudioProcessing"
+        )
         val audioDeviceModule = JavaAudioDeviceModule.builder(context)
-            .setUseHardwareAcousticEchoCanceler(true)
-            .setUseHardwareNoiseSuppressor(true)
+            .setUseHardwareAcousticEchoCanceler(useHardwareAudioProcessing)
+            .setUseHardwareNoiseSuppressor(useHardwareAudioProcessing)
             .createAudioDeviceModule()
 
         factory = PeerConnectionFactory.builder()

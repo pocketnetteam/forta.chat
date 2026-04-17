@@ -442,6 +442,38 @@ class NativeCallBridge {
     if (!isNative) return { granted: true };
     return NativeCall.requestAudioPermission();
   }
+
+  /**
+   * Activate VoIP audio routing via native AudioRouter.
+   *
+   * Must be called immediately after the call is placed/answered.
+   * Wires MODE_IN_COMMUNICATION, setCommunicationDevice (API 31+),
+   * AudioDeviceCallback for BT hot-swap, and OEM delayed re-apply
+   * (Xiaomi/Realme/XOS reset audio mode ~500 ms after init).
+   */
+  async startAudioRouting(options: { callType: string }): Promise<void> {
+    if (!isNative) return;
+    try {
+      await NativeCall.startAudioRouting(options);
+    } catch (e) {
+      console.warn('[NativeCallBridge] startAudioRouting failed:', e);
+    }
+  }
+
+  /**
+   * Tear down VoIP audio routing.
+   *
+   * Must be called on hangup / reject / ended. Restores MODE_NORMAL,
+   * clears communication device, unregisters receivers.
+   */
+  async stopAudioRouting(): Promise<void> {
+    if (!isNative) return;
+    try {
+      await NativeCall.stopAudioRouting();
+    } catch (e) {
+      console.warn('[NativeCallBridge] stopAudioRouting failed:', e);
+    }
+  }
 }
 
 export const nativeCallBridge = new NativeCallBridge();

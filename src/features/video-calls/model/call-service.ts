@@ -203,10 +203,12 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       playEndTone();
       callStore.stopTimer();
       unwireCallEvents(call);
-      // Notify native ConnectionService that call ended + dismiss native UI
+      // Notify native ConnectionService that call ended + dismiss native UI +
+      // tear down VoIP audio routing (restore MODE_NORMAL, clear comm device).
       if (isNative) {
         import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
           nativeCallBridge.reportCallEnded(call.callId);
+          nativeCallBridge.stopAudioRouting().catch(() => {});
         }).catch(() => {});
         NativeWebRTC.dismissCallUI().catch(() => {});
       }
@@ -266,6 +268,7 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     if (isNative) {
       import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
         nativeCallBridge.reportCallEnded(call.callId);
+        nativeCallBridge.stopAudioRouting().catch(() => {});
       }).catch(() => {});
       NativeWebRTC.dismissCallUI().catch(() => {});
     }
@@ -531,6 +534,16 @@ export function useCallService() {
       } else {
         await call.placeVoiceCall();
       }
+
+      // Activate native VoIP audio routing — MODE_IN_COMMUNICATION,
+      // setCommunicationDevice, BT hot-swap, OEM delayed re-apply.
+      // Must come AFTER placeCall so the call exists; graceful degradation
+      // on failure (no reason to drop the call if routing fails).
+      if (isNative) {
+        nativeCallBridge.startAudioRouting({ callType: type }).catch((e) => {
+          console.warn("[call-service] startAudioRouting failed:", e);
+        });
+      }
     } catch (e) {
       console.error("[call-service] Failed to place call:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.placeCall"), error: e });
@@ -746,6 +759,15 @@ export function useCallService() {
       console.log("[call-service] answerCall: calling SDK call.answer(true, " + isVideo + ")");
       await call.answer(true, isVideo);
       console.log("[call-service] answerCall: SDK call.answer resolved");
+
+      // Activate native VoIP audio routing after answering — same reasoning
+      // as startCall: must come AFTER answer, graceful degradation on failure.
+      if (isNative) {
+        const callType = isVideo ? "video" : "voice";
+        nativeCallBridge.startAudioRouting({ callType }).catch((e) => {
+          console.warn("[call-service] startAudioRouting failed:", e);
+        });
+      }
     } catch (e) {
       console.error("[call-service] Failed to answer call:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });
@@ -767,6 +789,14 @@ export function useCallService() {
       call.reject();
     } catch (e) {
       console.warn("[call-service] reject error:", e);
+    }
+
+    // Tear down audio routing — we never entered MODE_IN_COMMUNICATION cleanly
+    // for incoming calls that start from ringing, but starting the router on
+    // answer means a rejected call after a prior answer attempt must also
+    // clean up. Idempotent on native side.
+    if (isNative) {
+      nativeCallBridge.stopAudioRouting().catch(() => {});
     }
 
     unwireCallEvents(call);
@@ -798,6 +828,14 @@ export function useCallService() {
       call.hangup(CallErrorCode.UserHangup, false);
     } catch (e) {
       console.warn("[call-service] hangup error:", e);
+    }
+
+    // Tear down VoIP audio routing eagerly. The SDK's Ended state also
+    // triggers stopAudioRouting, but we call it here too so the user's
+    // earpiece/speaker is released immediately even if Ended is delayed.
+    // Idempotent on the native side.
+    if (isNative) {
+      nativeCallBridge.stopAudioRouting().catch(() => {});
     }
 
     // Fallback cleanup if SDK doesn't fire Ended event (#11)
