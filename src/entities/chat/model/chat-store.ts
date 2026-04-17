@@ -12,6 +12,7 @@ import { defineStore } from "pinia";
 import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
+import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
 
 
@@ -1042,11 +1043,44 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     });
   };
 
+  // ---------------------------------------------------------------------------
+  // Batched sortedRooms patches (rAF-coalesced)
+  //
+  // WHY: when the user opens an unread room, setActiveRoom triggers multiple
+  // writes to _sortedRoomsRef in quick succession (in-memory optimistic patch
+  // + Dexie clearUnread → observeRoomChanges microtask → another patch). Each
+  // mutation creates a new array reference, which cascades through
+  // allFilteredRooms → RecycleScroller. With `contain: strict` on every item,
+  // those back-to-back commits produce visible flicker in the sidebar.
+  //
+  // Coalescing all patches arriving within a single animation frame into one
+  // `_sortedRoomsRef.value` assignment collapses the cascade to a single render.
+  // ---------------------------------------------------------------------------
+  const sortedRoomsPatcher = createPatchScheduler<RoomChange>((batch) => {
+    applyPatchSortedRooms(batch);
+  });
+
+  /** Cancel scheduled flush and drop pending changes.
+   *  Call this before direct `_sortedRoomsRef.value` assignments
+   *  (fallback recompute, fullRebuildSortedRoomsAsync, cleanup) so stale
+   *  patches don't later overwrite the freshly-built state. */
+  const cancelPendingPatches = () => sortedRoomsPatcher.cancel();
+
   const patchSortedRooms = (changes: RoomChange[]) => {
+    sortedRoomsPatcher.schedule(changes);
+  };
+
+  const applyPatchSortedRooms = (changes: RoomChange[]) => {
     perfCount("sortedRooms:patch");
+    // Dedupe by roomId — only the final state for each room matters in a frame
+    const dedup = new Map<string, RoomChange>();
+    for (const c of changes) {
+      const id = c.type === "delete" ? c.roomId : c.room.id;
+      dedup.set(id, c);
+    }
     const arr = [..._sortedRoomsRef.value];
     const pinned = pinnedRoomIds.value;
-    for (const change of changes) {
+    for (const change of dedup.values()) {
       if (change.type === "delete") {
         const idx = arr.findIndex(r => r.id === change.roomId);
         if (idx !== -1) arr.splice(idx, 1);
@@ -1078,6 +1112,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const fullRebuildSortedRoomsAsync = async () => {
     perfCount("sortedRooms:fullRebuild");
+    // Drop any scheduled delta patches — we're about to rebuild from dexieRoomMap,
+    // which is already up-to-date with everything those patches would have applied.
+    cancelPendingPatches();
     const allRooms = Array.from(dexieRoomMap.values());
     if (allRooms.length === 0 && rooms.value.length > 0) {
       _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
@@ -1101,6 +1138,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (aPinned !== bPinned) return bPinned - aPinned;
       return getSortKey(b) - getSortKey(a);
     });
+    // Drop patches that arrived during the async yield — dexieRoomMap mutated
+    // in lock-step with those deltas, so `mapped` already reflects them.
+    cancelPendingPatches();
     _sortedRoomsRef.value = mapped;
 
     // Prune stale cache entries when cache grows beyond 1.5x current room count
@@ -1253,6 +1293,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Rebuild when pins or Matrix ignore list changes (sidebar membership).
         if (pinsChanged || ignoredChanged) scheduleFullSortedRebuild();
       } else {
+        cancelPendingPatches();
         _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
       }
     },
@@ -5855,6 +5896,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
     roomFetchStates.clear();
+    cancelPendingPatches();
     _sortedRoomsRef.value = [];
     messageWindowSize.value = 50;
 

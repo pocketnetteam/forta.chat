@@ -40,12 +40,14 @@
   }
 }
 
-/* vue-virtual-scroller: vertical item-view gets no inline height from JS (only grid mode does).
-   contain:size ignores child intrinsic height — set explicit height matching :item-size via
-   --recycle-item-size on the RecycleScroller root. */
+/* vue-virtual-scroller item-view: isolate layout+paint so mutating one row
+   doesn't invalidate siblings. `size` containment was dropped on purpose:
+   it required an explicit --recycle-item-size, which only ContactList set,
+   and caused visible flicker on other lists (ChannelList, ContactsPanel)
+   plus on every reactive patch to the active list. :item-size from the
+   scroller already supplies positioning height. */
 .vue-recycle-scroller.ready.direction-vertical .vue-recycle-scroller__item-view {
-  contain: strict;
-  height: var(--recycle-item-size);
+  contain: layout paint;
 }
 
 @media (max-height: 500px) {
