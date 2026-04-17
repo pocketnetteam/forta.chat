@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { PostComment } from "@/app/providers/initializers";
 import { useAuthStore } from "@/entities/auth";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 
 interface Props {
   comments: PostComment[];
@@ -19,8 +20,7 @@ const authorAvatars = ref<Record<string, string>>({});
 const avatarErrors = ref<Record<string, boolean>>({});
 
 function fixAvatarUrl(raw: string): string {
-  const url = raw.startsWith("http") ? raw : `https://bastyon.com/images/${raw}`;
-  return url.replace("bastyon.com:8092", "pocketnet.app:8092");
+  return normalizePocketnetImageUrl(raw);
 }
 
 const resolveAuthors = async (comments: PostComment[]) => {
