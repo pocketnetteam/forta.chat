@@ -13,7 +13,11 @@ import { isNative } from "@/shared/lib/platform";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { installNativeWebRTCProxy, NativeWebRTC } from "@/shared/lib/native-webrtc";
-import { nativeCallBridge } from "@/shared/lib/native-calls";
+import {
+  nativeCallBridge,
+  consumePendingAnswerCallId,
+  consumePendingRejectCallId,
+} from "@/shared/lib/native-calls";
 
 // Install native WebRTC proxy on mobile — must run before any call is placed.
 // This replaces window.RTCPeerConnection so that the Matrix SDK transparently
@@ -232,6 +236,19 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   const onHangup = (() => {
     stopAllSounds();
     clearIncomingTimeout();
+    // Also tear down the native surface. Without this, when the remote
+    // cancels a call we never answered, or when another of our devices
+    // picks up (m.call.select_answer), the SDK fires Hangup but the
+    // native IncomingCallActivity + shade notification stay up forever.
+    // onState → ended eventually does the same cleanup, but we can't
+    // rely on it: the SDK sometimes fires Hangup before State transitions
+    // for rejected-while-ringing cases.
+    if (isNative) {
+      import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
+        nativeCallBridge.reportCallEnded(call.callId);
+      }).catch(() => {});
+      NativeWebRTC.dismissCallUI().catch(() => {});
+    }
   }) as CallEventHandlerMap[CallEvent.Hangup];
 
   const onError = ((error: unknown) => {
@@ -276,8 +293,15 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   call.on(CallEvent.Hangup, onHangup);
   call.on(CallEvent.Error, onError);
 
-  // Attach WebRTC diagnostics (getStats polling, ICE/audio monitoring)
+  // Attach WebRTC diagnostics (getStats polling, ICE/audio monitoring).
+  // We may be invoked from BOTH the SDK's PeerConnectionCreated event
+  // AND the polling fallback below — on Bastyon's matrix-js-sdk fork the
+  // event often fires but the polling fires too for the same pc within
+  // ~300ms. Mark the pc on first attach so path 2 is skipped. The
+  // webrtcDiagnostics module itself also guards against double-wrap.
   const onPeerConnectionCreated = (pc: RTCPeerConnection) => {
+    if ((pc as unknown as Record<string, unknown>).__callServiceDiagAttached) return;
+    (pc as unknown as Record<string, unknown>).__callServiceDiagAttached = true;
     webrtcDiagnostics.attach(pc);
   };
   if (typeof (call as any).on === "function" && (CallEvent as any).PeerConnectionCreated) {
@@ -287,7 +311,6 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   const pcCheck = setInterval(() => {
     const pc: RTCPeerConnection | undefined = (call as any).peerConn;
     if (pc && !(pc as any).__callServiceDiagAttached) {
-      (pc as any).__callServiceDiagAttached = true;
       clearInterval(pcCheck);
       onPeerConnectionCreated(pc);
     }
@@ -524,7 +547,38 @@ export function useCallService() {
   }
 
   async function handleIncomingCall(matrixCall: MatrixCall) {
+    console.log(
+      "[call-service] handleIncomingCall: callId=" + matrixCall.callId +
+      ", roomId=" + matrixCall.roomId +
+      ", type=" + matrixCall.type,
+    );
+
+    // Check FIRST whether the user already declined this call in the
+    // native ringer (before JS was running). If so, send the rejection
+    // straight back to Matrix so the caller actually stops ringing.
+    // Must come before the Pre-accepted check so an accidental double-
+    // marker state can't accept a call the user rejected.
+    if (isNative) {
+      const alreadyRejected = await consumePendingRejectCallId(
+        matrixCall.callId,
+        matrixCall.roomId,
+      );
+      if (alreadyRejected) {
+        console.log(
+          "[call-service] Pre-rejected incoming call, calling reject():",
+          matrixCall.callId,
+        );
+        try {
+          matrixCall.reject();
+        } catch (e) {
+          console.error("[call-service] matrixCall.reject() failed:", e);
+        }
+        return;
+      }
+    }
+
     if (callStore.isInCall) {
+      console.log("[call-service] handleIncomingCall: already in call, rejecting");
       matrixCall.reject();
       return;
     }
@@ -555,22 +609,64 @@ export function useCallService() {
       endedAt: null,
     };
 
-    callStore.setActiveCall(callInfo);
     callStore.setMatrixCall(matrixCall);
     callStore.videoMuted = !isVideo;
     wireCallEvents(matrixCall, "incoming");
 
-    // On native: show system call UI via ConnectionService
+    // Fast-path: the user already tapped Answer on the FCM/push ringer
+    // before Matrix even delivered this invite. Don't re-show our own
+    // incoming UI (the native ringer would fire a second time and the
+    // user sees a confusing "another ring" after the app opens). Skip
+    // straight to answering — this is the path that matches what
+    // WhatsApp/Telegram do: one tap on Answer transitions the surface
+    // directly to the in-call screen.
+    const alreadyAccepted = isNative && (await consumePendingAnswerCallId(matrixCall.callId, matrixCall.roomId));
+    if (alreadyAccepted) {
+      console.log("[call-service] Pre-accepted incoming call, skipping ringer:", matrixCall.callId);
+      // Seed activeCall with incoming status so answerCall() sees the
+      // right state and the UI has something to bind to. Do NOT pre-set
+      // status=connecting here: answerCall has a guard that bails out
+      // when it sees a connecting/connected status, assuming another
+      // code path already drove the answer. That guard is correct for
+      // duplicate-answer races but would cause this intentional fast
+      // path to silently skip the actual SDK answer, leaving the
+      // caller stuck on "connecting…" forever.
+      callStore.setActiveCall(callInfo);
+      // Launch the native in-call surface right away. The native
+      // CallActivity covers the Vue UI, so the user doesn't see the
+      // incoming-ring screen flash through before answerCall() sets
+      // status=connecting a moment later.
+      NativeWebRTC.launchCallUI({
+        callerName: peerName,
+        callType: callInfo.type,
+        callId: matrixCall.callId,
+        direction: "incoming",
+      }).catch((e) => console.error("[call-service] launchCallUI failed:", e));
+      // Immediately drive the SDK answer flow. This mirrors what the
+      // normal user-presses-Answer path does, minus the native ringer
+      // detour that we've already satisfied via the push accept.
+      void answerCall();
+      return;
+    }
+
+    // Normal incoming flow — not pre-accepted.
+    //
+    // On native: the FCM push handler already showed IncomingCallActivity
+    // — that's the ONLY ringer the user should see. Do NOT set the Vue
+    // activeCall state to `incoming` here because the Vue UI binds to
+    // activeCall and would render a SECOND, web-based ringer on top of
+    // the native one. We also skip reportIncomingCall, which would just
+    // ask Telecom to open yet another incoming call surface. The user's
+    // accept/decline from the native ringer will route through
+    // CallConnection's callbacks and drive rejectCall() / answerCall()
+    // from the existing bridge listeners.
+    //
+    // On web: render the Vue incoming ringer and play our ringtone.
     if (isNative) {
-      import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
-        nativeCallBridge.reportIncomingCall({
-          callId: matrixCall.callId,
-          callerName: peerName,
-          roomId: matrixCall.roomId,
-          hasVideo: isVideo,
-        });
-      }).catch((e) => console.error('[call-service] native call bridge error:', e));
+      // activeCall stays cleared so no Vue ringer. matrixCall is set
+      // above so rejectCall()/answerCall() can find it.
     } else {
+      callStore.setActiveCall(callInfo);
       playRingtone();
     }
 
@@ -578,7 +674,10 @@ export function useCallService() {
     clearIncomingTimeout();
     incomingTimeoutId = setTimeout(() => {
       incomingTimeoutId = null;
-      if (callStore.activeCall?.status === CallStatus.incoming) {
+      if (
+        callStore.activeCall?.status === CallStatus.incoming ||
+        (isNative && callStore.matrixCall === matrixCall)
+      ) {
         rejectCall();
       }
     }, 30_000);
@@ -586,7 +685,22 @@ export function useCallService() {
 
   async function answerCall() {
     const call = callStore.matrixCall as MatrixCall | null;
-    if (!call) return;
+    if (!call) {
+      console.warn("[call-service] answerCall: no matrixCall, bailing");
+      return;
+    }
+    console.log("[call-service] answerCall: begin, callId=" + call.callId);
+
+    // Guard against duplicate invocations. We intentionally allow
+    // multiple answerCall() call sites (user tap in UI, native accept
+    // event, pre-accepted push path, wait-for-matrix poll) because any
+    // of them can realistically fire first, but all of them pass
+    // through this check so only the first one actually answers.
+    const currentStatus = callStore.activeCall?.status;
+    if (currentStatus === CallStatus.connecting || currentStatus === CallStatus.connected) {
+      console.log("[call-service] answerCall: already " + currentStatus + ", guard bails");
+      return;
+    }
 
     clearIncomingTimeout();
     stopAllSounds();
@@ -594,7 +708,9 @@ export function useCallService() {
     // D-01: JS-side permission check before answering
     if (isNative) {
       try {
+        console.log("[call-service] answerCall: requesting audio permission");
         const { granted } = await nativeCallBridge.requestAudioPermission();
+        console.log("[call-service] answerCall: permission granted=" + granted);
         if (!granted) {
           callStore.updateStatus(CallStatus.failed);
           callStore.scheduleClearCall(1500);
@@ -627,7 +743,9 @@ export function useCallService() {
     }
 
     try {
+      console.log("[call-service] answerCall: calling SDK call.answer(true, " + isVideo + ")");
       await call.answer(true, isVideo);
+      console.log("[call-service] answerCall: SDK call.answer resolved");
     } catch (e) {
       console.error("[call-service] Failed to answer call:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });

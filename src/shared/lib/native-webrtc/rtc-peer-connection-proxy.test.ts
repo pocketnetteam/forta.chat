@@ -67,6 +67,61 @@ describe("NativeRTCPeerConnection proxy", () => {
     uninstallNativeWebRTCProxy();
   });
 
+  describe("STUN fallback injection", () => {
+    it("injects default Google STUN when config provides no iceServers", async () => {
+      const pc = new window.RTCPeerConnection();
+      await tick();
+      await tick();
+
+      const createPc = getBridgeMethod("createPeerConnection");
+      expect(createPc).toHaveBeenCalledOnce();
+      const arg = createPc.mock.calls[0]?.[0] as
+        | { iceServers?: Array<{ urls: string | string[] }> }
+        | undefined;
+      const urls = (arg?.iceServers ?? [])
+        .flatMap((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]));
+      expect(urls.some((u) => /^stun:stun\.l\.google\.com/.test(u))).toBe(true);
+
+      pc.close();
+    });
+
+    it("injects default STUN when iceServers is an empty array", async () => {
+      const pc = new window.RTCPeerConnection({ iceServers: [] });
+      await tick();
+      await tick();
+
+      const createPc = getBridgeMethod("createPeerConnection");
+      const arg = createPc.mock.calls[0]?.[0] as
+        | { iceServers?: Array<{ urls: string | string[] }> }
+        | undefined;
+      expect((arg?.iceServers ?? []).length).toBeGreaterThan(0);
+
+      pc.close();
+    });
+
+    it("preserves caller-provided STUN/TURN and does not inject fallback", async () => {
+      const pc = new window.RTCPeerConnection({
+        iceServers: [
+          { urls: "turn:my-turn.example.com:3478", username: "u", credential: "p" },
+        ],
+      });
+      await tick();
+      await tick();
+
+      const createPc = getBridgeMethod("createPeerConnection");
+      const arg = createPc.mock.calls[0]?.[0] as
+        | { iceServers?: Array<{ urls: string | string[]; username?: string }> }
+        | undefined;
+      const servers = arg?.iceServers ?? [];
+      // Caller server preserved, no google fallback appended.
+      expect(servers).toHaveLength(1);
+      expect(servers[0].urls).toBe("turn:my-turn.example.com:3478");
+      expect(servers[0].username).toBe("u");
+
+      pc.close();
+    });
+  });
+
   describe("restartIce()", () => {
     it("calls NativeWebRTC.restartIce on the native bridge, not a no-op", async () => {
       const pc = new window.RTCPeerConnection();

@@ -39,13 +39,22 @@ class WebRTCDiagnostics {
   private zeroRecvStreak = 0;
   private iceCandidatesLog: string[] = [];
 
-  // Save original handlers to chain them
-  private origIceHandler: ((ev: Event) => void) | null = null;
-  private origSigHandler: ((ev: Event) => void) | null = null;
-  private origConnHandler: ((ev: Event) => void) | null = null;
-  private origIceCandHandler: ((ev: RTCPeerConnectionIceEvent) => void) | null = null;
+  // Marker placed on a PC we've already wrapped, so a second attach on
+  // the same pc is a no-op. Without this, and with our handlers stored
+  // on the singleton via `this.origXxx`, a second attach turned a
+  // harmless "log wrapper" into an infinite chain because wrapper_A's
+  // `this.origSigHandler` got reassigned to wrapper_A itself on the
+  // second attach → stack overflow on the first signalingstatechange,
+  // ~7800 logs/s, blocks JS thread, call drops after 1-2s.
+  private readonly ATTACHED_FLAG = "__webrtcDiagAttached";
 
   attach(pc: RTCPeerConnection): void {
+    if ((pc as unknown as Record<string, unknown>)[this.ATTACHED_FLAG]) {
+      // Already wrapped this PC — a second attach would compound wrappers
+      // and (worse) share state via `this` across them.
+      console.warn("[WebRTC-Diag] attach(): PC already wrapped, skipping duplicate");
+      return;
+    }
     this.detach();
     this.pc = pc;
     this.entries = [];
@@ -55,27 +64,31 @@ class WebRTCDiagnostics {
     this.zeroRecvStreak = 0;
     this.iceCandidatesLog = [];
 
-    // Chain state-change handlers
-    this.origIceHandler = pc.oniceconnectionstatechange as ((ev: Event) => void) | null;
+    // Capture each original handler in a LOCAL CLOSURE variable rather
+    // than `this.origXxx`. Closure-binding the original means wrapper
+    // identity and its tail-call target are fixed at wrap time, so a
+    // later `attach()` on a different PC cannot mutate what an earlier
+    // wrapper forwards to.
+    const origIce = pc.oniceconnectionstatechange;
     pc.oniceconnectionstatechange = (ev: Event) => {
       console.warn(`[WebRTC-Diag] ICE connection: ${pc.iceConnectionState}`);
-      this.origIceHandler?.call(pc, ev);
+      origIce?.call(pc, ev);
     };
 
-    this.origSigHandler = pc.onsignalingstatechange as ((ev: Event) => void) | null;
+    const origSig = pc.onsignalingstatechange;
     pc.onsignalingstatechange = (ev: Event) => {
       console.warn(`[WebRTC-Diag] Signaling: ${pc.signalingState}`);
-      this.origSigHandler?.call(pc, ev);
+      origSig?.call(pc, ev);
     };
 
-    this.origConnHandler = pc.onconnectionstatechange as ((ev: Event) => void) | null;
+    const origConn = pc.onconnectionstatechange;
     pc.onconnectionstatechange = (ev: Event) => {
       console.warn(`[WebRTC-Diag] Connection: ${pc.connectionState}`);
-      this.origConnHandler?.call(pc, ev);
+      origConn?.call(pc, ev);
     };
 
     // Log ICE candidates with type info
-    this.origIceCandHandler = pc.onicecandidate as ((ev: RTCPeerConnectionIceEvent) => void) | null;
+    const origCand = pc.onicecandidate;
     pc.onicecandidate = (ev: RTCPeerConnectionIceEvent) => {
       if (ev.candidate) {
         const c = ev.candidate;
@@ -83,9 +96,10 @@ class WebRTCDiagnostics {
         this.iceCandidatesLog.push(info);
         console.warn(`[WebRTC-Diag] ICE candidate: ${info}`);
       }
-      this.origIceCandHandler?.call(pc, ev);
+      origCand?.call(pc, ev);
     };
 
+    (pc as unknown as Record<string, unknown>)[this.ATTACHED_FLAG] = true;
     this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
     console.warn("[WebRTC-Diag] Attached, polling every 3s");
   }
@@ -95,11 +109,12 @@ class WebRTCDiagnostics {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    // We intentionally do NOT restore pc.onXxx to the pre-attach value:
+    // the wrappers capture the original via closure, so forwarding to
+    // the SDK continues to work even after `detach()` wipes the
+    // singleton's `this.pc`. Leaving them in place also avoids a race
+    // where an in-flight event dispatch hits a torn-down handler graph.
     this.pc = null;
-    this.origIceHandler = null;
-    this.origSigHandler = null;
-    this.origConnHandler = null;
-    this.origIceCandHandler = null;
   }
 
   getReport(): { entries: DiagnosticEntry[]; summary: string } {
