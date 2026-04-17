@@ -26,6 +26,7 @@ import { usePasteDrop } from "@/features/messaging/model/use-paste-drop";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { getRoomTitleForUI, type DisplayResult } from "@/entities/chat";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { MessageSkeleton } from "@/shared/ui/skeleton";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const userStore = useUserStore();
@@ -33,6 +34,18 @@ const channelStore = useChannelStore();
 const emit = defineEmits<{ back: [] }>();
 
 const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
+
+const isRoomLoading = computed(() =>
+  Boolean(
+    chatStore.activeRoomId &&
+    !chatStore.activeRoom &&
+    !chatStore.roomsInitialized,
+  ),
+);
+
+const isEmptyState = computed(() =>
+  !chatStore.activeRoom && !isRoomLoading.value,
+);
 
 // --- Auto-chain playback for voice messages ---
 const playback = useAudioPlayback();
@@ -439,9 +452,19 @@ onUnmounted(() => {
       @back="() => { channelStore.clearActiveChannel(); emit('back'); }"
     />
 
+    <!-- Room loading (activeRoomId set, but room not yet hydrated by Matrix sync) -->
+    <div
+      v-else-if="isRoomLoading"
+      data-testid="chat-loading"
+      class="flex flex-1 flex-col"
+    >
+      <MessageSkeleton />
+    </div>
+
     <!-- No room selected (only when no channel either) -->
     <div
-      v-else-if="!chatStore.activeRoom"
+      v-else-if="isEmptyState"
+      data-testid="chat-select-prompt"
       class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center text-text-on-main-bg-color"
     >
       <!-- Back button (mobile only) -->
