@@ -32,8 +32,9 @@ function ghHeaders(token: string): Record<string, string> {
   };
 }
 
-export async function fetchUserClosedIssues(
+async function fetchIssues(
   address: string,
+  stateFilter: 'open' | 'closed' | 'all',
 ): Promise<TrackedIssue[]> {
   if (!address) return [];
   try {
@@ -43,7 +44,8 @@ export async function fetchUserClosedIssues(
     // marker as a quoted literal in the body. Client-side re-checks the
     // body to guard against false positives (partial token matches, etc.).
     const marker = `reporter:${hash}`;
-    const query = `repo:${REPO} "${marker}" in:body state:closed`;
+    const stateTerm = stateFilter === 'all' ? '' : ` state:${stateFilter}`;
+    const query = `repo:${REPO} "${marker}" in:body${stateTerm}`;
     const url =
       `${API_BASE}/search/issues?q=${encodeURIComponent(query)}` +
       `&per_page=50&sort=updated`;
@@ -62,9 +64,17 @@ export async function fetchUserClosedIssues(
       .map(parseIssue)
       .filter((x): x is TrackedIssue => x !== null);
   } catch (e) {
-    console.warn('[bug-report-tracker] fetchUserClosedIssues failed:', e);
+    console.warn('[bug-report-tracker] fetchIssues failed:', e);
     return [];
   }
+}
+
+export function fetchUserClosedIssues(address: string): Promise<TrackedIssue[]> {
+  return fetchIssues(address, 'closed');
+}
+
+export function fetchAllUserIssues(address: string): Promise<TrackedIssue[]> {
+  return fetchIssues(address, 'all');
 }
 
 function parseIssue(raw: unknown): TrackedIssue | null {
@@ -127,6 +137,49 @@ export async function reopenIssue(
     });
   } catch (e) {
     console.warn('[bug-report-tracker] reopenIssue comment failed:', e);
+  }
+  return patched;
+}
+
+/**
+ * Close an open issue (user decides it is no longer relevant).
+ * Returns true only if the PATCH succeeded. A comment with the user's note
+ * is attached best-effort.
+ */
+export async function closeIssue(
+  issueNumber: number,
+  comment: string,
+): Promise<boolean> {
+  const token = getToken();
+  let patched = false;
+  try {
+    const res = await fetch(
+      `${API_BASE}/repos/${REPO}/issues/${issueNumber}`,
+      {
+        method: 'PATCH',
+        headers: ghHeaders(token),
+        body: JSON.stringify({ state: 'closed', state_reason: 'completed' }),
+      },
+    );
+    patched = res.ok;
+    if (!patched) {
+      console.warn(
+        `[bug-report-tracker] closeIssue PATCH ${issueNumber} returned ${res.status}`,
+      );
+    }
+  } catch (e) {
+    console.warn('[bug-report-tracker] closeIssue PATCH failed:', e);
+  }
+  if (comment.trim()) {
+    try {
+      await fetch(`${API_BASE}/repos/${REPO}/issues/${issueNumber}/comments`, {
+        method: 'POST',
+        headers: ghHeaders(token),
+        body: JSON.stringify({ body: comment }),
+      });
+    } catch (e) {
+      console.warn('[bug-report-tracker] closeIssue comment failed:', e);
+    }
   }
   return patched;
 }

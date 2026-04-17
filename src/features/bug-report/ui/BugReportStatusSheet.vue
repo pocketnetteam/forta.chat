@@ -7,52 +7,75 @@ interface Props {
   show: boolean;
   /** Bastyon address of the signed-in user */
   address: string;
+  /**
+   * "review" — automatic boot check, shows only closed-not-acknowledged issues
+   *            with "Resolved" / "Still broken" actions.
+   * "manage" — manual entry point, shows every issue so the user can close
+   *            open ones or reopen closed ones themselves.
+   */
+  mode?: "review" | "manage";
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), { mode: "review" });
 const emit = defineEmits<{ close: [] }>();
 
-const { pendingIssues, confirmResolved, markUnresolved } = useBugReportStatus();
+const {
+  pendingIssues,
+  allIssues,
+  confirmResolved,
+  markUnresolved,
+  closeUserIssue,
+} = useBugReportStatus();
 const { t } = useI18n();
 
-// Per-issue "reopen" UI state: { [issueNumber]: reason }
+// Per-issue textarea state — reused for both reopen and close notes.
 const reasonDrafts = ref<Record<number, string>>({});
-const reopeningFor = ref<number | null>(null);
+// The current inline form type for a given issue, if any.
+const actionFor = ref<{ number: number; kind: "reopen" | "close" } | null>(null);
 const submitting = ref<number | null>(null);
 const submitErrorFor = ref<number | null>(null);
 
-const issuesToShow = computed(() => pendingIssues.value);
+const issuesToShow = computed(() =>
+  props.mode === "manage" ? allIssues.value : pendingIssues.value,
+);
 
 const handleResolved = (issueNumber: number) => {
   confirmResolved(props.address, issueNumber);
   if (issuesToShow.value.length === 0) emit("close");
 };
 
-const startReopen = (issueNumber: number) => {
-  reopeningFor.value = issueNumber;
-  if (!reasonDrafts.value[issueNumber]) {
+const startAction = (issueNumber: number, kind: "reopen" | "close") => {
+  actionFor.value = { number: issueNumber, kind };
+  if (reasonDrafts.value[issueNumber] === undefined) {
     reasonDrafts.value[issueNumber] = "";
   }
+  submitErrorFor.value = null;
 };
 
-const cancelReopen = () => {
-  reopeningFor.value = null;
+const cancelAction = () => {
+  actionFor.value = null;
 };
 
-const submitReopen = async (issueNumber: number) => {
-  if (submitting.value !== null) return;
+const submitAction = async (issueNumber: number) => {
+  if (submitting.value !== null || !actionFor.value) return;
+  const kind = actionFor.value.kind;
   submitting.value = issueNumber;
   submitErrorFor.value = null;
   try {
     const reason = reasonDrafts.value[issueNumber] ?? "";
-    const ok = await markUnresolved(props.address, issueNumber, reason);
+    const ok =
+      kind === "reopen"
+        ? await markUnresolved(props.address, issueNumber, reason)
+        : await closeUserIssue(issueNumber, reason);
     if (!ok) {
       submitErrorFor.value = issueNumber;
       return;
     }
-    reopeningFor.value = null;
+    actionFor.value = null;
     delete reasonDrafts.value[issueNumber];
-    if (issuesToShow.value.length === 0) emit("close");
+    if (props.mode === "review" && issuesToShow.value.length === 0) {
+      emit("close");
+    }
   } finally {
     submitting.value = null;
   }
@@ -60,21 +83,28 @@ const submitReopen = async (issueNumber: number) => {
 
 const stripPlatformPrefix = (title: string) =>
   title.replace(/^\[(android|ios|electron|web)\]\s*/i, "");
+
+const titleKey = computed(() =>
+  props.mode === "manage" ? "bugReportStatus.manageTitle" : "bugReportStatus.title",
+);
+const subtitleKey = computed(() =>
+  props.mode === "manage" ? "bugReportStatus.manageSubtitle" : "bugReportStatus.subtitle",
+);
 </script>
 
 <template>
   <BottomSheet
     :show="props.show"
-    :aria-label="t('bugReportStatus.title')"
+    :aria-label="t(titleKey)"
     @close="emit('close')"
   >
     <div class="flex items-start justify-between gap-3 pb-4">
       <div class="min-w-0">
         <h2 class="text-lg font-semibold leading-tight text-text-color">
-          {{ t("bugReportStatus.title") }}
+          {{ t(titleKey) }}
         </h2>
         <p class="mt-1 text-xs leading-snug text-text-on-main-bg-color">
-          {{ t("bugReportStatus.subtitle") }}
+          {{ t(subtitleKey) }}
         </p>
       </div>
       <button
@@ -85,18 +115,40 @@ const stripPlatformPrefix = (title: string) =>
       </button>
     </div>
 
+    <p
+      v-if="props.mode === 'manage' && issuesToShow.length === 0"
+      class="py-4 text-center text-sm text-text-on-main-bg-color"
+    >
+      {{ t("bugReportStatus.emptyManage") }}
+    </p>
+
     <ul class="flex flex-col gap-3 pb-2">
       <li
         v-for="issue in issuesToShow"
         :key="issue.number"
         class="rounded-xl border border-neutral-grad-0 bg-background-total-theme p-3"
       >
-        <!-- Header: #number + title + github link -->
+        <!-- Header: #number + state pill + title + github link -->
         <div class="flex items-start gap-2">
           <span
             class="mt-0.5 shrink-0 rounded-md bg-neutral-grad-0 px-1.5 py-0.5 font-mono text-[11px] text-text-on-main-bg-color"
           >
             #{{ issue.number }}
+          </span>
+          <span
+            v-if="props.mode === 'manage'"
+            class="mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+            :class="
+              issue.state === 'open'
+                ? 'bg-color-good/15 text-color-good'
+                : 'bg-neutral-grad-1 text-text-on-main-bg-color'
+            "
+          >
+            {{
+              issue.state === 'open'
+                ? t('bugReportStatus.stateOpen')
+                : t('bugReportStatus.stateClosed')
+            }}
           </span>
           <p class="min-w-0 flex-1 break-words text-sm leading-snug text-text-color">
             {{ stripPlatformPrefix(issue.title) }}
@@ -123,53 +175,85 @@ const stripPlatformPrefix = (title: string) =>
           </a>
         </div>
 
-        <!-- Resolved / not resolved buttons OR reopen form -->
-        <div v-if="reopeningFor !== issue.number" class="mt-3 flex gap-2">
-          <button
-            class="flex-1 rounded-lg bg-color-good/15 px-3 py-2 text-sm font-medium text-color-good transition-opacity hover:opacity-80"
-            @click="handleResolved(issue.number)"
-          >
-            {{ t("bugReportStatus.resolvedBtn") }}
-          </button>
-          <button
-            class="flex-1 rounded-lg bg-neutral-grad-0 px-3 py-2 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-1"
-            @click="startReopen(issue.number)"
-          >
-            {{ t("bugReportStatus.notResolvedBtn") }}
-          </button>
+        <!-- Actions: review mode (closed issues) = Resolved / Still broken. -->
+        <!--          manage mode: one toggle button depending on current state. -->
+        <div
+          v-if="actionFor?.number !== issue.number"
+          class="mt-3 flex gap-2"
+        >
+          <template v-if="props.mode === 'review'">
+            <button
+              class="flex-1 rounded-lg bg-color-good/15 px-3 py-2 text-sm font-medium text-color-good transition-opacity hover:opacity-80"
+              @click="handleResolved(issue.number)"
+            >
+              {{ t("bugReportStatus.resolvedBtn") }}
+            </button>
+            <button
+              class="flex-1 rounded-lg bg-neutral-grad-0 px-3 py-2 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-1"
+              @click="startAction(issue.number, 'reopen')"
+            >
+              {{ t("bugReportStatus.notResolvedBtn") }}
+            </button>
+          </template>
+          <template v-else>
+            <button
+              v-if="issue.state === 'closed'"
+              class="flex-1 rounded-lg bg-color-bg-ac px-3 py-2 text-sm font-medium text-text-on-bg-ac-color transition-opacity hover:opacity-80"
+              @click="startAction(issue.number, 'reopen')"
+            >
+              {{ t("bugReportStatus.reopenBtn") }}
+            </button>
+            <button
+              v-else
+              class="flex-1 rounded-lg bg-neutral-grad-0 px-3 py-2 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-1"
+              @click="startAction(issue.number, 'close')"
+            >
+              {{ t("bugReportStatus.closeBtn") }}
+            </button>
+          </template>
         </div>
 
         <div v-else class="mt-3 flex flex-col gap-2">
           <label
-            :for="`reopen-reason-${issue.number}`"
+            :for="`reason-${issue.number}`"
             class="text-xs text-text-on-main-bg-color"
           >
-            {{ t("bugReportStatus.notResolvedReasonLabel") }}
+            {{
+              actionFor?.kind === "close"
+                ? t("bugReportStatus.closeReasonLabel")
+                : t("bugReportStatus.notResolvedReasonLabel")
+            }}
           </label>
           <textarea
-            :id="`reopen-reason-${issue.number}`"
+            :id="`reason-${issue.number}`"
             v-model="reasonDrafts[issue.number]"
             rows="2"
-            :placeholder="t('bugReportStatus.notResolvedReasonPlaceholder')"
+            :placeholder="
+              actionFor?.kind === 'close'
+                ? t('bugReportStatus.closeReasonPlaceholder')
+                : t('bugReportStatus.notResolvedReasonPlaceholder')
+            "
             class="w-full resize-none rounded-lg border border-neutral-grad-0 bg-background-total-theme p-2 text-sm text-text-color outline-none transition-colors focus:border-color-bg-ac"
           />
           <div class="flex gap-2">
             <button
               class="flex-1 rounded-lg px-3 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
               :disabled="submitting === issue.number"
-              @click="cancelReopen"
+              @click="cancelAction"
             >
               {{ t("common.cancel") }}
             </button>
             <button
               class="flex-1 rounded-lg bg-color-bg-ac px-3 py-2 text-sm font-medium text-text-on-bg-ac-color transition-opacity hover:opacity-80 disabled:opacity-40"
               :disabled="submitting === issue.number"
-              @click="submitReopen(issue.number)"
+              @click="submitAction(issue.number)"
             >
               {{
                 submitting === issue.number
                   ? t("bugReportStatus.submitting")
-                  : t("bugReportStatus.notResolvedSubmit")
+                  : actionFor?.kind === "close"
+                    ? t("bugReportStatus.closeSubmit")
+                    : t("bugReportStatus.notResolvedSubmit")
               }}
             </button>
           </div>

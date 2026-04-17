@@ -14,7 +14,9 @@ import { ref, readonly, computed } from 'vue';
 import { APP_NAME } from '@/shared/config';
 import {
   fetchUserClosedIssues,
+  fetchAllUserIssues,
   reopenIssue,
+  closeIssue,
   getAcknowledgedNumbers,
   acknowledgeIssue,
   type TrackedIssue,
@@ -55,6 +57,9 @@ export function resetBootCheckMeta(): void {
 
 // Module-level singleton state so the sheet and boot trigger share data.
 const pendingIssues = ref<TrackedIssue[]>([]);
+// Full list used by the manual "My reports" sheet — includes both open and
+// closed issues so the user can toggle state from within the app.
+const allIssues = ref<TrackedIssue[]>([]);
 const loading = ref(false);
 const sheetOpen = ref(false);
 
@@ -73,12 +78,25 @@ export function useBugReportStatus() {
     }
   }
 
+  /** Load every issue reported by this user (open + closed) — used by the
+   *  manual "My reports" entry point where the user wants to manage state. */
+  async function loadAllIssues(address: string): Promise<void> {
+    if (!address || loading.value) return;
+    loading.value = true;
+    try {
+      allIssues.value = await fetchAllUserIssues(address);
+    } finally {
+      loading.value = false;
+    }
+  }
+
   function confirmResolved(address: string, issueNumber: number): void {
     if (!address) return;
     acknowledgeIssue(address, issueNumber);
     pendingIssues.value = pendingIssues.value.filter(
       (i) => i.number !== issueNumber,
     );
+    allIssues.value = allIssues.value.filter((i) => i.number !== issueNumber);
   }
 
   async function markUnresolved(
@@ -94,10 +112,33 @@ export function useBugReportStatus() {
     if (!ok) return false;
     // Do NOT acknowledgeIssue here: the user said the fix did not work. If the
     // maintainer closes it again later with a new attempt, we want to ask the
-    // user again. We just remove it from the current list so the sheet can
-    // auto-close when empty.
+    // user again.
     pendingIssues.value = pendingIssues.value.filter(
       (i) => i.number !== issueNumber,
+    );
+    // In the all-issues list, reflect the new open state instead of dropping it.
+    allIssues.value = allIssues.value.map((i) =>
+      i.number === issueNumber
+        ? { ...i, state: 'open', closedAt: null, stateReason: 'reopened' }
+        : i,
+    );
+    return true;
+  }
+
+  /** User decides an open issue is no longer relevant — close it on GitHub. */
+  async function closeUserIssue(
+    issueNumber: number,
+    reason: string,
+  ): Promise<boolean> {
+    const comment = reason.trim()
+      ? `Reporter closed this via the app with a note:\n\n> ${reason.trim().slice(0, 1000)}`
+      : '';
+    const ok = await closeIssue(issueNumber, comment);
+    if (!ok) return false;
+    allIssues.value = allIssues.value.map((i) =>
+      i.number === issueNumber
+        ? { ...i, state: 'closed', closedAt: new Date().toISOString(), stateReason: 'completed' }
+        : i,
     );
     return true;
   }
@@ -117,18 +158,22 @@ export function useBugReportStatus() {
    */
   function resetState(): void {
     pendingIssues.value = [];
+    allIssues.value = [];
     loading.value = false;
     sheetOpen.value = false;
   }
 
   return {
     pendingIssues: readonly(pendingIssues),
+    allIssues: readonly(allIssues),
     loading: readonly(loading),
     sheetOpen: readonly(sheetOpen),
     hasPending,
     checkStatuses,
+    loadAllIssues,
     confirmResolved,
     markUnresolved,
+    closeUserIssue,
     openSheet,
     closeSheet,
     resetState,

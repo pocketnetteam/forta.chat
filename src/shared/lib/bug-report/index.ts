@@ -8,7 +8,9 @@ export {
 } from './reporter-hash';
 export {
   fetchUserClosedIssues,
+  fetchAllUserIssues,
   reopenIssue,
+  closeIssue,
   getAcknowledgedNumbers,
   hasAcknowledged,
   acknowledgeIssue,

@@ -226,6 +226,7 @@ const {
 let pendingBugCheckVersion: string | null = null;
 
 async function runBugStatusCheck() {
+  console.log("[BugStatus] runBugStatusCheck start, address:", authStore.address);
   if (!authStore.address) return;
   let version = "web";
   if (isNative) {
@@ -243,8 +244,11 @@ async function runBugStatusCheck() {
       version = "electron";
     }
   }
-  if (!shouldCheckOnBoot(version)) return;
+  const willCheck = shouldCheckOnBoot(version);
+  console.log("[BugStatus] version:", version, "shouldCheck:", willCheck);
+  if (!willCheck) return;
   await checkBugStatuses(authStore.address);
+  console.log("[BugStatus] pending issues:", hasBugPending.value);
   if (hasBugPending.value) {
     pendingBugCheckVersion = version;
     openBugStatusSheet();
@@ -261,11 +265,17 @@ function handleBugStatusSheetClose() {
   }
 }
 
-// Trigger once Matrix is ready (means user is fully authenticated)
+// Trigger once we have an authenticated address. matrixReady is not required
+// — the bug-report tracker only needs the Bastyon address to derive the
+// reporter hash, so waiting for Matrix would delay (or block) the check on
+// cold start when Matrix is slow.
+let bugStatusCheckTriggered = false;
 watch(
-  () => authStore.matrixReady && !!authStore.address,
-  (ready) => {
-    if (ready) {
+  () => authStore.address,
+  (addr) => {
+    console.log("[BugStatus] address watcher fired, addr:", addr, "triggered?", bugStatusCheckTriggered);
+    if (addr && !bugStatusCheckTriggered) {
+      bugStatusCheckTriggered = true;
       runBugStatusCheck().catch((e) =>
         console.warn("[App] bug status check failed:", e),
       );
