@@ -26,7 +26,7 @@ import { usePasteDrop } from "@/features/messaging/model/use-paste-drop";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { getRoomTitleForUI, type DisplayResult } from "@/entities/chat";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
-import Spinner from "@/shared/ui/spinner/Spinner.vue";
+import { MessageSkeleton } from "@/shared/ui/skeleton";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const userStore = useUserStore();
@@ -456,12 +456,9 @@ onUnmounted(() => {
     <div
       v-else-if="isRoomLoading"
       data-testid="chat-loading"
-      class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center text-text-on-main-bg-color"
+      class="flex flex-1 flex-col"
     >
-      <Spinner size="lg" />
-      <p class="text-base font-medium text-text-color/60">
-        {{ t("chat.loadingRoom") }}
-      </p>
+      <MessageSkeleton />
     </div>
 
     <!-- No room selected (only when no channel either) -->

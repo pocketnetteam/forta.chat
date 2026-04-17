@@ -181,7 +181,6 @@ export const en = {
 
   // ── Chat window ──
   "chat.selectToStart": "Select a chat to start messaging",
-  "chat.loadingRoom": "Loading chat…",
   "chat.offline": "You are offline. Messages will be sent when connection is restored.",
   "chat.slowConnection": "Slow connection detected",
   "chat.invitation": "Chat invitation",

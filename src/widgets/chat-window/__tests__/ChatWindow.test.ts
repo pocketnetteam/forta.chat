@@ -188,7 +188,7 @@ const mountOpts = {
       Avatar: { name: "Avatar", template: "<div />" },
       DonateModal: { name: "DonateModal", template: "<div />" },
       DropOverlay: { name: "DropOverlay", template: "<div />" },
-      Spinner: { name: "Spinner", template: '<div data-testid="spinner" />' },
+      MessageSkeleton: { name: "MessageSkeleton", template: '<div data-testid="message-skeleton" />' },
       Transition: TransitionStub,
       transition: TransitionStub,
     },
