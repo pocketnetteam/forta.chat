@@ -3,9 +3,11 @@ import { collectEnvironment, sendBugReport } from "@/shared/lib/bug-report";
 import type { AppEnvironment } from "@/shared/lib/bug-report";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { isNative } from "@/shared/lib/platform";
+import { useAuthStore } from "@/entities/auth";
 import { useBugReport } from "../model/use-bug-report";
 
 const { isOpen, prefillContext, prefillError, close } = useBugReport();
+const authStore = useAuthStore();
 const { t } = useI18n();
 
 const description = ref("");
@@ -100,6 +102,7 @@ const handleSend = async () => {
       description: description.value.trim(),
       environment: environment.value,
       screenshots: screenshots.value.map((s) => s.base64),
+      reporterAddress: authStore.address ?? undefined,
     });
     sent.value = true;
     if (result.screenshotsFailed > 0) {

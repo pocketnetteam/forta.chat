@@ -21,6 +21,12 @@ import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/com
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
 import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
 import { AppDownloadBanner } from "@/features/app-download-banner";
+import {
+  BugReportStatusSheet,
+  useBugReportStatus,
+  shouldCheckOnBoot,
+  markBootCheckCompleted,
+} from "@/features/bug-report";
 import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
@@ -205,6 +211,52 @@ watch(
 const isMobile = ref(window.innerWidth < 768);
 const onResize = () => { isMobile.value = window.innerWidth < 768; };
 
+// ─── Bug-report status tracker (trigger on app version change or >3 days idle) ───
+const {
+  sheetOpen: bugStatusSheetOpen,
+  checkStatuses: checkBugStatuses,
+  hasPending: hasBugPending,
+  openSheet: openBugStatusSheet,
+  closeSheet: closeBugStatusSheet,
+} = useBugReportStatus();
+
+async function runBugStatusCheck() {
+  if (!authStore.address) return;
+  let version = "web";
+  if (isNative) {
+    try {
+      const { App } = await import("@capacitor/app");
+      const info = await App.getInfo();
+      version = info.version ?? "native";
+    } catch {
+      version = "native";
+    }
+  } else if ((window as any).electronAPI?.getVersion) {
+    try {
+      version = await (window as any).electronAPI.getVersion();
+    } catch {
+      version = "electron";
+    }
+  }
+  if (!shouldCheckOnBoot(version)) return;
+  await checkBugStatuses(authStore.address);
+  markBootCheckCompleted(version);
+  if (hasBugPending.value) openBugStatusSheet();
+}
+
+// Trigger once Matrix is ready (means user is fully authenticated)
+watch(
+  () => authStore.matrixReady && !!authStore.address,
+  (ready) => {
+    if (ready) {
+      runBugStatusCheck().catch((e) =>
+        console.warn("[App] bug status check failed:", e),
+      );
+    }
+  },
+  { immediate: true },
+);
+
 const showQuickSearch = ref(false);
 
 // Android back: close quick search
@@ -296,6 +348,12 @@ onUnmounted(() => {
       v-if="showQuickSearch"
       @close="showQuickSearch = false"
       @select-room="showQuickSearch = false"
+    />
+    <BugReportStatusSheet
+      v-if="authStore.address"
+      :show="bugStatusSheetOpen"
+      :address="authStore.address"
+      @close="closeBugStatusSheet"
     />
   </div>
 </template>
