@@ -6,7 +6,7 @@
  * re-open the issue with a short note ("Всё ещё баг").
  *
  * Trigger policy (see shouldCheckOnBoot):
- *   - first app run ever, OR
+ *   - first app run ever (kept enabled for easier manual testing), OR
  *   - app version changed since last check, OR
  *   - more than 3 days since the last check.
  */
