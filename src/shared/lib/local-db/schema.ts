@@ -550,8 +550,10 @@ export class ChatDatabase extends Dexie {
       attachments: "++id, messageLocalId, status",
       decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
       listenedMessages: "messageId",
-      // PK: query (lower-cased). Index: expiresAt (GC scan).
-      searchCache: "&query, expiresAt",
+      // PK: query (lower-cased) — first field in the schema string is the
+      // primary key by default; no `&` prefix needed (that marks a unique
+      // index on a non-PK field). Index: expiresAt (GC scan).
+      searchCache: "query, expiresAt",
     });
   }
 }

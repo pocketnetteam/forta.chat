@@ -4,7 +4,7 @@ import { useUserStore } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { useChatStore } from "@/entities/chat";
 import { getMatrixClientService } from "@/entities/matrix";
-import { getmatrixid, hexEncode, tetatetid } from "@/shared/lib/matrix/functions";
+import { getmatrixid, hexDecode, hexEncode, tetatetid } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
 import { isChatDbReady, getChatDb, type CachedSearchUser } from "@/shared/lib/local-db";
 import type { TranslationKey } from "@/shared/lib/i18n";
@@ -17,28 +17,35 @@ function getAppInit() {
   return _appInit;
 }
 
+/** Bastyon addresses are ~34-char alphanumeric strings (base58-flavoured)
+ *  typically starting with "P". We allow `[A-Za-z0-9]{25,40}` as a defensive
+ *  filter — wide enough for version drift, strict enough to reject multibyte
+ *  Unicode, control bytes, or anything else a malicious homeserver might
+ *  inject via the user_directory response (results end up stored in Dexie
+ *  and rendered in Vue). */
+const BASTYON_ADDRESS_RE = /^[A-Za-z0-9]{25,40}$/;
+
 /** Turn a Matrix user directory result into a local User shape.
  *  Matrix user_id format: @<hex-address>:<server>. We decode the hex back
- *  to a Bastyon address. The SDK's `display_name` falls back to the user_id
- *  if the user has not set a display name. */
+ *  to a Bastyon address using the shared `hexDecode` (which mirrors
+ *  `hexEncode`'s 0x350 offset), then validate against the Bastyon shape. */
 function normalizeMatrixDirectoryUser(entry: { user_id: string; display_name?: string; avatar_url?: string }): { address: string; name: string; image: string } | null {
   // Extract hex localpart from @<localpart>:<server>
   const m = /^@([^:]+):/.exec(entry.user_id);
   if (!m) return null;
   const hex = m[1].toLowerCase();
-  // Hex → address (each pair of hex chars = one byte of ASCII). We only accept
-  // addresses that look like valid Bastyon addresses after decoding.
-  let address = "";
+  // Cap raw hex length: a valid Bastyon-encoded localpart is at most ~80 hex
+  // chars (40 bytes). Refuse anything larger to avoid unbounded allocation.
+  if (!hex || hex.length > 80 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return null;
+
+  let address: string;
   try {
-    for (let i = 0; i < hex.length; i += 2) {
-      const code = parseInt(hex.slice(i, i + 2), 16);
-      if (Number.isNaN(code)) return null;
-      address += String.fromCharCode(code);
-    }
+    address = hexDecode(hex);
   } catch {
     return null;
   }
-  if (!address) return null;
+  if (!BASTYON_ADDRESS_RE.test(address)) return null;
+
   return {
     address,
     name: entry.display_name && entry.display_name !== entry.user_id ? entry.display_name : address,
@@ -73,6 +80,10 @@ export function useContacts() {
   const searchError = ref<TranslationKey | null>(null);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Monotonic counter — every searchUsers() call grabs the next value and
+   *  compares it to this ref before writing results. Stale (older) calls are
+   *  discarded so fast typing can't race an older result over a newer one. */
+  let searchSeq = 0;
 
   const toUser = (u: { address: string; name: string; image?: string }): User => ({
     address: u.address,
@@ -85,15 +96,22 @@ export function useContacts() {
 
   const searchUsers = async (query: string) => {
     const trimmed = query.trim();
+    const mySeq = ++searchSeq;
+    /** Only the latest call is allowed to mutate shared refs. */
+    const isLatest = () => mySeq === searchSeq;
+
     if (!trimmed) {
+      if (!isLatest()) return;
       searchResults.value = [];
       searchError.value = null;
       return;
     }
 
     const myAddress = authStore.address ?? "";
-    searchError.value = null;
-    isSearching.value = true;
+    if (isLatest()) {
+      searchError.value = null;
+      isSearching.value = true;
+    }
 
     try {
       // 1) Dexie TTL cache — instant re-display for a recently-seen query.
@@ -108,7 +126,7 @@ export function useContacts() {
       }
       // Show cached results immediately so the user sees *something* while the
       // background tiers finish. These will be merged with tier 2/3/4 below.
-      if (cached.length > 0) {
+      if (cached.length > 0 && isLatest()) {
         searchResults.value = cached
           .filter(u => u.address !== myAddress)
           .map(toUser);
@@ -136,6 +154,10 @@ export function useContacts() {
           console.warn("[useContacts] Matrix user_directory fallback failed:", mErr);
         }
       }
+
+      // If a newer searchUsers() has started while we were awaiting RPC/Matrix,
+      // bail out without touching shared refs — its results will replace ours.
+      if (!isLatest()) return;
 
       // 4) Local user store — previously-seen users (case-insensitive match on
       //    name or address). Matches the original fallback behaviour.
@@ -179,19 +201,21 @@ export function useContacts() {
       }
     } catch (e) {
       console.error("[useContacts] searchUsers failed:", e);
+      if (!isLatest()) return;
       // Last-resort: serve cached user-store matches and surface a service-unavailable key.
       const q = trimmed.toLowerCase();
-      searchResults.value = Object.values(userStore.users)
+      const localMatches = Object.values(userStore.users)
         .filter(user =>
           user.address !== myAddress &&
           ((user.name ?? "").toLowerCase().includes(q) ||
            user.address.toLowerCase().includes(q))
         );
-      searchError.value = searchResults.value.length === 0
-        ? "search.serviceUnavailable"
-        : null;
+      searchResults.value = localMatches;
+      // Always surface the remote failure as a service-unavailable signal —
+      // local matches alone don't indicate the remote search succeeded.
+      searchError.value = "search.serviceUnavailable";
     } finally {
-      isSearching.value = false;
+      if (isLatest()) isSearching.value = false;
     }
   };
 

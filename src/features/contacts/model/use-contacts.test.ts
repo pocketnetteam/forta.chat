@@ -240,6 +240,70 @@ describe("useContacts", () => {
       }
     });
 
+    // ─── Security: malformed user_directory input ────────────
+
+    it("rejects Matrix results whose decoded address is not Bastyon-shaped", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("CORS"));
+      // Hex-encoded pure garbage 200 bytes of 'A' — decoded length exceeds
+      // the 25-40 char window, so normalizeMatrixDirectoryUser must reject it.
+      const oversizedHex = "41".repeat(200);
+      mockSearchUserDirectory.mockResolvedValue({
+        limited: false,
+        results: [{ user_id: `@${oversizedHex}:matrix.pocketnet.app`, display_name: "Attacker", avatar_url: "" }],
+      });
+
+      await contacts.searchUsers("attack");
+
+      expect(contacts.searchResults.value.length).toBe(0);
+      expect(contacts.searchError.value).toBe("search.userNotFound");
+    });
+
+    it("rejects Matrix results with non-alphanumeric decoded bytes", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("CORS"));
+      // 0x00 and 0x01 (NUL/SOH) encode back to control chars — must be rejected.
+      const controlHex = "00".repeat(34);
+      mockSearchUserDirectory.mockResolvedValue({
+        limited: false,
+        results: [{ user_id: `@${controlHex}:matrix.pocketnet.app`, display_name: "Control", avatar_url: "" }],
+      });
+
+      await contacts.searchUsers("ctrl");
+
+      expect(contacts.searchResults.value.length).toBe(0);
+    });
+
+    // ─── Race condition: fast typing must not show stale results ─
+
+    it("discards a slow earlier call when a newer call has started", async () => {
+      // Stage: "slow" returns old results after a delay; "fast" returns fresh
+      // results immediately. Caller awaits the earlier promise last. The fast
+      // call's results must stay; the slow call must NOT overwrite them.
+      let resolveSlow: (v: Array<{ address: string; name: string; image: string }>) => void = () => {};
+      const slowPromise = new Promise<Array<{ address: string; name: string; image: string }>>(
+        resolve => { resolveSlow = resolve; },
+      );
+
+      mockRpcSearchUsers.mockImplementationOnce(() => slowPromise);
+      mockRpcSearchUsers.mockImplementationOnce(async () => [
+        { address: "PFreshFresh1111111111111111111111AB", name: "Fresh", image: "" },
+      ]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      const slowCall = contacts.searchUsers("query-old");
+      // Start a second, "fresh" call before the first resolves
+      await contacts.searchUsers("query-new");
+
+      // Now resolve the slow call's RPC with stale results
+      resolveSlow([
+        { address: "PStaleStale11111111111111111111AB", name: "Stale", image: "" },
+      ]);
+      await slowCall;
+
+      // Only the fresh results should be visible — stale must be discarded.
+      expect(contacts.searchResults.value.find(u => u.name === "Fresh")).toBeTruthy();
+      expect(contacts.searchResults.value.find(u => u.name === "Stale")).toBeUndefined();
+    });
+
     it("uses Dexie TTL cache on cache hit", async () => {
       mockCacheGet.mockResolvedValue([
         { address: "PCached11111111111111111111111111AB", name: "Cached", image: "" },
