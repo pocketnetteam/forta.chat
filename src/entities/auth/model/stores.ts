@@ -35,7 +35,14 @@ import type { AuthData, UserData } from "./types";
 import { SessionManager, type StoredSession } from "./session-manager";
 import { BackgroundSyncManager } from "./background-sync";
 
-import { getAddressFromPubKey } from "../lib";
+import {
+  getAddressFromPubKey,
+  PollTimer,
+  ProxyRotator,
+  saveMnemonic,
+  loadMnemonic,
+  clearMnemonic,
+} from "../lib";
 import { createKeyPair } from "./key-pair";
 
 const NAMESPACE = "auth";
@@ -166,6 +173,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     useLocalStorage<boolean>("registration_pending", false);
   const registrationPending = ref(LSRegPending);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Tracks active (non-backgrounded) time for the registration poll so
+  // Android/Capacitor WebView throttling does not "charge" background time
+  // against the 30-min timeout budget. Reset on retryRegistration().
+  let pollTimer: PollTimer | null = null;
+  // Public attempt counter for RegistrationStepper UI so users see real
+  // progress instead of an opaque animation.
+  const registrationPollAttempt = ref(0);
+  let registrationVisibilityHandler: (() => void) | null = null;
+  let registrationAppStateHandle: { remove: () => Promise<void> } | null = null;
 
   // Pending registration profile: stored until PKOIN arrives and UserInfo is broadcast
   type PendingRegProfile = { name: string; language: string; about: string; image?: string; encPublicKeys: string[] };
@@ -868,6 +885,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setRegistrationPending(false);
     setPendingRegProfile(null);
     stopRegistrationPoll();
+    clearMnemonic();
+
+    // Clear the global POCKETNETINSTANCE.user.address.value to prevent
+    // credential leakage into the next session (two users registering
+    // simultaneously could otherwise end up logged in as each other).
+    PocketnetInstanceConfigurator.clearGlobalUser();
 
     // ── 8. Stop all background pollers ──
     backgroundSyncManager.stopAll();
@@ -882,7 +905,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // ── Registration methods ──
 
   const generateRegistrationKeys = () => {
-    const mnemonic = bitcoin.bip39.generateMnemonic();
+    // Recover a mnemonic persisted from a prior SaveMnemonicStep mount —
+    // protects the user's seed phrase against component unmounts (route
+    // change, Android backgrounding, HMR) before registration completes.
+    const stored = loadMnemonic();
+    const mnemonic = stored && bitcoin.bip39.validateMnemonic(stored)
+      ? stored
+      : bitcoin.bip39.generateMnemonic();
+
     const keyPair = createKeyPair(mnemonic);
     const addr = getAddressFromPubKey(keyPair.publicKey);
     if (!addr) throw new Error("Failed to derive address from generated keys");
@@ -890,6 +920,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     regMnemonic.value = mnemonic;
     regAddress.value = addr;
     regPrivateKeyHex.value = convertToHexString(keyPair.privateKey);
+    saveMnemonic(mnemonic);
 
     // Set user context so fetchauth can sign requests (required for captcha)
     PocketnetInstanceConfigurator.setUserAddress(addr);
@@ -897,8 +928,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const findRegistrationProxy = async () => {
-    const proxy = await appInitializer.getRegistrationProxy();
-    if (!proxy) throw new Error("No registration proxy available");
+    // Retry proxy lookup via ProxyRotator when a single getRegistrationProxy
+    // call returns null or throws — this happened on dead pocketnet nodes and
+    // used to surface as "registration hangs 12 hours". Up to 3 attempts.
+    const rotator = new ProxyRotator([0, 1, 2]);
+    const proxy = await rotator.call(async () => {
+      const p = await appInitializer.getRegistrationProxy();
+      if (!p) throw new Error("No registration proxy available");
+      return p;
+    });
     regProxyId.value = proxy.id;
     return proxy;
   };
@@ -992,15 +1030,46 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Poll blockchain with exponential backoff. Two phases:
    *  Phase 1: Wait for PKOIN (unspents) to arrive, then broadcast UserInfo.
    *  Phase 2: Wait for UserInfo to be confirmed on-chain (getuserstate + Actions status).
-   *  Safety bounds: 30-min total timeout, 15s per-RPC timeout, 5 consecutive errors → stop. */
+   *  Safety bounds: 30-min ACTIVE-time timeout, 15s per-RPC timeout, 5 consecutive errors → stop.
+   *
+   *  The active-time timeout (via PollTimer) excludes backgrounded intervals —
+   *  prevents the "swiped phone for 12h → timeout fires instantly on resume"
+   *  bug on Android where setTimeout is throttled but Date.now() still advances. */
   const startRegistrationPoll = () => {
     if (registrationPollTimer) clearTimeout(registrationPollTimer);
     let pollInterval = 3000;
     const MAX_POLL_INTERVAL = 60000;
     let attempt = 0;
-    const pollStartedAt = Date.now();
+    pollTimer = new PollTimer();
+    registrationPollAttempt.value = 0;
     let consecutiveErrors = 0;
     console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
+
+    // Wire background pause so the 30-min timeout budget only counts active
+    // foreground time. Covers both native (Capacitor App) and web
+    // (document.visibilitychange) paths.
+    registrationVisibilityHandler = () => {
+      if (!pollTimer) return;
+      if (typeof document !== "undefined" && document.hidden) {
+        pollTimer.pause();
+      } else {
+        pollTimer.resume();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", registrationVisibilityHandler);
+    }
+    if (isNative) {
+      import("@capacitor/app")
+        .then(({ App }) => App.addListener("appStateChange", ({ isActive }) => {
+          if (!pollTimer) return;
+          if (!isActive) pollTimer.pause();
+          else pollTimer.resume();
+        }))
+        .then((handle) => { registrationAppStateHandle = handle; })
+        .catch(() => { /* non-fatal */ });
+    }
+
     // Set initial phase based on current state (handles reload resume)
     if (pendingRegProfile.value) {
       if (registrationPhase.value !== 'init') setRegistrationPhase('init');
@@ -1014,9 +1083,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         return;
       }
 
-      // Total timeout check
-      if (Date.now() - pollStartedAt > REGISTRATION_POLL_TIMEOUT) {
-        console.error("[auth] Registration poll timed out after", REGISTRATION_POLL_TIMEOUT / 1000, "s");
+      // Active-time timeout check (excludes backgrounded periods via PollTimer)
+      if (pollTimer && pollTimer.isExpired(REGISTRATION_POLL_TIMEOUT)) {
+        console.error("[auth] Registration poll timed out after", REGISTRATION_POLL_TIMEOUT / 1000, "s of active time");
         registrationErrorMessage.value = 'timeout';
         setRegistrationPhase('error');
         stopRegistrationPoll();
@@ -1024,6 +1093,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
 
       attempt++;
+      registrationPollAttempt.value = attempt;
       try {
         // Phase 1: Broadcast UserInfo once PKOIN arrives
         if (pendingRegProfile.value) {
@@ -1142,6 +1212,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       setRegistrationPending(false);
       setRegistrationPhase('init'); // Reset phase for clean localStorage state
       stopRegistrationPoll();
+      // Registration is confirmed on-chain — safe to drop the seed from
+      // sessionStorage (the user already has it in the regular session/auth).
+      clearMnemonic();
 
       if (!matrixReady.value) {
         PocketnetInstanceConfigurator.setUserAddress(address.value!);
@@ -1163,13 +1236,28 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
+    pollTimer = null;
+    registrationPollAttempt.value = 0;
+    // Tear down background-pause listeners
+    if (typeof document !== "undefined" && registrationVisibilityHandler) {
+      document.removeEventListener("visibilitychange", registrationVisibilityHandler);
+      registrationVisibilityHandler = null;
+    }
+    if (registrationAppStateHandle) {
+      registrationAppStateHandle.remove().catch(() => { /* ignore */ });
+      registrationAppStateHandle = null;
+    }
   };
 
   /** Retry registration after a timeout or network error.
-   *  Clears error state and restarts the blockchain poll. */
+   *  Clears error state, resets the active-time timeout baseline (so the
+   *  previous 30-min budget doesn't carry over), and restarts the blockchain
+   *  poll. Without resetStart() a retry would fire the timeout almost
+   *  instantly on a user who hit timeout once. */
   const retryRegistration = () => {
     registrationErrorMessage.value = null;
     registrationUsernameError.value = false;
+    if (pollTimer) pollTimer.resetStart();
     setRegistrationPhase('init');
     setRegistrationPending(true);
     startRegistrationPoll();
@@ -1425,11 +1513,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     regCaptchaDone,
     regMnemonic,
     regProxyId,
+    /** Restore an interrupted mnemonic (e.g. from sessionStorage after unmount).
+     *  Updates both the Vue ref and sessionStorage so the seed survives the
+     *  next unmount too. Caller is responsible for sourcing a trusted value. */
+    setRegMnemonic: (m: string) => { regMnemonic.value = m; saveMnemonic(m); },
     checkUsername,
     register,
     registrationErrorMessage,
     registrationPending,
     registrationPhase,
+    registrationPollAttempt,
     registrationUsernameError,
     resumeRegistrationPoll,
     retryRegistration,

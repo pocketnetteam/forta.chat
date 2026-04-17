@@ -222,6 +222,7 @@ export const ru: Record<TranslationKey, string> = {
   "profile.saving": "Сохранение...",
   "profile.avatarUploading": "Загрузка...",
   "profile.avatarError": "Не удалось загрузить аватар",
+  "profile.saveFailed": "Не удалось сохранить профиль. Проверьте подключение и попробуйте снова.",
 
   // ── Message input ──
   "message.editing": "Редактирование",
@@ -716,6 +717,8 @@ export const ru: Record<TranslationKey, string> = {
   "register.networkErrorTitle": "Проблема с подключением",
   "register.networkErrorHint": "Не удалось связаться с сетью. Проверьте подключение к интернету и попробуйте снова.",
   "register.retry": "Попробовать снова",
+  "register.pollAttempt": "Попытка {n}",
+  "register.accountAddress": "Аккаунт",
   "invite.shareText": "Присоединяйтесь ко мне в Forta Chat!",
 
   // ── App download banner ──
