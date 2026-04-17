@@ -296,8 +296,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             const rawProfileMap = new Map<string, Record<string, unknown>>();
             for (const rawAddr of rawAddresses) {
-              const p = appInitializer.getRawUserProfile(rawAddr);
+              var p = appInitializer.getUserData(rawAddr);
+
               if (p && (p as any).address) {
+
+                p = p.export(true)
+
                 rawProfileMap.set((p as any).address, p);
               }
             }

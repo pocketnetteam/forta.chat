@@ -82,13 +82,13 @@ describe("login key verification", () => {
 });
 
 describe("pcrypto getUsersInfo profile load", () => {
-  it("should use a single loadUsersInfo batch with update:true, not parallel loadUsersInfoRaw", () => {
+  it("should use a single loadUsersInfo batch and getUserData, not parallel loadUsersInfoRaw", () => {
     const source = getSource();
     const idx = source.indexOf("getUsersInfo: async");
     expect(idx).toBeGreaterThan(-1);
     const section = source.slice(idx, idx + 4500);
-    expect(section).toContain("loadUsersInfo(rawAddresses, { update: true })");
-    expect(section).toContain("getRawUserProfile");
+    expect(section).toContain("loadUsersInfo(rawAddresses, { update: false })");
+    expect(section).toContain("getUserData");
     expect(section).not.toContain("loadUsersInfoRaw");
   });
 });
