@@ -16,8 +16,22 @@ const { t } = useI18n();
 const { settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
 
 const isMobile = ref(window.innerWidth < 768);
-// If navigating from push tap, activeRoomId is already set — skip sidebar immediately
-const showSidebar = ref(!(isMobile.value && chatStore.activeRoomId));
+
+// User-override: when the user manually returns to the sidebar via
+// onBackToSidebar, we remember this and keep showing the sidebar until they
+// select a room again. Without this, a racing external activeRoomId update
+// (e.g. stale push intent) could push them back into a chat they just exited.
+const userForcedSidebar = ref(false);
+
+// Desktop: both panels always visible. Mobile: show sidebar until we have a
+// concrete activeRoom object — not just an activeRoomId. This prevents an
+// empty "Select a chat" screen when a push intent restores activeRoomId
+// before the rooms list has finished syncing.
+const showSidebar = computed(() => {
+  if (!isMobile.value) return true;
+  if (userForcedSidebar.value) return true;
+  return !chatStore.activeRoom;
+});
 
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 const checkMobile = () => {
@@ -43,27 +57,26 @@ const onSelectRoom = () => {
   // Close settings/profile panels so ChatWindow is visible
   closeSettingsContent();
   setTab("chats");
-  if (isMobile.value) {
-    showSidebar.value = false;
-  }
+  userForcedSidebar.value = false;
 };
 
-// When activeRoomId is set externally (e.g. push notification tap from App.vue),
-// automatically transition from sidebar to chat on mobile
+// When activeRoom actually becomes available (e.g. after rooms sync resolves
+// a pending push-intent roomId), clean up any open panels so ChatWindow
+// shows immediately on mobile.
 watch(
-  () => chatStore.activeRoomId,
-  (newId) => {
-    if (newId && isMobile.value && showSidebar.value) {
+  () => chatStore.activeRoom,
+  (room) => {
+    if (room && isMobile.value) {
       closeSettingsContent();
       setTab("chats");
-      showSidebar.value = false;
+      userForcedSidebar.value = false;
     }
   },
 );
 
 const onBackToSidebar = () => {
+  userForcedSidebar.value = true;
   chatStore.setActiveRoom(null);
-  showSidebar.value = true;
 };
 
 const showGroupCreation = ref(false);
@@ -74,7 +87,7 @@ const onNewGroup = () => {
 
 const onGroupCreated = () => {
   showGroupCreation.value = false;
-  if (isMobile.value) showSidebar.value = false;
+  // Let showSidebar computed reflect the current active room state naturally
 };
 
 const onCloseGroupCreation = () => {

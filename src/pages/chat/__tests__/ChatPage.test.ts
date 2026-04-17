@@ -93,6 +93,16 @@ vi.mock("@/features/messaging/model/use-audio-playback", () => ({
 // ── Now import the SFC AFTER mocks are set up ─────────────────────
 import ChatPage from "../ChatPage.vue";
 
+// Stub <transition> to a pass-through so v-show display:none is applied
+// synchronously — jsdom/happy-dom don't fire transitionend, so the real
+// Transition component leaves elements visually visible indefinitely.
+const TransitionStub = {
+  name: "Transition",
+  render(this: { $slots: { default?: () => unknown } }) {
+    return this.$slots?.default?.();
+  },
+};
+
 // ── Stubs for child components that ChatPage renders ──────────────
 const mountOpts = {
   global: {
@@ -113,7 +123,8 @@ const mountOpts = {
         name: "GroupCreationPanel",
         template: '<div data-testid="group-creation" />',
       },
-      transition: false,
+      Transition: TransitionStub,
+      transition: TransitionStub,
     },
   },
 };
