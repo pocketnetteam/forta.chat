@@ -51,6 +51,10 @@ export const ru: Record<TranslationKey, string> = {
   "contactSearch.showMore": "Показать ещё",
   "contactSearch.clearSearch": "Очистить поиск",
 
+  // ── Search errors ──
+  "search.userNotFound": "Пользователь не найден",
+  "search.serviceUnavailable": "Сервис поиска временно недоступен",
+
   // ── Folder tabs ──
   "tabs.all": "Все",
   "tabs.personal": "Личные",

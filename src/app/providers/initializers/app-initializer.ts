@@ -342,11 +342,16 @@ export class AppInitializer {
     }
   }
 
-  /** Search Pocketnet users by text query — calls "searchusers" RPC */
+  /** Search Pocketnet users by text query — calls "searchusers" RPC.
+   *  Throws on transport / availability errors so callers can trigger fallback
+   *  (Matrix user_directory). The old silent-empty behaviour masked CORS failures
+   *  on web and left users looking at an empty list with no signal. */
   async searchUsers(query: string): Promise<Array<{ address: string; name: string; image: string }>> {
-    if (!this.api) return [];
+    await this.initApi();
+    if (!this._available || !this.api) {
+      throw new Error("search_service_unavailable");
+    }
     try {
-      await this.initApi();
       const data = await this.api.rpc("searchusers", [query, "users"]);
       const results = (data as Array<Record<string, unknown>>) || [];
       return results.map((info) => ({
@@ -356,7 +361,7 @@ export class AppInitializer {
       })).filter(u => u.address);
     } catch (e) {
       console.error("[appInit] searchUsers error:", e);
-      return [];
+      throw e instanceof Error ? e : new Error(String(e));
     }
   }
 

@@ -15,9 +15,12 @@ export type {
   LocalAttachment,
   DecryptionJob,
   ListenedMessage,
+  SearchCacheRow,
 } from "./schema";
 export { DecryptionWorker } from "./decryption-worker";
 export { ListenedRepository } from "./listened-repository";
+export { SearchCacheRepository } from "./search-cache-repository";
+export type { CachedSearchUser, SearchCacheEntry } from "./search-cache-repository";
 
 export { localToMessage, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "./mappers";
 export { MessageRepository } from "./message-repository";
@@ -48,6 +51,7 @@ import { SyncEngine } from "./sync-engine";
 import { EventWriter } from "./event-writer";
 import { DecryptionWorker } from "./decryption-worker";
 import { ListenedRepository } from "./listened-repository";
+import { SearchCacheRepository } from "./search-cache-repository";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 
 export interface ChatDbKit {
@@ -59,6 +63,7 @@ export interface ChatDbKit {
   eventWriter: EventWriter;
   decryptionWorker: DecryptionWorker;
   listened: ListenedRepository;
+  searchCache: SearchCacheRepository;
   /** Debounced retry for a room — wire to key-arrival callbacks */
   retryRoomDecryption?: (roomId: string) => void;
   /** Cleanup event listeners. Called on user switch / logout. */
@@ -102,6 +107,7 @@ export function initChatDb(
   const rooms = new RoomRepository(db);
   const users = new UserRepository(db);
   const listened = new ListenedRepository(db);
+  const searchCache = new SearchCacheRepository(db);
   const syncEngine = new SyncEngine(db, messages, rooms, getRoomCrypto, onChange);
   const eventWriter = new EventWriter(db, messages, rooms, users, onChange, fetchPreviewFn);
   const decryptionWorker = new DecryptionWorker(db, async (roomId: string) => {
@@ -162,7 +168,12 @@ export function initChatDb(
     console.warn("[local-db] Tombstone GC failed:", e);
   });
 
-  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
+  // GC expired search-cache entries (non-blocking)
+  searchCache.garbageCollect().catch((e) => {
+    console.warn("[local-db] SearchCache GC failed:", e);
+  });
+
+  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
   currentUserId = userId;
 
   return currentKit;
