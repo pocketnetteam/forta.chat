@@ -55,6 +55,9 @@ export class AppInitializer {
       return;
     }
     this.api = new Api(pocketnetInstance);
+
+    console.log('pocketnetInstance', pocketnetInstance)
+
     this.actions = new Actions(pocketnetInstance, this.api);
     this.actions.init();
     this.psdk = new pSDK({
@@ -258,12 +261,13 @@ export class AppInitializer {
   async loadUsersInfo(addresses: string[], options?: { update?: boolean }): Promise<void> {
     if (!this.psdk || !addresses.length) return;
     // Must pass light=true to match original bastyon-chat behavior
+
+
     await this.psdk.userInfo.load(addresses, true, options?.update ?? false);
   }
 
   /** Load user info for multiple addresses into full (non-light) cache.
-   *  After this call, getUserData(address) will return the profile data. */
-  async loadUsersBatch(addresses: string[]): Promise<void> {
+   *  After this call, getUs string[]): Promise<void> {
     if (!this.psdk || !addresses.length) return;
     await this.psdk.userInfo.load(addresses);
   }

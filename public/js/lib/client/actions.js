@@ -242,6 +242,7 @@ var errorCodesAndActions = {
     '61' : errorCodesAndActionsExecutors.limit,
     '65' : errorCodesAndActionsExecutors.limit,
     '18' : errorCodesAndActionsExecutors.useraction,
+    '11' : errorCodesAndActionsExecutors.useraction,
     '28' : errorCodesAndActionsExecutors.wait,
     '37' : errorCodesAndActionsExecutors.wait
 }
@@ -831,8 +832,6 @@ var Action = function(account, object, priority, settings){
 
         var hex = tx.toHex();
         var ttxid = tx.getId()
-
-        console.log('ttxid', ttxid)
 
             
 

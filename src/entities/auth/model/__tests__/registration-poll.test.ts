@@ -40,6 +40,17 @@ describe("registration poll", () => {
     );
     expect(stopSection).toContain("clearTimeout");
   });
+
+  it("should call loadUsersInfo with update:true before initializeAndFetchUserData on registration confirmed", () => {
+    const source = getSource();
+    const fnStart = source.indexOf("async function onRegistrationConfirmed");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnSection = source.slice(fnStart, fnStart + 1200);
+    const loadIdx = fnSection.indexOf("loadUsersInfo([address.value!], { update: true })");
+    const initIdx = fnSection.indexOf("initializeAndFetchUserData");
+    expect(loadIdx).toBeGreaterThan(-1);
+    expect(initIdx).toBeGreaterThan(loadIdx);
+  });
 });
 
 describe("login key verification", () => {

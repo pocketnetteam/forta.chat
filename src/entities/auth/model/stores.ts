@@ -682,7 +682,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           createKeyPair(privateKey.value!)
         );
         // Sync own profile to userStore so Avatar components show correct name/initial
-        if (userData.name) {
+        if (userData && userData.name) {
           useUserStore().setUser(address.value!, {
             address: address.value!,
             name: userData.name ?? "",
@@ -810,7 +810,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         }
 
         return { data: authData, error: null };
-      } catch {
+      } catch (e){
+        console.error(e)
         return { data: null, error: "Invalid private key or mnemonic" };
       }
     }
@@ -1120,7 +1121,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // Keep overlay visible for 1.5s to show success step
       await new Promise(resolve => setTimeout(resolve, 1500));
 
+
       try {
+        await appInitializer.loadUsersInfo([address.value!], { update: true });
         await appInitializer.initializeAndFetchUserData(
           address.value!,
           (data: UserData) => {
