@@ -266,8 +266,15 @@ export class AppInitializer {
   ): Promise<UserData | null> {
     if (!this.psdk || !stateAddresses.length) return Promise.resolve(null);
     return this.psdk.userInfo.load(stateAddresses).then(() => {
-      const userData = this.psdk!.userInfo.get(stateAddresses[0]) as UserData;
-      if (onLoad) {
+      // `psdk.userInfo.get()` returns undefined for addresses without an
+      // on-chain UserInfo yet (e.g. right after register(), before the
+      // blockchain confirms). The `as UserData` cast hides that — callers
+      // used to dereference undefined and crash with "Invalid private key
+      // or mnemonic" in the login flow. Guard the callback and the return
+      // so downstream code can safely handle the absence.
+      const raw = this.psdk!.userInfo.get(stateAddresses[0]);
+      const userData = (raw ?? null) as UserData | null;
+      if (onLoad && userData) {
         onLoad(userData);
       }
       return userData;

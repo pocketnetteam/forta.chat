@@ -690,13 +690,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     await appInitializer.initializeAndFetchUserData(
       address.value,
       (userData: UserData) => {
+        // Defensive: app-initializer guards against undefined userData, but
+        // this callback is reached from three flows (login, onConfirmed,
+        // HMR) and any future refactor could reintroduce undefined. If it
+        // happens, we must not throw — throwing here used to cascade into
+        // login()'s catch and surface as "Invalid private key or mnemonic"
+        // on the register page after a successful registration.
+        if (!userData) return;
         setUserInfo(userData);
         PocketnetInstanceConfigurator.setUserAddress(address.value!);
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
           createKeyPair(privateKey.value!)
         );
         // Sync own profile to userStore so Avatar components show correct name/initial
-        if (userData.name) {
+        if (userData && userData.name) {
           useUserStore().setUser(address.value!, {
             address: address.value!,
             name: userData.name ?? "",
@@ -1191,6 +1198,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         await appInitializer.initializeAndFetchUserData(
           address.value!,
           (data: UserData) => {
+            // Defensive guard — see fetchUserInfo for rationale. Without
+            // this, a timing quirk in psdk.userInfo.get() (cache miss right
+            // after blockchain confirmation) would crash the callback and
+            // abort the post-registration flow.
+            if (!data) return;
             setUserInfo(data);
             // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
             useUserStore().setUser(address.value!, {
