@@ -5,6 +5,16 @@ const REPO = 'greenShirtMystery/forta-bugs';
 const API_BASE = 'https://api.github.com';
 const LS_ACK_KEY = (address: string) =>
   `${APP_NAME}:bug-report-ack:${address}`;
+const LS_REPORTS_KEY = (address: string) =>
+  `${APP_NAME}:bug-report-mine:${address}`;
+
+/** Minimal locally-cached info about an issue the user has reported. */
+export interface LocalIssueCache {
+  number: number;
+  title: string;
+  createdAt: string;
+  lastKnownState: 'open' | 'closed';
+}
 
 export type IssueStateReason = 'completed' | 'not_planned' | 'reopened' | null;
 
@@ -50,19 +60,38 @@ async function fetchIssues(
       `${API_BASE}/search/issues?q=${encodeURIComponent(query)}` +
       `&per_page=50&sort=updated`;
     const res = await fetch(url, { headers: ghHeaders(token) });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { items?: unknown[] };
+    if (!res.ok) {
+      console.warn(
+        `[bug-report-tracker] search ${stateFilter} returned ${res.status}`,
+      );
+      return [];
+    }
+    const data = (await res.json()) as { items?: unknown[]; total_count?: number };
     const items = Array.isArray(data.items) ? data.items : [];
-    return items
+    console.log(
+      `[bug-report-tracker] search ${stateFilter} for ${hash}: ${items.length} raw items (total=${data.total_count ?? '?'})`,
+    );
+    const filtered = items
       .filter((raw) => {
         if (!raw || typeof raw !== 'object') return false;
         const body = (raw as Record<string, unknown>).body;
-        return extractReporterHashFromBody(
+        const matched = extractReporterHashFromBody(
           typeof body === 'string' ? body : null,
         ) === hash;
+        if (!matched) {
+          const num = (raw as Record<string, unknown>).number;
+          console.warn(
+            `[bug-report-tracker] search returned #${num} but body marker missing/mismatch — dropped`,
+          );
+        }
+        return matched;
       })
       .map(parseIssue)
       .filter((x): x is TrackedIssue => x !== null);
+    console.log(
+      `[bug-report-tracker] search ${stateFilter}: ${filtered.length} items after marker filter`,
+    );
+    return filtered;
   } catch (e) {
     console.warn('[bug-report-tracker] fetchIssues failed:', e);
     return [];
@@ -182,6 +211,76 @@ export async function closeIssue(
     }
   }
   return patched;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Local cache of reported issues
+// ─────────────────────────────────────────────────────────────────────────
+// Stored at bug-report submission time so the "My reports" sheet can render
+// instantly without depending on GitHub search indexing (which lags 1–2 min
+// after issue creation). GitHub remains the source of truth for state; the
+// cache is authoritative only for existence + title + createdAt.
+
+export function getLocalIssueCache(address: string): LocalIssueCache[] {
+  if (!address) return [];
+  try {
+    const raw = localStorage.getItem(LS_REPORTS_KEY(address));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (i): i is LocalIssueCache =>
+        !!i &&
+        typeof i === 'object' &&
+        typeof (i as LocalIssueCache).number === 'number' &&
+        typeof (i as LocalIssueCache).title === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function trackCreatedIssue(
+  address: string,
+  entry: { number: number; title: string },
+): void {
+  if (!address) return;
+  const current = getLocalIssueCache(address);
+  if (current.some((i) => i.number === entry.number)) return;
+  const next: LocalIssueCache[] = [
+    {
+      number: entry.number,
+      title: entry.title,
+      createdAt: new Date().toISOString(),
+      lastKnownState: 'open',
+    },
+    ...current,
+  ];
+  localStorage.setItem(LS_REPORTS_KEY(address), JSON.stringify(next));
+}
+
+export function updateLocalIssueState(
+  address: string,
+  issueNumber: number,
+  newState: 'open' | 'closed',
+): void {
+  if (!address) return;
+  const current = getLocalIssueCache(address);
+  const next = current.map((i) =>
+    i.number === issueNumber ? { ...i, lastKnownState: newState } : i,
+  );
+  localStorage.setItem(LS_REPORTS_KEY(address), JSON.stringify(next));
+}
+
+export function removeFromLocalCache(
+  address: string,
+  issueNumber: number,
+): void {
+  if (!address) return;
+  const next = getLocalIssueCache(address).filter(
+    (i) => i.number !== issueNumber,
+  );
+  localStorage.setItem(LS_REPORTS_KEY(address), JSON.stringify(next));
 }
 
 export function getAcknowledgedNumbers(address: string): number[] {

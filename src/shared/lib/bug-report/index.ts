@@ -15,7 +15,11 @@ export {
   hasAcknowledged,
   acknowledgeIssue,
   clearAcknowledged,
+  getLocalIssueCache,
+  trackCreatedIssue,
+  updateLocalIssueState,
+  removeFromLocalCache,
 } from './bug-report-tracker';
-export type { TrackedIssue, IssueStateReason } from './bug-report-tracker';
+export type { TrackedIssue, IssueStateReason, LocalIssueCache } from './bug-report-tracker';
 export type { AppEnvironment, BugReportInput } from './types';
 export type { BugReportResult } from './bug-report-sender';

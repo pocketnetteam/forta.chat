@@ -19,6 +19,8 @@ import {
   closeIssue,
   getAcknowledgedNumbers,
   acknowledgeIssue,
+  getLocalIssueCache,
+  updateLocalIssueState,
   type TrackedIssue,
 } from '@/shared/lib/bug-report';
 
@@ -79,12 +81,55 @@ export function useBugReportStatus() {
   }
 
   /** Load every issue reported by this user (open + closed) — used by the
-   *  manual "My reports" entry point where the user wants to manage state. */
+   *  manual "My reports" entry point where the user wants to manage state.
+   *
+   *  Strategy: render from the local cache first so the sheet is never empty
+   *  for a freshly-submitted issue (GitHub search lags 1-2 minutes after
+   *  creation). Then, in the background, query GitHub to pick up any state
+   *  changes and newly-discovered issues (e.g. after reinstall on a device
+   *  that has the same Matrix account). */
   async function loadAllIssues(address: string): Promise<void> {
-    if (!address || loading.value) return;
+    if (!address) return;
+    const cache = getLocalIssueCache(address);
+    // Seed from cache for instant render.
+    allIssues.value = cache.map(
+      (c): TrackedIssue => ({
+        number: c.number,
+        title: c.title,
+        url: `https://github.com/greenShirtMystery/forta-bugs/issues/${c.number}`,
+        state: c.lastKnownState,
+        closedAt: null,
+        stateReason: null,
+      }),
+    );
+    if (loading.value) return;
     loading.value = true;
     try {
-      allIssues.value = await fetchAllUserIssues(address);
+      const remote = await fetchAllUserIssues(address);
+      // Merge: remote wins on state/title, cache-only entries survive until
+      // GitHub has indexed them.
+      const remoteByNumber = new Map(remote.map((r) => [r.number, r]));
+      const merged: TrackedIssue[] = [];
+      for (const r of remote) merged.push(r);
+      for (const c of cache) {
+        if (!remoteByNumber.has(c.number)) {
+          merged.push({
+            number: c.number,
+            title: c.title,
+            url: `https://github.com/greenShirtMystery/forta-bugs/issues/${c.number}`,
+            state: c.lastKnownState,
+            closedAt: null,
+            stateReason: null,
+          });
+        } else {
+          // Sync cache with GitHub's current state.
+          const r = remoteByNumber.get(c.number)!;
+          if (r.state !== c.lastKnownState) {
+            updateLocalIssueState(address, c.number, r.state);
+          }
+        }
+      }
+      allIssues.value = merged.sort((a, b) => b.number - a.number);
     } finally {
       loading.value = false;
     }
@@ -110,6 +155,7 @@ export function useBugReportStatus() {
       : 'Reporter reopened this via the app — the bug is not fixed.';
     const ok = await reopenIssue(issueNumber, comment);
     if (!ok) return false;
+    updateLocalIssueState(address, issueNumber, 'open');
     // Do NOT acknowledgeIssue here: the user said the fix did not work. If the
     // maintainer closes it again later with a new attempt, we want to ask the
     // user again.
@@ -127,6 +173,7 @@ export function useBugReportStatus() {
 
   /** User decides an open issue is no longer relevant — close it on GitHub. */
   async function closeUserIssue(
+    address: string,
     issueNumber: number,
     reason: string,
   ): Promise<boolean> {
@@ -135,6 +182,7 @@ export function useBugReportStatus() {
       : '';
     const ok = await closeIssue(issueNumber, comment);
     if (!ok) return false;
+    updateLocalIssueState(address, issueNumber, 'closed');
     allIssues.value = allIssues.value.map((i) =>
       i.number === issueNumber
         ? { ...i, state: 'closed', closedAt: new Date().toISOString(), stateReason: 'completed' }

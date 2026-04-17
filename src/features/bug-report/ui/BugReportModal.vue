@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { collectEnvironment, sendBugReport } from "@/shared/lib/bug-report";
+import {
+  collectEnvironment,
+  sendBugReport,
+  trackCreatedIssue,
+} from "@/shared/lib/bug-report";
 import type { AppEnvironment } from "@/shared/lib/bug-report";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { isNative } from "@/shared/lib/platform";
@@ -104,6 +108,12 @@ const handleSend = async () => {
       screenshots: screenshots.value.map((s) => s.base64),
       reporterAddress: authStore.address ?? undefined,
     });
+    if (authStore.address && result.issueNumber) {
+      trackCreatedIssue(authStore.address, {
+        number: result.issueNumber,
+        title: `[${environment.value.platform}] ${description.value.trim().slice(0, 80)}`,
+      });
+    }
     sent.value = true;
     if (result.screenshotsFailed > 0) {
       errorMsg.value = `${t("bugReport.screenshotUploadFailed")} (${result.uploadError ?? "unknown"})`;

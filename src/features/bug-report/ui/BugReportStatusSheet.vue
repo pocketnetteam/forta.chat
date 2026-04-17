@@ -66,7 +66,7 @@ const submitAction = async (issueNumber: number) => {
     const ok =
       kind === "reopen"
         ? await markUnresolved(props.address, issueNumber, reason)
-        : await closeUserIssue(issueNumber, reason);
+        : await closeUserIssue(props.address, issueNumber, reason);
     if (!ok) {
       submitErrorFor.value = issueNumber;
       return;
