@@ -32,7 +32,7 @@ var pSDK = function ({ app, api, actions }) {
         },
 
         userInfoLight: {
-            time: 120000
+            time: 1200000
         },
 
         userState: {

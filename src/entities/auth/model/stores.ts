@@ -289,7 +289,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             // Single SDK load (getuserprofile once per batch); raw rows stored pre-cleanData in SDK
             await appInitializer
-              .loadUsersInfo(rawAddresses, { update: true })
+              .loadUsersInfo(rawAddresses, { update: false })
               .catch((e) => {
                 console.warn("[pcrypto] loadUsersInfo failed:", e);
               });
