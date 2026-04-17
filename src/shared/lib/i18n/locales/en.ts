@@ -130,6 +130,7 @@ export const en = {
   "bugReportStatus.notResolvedReasonPlaceholder": "A short note about what still doesn't work",
   "bugReportStatus.notResolvedSubmit": "Reopen report",
   "bugReportStatus.submitting": "Submitting...",
+  "bugReportStatus.submitError": "Couldn't reopen the report. Try again later.",
   "settings.bugReport": "Report a Bug",
   "settings.addAccount": "Add Account",
   "settings.removeAccount": "Log out",

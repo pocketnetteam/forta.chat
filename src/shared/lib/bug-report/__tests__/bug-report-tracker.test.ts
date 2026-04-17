@@ -19,7 +19,15 @@ afterEach(() => {
 });
 
 describe('fetchUserClosedIssues', () => {
-  it('queries GitHub search API with reporter hash and state:closed', async () => {
+  async function issueBody(address: string) {
+    const { computeReporterHash, buildReporterMarker } = await import(
+      '../reporter-hash'
+    );
+    const hash = await computeReporterHash(address);
+    return { marker: buildReporterMarker(hash), hash };
+  }
+
+  it('queries GitHub search API with quoted marker + in:body + state:closed', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ items: [] }),
@@ -31,12 +39,17 @@ describe('fetchUserClosedIssues', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const url = fetchMock.mock.calls[0][0] as string;
     expect(url).toContain('/search/issues');
-    expect(url).toContain(encodeURIComponent('repo:greenShirtMystery/forta-bugs'));
+    expect(url).toContain(
+      encodeURIComponent('repo:greenShirtMystery/forta-bugs'),
+    );
     expect(url).toContain(encodeURIComponent('state:closed'));
-    expect(url).toMatch(/reporter%3A[0-9a-f]{16}/);
+    expect(url).toContain(encodeURIComponent('in:body'));
+    // Quoted exact-phrase search
+    expect(url).toMatch(/%22reporter%3A[0-9a-f]{16}%22/);
   });
 
-  it('parses items into TrackedIssue[]', async () => {
+  it('keeps only items whose body actually contains the marker', async () => {
+    const { marker } = await issueBody('addr-1');
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -51,14 +64,16 @@ describe('fetchUserClosedIssues', () => {
                 state: 'closed',
                 closed_at: '2026-04-10T00:00:00Z',
                 state_reason: 'completed',
+                body: `${marker}\n\n## Description\nfoo`,
               },
+              // Decoy without the marker — search could return it from a
+              // different qualifier match; client-side filter MUST drop it.
               {
-                number: 43,
-                title: '[ios] glitch',
-                html_url: 'https://github.com/x/y/issues/43',
+                number: 99,
+                title: '[x] other user',
+                html_url: 'https://github.com/x/y/issues/99',
                 state: 'closed',
-                closed_at: null,
-                state_reason: null,
+                body: 'No marker here.',
               },
             ],
           }),
@@ -66,18 +81,7 @@ describe('fetchUserClosedIssues', () => {
     );
 
     const issues = await fetchUserClosedIssues('addr-1');
-
-    expect(issues).toHaveLength(2);
-    expect(issues[0]).toMatchObject({
-      number: 42,
-      title: '[android] crash',
-      url: 'https://github.com/x/y/issues/42',
-      state: 'closed',
-      closedAt: '2026-04-10T00:00:00Z',
-      stateReason: 'completed',
-    });
-    expect(issues[1].closedAt).toBeNull();
-    expect(issues[1].stateReason).toBeNull();
+    expect(issues.map((i) => i.number)).toEqual([42]);
   });
 
   it('returns [] on HTTP error', async () => {
@@ -138,15 +142,16 @@ describe('acknowledgements', () => {
 });
 
 describe('reopenIssue', () => {
-  it('PATCHes issue with state=open and posts comment', async () => {
+  it('PATCHes issue with state=open, posts comment, returns true', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
     vi.stubGlobal('fetch', fetchMock);
 
-    await reopenIssue(42, 'still broken after v1.2.3');
+    const ok = await reopenIssue(42, 'still broken after v1.2.3');
 
+    expect(ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const [patchUrl, patchInit] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -161,14 +166,15 @@ describe('reopenIssue', () => {
     expect(commentBody.body).toContain('still broken');
   });
 
-  it('posts comment even if PATCH fails (best-effort)', async () => {
+  it('returns false when PATCH is not ok (still posts comment)', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({ ok: false, status: 403 })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(reopenIssue(1, 'x')).resolves.toBeUndefined();
+    const ok = await reopenIssue(1, 'x');
+    expect(ok).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

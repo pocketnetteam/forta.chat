@@ -45,6 +45,10 @@ describe('BugReportStatusSheet', () => {
   it('renders a card per pending issue and resolves one on click', async () => {
     // Seed pendingIssues via the real composable.
     const status = useBugReportStatus();
+    const { computeReporterHash, buildReporterMarker } = await import(
+      '@/shared/lib/bug-report'
+    );
+    const marker = buildReporterMarker(await computeReporterHash('addr-1'));
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -57,12 +61,14 @@ describe('BugReportStatusSheet', () => {
                 title: '[android] bug A',
                 html_url: 'u100',
                 state: 'closed',
+                body: `${marker}\nbody`,
               },
               {
                 number: 101,
                 title: '[android] bug B',
                 html_url: 'u101',
                 state: 'closed',
+                body: `${marker}\nbody`,
               },
             ],
           }),

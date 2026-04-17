@@ -85,19 +85,21 @@ export function useBugReportStatus() {
     address: string,
     issueNumber: number,
     reason: string,
-  ): Promise<void> {
-    if (!address) return;
+  ): Promise<boolean> {
+    if (!address) return false;
     const comment = reason.trim()
       ? `Reporter says it is still broken:\n\n> ${reason.trim().slice(0, 1000)}`
       : 'Reporter reopened this via the app — the bug is not fixed.';
-    await reopenIssue(issueNumber, comment);
-    // Ack locally so we don't keep surfacing it; if maintainer closes it again
-    // later, the new closed_at will differ and we will query again but the
-    // acknowledgement already cleared our interest.
-    acknowledgeIssue(address, issueNumber);
+    const ok = await reopenIssue(issueNumber, comment);
+    if (!ok) return false;
+    // Do NOT acknowledgeIssue here: the user said the fix did not work. If the
+    // maintainer closes it again later with a new attempt, we want to ask the
+    // user again. We just remove it from the current list so the sheet can
+    // auto-close when empty.
     pendingIssues.value = pendingIssues.value.filter(
       (i) => i.number !== issueNumber,
     );
+    return true;
   }
 
   function openSheet(): void {
@@ -105,6 +107,17 @@ export function useBugReportStatus() {
   }
 
   function closeSheet(): void {
+    sheetOpen.value = false;
+  }
+
+  /**
+   * Wipe in-memory state. Call this from the logout path so another account
+   * signed in on the same browser tab does not see the previous user's
+   * unresolved issues.
+   */
+  function resetState(): void {
+    pendingIssues.value = [];
+    loading.value = false;
     sheetOpen.value = false;
   }
 
@@ -118,5 +131,6 @@ export function useBugReportStatus() {
     markUnresolved,
     openSheet,
     closeSheet,
+    resetState,
   };
 }

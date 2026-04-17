@@ -132,6 +132,7 @@ export const ru: Record<TranslationKey, string> = {
   "bugReportStatus.notResolvedReasonPlaceholder": "Коротко опишите, что всё ещё не работает",
   "bugReportStatus.notResolvedSubmit": "Переоткрыть жалобу",
   "bugReportStatus.submitting": "Отправляем...",
+  "bugReportStatus.submitError": "Не удалось переоткрыть жалобу. Попробуйте позже.",
   "settings.bugReport": "Сообщить о баге",
   "settings.addAccount": "Добавить аккаунт",
   "settings.removeAccount": "Выйти",

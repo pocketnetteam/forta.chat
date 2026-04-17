@@ -87,12 +87,19 @@ describe('useBugReportStatus actions', () => {
     closeSheet?.();
   });
 
-  function mockSearch(items: any[]) {
+  async function mockSearchForAddress(address: string, items: any[]) {
+    const { computeReporterHash, buildReporterMarker } = await import(
+      '@/shared/lib/bug-report'
+    );
+    const marker = buildReporterMarker(await computeReporterHash(address));
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ items }),
+        json: () =>
+          Promise.resolve({
+            items: items.map((it) => ({ body: `${marker}\nx`, ...it })),
+          }),
       }),
     );
   }
@@ -100,7 +107,7 @@ describe('useBugReportStatus actions', () => {
   it('checkStatuses filters out already-acknowledged issues', async () => {
     const { checkStatuses, pendingIssues, confirmResolved } =
       useBugReportStatus();
-    mockSearch([
+    await mockSearchForAddress('addr-1', [
       { number: 1, title: 'a', html_url: 'u1', state: 'closed' },
       { number: 2, title: 'b', html_url: 'u2', state: 'closed' },
     ]);
@@ -112,19 +119,23 @@ describe('useBugReportStatus actions', () => {
   it('confirmResolved persists ack and drops from pending', async () => {
     const { checkStatuses, pendingIssues, confirmResolved } =
       useBugReportStatus();
-    mockSearch([{ number: 5, title: 'x', html_url: 'u', state: 'closed' }]);
+    await mockSearchForAddress('addr-xyz', [
+      { number: 5, title: 'x', html_url: 'u', state: 'closed' },
+    ]);
     await checkStatuses('addr-xyz');
     expect(pendingIssues.value).toHaveLength(1);
     confirmResolved('addr-xyz', 5);
     expect(pendingIssues.value).toHaveLength(0);
   });
 
-  it('markUnresolved calls GitHub reopen + comment', async () => {
+  it('markUnresolved reopens on GitHub, returns true, does NOT ack', async () => {
     const { checkStatuses, markUnresolved, pendingIssues } =
       useBugReportStatus();
 
     // Seed pending
-    mockSearch([{ number: 9, title: 'y', html_url: 'u9', state: 'closed' }]);
+    await mockSearchForAddress('addr-reopen', [
+      { number: 9, title: 'y', html_url: 'u9', state: 'closed' },
+    ]);
     await checkStatuses('addr-reopen');
     expect(pendingIssues.value).toHaveLength(1);
 
@@ -134,7 +145,15 @@ describe('useBugReportStatus actions', () => {
       .mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
     vi.stubGlobal('fetch', fetchMock);
 
-    await markUnresolved('addr-reopen', 9, 'still crashes');
+    const ok = await markUnresolved('addr-reopen', 9, 'still crashes');
+    expect(ok).toBe(true);
+
+    // And crucially: acknowledgeIssue was NOT called, so if the maintainer
+    // closes it again, the user will see it again.
+    const { getAcknowledgedNumbers } = await import(
+      '@/shared/lib/bug-report'
+    );
+    expect(getAcknowledgedNumbers('addr-reopen')).toEqual([]);
 
     const patchCall = fetchMock.mock.calls.find(
       (c) => (c[1] as RequestInit).method === 'PATCH',
@@ -148,5 +167,43 @@ describe('useBugReportStatus actions', () => {
       JSON.parse((postCall![1] as RequestInit).body as string).body,
     ).toContain('still crashes');
     expect(pendingIssues.value).toHaveLength(0);
+  });
+
+  it('markUnresolved returns false and keeps issue in list when PATCH fails', async () => {
+    const { checkStatuses, markUnresolved, pendingIssues } =
+      useBugReportStatus();
+
+    await mockSearchForAddress('addr-fail', [
+      { number: 7, title: 'z', html_url: 'u7', state: 'closed' },
+    ]);
+    await checkStatuses('addr-fail');
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 403 })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) }),
+    );
+
+    const ok = await markUnresolved('addr-fail', 7, 'noop');
+    expect(ok).toBe(false);
+    // Still in the list so the UI can retry / show error
+    expect(pendingIssues.value.map((i) => i.number)).toEqual([7]);
+  });
+
+  it('resetState clears pending, loading and sheetOpen', async () => {
+    const { checkStatuses, pendingIssues, openSheet, sheetOpen, resetState } =
+      useBugReportStatus();
+    await mockSearchForAddress('addr-r', [
+      { number: 1, title: 't', html_url: 'u', state: 'closed' },
+    ]);
+    await checkStatuses('addr-r');
+    openSheet();
+    expect(pendingIssues.value).toHaveLength(1);
+    expect(sheetOpen.value).toBe(true);
+    resetState();
+    expect(pendingIssues.value).toHaveLength(0);
+    expect(sheetOpen.value).toBe(false);
   });
 });

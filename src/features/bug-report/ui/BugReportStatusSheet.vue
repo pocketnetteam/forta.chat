@@ -19,6 +19,7 @@ const { t } = useI18n();
 const reasonDrafts = ref<Record<number, string>>({});
 const reopeningFor = ref<number | null>(null);
 const submitting = ref<number | null>(null);
+const submitErrorFor = ref<number | null>(null);
 
 const issuesToShow = computed(() => pendingIssues.value);
 
@@ -41,9 +42,14 @@ const cancelReopen = () => {
 const submitReopen = async (issueNumber: number) => {
   if (submitting.value !== null) return;
   submitting.value = issueNumber;
+  submitErrorFor.value = null;
   try {
     const reason = reasonDrafts.value[issueNumber] ?? "";
-    await markUnresolved(props.address, issueNumber, reason);
+    const ok = await markUnresolved(props.address, issueNumber, reason);
+    if (!ok) {
+      submitErrorFor.value = issueNumber;
+      return;
+    }
     reopeningFor.value = null;
     delete reasonDrafts.value[issueNumber];
     if (issuesToShow.value.length === 0) emit("close");
@@ -167,6 +173,12 @@ const stripPlatformPrefix = (title: string) =>
               }}
             </button>
           </div>
+          <p
+            v-if="submitErrorFor === issue.number"
+            class="text-xs text-color-bad"
+          >
+            {{ t("bugReportStatus.submitError") }}
+          </p>
         </div>
       </li>
     </ul>

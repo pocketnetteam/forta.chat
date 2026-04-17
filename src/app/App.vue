@@ -218,7 +218,12 @@ const {
   hasPending: hasBugPending,
   openSheet: openBugStatusSheet,
   closeSheet: closeBugStatusSheet,
+  resetState: resetBugStatus,
 } = useBugReportStatus();
+
+// Version used by the current check; retained so we only mark the boot
+// check completed once the user has actually dismissed the sheet.
+let pendingBugCheckVersion: string | null = null;
 
 async function runBugStatusCheck() {
   if (!authStore.address) return;
@@ -240,8 +245,20 @@ async function runBugStatusCheck() {
   }
   if (!shouldCheckOnBoot(version)) return;
   await checkBugStatuses(authStore.address);
-  markBootCheckCompleted(version);
-  if (hasBugPending.value) openBugStatusSheet();
+  if (hasBugPending.value) {
+    pendingBugCheckVersion = version;
+    openBugStatusSheet();
+  } else {
+    markBootCheckCompleted(version);
+  }
+}
+
+function handleBugStatusSheetClose() {
+  closeBugStatusSheet();
+  if (pendingBugCheckVersion) {
+    markBootCheckCompleted(pendingBugCheckVersion);
+    pendingBugCheckVersion = null;
+  }
 }
 
 // Trigger once Matrix is ready (means user is fully authenticated)
@@ -255,6 +272,15 @@ watch(
     }
   },
   { immediate: true },
+);
+
+// Reset in-memory state on logout so the next account on the same tab does
+// not inherit the previous user's pending issues.
+watch(
+  () => authStore.isAuthenticated,
+  (isAuthed, was) => {
+    if (was && !isAuthed) resetBugStatus();
+  },
 );
 
 const showQuickSearch = ref(false);
@@ -353,7 +379,7 @@ onUnmounted(() => {
       v-if="authStore.address"
       :show="bugStatusSheetOpen"
       :address="authStore.address"
-      @close="closeBugStatusSheet"
+      @close="handleBugStatusSheetClose"
     />
   </div>
 </template>

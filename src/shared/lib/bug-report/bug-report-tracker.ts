@@ -1,5 +1,5 @@
 import { APP_NAME } from '@/shared/config';
-import { computeReporterHash } from './reporter-hash';
+import { computeReporterHash, extractReporterHashFromBody } from './reporter-hash';
 
 const REPO = 'greenShirtMystery/forta-bugs';
 const API_BASE = 'https://api.github.com';
@@ -39,7 +39,11 @@ export async function fetchUserClosedIssues(
   try {
     const token = getToken();
     const hash = await computeReporterHash(address);
-    const query = `repo:${REPO} reporter:${hash} state:closed`;
+    // GitHub Issues search has no `reporter:` qualifier, so search the
+    // marker as a quoted literal in the body. Client-side re-checks the
+    // body to guard against false positives (partial token matches, etc.).
+    const marker = `reporter:${hash}`;
+    const query = `repo:${REPO} "${marker}" in:body state:closed`;
     const url =
       `${API_BASE}/search/issues?q=${encodeURIComponent(query)}` +
       `&per_page=50&sort=updated`;
@@ -47,7 +51,16 @@ export async function fetchUserClosedIssues(
     if (!res.ok) return [];
     const data = (await res.json()) as { items?: unknown[] };
     const items = Array.isArray(data.items) ? data.items : [];
-    return items.map(parseIssue).filter((x): x is TrackedIssue => x !== null);
+    return items
+      .filter((raw) => {
+        if (!raw || typeof raw !== 'object') return false;
+        const body = (raw as Record<string, unknown>).body;
+        return extractReporterHashFromBody(
+          typeof body === 'string' ? body : null,
+        ) === hash;
+      })
+      .map(parseIssue)
+      .filter((x): x is TrackedIssue => x !== null);
   } catch (e) {
     console.warn('[bug-report-tracker] fetchUserClosedIssues failed:', e);
     return [];
@@ -76,19 +89,33 @@ function parseIssue(raw: unknown): TrackedIssue | null {
   };
 }
 
+/**
+ * Reopen a closed issue and leave an explanatory comment.
+ * Returns true only if the PATCH succeeded; the comment is best-effort and
+ * does not affect the return value so the issue is still reopened even if
+ * the comment POST fails.
+ */
 export async function reopenIssue(
   issueNumber: number,
   comment: string,
-): Promise<void> {
+): Promise<boolean> {
   const token = getToken();
-  // PATCH first; comment is best-effort so that even a partial success still
-  // leaves a trail on the issue for the maintainer.
+  let patched = false;
   try {
-    await fetch(`${API_BASE}/repos/${REPO}/issues/${issueNumber}`, {
-      method: 'PATCH',
-      headers: ghHeaders(token),
-      body: JSON.stringify({ state: 'open', state_reason: 'reopened' }),
-    });
+    const res = await fetch(
+      `${API_BASE}/repos/${REPO}/issues/${issueNumber}`,
+      {
+        method: 'PATCH',
+        headers: ghHeaders(token),
+        body: JSON.stringify({ state: 'open', state_reason: 'reopened' }),
+      },
+    );
+    patched = res.ok;
+    if (!patched) {
+      console.warn(
+        `[bug-report-tracker] reopenIssue PATCH ${issueNumber} returned ${res.status}`,
+      );
+    }
   } catch (e) {
     console.warn('[bug-report-tracker] reopenIssue PATCH failed:', e);
   }
@@ -101,6 +128,7 @@ export async function reopenIssue(
   } catch (e) {
     console.warn('[bug-report-tracker] reopenIssue comment failed:', e);
   }
+  return patched;
 }
 
 export function getAcknowledgedNumbers(address: string): number[] {
