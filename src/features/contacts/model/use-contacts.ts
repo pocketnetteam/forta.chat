@@ -7,6 +7,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import { getmatrixid, hexEncode, tetatetid } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
 import { isChatDbReady, getChatDb, type CachedSearchUser } from "@/shared/lib/local-db";
+import type { TranslationKey } from "@/shared/lib/i18n";
 
 import type { User } from "@/entities/user";
 
@@ -69,7 +70,7 @@ export function useContacts() {
   /** i18n key for the last search failure (null on success). UI reads this to
    *  localize user-facing errors instead of surfacing raw SDK strings such as
    *  "Невозможно разыскать идентификатор". */
-  const searchError = ref<string | null>(null);
+  const searchError = ref<TranslationKey | null>(null);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
