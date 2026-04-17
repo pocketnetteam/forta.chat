@@ -739,7 +739,8 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
       v-if="filteredRooms.length > 0"
       ref="scrollerRef"
       :items="filteredRooms"
-      :item-size="68"
+      :item-size="ITEM_HEIGHT"
+      :style="{ '--recycle-item-size': `${ITEM_HEIGHT}px` }"
       key-field="_key"
       class="h-full"
     >

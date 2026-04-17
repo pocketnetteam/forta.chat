@@ -506,7 +506,7 @@ onUnmounted(() => {
             :disabled="inviteLoading"
             @click="handleAcceptInvite"
           >
-            <span v-if="inviteLoading" class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            <span v-if="inviteLoading" class="contain-strict inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
             <span v-else>{{ t("chat.accept") }}</span>
           </button>
         </div>

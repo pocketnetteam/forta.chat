@@ -65,6 +65,24 @@ function pollInfoShallowEqual(a: PollInfo | undefined, b: PollInfo | undefined):
   return true;
 }
 
+/** Read `m.room.history_visibility` (stream rooms use `world_readable` — excluded from sidebar per bastyon-chat). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getHistoryVisibilityFromMatrixRoom(room: any): string | null {
+  try {
+    const ev = room?.currentState?.getStateEvents?.("m.room.history_visibility", "");
+    if (!ev) return null;
+    const c = typeof ev.getContent === "function" ? ev.getContent() : ev.event?.content;
+    const hv = c?.history_visibility;
+    return typeof hv === "string" ? hv : null;
+  } catch {
+    return null;
+  }
+}
+
+function isStreamHistoryVisibility(hv: string | null | undefined): boolean {
+  return hv === "world_readable";
+}
+
 /** Convert a Matrix SDK room object into our ChatRoom type */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameHints?: Record<string, string>): ChatRoom {
@@ -302,6 +320,23 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
           if (createTs && typeof createTs === "number") return createTs;
         } catch { /* ignore */ }
         return 1; // last resort: use minimal timestamp (never Date.now() — inflates sort)
+      }
+      // Joined room with no timeline activity: match bastyon FETCH_CHATS sentinel fallback
+      // (SDK getLastActiveTimestamp() === MIN_SAFE_INTEGER → use self m.room.member ts).
+      if (membership === "join" || membership === undefined) {
+        try {
+          const memberObj = room.getMember?.(myUserId);
+          const memEv = memberObj?.events?.member;
+          const joinTs = typeof memEv?.getTs === "function"
+            ? memEv.getTs()
+            : memEv?.event?.origin_server_ts;
+          if (joinTs && typeof joinTs === "number") return joinTs;
+        } catch { /* ignore */ }
+        try {
+          const stateEvent = room.currentState?.getStateEvents?.("m.room.member", myUserId);
+          const stateTs = stateEvent?.event?.origin_server_ts;
+          if (stateTs && typeof stateTs === "number") return stateTs;
+        } catch { /* ignore */ }
       }
       return 0;
     })(),
@@ -746,6 +781,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // This makes computed properties that read from dexieRoomMap properly reactive.
   const _dexieRoomMapVersion = ref(0);
 
+  /** Matrix `m.ignored_user_list` — refreshed before room list / unread recompute */
+  const ignoredMatrixUserIdSet = shallowRef<Set<string>>(new Set());
+
+  const refreshIgnoredMatrixUserCache = () => {
+    const ms = getMatrixClientService();
+    if (!ms.isReady()) return;
+    ignoredMatrixUserIdSet.value = new Set(ms.getIgnoredMatrixUserIds());
+  };
+
+  /** Stream rooms + single-peer ignored DM — excluded from sidebar (bastyon-chat CHAT_SORTING.md §7). */
+  const shouldExcludeLocalRoomFromSidebar = (lr: LocalRoom): boolean => {
+    if (isStreamHistoryVisibility(lr.historyVisibility ?? null)) return true;
+    if (lr.isGroup) return false;
+    const ms = getMatrixClientService();
+    if (!ms.isReady()) return false;
+    const myUid = ms.getUserId();
+    if (!myUid) return false;
+    const myHex = getmatrixid(myUid);
+    const others = lr.members.filter(m => m !== myHex);
+    if (others.length !== 1) return false;
+    return ignoredMatrixUserIdSet.value.has(ms.matrixId(others[0]));
+  };
+
   // Outbound watermark for active room — used to derive message statuses
   const activeRoomOutboundWatermark = computed(() => {
     // Access version counter to register reactive dependency on dexieRoomMap mutations
@@ -971,7 +1029,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let _suppressDexieRecompute = false;
 
   const computeSortedRoomsFallback = (source: ChatRoom[], pinned: ReadonlySet<string>): ChatRoom[] => {
-    return [...source].sort((a, b) => {
+    return [...source]
+      .filter((a) => {
+        const lr = dexieRoomMap.get(a.id);
+        return !lr || !shouldExcludeLocalRoomFromSidebar(lr);
+      })
+      .sort((a, b) => {
       const aPinned = pinned.has(a.id) ? 1 : 0;
       const bPinned = pinned.has(b.id) ? 1 : 0;
       if (aPinned !== bPinned) return bPinned - aPinned;
@@ -989,6 +1052,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (idx !== -1) arr.splice(idx, 1);
         _chatRoomFromDexieCache.delete(change.roomId);
       } else {
+        if (shouldExcludeLocalRoomFromSidebar(change.room)) {
+          const oldIdx = arr.findIndex(r => r.id === change.room.id);
+          if (oldIdx !== -1) {
+            arr.splice(oldIdx, 1);
+            _chatRoomFromDexieCache.delete(change.room.id);
+          }
+          continue;
+        }
         const chatRoom = mapLocalRoomToChatRoom(change.room);
         const oldIdx = arr.findIndex(r => r.id === change.room.id);
         if (oldIdx !== -1) arr.splice(oldIdx, 1);
@@ -1017,7 +1088,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (let i = 0; i < allRooms.length; i += CHUNK) {
       const end = Math.min(i + CHUNK, allRooms.length);
       for (let j = i; j < end; j++) {
-        mapped.push(mapLocalRoomToChatRoom(allRooms[j]));
+        const lr = allRooms[j];
+        if (shouldExcludeLocalRoomFromSidebar(lr)) continue;
+        mapped.push(mapLocalRoomToChatRoom(lr));
       }
       if (end < allRooms.length) await yieldToMain();
     }
@@ -1058,6 +1131,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const ev = room?.currentState?.getStateEvents?.("m.room.history_visibility", "");
           return ev?.getContent?.()?.history_visibility ?? null;
         } catch { return null; }
+      },
+      leaveForgetStreamRoom: async (roomId: string) => {
+        if (!matrixService.isReady()) return;
+        try {
+          await matrixService.leaveRoom(roomId);
+          await matrixService.forgetRoom(roomId);
+        } catch (e) {
+          console.warn("[chat-store] leaveForgetStreamRoom failed:", roomId, e);
+          throw e;
+        }
       },
     });
   };
@@ -1155,17 +1238,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // After Dexie init: delta tracking owns _sortedRoomsRef, rooms.value changes are ignored.
   // pinnedRoomIds changes always trigger rebuild (pin order affects sort).
   let _prevPinnedRef = pinnedRoomIds.value;
+  let _prevIgnoredSerialized = "";
   watch(
-    [rooms, pinnedRoomIds],
+    [rooms, pinnedRoomIds, ignoredMatrixUserIdSet],
     () => {
       const dexieActive = chatDbKitRef.value && dexieRoomMap.size > 0;
       const pinsChanged = pinnedRoomIds.value !== _prevPinnedRef;
       _prevPinnedRef = pinnedRoomIds.value;
+      const ignoredSer = [...ignoredMatrixUserIdSet.value].sort().join("\0");
+      const ignoredChanged = ignoredSer !== _prevIgnoredSerialized;
+      _prevIgnoredSerialized = ignoredSer;
 
       if (dexieActive) {
-        // Only rebuild if pinned rooms changed — rooms.value updates are
-        // handled by Dexie delta tracking (observeRoomChanges → patchSortedRooms)
-        if (pinsChanged) scheduleFullSortedRebuild();
+        // Rebuild when pins or Matrix ignore list changes (sidebar membership).
+        if (pinsChanged || ignoredChanged) scheduleFullSortedRebuild();
       } else {
         _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
       }
@@ -1199,13 +1285,33 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const sortedRooms = computed(() => _sortedRoomsRef.value);
 
   const totalUnread = computed(() => {
+    void _dexieRoomMapVersion.value;
+    void ignoredMatrixUserIdSet.value;
+    const ms = getMatrixClientService();
+    const myUid = ms.getUserId();
+    const myHex = myUid ? getmatrixid(myUid) : "";
     if (chatDbKitRef.value && dexieRoomMap.size > 0) {
       void dexieRooms.value; // register reactive dependency
       let sum = 0;
-      for (const r of dexieRoomMap.values()) sum += r.unreadCount;
+      for (const r of dexieRoomMap.values()) {
+        if (isStreamHistoryVisibility(r.historyVisibility ?? null)) continue;
+        if (!r.isGroup && myHex) {
+          const others = r.members.filter(m => m !== myHex);
+          if (others.length === 1 && ms.isReady() && ignoredMatrixUserIdSet.value.has(ms.matrixId(others[0]))) {
+            continue;
+          }
+        }
+        sum += r.unreadCount;
+      }
       return sum;
     }
-    return rooms.value.reduce((sum, r) => sum + r.unreadCount, 0);
+    return rooms.value.reduce((sum, r) => {
+      const lr = dexieRoomMap.get(r.id);
+      if (lr && (isStreamHistoryVisibility(lr.historyVisibility ?? null) || shouldExcludeLocalRoomFromSidebar(lr))) {
+        return sum;
+      }
+      return sum + r.unreadCount;
+    }, 0);
   });
 
   /** Set helper references from auth store */
@@ -1635,15 +1741,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         : newRooms;
 
       // OPTIMIZATION: Only write rooms with display-relevant changes to Dexie
+      const matrixById = new Map<string, unknown>(
+        interactiveRooms.map((mr: { roomId: string }) => [mr.roomId as string, mr]),
+      );
       const changedForDexie: ChatRoom[] = [];
       for (const r of dexieSourceRooms) {
         const prev = dexieRoomMap.get(r.id);
+        const mr = matrixById.get(r.id) as { currentState?: { getStateEvents?: (t: string, k: string) => unknown } } | undefined;
+        const hv = mr ? getHistoryVisibilityFromMatrixRoom(mr) : null;
         if (!prev
           || prev.name !== r.name
           || prev.unreadCount !== r.unreadCount
           || (r.lastMessage?.timestamp ?? 0) !== (prev.lastMessageTimestamp ?? 0)
           || prev.membership !== (r.membership ?? "join")
           || prev.avatar !== r.avatar
+          || (prev.historyVisibility ?? null) !== (hv ?? null)
         ) {
           changedForDexie.push(r);
         }
@@ -1653,7 +1765,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         console.log(`[perf] fullRoomRefresh: ${dexieSourceRooms.length} total, ${changedForDexie.length} changed, ${dexieSourceRooms.length - changedForDexie.length} skipped`);
       }
 
-      const updates = changedForDexie.map(r => ({
+      const updates = changedForDexie.map(r => {
+        const mr = matrixById.get(r.id) as Parameters<typeof getHistoryVisibilityFromMatrixRoom>[0] | undefined;
+        const historyVisibility = mr ? getHistoryVisibilityFromMatrixRoom(mr) : null;
+        return {
         id: r.id,
         name: r.name,
         avatar: r.avatar,
@@ -1678,7 +1793,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           : r.lastMessage?.status === MessageStatus.failed ? "failed"
           : "synced"
         ) as import("@/shared/lib/local-db").LocalMessageStatus,
-      }));
+        historyVisibility,
+        };
+      });
       // Await Dexie writes so that when _suppressDexieRecompute is lifted,
       // the recompute sees fresh timestamps — avoids stale sort order AND
       // avoids source-switching blink (Dexie→in-memory→Dexie).
@@ -1904,7 +2021,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const updates = [...changed]
         .map(roomId => roomsMap.get(roomId))
         .filter((r): r is ChatRoom => !!r)
-        .map(r => ({
+        .map(r => {
+          const matrixRoom = matrixService.getRoom(r.id) as Parameters<typeof getHistoryVisibilityFromMatrixRoom>[0] | null;
+          const historyVisibility = matrixRoom ? getHistoryVisibilityFromMatrixRoom(matrixRoom) : null;
+          return {
           id: r.id,
           name: r.name,
           avatar: r.avatar,
@@ -1928,7 +2048,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             : r.lastMessage?.status === MessageStatus.failed ? "failed"
             : "synced"
           ) as import("@/shared/lib/local-db").LocalMessageStatus,
-        }));
+          historyVisibility,
+          };
+        });
       if (updates.length > 0) {
         dbKit.rooms.bulkSyncRooms(updates).catch(e =>
           console.warn("[chat-store] Dexie incremental room sync failed:", e)
@@ -2129,6 +2251,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (!matrixService.isReady() || !kit) {
       return;
     }
+
+    refreshIgnoredMatrixUserCache();
 
     // Skip if a chunked full refresh is still running — changedRoomIds
     // will accumulate and be processed when the next refresh fires.

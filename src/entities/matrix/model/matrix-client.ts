@@ -592,6 +592,28 @@ export class MatrixClientService {
     return this.client?.credentials?.userId ?? null;
   }
 
+  /** Matrix account-data ignore list (`m.ignored_user_list`) */
+  getIgnoredMatrixUserIds(): string[] {
+    if (!this.client) return [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (this.client as any).getIgnoredUsers() as string[];
+    } catch {
+      return [];
+    }
+  }
+
+  /** True if the Matrix user ID is on the ignore list */
+  isMatrixUserIgnored(userId: string): boolean {
+    if (!this.client) return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (this.client as any).isUserIgnored(userId) as boolean;
+    } catch {
+      return false;
+    }
+  }
+
   /** Convert address to Matrix user ID */
   matrixId(address: string, domain?: string): string {
     return `@${address}:${domain ?? MATRIX_SERVER}`;

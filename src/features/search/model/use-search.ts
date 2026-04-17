@@ -1,38 +1,43 @@
 import { ref, computed } from "vue";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
+import { getMatrixClientService } from "@/entities/matrix";
+import { useUserStore } from "@/entities/user/model";
+import { rankChatRoomsBySearchRelevance } from "./rank-chat-rooms";
 
 export interface MessageSearchResult {
   room: ChatRoom;
   message: Message;
 }
 
-function rankRooms(rooms: ChatRoom[], query: string, pinnedIds: Set<string>): ChatRoom[] {
-  const q = query.toLowerCase();
-  const scored = rooms
-    .filter(r => r.name.toLowerCase().includes(q))
-    .map(r => {
-      let score = 0;
-      if (r.name.toLowerCase().startsWith(q)) score += 100;
-      if (pinnedIds.has(r.id)) score += 50;
-      const ageMs = Date.now() - r.updatedAt;
-      const ageDays = ageMs / (1000 * 60 * 60 * 24);
-      score += Math.max(0, 30 - ageDays);
-      return { room: r, score };
-    });
-  scored.sort((a, b) => b.score - a.score);
-  return scored.map(s => s.room);
-}
-
 export function useSearch() {
   const chatStore = useChatStore();
+  const userStore = useUserStore();
   const query = ref("");
   const isSearching = ref(false);
 
   const chatResults = computed(() => {
     const q = query.value.trim();
     if (!q) return [];
-    return rankRooms(chatStore.sortedRooms, q, chatStore.pinnedRoomIds);
+    const qLower = q.toLowerCase();
+    const matrix = getMatrixClientService();
+    return rankChatRoomsBySearchRelevance(chatStore.sortedRooms, {
+      queryLower: qLower,
+      getMatrixRoom: (roomId) => {
+        const raw = matrix.getRoom(roomId);
+        if (!raw || typeof raw !== "object") return null;
+        return raw as {
+          getJoinRule?: () => string;
+          currentState?: { getStateEvents?: (type: string, key: string) => unknown };
+          name?: string;
+        };
+      },
+      getMemberNameLower: (address: string) => {
+        const u = userStore.getUser(address);
+        const raw = (u?.name && String(u.name).trim()) || address;
+        return raw.toLowerCase();
+      },
+    });
   });
 
   const messageResults = computed((): MessageSearchResult[] => {

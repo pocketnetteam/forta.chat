@@ -88,6 +88,9 @@ export interface LocalRoom {
 
   /** Timestamp (ms) when user cleared chat history. Events before this are hidden/purged. */
   clearedAtTs?: number;
+
+  /** `m.room.history_visibility` content value; `"world_readable"` marks stream rooms (hidden from sidebar). */
+  historyVisibility?: string | null;
 }
 
 /** Local message — extended with sync & local-first fields */
@@ -530,6 +533,18 @@ export class ChatDatabase extends Dexie {
         if (job.status === "pending") job.status = "queued";
         if (job.status === "failed") job.status = "waiting";
       });
+    });
+
+    // Version 11: historyVisibility on rooms (stream = world_readable) — optional field, no index change
+    this.version(11).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
     });
   }
 }

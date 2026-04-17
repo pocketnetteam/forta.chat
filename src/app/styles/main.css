@@ -34,6 +34,18 @@
     max-height: 100px;
     opacity: 1;
   }
+  /* Fixed explicit box — isolates layout/paint from scrolling parents (spinners, small loaders) */
+  .contain-strict {
+    contain: strict;
+  }
+}
+
+/* vue-virtual-scroller: vertical item-view gets no inline height from JS (only grid mode does).
+   contain:size ignores child intrinsic height — set explicit height matching :item-size via
+   --recycle-item-size on the RecycleScroller root. */
+.vue-recycle-scroller.ready.direction-vertical .vue-recycle-scroller__item-view {
+  contain: strict;
+  height: var(--recycle-item-size);
 }
 
 @media (max-height: 500px) {

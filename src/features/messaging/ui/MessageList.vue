@@ -1096,7 +1096,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
         class="absolute inset-x-0 top-0 z-30 flex justify-center pt-2"
       >
         <span class="flex items-center gap-1.5 rounded-full bg-neutral-grad-0/90 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">
-          <span class="inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-text-on-main-bg-color border-t-transparent" />
+          <span class="contain-strict inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-text-on-main-bg-color border-t-transparent" />
           {{ t("chat.updatingMessages") }}
         </span>
       </div>
