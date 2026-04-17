@@ -1,16 +1,13 @@
 <script setup lang="ts">
-import { useChatStore } from "@/entities/chat";
+import { useChatStore, MessageType, getMessagePreviewForUI, RoomAvatar, type DisplayResult } from "@/entities/chat";
 import type { ChatRoom } from "@/entities/chat";
-import { MessageType } from "@/entities/chat";
 import MessageStatusIcon from "@/features/messaging/ui/MessageStatusIcon.vue";
 import { useAuthStore } from "@/entities/auth";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { cleanMatrixIds, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
-import { getMessagePreviewForUI, type DisplayResult } from "@/entities/chat";
 import { useLongPress } from "@/shared/lib/gestures";
-import { UserAvatar } from "@/entities/user";
 import { getDraft } from "@/shared/lib/drafts";
 import { useSelectionStore } from "@/features/selection";
 import { hapticImpact } from "@/shared/lib/haptics";
@@ -157,13 +154,12 @@ const handleContextMenu = (e: MouseEvent) => {
           </svg>
         </div>
       </transition>
-      <UserAvatar
-        v-if="room.avatar?.startsWith('__pocketnet__:')"
-        :address="room.avatar!.replace('__pocketnet__:', '')"
+      <RoomAvatar
+        :room="room"
+        :initials-name="room._title?.text || room.name"
         size="md"
         eager
       />
-      <Avatar v-else :src="room.avatar" :name="room._title?.text || ''" size="md" />
       <!-- Invite badge -->
       <div
         v-if="!isSelectionMode && room.membership === 'invite'"

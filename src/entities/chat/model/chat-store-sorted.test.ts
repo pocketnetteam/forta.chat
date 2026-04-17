@@ -1,8 +1,27 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
-import { useChatStore } from "./chat-store";
 import { makeRoom } from "@/test-utils";
+
+// ── Mock MatrixClientService (real module can wire Dexie + leave sortedRooms on Dexie path) ──
+const mockGetRoom = vi.fn(() => ({ selfMembership: "join" }));
+const mockGetUserIdFn = vi.fn(() => "@me:server");
+const mockMatrixService = {
+  getUserId: mockGetUserIdFn,
+  getRoom: mockGetRoom,
+  sendReadReceipt: vi.fn(async () => true),
+  kit: {
+    client: { getUserId: mockGetUserIdFn },
+    isTetatetChat: vi.fn(() => true),
+    getRoomMembers: vi.fn(() => []),
+  },
+};
+
+vi.mock("@/entities/matrix", () => ({
+  getMatrixClientService: vi.fn(() => mockMatrixService),
+}));
+
+import { useChatStore } from "./chat-store";
 import type { Message } from "./types";
 import { MessageStatus, MessageType } from "./types";
 
@@ -23,6 +42,7 @@ describe("sortedRooms", () => {
   let store: ReturnType<typeof useChatStore>;
 
   beforeEach(() => {
+    localStorage.clear();
     setActivePinia(createTestingPinia({ stubActions: false }));
     store = useChatStore();
   });
@@ -56,8 +76,8 @@ describe("sortedRooms", () => {
   });
 
   it("returns rooms without lastMessage at the bottom", () => {
-    const withMsg = makeRoom({ id: "!a:s", lastMessage: makeMsgField({ timestamp: 100 }) });
-    const noMsg = makeRoom({ id: "!b:s" });
+    const withMsg = makeRoom({ id: "!a:s", lastMessage: makeMsgField({ timestamp: 100 }), updatedAt: 100 });
+    const noMsg = makeRoom({ id: "!b:s", updatedAt: 50 });
     store.rooms = [noMsg, withMsg];
     const sorted = store.sortedRooms;
     expect(sorted[0].id).toBe("!a:s");
@@ -68,6 +88,7 @@ describe("sortedRooms", () => {
     let guardStore: ReturnType<typeof useChatStore>;
 
     beforeEach(() => {
+      localStorage.clear();
       setActivePinia(createTestingPinia({ stubActions: false }));
       guardStore = useChatStore();
     });

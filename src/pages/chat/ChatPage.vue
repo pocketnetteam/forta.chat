@@ -4,6 +4,7 @@ import ChatWindow from "@/widgets/chat-window/ChatWindow.vue";
 import SettingsContentPanel from "@/widgets/sidebar/ui/SettingsContentPanel.vue";
 import { GroupCreationPanel } from "@/features/group-creation";
 import { useChatStore } from "@/entities/chat";
+import { useRoomTitleGaveUpReconcile } from "@/entities/chat/lib/use-room-title-gave-up-reconcile";
 import { useAuthStore } from "@/entities/auth";
 import { useI18n } from "@/shared/lib/i18n";
 import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
@@ -11,6 +12,7 @@ import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back
 import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
 
 const chatStore = useChatStore();
+useRoomTitleGaveUpReconcile();
 const authStore = useAuthStore();
 const { t } = useI18n();
 const { settingsSubView, closeSettingsContent, setTab } = useSidebarTab();

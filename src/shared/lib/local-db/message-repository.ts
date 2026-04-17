@@ -438,13 +438,14 @@ export class MessageRepository {
    *  @param maxAgeMs — only recover messages older than this (default 2 min) */
   async recoverStuckMedia(maxAgeMs = 2 * 60 * 1000): Promise<number> {
     const cutoff = Date.now() - maxAgeMs;
-    // Note: "status" has no standalone index (only [roomId+status] compound).
-    // Dexie falls back to a table scan, but this runs once at startup and
-    // the JS filter narrows results quickly — acceptable tradeoff.
+    // messages only indexes [roomId+status], not standalone "status" — .where("status") throws SchemaError.
     return this.db.messages
-      .where("status")
-      .equals("pending")
-      .filter((m) => m.uploadProgress !== undefined && m.timestamp < cutoff)
+      .filter(
+        (m) =>
+          m.status === "pending" &&
+          m.uploadProgress !== undefined &&
+          m.timestamp < cutoff,
+      )
       .modify({
         status: "failed" as LocalMessageStatus,
         uploadProgress: undefined,
@@ -455,9 +456,7 @@ export class MessageRepository {
   async cleanupCancelledUploads(maxAgeMs = 5 * 60 * 1000): Promise<number> {
     const cutoff = Date.now() - maxAgeMs;
     const cancelled = await this.db.messages
-      .where("status")
-      .equals("cancelled")
-      .filter((m) => m.timestamp < cutoff)
+      .filter((m) => m.status === "cancelled" && m.timestamp < cutoff)
       .toArray();
 
     if (cancelled.length === 0) return 0;

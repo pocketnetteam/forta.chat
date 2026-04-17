@@ -402,6 +402,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   // Debounce timer for refreshRooms
   let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When Matrix emits SYNCING faster than the debounce window, the timer is reset forever and
+   *  roomsInitialized never flips — sidebar stays on the loading skeleton. Bounded fallback. */
+  let refreshMaxWaitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearRefreshSchedule = () => {
+    if (refreshDebounceTimer) {
+      clearTimeout(refreshDebounceTimer);
+      refreshDebounceTimer = null;
+    }
+    if (refreshMaxWaitTimer) {
+      clearTimeout(refreshMaxWaitTimer);
+      refreshMaxWaitTimer = null;
+    }
+  };
 
   // Diff-based refresh: track which rooms changed since last refresh
   const changedRoomIds = new Set<string>();
@@ -899,18 +913,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   });
 
   // Cache: reuse ChatRoom objects when LocalRoom hasn't changed (reduces GC pressure).
-  // Invalidated by fields that affect display: timestamp, unread, name, membership.
+  // Invalidated by fields that affect list/header: timestamps, preview, members, flags, etc.
   const _chatRoomFromDexieCache = new Map<string, {
     ts: number;
     unread: number;
     name: string;
     membership: string;
+    membersKey: string;
+    updatedAt: number;
+    isGroup: boolean;
+    isPublic: boolean;
+    isWorldReadable: boolean;
     preview: string | null | undefined;
     senderId: string;
     eventId: string;
     localStatus: string | null | undefined;
     readOutboundTs: number;
     lastMsgDecryptionStatus: string | undefined;
+    reactionKey: string;
     room: ChatRoom;
   }>();
 
@@ -930,6 +950,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const readOutboundTs = lr.lastReadOutboundTs ?? 0;
     const lastMsgDecryptionStatus = lr.lastMessageDecryptionStatus;
     const lastMsgSenderId = lr.lastMessageSenderId ?? "";
+    const membersKey = lr.members.join("\u0001");
+    const reactionKey = lr.lastMessageReaction ? JSON.stringify(lr.lastMessageReaction) : "";
+    const isPublic = !!lr.isPublic;
+    const isWorldReadable = !!lr.isWorldReadable;
     const cached = _chatRoomFromDexieCache.get(lr.id);
     if (
       cached &&
@@ -937,13 +961,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       cached.unread === lr.unreadCount &&
       cached.name === lr.name &&
       cached.membership === lr.membership &&
+      cached.membersKey === membersKey &&
+      cached.updatedAt === lr.updatedAt &&
+      cached.isGroup === lr.isGroup &&
+      cached.isPublic === isPublic &&
+      cached.isWorldReadable === isWorldReadable &&
       cached.room.avatar === lr.avatar &&
       cached.preview === effectivePreview &&
       cached.senderId === lastMsgSenderId &&
       cached.eventId === (lr.lastMessageEventId ?? "") &&
       cached.localStatus === localStatus &&
       cached.readOutboundTs === readOutboundTs &&
-      cached.lastMsgDecryptionStatus === lastMsgDecryptionStatus
+      cached.lastMsgDecryptionStatus === lastMsgDecryptionStatus &&
+      cached.reactionKey === reactionKey
     ) {
       return cached.room;
     }
@@ -977,7 +1007,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } as Message : undefined,
       lastMessageReaction: lr.lastMessageReaction ?? undefined,
     } as ChatRoom;
-    _chatRoomFromDexieCache.set(lr.id, { ts, unread: lr.unreadCount, name: lr.name, membership: lr.membership, preview: effectivePreview, senderId: lastMsgSenderId, eventId: lr.lastMessageEventId ?? "", localStatus, readOutboundTs, lastMsgDecryptionStatus, room });
+    _chatRoomFromDexieCache.set(lr.id, {
+      ts,
+      unread: lr.unreadCount,
+      name: lr.name,
+      membership: lr.membership,
+      membersKey,
+      updatedAt: lr.updatedAt,
+      isGroup: lr.isGroup,
+      isPublic,
+      isWorldReadable,
+      preview: effectivePreview,
+      senderId: lastMsgSenderId,
+      eventId: lr.lastMessageEventId ?? "",
+      localStatus,
+      readOutboundTs,
+      lastMsgDecryptionStatus,
+      reactionKey,
+      room,
+    });
     return room;
   };
 
@@ -1244,7 +1292,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
       }
     },
-    { immediate: true, flush: "pre" },
+    { immediate: true, flush: "sync" },
   );
 
   // Watch for chatDbKit initialization
@@ -2246,7 +2294,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const refreshRoomsImmediate = () => {
     const matrixService = getMatrixClientService();
     const kit = matrixKitRef.value;
-    if (!matrixService.isReady() || !kit) {
+    // Do not gate on isReady(): it flips only after init()'s await getClient() returns, but the
+    // SDK emits PREPARED during await startClient() inside getClient() while ready is still false.
+    // Dropping that refresh leaves roomsInitialized=false and the sidebar on the loading skeleton.
+    if (!kit || !matrixService.client || matrixService.error) {
       return;
     }
 
@@ -2303,13 +2354,36 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       syncState.value = state;
       if (state === "PREPARED") clearTimelineSessionGuards();
     }
+    // PREPARED is rare; running it through the same debounce as wall-of SYNCING can lose it
+    // when the SDK catch-up loop emits faster than 150ms.
+    if (state === "PREPARED") {
+      clearRefreshSchedule();
+      refreshRoomsImmediate();
+      flushPendingReadWatermarks();
+      return;
+    }
     if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
     refreshDebounceTimer = setTimeout(() => {
       refreshDebounceTimer = null;
+      if (refreshMaxWaitTimer) {
+        clearTimeout(refreshMaxWaitTimer);
+        refreshMaxWaitTimer = null;
+      }
       refreshRoomsImmediate();
       // Retry pending read watermarks — timeline may now have the events we need
       flushPendingReadWatermarks();
     }, 150);
+    if (!roomsInitialized.value && !refreshMaxWaitTimer) {
+      refreshMaxWaitTimer = setTimeout(() => {
+        refreshMaxWaitTimer = null;
+        if (refreshDebounceTimer) {
+          clearTimeout(refreshDebounceTimer);
+          refreshDebounceTimer = null;
+        }
+        refreshRoomsImmediate();
+        flushPendingReadWatermarks();
+      }, 300);
+    }
   };
 
   /** Update sync state for non-refresh states (ERROR, RECONNECTING, STOPPED) */
@@ -2322,12 +2396,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Force immediate refresh (used after init when first load must be instant) */
   const refreshRoomsNow = () => {
-    if (refreshDebounceTimer) {
-      clearTimeout(refreshDebounceTimer);
-      refreshDebounceTimer = null;
-    }
+    clearRefreshSchedule();
     lastSyncState = "PREPARED"; // Force full refresh
     refreshRoomsImmediate();
+    flushPendingReadWatermarks();
   };
 
   /** Decrypt last-message previews for rooms that show [encrypted].
@@ -5953,6 +6025,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Reset all in-memory state and account-specific localStorage (called on logout) */
   const cleanup = () => {
+    clearRefreshSchedule();
     rooms.value = [];
     roomsMap.clear();
     activeRoomId.value = null;
@@ -6093,6 +6166,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     setRoomTopic,
     setTypingUsers,
     sortedRooms,
+    /** Bumped when Dexie room rows change — tie header/list to the same reactive epoch */
+    roomUiEpoch: computed(() => _dexieRoomMapVersion.value),
     unbanMember,
     toggleMuteRoom,
     togglePinRoom,

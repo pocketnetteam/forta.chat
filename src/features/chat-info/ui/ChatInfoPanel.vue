@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useChatStore } from "@/entities/chat";
+import { useChatStore, RoomAvatar } from "@/entities/chat";
 import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
@@ -456,12 +456,12 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 :class="isAdmin && room.isGroup ? 'cursor-pointer' : ''"
                 @click="handleAvatarClick"
               >
-                <UserAvatar
-                  v-if="room.avatar?.startsWith('__pocketnet__:')"
-                  :address="room.avatar.replace('__pocketnet__:', '')"
+                <RoomAvatar
+                  :room="room"
+                  :initials-name="roomDisplayName"
                   size="xl"
+                  eager
                 />
-                <Avatar v-else :src="room.avatar" :name="room.name" size="xl" />
                 <!-- Camera overlay (admin + group only) -->
                 <div
                   v-if="isAdmin && room.isGroup"

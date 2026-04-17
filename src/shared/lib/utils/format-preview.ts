@@ -1,4 +1,4 @@
-import { useChatStore } from "@/entities/chat";
+import { useChatStore, getMessagePreviewForUI } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
@@ -19,7 +19,13 @@ export function useFormatPreview() {
 
   const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
     if (!msg) return t("contactList.noMessages");
-    if (isEncryptedPlaceholder(msg.content)) return "";
+    if (isEncryptedPlaceholder(msg.content)) {
+      return getMessagePreviewForUI(
+        msg.content ?? "",
+        msg.decryptionStatus,
+        t("message.notDecrypted"),
+      ).text;
+    }
     if (msg.deleted || (!msg.content && msg.type === MessageType.text && !msg.fileInfo)) {
       return `🚫 ${t("message.deleted")}`;
     }

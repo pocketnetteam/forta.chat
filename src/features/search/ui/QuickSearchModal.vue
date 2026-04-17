@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { useChatStore } from "@/entities/chat";
+import { useChatStore, getRoomTitleForUI, RoomAvatar, roomTitleGaveUpIds } from "@/entities/chat";
 import type { ChatRoom } from "@/entities/chat";
-import { UserAvatar } from "@/entities/user";
-import Avatar from "@/shared/ui/avatar/Avatar.vue";
+import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { splitByQuery } from "@/shared/lib/utils/highlight";
 import { useSearch } from "../model/use-search";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
@@ -13,6 +12,15 @@ const chatStore = useChatStore();
 const { query, chatResults, clearSearch } = useSearch();
 const { t } = useI18n();
 const { formatPreview } = useFormatPreview();
+const { resolve: resolveRoomName } = useResolvedRoomName();
+
+function roomTitleText(room: ChatRoom): string {
+  return getRoomTitleForUI(resolveRoomName(room), {
+    gaveUp: roomTitleGaveUpIds.value.has(room.id),
+    roomId: room.id,
+    fallbackPrefix: t("common.encryptedChat"),
+  }).text;
+}
 
 const inputRef = ref<HTMLInputElement>();
 const listRef = ref<HTMLElement>();
@@ -116,21 +124,21 @@ const handleBackdropClick = () => {
               @click="selectRoom(room)"
               @mouseenter="selectedIndex = i"
             >
-              <UserAvatar
-                v-if="room.avatar?.startsWith('__pocketnet__:')"
-                :address="room.avatar.replace('__pocketnet__:', '')"
+              <RoomAvatar
+                :room="room"
+                :initials-name="roomTitleText(room)"
                 size="sm"
+                eager
               />
-              <Avatar v-else :src="room.avatar" :name="room.name" size="sm" />
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm font-medium text-text-color">
                   <template v-if="query.trim()">
-                    <template v-for="(part, j) in splitByQuery(room.name, query.trim())" :key="j">
+                    <template v-for="(part, j) in splitByQuery(roomTitleText(room), query.trim())" :key="j">
                       <mark v-if="part.highlight" class="rounded-sm bg-color-txt-ac/20 font-semibold text-color-txt-ac">{{ part.text }}</mark>
                       <span v-else>{{ part.text }}</span>
                     </template>
                   </template>
-                  <span v-else>{{ room.name }}</span>
+                  <span v-else>{{ roomTitleText(room) }}</span>
                 </div>
                 <div class="truncate text-xs text-text-on-main-bg-color">
                   {{ formatPreview(room.lastMessage, room) }}

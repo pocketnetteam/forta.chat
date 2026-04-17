@@ -1,20 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
+import { ref, computed, nextTick, watch, onUnmounted } from "vue";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useChannelStore } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
-import { cleanMatrixIds, isUnresolvedName, formatGroupMemberNames } from "@/entities/chat/lib/chat-helpers";
-import { getRoomTitleForUI, type DisplayResult } from "@/entities/chat";
+import { cleanMatrixIds } from "@/entities/chat/lib/chat-helpers";
+import { getRoomTitleForUI, type DisplayResult, resolveRoomDisplayName, resolveMemberNamesForRoomTitle, markRoomTitlesGaveUp, roomTitleGaveUpIds } from "@/entities/chat";
 import { ContextMenu } from "@/shared/ui/context-menu";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
 import { useUserStore } from "@/entities/user/model";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { useSelectionStore } from "@/features/selection";
-import { tRaw } from "@/shared/lib/i18n";
 import ChatRoomRow from "./ChatRoomRow.vue";
 import ChannelRow from "./ChannelRow.vue";
 
@@ -74,7 +73,7 @@ const roomNameMap = computed(() => {
   const map: Record<string, string> = {};
   let changed = false;
   for (const room of chatStore.sortedRooms) {
-    const name = _resolveRoomName(room, allUsers, myHexId);
+    const name = resolveRoomDisplayName(room, allUsers, myHexId, a => chatStore.getDisplayName(a));
     map[room.id] = name;
     if (!changed && _prevNameMapResult[room.id] !== name) changed = true;
   }
@@ -89,102 +88,18 @@ const roomNameMap = computed(() => {
   return map;
 });
 
-/** Resolve room display name — matches original bastyon-chat name.vue exactly:
- *  1. For 1:1: get other members → hexDecode(hexId) → look up name in userStore → join with ", "
- *  2. If no names found → "-"
- *  3. If room name starts with "@" → strip "@"
- *  4. For groups/public: use room name as-is */
-
-// Cache hexDecode results to avoid repeated computation
-const hexDecodeCache = new Map<string, string>();
-function cachedHexDecode(hex: string): string {
-  let result = hexDecodeCache.get(hex);
-  if (result === undefined) {
-    result = hexDecode(hex);
-    hexDecodeCache.set(hex, result);
-  }
-  return result;
-}
-
-/** Resolve member names — checks Pocketnet profiles first, then Matrix displaynames.
- *  Matrix displaynames come from m.room.member state events (free, already in sync)
- *  and are available instantly without any RPC call. */
-function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string[] {
-  const otherMembers = room.members.filter(m => m !== myHexId);
-
-  const names: string[] = [];
-  for (const hexId of otherMembers) {
-    const addr = cachedHexDecode(hexId);
-    if (/^[A-Za-z0-9]+$/.test(addr)) {
-      const user = allUsers[addr];
-      if (user?.deleted) { names.push(tRaw("profile.deletedAccount")); continue; }
-      if (user?.name && !isUnresolvedName(user.name) && user.name !== addr) {
-        names.push(user.name); continue;
-      }
-      const matrixName = chatStore.getDisplayName(addr);
-      if (matrixName && matrixName !== addr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-        names.push(matrixName); continue;
-      }
-    }
-  }
-
-  // Fallback: try avatar address
-  if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
-    const avatarAddr = room.avatar.slice("__pocketnet__:".length);
-    const user = allUsers[avatarAddr];
-    if (user?.deleted) {
-      names.push(tRaw("profile.deletedAccount"));
-    } else if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
-      names.push(user.name);
-    } else {
-      const matrixName = chatStore.getDisplayName(avatarAddr);
-      if (matrixName && matrixName !== avatarAddr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-        names.push(matrixName);
-      }
-    }
-  }
-
-  return names;
-}
-
-/** Rooms where name resolution permanently failed — stop showing skeleton for these */
-const gaveUpRooms = ref(new Set<string>());
-
-/** Track which rooms have no real display name yet */
+/** Track which rooms have no member-derived display name yet (for retries). */
 const unresolvedRoomSet = computed(() => {
   const set = new Set<string>();
   const allUsers = userStore.users;
   const myHexId = authStore.address ? hexEncode(authStore.address) : "";
   for (const room of chatStore.sortedRooms) {
-    if (gaveUpRooms.value.has(room.id)) continue;
-    const resolved = _resolveMemberNames(room, allUsers, myHexId);
+    if (roomTitleGaveUpIds.value.has(room.id)) continue;
+    const resolved = resolveMemberNamesForRoomTitle(room, allUsers, myHexId, a => chatStore.getDisplayName(a));
     if (resolved.length === 0) set.add(room.id);
   }
   return set;
 });
-
-
-function _resolveRoomName(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string {
-  if (!room.isGroup) {
-    const names = _resolveMemberNames(room, allUsers, myHexId);
-    if (names.length > 0) return names.join(", ");
-    return cleanMatrixIds(room.name);
-  }
-  if (room.name?.startsWith("@")) return room.name.slice(1);
-  if (!isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
-  const names = _resolveMemberNames(room, allUsers, myHexId);
-  if (names.length > 0) return formatGroupMemberNames(names);
-  // Fallback for groups (including mis-flagged 1:1): try avatar address, then member address
-  if (room.avatar?.startsWith("__pocketnet__:")) {
-    return room.avatar.slice("__pocketnet__:".length);
-  }
-  const otherMembers = room.members.filter(m => m !== myHexId);
-  if (otherMembers.length > 0) {
-    const addr = cachedHexDecode(otherMembers[0]);
-    if (/^[A-Za-z0-9]+$/.test(addr)) return addr;
-  }
-  return cleanMatrixIds(room.name);
-}
 
 const resolveRoomName = (room: ChatRoom): string => {
   return roomNameMap.value[room.id] ?? cleanMatrixIds(room.name);
@@ -194,7 +109,7 @@ const resolveRoomName = (room: ChatRoom): string => {
 function getRoomTitle(room: ChatRoom): DisplayResult {
   return getRoomTitleForUI(
     resolveRoomName(room),
-    { gaveUp: gaveUpRooms.value.has(room.id), roomId: room.id, fallbackPrefix: t("common.encryptedChat") },
+    { gaveUp: roomTitleGaveUpIds.value.has(room.id), roomId: room.id, fallbackPrefix: t("common.encryptedChat") },
   );
 }
 
@@ -239,8 +154,7 @@ watch(unresolvedRoomSet, (set) => {
     console.warn(
       `[contact-list] giving up on ${unresolvedRoomIds.length} unresolved rooms after ${MAX_NAME_RETRIES} retries`,
     );
-    for (const id of unresolvedRoomIds) gaveUpRooms.value.add(id);
-    triggerRef(gaveUpRooms);
+    markRoomTitlesGaveUp(unresolvedRoomIds);
     return;
   }
   clearTimeout(nameRetryTimer);
@@ -262,7 +176,7 @@ watch(unresolvedRoomSet, (set) => {
       if (!room) continue;
       for (const hexId of room.members) {
         if (hexId === myHex) continue;
-        const addr = cachedHexDecode(hexId);
+        const addr = hexDecode(hexId);
         if (/^[A-Za-z0-9]+$/.test(addr) && !userStore.users[addr]?.name) addrs.push(addr);
       }
     }
@@ -271,21 +185,6 @@ watch(unresolvedRoomSet, (set) => {
 }, { immediate: true });
 
 onUnmounted(() => clearTimeout(nameRetryTimer));
-
-// If user profiles arrive late (e.g. from background refresh), remove gave-up flag
-watch(() => userStore.users, () => {
-  if (gaveUpRooms.value.size === 0) return;
-  const myHexId = authStore.address ? hexEncode(authStore.address) : "";
-  const allUsers = userStore.users;
-  for (const roomId of [...gaveUpRooms.value]) {
-    const room = chatStore.sortedRooms.find(r => r.id === roomId);
-    if (!room) continue;
-    if (_resolveMemberNames(room, allUsers, myHexId).length > 0) {
-      gaveUpRooms.value.delete(roomId);
-    }
-  }
-}, { deep: false });
-
 
 const PAGE_SIZE = 50;
 const displayLimit = ref(PAGE_SIZE);
@@ -300,7 +199,22 @@ type UnifiedItem = (ChatRoom | Channel) & { _key: string; _type: "room" | "chann
 // IMPORTANT: resolvedName is included in the cache key so that background profile
 // loading (triggerRef on userStore.users → roomNameMap recompute) invalidates
 // stale titles that were computed before profiles arrived.
-const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; preview: string; resolvedName: string; decryptionStatus: string; senderId: string; avatar: string; item: UnifiedItem }>();
+const _unifiedItemCache = new Map<string, {
+  ts: number;
+  unread: number;
+  name: string;
+  membership: string;
+  membersKey: string;
+  isGroup: boolean;
+  updatedAt: number;
+  msgStatus: string;
+  preview: string;
+  resolvedName: string;
+  decryptionStatus: string;
+  senderId: string;
+  avatar: string;
+  item: UnifiedItem;
+}>();
 const _channelItemCache = new Map<string, { lastTime: number; name: string; avatar: string; item: UnifiedItem }>();
 
 const allFilteredRooms = computed<UnifiedItem[]>(() => {
@@ -316,9 +230,13 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
     const decryptionStatus = r.lastMessage?.decryptionStatus ?? "";
     const senderId = r.lastMessage?.senderId ?? "";
     const avatar = r.avatar ?? "";
+    const membersKey = r.members.join("\u0001");
     const cached = _unifiedItemCache.get(r.id);
     if (cached && cached.ts === ts && cached.unread === r.unreadCount
         && cached.name === r.name && cached.membership === (r.membership ?? "join")
+        && cached.membersKey === membersKey
+        && cached.isGroup === r.isGroup
+        && cached.updatedAt === r.updatedAt
         && cached.msgStatus === msgStatus && cached.preview === preview
         && cached.resolvedName === resolvedName
         && cached.decryptionStatus === decryptionStatus
@@ -327,7 +245,22 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
       return cached.item;
     }
     const item: UnifiedItem = { ...r, _key: r.id, _type: "room", _title: getRoomTitle(r) };
-    _unifiedItemCache.set(r.id, { ts, unread: r.unreadCount, name: r.name, membership: r.membership ?? "join", msgStatus, preview, resolvedName, decryptionStatus, senderId, avatar, item });
+    _unifiedItemCache.set(r.id, {
+      ts,
+      unread: r.unreadCount,
+      name: r.name,
+      membership: r.membership ?? "join",
+      membersKey,
+      isGroup: r.isGroup,
+      updatedAt: r.updatedAt,
+      msgStatus,
+      preview,
+      resolvedName,
+      decryptionStatus,
+      senderId,
+      avatar,
+      item,
+    });
     return item;
   };
 

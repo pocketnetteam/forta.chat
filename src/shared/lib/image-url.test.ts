@@ -36,6 +36,12 @@ describe("normalizePocketnetImageUrl", () => {
     expect(normalizePocketnetImageUrl(blobUrl)).toBe(blobUrl);
   });
 
+  it("returns empty for __pocketnet__: address sentinel (not a /images/ path)", () => {
+    expect(
+      normalizePocketnetImageUrl("__pocketnet__:PK7HZTSCG1AGtbokfLuc9Pnd6VTgVFa45b"),
+    ).toBe("");
+  });
+
   it("does not double-prefix http URLs", () => {
     const url = "https://example.com/images/foo.jpg";
     expect(normalizePocketnetImageUrl(url)).toBe(url);

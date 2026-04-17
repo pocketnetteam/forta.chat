@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from "vue";
-import { useChatStore, type ChatRoom } from "@/entities/chat";
-import { UserAvatar } from "@/entities/user";
+import { useChatStore, getRoomTitleForUI, RoomAvatar, roomTitleGaveUpIds, type ChatRoom } from "@/entities/chat";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
@@ -74,6 +73,13 @@ const filteredRooms = computed(() => {
 
   return rooms;
 });
+
+const roomAvatarTitle = (room: ChatRoom): string =>
+  getRoomTitleForUI(resolveRoomName(room), {
+    gaveUp: roomTitleGaveUpIds.value.has(room.id),
+    roomId: room.id,
+    fallbackPrefix: t("common.encryptedChat"),
+  }).text;
 
 const getRoomSubtitle = (room: ChatRoom): string => {
   if (room.isGroup) {
@@ -167,12 +173,12 @@ const handleClose = () => {
                 @click="selectRoom(room.id)"
               >
                 <div class="relative shrink-0">
-                  <UserAvatar
-                    v-if="room.avatar?.startsWith('__pocketnet__:')"
-                    :address="room.avatar.replace('__pocketnet__:', '')"
+                  <RoomAvatar
+                    :room="room"
+                    :initials-name="roomAvatarTitle(room)"
                     size="md"
+                    eager
                   />
-                  <Avatar v-else :src="room.avatar" :name="resolveRoomName(room) || ''" size="md" />
                   <!-- Group badge -->
                   <div
                     v-if="room.isGroup"

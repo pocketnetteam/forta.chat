@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useChatStore, MessageType } from "@/entities/chat";
+import { useChatStore, MessageType, type ChatRoom } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
@@ -13,7 +13,6 @@ import ChatSearch from "@/features/messaging/ui/ChatSearch.vue";
 import { useToast } from "@/shared/lib/use-toast";
 import { ChatInfoPanel, UserProfilePanel } from "@/features/chat-info";
 import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
-import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
 
 import { useCallService } from "@/features/video-calls/model/call-service";
@@ -24,7 +23,9 @@ import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import DropOverlay from "@/features/messaging/ui/DropOverlay.vue";
 import { usePasteDrop } from "@/features/messaging/model/use-paste-drop";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
-import { getRoomTitleForUI, type DisplayResult } from "@/entities/chat";
+import { getRoomTitleForUI, type DisplayResult, RoomAvatar, roomTitleGaveUpIds } from "@/entities/chat";
+import { useActiveRoomTitleRecovery } from "@/entities/chat/lib/use-active-room-title-recovery";
+import { getRoomForUiSync } from "@/entities/chat/lib/room-for-ui-sync";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -33,6 +34,12 @@ const channelStore = useChannelStore();
 const emit = defineEmits<{ back: [] }>();
 
 const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
+
+/** roomsMap can lag Dexie/sortedRooms — align header with the same row as the sidebar list. */
+const roomForUi = computed((): ChatRoom | undefined => {
+  void chatStore.roomUiEpoch;
+  return getRoomForUiSync(chatStore);
+});
 
 // --- Auto-chain playback for voice messages ---
 const playback = useAudioPlayback();
@@ -87,7 +94,7 @@ const peerKeysMissing = computed(() => {
   if (!roomId) return false;
   const status = chatStore.peerKeysStatus.get(roomId);
   // Show warning only when peers lack keys (not for public/large rooms)
-  if (chatStore.activeRoom?.isGroup) return false;
+  if (roomForUi.value?.isGroup) return false;
   return status === "missing";
 });
 
@@ -122,14 +129,16 @@ const { toast } = useToast();
 const { t } = useI18n();
 
 const isAdmin = computed(() => {
-  if (!chatStore.activeRoom) return false;
-  return chatStore.getRoomPowerLevels(chatStore.activeRoom.id).myLevel >= 50;
+  const room = roomForUi.value;
+  if (!room) return false;
+  return chatStore.getRoomPowerLevels(room.id).myLevel >= 50;
 });
 
 const { resolve: resolveRoomName } = useResolvedRoomName();
+useActiveRoomTitleRecovery();
 
 /** Trigger lazy-loading of missing user profiles for active room members */
-function _ensureActiveMembers(room: NonNullable<typeof chatStore.activeRoom>): void {
+function _ensureActiveMembers(room: ChatRoom): void {
   const myHex = authStore.address ? hexEncode(authStore.address) : "";
   const otherMembers = room.members.filter(m => m !== myHex);
   for (const hexId of otherMembers) {
@@ -142,11 +151,19 @@ function _ensureActiveMembers(room: NonNullable<typeof chatStore.activeRoom>): v
 }
 
 const activeRoomTitle = computed<DisplayResult>(() => {
-  const room = chatStore.activeRoom;
-  if (!room) return { state: "ready", text: "" };
+  const room = roomForUi.value;
+  if (!room) {
+    return chatStore.activeRoomId
+      ? { state: "resolving" as const, text: "" }
+      : { state: "ready" as const, text: "" };
+  }
   _ensureActiveMembers(room);
   const resolved = resolveRoomName(room);
-  return getRoomTitleForUI(resolved, { gaveUp: false, roomId: room.id, fallbackPrefix: t("common.encryptedChat") });
+  return getRoomTitleForUI(resolved, {
+    gaveUp: roomTitleGaveUpIds.value.has(room.id),
+    roomId: room.id,
+    fallbackPrefix: t("common.encryptedChat"),
+  });
 });
 
 const showForwardPicker = ref(false);
@@ -208,7 +225,7 @@ provide("openUserProfile", openUserProfile);
 /** Get the other member's Pocketnet address in a 1:1 chat.
  *  room.members stores hex-encoded addresses; we compare in hex then decode to Base58. */
 const otherMemberAddress = computed(() => {
-  const room = chatStore.activeRoom;
+  const room = roomForUi.value;
   if (!room || room.isGroup) return "";
   const myHex = authStore.address ? hexEncode(authStore.address) : "";
   const hexAddr = room.members.find((m) => m !== myHex) ?? "";
@@ -265,7 +282,7 @@ const typingText = computed(() => {
   const others = typingUsers.filter(id => id !== myAddr);
   if (others.length === 0) return "";
 
-  const room = chatStore.activeRoom;
+  const room = roomForUi.value;
   if (!room?.isGroup) {
     return t("chat.typing");
   }
@@ -283,7 +300,7 @@ const typingText = computed(() => {
 /** Subtitle: typing indicator or member count */
 const subtitle = computed(() => {
   if (typingText.value) return typingText.value;
-  const room = chatStore.activeRoom;
+  const room = roomForUi.value;
   if (!room) return "";
   if (room.isGroup) return t("chat.members", { count: chatStore.getRoomMemberCount(room.id) });
   return "";
@@ -302,14 +319,14 @@ const closeSearch = () => {
 
 /** Ctrl+F / Cmd+F keyboard shortcut to open search */
 const handleKeydown = (e: KeyboardEvent) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "f" && chatStore.activeRoom) {
+  if ((e.ctrlKey || e.metaKey) && e.key === "f" && roomForUi.value) {
     e.preventDefault();
     showSearch.value = true;
   }
   if (e.key === "Escape") {
     if (showSearch.value) {
       closeSearch();
-    } else if (chatStore.activeRoom && !isChannelView.value) {
+    } else if (roomForUi.value && !isChannelView.value) {
       chatStore.setActiveRoom(null);
       // Снять фокус, чтобы не оставалась обводка на vue-recycle-scroller__item-view
       (document.activeElement as HTMLElement)?.blur();
@@ -318,7 +335,7 @@ const handleKeydown = (e: KeyboardEvent) => {
 };
 
 /** Whether the active room is an invite (not yet joined) */
-const isInvite = computed(() => chatStore.activeRoom?.membership === "invite");
+const isInvite = computed(() => roomForUi.value?.membership === "invite");
 const inviteLoading = ref(false);
 
 const handleAcceptInvite = async () => {
@@ -355,9 +372,9 @@ onUnmounted(() => {
 
 <template>
   <div ref="chatWindowRef" class="safe-bottom relative flex h-full flex-col bg-background-total-theme">
-    <!-- Chat header -->
+    <!-- Chat header (activeRoomId: room row can exist in Dexie before roomsMap catches up) -->
     <div
-      v-if="chatStore.activeRoom && !isChannelView"
+      v-if="chatStore.activeRoomId && !isChannelView"
       class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-3"
     >
       <!-- Back button (mobile) -->
@@ -377,12 +394,18 @@ onUnmounted(() => {
         :aria-label="activeRoomTitle.text + ' — ' + t('info.title')"
         @click="showInfoPanel = true"
       >
-        <UserAvatar
-          v-if="chatStore.activeRoom.avatar?.startsWith('__pocketnet__:')"
-          :address="chatStore.activeRoom.avatar.replace('__pocketnet__:', '')"
+        <RoomAvatar
+          v-if="roomForUi"
+          :room="roomForUi"
+          :initials-name="activeRoomTitle.text || roomForUi.name"
           size="sm"
+          eager
         />
-        <Avatar v-else :src="chatStore.activeRoom.avatar" :name="activeRoomTitle.text" size="sm" />
+        <div
+          v-else
+          class="h-8 w-8 shrink-0 animate-pulse rounded-full bg-neutral-grad-2"
+          aria-hidden="true"
+        />
         <div class="min-w-0 flex-1">
           <div v-if="activeRoomTitle.state === 'resolving'" class="h-4 w-28 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
           <div
@@ -415,7 +438,7 @@ onUnmounted(() => {
 
       <!-- Voice call button (1:1 only) -->
       <button
-        v-if="!chatStore.activeRoom.isGroup"
+        v-if="roomForUi && !roomForUi.isGroup"
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
         :title="t('call.voiceCall')"
         :aria-label="t('call.voiceCall')"
@@ -448,9 +471,9 @@ onUnmounted(() => {
       @back="() => { channelStore.clearActiveChannel(); emit('back'); }"
     />
 
-    <!-- No room selected (only when no channel either) -->
+    <!-- No room selected (only when no channel either; do not use activeRoom — it can lag activeRoomId) -->
     <div
-      v-else-if="!chatStore.activeRoom"
+      v-else-if="!chatStore.activeRoomId"
       class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center text-text-on-main-bg-color"
     >
       <!-- Back button (mobile only) -->
@@ -474,8 +497,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Active room content -->
-    <template v-else-if="chatStore.activeRoom">
+    <!-- Active room content (room object follows activeRoomId once store syncs) -->
+    <template v-else-if="chatStore.activeRoomId">
 
       <!-- Invite preview (not yet joined) -->
       <div
@@ -492,10 +515,10 @@ onUnmounted(() => {
             {{ t("chat.invitation") }}
           </h3>
           <p class="mt-1 text-sm text-text-on-main-bg-color">
-            <template v-if="chatStore.activeRoom?.isGroup">
+            <template v-if="roomForUi?.isGroup">
               {{ t("chat.inviteGroup", { name: activeRoomTitle.text }) }}
               <br />
-              <span class="text-xs">{{ t("chat.members", { count: chatStore.getRoomMemberCount(chatStore.activeRoom.id) }) }}</span>
+              <span class="text-xs">{{ t("chat.members", { count: roomForUi ? chatStore.getRoomMemberCount(roomForUi.id) : 0 }) }}</span>
             </template>
             <template v-else>
               {{ t("chat.invitePersonal", { name: activeRoomTitle.text }) }}
@@ -547,7 +570,7 @@ onUnmounted(() => {
         <MessageInput
           v-else
           ref="messageInputRef"
-          :show-donate="!chatStore.activeRoom?.isGroup && walletStore.isAvailable"
+          :show-donate="!roomForUi?.isGroup && walletStore.isAvailable"
           @donate="showDonateModal = true"
         />
       </template>

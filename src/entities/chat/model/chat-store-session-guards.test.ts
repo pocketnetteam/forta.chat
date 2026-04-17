@@ -63,6 +63,26 @@ describe("session guards — prevent redundant scrollback on room re-entry", () 
     expect(fn).toContain(`if (state === "PREPARED") clearTimelineSessionGuards()`);
   });
 
+  it("refreshRooms runs PREPARED immediately and max-waits until first init under rapid SYNCING", () => {
+    const source = getSource();
+    const fn = source.slice(
+      source.indexOf("const refreshRooms"),
+      source.indexOf("/** Update sync state"),
+    );
+    expect(fn).toContain("clearRefreshSchedule()");
+    expect(fn).toContain("!roomsInitialized.value && !refreshMaxWaitTimer");
+  });
+
+  it("refreshRoomsImmediate must not gate on matrix isReady (PREPARED during startClient)", () => {
+    const source = getSource();
+    const fn = source.slice(
+      source.indexOf("const refreshRoomsImmediate"),
+      source.indexOf("/** Debounced refresh"),
+    );
+    expect(fn).toContain("Do not gate on isReady()");
+    expect(fn).toContain("!matrixService.client");
+  });
+
   it("isRoomTimelineLoaded is exported for MessageList", () => {
     const source = getSource();
     expect(source).toContain("isRoomTimelineLoaded,");

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { useContacts } from "../model/use-contacts";
-import { useChatStore } from "@/entities/chat";
-import type { ChatRoom } from "@/entities/chat";
+import { useChatStore, getRoomTitleForUI, RoomAvatar, roomTitleGaveUpIds, type ChatRoom } from "@/entities/chat";
 import { useChannelStore } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
 import { UserAvatar } from "@/entities/user";
@@ -28,6 +27,13 @@ const channelStore = useChannelStore();
 const { t } = useI18n();
 const { formatPreview } = useFormatPreview();
 const { resolve: resolveRoomName } = useResolvedRoomName();
+
+const roomListTitle = (room: ChatRoom) =>
+  getRoomTitleForUI(resolveRoomName(room), {
+    gaveUp: roomTitleGaveUpIds.value.has(room.id),
+    roomId: room.id,
+    fallbackPrefix: t("common.encryptedChat"),
+  }).text;
 
 // Use the shared search composable for chat and message results
 const search = useSearch();
@@ -120,12 +126,12 @@ const handleSelectChannel = (channel: Channel) => {
         class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-all hover:bg-neutral-grad-0 active:scale-[0.98]"
         @click="handleSelectRoom(room)"
       >
-        <UserAvatar
-          v-if="room.avatar?.startsWith('__pocketnet__:')"
-          :address="room.avatar.replace('__pocketnet__:', '')"
+        <RoomAvatar
+          :room="room"
+          :initials-name="roomListTitle(room)"
           size="sm"
+          eager
         />
-        <Avatar v-else :src="room.avatar" :name="resolveRoomName(room)" size="sm" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-[15px] font-medium text-text-color">
             <span v-if="isUnresolvedName(resolveRoomName(room))" class="inline-block h-4 w-24 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
@@ -229,12 +235,12 @@ const handleSelectChannel = (channel: Channel) => {
         class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-all hover:bg-neutral-grad-0 active:scale-[0.98]"
         @click="handleSelectMessage(result)"
       >
-        <UserAvatar
-          v-if="result.room.avatar?.startsWith('__pocketnet__:')"
-          :address="result.room.avatar.replace('__pocketnet__:', '')"
+        <RoomAvatar
+          :room="result.room"
+          :initials-name="roomListTitle(result.room)"
           size="sm"
+          eager
         />
-        <Avatar v-else :src="result.room.avatar" :name="resolveRoomName(result.room)" size="sm" />
         <div class="min-w-0 flex-1">
           <div v-if="isUnresolvedName(resolveRoomName(result.room))" class="h-3 w-20 shrink-0 contain-strict animate-pulse rounded bg-neutral-grad-2" />
           <div v-else class="truncate text-xs font-medium text-text-on-main-bg-color">{{ resolveRoomName(result.room) }}</div>

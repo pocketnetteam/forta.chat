@@ -28,6 +28,8 @@ export function getArchivedPeertubeServers(): readonly string[] {
  * Normalize a Pocketnet image URL:
  *  1. If `src` is a relative image identifier (not starting with "http"),
  *     prefix it with the Bastyon images base.
+ *     Skips the internal chat-room sentinel `__pocketnet__:address` (that value is
+ *     not on /images/ — UI must resolve it via UserAvatar / profile APIs).
  *  2. Rewrite archived peertube server hosts → archive CDN.
  *  3. Fix known host/protocol issues (bastyon SSL, test env, double-scheme).
  *
@@ -38,6 +40,10 @@ export function normalizePocketnetImageUrl(src: string | undefined | null): stri
   if (!src) return "";
 
   let url = src;
+
+  // Chat/Matrix store this sentinel for “avatar = other user’s Pocketnet profile”.
+  // It must never be turned into https://bastyon.com/images/__pocketnet__:… (404).
+  if (url.startsWith("__pocketnet__:")) return "";
 
   // Relative image ids → absolute Bastyon images URL
   if (!url.startsWith("http") && !url.startsWith("data:") && !url.startsWith("blob:")) {

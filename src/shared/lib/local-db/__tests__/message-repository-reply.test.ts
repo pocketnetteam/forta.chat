@@ -184,3 +184,50 @@ describe("MessageRepository.patchUnresolvedReplies", () => {
     expect(b?.replyTo?.senderId).toBe("bob");
   });
 });
+
+describe("MessageRepository media recovery (no standalone messages.status index)", () => {
+  let db: TestDb;
+  let repo: MessageRepository;
+
+  beforeEach(async () => {
+    db = new TestDb();
+    await db.open();
+    repo = new MessageRepository(db as unknown as ChatDatabase);
+  });
+
+  afterEach(async () => {
+    await db.delete();
+  });
+
+  it("recoverStuckMedia uses filter+modify without SchemaError", async () => {
+    const old = Date.now() - 10 * 60 * 1000;
+    await db.messages.add(
+      makeLocalMsg({
+        eventId: "",
+        clientId: "c1",
+        status: "pending",
+        timestamp: old,
+        uploadProgress: 42,
+      }),
+    );
+    const n = await repo.recoverStuckMedia(2 * 60 * 1000);
+    expect(n).toBe(1);
+    const m = await db.messages.orderBy("localId").last();
+    expect(m?.status).toBe("failed");
+    expect(m?.uploadProgress).toBeUndefined();
+  });
+
+  it("cleanupCancelledUploads uses filter without SchemaError", async () => {
+    const old = Date.now() - 10 * 60 * 1000;
+    await db.messages.add(
+      makeLocalMsg({
+        eventId: "$x",
+        status: "cancelled",
+        timestamp: old,
+      }),
+    );
+    const n = await repo.cleanupCancelledUploads(5 * 60 * 1000);
+    expect(n).toBe(1);
+    expect(await db.messages.count()).toBe(0);
+  });
+});

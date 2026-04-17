@@ -24,6 +24,7 @@ import ChatVirtualScroller from "@/shared/ui/ChatVirtualScroller.vue";
 import { useI18n } from "@/shared/lib/i18n";
 import { useUnreadBanner } from "../model/use-unread-banner";
 import { useReadTracker } from "../model/use-read-tracker";
+import { shouldWaitForMatrixSyncAfterEmptyInitialLoad } from "../model/empty-chat-sync-guard";
 import UnreadBanner from "./UnreadBanner.vue";
 
 const chatStore = useChatStore();
@@ -590,10 +591,10 @@ watch(
         if (isStale()) return;
 
         if (chatStore.activeMessages.length === 0) {
-          // Skip waiting for messages if history was cleared — no messages will arrive
           const dbKit = getChatDb();
-          const hasClearedHistory = dbKit?.eventWriter.getClearedAtTs(roomId);
-          if (!hasClearedHistory) {
+          const hasClearedHistory = Boolean(dbKit?.eventWriter.getClearedAtTs(roomId));
+          const timelineLoaded = chatStore.isRoomTimelineLoaded(roomId);
+          if (shouldWaitForMatrixSyncAfterEmptyInitialLoad(hasClearedHistory, timelineLoaded)) {
             const SYNC_WAIT_MS = 8_000;
             await new Promise<void>((resolve) => {
               const timer = setTimeout(resolve, SYNC_WAIT_MS);
