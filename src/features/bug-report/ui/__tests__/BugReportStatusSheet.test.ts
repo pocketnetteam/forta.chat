@@ -5,16 +5,12 @@ import BugReportStatusSheet from '../BugReportStatusSheet.vue';
 import { useBugReportStatus } from '../../model/use-bug-report-status';
 import { trackCreatedIssue, updateLocalIssueState } from '@/shared/lib/bug-report';
 
-vi.mock('@/shared/ui/bottom-sheet/BottomSheet.vue', () => ({
-  default: {
-    name: 'BottomSheet',
-    props: ['show', 'ariaLabel', 'height', 'dragDismiss'],
-    emits: ['close'],
-    template: '<div v-if="show" data-testid="sheet"><slot /></div>',
-  },
-}));
-
 vi.stubGlobal('useI18n', () => ({ t: (k: string) => k }));
+vi.stubGlobal('matchMedia', () => ({
+  matches: false,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+}));
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -29,12 +25,19 @@ afterEach(() => {
   vi.stubGlobal('useI18n', () => ({ t: (k: string) => k }));
 });
 
+const mountOpts = {
+  global: {
+    stubs: { Teleport: true },
+  },
+};
+
 describe('BugReportStatusSheet', () => {
-  it('renders nothing visible when show=false', () => {
+  it('renders no list when show=false', () => {
     const wrapper = mount(BugReportStatusSheet, {
+      ...mountOpts,
       props: { show: false, address: 'addr-1' },
     });
-    expect(wrapper.find('[data-testid="sheet"]').exists()).toBe(false);
+    expect(wrapper.findAll('li')).toHaveLength(0);
   });
 
   it('manage mode renders a card per locally-tracked issue', async () => {
@@ -43,6 +46,7 @@ describe('BugReportStatusSheet', () => {
     useBugReportStatus().loadAllIssues('addr-1');
 
     const wrapper = mount(BugReportStatusSheet, {
+      ...mountOpts,
       props: { show: true, address: 'addr-1', mode: 'manage' },
     });
     await flushPromises();
@@ -60,16 +64,15 @@ describe('BugReportStatusSheet', () => {
     useBugReportStatus().loadAllIssues('addr-2');
 
     const wrapper = mount(BugReportStatusSheet, {
+      ...mountOpts,
       props: { show: true, address: 'addr-2', mode: 'manage' },
     });
     await flushPromises();
 
     const cards = wrapper.findAll('li');
     expect(cards).toHaveLength(2);
-    // Each card has exactly one primary action button (close or reopen).
     for (const card of cards) {
-      const actionButtons = card.findAll('button');
-      expect(actionButtons.length).toBeGreaterThanOrEqual(1);
+      expect(card.findAll('button').length).toBeGreaterThanOrEqual(1);
     }
   });
 
@@ -77,6 +80,7 @@ describe('BugReportStatusSheet', () => {
     useBugReportStatus().loadAllIssues('addr-empty');
 
     const wrapper = mount(BugReportStatusSheet, {
+      ...mountOpts,
       props: { show: true, address: 'addr-empty', mode: 'manage' },
     });
     await flushPromises();
