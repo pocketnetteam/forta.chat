@@ -230,12 +230,15 @@ class NativeRTCPeerConnection extends EventTarget {
             // MediaStream constructor with existing tracks
             stream = new MediaStream(track ? [track] : []);
 
-            // Override the stream id to match remote SDP's msid
-            // The SDK does: this.remoteSDPStreamMetadata![stream.id].purpose
+            // Override the stream id to match remote SDP's msid.
+            // The SDK does: this.remoteSDPStreamMetadata![stream.id].purpose.
+            // writable/configurable:true so the id can be updated on
+            // renegotiation (video upgrade, glare) without silently failing.
             if (data.streamId) {
               Object.defineProperty(stream, "id", {
                 value: data.streamId,
-                writable: false,
+                writable: true,
+                configurable: true,
               });
             }
           } catch (err) {
@@ -459,7 +462,19 @@ class NativeRTCPeerConnection extends EventTarget {
   }
 
   restartIce(): void {
-    console.log("[NativeRTCProxy] restartIce (no-op — native handles ICE)");
+    // Forward the restart to the native PeerConnection. The SDK invokes
+    // this on network flips (WiFi ↔ cellular), on ICE failure, or during
+    // glare. Without this hop calls drop permanently on any jitter.
+    // The RTCPeerConnection.restartIce() spec signature is void-returning,
+    // so we can't propagate the async failure — log it and move on. Guard
+    // against close() racing with init so we don't call native on a
+    // torn-down peer.
+    this._waitReady()
+      .then(() => {
+        if (this._closed) return;
+        return NativeWebRTC.restartIce({ peerId: this._peerId });
+      })
+      .catch((e) => console.error("[NativeRTCProxy] restartIce failed:", e));
   }
 
   // -----------------------------------------------------------------------
@@ -478,7 +493,19 @@ class NativeRTCPeerConnection extends EventTarget {
   // -----------------------------------------------------------------------
 
   async getStats(): Promise<RTCStatsReport> {
-    return new Map() as any;
+    try {
+      await this._waitReady();
+      const result = await NativeWebRTC.getStats({ peerId: this._peerId });
+      const map = new Map<string, unknown>();
+      const report = result?.report ?? {};
+      for (const [k, v] of Object.entries(report)) {
+        map.set(k, v);
+      }
+      return map as unknown as RTCStatsReport;
+    } catch (e) {
+      console.error("[NativeRTCProxy] getStats failed:", e);
+      return new Map() as unknown as RTCStatsReport;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -536,7 +563,7 @@ class NativeRTCPeerConnection extends EventTarget {
         console.log(`[NativeRTCProxy] syncing local stream ID: ${dummyStream.id} → ${nativeId}`);
         Object.defineProperty(dummyStream, "id", {
           value: nativeId,
-          writable: false,
+          writable: true,
           configurable: true,
         });
       }

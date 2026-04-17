@@ -224,6 +224,19 @@ export class MatrixClientService {
       deviceId: userData.device_id,
       request: this.request.bind(this),
       iceCandidatePoolSize: 20,
+      // Session 02 — explicit public STUN fallback.
+      //
+      // The Matrix homeserver's /turnServer endpoint is unreliable in
+      // restricted regions (rate-limited, sometimes blocked). Without at
+      // least one reachable STUN, ICE gathering produces only host
+      // candidates and any NAT-ed peer can't connect, so the call drops
+      // within 1-2 seconds. We keep fallbackICEServerAllowed so the SDK
+      // still tries turn.matrix.org when the homeserver refuses, but
+      // adding these defaults makes ICE robust even when it doesn't.
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+      ],
       fallbackICEServerAllowed: true,
       disableVoip: false, // ensure WebRTC call handler and Call.incoming are enabled
     };

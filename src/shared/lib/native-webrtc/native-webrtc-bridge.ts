@@ -50,6 +50,24 @@ export interface NativeWebRTCPlugin {
   closePeerConnection(options: { peerId: string }): Promise<void>;
   getConnectionState(options: { peerId: string }): Promise<{ state: string }>;
 
+  // ICE restart — perform a native ICE restart on the given PeerConnection.
+  // The JS SDK calls `pc.restartIce()` on network flips (WiFi ↔ cellular),
+  // on ICE disconnected/failed, or during glare resolution. Previously this
+  // was a JS no-op and native never received the signal, so calls dropped
+  // permanently on any jitter. Now this path is wired through to
+  // PeerConnection.restartIce() (API 28+) with a createOffer({IceRestart:true})
+  // fallback on older Android.
+  restartIce(options: { peerId: string }): Promise<void>;
+
+  // Return native WebRTC stats for this PeerConnection as a flat map of
+  // stats-object-id → stats object. Consumed by the SDK's diagnostics and
+  // by our own webrtc-diagnostics to detect zero-audio / zero-video.
+  // Previously returned an empty Map unconditionally, causing false
+  // ZERO_AUDIO_ALERT and preventing the SDK from confirming media flow.
+  getStats(options: { peerId: string }): Promise<{
+    report: Record<string, Record<string, unknown>>;
+  }>;
+
   // Remote video state
   updateRemoteVideoState(options: { muted: boolean }): Promise<void>;
 

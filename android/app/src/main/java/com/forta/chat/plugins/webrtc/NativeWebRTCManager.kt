@@ -294,6 +294,92 @@ class NativeWebRTCManager(private val context: Context) {
     }
 
     // -----------------------------------------------------------------------
+    // ICE restart / stats (Session 02 — fix for 1-2 sec call drops)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Perform an ICE restart on the given PeerConnection. Called when the
+     * JS side detects a network flip or ICE disconnected/failed and needs
+     * a fresh ICE agent without tearing the whole call down.
+     *
+     * Note: `PeerConnection.restartIce()` here is the libwebrtc Java
+     * binding (org.webrtc.PeerConnection), not Android's framework WebRTC.
+     * It is available on every Android API level our `minSdk 24` supports
+     * because libwebrtc ships its own implementation. An earlier version
+     * of this method had an API 28 guard with a `createOffer(IceRestart)`
+     * fallback, but that fallback never called `setLocalDescription` and
+     * our `onRenegotiationNeeded` observer is suppressed to avoid
+     * premature offers from track management — so the fallback would have
+     * silently done nothing. The unconditional call is correct.
+     *
+     * Returns true on success, false when peer is unknown or the native
+     * call threw.
+     */
+    fun restartIce(peerId: String): Boolean {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] restartIce: no PeerConnection")
+            return false
+        }
+        return try {
+            pc.restartIce()
+            Log.d(TAG, "[$peerId] restartIce: invoked PeerConnection.restartIce()")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "[$peerId] restartIce threw", e)
+            false
+        }
+    }
+
+    /**
+     * Return the latest WebRTC stats for the given PeerConnection as a
+     * JSObject (flat map of stat-id → { id, type, timestamp, ...members }).
+     *
+     * We serialize the fields our JS consumers actually read: type, kind,
+     * bytesSent/Received, packetsSent/Received, jitter, rtt,
+     * framesEncoded/Decoded, etc. Unknown value types become their
+     * toString(). The callback is invoked with null if peer is unknown.
+     */
+    fun getStats(peerId: String, callback: (com.getcapacitor.JSObject?) -> Unit) {
+        val pc = peerConnections[peerId]
+        if (pc == null) {
+            Log.e(TAG, "[$peerId] getStats: no PeerConnection")
+            callback(null)
+            return
+        }
+        try {
+            pc.getStats { rtcStatsReport ->
+                val report = com.getcapacitor.JSObject()
+                try {
+                    for ((id, stat) in rtcStatsReport.statsMap) {
+                        val entry = com.getcapacitor.JSObject().apply {
+                            put("id", id)
+                            put("type", stat.type ?: "")
+                            put("timestamp", stat.timestampUs)
+                        }
+                        for ((memberName, memberValue) in stat.members) {
+                            if (memberValue == null) continue
+                            when (memberValue) {
+                                is Number -> entry.put(memberName, memberValue)
+                                is Boolean -> entry.put(memberName, memberValue)
+                                is String -> entry.put(memberName, memberValue)
+                                else -> entry.put(memberName, memberValue.toString())
+                            }
+                        }
+                        report.put(id, entry)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[$peerId] getStats: partial serialization failure", e)
+                }
+                callback(report)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[$peerId] getStats threw", e)
+            callback(null)
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Local Media
     // -----------------------------------------------------------------------
 
