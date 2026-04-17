@@ -253,11 +253,12 @@ export class AppInitializer {
 
   /** Load user info for multiple addresses (for encryption key resolution).
    *  Original bastyon-chat uses light=true: psdk.userInfo.load(addresses, true, reload)
-   *  This uses userInfoLight storage, queue-based processing, and maxcount=70. */
-  async loadUsersInfo(addresses: string[]): Promise<void> {
+   *  This uses userInfoLight storage, queue-based processing, and maxcount=70.
+   *  Pass update:true to bypass SDK cache and fetch fresh getuserprofile (e.g. key checks). */
+  async loadUsersInfo(addresses: string[], options?: { update?: boolean }): Promise<void> {
     if (!this.psdk || !addresses.length) return;
     // Must pass light=true to match original bastyon-chat behavior
-    await this.psdk.userInfo.load(addresses, true);
+    await this.psdk.userInfo.load(addresses, true, options?.update ?? false);
   }
 
   /** Load user info for multiple addresses into full (non-light) cache.
@@ -277,14 +278,30 @@ export class AppInitializer {
     }
   }
 
-  /** Get RAW user profiles via RPC — preserves all fields including numeric `id`.
-   *  Must pass '1' as second param (light mode) to match SDK behavior. */
-  async loadUsersInfoRaw(addresses: string[]): Promise<Record<string, unknown>[]> {
-    if (!this.api || !addresses.length) return [];
+  /** Last getuserprofile row for this address before SDK cleanData (numeric id, k/keys). Requires prior loadUsersInfo. */
+  getRawUserProfile(address: string): Record<string, unknown> | null {
+    if (!this.psdk) return null;
     try {
-      // Match SDK: api.rpc('getuserprofile', [addresses, '1'])
-      const data = await this.api.rpc("getuserprofile", [addresses, "1"]);
-      return (data as Record<string, unknown>[]) || [];
+      const raw = (
+        this.psdk.userInfo as unknown as { getRawProfile?: (a: string) => unknown }
+      ).getRawProfile?.(address);
+      if (raw && typeof raw === "object") {
+        return raw as Record<string, unknown>;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Load profiles via SDK then return raw RPC-shaped rows (same contract as former direct getuserprofile). */
+  async loadUsersInfoRaw(addresses: string[]): Promise<Record<string, unknown>[]> {
+    if (!this.psdk || !addresses.length) return [];
+    try {
+      await this.loadUsersInfo(addresses, { update: true });
+      return addresses
+        .map((addr) => this.getRawUserProfile(addr))
+        .filter((p): p is Record<string, unknown> => p != null);
     } catch (e) {
       console.error("[appInit] loadUsersInfoRaw error:", e);
       return [];

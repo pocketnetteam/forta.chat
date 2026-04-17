@@ -68,7 +68,7 @@ describe("login key verification", () => {
     const fnSection = source.slice(fnStart, fnStart + 2000);
     // Should check cache first
     expect(fnSection).toContain("cachedKeys.length >= 12");
-    // Should fallback to blockchain RPC
+    // Fresh profile via SDK (loadUsersInfoRaw wraps loadUsersInfo + getRawProfile)
     expect(fnSection).toContain("loadUsersInfoRaw");
     expect(fnSection).toContain("blockchainKeys.length >= 12");
   });
@@ -76,7 +76,19 @@ describe("login key verification", () => {
   it("verifyAndRepublishKeys should not block login if RPC fails", () => {
     const source = getSource();
     const fnStart = source.indexOf("const verifyAndRepublishKeys");
-    const fnSection = source.slice(fnStart, fnStart + 2000);
-    expect(fnSection).toContain("skipping re-publish");
+    const fnSection = source.slice(fnStart, fnStart + 2600);
+    expect(fnSection).toContain("RPC key check failed");
+  });
+});
+
+describe("pcrypto getUsersInfo profile load", () => {
+  it("should use a single loadUsersInfo batch with update:true, not parallel loadUsersInfoRaw", () => {
+    const source = getSource();
+    const idx = source.indexOf("getUsersInfo: async");
+    expect(idx).toBeGreaterThan(-1);
+    const section = source.slice(idx, idx + 4500);
+    expect(section).toContain("loadUsersInfo(rawAddresses, { update: true })");
+    expect(section).toContain("getRawUserProfile");
+    expect(section).not.toContain("loadUsersInfoRaw");
   });
 });
