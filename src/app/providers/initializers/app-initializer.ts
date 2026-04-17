@@ -2,6 +2,11 @@ import type { UserData } from "./types";
 
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
+import { withTimeout } from "@/shared/lib/with-timeout";
+
+export type EditUserDataResult =
+  | { success: true; action: unknown }
+  | { success: false; reason: "timeout" | "rejected" | "network"; error: string };
 
 export interface BastyonPostData {
   txid: string;
@@ -55,6 +60,9 @@ export class AppInitializer {
       return;
     }
     this.api = new Api(pocketnetInstance);
+
+    console.log('pocketnetInstance', pocketnetInstance)
+
     this.actions = new Actions(pocketnetInstance, this.api);
     this.actions.init();
     this.psdk = new pSDK({
@@ -203,8 +211,10 @@ export class AppInitializer {
   }: {
     address: string;
     userData: UserData;
-  }) {
-    if (!this.actions) return null;
+  }): Promise<EditUserDataResult> {
+    if (!this.actions) {
+      return { success: false, reason: "network", error: "Actions not available" };
+    }
     const userInfo = new UserInfo();
     userInfo.name.set(superXSS(userData.name));
     userInfo.language.set(superXSS(userData.language));
@@ -215,7 +225,23 @@ export class AppInitializer {
     userInfo.ref.set(userData.ref);
     userInfo.keys.set(userData.keys);
 
-    return this.actions.addActionAndSendIfCan(userInfo, null, address);
+    try {
+      // 30s timeout: UserInfo broadcast may queue on proxy; without a timeout
+      // the UI silently hangs ("Save Changes" stuck on "Saving..." forever).
+      const action = await withTimeout(
+        this.actions.addActionAndSendIfCan(userInfo, null, address),
+        30_000,
+        "editUserData",
+      );
+      return { success: true, action };
+    } catch (e: unknown) {
+      const errMessage = e instanceof Error ? e.message : String(e);
+      let reason: "timeout" | "rejected" | "network" = "network";
+      if (errMessage.includes("timed out")) reason = "timeout";
+      else if (/rejected|invalid|code\s*1\d/i.test(errMessage)) reason = "rejected";
+      console.error("[appInit] editUserData failed:", errMessage);
+      return { success: false, reason, error: errMessage };
+    }
   }
 
   initApi() {
@@ -243,8 +269,15 @@ export class AppInitializer {
   ): Promise<UserData | null> {
     if (!this.psdk || !stateAddresses.length) return Promise.resolve(null);
     return this.psdk.userInfo.load(stateAddresses).then(() => {
-      const userData = this.psdk!.userInfo.get(stateAddresses[0]) as UserData;
-      if (onLoad) {
+      // `psdk.userInfo.get()` returns undefined for addresses without an
+      // on-chain UserInfo yet (e.g. right after register(), before the
+      // blockchain confirms). The `as UserData` cast hides that — callers
+      // used to dereference undefined and crash with "Invalid private key
+      // or mnemonic" in the login flow. Guard the callback and the return
+      // so downstream code can safely handle the absence.
+      const raw = this.psdk!.userInfo.get(stateAddresses[0]);
+      const userData = (raw ?? null) as UserData | null;
+      if (onLoad && userData) {
         onLoad(userData);
       }
       return userData;
@@ -253,16 +286,18 @@ export class AppInitializer {
 
   /** Load user info for multiple addresses (for encryption key resolution).
    *  Original bastyon-chat uses light=true: psdk.userInfo.load(addresses, true, reload)
-   *  This uses userInfoLight storage, queue-based processing, and maxcount=70. */
-  async loadUsersInfo(addresses: string[]): Promise<void> {
+   *  This uses userInfoLight storage, queue-based processing, and maxcount=70.
+   *  Pass update:true to bypass SDK cache and fetch fresh getuserprofile (e.g. key checks). */
+  async loadUsersInfo(addresses: string[], options?: { update?: boolean }): Promise<void> {
     if (!this.psdk || !addresses.length) return;
     // Must pass light=true to match original bastyon-chat behavior
-    await this.psdk.userInfo.load(addresses, true);
+
+
+    await this.psdk.userInfo.load(addresses, true, options?.update ?? false);
   }
 
   /** Load user info for multiple addresses into full (non-light) cache.
-   *  After this call, getUserData(address) will return the profile data. */
-  async loadUsersBatch(addresses: string[]): Promise<void> {
+   *  After this call, getUs string[]): Promise<void> {
     if (!this.psdk || !addresses.length) return;
     await this.psdk.userInfo.load(addresses);
   }
@@ -277,14 +312,30 @@ export class AppInitializer {
     }
   }
 
-  /** Get RAW user profiles via RPC — preserves all fields including numeric `id`.
-   *  Must pass '1' as second param (light mode) to match SDK behavior. */
-  async loadUsersInfoRaw(addresses: string[]): Promise<Record<string, unknown>[]> {
-    if (!this.api || !addresses.length) return [];
+  /** Last getuserprofile row for this address before SDK cleanData (numeric id, k/keys). Requires prior loadUsersInfo. */
+  getRawUserProfile(address: string): Record<string, unknown> | null {
+    if (!this.psdk) return null;
     try {
-      // Match SDK: api.rpc('getuserprofile', [addresses, '1'])
-      const data = await this.api.rpc("getuserprofile", [addresses, "1"]);
-      return (data as Record<string, unknown>[]) || [];
+      const raw = (
+        this.psdk.userInfo as unknown as { getRawProfile?: (a: string) => unknown }
+      ).getRawProfile?.(address);
+      if (raw && typeof raw === "object") {
+        return raw as Record<string, unknown>;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Load profiles via SDK then return raw RPC-shaped rows (same contract as former direct getuserprofile). */
+  async loadUsersInfoRaw(addresses: string[]): Promise<Record<string, unknown>[]> {
+    if (!this.psdk || !addresses.length) return [];
+    try {
+      await this.loadUsersInfo(addresses, { update: true });
+      return addresses
+        .map((addr) => this.getRawUserProfile(addr))
+        .filter((p): p is Record<string, unknown> => p != null);
     } catch (e) {
       console.error("[appInit] loadUsersInfoRaw error:", e);
       return [];

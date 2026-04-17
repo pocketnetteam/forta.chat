@@ -42,6 +42,14 @@ vi.mock("@/shared/lib/matrix/functions", () => ({
   hexEncode: vi.fn((s: string) => s),
 }));
 
+// --- Bug report & i18n mocks (called on download errors) ---
+vi.mock("@/features/bug-report", () => ({
+  useBugReport: vi.fn(() => ({ open: vi.fn() })),
+}));
+vi.mock("@/shared/lib/i18n", () => ({
+  tRaw: (k: string) => k,
+}));
+
 // --- Global fetch mock ---
 const mockFetchResponse = {
   ok: true,
@@ -202,6 +210,87 @@ describe("useFileDownload", () => {
         expect(formatSize(1536)).toBe("1.5 KB");
         expect(formatSize(1048576)).toBe("1.0 MB");
         expect(formatSize(1073741824)).toBe("1.0 GB");
+      });
+      scope.stop();
+    });
+  });
+
+  describe("download — network resilience", () => {
+    it("passes an AbortSignal to fetch so hanging requests can be cancelled (MIUI/Tor scenario)", async () => {
+      // Immediately resolve so the test runs fast — we're only verifying that
+      // fetch was called with an AbortSignal (proving the abort mechanism is
+      // wired up), not the full retry timing behavior.
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt1",
+          _key: "client_abort",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "https://example.com/file.pdf",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // The fetch MUST have been called with an AbortSignal so a hung
+        // request can be cancelled by the FETCH_TIMEOUT timer.
+        expect((global.fetch as Mock).mock.calls.length).toBeGreaterThanOrEqual(1);
+        const [, init] = (global.fetch as Mock).mock.calls[0];
+        expect(init).toBeDefined();
+        expect(init.signal).toBeInstanceOf(AbortSignal);
+      });
+      scope.stop();
+    });
+
+    it("does not retry on 404 (fast-fail)", async () => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: false,
+        status: 404,
+        blob: () => Promise.resolve(new Blob()),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt2",
+          _key: "client_2",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "https://example.com/missing.pdf",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // 404 → one attempt, NOT retried 3+ times
+        expect((global.fetch as Mock).mock.calls.length).toBe(1);
       });
       scope.stop();
     });

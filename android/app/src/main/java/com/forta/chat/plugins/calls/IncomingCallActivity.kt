@@ -136,8 +136,16 @@ class IncomingCallActivity : Activity() {
         cleanup()
 
         val callId = intent.getStringExtra("callId") ?: ""
+        val callerName = intent.getStringExtra("callerName") ?: "Unknown"
+        val hasVideo = intent.getBooleanExtra("hasVideo", false)
 
-        // Try ConnectionService first; if unavailable, notify JS directly
+        // Notify Telecom / JS listener that user tapped Answer. One of
+        // two paths fires depending on whether the app process is alive:
+        //   - connection.onAnswer() → invokes onAnswered callback (wired
+        //     by CallPlugin.load) or queues pendingAnswerCallId for JS
+        //     to pick up later via getPendingAnswer.
+        //   - CallConnection.onAnswered direct invoke as fallback when
+        //     we bypassed Telecom.
         val connection = CallConnectionService.currentConnection
         if (connection != null) {
             connection.onAnswer()
@@ -146,14 +154,49 @@ class IncomingCallActivity : Activity() {
             CallConnection.onAnswered?.invoke(callId)
         }
 
-        // Open app — JS handles the actual WebRTC answer via Matrix SDK
-        val mainIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        // Belt-and-braces: ensure the pending-answer markers are set on
+        // CallConnection even when Telecom integration failed (e.g. a
+        // region that rate-limits addNewIncomingCall and never calls
+        // onCreateIncomingConnection — we'd have no roomId stashed).
+        // JS-side consumePendingAnswerCallId correlates by roomId when
+        // the push-side call_id doesn't match the Matrix call.callId,
+        // so the roomId in particular must be present.
+        val roomIdForPending = intent.getStringExtra("roomId")
+        if (CallConnection.pendingAnswerCallId.isNullOrEmpty()) {
+            CallConnection.pendingAnswerCallId = callId
+        }
+        if (CallConnection.pendingAnswerRoomId.isNullOrEmpty()) {
+            CallConnection.pendingAnswerRoomId = roomIdForPending
+        }
+
+        // Launch MainActivity in the FOREGROUND so Capacitor's WebView
+        // becomes the resumed activity. Android pauses and eventually
+        // stops a WebView's host activity when it's fully covered by
+        // another opaque activity (which is what the ealier design did
+        // with CallActivity on top + MainActivity in background) — when
+        // stopped, the WebView throttles/freezes its JS timers, so the
+        // JS call-answer flow doesn't actually run until the user
+        // manually returns to the app. Symptom: user tapped Answer but
+        // saw "connecting" forever until they switched to the app.
+        //
+        // By putting MainActivity on top, its onResume fires, the
+        // WebView keeps running at full speed, and the JS
+        // handleIncomingCall → fast-path → answerCall path completes in
+        // the background. As soon as the answer succeeds, the JS side
+        // calls NativeWebRTC.launchCallUI, which then pops CallActivity
+        // with the "Connecting…" template that transitions to
+        // "Connected" on ICE success — same end state as before, just
+        // with a short (1-2 sec) Vue loading flicker along the way.
+        val appBootIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("push_call_accept", true)
             putExtra("callId", callId)
             putExtra("roomId", intent.getStringExtra("roomId"))
         }
-        startActivity(mainIntent)
+        startActivity(appBootIntent)
+
         CallConnectionService.dismissIncomingCallNotification(this)
         finish()
     }
@@ -162,10 +205,42 @@ class IncomingCallActivity : Activity() {
         Log.d(TAG, "Decline pressed")
         cleanup()
 
-        // Try ConnectionService if available
+        val callId = intent.getStringExtra("callId") ?: ""
+        val roomIdForPending = intent.getStringExtra("roomId")
+
+        // Try ConnectionService — populates CallConnection.pendingReject*
         CallConnectionService.currentConnection?.onReject()
 
-        // Just close — caller will see "no answer" / timeout
+        // Defence-in-depth: clear accept markers (we're declining, not
+        // accepting) and set reject markers if Telecom path was bypassed.
+        CallConnection.pendingAnswerCallId = null
+        CallConnection.pendingAnswerRoomId = null
+        if (CallConnection.pendingRejectCallId.isNullOrEmpty()) {
+            CallConnection.pendingRejectCallId = callId
+        }
+        if (CallConnection.pendingRejectRoomId.isNullOrEmpty()) {
+            CallConnection.pendingRejectRoomId = roomIdForPending
+        }
+
+        // Boot the app (in the same way as Accept) so JS can actually
+        // send m.call.reject to Matrix once the invite is delivered via
+        // /sync. Without this the caller keeps ringing until their own
+        // lifetime timeout expires (often 30-60s) — from the user's
+        // perspective the Decline button "did nothing".
+        try {
+            val intent = Intent(this, com.forta.chat.MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("push_call_decline", true)
+                putExtra("callId", callId)
+                putExtra("roomId", roomIdForPending)
+            }
+            startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to launch MainActivity on decline: $e")
+        }
+
         CallConnectionService.dismissIncomingCallNotification(this)
         finish()
     }
@@ -174,6 +249,10 @@ class IncomingCallActivity : Activity() {
     private fun dismissByRemote() {
         Log.d(TAG, "Remote hangup — dismissing")
         cleanup()
+        // Clear accept markers so a stale invite can't re-trigger
+        // the JS fast-path after the caller has cancelled.
+        CallConnection.pendingAnswerCallId = null
+        CallConnection.pendingAnswerRoomId = null
         CallConnectionService.dismissIncomingCallNotification(this)
         finish()
     }

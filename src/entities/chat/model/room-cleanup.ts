@@ -8,6 +8,8 @@ export interface CleanupContext {
   deleteRooms: (ids: string[]) => Promise<void>;
   isRoomInSdk: (roomId: string) => boolean;
   getRoomHistoryVisibility: (roomId: string) => string | null;
+  /** Matrix leave + forget for stale stream rooms (bastyon-chat parity). Optional — tests omit. */
+  leaveForgetStreamRoom?: (roomId: string) => Promise<void>;
 }
 
 /**
@@ -34,6 +36,13 @@ export async function cleanupStaleRooms(ctx: CleanupContext): Promise<number> {
     if (histVis === "world_readable") {
       const lastActive = room.lastMessageTimestamp ?? room.updatedAt ?? 0;
       if (now - lastActive > THREE_DAYS_MS) {
+        if (ctx.leaveForgetStreamRoom) {
+          try {
+            await ctx.leaveForgetStreamRoom(room.id);
+          } catch {
+            continue;
+          }
+        }
         toRemove.push(room.id);
         continue;
       }

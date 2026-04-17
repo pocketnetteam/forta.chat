@@ -79,7 +79,7 @@ const handleSelectMessage = (result: MessageSearchResult) => {
   <div class="flex flex-col gap-1 overflow-y-auto px-1">
     <!-- Loading -->
     <div v-if="isSearching" class="flex items-center justify-center gap-2 p-3 text-sm text-text-on-main-bg-color">
-      <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg class="contain-strict h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>
       {{ t("contactSearch.searching") }}
@@ -87,7 +87,7 @@ const handleSelectMessage = (result: MessageSearchResult) => {
 
     <!-- Creating room -->
     <div v-if="isCreatingRoom" class="flex items-center justify-center gap-2 p-3 text-sm text-text-on-main-bg-color">
-      <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg class="contain-strict h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>
       {{ t("contactSearch.openingChat") }}

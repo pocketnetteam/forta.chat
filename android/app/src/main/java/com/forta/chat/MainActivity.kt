@@ -1,7 +1,11 @@
 package com.forta.chat
 
+import android.app.KeyguardManager
+import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -45,6 +49,44 @@ class MainActivity : BridgeActivity() {
         registerPlugin(PushDataPlugin::class.java)
         registerPlugin(LocalePlugin::class.java)
         super.onCreate(savedInstanceState)
+
+        // When this activity is launched from the push-call ringer's
+        // Accept tap (IncomingCallActivity → push_call_accept=true), the
+        // device may still be locked. Without the next few flags the
+        // WebView host activity would sit BEHIND the keyguard, Android
+        // would immediately mark it stopped, and the WebView would
+        // throttle its JS — so our Matrix `answerCall()` flow never
+        // completes until the user manually unlocks. Lifting the
+        // keyguard for this specific launch lets the call actually
+        // answer from the lock screen.
+        val cameFromCallAccept = intent?.getBooleanExtra("push_call_accept", false) == true
+        if (cameFromCallAccept) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            } else {
+                @Suppress("DEPRECATION")
+                window.addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
+                )
+            }
+            // Ask keyguard to dismiss if device is locked without a PIN
+            // (or to prompt the user otherwise). Without this the WebView
+            // is often kept in the onStop state when the OS deems the
+            // lock overlay opaque — JS frozen, call hangs in
+            // "Connecting…" forever.
+            try {
+                val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                if (km?.isKeyguardLocked == true && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    km.requestDismissKeyguard(this, null)
+                }
+            } catch (_: Throwable) {
+                // Best-effort — keyguard dismissal is not critical if the
+                // user is willing to unlock manually.
+            }
+        }
 
         // BUG-03: Force LTR layout direction on the root view.
         // Prevents Android WebView from inheriting system RTL direction

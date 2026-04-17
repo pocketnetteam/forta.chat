@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { PostComment } from "@/app/providers/initializers";
 import { useAuthStore } from "@/entities/auth";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 
 interface Props {
   comments: PostComment[];
@@ -19,8 +20,7 @@ const authorAvatars = ref<Record<string, string>>({});
 const avatarErrors = ref<Record<string, boolean>>({});
 
 function fixAvatarUrl(raw: string): string {
-  const url = raw.startsWith("http") ? raw : `https://bastyon.com/images/${raw}`;
-  return url.replace("bastyon.com:8092", "pocketnet.app:8092");
+  return normalizePocketnetImageUrl(raw);
 }
 
 const resolveAuthors = async (comments: PostComment[]) => {
@@ -63,7 +63,7 @@ const formatTime = (ts: number) => {
     </h3>
 
     <div v-if="loading" class="flex items-center gap-2 py-4">
-      <div class="h-4 w-4 animate-spin rounded-full border-2 border-neutral-grad-2 border-t-transparent" />
+      <div class="contain-strict h-4 w-4 animate-spin rounded-full border-2 border-neutral-grad-2 border-t-transparent" />
       <span class="text-xs text-text-on-main-bg-color">{{ t("post.loading") }}</span>
     </div>
 
@@ -118,7 +118,7 @@ const formatTime = (ts: number) => {
         :disabled="!newComment.trim() || submitting"
         @click="handleSubmit"
       >
-        <div v-if="submitting" class="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+        <div v-if="submitting" class="contain-strict h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
         {{ submitting ? t("post.loading") : t("postPlayer.send") }}
       </button>
     </div>

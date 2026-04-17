@@ -69,7 +69,7 @@ function formatTime(seconds: number): string {
 
     <!-- Loading overlay -->
     <div v-if="state === 'loading'" class="absolute inset-0 flex items-center justify-center bg-black/30">
-      <div class="h-10 w-10 animate-spin rounded-full border-[3px] border-white/30 border-t-white" />
+      <div class="contain-strict h-10 w-10 animate-spin rounded-full border-[3px] border-white/30 border-t-white" />
     </div>
 
     <!-- Play button (paused/ready/idle) -->

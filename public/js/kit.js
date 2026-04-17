@@ -2996,6 +2996,7 @@ pUserInfo = function(){
 	self.content = {}
 
 	self.objectid = makeid()
+	self.id = 0
 
 	self._import = function(v){
 		self.name = v.n || v.name || '';
@@ -3010,6 +3011,7 @@ pUserInfo = function(){
 		self.reputation = v.reputation || 0;
 		self.deleted = v.deleted || false
 		self.bans = v.bans || {}
+		self.id = v.id
 
 		if (v.subscribes) {
 			self.subscribes = v.subscribes;
@@ -3116,7 +3118,7 @@ pUserInfo = function(){
 		v.b = JSON.stringify(self.addresses || [])
 		v.adr = self.address
 		v.k = self.keys.join(',')
-
+		v.id = self.id
 
 		v.reputation = self.reputation
 		v.subscribers = _.clone(self.subscribers)

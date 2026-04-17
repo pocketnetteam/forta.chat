@@ -7,7 +7,7 @@ const { t } = useI18n();
   <div class="flex h-full flex-col">
     <!-- Full loading message — only on first login (no cache) -->
     <div v-if="props.firstLoad" class="flex flex-col items-center gap-2 px-4 pt-8 pb-4 text-center">
-      <div class="h-5 w-5 animate-spin rounded-full border-2 border-neutral-grad-2 border-t-primary" />
+      <div class="contain-strict h-5 w-5 animate-spin rounded-full border-2 border-neutral-grad-2 border-t-primary" />
       <p class="text-sm font-medium text-neutral-content">{{ t('contactList.loadingChats') }}</p>
       <p class="text-xs text-neutral-content/60">{{ t('contactList.loadingChatsHint') }}</p>
     </div>

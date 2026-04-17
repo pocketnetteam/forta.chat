@@ -85,16 +85,60 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             cacheSenderName(this, sender, senderName)
         }
 
-        // Handle call hangup/cancel — dismiss incoming call screen
-        if (msgType == "m.call.hangup" || msgType == "m.call.reject") {
-            Log.d(TAG, "Call ended remotely (type=$msgType), dismissing incoming call UI")
+        // Handle call cancel paths — full cleanup of incoming-call UI state.
+        //
+        // Three ways an incoming call can end before we answer:
+        //   m.call.hangup        — caller cancelled
+        //   m.call.reject        — we (or another device of ours) rejected
+        //   m.call.select_answer — another of our devices answered
+        //
+        // For all three we must tear down BOTH surfaces:
+        //   1. IncomingCallActivity (full-screen ringer)
+        //   2. CallConnectionService notification in the shade
+        //      + its Telecom `currentConnection`, or the shade keeps
+        //        pulling the ringer back every time the user drags down.
+        //
+        // Without this, users saw the notification persist after the
+        // caller had long given up — the JS side received the Matrix
+        // event but had no hook into the native notification stack.
+        if (msgType == "m.call.hangup" || msgType == "m.call.reject" ||
+            msgType == "m.call.select_answer") {
+            Log.d(TAG, "Call ended remotely (type=$msgType), tearing down incoming UI")
             IncomingCallActivity.dismissIfShowing()
+            com.forta.chat.plugins.calls.CallConnectionService.dismissIncomingCallNotification(this)
+            try {
+                com.forta.chat.plugins.calls.CallConnectionService.currentConnection
+                    ?.onDisconnect()
+                com.forta.chat.plugins.calls.CallConnectionService.currentConnection = null
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to disconnect currentConnection", e)
+            }
+            // End-of-call signal also clears the dedup marker so a
+            // genuinely new invite (new call_id) can ring again.
+            val endedCallId = data["call_id"] ?: data["event_id"]
+            if (endedCallId != null && lastRingingCallId == endedCallId) {
+                lastRingingCallId = null
+            }
             forwardToJs(data)
             return
         }
 
         // Handle calls
         if (msgType == "m.call.invite") {
+            // Suppress invite retries for a call we're already ringing
+            // or answering. Caller clients resend m.call.invite every
+            // few seconds until they see our answer/hangup; each retry
+            // arrives as a fresh push with the same call_id but a new
+            // event_id. Without this guard each retry stacks another
+            // ringer on top of the one the user is already looking at.
+            val callId = data["call_id"] ?: data["event_id"] ?: ""
+            if (callId.isNotEmpty() && callId == lastRingingCallId) {
+                Log.d(TAG, "Duplicate invite retry for $callId — suppressing")
+                forwardToJs(data)
+                return
+            }
+            lastRingingCallId = callId.takeIf { it.isNotEmpty() }
+
             // Cancel any existing message notification for this room
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.cancel(NOTIF_TAG, roomId.hashCode())
@@ -261,6 +305,22 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
 
         // PushDataPlugin registers itself here so we can forward data
         var pluginInstance: com.forta.chat.plugins.push.PushDataPlugin? = null
+
+        /**
+         * Deduplicate call pushes by call_id.
+         *
+         * Caller clients retry m.call.invite (different event_id, same
+         * call_id) while they wait for us to answer, so the same logical
+         * ring arrives as multiple pushes. Without dedup each retry
+         * triggers another IncomingCallActivity + another Telecom
+         * incoming connection — stacking ringers on top of the call the
+         * user has already accepted.
+         *
+         * We remember the last call_id handled as a ring and suppress
+         * any further invite for it until we see a hangup/reject/
+         * select_answer for the same id (or the process dies).
+         */
+        private var lastRingingCallId: String? = null
 
         fun cacheRoomName(context: Context, roomId: String, name: String) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

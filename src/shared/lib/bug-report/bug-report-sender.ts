@@ -1,4 +1,5 @@
 import type { BugReportInput } from './types';
+import { buildReporterMarker, computeReporterHash } from './reporter-hash';
 
 const REPO = 'greenShirtMystery/forta-bugs';
 const API_BASE = 'https://api.github.com';
@@ -109,13 +110,26 @@ function formatTitle(platform: string, description: string): string {
   return `${prefix}${trimmed}`;
 }
 
-function formatBody(
+async function formatBody(
   input: BugReportInput,
   results: ScreenshotResult[],
-): string {
+): Promise<string> {
   const { description, environment: env } = input;
 
-  const lines = [
+  const lines: string[] = [];
+
+  if (input.reporterAddress) {
+    try {
+      const hash = await computeReporterHash(input.reporterAddress);
+      lines.push(buildReporterMarker(hash), '');
+    } catch (e) {
+      // Marker is a nice-to-have for status tracking — never let it block
+      // the bug report itself. Log so we can diagnose if it ever happens.
+      console.warn('[bug-report] reporter hash failed, sending without marker:', e);
+    }
+  }
+
+  lines.push(
     '## Description',
     description,
     '',
@@ -143,7 +157,7 @@ function formatBody(
     env.userAgent,
     '```',
     '</details>',
-  ];
+  );
 
   const uploaded = results.filter((r) => r.url);
   const failed = results.filter((r) => !r.url && r.thumbBase64);
@@ -180,6 +194,7 @@ function formatBody(
 
 export interface BugReportResult {
   issueUrl: string;
+  issueNumber: number;
   screenshotsFailed: number;
   uploadError?: string;
 }
@@ -196,12 +211,14 @@ export async function sendBugReport(
     }
   }
 
+  const body = await formatBody(input, results);
+
   const res = await fetch(`${API_BASE}/repos/${REPO}/issues`, {
     method: 'POST',
     headers: headers(token),
     body: JSON.stringify({
       title: formatTitle(input.environment.platform, input.description),
-      body: formatBody(input, results),
+      body,
       labels: ['bug-report'],
     }),
   });
@@ -215,6 +232,7 @@ export async function sendBugReport(
 
   return {
     issueUrl: data.html_url as string,
+    issueNumber: data.number as number,
     screenshotsFailed: failedScreenshots.length,
     uploadError: failedScreenshots[0]?.error,
   };

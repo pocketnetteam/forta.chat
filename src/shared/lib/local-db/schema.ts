@@ -88,6 +88,9 @@ export interface LocalRoom {
 
   /** Timestamp (ms) when user cleared chat history. Events before this are hidden/purged. */
   clearedAtTs?: number;
+
+  /** `m.room.history_visibility` content value; `"world_readable"` marks stream rooms (hidden from sidebar). */
+  historyVisibility?: string | null;
 }
 
 /** Local message — extended with sync & local-first fields */
@@ -540,7 +543,10 @@ export class ChatDatabase extends Dexie {
       });
     });
 
-    // Version 11: add searchCache table for user-directory search TTL cache
+    // Version 11:
+    //   - add searchCache table for user-directory search TTL cache
+    //   - historyVisibility on rooms (stream = world_readable) — optional field,
+    //     no index change, merged from master
     this.version(11).stores({
       rooms: "id, updatedAt, membership, isDeleted",
       messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",

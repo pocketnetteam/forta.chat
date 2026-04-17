@@ -57,7 +57,8 @@ describe("sortedRooms", () => {
 
   it("returns rooms without lastMessage at the bottom", () => {
     const withMsg = makeRoom({ id: "!a:s", lastMessage: makeMsgField({ timestamp: 100 }) });
-    const noMsg = makeRoom({ id: "!b:s" });
+    // Default makeRoom.updatedAt is Date.now() — would sort above ts=100 without lastMessage
+    const noMsg = makeRoom({ id: "!b:s", updatedAt: 0 });
     store.rooms = [noMsg, withMsg];
     const sorted = store.sortedRooms;
     expect(sorted[0].id).toBe("!a:s");
