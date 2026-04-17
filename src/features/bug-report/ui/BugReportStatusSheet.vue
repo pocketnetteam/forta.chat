@@ -72,29 +72,14 @@ void props.mode;
     :aria-label="t('bugReportStatus.manageTitle')"
     @close="emit('close')"
   >
-    <div class="flex items-start justify-between gap-3 pb-4">
-      <div class="min-w-0">
-        <h2 class="text-lg font-semibold leading-tight text-text-color">
-          {{ t("bugReportStatus.manageTitle") }}
-        </h2>
-        <p class="mt-1 text-xs leading-snug text-text-on-main-bg-color">
-          {{ t("bugReportStatus.manageSubtitle") }}
-        </p>
-      </div>
-      <button
-        class="shrink-0 rounded-lg px-3 py-1.5 text-xs text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        @click="emit('close')"
-      >
-        {{ t("bugReportStatus.laterBtn") }}
-      </button>
+    <div class="pb-4">
+      <h2 class="text-lg font-semibold leading-tight text-text-color">
+        {{ t("bugReportStatus.manageTitle") }}
+      </h2>
+      <p class="mt-1 text-xs leading-snug text-text-on-main-bg-color">
+        {{ t("bugReportStatus.manageSubtitle") }}
+      </p>
     </div>
-
-    <p
-      v-if="issuesToShow.length === 0"
-      class="py-4 text-center text-sm text-text-on-main-bg-color"
-    >
-      {{ t("bugReportStatus.emptyManage") }}
-    </p>
 
     <ul class="flex flex-col gap-3 pb-2">
       <li

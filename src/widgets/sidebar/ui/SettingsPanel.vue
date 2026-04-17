@@ -16,6 +16,7 @@ import {
   useBugReport,
   useBugReportStatus,
 } from "@/features/bug-report";
+import { getLocalIssueCache } from "@/shared/lib/bug-report";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
 // App updater Capacitor plugin (Android only)
@@ -113,10 +114,18 @@ const bugReport = useBugReport();
 const bugStatus = useBugReportStatus();
 const myReportsSheetOpen = ref(false);
 
-const handleOpenMyReports = async () => {
+// Hide the "My reports" entry if the current account has nothing in the
+// local cache — no point in showing an empty sheet to a user who has never
+// filed a report from this device.
+const hasLocalBugReports = computed(() => {
+  if (!authStore.address) return false;
+  return getLocalIssueCache(authStore.address).length > 0;
+});
+
+const handleOpenMyReports = () => {
   if (!authStore.address) return;
+  bugStatus.loadAllIssues(authStore.address);
   myReportsSheetOpen.value = true;
-  await bugStatus.loadAllIssues(authStore.address);
 };
 
 const handleCloseMyReports = () => {
@@ -466,6 +475,7 @@ const handleLogout = () => {
 
         <!-- My Bug Reports -->
         <button
+          v-if="hasLocalBugReports"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
           @click="handleOpenMyReports"
         >
