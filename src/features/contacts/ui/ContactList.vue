@@ -712,19 +712,12 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
 
 <template>
   <div class="flex flex-col">
-    <!-- Skeleton placeholder during initial sync -->
-    <div v-if="filteredRooms.length === 0 && chatStore.isSyncing" class="flex flex-col">
-      <div v-for="i in 6" :key="i" class="flex h-[68px] w-full items-center gap-3 px-3 py-2.5 animate-pulse">
-        <div class="h-10 w-10 shrink-0 rounded-full bg-neutral-grad-0" />
-        <div class="flex min-w-0 flex-1 flex-col gap-1.5">
-          <div class="h-3.5 w-2/5 rounded bg-neutral-grad-0" />
-          <div class="h-3 w-3/5 rounded bg-neutral-grad-0" />
-        </div>
-      </div>
-    </div>
-
+    <!-- Empty state. A separate skeleton for "initial load" lives in ChatSidebar and is
+         keyed off `sortedRooms.length === 0 && !roomsInitialized`. Showing another skeleton
+         here based on isSyncing caused visible flicker on every WebSocket reconnect
+         (isSyncing flips between RECONNECTING and idle). -->
     <div
-      v-else-if="filteredRooms.length === 0 && chatStore.roomsInitialized"
+      v-if="filteredRooms.length === 0 && chatStore.roomsInitialized"
       class="flex flex-col items-center gap-3 px-6 py-12 text-center"
     >
       <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">
@@ -748,7 +741,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
         <!-- Channel item (same layout as chat room) -->
         <button
           v-if="isChannel(item)"
-          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
+          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
           :class="(item as Channel).address === channelStore.activeChannelAddress ? 'bg-color-bg-ac/10' : ''"
           @click="handleSelectChannel(item as Channel)"
         >
@@ -784,7 +777,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
         <!-- Chat room item -->
         <button
           v-else
-          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
+          class="flex h-[68px] w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
           :class="[
             selectionStore.isSelected((item as ChatRoom).id) ? 'bg-color-bg-ac/8' :
             (item as ChatRoom).id === chatStore.activeRoomId ? 'bg-color-bg-ac/10' : ''
