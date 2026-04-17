@@ -229,4 +229,81 @@ describe("ChatPage — reactive showSidebar", () => {
 
     wrapper.unmount();
   });
+
+  it("keeps sidebar visible on desktop regardless of activeRoom state", async () => {
+    // Override default mobile viewport for this test only — isMobile samples
+    // window.innerWidth synchronously at setup time.
+    Object.defineProperty(window, "innerWidth", {
+      value: 1200,
+      configurable: true,
+      writable: true,
+    });
+
+    // Even with activeRoom fully loaded, desktop shows sidebar + chat pane
+    fakeActiveRoomId.value = "!abc:matrix.org";
+    fakeRooms.value = [{ id: "!abc:matrix.org", name: "Test Room" }];
+    fakeRoomsInitialized.value = true;
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    // On desktop the <template v-if="!isMobile"> branch renders ChatSidebar
+    // and ChatWindow side-by-side; both must be present and visible.
+    const sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(sidebar.exists()).toBe(true);
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+
+    const chatWindow = wrapper.find('[data-testid="chat-window"]');
+    expect(chatWindow.exists()).toBe(true);
+    expect(isVisible(chatWindow.element as HTMLElement)).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("resets userForcedSidebar when external push sets a new activeRoomId", async () => {
+    // Start mobile, inside a fully loaded room
+    fakeActiveRoomId.value = "!first:matrix.org";
+    fakeRooms.value = [{ id: "!first:matrix.org", name: "First Room" }];
+    fakeRoomsInitialized.value = true;
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    // User backs out to sidebar — userForcedSidebar becomes true internally
+    const chatWindow = wrapper.findComponent({ name: "ChatWindow" });
+    expect(chatWindow.exists()).toBe(true);
+    chatWindow.vm.$emit("back");
+    await flushPromises();
+
+    let sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+
+    // External push intent: a new activeRoomId arrives while rooms[] doesn't
+    // yet contain the target room. Without the new watcher, userForcedSidebar
+    // would stay true and sidebar would remain stuck visible even after the
+    // room materialises below.
+    fakeActiveRoomId.value = "!second:matrix.org";
+    await flushPromises();
+
+    // Sidebar still visible because activeRoom is undefined (room not in list)
+    sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+
+    // Now the second room materialises in rooms[] — this is the verification:
+    // if userForcedSidebar had stayed true, sidebar would stay visible. With
+    // the watcher reset, showSidebar falls back to !activeRoom and hides.
+    fakeRooms.value = [
+      ...fakeRooms.value,
+      { id: "!second:matrix.org", name: "Second Room" },
+    ];
+    await flushPromises();
+
+    sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
+
+    const chatWindowAfter = wrapper.find('[data-testid="chat-window"]');
+    expect(isVisible(chatWindowAfter.element as HTMLElement)).toBe(true);
+
+    wrapper.unmount();
+  });
 });

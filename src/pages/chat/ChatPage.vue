@@ -74,6 +74,19 @@ watch(
   },
 );
 
+// Any external nav-intent (push, deep link) clears user-forced state;
+// the activeRoom watcher above will subsequently close panels once the
+// room object resolves. This ensures liveness even if the room never
+// materializes (stale ID, deleted room).
+watch(
+  () => chatStore.activeRoomId,
+  (newId, oldId) => {
+    if (newId && newId !== oldId) {
+      userForcedSidebar.value = false;
+    }
+  },
+);
+
 const onBackToSidebar = () => {
   userForcedSidebar.value = true;
   chatStore.setActiveRoom(null);
