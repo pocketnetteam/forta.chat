@@ -11,6 +11,7 @@ import { formatRelativeTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
 import { cleanMatrixIds, resolveSystemText, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import { filterRoomsForTab } from "@/entities/chat/lib/room-visibility";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 import { getRoomTitleForUI, getMessagePreviewForUI, type DisplayResult } from "@/entities/chat";
 import { useLongPress } from "@/shared/lib/gestures";
@@ -425,13 +426,16 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
     return item;
   };
 
-  if (props.filter === "personal") return rooms.filter(r => !r.isGroup && r.membership !== "invite").map(toItem);
-  if (props.filter === "groups") return rooms.filter(r => r.isGroup && r.membership !== "invite").map(toItem);
-  if (props.filter === "invites") return rooms.filter(r => r.membership === "invite").map(toItem);
+  if (props.filter === "personal") return filterRoomsForTab(rooms, "personal").map(toItem);
+  if (props.filter === "groups") return filterRoomsForTab(rooms, "groups").map(toItem);
+  if (props.filter === "invites") return filterRoomsForTab(rooms, "invites").map(toItem);
 
   // "all": merge-sort rooms + channels (both already sorted by time desc).
   // O(n+m) instead of O((n+m) log(n+m)).
-  const roomItems: UnifiedItem[] = rooms.map(toItem);
+  // Invites and empty placeholder rooms are filtered out here to prevent
+  // blank stripes in RecycleScroller (each slot reserves ITEM_HEIGHT even
+  // when its content is empty). Invites live on the dedicated Invites tab.
+  const roomItems: UnifiedItem[] = filterRoomsForTab(rooms, "all").map(toItem);
   const channelItems: UnifiedItem[] = channelStore.channels
     .map(c => ({ ...c, _key: `ch:${c.address}` }))
     .sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
