@@ -211,22 +211,19 @@ watch(
 const isMobile = ref(window.innerWidth < 768);
 const onResize = () => { isMobile.value = window.innerWidth < 768; };
 
-// ─── Bug-report status tracker (trigger on app version change or >3 days idle) ───
+// ─── Bug-report sheet: auto-open from local cache on version change / 3-day idle ───
 const {
+  allIssues: bugStatusIssues,
   sheetOpen: bugStatusSheetOpen,
-  checkStatuses: checkBugStatuses,
-  hasPending: hasBugPending,
+  loadAllIssues: loadBugIssues,
   openSheet: openBugStatusSheet,
   closeSheet: closeBugStatusSheet,
   resetState: resetBugStatus,
 } = useBugReportStatus();
 
-// Version used by the current check; retained so we only mark the boot
-// check completed once the user has actually dismissed the sheet.
 let pendingBugCheckVersion: string | null = null;
 
 async function runBugStatusCheck() {
-  console.log("[BugStatus] runBugStatusCheck start, address:", authStore.address);
   if (!authStore.address) return;
   let version = "web";
   if (isNative) {
@@ -244,12 +241,9 @@ async function runBugStatusCheck() {
       version = "electron";
     }
   }
-  const willCheck = shouldCheckOnBoot(version);
-  console.log("[BugStatus] version:", version, "shouldCheck:", willCheck);
-  if (!willCheck) return;
-  await checkBugStatuses(authStore.address);
-  console.log("[BugStatus] pending issues:", hasBugPending.value);
-  if (hasBugPending.value) {
+  if (!shouldCheckOnBoot(version)) return;
+  loadBugIssues(authStore.address);
+  if (bugStatusIssues.value.length > 0) {
     pendingBugCheckVersion = version;
     openBugStatusSheet();
   } else {
@@ -265,15 +259,10 @@ function handleBugStatusSheetClose() {
   }
 }
 
-// Trigger once we have an authenticated address. matrixReady is not required
-// — the bug-report tracker only needs the Bastyon address to derive the
-// reporter hash, so waiting for Matrix would delay (or block) the check on
-// cold start when Matrix is slow.
 let bugStatusCheckTriggered = false;
 watch(
   () => authStore.address,
   (addr) => {
-    console.log("[BugStatus] address watcher fired, addr:", addr, "triggered?", bugStatusCheckTriggered);
     if (addr && !bugStatusCheckTriggered) {
       bugStatusCheckTriggered = true;
       runBugStatusCheck().catch((e) =>
@@ -284,8 +273,7 @@ watch(
   { immediate: true },
 );
 
-// Reset in-memory state on logout so the next account on the same tab does
-// not inherit the previous user's pending issues.
+// Reset on logout so another account on the same tab starts clean.
 watch(
   () => authStore.isAuthenticated,
   (isAuthed, was) => {
@@ -389,6 +377,7 @@ onUnmounted(() => {
       v-if="authStore.address"
       :show="bugStatusSheetOpen"
       :address="authStore.address"
+      mode="manage"
       @close="handleBugStatusSheetClose"
     />
   </div>

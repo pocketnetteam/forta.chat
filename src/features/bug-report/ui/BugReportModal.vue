@@ -102,17 +102,20 @@ const handleSend = async () => {
   errorMsg.value = "";
 
   try {
+    console.log("[BugReport] sending with reporterAddress:", authStore.address);
     const result = await sendBugReport({
       description: description.value.trim(),
       environment: environment.value,
       screenshots: screenshots.value.map((s) => s.base64),
       reporterAddress: authStore.address ?? undefined,
     });
+    console.log("[BugReport] created issue #", result.issueNumber, "url:", result.issueUrl);
     if (authStore.address && result.issueNumber) {
       trackCreatedIssue(authStore.address, {
         number: result.issueNumber,
         title: `[${environment.value.platform}] ${description.value.trim().slice(0, 80)}`,
       });
+      console.log("[BugReport] tracked locally for", authStore.address);
     }
     sent.value = true;
     if (result.screenshotsFailed > 0) {

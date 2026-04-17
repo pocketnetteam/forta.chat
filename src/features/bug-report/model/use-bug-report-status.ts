@@ -1,29 +1,30 @@
 /**
- * Composable for the bug-report status review sheet.
+ * Composable for the "My bug reports" sheet.
  *
- * Tracks issues that the maintainer has closed on GitHub for the current user
- * and surfaces them so the user can confirm the fix worked ("Решено") or
- * re-open the issue with a short note ("Всё ещё баг").
+ * Everything is driven by the per-address localStorage cache populated at
+ * submission time (trackCreatedIssue) and updated by the close/reopen
+ * actions. We explicitly do NOT query GitHub search to list issues —
+ * burning the PAT's 5000 req/hr rate limit for tens of thousands of users
+ * each launch is not worth it.
  *
- * Trigger policy (see shouldCheckOnBoot):
- *   - first app run ever (kept enabled for easier manual testing), OR
- *   - app version changed since last check, OR
- *   - more than 3 days since the last check.
+ * Cost: one GitHub call per explicit close/reopen action only.
  */
-import { ref, readonly, computed } from 'vue';
+import { ref, readonly } from 'vue';
 import { APP_NAME } from '@/shared/config';
 import {
-  fetchUserClosedIssues,
-  fetchAllUserIssues,
   reopenIssue,
   closeIssue,
-  getAcknowledgedNumbers,
-  acknowledgeIssue,
   getLocalIssueCache,
   updateLocalIssueState,
   type TrackedIssue,
 } from '@/shared/lib/bug-report';
 
+const REPO_URL = 'https://github.com/greenShirtMystery/forta-bugs/issues';
+
+// ─── Boot-trigger policy ───────────────────────────────────────────────
+// The sheet is auto-opened after login when the user has locally-tracked
+// reports AND at least one of: new app version since last check, or
+// >3 days elapsed since last check. Purely local — no network involved.
 const VERSION_KEY = `${APP_NAME}:bug-report-status:last-version`;
 const CHECKED_AT_KEY = `${APP_NAME}:bug-report-status:last-checked-at`;
 const INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
@@ -52,96 +53,31 @@ export function markBootCheckCompleted(currentVersion: string): void {
   localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(Date.now()));
 }
 
-export function resetBootCheckMeta(): void {
-  localStorage.removeItem(VERSION_KEY);
-  localStorage.removeItem(CHECKED_AT_KEY);
-}
-
-// Module-level singleton state so the sheet and boot trigger share data.
-const pendingIssues = ref<TrackedIssue[]>([]);
-// Full list used by the manual "My reports" sheet — includes both open and
-// closed issues so the user can toggle state from within the app.
+// Module-level singleton state so the sheet shares data across call sites.
 const allIssues = ref<TrackedIssue[]>([]);
 const loading = ref(false);
 const sheetOpen = ref(false);
 
 export function useBugReportStatus() {
-  const hasPending = computed(() => pendingIssues.value.length > 0);
-
-  async function checkStatuses(address: string): Promise<void> {
-    if (!address || loading.value) return;
-    loading.value = true;
-    try {
-      const closed = await fetchUserClosedIssues(address);
-      const acked = new Set(getAcknowledgedNumbers(address));
-      pendingIssues.value = closed.filter((i) => !acked.has(i.number));
-    } finally {
-      loading.value = false;
+  /** Load every locally-tracked issue. Purely local — no network. */
+  function loadAllIssues(address: string): void {
+    if (!address) {
+      allIssues.value = [];
+      return;
     }
-  }
-
-  /** Load every issue reported by this user (open + closed) — used by the
-   *  manual "My reports" entry point where the user wants to manage state.
-   *
-   *  Strategy: render from the local cache first so the sheet is never empty
-   *  for a freshly-submitted issue (GitHub search lags 1-2 minutes after
-   *  creation). Then, in the background, query GitHub to pick up any state
-   *  changes and newly-discovered issues (e.g. after reinstall on a device
-   *  that has the same Matrix account). */
-  async function loadAllIssues(address: string): Promise<void> {
-    if (!address) return;
     const cache = getLocalIssueCache(address);
-    // Seed from cache for instant render.
-    allIssues.value = cache.map(
-      (c): TrackedIssue => ({
-        number: c.number,
-        title: c.title,
-        url: `https://github.com/greenShirtMystery/forta-bugs/issues/${c.number}`,
-        state: c.lastKnownState,
-        closedAt: null,
-        stateReason: null,
-      }),
-    );
-    if (loading.value) return;
-    loading.value = true;
-    try {
-      const remote = await fetchAllUserIssues(address);
-      // Merge: remote wins on state/title, cache-only entries survive until
-      // GitHub has indexed them.
-      const remoteByNumber = new Map(remote.map((r) => [r.number, r]));
-      const merged: TrackedIssue[] = [];
-      for (const r of remote) merged.push(r);
-      for (const c of cache) {
-        if (!remoteByNumber.has(c.number)) {
-          merged.push({
-            number: c.number,
-            title: c.title,
-            url: `https://github.com/greenShirtMystery/forta-bugs/issues/${c.number}`,
-            state: c.lastKnownState,
-            closedAt: null,
-            stateReason: null,
-          });
-        } else {
-          // Sync cache with GitHub's current state.
-          const r = remoteByNumber.get(c.number)!;
-          if (r.state !== c.lastKnownState) {
-            updateLocalIssueState(address, c.number, r.state);
-          }
-        }
-      }
-      allIssues.value = merged.sort((a, b) => b.number - a.number);
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  function confirmResolved(address: string, issueNumber: number): void {
-    if (!address) return;
-    acknowledgeIssue(address, issueNumber);
-    pendingIssues.value = pendingIssues.value.filter(
-      (i) => i.number !== issueNumber,
-    );
-    allIssues.value = allIssues.value.filter((i) => i.number !== issueNumber);
+    allIssues.value = cache
+      .map(
+        (c): TrackedIssue => ({
+          number: c.number,
+          title: c.title,
+          url: `${REPO_URL}/${c.number}`,
+          state: c.lastKnownState,
+          closedAt: null,
+          stateReason: null,
+        }),
+      )
+      .sort((a, b) => b.number - a.number);
   }
 
   async function markUnresolved(
@@ -153,42 +89,50 @@ export function useBugReportStatus() {
     const comment = reason.trim()
       ? `Reporter says it is still broken:\n\n> ${reason.trim().slice(0, 1000)}`
       : 'Reporter reopened this via the app — the bug is not fixed.';
-    const ok = await reopenIssue(issueNumber, comment);
-    if (!ok) return false;
-    updateLocalIssueState(address, issueNumber, 'open');
-    // Do NOT acknowledgeIssue here: the user said the fix did not work. If the
-    // maintainer closes it again later with a new attempt, we want to ask the
-    // user again.
-    pendingIssues.value = pendingIssues.value.filter(
-      (i) => i.number !== issueNumber,
-    );
-    // In the all-issues list, reflect the new open state instead of dropping it.
-    allIssues.value = allIssues.value.map((i) =>
-      i.number === issueNumber
-        ? { ...i, state: 'open', closedAt: null, stateReason: 'reopened' }
-        : i,
-    );
-    return true;
+    loading.value = true;
+    try {
+      const ok = await reopenIssue(issueNumber, comment);
+      if (!ok) return false;
+      updateLocalIssueState(address, issueNumber, 'open');
+      allIssues.value = allIssues.value.map((i) =>
+        i.number === issueNumber
+          ? { ...i, state: 'open', closedAt: null, stateReason: 'reopened' }
+          : i,
+      );
+      return true;
+    } finally {
+      loading.value = false;
+    }
   }
 
-  /** User decides an open issue is no longer relevant — close it on GitHub. */
   async function closeUserIssue(
     address: string,
     issueNumber: number,
     reason: string,
   ): Promise<boolean> {
+    if (!address) return false;
     const comment = reason.trim()
       ? `Reporter closed this via the app with a note:\n\n> ${reason.trim().slice(0, 1000)}`
       : '';
-    const ok = await closeIssue(issueNumber, comment);
-    if (!ok) return false;
-    updateLocalIssueState(address, issueNumber, 'closed');
-    allIssues.value = allIssues.value.map((i) =>
-      i.number === issueNumber
-        ? { ...i, state: 'closed', closedAt: new Date().toISOString(), stateReason: 'completed' }
-        : i,
-    );
-    return true;
+    loading.value = true;
+    try {
+      const ok = await closeIssue(issueNumber, comment);
+      if (!ok) return false;
+      updateLocalIssueState(address, issueNumber, 'closed');
+      allIssues.value = allIssues.value.map((i) =>
+        i.number === issueNumber
+          ? {
+              ...i,
+              state: 'closed',
+              closedAt: new Date().toISOString(),
+              stateReason: 'completed',
+            }
+          : i,
+      );
+      return true;
+    } finally {
+      loading.value = false;
+    }
   }
 
   function openSheet(): void {
@@ -199,27 +143,17 @@ export function useBugReportStatus() {
     sheetOpen.value = false;
   }
 
-  /**
-   * Wipe in-memory state. Call this from the logout path so another account
-   * signed in on the same browser tab does not see the previous user's
-   * unresolved issues.
-   */
   function resetState(): void {
-    pendingIssues.value = [];
     allIssues.value = [];
     loading.value = false;
     sheetOpen.value = false;
   }
 
   return {
-    pendingIssues: readonly(pendingIssues),
     allIssues: readonly(allIssues),
     loading: readonly(loading),
     sheetOpen: readonly(sheetOpen),
-    hasPending,
-    checkStatuses,
     loadAllIssues,
-    confirmResolved,
     markUnresolved,
     closeUserIssue,
     openSheet,

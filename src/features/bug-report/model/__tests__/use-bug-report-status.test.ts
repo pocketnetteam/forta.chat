@@ -2,9 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   shouldCheckOnBoot,
   markBootCheckCompleted,
-  resetBootCheckMeta,
   useBugReportStatus,
 } from '../use-bug-report-status';
+import { trackCreatedIssue } from '@/shared/lib/bug-report';
 
 const APP_NAME = 'forta-chat';
 const VERSION_KEY = `${APP_NAME}:bug-report-status:last-version`;
@@ -18,6 +18,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  useBugReportStatus().resetState();
 });
 
 describe('shouldCheckOnBoot', () => {
@@ -27,10 +30,7 @@ describe('shouldCheckOnBoot', () => {
 
   it('returns true when app version changed', () => {
     localStorage.setItem(VERSION_KEY, JSON.stringify('1.0.0'));
-    localStorage.setItem(
-      CHECKED_AT_KEY,
-      JSON.stringify(Date.now()),
-    );
+    localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(Date.now()));
     expect(shouldCheckOnBoot('1.1.0')).toBe(true);
   });
 
@@ -60,100 +60,64 @@ describe('markBootCheckCompleted', () => {
     expect(typeof JSON.parse(localStorage.getItem(CHECKED_AT_KEY)!)).toBe(
       'number',
     );
-    // Subsequent call with same version and no time elapsed → skip
     expect(shouldCheckOnBoot('1.2.3')).toBe(false);
   });
 });
 
-describe('resetBootCheckMeta', () => {
-  it('clears persisted metadata', () => {
-    markBootCheckCompleted('1.0.0');
-    resetBootCheckMeta();
-    expect(shouldCheckOnBoot('1.0.0')).toBe(true);
+describe('loadAllIssues (local cache only)', () => {
+  it('reads per-address localStorage entries sorted by number desc', () => {
+    trackCreatedIssue('addr-1', { number: 10, title: '[web] a' });
+    trackCreatedIssue('addr-1', { number: 12, title: '[web] c' });
+    trackCreatedIssue('addr-1', { number: 11, title: '[web] b' });
+
+    const { loadAllIssues, allIssues } = useBugReportStatus();
+    loadAllIssues('addr-1');
+
+    expect(allIssues.value.map((i) => i.number)).toEqual([12, 11, 10]);
+    expect(allIssues.value[0].state).toBe('open');
+  });
+
+  it('returns empty list for empty address', () => {
+    const { loadAllIssues, allIssues } = useBugReportStatus();
+    loadAllIssues('');
+    expect(allIssues.value).toEqual([]);
+  });
+
+  it('isolates per-address data', () => {
+    trackCreatedIssue('a', { number: 1, title: 't' });
+    trackCreatedIssue('b', { number: 2, title: 't' });
+
+    const status = useBugReportStatus();
+    status.loadAllIssues('a');
+    expect(status.allIssues.value.map((i) => i.number)).toEqual([1]);
+    status.loadAllIssues('b');
+    expect(status.allIssues.value.map((i) => i.number)).toEqual([2]);
   });
 });
 
 describe('useBugReportStatus actions', () => {
   beforeEach(() => {
     vi.stubEnv('VITE_BUG_REPORT_TOKEN', 'test-token');
+    trackCreatedIssue('addr-u', { number: 9, title: '[web] bug' });
   });
 
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.unstubAllGlobals();
-    // Reset singleton state between tests
-    const { pendingIssues, closeSheet } = useBugReportStatus() as any;
-    if (pendingIssues?.value) pendingIssues.value.length = 0;
-    closeSheet?.();
-  });
-
-  async function mockSearchForAddress(address: string, items: any[]) {
-    const { computeReporterHash, buildReporterMarker } = await import(
-      '@/shared/lib/bug-report'
-    );
-    const marker = buildReporterMarker(await computeReporterHash(address));
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            items: items.map((it) => ({ body: `${marker}\nx`, ...it })),
-          }),
-      }),
-    );
-  }
-
-  it('checkStatuses filters out already-acknowledged issues', async () => {
-    const { checkStatuses, pendingIssues, confirmResolved } =
-      useBugReportStatus();
-    await mockSearchForAddress('addr-1', [
-      { number: 1, title: 'a', html_url: 'u1', state: 'closed' },
-      { number: 2, title: 'b', html_url: 'u2', state: 'closed' },
-    ]);
-    confirmResolved('addr-1', 1); // pre-ack issue #1
-    await checkStatuses('addr-1');
-    expect(pendingIssues.value.map((i) => i.number)).toEqual([2]);
-  });
-
-  it('confirmResolved persists ack and drops from pending', async () => {
-    const { checkStatuses, pendingIssues, confirmResolved } =
-      useBugReportStatus();
-    await mockSearchForAddress('addr-xyz', [
-      { number: 5, title: 'x', html_url: 'u', state: 'closed' },
-    ]);
-    await checkStatuses('addr-xyz');
-    expect(pendingIssues.value).toHaveLength(1);
-    confirmResolved('addr-xyz', 5);
-    expect(pendingIssues.value).toHaveLength(0);
-  });
-
-  it('markUnresolved reopens on GitHub, returns true, does NOT ack', async () => {
-    const { checkStatuses, markUnresolved, pendingIssues } =
-      useBugReportStatus();
-
-    // Seed pending
-    await mockSearchForAddress('addr-reopen', [
-      { number: 9, title: 'y', html_url: 'u9', state: 'closed' },
-    ]);
-    await checkStatuses('addr-reopen');
-    expect(pendingIssues.value).toHaveLength(1);
-
-    // Now mock reopen calls
+  it('markUnresolved calls GitHub PATCH+comment and updates local state', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
     vi.stubGlobal('fetch', fetchMock);
 
-    const ok = await markUnresolved('addr-reopen', 9, 'still crashes');
-    expect(ok).toBe(true);
+    const status = useBugReportStatus();
+    status.loadAllIssues('addr-u');
+    // Simulate that locally we think it's closed (e.g. user closed it earlier).
+    const { updateLocalIssueState } = await import('@/shared/lib/bug-report');
+    updateLocalIssueState('addr-u', 9, 'closed');
+    status.loadAllIssues('addr-u');
+    expect(status.allIssues.value[0].state).toBe('closed');
 
-    // And crucially: acknowledgeIssue was NOT called, so if the maintainer
-    // closes it again, the user will see it again.
-    const { getAcknowledgedNumbers } = await import(
-      '@/shared/lib/bug-report'
-    );
-    expect(getAcknowledgedNumbers('addr-reopen')).toEqual([]);
+    const ok = await status.markUnresolved('addr-u', 9, 'still crashes');
+    expect(ok).toBe(true);
+    expect(status.allIssues.value[0].state).toBe('open');
 
     const patchCall = fetchMock.mock.calls.find(
       (c) => (c[1] as RequestInit).method === 'PATCH',
@@ -166,18 +130,9 @@ describe('useBugReportStatus actions', () => {
     expect(
       JSON.parse((postCall![1] as RequestInit).body as string).body,
     ).toContain('still crashes');
-    expect(pendingIssues.value).toHaveLength(0);
   });
 
-  it('markUnresolved returns false and keeps issue in list when PATCH fails', async () => {
-    const { checkStatuses, markUnresolved, pendingIssues } =
-      useBugReportStatus();
-
-    await mockSearchForAddress('addr-fail', [
-      { number: 7, title: 'z', html_url: 'u7', state: 'closed' },
-    ]);
-    await checkStatuses('addr-fail');
-
+  it('markUnresolved returns false and keeps state when PATCH fails', async () => {
     vi.stubGlobal(
       'fetch',
       vi
@@ -186,24 +141,45 @@ describe('useBugReportStatus actions', () => {
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) }),
     );
 
-    const ok = await markUnresolved('addr-fail', 7, 'noop');
+    const status = useBugReportStatus();
+    status.loadAllIssues('addr-u');
+    const beforeState = status.allIssues.value[0].state;
+
+    const ok = await status.markUnresolved('addr-u', 9, 'noop');
     expect(ok).toBe(false);
-    // Still in the list so the UI can retry / show error
-    expect(pendingIssues.value.map((i) => i.number)).toEqual([7]);
+    expect(status.allIssues.value[0].state).toBe(beforeState);
   });
 
-  it('resetState clears pending, loading and sheetOpen', async () => {
-    const { checkStatuses, pendingIssues, openSheet, sheetOpen, resetState } =
-      useBugReportStatus();
-    await mockSearchForAddress('addr-r', [
-      { number: 1, title: 't', html_url: 'u', state: 'closed' },
-    ]);
-    await checkStatuses('addr-r');
-    openSheet();
-    expect(pendingIssues.value).toHaveLength(1);
-    expect(sheetOpen.value).toBe(true);
-    resetState();
-    expect(pendingIssues.value).toHaveLength(0);
-    expect(sheetOpen.value).toBe(false);
+  it('closeUserIssue PATCHes closed and updates local state', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const status = useBugReportStatus();
+    status.loadAllIssues('addr-u');
+    expect(status.allIssues.value[0].state).toBe('open');
+
+    const ok = await status.closeUserIssue('addr-u', 9, 'figured it out');
+    expect(ok).toBe(true);
+    expect(status.allIssues.value[0].state).toBe('closed');
+
+    const patchCall = fetchMock.mock.calls.find(
+      (c) => (c[1] as RequestInit).method === 'PATCH',
+    );
+    expect(JSON.parse((patchCall![1] as RequestInit).body as string)).toMatchObject({
+      state: 'closed',
+    });
+  });
+
+  it('resetState clears list, loading, sheet', () => {
+    const status = useBugReportStatus();
+    status.loadAllIssues('addr-u');
+    status.openSheet();
+    expect(status.allIssues.value).toHaveLength(1);
+    expect(status.sheetOpen.value).toBe(true);
+    status.resetState();
+    expect(status.allIssues.value).toHaveLength(0);
+    expect(status.sheetOpen.value).toBe(false);
   });
 });

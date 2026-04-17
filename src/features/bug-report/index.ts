@@ -5,6 +5,5 @@ export {
   useBugReportStatus,
   shouldCheckOnBoot,
   markBootCheckCompleted,
-  resetBootCheckMeta,
 } from './model/use-bug-report-status';
 export type { BugReportOpenOptions } from './model/use-bug-report';

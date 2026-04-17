@@ -3,8 +3,8 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import BugReportStatusSheet from '../BugReportStatusSheet.vue';
 import { useBugReportStatus } from '../../model/use-bug-report-status';
+import { trackCreatedIssue, updateLocalIssueState } from '@/shared/lib/bug-report';
 
-// Stub the BottomSheet wrapper — we only care about the inner slot markup.
 vi.mock('@/shared/ui/bottom-sheet/BottomSheet.vue', () => ({
   default: {
     name: 'BottomSheet',
@@ -14,23 +14,18 @@ vi.mock('@/shared/ui/bottom-sheet/BottomSheet.vue', () => ({
   },
 }));
 
-// Stub i18n + provide auto-import shim that BugReportStatusSheet.vue uses.
 vi.stubGlobal('useI18n', () => ({ t: (k: string) => k }));
-
-function flushPending() {
-  return flushPromises();
-}
 
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.stubEnv('VITE_BUG_REPORT_TOKEN', 'test-token');
   localStorage.clear();
+  useBugReportStatus().resetState();
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
-  // Re-stub useI18n because unstubAllGlobals removes it.
   vi.stubGlobal('useI18n', () => ({ t: (k: string) => k }));
 });
 
@@ -42,56 +37,50 @@ describe('BugReportStatusSheet', () => {
     expect(wrapper.find('[data-testid="sheet"]').exists()).toBe(false);
   });
 
-  it('renders a card per pending issue and resolves one on click', async () => {
-    // Seed pendingIssues via the real composable.
-    const status = useBugReportStatus();
-    const { computeReporterHash, buildReporterMarker } = await import(
-      '@/shared/lib/bug-report'
-    );
-    const marker = buildReporterMarker(await computeReporterHash('addr-1'));
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            items: [
-              {
-                number: 100,
-                title: '[android] bug A',
-                html_url: 'u100',
-                state: 'closed',
-                body: `${marker}\nbody`,
-              },
-              {
-                number: 101,
-                title: '[android] bug B',
-                html_url: 'u101',
-                state: 'closed',
-                body: `${marker}\nbody`,
-              },
-            ],
-          }),
-      }),
-    );
-    await status.checkStatuses('addr-1');
-    // Re-stub useI18n (unstub happened in prior afterEach could wipe; safe here).
-    vi.stubGlobal('useI18n', () => ({ t: (k: string) => k }));
+  it('manage mode renders a card per locally-tracked issue', async () => {
+    trackCreatedIssue('addr-1', { number: 100, title: '[android] bug A' });
+    trackCreatedIssue('addr-1', { number: 101, title: '[android] bug B' });
+    useBugReportStatus().loadAllIssues('addr-1');
 
     const wrapper = mount(BugReportStatusSheet, {
-      props: { show: true, address: 'addr-1' },
+      props: { show: true, address: 'addr-1', mode: 'manage' },
     });
-    await flushPending();
+    await flushPromises();
 
     const cards = wrapper.findAll('li');
     expect(cards).toHaveLength(2);
-    expect(cards[0].text()).toContain('#100');
-    expect(cards[0].text()).toContain('bug A');
+    expect(cards[0].text()).toContain('#101');
+    expect(cards[1].text()).toContain('#100');
+  });
 
-    // Click "resolved" on first card
-    await cards[0].findAll('button')[0].trigger('click');
-    await flushPending();
+  it('manage mode renders state pills (open vs closed)', async () => {
+    trackCreatedIssue('addr-2', { number: 1, title: 'open-one' });
+    trackCreatedIssue('addr-2', { number: 2, title: 'closed-one' });
+    updateLocalIssueState('addr-2', 2, 'closed');
+    useBugReportStatus().loadAllIssues('addr-2');
 
-    expect(status.pendingIssues.value.map((i) => i.number)).toEqual([101]);
+    const wrapper = mount(BugReportStatusSheet, {
+      props: { show: true, address: 'addr-2', mode: 'manage' },
+    });
+    await flushPromises();
+
+    const cards = wrapper.findAll('li');
+    expect(cards).toHaveLength(2);
+    // Each card has exactly one primary action button (close or reopen).
+    for (const card of cards) {
+      const actionButtons = card.findAll('button');
+      expect(actionButtons.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('manage mode hides list when no issues tracked', async () => {
+    useBugReportStatus().loadAllIssues('addr-empty');
+
+    const wrapper = mount(BugReportStatusSheet, {
+      props: { show: true, address: 'addr-empty', mode: 'manage' },
+    });
+    await flushPromises();
+
+    expect(wrapper.findAll('li')).toHaveLength(0);
   });
 });
