@@ -183,6 +183,7 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Chat window ──
   "chat.selectToStart": "Выберите чат, чтобы начать общение",
+  "chat.loadingRoom": "Загрузка чата…",
   "chat.offline": "Вы офлайн. Сообщения будут отправлены при восстановлении связи.",
   "chat.slowConnection": "Медленное соединение",
   "chat.invitation": "Приглашение в чат",
