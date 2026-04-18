@@ -3,6 +3,7 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
@@ -892,6 +893,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         deduped.push(m);
       }
       if (deduped.length !== msgs.length) msgs = deduped;
+    }
+
+    if (msgs.length > 0) {
+      msgs = sortMessagesTimelineAsc(msgs);
     }
 
     _prevActiveOutput = msgs;

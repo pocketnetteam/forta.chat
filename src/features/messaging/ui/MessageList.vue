@@ -204,6 +204,8 @@ interface VirtualItem {
   label?: string;
   index?: number;
   unreadCount?: number;
+  /** Satisfies ChatVirtualScroller ChatVirtualItem index signature */
+  [key: string]: unknown;
 }
 
 const virtualItems = computed<VirtualItem[]>(() => {
@@ -280,16 +282,10 @@ const virtualItems = computed<VirtualItem[]>(() => {
   return items;
 });
 
-/** Reversed for the inverted scroller: newest first (index 0 = visual bottom).
- *  History loading appends to the END of this array = visual TOP = no scroll jump. */
-const reversedItems = computed(() => {
-  const items = virtualItems.value;
-  const reversed = new Array(items.length);
-  for (let i = 0; i < items.length; i++) {
-    reversed[i] = items[items.length - 1 - i];
-  }
-  return reversed;
-});
+/** Newest-first for the inverted scroller (index 0 = visual bottom).
+ *  Requires `activeMessages` / `virtualItems` in chronological order (oldest→newest).
+ *  History loading appends at the chronological end = far end here = visual TOP = no scroll jump. */
+const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().reverse());
 
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
