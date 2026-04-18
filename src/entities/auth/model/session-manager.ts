@@ -70,6 +70,12 @@ export class SessionManager {
     return sessions.find((s) => s.address === address) ?? null;
   }
 
+  /**
+   * Appends a session to the list. Does not change the active account — callers
+   * must call `setActive` when the new session should become current (e.g. login
+   * via `setAuthData`), or leave active unchanged so `switchAccount` can run a
+   * full Matrix/Dexie teardown (add-account flow).
+   */
   addSession(address: string, privateKey: string): void {
     const sessions = this.getSessions();
 
@@ -90,7 +96,6 @@ export class SessionManager {
 
     sessions.push(session);
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
-    this.setActive(address);
   }
 
   removeSession(address: string): void {

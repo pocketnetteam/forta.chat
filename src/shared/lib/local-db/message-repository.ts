@@ -2,6 +2,7 @@ import Dexie from "dexie";
 import type { ChatDatabase, LocalMessage, LocalMessageStatus } from "./schema";
 import { MessageType } from "@/entities/chat/model/types";
 import type { ReplyTo } from "@/entities/chat/model/types";
+import { sortLocalMessagesTimelineAsc } from "./timeline-sort";
 
 export class MessageRepository {
   constructor(private db: ChatDatabase) {}
@@ -27,7 +28,7 @@ export class MessageRepository {
       .limit(limit)
       .toArray();
 
-    return msgs.reverse();
+    return sortLocalMessagesTimelineAsc(msgs);
   }
 
   /** Get a single message by server eventId */
@@ -56,7 +57,7 @@ export class MessageRepository {
         [roomId, "failed"],
       ])
       .toArray();
-    return pending.sort((a, b) => a.timestamp - b.timestamp);
+    return sortLocalMessagesTimelineAsc(pending);
   }
 
   /** Get the last non-deleted message in a room (for preview after deletion) */
@@ -495,7 +496,8 @@ export class MessageRepository {
   // ---------------------------------------------------------------------------
 
   /** Load messages around a timestamp for jump-to-unread.
-   *  Returns `beforeCount` messages before ts + messages after ts up to `afterCount`. */
+   *  Returns `beforeCount` messages before ts + messages after ts up to `afterCount`.
+   *  `anchorIndex` — first message strictly after `timestamp` (aligned with the "after" query lower bound). */
   async getMessagesAroundTimestamp(
     roomId: string,
     timestamp: number,
@@ -518,8 +520,10 @@ export class MessageRepository {
         .toArray(),
     ]);
 
-    const messages = [...before.reverse(), ...after];
-    const anchorIndex = before.length;
+    const merged = [...before.reverse(), ...after];
+    const messages = sortLocalMessagesTimelineAsc(merged);
+    let anchorIndex = messages.findIndex(m => m.timestamp > timestamp);
+    if (anchorIndex === -1) anchorIndex = messages.length;
     return { messages, anchorIndex };
   }
 
@@ -598,7 +602,7 @@ export class MessageRepository {
         .toArray(),
     ]);
 
-    const all = [...before.reverse(), target, ...after];
+    const all = sortLocalMessagesTimelineAsc([...before.reverse(), target, ...after]);
     const targetIndex = all.findIndex(m => m.eventId === targetEventId);
 
     return { messages: all, targetIndex };
@@ -617,7 +621,7 @@ export class MessageRepository {
       .between([roomId, effectiveAfter], [roomId, Dexie.maxKey], false, true)
       .limit(limit)
       .toArray();
-    return msgs;
+    return sortLocalMessagesTimelineAsc(msgs);
   }
 
 }

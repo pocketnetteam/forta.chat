@@ -204,6 +204,8 @@ interface VirtualItem {
   label?: string;
   index?: number;
   unreadCount?: number;
+  /** Satisfies ChatVirtualScroller ChatVirtualItem index signature */
+  [key: string]: unknown;
 }
 
 const virtualItems = computed<VirtualItem[]>(() => {
@@ -280,16 +282,10 @@ const virtualItems = computed<VirtualItem[]>(() => {
   return items;
 });
 
-/** Reversed for the inverted scroller: newest first (index 0 = visual bottom).
- *  History loading appends to the END of this array = visual TOP = no scroll jump. */
-const reversedItems = computed(() => {
-  const items = virtualItems.value;
-  const reversed = new Array(items.length);
-  for (let i = 0; i < items.length; i++) {
-    reversed[i] = items[items.length - 1 - i];
-  }
-  return reversed;
-});
+/** Newest-first for the inverted scroller (index 0 = visual bottom).
+ *  Requires `activeMessages` / `virtualItems` in chronological order (oldest→newest).
+ *  History loading appends at the chronological end = far end here = visual TOP = no scroll jump. */
+const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().reverse());
 
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
@@ -533,6 +529,23 @@ watch(
       const cacheAge = await chatStore.loadCachedMessages(roomId);
       if (isStale()) return;
 
+      // liveQuery can lag behind a Dexie read in loadCachedMessages — avoid treating
+      // a non-empty local DB as "no cache" and forcing Matrix scrollback + loading spinner.
+      if (isChatDbReady()) {
+        const dbKit = getChatDb();
+        const clearedAtPeek = dbKit.eventWriter.getClearedAtTs(roomId);
+        const peek = await dbKit.messages.getMessages(roomId, 1, undefined, clearedAtPeek);
+        if (peek.length > 0) {
+          const dexieWaitDeadline = Date.now() + 2000;
+          while (Date.now() < dexieWaitDeadline) {
+            if (isStale()) return;
+            const am = chatStore.activeMessages;
+            if (am.length > 0 && am[0]?.roomId === roomId) break;
+            await new Promise<void>(r => setTimeout(r, 10));
+          }
+        }
+      }
+
       if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
         const readyDeadline = Date.now() + 500;
         while (!chatStore.dexieMessagesReady && Date.now() < readyDeadline) {
@@ -717,6 +730,16 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
 
   if (lastAddedIsOwn || isNearBottom.value) {
     scrollToBottom();
+    // Inbound message while at bottom: viewport already shows latest — flush read tracker
+    // without waiting for IntersectionObserver batch (2s) so read markers stay in sync.
+    if (!lastAddedIsOwn && isNearBottom.value) {
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          readTracker.performManualScan();
+          readTracker.flushNow();
+        });
+      });
+    }
   } else {
     newMessageCount.value++;
   }

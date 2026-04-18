@@ -236,4 +236,25 @@ describe("RoomRepository", () => {
       expect(rooms[0].id).toBe("!alive:s");
     });
   });
+
+  // ── markAsRead (boolean) ──────────────────────────────────────────
+
+  describe("markAsRead", () => {
+    it("returns true when watermark advances", async () => {
+      await db.rooms.put(makeLocalRoom({ id: "!r:s", lastReadInboundTs: 500 }));
+      const ok = await repo.markAsRead("!r:s", 1000);
+      expect(ok).toBe(true);
+    });
+
+    it("returns false when timestamp is not newer than watermark", async () => {
+      await db.rooms.put(makeLocalRoom({ id: "!r:s", lastReadInboundTs: 2000 }));
+      const ok = await repo.markAsRead("!r:s", 1000);
+      expect(ok).toBe(false);
+    });
+
+    it("returns false when room does not exist", async () => {
+      const ok = await repo.markAsRead("!missing:s", 1000);
+      expect(ok).toBe(false);
+    });
+  });
 });

@@ -3,6 +3,7 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
@@ -892,6 +893,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         deduped.push(m);
       }
       if (deduped.length !== msgs.length) msgs = deduped;
+    }
+
+    if (msgs.length > 0) {
+      msgs = sortMessagesTimelineAsc(msgs);
     }
 
     _prevActiveOutput = msgs;
@@ -2665,9 +2670,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Matrix event origin_server_ts — used to dedupe successful read_marker POSTs. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const getMatrixEventTimestamp = (event: any): number =>
+    event?.getTs?.() ?? event?.event?.origin_server_ts ?? 0;
+
   /** Per-room cooldown for network receipt sends (local Dexie commit is always instant) */
   const RECEIPT_COOLDOWN_MS = 3000;
   const receiptCooldowns = new Map<string, number>();
+
+  /** Last successful read_marker POST per room (event timestamp). Dexie `lastReadInboundTs`
+   *  can advance without a network send (e.g. room bulkUpsert when server unread=0); network
+   *  dedupe must not rely on `markAsRead` returning true. */
+  const lastReadReceiptSentTs = new Map<string, number>();
 
   /** Atomically commit a read watermark: update Dexie (instant UI) + send
    *  Matrix receipt (server sync) with per-room throttling.
@@ -2678,12 +2693,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
     }
 
+    const lastReceiptTs = lastReadReceiptSentTs.get(roomId) ?? 0;
+    if (timestamp <= lastReceiptTs) {
+      // Server already has a read marker at or past this watermark position.
+      return;
+    }
+
     // 2. SERVER SYNC — throttled per room
     const now = Date.now();
     const lastSent = receiptCooldowns.get(roomId) ?? 0;
     if (now - lastSent < RECEIPT_COOLDOWN_MS) {
-      // Queue for next flush — don't spam the server
-      pendingReadWatermarks.set(roomId, timestamp);
+      // Queue for next flush — don't spam the server (keep highest pending ts)
+      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
+      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
       return;
     }
 
@@ -2692,11 +2714,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       receiptCooldowns.set(roomId, now);
       const success = await sendReadReceiptIfVisible(roomId, event);
       if (success) {
+        const evTs = getMatrixEventTimestamp(event);
+        const appliedTs = evTs > 0 ? evTs : timestamp;
+        lastReadReceiptSentTs.set(
+          roomId,
+          Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
+        );
         pendingReadWatermarks.delete(roomId);
         watermarkQueuedAt.delete(roomId);
       }
     } else {
-      pendingReadWatermarks.set(roomId, timestamp);
+      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
+      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
       if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, Date.now());
     }
   };
@@ -2726,11 +2755,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Snapshot entries to avoid mutation-during-iteration
     const entries = [...pendingReadWatermarks];
     for (const [roomId, timestamp] of entries) {
+      if (timestamp <= (lastReadReceiptSentTs.get(roomId) ?? 0)) {
+        pendingReadWatermarks.delete(roomId);
+        watermarkQueuedAt.delete(roomId);
+        continue;
+      }
       const event = findMatrixEventForTimestamp(roomId, timestamp);
       if (event) {
         receiptCooldowns.set(roomId, now);
         sendReadReceiptIfVisible(roomId, event).then((success) => {
           if (success) {
+            const evTs = getMatrixEventTimestamp(event);
+            const appliedTs = evTs > 0 ? evTs : timestamp;
+            lastReadReceiptSentTs.set(
+              roomId,
+              Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
+            );
             pendingReadWatermarks.delete(roomId);
             watermarkQueuedAt.delete(roomId);
           }
@@ -5899,6 +5939,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     cancelPendingPatches();
     _sortedRoomsRef.value = [];
     messageWindowSize.value = 50;
+    lastReadReceiptSentTs.clear();
 
     // Clear localStorage account data
     localStorage.removeItem(_pinnedKey);

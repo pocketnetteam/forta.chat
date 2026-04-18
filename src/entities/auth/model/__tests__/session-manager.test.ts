@@ -152,7 +152,7 @@ describe("SessionManager", () => {
   // --- addSession ---
 
   describe("addSession()", () => {
-    it("adds a new session and sets it active", () => {
+    it("adds a new session without changing active account", () => {
       sm.addSession("addr1", "pk1");
 
       const sessions = sm.getSessions();
@@ -160,19 +160,19 @@ describe("SessionManager", () => {
       expect(sessions[0].address).toBe("addr1");
       expect(sessions[0].privateKey).toBe("pk1");
       expect(sessions[0].addedAt).toBeTypeOf("number");
-      expect(sm.getActiveAddress()).toBe("addr1");
+      expect(sm.getActiveAddress()).toBeNull();
     });
 
-    it("appends to end of existing sessions", () => {
+    it("appends to end; adding a second session does not change active (switchAccount must run teardown)", () => {
       sm.addSession("addr1", "pk1");
+      sm.setActive("addr1");
       sm.addSession("addr2", "pk2");
 
       const sessions = sm.getSessions();
       expect(sessions).toHaveLength(2);
       expect(sessions[0].address).toBe("addr1");
       expect(sessions[1].address).toBe("addr2");
-      // Second added session becomes active
-      expect(sm.getActiveAddress()).toBe("addr2");
+      expect(sm.getActiveAddress()).toBe("addr1");
     });
 
     it("does not add duplicate addresses", () => {
@@ -200,7 +200,7 @@ describe("SessionManager", () => {
     it("removes a non-active session", () => {
       sm.addSession("addr1", "pk1");
       sm.addSession("addr2", "pk2");
-      // active is addr2
+      sm.setActive("addr2");
 
       sm.removeSession("addr1");
 
@@ -213,7 +213,7 @@ describe("SessionManager", () => {
       sm.addSession("addr1", "pk1");
       sm.addSession("addr2", "pk2");
       sm.addSession("addr3", "pk3");
-      // active is addr3
+      sm.setActive("addr3");
 
       sm.removeSession("addr3");
 
