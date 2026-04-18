@@ -5,6 +5,10 @@ import { useChatStore } from "./chat-store";
 import { makeRoom } from "@/test-utils";
 import { getCachedMessages } from "@/shared/lib/cache/chat-cache";
 
+const matrixMocks = vi.hoisted(() => ({
+  scrollback: vi.fn(() => Promise.resolve()),
+}));
+
 // ── Mock chat-cache ──────────────────────────────────────────────
 vi.mock("@/shared/lib/cache/chat-cache", () => ({
   cacheRooms: vi.fn(() => Promise.resolve()),
@@ -21,7 +25,7 @@ vi.mock("@/entities/matrix", () => ({
       client: {
         sendEvent: vi.fn(),
         redactEvent: vi.fn(),
-        scrollback: vi.fn(),
+        scrollback: matrixMocks.scrollback,
         setRoomTopic: vi.fn(),
         sendStateEvent: vi.fn(),
         getUserId: vi.fn(() => "@mock:s"),
@@ -33,7 +37,7 @@ vi.mock("@/entities/matrix", () => ({
     sendEncryptedText: vi.fn(),
     sendFile: vi.fn(),
     redactEvent: vi.fn(),
-    scrollback: vi.fn(() => Promise.resolve()),
+    scrollback: matrixMocks.scrollback,
     joinRoom: vi.fn(),
     createRoom: vi.fn(),
     getRoom: vi.fn(() => ({
@@ -85,6 +89,15 @@ describe("ensureRoomsLoaded — viewport-fetch state machine", () => {
     // Wait for async cache fetch to complete
     await waitFor(() => store.roomFetchStates.get("!r2:s")?.status === "success");
     expect(store.roomFetchStates.get("!r2:s")?.status).toBe("success");
+  });
+
+  it("does not call Matrix scrollback — sidebar viewport must not hit /messages", async () => {
+    store.ensureRoomsLoaded(["!r2:s", "!r3:s"], "high");
+    await waitFor(() =>
+      store.roomFetchStates.get("!r2:s")?.status === "success" &&
+      store.roomFetchStates.get("!r3:s")?.status === "success",
+    );
+    expect(matrixMocks.scrollback).not.toHaveBeenCalled();
   });
 
   it("skips rooms already in success state", () => {

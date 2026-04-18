@@ -1468,7 +1468,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Fetch room data for viewport preview: cache first, then network (loadRoomMessages).
+  /** Hydrate viewport preview from local cache only (Dexie/localStorage).
+   *  Does NOT call loadRoomMessages — scrollback hits /messages and is unnecessary for list
+   *  previews (sync + EventWriter already populate LocalRoom / lastMessage).
    *  Checks generation between async steps — if the user scrolled away, aborts early. */
   const fetchRoomPreview = async (roomId: string, generation: number): Promise<void> => {
     // Stale generation — user scrolled away, abort
@@ -1486,15 +1488,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     try {
       if (generation !== currentViewportGeneration) return;
 
-      // Phase 1: cache (fast, from Dexie/localStorage)
       if (!messages.value[roomId]?.length) {
         await loadCachedMessages(roomId).catch(() => {});
       }
-
-      if (generation !== currentViewportGeneration) return;
-
-      // Phase 2: network — loadRoomMessages fetches from Matrix SDK (scrollback)
-      await loadRoomMessages(roomId);
 
       if (generation !== currentViewportGeneration) return;
 
@@ -1628,7 +1624,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Background-preload messages for rooms near the active room.
-   *  Phase 1: active room + 2 neighbors get immediate network preload.
+   *  Phase 1: neighbors get cache preload via ensureRoomsLoaded (no /messages scrollback).
    *  Phase 2: remaining viewport rooms get cache-only preload via requestIdleCallback. */
   const preloadVisibleRooms = async () => {
     if (preloadDone) return;
@@ -1654,7 +1650,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Priority: active room + N neighbors (immediate network preload)
+    // Priority: active room + N neighbors (cache preload first)
     const activeIdx = activeId ? sorted.findIndex(r => r.id === activeId) : -1;
     const priorityRooms: typeof sorted = [];
     if (activeIdx >= 0) {
@@ -1667,12 +1663,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       r => r.id !== activeId && r.membership !== "invite",
     );
 
-    // Phase 1: cache + network for priority rooms via ensureRoomsLoaded
+    // Phase 1: cache for priority neighbor rooms via ensureRoomsLoaded
     ensureRoomsLoaded(priorityFiltered.map(r => r.id), "high");
 
     // Phase 2: cache-only preload for remaining viewport rooms via idle callback.
     // These rooms are NOT added to roomFetchStates — intentionally allowing
-    // ensureRoomsLoaded to trigger a full network fetch when the user scrolls to them.
+    // ensureRoomsLoaded to run cache hydration when the user scrolls to them.
     const remaining = sorted
       .slice(0, PRELOAD_COUNT)
       .filter(r => r.id !== activeId && r.membership !== "invite" &&
@@ -4429,7 +4425,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Check activeRoomId between iterations — if user switched rooms, bail
         // early to avoid piling up stale scrollback/crypto work.
         // Only applies when the room WAS active (user opened it, then navigated away).
-        // Viewport-fetch rooms were never active — they must complete to provide previews.
+        // Sidebar viewport preload does not call loadRoomMessages — no scrollback there.
         for (let attempt = 0; attempt < MAX_SCROLLBACK_ATTEMPTS && msgCount < MIN_MESSAGES; attempt++) {
           if (wasActiveRoom && activeRoomId.value !== roomId) return;
           const prevCount = timelineEvents.length;
@@ -4449,7 +4445,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Bail if user already switched to another room — no point parsing/writing
       // stale data that will saturate Dexie transactions and block the active room.
-      // Only applies when the room WAS active (viewport-fetch rooms were never active).
+      // Only applies when the room WAS active (sidebar never hits this via viewport preload).
       if (wasActiveRoom && activeRoomId.value !== roomId) return;
 
       const msgs = await parseTimelineEvents(timelineEvents, roomId);
