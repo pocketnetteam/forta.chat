@@ -533,6 +533,23 @@ watch(
       const cacheAge = await chatStore.loadCachedMessages(roomId);
       if (isStale()) return;
 
+      // liveQuery can lag behind a Dexie read in loadCachedMessages — avoid treating
+      // a non-empty local DB as "no cache" and forcing Matrix scrollback + loading spinner.
+      if (isChatDbReady()) {
+        const dbKit = getChatDb();
+        const clearedAtPeek = dbKit.eventWriter.getClearedAtTs(roomId);
+        const peek = await dbKit.messages.getMessages(roomId, 1, undefined, clearedAtPeek);
+        if (peek.length > 0) {
+          const dexieWaitDeadline = Date.now() + 2000;
+          while (Date.now() < dexieWaitDeadline) {
+            if (isStale()) return;
+            const am = chatStore.activeMessages;
+            if (am.length > 0 && am[0]?.roomId === roomId) break;
+            await new Promise<void>(r => setTimeout(r, 10));
+          }
+        }
+      }
+
       if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
         const readyDeadline = Date.now() + 500;
         while (!chatStore.dexieMessagesReady && Date.now() < readyDeadline) {

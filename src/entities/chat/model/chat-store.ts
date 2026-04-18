@@ -2670,8 +2670,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  Local commit is always immediate; network send is throttled to max 1/3s per room. */
   const commitReadWatermark = async (roomId: string, timestamp: number) => {
     // 1. LOCAL COMMIT — instant, UI reacts via liveQuery
+    let advanced = true;
     if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
+      advanced = await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
+    }
+    if (!advanced) {
+      // Watermark did not move — nothing new for the server to record.
+      return;
     }
 
     // 2. SERVER SYNC — throttled per room

@@ -181,7 +181,8 @@ describe("markAsRead atomicity", () => {
   it("sets unreadCount=0 and advances watermark", async () => {
     await db.rooms.put(makeRoom({ id: "!r:test", unreadCount: 10, lastReadInboundTs: 500 }));
 
-    await roomRepo.markAsRead("!r:test", 1000);
+    const ok = await roomRepo.markAsRead("!r:test", 1000);
+    expect(ok).toBe(true);
 
     const room = await db.rooms.get("!r:test");
     expect(room!.unreadCount).toBe(0);
@@ -191,15 +192,16 @@ describe("markAsRead atomicity", () => {
   it("does not regress watermark (monotonic)", async () => {
     await db.rooms.put(makeRoom({ id: "!r:test", unreadCount: 0, lastReadInboundTs: 2000 }));
 
-    await roomRepo.markAsRead("!r:test", 1000);
+    const ok = await roomRepo.markAsRead("!r:test", 1000);
+    expect(ok).toBe(false);
 
     const room = await db.rooms.get("!r:test");
     expect(room!.lastReadInboundTs).toBe(2000); // unchanged
   });
 
   it("handles non-existent room gracefully", async () => {
-    // Should not throw
-    await roomRepo.markAsRead("!nonexistent:test", 1000);
+    const ok = await roomRepo.markAsRead("!nonexistent:test", 1000);
+    expect(ok).toBe(false);
   });
 
   it("concurrent writeMessage + markAsRead resolves correctly", async () => {
