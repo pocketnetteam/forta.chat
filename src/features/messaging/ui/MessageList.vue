@@ -734,6 +734,16 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
 
   if (lastAddedIsOwn || isNearBottom.value) {
     scrollToBottom();
+    // Inbound message while at bottom: viewport already shows latest — flush read tracker
+    // without waiting for IntersectionObserver batch (2s) so read markers stay in sync.
+    if (!lastAddedIsOwn && isNearBottom.value) {
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          readTracker.performManualScan();
+          readTracker.flushNow();
+        });
+      });
+    }
   } else {
     newMessageCount.value++;
   }

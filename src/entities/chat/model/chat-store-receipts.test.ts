@@ -119,6 +119,20 @@ describe("receipt throttling", () => {
     expect(mockSendReadReceipt).not.toHaveBeenCalled();
   });
 
+  it("sends receipt when Dexie did not advance but server read marker was never sent", async () => {
+    const kit = makeMinimalChatDbKit(async () => false);
+    store.setChatDbKit(kit as any);
+
+    await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+
+    mockSendReadReceipt.mockClear();
+    await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).not.toHaveBeenCalled();
+  });
+
   it("throttles rapid calls within cooldown window", async () => {
     await store.advanceInboundWatermark("!r1:s", 1000);
     await flushCoalescing();
