@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
+import { loadMnemonic } from "@/entities/auth/lib";
 import { useI18n } from "@/shared/lib/i18n";
 
 const props = defineProps<{
@@ -9,6 +10,16 @@ const props = defineProps<{
 const router = useRouter();
 const { t } = useI18n();
 const authStore = useAuthStore();
+
+// Recover the mnemonic from sessionStorage if the Vue ref was lost due to
+// unmount / HMR / route change. Without this the user could see a blank
+// "save your seed phrase" screen after Android backgrounded the app.
+onMounted(() => {
+  if (!authStore.regMnemonic) {
+    const stored = loadMnemonic();
+    if (stored) authStore.setRegMnemonic(stored);
+  }
+});
 
 const confirmed = ref(false);
 const registering = ref(false);

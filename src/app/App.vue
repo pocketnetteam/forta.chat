@@ -31,6 +31,11 @@ import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
+import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
+import { PROXY_NODES } from "@/shared/config/constants";
+
+// Non-critical: if the request fails, images keep original URLs until next session.
+loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].port}`);
 
 const isElectron = !!(window as any).electronAPI?.isElectron;
 const { t } = useI18n();

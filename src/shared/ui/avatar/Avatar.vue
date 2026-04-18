@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
+
 interface Props {
   src?: string;
   name?: string;
@@ -54,30 +56,30 @@ const sizeClass = computed(() => ({
 
 const imgError = ref(false);
 
-/** Fix bastyon.com:8092 → pocketnet.app:8092 (SSL cert mismatch) */
-const fixedSrc = computed(() => {
-  if (!props.src) return "";
-  return props.src.replace("bastyon.com:8092", "pocketnet.app:8092");
-});
+const fixedSrc = computed(() => normalizePocketnetImageUrl(props.src));
 
-const showFallback = computed(() => !props.src || imgError.value);
+const hasImage = computed(() => !!props.src && !imgError.value);
 </script>
 
 <template>
   <div
     :class="sizeClass"
-    class="flex shrink-0 items-center justify-center overflow-hidden rounded-full"
-    :style="showFallback ? { backgroundColor: avatarColor } : {}"
+    class="relative flex shrink-0 items-center justify-center overflow-hidden rounded-full"
+    :style="{ backgroundColor: avatarColor }"
     role="img"
     :aria-label="props.name || 'User avatar'"
   >
+    <!-- Initials are always rendered underneath the image so the tile never
+         shows a blank frame while the image is loading (e.g. right after
+         RecycleScroller recycles the row under a new src). Image covers
+         initials once it paints. -->
+    <span class="font-medium text-white">{{ initials }}</span>
     <img
-      v-if="!showFallback"
+      v-if="hasImage"
       :src="fixedSrc"
       :alt="props.name"
-      class="h-full w-full object-cover"
+      class="absolute inset-0 h-full w-full object-cover"
       @error="imgError = true"
     />
-    <span v-else class="font-medium text-white">{{ initials }}</span>
   </div>
 </template>

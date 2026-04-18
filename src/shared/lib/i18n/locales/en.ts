@@ -49,6 +49,10 @@ export const en = {
   "contactSearch.showMore": "Show more",
   "contactSearch.clearSearch": "Clear search",
 
+  // ── Search errors ──
+  "search.userNotFound": "User not found",
+  "search.serviceUnavailable": "Search service is temporarily unavailable",
+
   // ── Folder tabs ──
   "tabs.all": "All",
   "tabs.personal": "Personal",
@@ -220,6 +224,7 @@ export const en = {
   "profile.saving": "Saving...",
   "profile.avatarUploading": "Uploading...",
   "profile.avatarError": "Failed to upload avatar",
+  "profile.saveFailed": "Failed to save profile. Check your connection and try again.",
 
   // ── Message input ──
   "message.editing": "Editing",
@@ -714,6 +719,8 @@ export const en = {
   "register.networkErrorTitle": "Connection problem",
   "register.networkErrorHint": "Unable to reach the network. Please check your internet connection and try again.",
   "register.retry": "Try Again",
+  "register.pollAttempt": "Attempt {n}",
+  "register.accountAddress": "Account",
   "invite.shareText": "Join me on Forta Chat!",
 
   // ── App download banner ──

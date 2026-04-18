@@ -19,7 +19,14 @@ const handleProfileDone = (data: { name: string; language: string; about: string
   currentStep.value = 2;
 };
 
+// Only clear registration state on unmount if registration is NOT in flight.
+// Previously this unconditional clear wiped the seed phrase whenever the
+// RegisterForm unmounted mid-flow (route change, Android backgrounding, HMR),
+// leaving users with no way to back up their mnemonic. sessionStorage carries
+// the seed through unmounts now (see mnemonic-storage helper), but we still
+// avoid blowing away the Vue-refs while the blockchain poll is running.
 onUnmounted(() => {
+  if (authStore.registrationPending) return;
   authStore.clearRegistrationState();
 });
 </script>

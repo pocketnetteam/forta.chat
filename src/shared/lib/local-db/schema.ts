@@ -88,6 +88,9 @@ export interface LocalRoom {
 
   /** Timestamp (ms) when user cleared chat history. Events before this are hidden/purged. */
   clearedAtTs?: number;
+
+  /** `m.room.history_visibility` content value; `"world_readable"` marks stream rooms (hidden from sidebar). */
+  historyVisibility?: string | null;
 }
 
 /** Local message — extended with sync & local-first fields */
@@ -189,6 +192,13 @@ export interface ListenedMessage {
   messageId: string;               // PK: Matrix event ID or clientId
 }
 
+/** Cached user-directory search results (query → results with TTL) */
+export interface SearchCacheRow {
+  query: string;                   // PK: lower-cased search query
+  results: Array<{ address: string; name: string; image?: string }>;
+  expiresAt: number;               // Unix ms — entry is considered stale past this
+}
+
 /** Queued decryption retry job */
 export interface DecryptionJob {
   id?: number;                   // Auto PK
@@ -216,6 +226,7 @@ export class ChatDatabase extends Dexie {
   attachments!: Table<LocalAttachment>;
   decryptionQueue!: Table<DecryptionJob>;
   listenedMessages!: Table<ListenedMessage>;
+  searchCache!: Table<SearchCacheRow>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -530,6 +541,25 @@ export class ChatDatabase extends Dexie {
         if (job.status === "pending") job.status = "queued";
         if (job.status === "failed") job.status = "waiting";
       });
+    });
+
+    // Version 11:
+    //   - add searchCache table for user-directory search TTL cache
+    //   - historyVisibility on rooms (stream = world_readable) — optional field,
+    //     no index change, merged from master
+    this.version(11).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt",
+      pendingOps: "++id, [roomId+createdAt], status",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      // PK: query (lower-cased) — first field in the schema string is the
+      // primary key by default; no `&` prefix needed (that marks a unique
+      // index on a non-PK field). Index: expiresAt (GC scan).
+      searchCache: "query, expiresAt",
     });
   }
 }

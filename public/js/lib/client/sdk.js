@@ -32,7 +32,7 @@ var pSDK = function ({ app, api, actions }) {
         },
 
         userInfoLight: {
-            time: 120000
+            time: 1200000
         },
 
         userState: {
@@ -777,6 +777,9 @@ var pSDK = function ({ app, api, actions }) {
     self.userInfo = {
         keys: ['userInfoFull', 'userInfoLight'],
 
+        /** Last getuserprofile rows before cleanData (numeric id, k/keys, …). Keyed by address from RPC. */
+        _rawProfileByAddress: {},
+
         objkey : 'address',
 
         searchIndex : function(obj){
@@ -823,6 +826,15 @@ var pSDK = function ({ app, api, actions }) {
 
                 return api.rpc('getuserprofile', parameters).then((data) => {
 
+                    var self = this;
+                    if (data && _.isArray(data)) {
+                        _.each(data, function (row) {
+                            if (row && row.address) {
+                                self._rawProfileByAddress[row.address] = _.clone(row);
+                            }
+                        });
+                    }
+
                     data = this.cleanData(data)
 
                     return _.map(addresses, (address) => {
@@ -844,6 +856,12 @@ var pSDK = function ({ app, api, actions }) {
                 maxcount : light ? 70 : 10,
                 ignoreBadData : true
             })
+        },
+
+        /** Snapshot from last successful getuserprofile for this address, before cleanData. */
+        getRawProfile: function (address) {
+            if (!address) return null;
+            return this._rawProfileByAddress[address] || null;
         },
 
         insertFromResponse: function (data, light) {

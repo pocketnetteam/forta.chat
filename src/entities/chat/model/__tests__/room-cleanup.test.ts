@@ -27,6 +27,7 @@ function makeContext(
   rooms: LocalRoom[],
   sdkRoomIds: Set<string> = new Set(rooms.map((r) => r.id)),
   historyVisibility: Record<string, string> = {},
+  leaveForgetStreamRoom?: (roomId: string) => Promise<void>,
 ): CleanupContext {
   const deletedIds: string[] = [];
   return {
@@ -36,6 +37,7 @@ function makeContext(
     },
     isRoomInSdk: (id) => sdkRoomIds.has(id),
     getRoomHistoryVisibility: (id) => historyVisibility[id] ?? null,
+    leaveForgetStreamRoom,
     /** Test helper — not part of CleanupContext */
     _deletedIds: deletedIds,
   } as CleanupContext & { _deletedIds: string[] };
@@ -129,5 +131,37 @@ describe("cleanupStaleRooms", () => {
     expect(ctx._deletedIds).toContain("!stale-stream:s");
     expect(ctx._deletedIds).not.toContain("!keep:s");
     expect(ctx._deletedIds).not.toContain("!fresh-stream:s");
+  });
+
+  it("calls leaveForgetStreamRoom before removing stale stream room", async () => {
+    const leaveForget = vi.fn().mockResolvedValue(undefined);
+    const rooms = [
+      makeLocalRoom({ id: "!stream:s", lastMessageTimestamp: FOUR_DAYS_AGO }),
+    ];
+    const ctx = makeContext(rooms, new Set(["!stream:s"]), {
+      "!stream:s": "world_readable",
+    }, leaveForget) as CleanupContext & { _deletedIds: string[] };
+
+    const count = await cleanupStaleRooms(ctx);
+
+    expect(leaveForget).toHaveBeenCalledWith("!stream:s");
+    expect(count).toBe(1);
+    expect(ctx._deletedIds).toEqual(["!stream:s"]);
+  });
+
+  it("does not delete stale stream room when leaveForgetStreamRoom fails", async () => {
+    const leaveForget = vi.fn().mockRejectedValue(new Error("network"));
+    const rooms = [
+      makeLocalRoom({ id: "!stream:s", lastMessageTimestamp: FOUR_DAYS_AGO }),
+    ];
+    const ctx = makeContext(rooms, new Set(["!stream:s"]), {
+      "!stream:s": "world_readable",
+    }, leaveForget) as CleanupContext & { _deletedIds: string[] };
+
+    const count = await cleanupStaleRooms(ctx);
+
+    expect(leaveForget).toHaveBeenCalledWith("!stream:s");
+    expect(count).toBe(0);
+    expect(ctx._deletedIds).toEqual([]);
   });
 });

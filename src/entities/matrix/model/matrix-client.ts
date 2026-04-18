@@ -672,6 +672,28 @@ export class MatrixClientService {
     return this.client?.credentials?.userId ?? null;
   }
 
+  /** Matrix account-data ignore list (`m.ignored_user_list`) */
+  getIgnoredMatrixUserIds(): string[] {
+    if (!this.client) return [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (this.client as any).getIgnoredUsers() as string[];
+    } catch {
+      return [];
+    }
+  }
+
+  /** True if the Matrix user ID is on the ignore list */
+  isMatrixUserIgnored(userId: string): boolean {
+    if (!this.client) return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (this.client as any).isUserIgnored(userId) as boolean;
+    } catch {
+      return false;
+    }
+  }
+
   /** Convert address to Matrix user ID */
   matrixId(address: string, domain?: string): string {
     return `@${address}:${domain ?? MATRIX_SERVER}`;
@@ -909,6 +931,24 @@ export class MatrixClientService {
     } catch {
       return false;
     }
+  }
+
+  /** Search the Matrix user directory (/_matrix/client/v3/user_directory/search).
+   *  Used as a fallback when Bastyon RPC searchusers is unavailable (e.g. CORS on web).
+   *  Returns an array of { user_id, display_name, avatar_url } entries. */
+  async searchUserDirectory(
+    term: string,
+    limit = 20,
+  ): Promise<{ limited: boolean; results: Array<{ user_id: string; display_name?: string; avatar_url?: string }> }> {
+    if (!this.client) throw new Error("Client not initialized");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = this.client as any;
+    // matrix-js-sdk exposes searchUserDirectory({ term, limit })
+    const res = await client.searchUserDirectory({ term, limit });
+    return {
+      limited: Boolean(res?.limited),
+      results: (res?.results ?? []) as Array<{ user_id: string; display_name?: string; avatar_url?: string }>,
+    };
   }
 
   /** Destroy the client */

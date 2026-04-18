@@ -114,6 +114,7 @@ export class RoomRepository {
       isDeleted?: boolean;
       deletedAt?: number | null;
       deleteReason?: "left" | "kicked" | "banned" | "removed" | null;
+      historyVisibility?: string | null;
     }>,
   ): Promise<void> {
     if (roomUpdates.length === 0) return;
@@ -138,7 +139,8 @@ export class RoomRepository {
           const metaChanged = (update.name !== undefined && update.name !== prev.name)
             || (update.avatar !== undefined && update.avatar !== prev.avatar)
             || (update.membership !== undefined && update.membership !== prev.membership)
-            || (update.topic !== undefined && update.topic !== prev.topic);
+            || (update.topic !== undefined && update.topic !== prev.topic)
+            || (update.historyVisibility !== undefined && update.historyVisibility !== (prev.historyVisibility ?? null));
           // Unread reconciliation: Matrix SDK is the single source of truth.
           // EventWriter does NOT touch unreadCount — so serverUnreadCount is always authoritative.
           const unreadChanged = update.serverUnreadCount !== undefined
@@ -159,6 +161,7 @@ export class RoomRepository {
           if (update.membership !== undefined) patched.membership = update.membership;
           if (update.topic !== undefined) patched.topic = update.topic;
           if (update.syncedAt !== undefined) patched.syncedAt = update.syncedAt;
+          if (update.historyVisibility !== undefined) patched.historyVisibility = update.historyVisibility;
 
           // Monotonically advance timestamps
           if (update.updatedAt !== undefined) {
@@ -224,6 +227,7 @@ export class RoomRepository {
             lastMessageLocalStatus: update.lastMessageLocalStatus,
             lastMessageDecryptionStatus: undefined,
             lastMessageReaction: update.lastMessageReaction ?? null,
+            historyVisibility: update.historyVisibility ?? null,
           };
           toPut.push(newRoom);
         }

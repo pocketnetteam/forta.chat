@@ -4,8 +4,10 @@ import { useUserStore } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { useChatStore } from "@/entities/chat";
 import { getMatrixClientService } from "@/entities/matrix";
-import { getmatrixid, hexEncode, tetatetid } from "@/shared/lib/matrix/functions";
+import { getmatrixid, hexDecode, hexEncode, tetatetid } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
+import { isChatDbReady, getChatDb, type CachedSearchUser } from "@/shared/lib/local-db";
+import type { TranslationKey } from "@/shared/lib/i18n";
 
 import type { User } from "@/entities/user";
 
@@ -13,6 +15,55 @@ let _appInit: ReturnType<typeof createAppInitializer> | null = null;
 function getAppInit() {
   if (!_appInit) _appInit = createAppInitializer();
   return _appInit;
+}
+
+/** Bastyon addresses are ~34-char alphanumeric strings (base58-flavoured)
+ *  typically starting with "P". We allow `[A-Za-z0-9]{25,40}` as a defensive
+ *  filter — wide enough for version drift, strict enough to reject multibyte
+ *  Unicode, control bytes, or anything else a malicious homeserver might
+ *  inject via the user_directory response (results end up stored in Dexie
+ *  and rendered in Vue). */
+const BASTYON_ADDRESS_RE = /^[A-Za-z0-9]{25,40}$/;
+
+/** Turn a Matrix user directory result into a local User shape.
+ *  Matrix user_id format: @<hex-address>:<server>. We decode the hex back
+ *  to a Bastyon address using the shared `hexDecode` (which mirrors
+ *  `hexEncode`'s 0x350 offset), then validate against the Bastyon shape. */
+function normalizeMatrixDirectoryUser(entry: { user_id: string; display_name?: string; avatar_url?: string }): { address: string; name: string; image: string } | null {
+  // Extract hex localpart from @<localpart>:<server>
+  const m = /^@([^:]+):/.exec(entry.user_id);
+  if (!m) return null;
+  const hex = m[1].toLowerCase();
+  // Cap raw hex length: a valid Bastyon-encoded localpart is at most ~80 hex
+  // chars (40 bytes). Refuse anything larger to avoid unbounded allocation.
+  if (!hex || hex.length > 80 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return null;
+
+  let address: string;
+  try {
+    address = hexDecode(hex);
+  } catch {
+    return null;
+  }
+  if (!BASTYON_ADDRESS_RE.test(address)) return null;
+
+  return {
+    address,
+    name: entry.display_name && entry.display_name !== entry.user_id ? entry.display_name : address,
+    image: entry.avatar_url ?? "",
+  };
+}
+
+function dedupeByAddress<T extends { address: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (!item.address) continue;
+    const key = item.address.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
 }
 
 export function useContacts() {
@@ -23,59 +74,148 @@ export function useContacts() {
   const searchResults = ref<User[]>([]);
   const isSearching = ref(false);
   const isCreatingRoom = ref(false);
+  /** i18n key for the last search failure (null on success). UI reads this to
+   *  localize user-facing errors instead of surfacing raw SDK strings such as
+   *  "Невозможно разыскать идентификатор". */
+  const searchError = ref<TranslationKey | null>(null);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Monotonic counter — every searchUsers() call grabs the next value and
+   *  compares it to this ref before writing results. Stale (older) calls are
+   *  discarded so fast typing can't race an older result over a newer one. */
+  let searchSeq = 0;
+
+  const toUser = (u: { address: string; name: string; image?: string }): User => ({
+    address: u.address,
+    name: u.name || u.address,
+    about: "",
+    image: u.image ?? "",
+    site: "",
+    language: "",
+  });
 
   const searchUsers = async (query: string) => {
-    if (!query.trim()) {
+    const trimmed = query.trim();
+    const mySeq = ++searchSeq;
+    /** Only the latest call is allowed to mutate shared refs. */
+    const isLatest = () => mySeq === searchSeq;
+
+    if (!trimmed) {
+      if (!isLatest()) return;
       searchResults.value = [];
+      searchError.value = null;
       return;
     }
 
-    isSearching.value = true;
+    const myAddress = authStore.address ?? "";
+    if (isLatest()) {
+      searchError.value = null;
+      isSearching.value = true;
+    }
+
     try {
-      const appInit = getAppInit();
-      const results = await appInit.searchUsers(query.trim());
+      // 1) Dexie TTL cache — instant re-display for a recently-seen query.
+      let cached: CachedSearchUser[] = [];
+      if (isChatDbReady()) {
+        try {
+          const row = await getChatDb().searchCache.get(trimmed);
+          cached = row ?? [];
+        } catch {
+          cached = [];
+        }
+      }
+      // Show cached results immediately so the user sees *something* while the
+      // background tiers finish. These will be merged with tier 2/3/4 below.
+      if (cached.length > 0 && isLatest()) {
+        searchResults.value = cached
+          .filter(u => u.address !== myAddress)
+          .map(toUser);
+      }
 
-      // Filter out self
-      const myAddress = authStore.address ?? "";
-      searchResults.value = results
-        .filter(u => u.address !== myAddress)
-        .map(u => ({
-          address: u.address,
-          name: u.name || u.address,
-          about: "",
-          image: u.image,
-          site: "",
-          language: "",
-        }));
+      // 2) Bastyon RPC — canonical Pocketnet search. On web this may fail with
+      //    CORS; we still fall through to Matrix user_directory below.
+      let rpcResults: Array<{ address: string; name: string; image: string }> = [];
+      try {
+        rpcResults = await getAppInit().searchUsers(trimmed);
+      } catch (rpcErr) {
+        console.warn("[useContacts] Bastyon RPC searchUsers failed, falling back:", rpcErr);
+      }
 
-      // Cache found users in user store
+      // 3) Matrix user_directory fallback — works whenever Matrix is online.
+      let matrixResults: Array<{ address: string; name: string; image: string }> = [];
+      const matrixService = getMatrixClientService();
+      if (matrixService.isReady()) {
+        try {
+          const resp = await matrixService.searchUserDirectory(trimmed, 20);
+          matrixResults = resp.results
+            .map(normalizeMatrixDirectoryUser)
+            .filter((u): u is { address: string; name: string; image: string } => u !== null);
+        } catch (mErr) {
+          console.warn("[useContacts] Matrix user_directory fallback failed:", mErr);
+        }
+      }
+
+      // If a newer searchUsers() has started while we were awaiting RPC/Matrix,
+      // bail out without touching shared refs — its results will replace ours.
+      if (!isLatest()) return;
+
+      // 4) Local user store — previously-seen users (case-insensitive match on
+      //    name or address). Matches the original fallback behaviour.
+      const q = trimmed.toLowerCase();
+      const localResults = Object.values(userStore.users)
+        .filter(u =>
+          u.address !== myAddress &&
+          ((u.name ?? "").toLowerCase().includes(q) ||
+           u.address.toLowerCase().includes(q))
+        )
+        .map(u => ({ address: u.address, name: u.name || u.address, image: u.image ?? "" }));
+
+      // 5) Merge, dedupe by address, filter self. Fresh tiers win over cached
+      //    (cache last) so renames/avatar updates from a new RPC call land.
+      const merged = dedupeByAddress([...rpcResults, ...matrixResults, ...localResults, ...cached.map(c => ({ address: c.address, name: c.name, image: c.image ?? "" }))])
+        .filter(u => u.address && u.address !== myAddress);
+
+      searchResults.value = merged.map(toUser);
+
+      // Cache found users in user store so subsequent local lookups succeed.
       for (const user of searchResults.value) {
         userStore.setUser(user.address, user);
       }
 
-      // Supplement with cached users not already in results
-      if (searchResults.value.length === 0) {
-        const resultAddrs = new Set(searchResults.value.map(u => u.address));
-        const cached = Object.values(userStore.users).filter(
-          user =>
-            !resultAddrs.has(user.address) &&
-            user.address !== myAddress &&
-            (user.name.toLowerCase().includes(query.toLowerCase()) ||
-             user.address.toLowerCase().includes(query.toLowerCase()))
-        );
-        searchResults.value = [...searchResults.value, ...cached];
+      // Persist to Dexie cache for 1h TTL reuse.
+      if (isChatDbReady() && merged.length > 0) {
+        try {
+          await getChatDb().searchCache.put(
+            trimmed,
+            merged.map(u => ({ address: u.address, name: u.name, image: u.image })),
+          );
+        } catch {
+          // cache write failure is non-fatal
+        }
       }
-    } catch {
-      // Fallback to cached users
-      searchResults.value = Object.values(userStore.users).filter(
-        user =>
-          user.name.toLowerCase().includes(query.toLowerCase()) ||
-          user.address.toLowerCase().includes(query.toLowerCase())
-      );
+
+      if (searchResults.value.length === 0) {
+        // If all three tiers returned nothing, surface a localizable "not found"
+        // signal instead of whatever raw string the SDK may have produced.
+        searchError.value = "search.userNotFound";
+      }
+    } catch (e) {
+      console.error("[useContacts] searchUsers failed:", e);
+      if (!isLatest()) return;
+      // Last-resort: serve cached user-store matches and surface a service-unavailable key.
+      const q = trimmed.toLowerCase();
+      const localMatches = Object.values(userStore.users)
+        .filter(user =>
+          user.address !== myAddress &&
+          ((user.name ?? "").toLowerCase().includes(q) ||
+           user.address.toLowerCase().includes(q))
+        );
+      searchResults.value = localMatches;
+      // Always surface the remote failure as a service-unavailable signal —
+      // local matches alone don't indicate the remote search succeeded.
+      searchError.value = "search.serviceUnavailable";
     } finally {
-      isSearching.value = false;
+      if (isLatest()) isSearching.value = false;
     }
   };
 
@@ -322,6 +462,7 @@ export function useContacts() {
     isCreatingRoom,
     searchQuery,
     searchResults,
+    searchError,
     searchUsers,
     debouncedSearch,
     getOrCreateRoom,
