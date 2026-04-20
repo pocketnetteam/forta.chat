@@ -7,7 +7,6 @@ import {
 import { trackCreatedIssue } from '@/shared/lib/bug-report';
 
 const APP_NAME = 'forta-chat';
-const VERSION_KEY = `${APP_NAME}:bug-report-status:last-version`;
 const CHECKED_AT_KEY = `${APP_NAME}:bug-report-status:last-checked-at`;
 
 beforeEach(() => {
@@ -24,43 +23,35 @@ afterEach(() => {
 });
 
 describe('shouldCheckOnBoot', () => {
-  it('returns true on first run (no metadata stored)', () => {
-    expect(shouldCheckOnBoot('1.0.0')).toBe(true);
+  it('returns true on first run (no timestamp stored)', () => {
+    expect(shouldCheckOnBoot()).toBe(true);
   });
 
-  it('returns true when app version changed', () => {
-    localStorage.setItem(VERSION_KEY, JSON.stringify('1.0.0'));
-    localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(Date.now()));
-    expect(shouldCheckOnBoot('1.1.0')).toBe(true);
-  });
-
-  it('returns false when version same and <3 days since last check', () => {
-    localStorage.setItem(VERSION_KEY, JSON.stringify('1.0.0'));
+  it('returns false when <2 days elapsed since last check', () => {
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
     localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(oneDayAgo));
-    expect(shouldCheckOnBoot('1.0.0')).toBe(false);
+    expect(shouldCheckOnBoot()).toBe(false);
   });
 
-  it('returns true when >3 days since last check', () => {
-    localStorage.setItem(VERSION_KEY, JSON.stringify('1.0.0'));
-    const fourDaysAgo = Date.now() - 4 * 24 * 60 * 60 * 1000;
-    localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(fourDaysAgo));
-    expect(shouldCheckOnBoot('1.0.0')).toBe(true);
+  it('returns true when >2 days elapsed since last check', () => {
+    const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(threeDaysAgo));
+    expect(shouldCheckOnBoot()).toBe(true);
   });
 
-  it('treats empty version string as first run', () => {
-    expect(shouldCheckOnBoot('')).toBe(true);
+  it('returns false right after markBootCheckCompleted (app update should not re-trigger)', () => {
+    markBootCheckCompleted();
+    expect(shouldCheckOnBoot()).toBe(false);
   });
 });
 
 describe('markBootCheckCompleted', () => {
-  it('persists version + timestamp', () => {
-    markBootCheckCompleted('1.2.3');
-    expect(JSON.parse(localStorage.getItem(VERSION_KEY)!)).toBe('1.2.3');
+  it('persists timestamp', () => {
+    markBootCheckCompleted();
     expect(typeof JSON.parse(localStorage.getItem(CHECKED_AT_KEY)!)).toBe(
       'number',
     );
-    expect(shouldCheckOnBoot('1.2.3')).toBe(false);
+    expect(shouldCheckOnBoot()).toBe(false);
   });
 });
 

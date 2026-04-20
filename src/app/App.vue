@@ -226,41 +226,25 @@ const {
   resetState: resetBugStatus,
 } = useBugReportStatus();
 
-let pendingBugCheckVersion: string | null = null;
+let pendingBugCheck = false;
 
-async function runBugStatusCheck() {
+function runBugStatusCheck() {
   if (!authStore.address) return;
-  let version = "web";
-  if (isNative) {
-    try {
-      const { App } = await import("@capacitor/app");
-      const info = await App.getInfo();
-      version = info.version ?? "native";
-    } catch {
-      version = "native";
-    }
-  } else if ((window as any).electronAPI?.getVersion) {
-    try {
-      version = await (window as any).electronAPI.getVersion();
-    } catch {
-      version = "electron";
-    }
-  }
-  if (!shouldCheckOnBoot(version)) return;
+  if (!shouldCheckOnBoot()) return;
   loadBugIssues(authStore.address);
   if (bugStatusIssues.value.length > 0) {
-    pendingBugCheckVersion = version;
+    pendingBugCheck = true;
     openBugStatusSheet();
   } else {
-    markBootCheckCompleted(version);
+    markBootCheckCompleted();
   }
 }
 
 function handleBugStatusSheetClose() {
   closeBugStatusSheet();
-  if (pendingBugCheckVersion) {
-    markBootCheckCompleted(pendingBugCheckVersion);
-    pendingBugCheckVersion = null;
+  if (pendingBugCheck) {
+    markBootCheckCompleted();
+    pendingBugCheck = false;
   }
 }
 
@@ -270,9 +254,11 @@ watch(
   (addr) => {
     if (addr && !bugStatusCheckTriggered) {
       bugStatusCheckTriggered = true;
-      runBugStatusCheck().catch((e) =>
-        console.warn("[App] bug status check failed:", e),
-      );
+      try {
+        runBugStatusCheck();
+      } catch (e) {
+        console.warn("[App] bug status check failed:", e);
+      }
     }
   },
   { immediate: true },
