@@ -313,7 +313,9 @@ export class SyncEngine {
       content.secrets = secrets;
     }
 
-    const serverEventId = await matrixService.sendEncryptedText(op.roomId, content);
+    // Pass op.clientId as the Matrix txnId so the homeserver dedupes
+    // multi-tab/retry sends into a single event (matches syncSendMessage).
+    const serverEventId = await matrixService.sendEncryptedText(op.roomId, content, op.clientId);
     await this.messageRepo.confirmSent(op.clientId, serverEventId);
     await this.roomRepo.updateRoom(op.roomId, {
       lastMessageLocalStatus: "synced" as import("./schema").LocalMessageStatus,
@@ -350,7 +352,9 @@ export class SyncEngine {
       };
     }
 
-    await matrixService.sendEncryptedText(op.roomId, content);
+    // Idempotent edit: use clientId as txnId so an edit is never applied twice
+    // if the user has multiple tabs or a flaky connection causes a retry.
+    await matrixService.sendEncryptedText(op.roomId, content, op.clientId);
   }
 
   private async syncDeleteMessage(op: PendingOperation): Promise<void> {
@@ -445,12 +449,15 @@ export class SyncEngine {
       message: payload.message,
     });
 
+    // Transfers MUST dedupe on retry — a double-send here would mean a
+    // duplicate tip bubble for the recipient. Pass clientId as the Matrix
+    // txnId on both the encrypted and plaintext paths.
     let serverEventId: string;
     if (roomCrypto?.canBeEncrypt()) {
       const encrypted = await roomCrypto.encryptEvent(transferBody);
-      serverEventId = await matrixService.sendEncryptedText(op.roomId, encrypted);
+      serverEventId = await matrixService.sendEncryptedText(op.roomId, encrypted, op.clientId);
     } else {
-      serverEventId = await matrixService.sendText(op.roomId, transferBody);
+      serverEventId = await matrixService.sendText(op.roomId, transferBody, op.clientId);
     }
 
     await this.messageRepo.confirmSent(op.clientId, serverEventId);

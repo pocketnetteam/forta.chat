@@ -550,11 +550,17 @@ export class MatrixClientService {
     return this.chatsReady;
   }
 
-  /** Send text message. Returns server event_id. */
-  async sendText(roomId: string, text: string): Promise<string> {
+  /** Send text message. `txnId` is the Matrix transaction ID used for
+   *  idempotency — passing a stable ID (e.g. LocalMessage.clientId) lets the
+   *  server deduplicate retries / multi-tab races into a single event. */
+  async sendText(roomId: string, text: string, txnId?: string): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
     const content = sdk.ContentHelpers.makeTextMessage(text);
-    const res = await this.client.sendMessage(roomId, content);
+    const res = txnId !== undefined
+      // matrix-js-sdk routes sendEvent through the same txnId dedup path that
+      // sendMessage uses, so we can go through sendEvent when we have an ID.
+      ? await this.client.sendEvent(roomId, "m.room.message", content, txnId)
+      : await this.client.sendMessage(roomId, content);
     return (res as { event_id: string }).event_id;
   }
 
