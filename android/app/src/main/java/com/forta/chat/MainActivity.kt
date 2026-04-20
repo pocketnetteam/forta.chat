@@ -39,6 +39,13 @@ class MainActivity : BridgeActivity() {
     private var keyboardHeight = 0
     private var appBottomInset = 0
 
+    // Named Runnable reference — removable in onDestroy.
+    // Kept as a 500ms safety net re-inject after each insets callback to
+    // survive flaky OEM WebViews (Xiaomi/MIUI, Infinix, MOBI) where the
+    // system insets listener may not fire consistently on IME toggles or
+    // WebView internal resets.
+    private val reinjectAll: Runnable = Runnable { injectAllCssVars() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(TorPlugin::class.java)
         registerPlugin(CallPlugin::class.java)
@@ -171,6 +178,7 @@ class MainActivity : BridgeActivity() {
     override fun onDestroy() {
         super.onDestroy()
         activityScope.cancel()
+        bridge?.webView?.removeCallbacks(reinjectAll)
     }
 
     /**
@@ -220,8 +228,12 @@ class MainActivity : BridgeActivity() {
         """.trimIndent()
 
         webView.post { if (!isFinishing && !isDestroyed) webView.evaluateJavascript(js, null) }
-        // No postDelayed re-inject loop: CSS vars are updated live through
-        // setOnApplyWindowInsetsListener + onResume + onConfigurationChanged.
-        // First paint is covered by inline env() fallbacks in index.html.
+        // 500ms safety-net re-inject: some OEM WebViews (Xiaomi/MIUI,
+        // Infinix, MOBI) do not reliably re-dispatch window insets after
+        // IME toggles or internal WebView resets. This backup re-inject
+        // keeps --keyboardheight / --app-bottom-inset in sync on those
+        // devices without waiting for the next insets callback.
+        webView.removeCallbacks(reinjectAll)
+        webView.postDelayed(reinjectAll, 500)
     }
 }
