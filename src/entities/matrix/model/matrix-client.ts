@@ -223,7 +223,7 @@ export class MatrixClientService {
       store: indexedDBStore,
       deviceId: userData.device_id,
       request: this.request.bind(this),
-      iceCandidatePoolSize: 20,
+      /*iceCandidatePoolSize: 20,
       // Session 02 — explicit public STUN fallback.
       //
       // The Matrix homeserver's /turnServer endpoint is unreliable in
@@ -237,7 +237,7 @@ export class MatrixClientService {
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
       ],
-      fallbackICEServerAllowed: true,
+      fallbackICEServerAllowed: true,*/
       disableVoip: false, // ensure WebRTC call handler and Call.incoming are enabled
     };
 
