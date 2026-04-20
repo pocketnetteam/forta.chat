@@ -52,6 +52,17 @@ vi.mock("@/entities/matrix", () => ({
   })),
 }));
 
+function makeMinimalChatDbKit(markAsReadImpl: (roomId: string, ts: number) => Promise<boolean>) {
+  return {
+    rooms: {
+      markAsRead: markAsReadImpl,
+      getAllRooms: vi.fn(async () => []),
+      observeRoomChanges: vi.fn(() => () => {}),
+    },
+    eventWriter: { enableBatching: vi.fn() },
+  };
+}
+
 /** Advance coalescing timer (100ms) and flush microtasks */
 async function flushCoalescing() {
   vi.advanceTimersByTime(150);
@@ -87,6 +98,39 @@ describe("receipt throttling", () => {
     await store.advanceInboundWatermark("!r1:s", 1000);
     await flushCoalescing();
     expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send receipt when Dexie watermark did not advance (duplicate ts)", async () => {
+    let lastInboundTs = 0;
+    const kit = makeMinimalChatDbKit(async (_roomId: string, ts: number) => {
+      if (ts <= lastInboundTs) return false;
+      lastInboundTs = ts;
+      return true;
+    });
+    store.setChatDbKit(kit as any);
+
+    await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+
+    mockSendReadReceipt.mockClear();
+    await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).not.toHaveBeenCalled();
+  });
+
+  it("sends receipt when Dexie did not advance but server read marker was never sent", async () => {
+    const kit = makeMinimalChatDbKit(async () => false);
+    store.setChatDbKit(kit as any);
+
+    await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).toHaveBeenCalledTimes(1);
+
+    mockSendReadReceipt.mockClear();
+    await store.advanceInboundWatermark("!r1:s", 3000);
+    await flushCoalescing();
+    expect(mockSendReadReceipt).not.toHaveBeenCalled();
   });
 
   it("throttles rapid calls within cooldown window", async () => {

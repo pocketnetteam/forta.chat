@@ -1,1 +1,5 @@
-export { nativeCallBridge } from './native-call-bridge';
+export {
+  nativeCallBridge,
+  consumePendingAnswerCallId,
+  consumePendingRejectCallId,
+} from './native-call-bridge';

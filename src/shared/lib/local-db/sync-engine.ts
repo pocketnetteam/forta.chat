@@ -28,6 +28,11 @@ function sleep(ms: number): Promise<void> {
 export class SyncEngine {
   private processing = false;
   private online = true;
+  /** Becomes true the first time setOnline() is called with `true`.
+   *  Guards against the "app started offline from a previous session and
+   *  wakes up online without ever seeing setOnline(false)" case, where
+   *  wasOffline would be `false` and failed ops would never get retried. */
+  private hasSeenFirstOnline = false;
   private getRoomCrypto: GetRoomCryptoFn;
   private onChange?: OnChangeCallback;
 
@@ -42,12 +47,33 @@ export class SyncEngine {
     this.onChange = onChange;
   }
 
-  /** Update online/offline state. Resumes queue on reconnect. */
+  /** Update online/offline state. Resumes queue on reconnect and
+   *  re-arms any operations that died as "failed" while we were offline so
+   *  the user does not have to tap Retry manually after coming back online. */
   setOnline(isOnline: boolean): void {
     const wasOffline = !this.online;
     this.online = isOnline;
-    if (isOnline && wasOffline) {
-      this.processQueue();
+    if (!isOnline) return;
+
+    // Trigger retryAllFailed on BOTH: the offline→online edge, AND the very
+    // first online signal after construction. The second case matters because
+    // this.online is initialized to `true` — so a fresh instance whose first
+    // incoming signal is `setOnline(true)` would otherwise see wasOffline=false
+    // and skip retrying any failed ops carried over from a previous session.
+    const shouldRetry = wasOffline || !this.hasSeenFirstOnline;
+    this.hasSeenFirstOnline = true;
+
+    if (shouldRetry) {
+      // Fire-and-forget — retryAllFailed itself calls processQueue().
+      // NOTE: we intentionally do NOT call recoverStrandedOps() here because
+      // it has a race with an already-in-flight processQueue() (it could
+      // reset a "syncing" op that's mid-execution). recoverStrandedOps is
+      // documented as "call once at startup before processQueue()" — callers
+      // own that ordering.
+      this.retryAllFailed().catch((e) => {
+        console.warn("[SyncEngine] retryAllFailed on reconnect failed:", e);
+        this.processQueue();
+      });
     }
   }
 

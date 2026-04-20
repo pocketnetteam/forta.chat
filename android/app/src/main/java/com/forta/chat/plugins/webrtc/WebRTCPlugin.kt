@@ -12,7 +12,6 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.PermissionState
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
-import com.getcapacitor.annotation.PermissionCallback
 import org.webrtc.*
 
 /**
@@ -324,9 +323,21 @@ class WebRTCPlugin : Plugin() {
             call.reject("Manager not initialized")
             return
         }
-        // Safety net permission guard (D-01: Kotlin side)
+        // Session 02 — single permission path.
+        //
+        // RECORD_AUDIO must already be granted via CallPlugin.requestAudioPermission
+        // BEFORE we get here. Opening a second system dialog from inside
+        // startLocalMedia would land in the middle of the call setup, steal
+        // focus from the Activity, pause the WebRTC engine and drop the call
+        // after 1-2 seconds. So this path only verifies state and fails fast
+        // if the centralized permission gate was bypassed.
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
-            requestPermissionForAlias("microphone", call, "micPermissionCallback")
+            Log.w(TAG, "[WebRTCAudio] startLocalMedia without mic permission — failing fast")
+            notifyListeners("onAudioError", JSObject().apply {
+                put("type", "permission_denied")
+                put("message", "Microphone permission not granted")
+            })
+            call.reject("RECORD_AUDIO permission not granted — must be requested before startLocalMedia")
             return
         }
         doStartLocalMedia(call, mgr)
@@ -343,21 +354,6 @@ class WebRTCPlugin : Plugin() {
             mgr.startLocalVideo(peerId)
         }
         call.resolve()
-    }
-
-    @PermissionCallback
-    private fun micPermissionCallback(call: PluginCall) {
-        if (getPermissionState("microphone") != PermissionState.GRANTED) {
-            Log.w(TAG, "[WebRTCAudio] RECORD_AUDIO denied — cannot start audio")
-            notifyListeners("onAudioError", JSObject().apply {
-                put("type", "permission_denied")
-                put("message", "Microphone permission denied")
-            })
-            call.reject("RECORD_AUDIO permission denied")
-            return
-        }
-        val mgr = manager ?: run { call.reject("Manager not initialized"); return }
-        doStartLocalMedia(call, mgr)
     }
 
     @PluginMethod
@@ -492,6 +488,49 @@ class WebRTCPlugin : Plugin() {
         call.resolve(JSObject().apply {
             put("state", state)
         })
+    }
+
+    /**
+     * Session 02: forward JS pc.restartIce() into native PeerConnection.
+     *
+     * The JS SDK (matrix-js-sdk-bastyon) calls restartIce() on any network
+     * flip (WiFi ↔ cellular), on ICE disconnected, or during glare. With
+     * the old JS no-op this never reached native, so the ICE agent stayed
+     * wedged in a failed state and the call was dropped after ~1-2 seconds.
+     */
+    @PluginMethod
+    fun restartIce(call: PluginCall) {
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
+        val ok = manager?.restartIce(peerId) ?: false
+        if (ok) call.resolve() else call.reject("restartIce failed (peer not found)")
+    }
+
+    /**
+     * Session 02: return real native WebRTC stats so the JS SDK and our
+     * diagnostics can confirm media is flowing. Previously we returned an
+     * empty Map, which made the SDK believe the peer was silent and made
+     * webrtc-diagnostics raise false ZERO_AUDIO_ALERT on every call.
+     */
+    @PluginMethod
+    fun getStats(call: PluginCall) {
+        val peerId = call.getString("peerId") ?: run {
+            call.reject("Missing peerId")
+            return
+        }
+        val mgr = manager ?: run {
+            call.reject("Manager not initialized")
+            return
+        }
+        mgr.getStats(peerId) { report ->
+            if (report == null) {
+                call.reject("getStats failed (peer not found)")
+            } else {
+                call.resolve(JSObject().apply { put("report", report) })
+            }
+        }
     }
 
     override fun handleOnDestroy() {

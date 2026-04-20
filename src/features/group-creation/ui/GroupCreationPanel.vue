@@ -139,7 +139,7 @@ const handleAvatarChange = (e: Event) => {
       <!-- User list -->
       <div class="flex-1 overflow-y-auto">
         <div v-if="isSearching" class="flex items-center justify-center p-8">
-          <div class="h-6 w-6 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+          <div class="contain-strict h-6 w-6 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
         </div>
 
         <div v-else-if="searchResults.length === 0 && searchQuery" class="p-8 text-center text-sm text-text-on-main-bg-color">

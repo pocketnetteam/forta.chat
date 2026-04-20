@@ -20,4 +20,6 @@ export interface BugReportInput {
   description: string;
   environment: AppEnvironment;
   screenshots?: string[]; // base64 array
+  /** Bastyon address used to derive the anonymous reporter hash */
+  reporterAddress?: string;
 }

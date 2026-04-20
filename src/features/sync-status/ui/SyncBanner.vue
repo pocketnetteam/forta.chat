@@ -25,7 +25,7 @@ const isError = computed(() => displayStatus.value === "error");
       >
         <svg
           v-if="isSpinning"
-          class="h-3 w-3 animate-spin"
+          class="contain-strict h-3 w-3 animate-spin"
           viewBox="0 0 16 16"
           fill="none"
         >

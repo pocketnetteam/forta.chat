@@ -152,7 +152,8 @@ onUnmounted(() => {
       v-if="channelStore.channels.length > 0"
       ref="scrollerRef"
       :items="channelStore.channels"
-      :item-size="68"
+      :item-size="ITEM_HEIGHT"
+      :style="{ '--recycle-item-size': `${ITEM_HEIGHT}px` }"
       key-field="address"
       class="h-full"
     >
@@ -205,7 +206,7 @@ onUnmounted(() => {
       v-if="channelStore.isLoadingChannels && channelStore.channels.length > 0"
       class="flex justify-center py-3"
     >
-      <div class="h-5 w-5 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+      <div class="contain-strict h-5 w-5 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
     </div>
   </div>
 </template>

@@ -137,7 +137,7 @@ onUnmounted(() => {
 
     <!-- Loading spinner -->
     <div v-if="fileState.loading || (!isLoaded && videoSrc)" class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-      <div class="h-8 w-8 animate-spin rounded-full border-[3px] border-white/50 border-t-white" />
+      <div class="contain-strict h-8 w-8 animate-spin rounded-full border-[3px] border-white/50 border-t-white" />
     </div>
 
     <!-- Play icon -->

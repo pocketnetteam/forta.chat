@@ -2,6 +2,7 @@
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
 import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 
 interface Props {
   txid: string;
@@ -24,9 +25,7 @@ const resolvedThumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.
 
 const firstImage = computed(() => {
   if (!post.value?.images?.length) return null;
-  const img = post.value.images[0];
-  if (img.startsWith("http")) return img;
-  return `https://bastyon.com/images/${img}`;
+  return normalizePocketnetImageUrl(post.value.images[0]);
 });
 
 const truncatedMessage = computed(() => {
@@ -72,11 +71,7 @@ onMounted(async () => {
   }
 });
 
-const authorAvatarUrl = computed(() => {
-  if (!authorImage.value) return "";
-  if (authorImage.value.startsWith("http")) return authorImage.value;
-  return `https://bastyon.com/images/${authorImage.value}`;
-});
+const authorAvatarUrl = computed(() => normalizePocketnetImageUrl(authorImage.value));
 
 const openPost = () => {
   window.open(postUrl.value, "_blank");

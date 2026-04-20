@@ -3,6 +3,7 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
@@ -12,6 +13,7 @@ import { defineStore } from "pinia";
 import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
+import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
 
 
@@ -63,6 +65,24 @@ function pollInfoShallowEqual(a: PollInfo | undefined, b: PollInfo | undefined):
     if ((a.votes[k]?.length ?? 0) !== (b.votes[k]?.length ?? 0)) return false;
   }
   return true;
+}
+
+/** Read `m.room.history_visibility` (stream rooms use `world_readable` — excluded from sidebar per bastyon-chat). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getHistoryVisibilityFromMatrixRoom(room: any): string | null {
+  try {
+    const ev = room?.currentState?.getStateEvents?.("m.room.history_visibility", "");
+    if (!ev) return null;
+    const c = typeof ev.getContent === "function" ? ev.getContent() : ev.event?.content;
+    const hv = c?.history_visibility;
+    return typeof hv === "string" ? hv : null;
+  } catch {
+    return null;
+  }
+}
+
+function isStreamHistoryVisibility(hv: string | null | undefined): boolean {
+  return hv === "world_readable";
 }
 
 /** Convert a Matrix SDK room object into our ChatRoom type */
@@ -302,6 +322,23 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
           if (createTs && typeof createTs === "number") return createTs;
         } catch { /* ignore */ }
         return 1; // last resort: use minimal timestamp (never Date.now() — inflates sort)
+      }
+      // Joined room with no timeline activity: match bastyon FETCH_CHATS sentinel fallback
+      // (SDK getLastActiveTimestamp() === MIN_SAFE_INTEGER → use self m.room.member ts).
+      if (membership === "join" || membership === undefined) {
+        try {
+          const memberObj = room.getMember?.(myUserId);
+          const memEv = memberObj?.events?.member;
+          const joinTs = typeof memEv?.getTs === "function"
+            ? memEv.getTs()
+            : memEv?.event?.origin_server_ts;
+          if (joinTs && typeof joinTs === "number") return joinTs;
+        } catch { /* ignore */ }
+        try {
+          const stateEvent = room.currentState?.getStateEvents?.("m.room.member", myUserId);
+          const stateTs = stateEvent?.event?.origin_server_ts;
+          if (stateTs && typeof stateTs === "number") return stateTs;
+        } catch { /* ignore */ }
       }
       return 0;
     })(),
@@ -746,6 +783,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // This makes computed properties that read from dexieRoomMap properly reactive.
   const _dexieRoomMapVersion = ref(0);
 
+  /** Matrix `m.ignored_user_list` — refreshed before room list / unread recompute */
+  const ignoredMatrixUserIdSet = shallowRef<Set<string>>(new Set());
+
+  const refreshIgnoredMatrixUserCache = () => {
+    const ms = getMatrixClientService();
+    if (!ms.isReady()) return;
+    ignoredMatrixUserIdSet.value = new Set(ms.getIgnoredMatrixUserIds());
+  };
+
+  /** Stream rooms + single-peer ignored DM — excluded from sidebar (bastyon-chat CHAT_SORTING.md §7). */
+  const shouldExcludeLocalRoomFromSidebar = (lr: LocalRoom): boolean => {
+    if (isStreamHistoryVisibility(lr.historyVisibility ?? null)) return true;
+    if (lr.isGroup) return false;
+    const ms = getMatrixClientService();
+    if (!ms.isReady()) return false;
+    const myUid = ms.getUserId();
+    if (!myUid) return false;
+    const myHex = getmatrixid(myUid);
+    const others = lr.members.filter(m => m !== myHex);
+    if (others.length !== 1) return false;
+    return ignoredMatrixUserIdSet.value.has(ms.matrixId(others[0]));
+  };
+
   // Outbound watermark for active room — used to derive message statuses
   const activeRoomOutboundWatermark = computed(() => {
     // Access version counter to register reactive dependency on dexieRoomMap mutations
@@ -833,6 +893,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         deduped.push(m);
       }
       if (deduped.length !== msgs.length) msgs = deduped;
+    }
+
+    if (msgs.length > 0) {
+      msgs = sortMessagesTimelineAsc(msgs);
     }
 
     _prevActiveOutput = msgs;
@@ -971,7 +1035,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let _suppressDexieRecompute = false;
 
   const computeSortedRoomsFallback = (source: ChatRoom[], pinned: ReadonlySet<string>): ChatRoom[] => {
-    return [...source].sort((a, b) => {
+    return [...source]
+      .filter((a) => {
+        const lr = dexieRoomMap.get(a.id);
+        return !lr || !shouldExcludeLocalRoomFromSidebar(lr);
+      })
+      .sort((a, b) => {
       const aPinned = pinned.has(a.id) ? 1 : 0;
       const bPinned = pinned.has(b.id) ? 1 : 0;
       if (aPinned !== bPinned) return bPinned - aPinned;
@@ -979,16 +1048,57 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     });
   };
 
+  // ---------------------------------------------------------------------------
+  // Batched sortedRooms patches (rAF-coalesced)
+  //
+  // WHY: when the user opens an unread room, setActiveRoom triggers multiple
+  // writes to _sortedRoomsRef in quick succession (in-memory optimistic patch
+  // + Dexie clearUnread → observeRoomChanges microtask → another patch). Each
+  // mutation creates a new array reference, which cascades through
+  // allFilteredRooms → RecycleScroller. With `contain: strict` on every item,
+  // those back-to-back commits produce visible flicker in the sidebar.
+  //
+  // Coalescing all patches arriving within a single animation frame into one
+  // `_sortedRoomsRef.value` assignment collapses the cascade to a single render.
+  // ---------------------------------------------------------------------------
+  const sortedRoomsPatcher = createPatchScheduler<RoomChange>((batch) => {
+    applyPatchSortedRooms(batch);
+  });
+
+  /** Cancel scheduled flush and drop pending changes.
+   *  Call this before direct `_sortedRoomsRef.value` assignments
+   *  (fallback recompute, fullRebuildSortedRoomsAsync, cleanup) so stale
+   *  patches don't later overwrite the freshly-built state. */
+  const cancelPendingPatches = () => sortedRoomsPatcher.cancel();
+
   const patchSortedRooms = (changes: RoomChange[]) => {
+    sortedRoomsPatcher.schedule(changes);
+  };
+
+  const applyPatchSortedRooms = (changes: RoomChange[]) => {
     perfCount("sortedRooms:patch");
+    // Dedupe by roomId — only the final state for each room matters in a frame
+    const dedup = new Map<string, RoomChange>();
+    for (const c of changes) {
+      const id = c.type === "delete" ? c.roomId : c.room.id;
+      dedup.set(id, c);
+    }
     const arr = [..._sortedRoomsRef.value];
     const pinned = pinnedRoomIds.value;
-    for (const change of changes) {
+    for (const change of dedup.values()) {
       if (change.type === "delete") {
         const idx = arr.findIndex(r => r.id === change.roomId);
         if (idx !== -1) arr.splice(idx, 1);
         _chatRoomFromDexieCache.delete(change.roomId);
       } else {
+        if (shouldExcludeLocalRoomFromSidebar(change.room)) {
+          const oldIdx = arr.findIndex(r => r.id === change.room.id);
+          if (oldIdx !== -1) {
+            arr.splice(oldIdx, 1);
+            _chatRoomFromDexieCache.delete(change.room.id);
+          }
+          continue;
+        }
         const chatRoom = mapLocalRoomToChatRoom(change.room);
         const oldIdx = arr.findIndex(r => r.id === change.room.id);
         if (oldIdx !== -1) arr.splice(oldIdx, 1);
@@ -1007,6 +1117,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const fullRebuildSortedRoomsAsync = async () => {
     perfCount("sortedRooms:fullRebuild");
+    // Drop any scheduled delta patches — we're about to rebuild from dexieRoomMap,
+    // which is already up-to-date with everything those patches would have applied.
+    cancelPendingPatches();
     const allRooms = Array.from(dexieRoomMap.values());
     if (allRooms.length === 0 && rooms.value.length > 0) {
       _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
@@ -1017,7 +1130,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (let i = 0; i < allRooms.length; i += CHUNK) {
       const end = Math.min(i + CHUNK, allRooms.length);
       for (let j = i; j < end; j++) {
-        mapped.push(mapLocalRoomToChatRoom(allRooms[j]));
+        const lr = allRooms[j];
+        if (shouldExcludeLocalRoomFromSidebar(lr)) continue;
+        mapped.push(mapLocalRoomToChatRoom(lr));
       }
       if (end < allRooms.length) await yieldToMain();
     }
@@ -1028,6 +1143,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (aPinned !== bPinned) return bPinned - aPinned;
       return getSortKey(b) - getSortKey(a);
     });
+    // Drop patches that arrived during the async yield — dexieRoomMap mutated
+    // in lock-step with those deltas, so `mapped` already reflects them.
+    cancelPendingPatches();
     _sortedRoomsRef.value = mapped;
 
     // Prune stale cache entries when cache grows beyond 1.5x current room count
@@ -1058,6 +1176,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const ev = room?.currentState?.getStateEvents?.("m.room.history_visibility", "");
           return ev?.getContent?.()?.history_visibility ?? null;
         } catch { return null; }
+      },
+      leaveForgetStreamRoom: async (roomId: string) => {
+        if (!matrixService.isReady()) return;
+        try {
+          await matrixService.leaveRoom(roomId);
+          await matrixService.forgetRoom(roomId);
+        } catch (e) {
+          console.warn("[chat-store] leaveForgetStreamRoom failed:", roomId, e);
+          throw e;
+        }
       },
     });
   };
@@ -1155,18 +1283,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // After Dexie init: delta tracking owns _sortedRoomsRef, rooms.value changes are ignored.
   // pinnedRoomIds changes always trigger rebuild (pin order affects sort).
   let _prevPinnedRef = pinnedRoomIds.value;
+  let _prevIgnoredSerialized = "";
   watch(
-    [rooms, pinnedRoomIds],
+    [rooms, pinnedRoomIds, ignoredMatrixUserIdSet],
     () => {
       const dexieActive = chatDbKitRef.value && dexieRoomMap.size > 0;
       const pinsChanged = pinnedRoomIds.value !== _prevPinnedRef;
       _prevPinnedRef = pinnedRoomIds.value;
+      const ignoredSer = [...ignoredMatrixUserIdSet.value].sort().join("\0");
+      const ignoredChanged = ignoredSer !== _prevIgnoredSerialized;
+      _prevIgnoredSerialized = ignoredSer;
 
       if (dexieActive) {
-        // Only rebuild if pinned rooms changed — rooms.value updates are
-        // handled by Dexie delta tracking (observeRoomChanges → patchSortedRooms)
-        if (pinsChanged) scheduleFullSortedRebuild();
+        // Rebuild when pins or Matrix ignore list changes (sidebar membership).
+        if (pinsChanged || ignoredChanged) scheduleFullSortedRebuild();
       } else {
+        cancelPendingPatches();
         _sortedRoomsRef.value = computeSortedRoomsFallback(rooms.value, pinnedRoomIds.value);
       }
     },
@@ -1199,13 +1331,33 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const sortedRooms = computed(() => _sortedRoomsRef.value);
 
   const totalUnread = computed(() => {
+    void _dexieRoomMapVersion.value;
+    void ignoredMatrixUserIdSet.value;
+    const ms = getMatrixClientService();
+    const myUid = ms.getUserId();
+    const myHex = myUid ? getmatrixid(myUid) : "";
     if (chatDbKitRef.value && dexieRoomMap.size > 0) {
       void dexieRooms.value; // register reactive dependency
       let sum = 0;
-      for (const r of dexieRoomMap.values()) sum += r.unreadCount;
+      for (const r of dexieRoomMap.values()) {
+        if (isStreamHistoryVisibility(r.historyVisibility ?? null)) continue;
+        if (!r.isGroup && myHex) {
+          const others = r.members.filter(m => m !== myHex);
+          if (others.length === 1 && ms.isReady() && ignoredMatrixUserIdSet.value.has(ms.matrixId(others[0]))) {
+            continue;
+          }
+        }
+        sum += r.unreadCount;
+      }
       return sum;
     }
-    return rooms.value.reduce((sum, r) => sum + r.unreadCount, 0);
+    return rooms.value.reduce((sum, r) => {
+      const lr = dexieRoomMap.get(r.id);
+      if (lr && (isStreamHistoryVisibility(lr.historyVisibility ?? null) || shouldExcludeLocalRoomFromSidebar(lr))) {
+        return sum;
+      }
+      return sum + r.unreadCount;
+    }, 0);
   });
 
   /** Set helper references from auth store */
@@ -1635,15 +1787,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         : newRooms;
 
       // OPTIMIZATION: Only write rooms with display-relevant changes to Dexie
+      const matrixById = new Map<string, unknown>(
+        interactiveRooms.map((mr: { roomId: string }) => [mr.roomId as string, mr]),
+      );
       const changedForDexie: ChatRoom[] = [];
       for (const r of dexieSourceRooms) {
         const prev = dexieRoomMap.get(r.id);
+        const mr = matrixById.get(r.id) as { currentState?: { getStateEvents?: (t: string, k: string) => unknown } } | undefined;
+        const hv = mr ? getHistoryVisibilityFromMatrixRoom(mr) : null;
         if (!prev
           || prev.name !== r.name
           || prev.unreadCount !== r.unreadCount
           || (r.lastMessage?.timestamp ?? 0) !== (prev.lastMessageTimestamp ?? 0)
           || prev.membership !== (r.membership ?? "join")
           || prev.avatar !== r.avatar
+          || (prev.historyVisibility ?? null) !== (hv ?? null)
         ) {
           changedForDexie.push(r);
         }
@@ -1653,7 +1811,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         console.log(`[perf] fullRoomRefresh: ${dexieSourceRooms.length} total, ${changedForDexie.length} changed, ${dexieSourceRooms.length - changedForDexie.length} skipped`);
       }
 
-      const updates = changedForDexie.map(r => ({
+      const updates = changedForDexie.map(r => {
+        const mr = matrixById.get(r.id) as Parameters<typeof getHistoryVisibilityFromMatrixRoom>[0] | undefined;
+        const historyVisibility = mr ? getHistoryVisibilityFromMatrixRoom(mr) : null;
+        return {
         id: r.id,
         name: r.name,
         avatar: r.avatar,
@@ -1678,7 +1839,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           : r.lastMessage?.status === MessageStatus.failed ? "failed"
           : "synced"
         ) as import("@/shared/lib/local-db").LocalMessageStatus,
-      }));
+        historyVisibility,
+        };
+      });
       // Await Dexie writes so that when _suppressDexieRecompute is lifted,
       // the recompute sees fresh timestamps — avoids stale sort order AND
       // avoids source-switching blink (Dexie→in-memory→Dexie).
@@ -1904,7 +2067,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const updates = [...changed]
         .map(roomId => roomsMap.get(roomId))
         .filter((r): r is ChatRoom => !!r)
-        .map(r => ({
+        .map(r => {
+          const matrixRoom = matrixService.getRoom(r.id) as Parameters<typeof getHistoryVisibilityFromMatrixRoom>[0] | null;
+          const historyVisibility = matrixRoom ? getHistoryVisibilityFromMatrixRoom(matrixRoom) : null;
+          return {
           id: r.id,
           name: r.name,
           avatar: r.avatar,
@@ -1928,7 +2094,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             : r.lastMessage?.status === MessageStatus.failed ? "failed"
             : "synced"
           ) as import("@/shared/lib/local-db").LocalMessageStatus,
-        }));
+          historyVisibility,
+          };
+        });
       if (updates.length > 0) {
         dbKit.rooms.bulkSyncRooms(updates).catch(e =>
           console.warn("[chat-store] Dexie incremental room sync failed:", e)
@@ -2129,6 +2297,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (!matrixService.isReady() || !kit) {
       return;
     }
+
+    refreshIgnoredMatrixUserCache();
 
     // Skip if a chunked full refresh is still running — changedRoomIds
     // will accumulate and be processed when the next refresh fires.
@@ -2500,9 +2670,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Matrix event origin_server_ts — used to dedupe successful read_marker POSTs. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const getMatrixEventTimestamp = (event: any): number =>
+    event?.getTs?.() ?? event?.event?.origin_server_ts ?? 0;
+
   /** Per-room cooldown for network receipt sends (local Dexie commit is always instant) */
   const RECEIPT_COOLDOWN_MS = 3000;
   const receiptCooldowns = new Map<string, number>();
+
+  /** Last successful read_marker POST per room (event timestamp). Dexie `lastReadInboundTs`
+   *  can advance without a network send (e.g. room bulkUpsert when server unread=0); network
+   *  dedupe must not rely on `markAsRead` returning true. */
+  const lastReadReceiptSentTs = new Map<string, number>();
 
   /** Atomically commit a read watermark: update Dexie (instant UI) + send
    *  Matrix receipt (server sync) with per-room throttling.
@@ -2513,12 +2693,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
     }
 
+    const lastReceiptTs = lastReadReceiptSentTs.get(roomId) ?? 0;
+    if (timestamp <= lastReceiptTs) {
+      // Server already has a read marker at or past this watermark position.
+      return;
+    }
+
     // 2. SERVER SYNC — throttled per room
     const now = Date.now();
     const lastSent = receiptCooldowns.get(roomId) ?? 0;
     if (now - lastSent < RECEIPT_COOLDOWN_MS) {
-      // Queue for next flush — don't spam the server
-      pendingReadWatermarks.set(roomId, timestamp);
+      // Queue for next flush — don't spam the server (keep highest pending ts)
+      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
+      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
       return;
     }
 
@@ -2527,11 +2714,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       receiptCooldowns.set(roomId, now);
       const success = await sendReadReceiptIfVisible(roomId, event);
       if (success) {
+        const evTs = getMatrixEventTimestamp(event);
+        const appliedTs = evTs > 0 ? evTs : timestamp;
+        lastReadReceiptSentTs.set(
+          roomId,
+          Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
+        );
         pendingReadWatermarks.delete(roomId);
         watermarkQueuedAt.delete(roomId);
       }
     } else {
-      pendingReadWatermarks.set(roomId, timestamp);
+      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
+      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
       if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, Date.now());
     }
   };
@@ -2561,11 +2755,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Snapshot entries to avoid mutation-during-iteration
     const entries = [...pendingReadWatermarks];
     for (const [roomId, timestamp] of entries) {
+      if (timestamp <= (lastReadReceiptSentTs.get(roomId) ?? 0)) {
+        pendingReadWatermarks.delete(roomId);
+        watermarkQueuedAt.delete(roomId);
+        continue;
+      }
       const event = findMatrixEventForTimestamp(roomId, timestamp);
       if (event) {
         receiptCooldowns.set(roomId, now);
         sendReadReceiptIfVisible(roomId, event).then((success) => {
           if (success) {
+            const evTs = getMatrixEventTimestamp(event);
+            const appliedTs = evTs > 0 ? evTs : timestamp;
+            lastReadReceiptSentTs.set(
+              roomId,
+              Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
+            );
             pendingReadWatermarks.delete(roomId);
             watermarkQueuedAt.delete(roomId);
           }
@@ -5731,8 +5936,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
     roomFetchStates.clear();
+    cancelPendingPatches();
     _sortedRoomsRef.value = [];
     messageWindowSize.value = 50;
+    lastReadReceiptSentTs.clear();
 
     // Clear localStorage account data
     localStorage.removeItem(_pinnedKey);

@@ -7,6 +7,11 @@ const props = defineProps<{
   phase: RegistrationPhase;
   errorMessage?: string;
   errorType?: 'username' | 'timeout' | 'network' | null;
+  /** Live poll attempt counter from authStore.registrationPollAttempt */
+  pollAttempt?: number;
+  /** Pending registration address (surfaced in error UI so the user can
+   *  reference it when contacting support or recovering via mnemonic). */
+  regAddress?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -162,6 +167,22 @@ const handleRetry = () => {
           <!-- Subtitle -->
           <p class="max-w-[260px] text-[13px] leading-5 text-gray-400 dark:text-gray-500">
             {{ stepText }}
+          </p>
+
+          <!-- Live attempt counter so users see real progress instead of an opaque loader -->
+          <p
+            v-if="!isError && pollAttempt && pollAttempt > 0 && (phase === 'confirming' || phase === 'broadcasting' || phase === 'init')"
+            class="mt-2 text-[11px] text-gray-400 dark:text-gray-500"
+          >
+            {{ t("register.pollAttempt", { n: pollAttempt }) }}
+          </p>
+
+          <!-- Address reveal for user support (mnemonic-recoverable account). Only shown on error. -->
+          <p
+            v-if="isError && regAddress"
+            class="mt-2 max-w-[260px] break-all text-[10px] text-gray-400 dark:text-gray-500"
+          >
+            {{ t("register.accountAddress") }}: {{ regAddress }}
           </p>
 
           <!-- Error: username retry form -->

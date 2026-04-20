@@ -51,7 +51,7 @@
     "dexie": "^4.3.0",
     "emoji-kitchen-mart": "^6.0.5",
     "file-saver": "^2.0.5",
-    "matrix-js-sdk-bastyon": "^23.2.4",
+    "matrix-js-sdk-bastyon": "^23.2.5",
     "miscreant": "^0.3.2",
     "node-fetch": "^2.7.0",
     "pbkdf2": "^3.1.2",

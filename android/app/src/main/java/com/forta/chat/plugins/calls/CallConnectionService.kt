@@ -49,10 +49,19 @@ class CallConnectionService : ConnectionService() {
         val callId = extras.getString("callId", "")
         val callerName = extras.getString("callerName", "Unknown")
         val hasVideo = extras.getBoolean("hasVideo", false)
+        val roomId = extras.getString("roomId", "")
 
-        Log.d(TAG, "onCreateIncomingConnection: callId=$callId, caller=$callerName")
+        Log.d(TAG, "onCreateIncomingConnection: callId=$callId, caller=$callerName, roomId=$roomId")
 
-        val connection = CallConnection(applicationContext, callId)
+        // Stash the room id on the CallConnection instance so that
+        // when (and ONLY when) the user taps Answer, CallConnection.
+        // onAnswer() can populate pendingAnswerRoomId. Setting it here
+        // unconditionally was a bug: the JS-side fast-path treats
+        // pendingAnswerRoomId as "user already accepted a call in room
+        // R", so declines would then trigger the same fast-path and
+        // pop CallActivity anyway.
+
+        val connection = CallConnection(applicationContext, callId, roomId)
         connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         connection.setAddress(
             Uri.fromParts("sip", callerName, null),
@@ -207,7 +216,8 @@ class CallConnectionService : ConnectionService() {
 
 class CallConnection(
     private val context: Context,
-    val callId: String
+    val callId: String,
+    private val roomId: String = ""
 ) : Connection() {
 
     companion object {
@@ -218,28 +228,69 @@ class CallConnection(
         /**
          * Queued answer callId — set when user taps "Answer" before JS listener
          * is wired. JS side checks and replays this on wire().
+         *
+         * Note: the push payload from pocketnet's Matrix homeserver does
+         * NOT include the Matrix `content.call_id`, so the value stored
+         * here is really the push `event_id` — different from the call
+         * id the JS-side SDK will later see on the MatrixCall object.
+         * Consumers should also match by room (pendingAnswerRoomId
+         * below) to reliably correlate.
          */
         var pendingAnswerCallId: String? = null
+
+        /**
+         * Matrix room id the user tapped "Answer" on — set ONLY inside
+         * CallConnection.onAnswer() so Decline and other paths never
+         * trigger the JS-side fast-path auto-answer. JS consumer treats
+         * the presence of this marker as "user already accepted a call
+         * in room R, next incoming MatrixCall for R is that one".
+         */
+        var pendingAnswerRoomId: String? = null
+
+        /**
+         * Set when user taps Decline before JS is running. Symmetric to
+         * pendingAnswerCallId/RoomId. When JS boots it reads both via
+         * NativeCall.getPendingReject, and when Matrix finally delivers
+         * the invite for this room the handler calls `matrixCall.reject()`
+         * so the caller actually gets our rejection signal — otherwise
+         * the caller keeps ringing until their own timeout.
+         */
+        var pendingRejectCallId: String? = null
+        var pendingRejectRoomId: String? = null
     }
 
     override fun onAnswer() {
-        Log.d("CallConnection", "onAnswer: $callId")
+        Log.d("CallConnection", "onAnswer: callId=$callId, roomId=$roomId")
         setActive()
         CallConnectionService.dismissIncomingCallNotification(context)
+        // Populate accept-only markers here, never in onCreateIncoming-
+        // Connection — otherwise Decline and a plain push delivery
+        // would also set them and JS would fast-path into an in-call
+        // screen the user never asked for.
+        pendingAnswerCallId = callId
+        if (roomId.isNotEmpty()) {
+            pendingAnswerRoomId = roomId
+        }
         if (onAnswered != null) {
             onAnswered?.invoke(callId)
         } else {
-            // JS not ready yet — queue for replay
-            Log.w("CallConnection", "onAnswer: JS listener not wired, queuing callId=$callId")
-            pendingAnswerCallId = callId
+            Log.w("CallConnection", "onAnswer: JS listener not wired, queued for replay")
         }
     }
 
     override fun onReject() {
-        Log.d("CallConnection", "onReject: $callId")
+        Log.d("CallConnection", "onReject: callId=$callId, roomId=$roomId")
         setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
         destroy()
         CallConnectionService.dismissIncomingCallNotification(context)
+        // Wipe any stale accept markers so a late-arriving MatrixCall
+        // for this room can't trigger the JS fast-path to auto-answer.
+        clearPendingFor(callId, roomId)
+        // Queue the reject so that when the JS app eventually boots
+        // (or is already running) it can send m.call.reject to Matrix
+        // and the caller stops ringing.
+        pendingRejectCallId = callId
+        if (roomId.isNotEmpty()) pendingRejectRoomId = roomId
         onRejected?.invoke(callId)
     }
 
@@ -248,6 +299,12 @@ class CallConnection(
         setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
         destroy()
         CallConnectionService.dismissIncomingCallNotification(context)
+        clearPendingFor(callId, roomId)
         onEnded?.invoke(callId)
+    }
+
+    private fun clearPendingFor(cid: String, rid: String) {
+        if (pendingAnswerCallId == cid) pendingAnswerCallId = null
+        if (rid.isNotEmpty() && pendingAnswerRoomId == rid) pendingAnswerRoomId = null
     }
 }

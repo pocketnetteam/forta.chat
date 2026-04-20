@@ -17,6 +17,6 @@ const sizeClass = computed(() => ({
     role="status"
     aria-label="Loading"
     :class="sizeClass"
-    class="animate-spin rounded-full border-color-bg-ac/20 border-t-color-bg-ac"
+    class="contain-strict animate-spin rounded-full border-color-bg-ac/20 border-t-color-bg-ac"
   />
 </template>

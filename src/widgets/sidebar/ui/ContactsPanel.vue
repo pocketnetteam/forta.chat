@@ -5,6 +5,7 @@ import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { RecycleScroller } from "vue-virtual-scroller";
+import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
 const chatStore = useChatStore();
 const userStore = useUserStore();
@@ -205,6 +206,7 @@ const toggleSearch = () => {
         ref="scrollerRef"
         :items="contacts"
         :item-size="ITEM_HEIGHT"
+        :style="{ '--recycle-item-size': `${ITEM_HEIGHT}px` }"
         key-field="_key"
         class="h-full"
       >

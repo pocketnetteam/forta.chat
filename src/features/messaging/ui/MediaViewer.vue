@@ -167,7 +167,7 @@ watch(currentMessage, async (msg) => {
             class="max-h-full max-w-full"
           />
           <div v-else class="flex items-center justify-center">
-            <div class="h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
           </div>
         </div>
 

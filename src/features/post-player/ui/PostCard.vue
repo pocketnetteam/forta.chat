@@ -2,6 +2,7 @@
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
 import { parseVideoUrl } from "@/shared/lib/video-embed";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 import { usePostScores } from "../model/use-post-scores";
 import { usePostBoost } from "../model/use-post-boost";
 import { useToast } from "@/shared/lib/use-toast";
@@ -47,8 +48,7 @@ const isArticle = computed(() => post.value?.settings?.v === "a");
 
 const firstImage = computed(() => {
   if (!post.value?.images?.length) return null;
-  const img = post.value.images[0];
-  return img.startsWith("http") ? img : `https://bastyon.com/images/${img}`;
+  return normalizePocketnetImageUrl(post.value.images[0]);
 });
 
 const truncatedMessage = computed(() => {
@@ -60,13 +60,7 @@ const truncatedMessage = computed(() => {
 });
 
 const authorAvatarError = ref(false);
-const authorAvatarUrl = computed(() => {
-  if (!authorImage.value) return "";
-  const url = authorImage.value.startsWith("http")
-    ? authorImage.value
-    : `https://bastyon.com/images/${authorImage.value}`;
-  return url.replace("bastyon.com:8092", "pocketnet.app:8092");
-});
+const authorAvatarUrl = computed(() => normalizePocketnetImageUrl(authorImage.value));
 
 const formattedReputation = computed(() => {
   if (authorReputation.value == null) return "";

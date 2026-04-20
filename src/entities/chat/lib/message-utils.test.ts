@@ -6,7 +6,7 @@
  *   showAvatar for the last message in the list.
  */
 import { describe, it, expect } from "vitest";
-import { isConsecutiveMessage, sortMessagesByTime, groupMessagesByDate } from "./message-utils";
+import { isConsecutiveMessage, sortMessagesByTime, sortMessagesTimelineAsc, groupMessagesByDate } from "./message-utils";
 import { MessageStatus, MessageType } from "../model/types";
 import type { Message } from "../model/types";
 
@@ -96,6 +96,18 @@ describe("sortMessagesByTime", () => {
     const sorted = sortMessagesByTime(msgs);
     expect(msgs[0].timestamp).toBe(2); // unchanged
     expect(sorted[0].timestamp).toBe(1);
+  });
+});
+
+// ─── sortMessagesTimelineAsc ─────────────────────────────────────
+
+describe("sortMessagesTimelineAsc", () => {
+  it("tie-breaks equal timestamps by id", () => {
+    const ts = 99;
+    const a = makeMsg({ id: "z", timestamp: ts });
+    const b = makeMsg({ id: "a", timestamp: ts });
+    const sorted = sortMessagesTimelineAsc([a, b]);
+    expect(sorted.map(m => m.id)).toEqual(["a", "z"]);
   });
 });
 

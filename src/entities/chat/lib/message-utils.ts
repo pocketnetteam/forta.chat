@@ -5,6 +5,17 @@ export function sortMessagesByTime(messages: Message[]): Message[] {
   return [...messages].sort((a, b) => a.timestamp - b.timestamp);
 }
 
+/** Ascending timeline: timestamp, then id (stable tie-breaker for Matrix + local ids). */
+export function compareMessagesTimelineAsc(a: Message, b: Message): number {
+  const dt = a.timestamp - b.timestamp;
+  if (dt !== 0) return dt;
+  return a.id.localeCompare(b.id);
+}
+
+export function sortMessagesTimelineAsc(messages: Message[]): Message[] {
+  return [...messages].sort(compareMessagesTimelineAsc);
+}
+
 export function groupMessagesByDate(messages: Message[]): Map<string, Message[]> {
   const groups = new Map<string, Message[]>();
 

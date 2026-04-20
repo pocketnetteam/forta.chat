@@ -65,7 +65,7 @@ const clearAndRetry = async () => {
       <!-- Booting: spinner + step label -->
       <template v-if="state === 'booting'">
         <div
-          class="h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white"
+          class="contain-strict h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white"
         />
         <span class="text-sm text-white/60">{{ stepLabel }}</span>
       </template>

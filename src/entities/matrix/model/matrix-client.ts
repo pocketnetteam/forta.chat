@@ -223,8 +223,21 @@ export class MatrixClientService {
       store: indexedDBStore,
       deviceId: userData.device_id,
       request: this.request.bind(this),
-      iceCandidatePoolSize: 20,
-      fallbackICEServerAllowed: true,
+      /*iceCandidatePoolSize: 20,
+      // Session 02 — explicit public STUN fallback.
+      //
+      // The Matrix homeserver's /turnServer endpoint is unreliable in
+      // restricted regions (rate-limited, sometimes blocked). Without at
+      // least one reachable STUN, ICE gathering produces only host
+      // candidates and any NAT-ed peer can't connect, so the call drops
+      // within 1-2 seconds. We keep fallbackICEServerAllowed so the SDK
+      // still tries turn.matrix.org when the homeserver refuses, but
+      // adding these defaults makes ICE robust even when it doesn't.
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+      ],
+      fallbackICEServerAllowed: true,*/
       disableVoip: false, // ensure WebRTC call handler and Call.incoming are enabled
     };
 
@@ -247,7 +260,15 @@ export class MatrixClientService {
       const filterDefinition = {
         room: {
           timeline: {
-            limit: 1,
+            // Was 1, which was way too aggressive: if multiple events
+            // arrived in a room since our last sync token, the server
+            // would return only the most recent — so an m.call.invite
+            // followed by any other event (typing, read receipt promoted
+            // to timeline on some servers, or a retry hangup) would
+            // disappear from our /sync, and the Matrix SDK would never
+            // fire Call.incoming. Raise to 20 so a realistic burst of
+            // new events still fits without losing the call invite.
+            limit: 20,
             lazy_load_members: true,
           },
           state: {
@@ -295,6 +316,65 @@ export class MatrixClientService {
       lazyLoadMembers: true,
       ...(syncFilter ? { filter: syncFilter } : {}),
     });
+
+    // Cold-start-from-push race fix:
+    //
+    // Matrix SDK only calls `callEventHandler.start()` after the first
+    // `/sync` has transitioned to the "Prepared" state. But the very
+    // sync batch that triggers Prepared ALSO contains the m.call.invite
+    // (room-event or to-device) the caller sent while we were killed —
+    // and the handler's Room.timeline / ToDeviceEvent listeners aren't
+    // attached yet when those events fire, so Call.incoming is silently
+    // dropped. On this homeserver that loses 100% of cold-start answers.
+    //
+    // Attaching the listeners eagerly, before the first sync batch fires,
+    // lets the handler catch the invite in the usual way. CRITICAL: we
+    // also have to neutralize the SDK's own startCallEventHandler so it
+    // doesn't later call start() a second time. start() re-registers
+    // `Room.timeline`/`ToDeviceEvent` listeners on the client's
+    // EventEmitter — double-registration makes every call event fire
+    // handleCallEvent twice, which Matrix logs as "already has a call
+    // but got an invite - clobbering" and destroys the freshly-created
+    // call, orphaning our already-created PeerConnection. The second
+    // call waits for an answer that goes to the first PC → ICE never
+    // reaches connected, user stares at "Connecting..." forever.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const uc = userClient as any;
+      const ceh = uc.callEventHandler;
+      const gceh = uc.groupCallEventHandler;
+
+      // STEP 1: unregister SDK's built-in lazy starter. It's a Sync-
+      // event listener that fires once `isInitialSyncComplete()` is
+      // true, and invokes `callEventHandler.start()` again. Re-assigning
+      // `uc.startCallEventHandler = ...` does NOT unregister it because
+      // EventEmitter stored the original function reference. We must
+      // `.off(...)` with that reference before overriding.
+      const sdkStartRef = uc.startCallEventHandler;
+      if (typeof sdkStartRef === "function" && typeof uc.off === "function") {
+        try {
+          uc.off("sync", sdkStartRef);
+        } catch {
+          /* ignore */
+        }
+      }
+
+      // STEP 2: eagerly start so the handler's Room.timeline and
+      // ToDeviceEvent listeners are attached before the very first
+      // sync batch begins dispatching events. Without this, the
+      // m.call.invite arriving in the initial-sync delivery is never
+      // caught and Call.incoming never fires.
+      if (ceh && typeof ceh.start === "function") ceh.start();
+      if (gceh && typeof gceh.start === "function") gceh.start();
+
+      // STEP 3: replace starter with no-op as a belt-and-braces guard
+      // in case the SDK or any extension calls it by reference later.
+      uc.startCallEventHandler = () => {};
+
+      console.log("[matrix-client] CallEventHandler started eagerly, SDK auto-start unregistered");
+    } catch (e) {
+      console.warn("[matrix-client] Failed to eagerly start CallEventHandler:", e);
+    }
 
     return userClient;
   }
@@ -592,6 +672,28 @@ export class MatrixClientService {
     return this.client?.credentials?.userId ?? null;
   }
 
+  /** Matrix account-data ignore list (`m.ignored_user_list`) */
+  getIgnoredMatrixUserIds(): string[] {
+    if (!this.client) return [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (this.client as any).getIgnoredUsers() as string[];
+    } catch {
+      return [];
+    }
+  }
+
+  /** True if the Matrix user ID is on the ignore list */
+  isMatrixUserIgnored(userId: string): boolean {
+    if (!this.client) return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (this.client as any).isUserIgnored(userId) as boolean;
+    } catch {
+      return false;
+    }
+  }
+
   /** Convert address to Matrix user ID */
   matrixId(address: string, domain?: string): string {
     return `@${address}:${domain ?? MATRIX_SERVER}`;
@@ -829,6 +931,24 @@ export class MatrixClientService {
     } catch {
       return false;
     }
+  }
+
+  /** Search the Matrix user directory (/_matrix/client/v3/user_directory/search).
+   *  Used as a fallback when Bastyon RPC searchusers is unavailable (e.g. CORS on web).
+   *  Returns an array of { user_id, display_name, avatar_url } entries. */
+  async searchUserDirectory(
+    term: string,
+    limit = 20,
+  ): Promise<{ limited: boolean; results: Array<{ user_id: string; display_name?: string; avatar_url?: string }> }> {
+    if (!this.client) throw new Error("Client not initialized");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = this.client as any;
+    // matrix-js-sdk exposes searchUserDirectory({ term, limit })
+    const res = await client.searchUserDirectory({ term, limit });
+    return {
+      limited: Boolean(res?.limited),
+      results: (res?.results ?? []) as Array<{ user_id: string; display_name?: string; avatar_url?: string }>,
+    };
   }
 
   /** Destroy the client */

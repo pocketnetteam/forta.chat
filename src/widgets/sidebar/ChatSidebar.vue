@@ -325,8 +325,10 @@ const walletStore = useWalletStore();
       </transition>
     </div>
 
-    <!-- Invite banner -->
+    <!-- Invite banner — hidden while a search query is active so the FAB's
+         glow ring cannot visually overlap the search input or steal taps. -->
     <button
+      v-show="!sidebarSearchQuery.trim()"
       class="invite-fab hide-on-keyboard btn-press mx-2 mb-1.5 flex shrink-0 items-center justify-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-bold text-text-on-bg-ac-color shadow-lg transition-all active:scale-[0.97]"
       :title="t('invite.fab')"
       @click="showInviteModal = true"
@@ -412,14 +414,18 @@ const walletStore = useWalletStore();
   opacity: 0;
 }
 
-/* Invite FAB — gradient + aggressive glow pulse */
+/* Invite FAB — gradient + subtle glow pulse.
+   Glow ring shrunk from 6px → 2px so it no longer overlaps the search input
+   on narrow layouts. z-index ensures the search input stays clickable. */
 .invite-fab {
   background: linear-gradient(135deg, rgb(var(--color-bg-ac-bright)), rgb(var(--color-bg-ac-2)));
   animation: invite-pulse 2s ease-in-out infinite;
+  position: relative;
+  z-index: 10;
 }
 @keyframes invite-pulse {
   0%, 100% { box-shadow: 0 4px 16px rgba(var(--color-bg-ac-bright), 0.4), 0 0 0 0 rgba(var(--color-bg-ac-2), 0); }
-  50% { box-shadow: 0 6px 28px rgba(var(--color-bg-ac-bright), 0.6), 0 0 0 6px rgba(var(--color-bg-ac-2), 0.15); }
+  50% { box-shadow: 0 6px 24px rgba(var(--color-bg-ac-bright), 0.55), 0 0 0 2px rgba(var(--color-bg-ac-2), 0.15); }
 }
 
 @media (prefers-reduced-motion: reduce) {

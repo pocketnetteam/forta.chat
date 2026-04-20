@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ChannelPost } from "@/entities/channel";
 import { formatRelativeTime } from "@/shared/lib/format";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 
 interface Props {
   post: ChannelPost;
@@ -27,9 +28,7 @@ const isVideo = computed(() =>
 
 const displayImages = computed(() => {
   if (!props.post.images || props.post.images.length === 0) return [];
-  return props.post.images.slice(0, 4).map((img) =>
-    img.startsWith("http") ? img : `https://bastyon.com/images/${img}`
-  );
+  return props.post.images.slice(0, 4).map((img) => normalizePocketnetImageUrl(img));
 });
 
 /** Parse message text — for articles (EditorJS JSON), extract paragraph text */

@@ -10,7 +10,13 @@ import { Toggle } from "@/shared/ui/toggle";
 import { isNative, isAndroid } from "@/shared/lib/platform";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
-import { BugReportModal, useBugReport } from "@/features/bug-report";
+import {
+  BugReportModal,
+  BugReportStatusSheet,
+  useBugReport,
+  useBugReportStatus,
+} from "@/features/bug-report";
+import { getLocalIssueCache } from "@/shared/lib/bug-report";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
 // App updater Capacitor plugin (Android only)
@@ -105,6 +111,26 @@ const handleCheckUpdates = async () => {
 
 
 const bugReport = useBugReport();
+const bugStatus = useBugReportStatus();
+const myReportsSheetOpen = ref(false);
+
+// Hide the "My reports" entry if the current account has nothing in the
+// local cache — no point in showing an empty sheet to a user who has never
+// filed a report from this device.
+const hasLocalBugReports = computed(() => {
+  if (!authStore.address) return false;
+  return getLocalIssueCache(authStore.address).length > 0;
+});
+
+const handleOpenMyReports = () => {
+  if (!authStore.address) return;
+  bugStatus.loadAllIssues(authStore.address);
+  myReportsSheetOpen.value = true;
+};
+
+const handleCloseMyReports = () => {
+  myReportsSheetOpen.value = false;
+};
 const showAddModal = ref(false);
 const showRemoveConfirm = ref(false);
 const removeTargetAddress = ref("");
@@ -370,7 +396,7 @@ const handleLogout = () => {
           </span>
           <svg
             v-if="updateChecking"
-            class="h-4 w-4 shrink-0 animate-spin text-text-on-main-bg-color"
+            class="contain-strict h-4 w-4 shrink-0 animate-spin text-text-on-main-bg-color"
             viewBox="0 0 24 24"
             fill="none"
           >
@@ -434,6 +460,40 @@ const handleLogout = () => {
             <path d="M22 13h-4" /><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4" />
           </svg>
           <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.bugReport") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
+        <!-- My Bug Reports -->
+        <button
+          v-if="hasLocalBugReports"
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="handleOpenMyReports"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="9" y1="13" x2="15" y2="13" />
+            <line x1="9" y1="17" x2="15" y2="17" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.myBugReports") }}</span>
           <svg
             width="16"
             height="16"
@@ -516,6 +576,14 @@ const handleLogout = () => {
     />
 
     <BugReportModal />
+
+    <BugReportStatusSheet
+      v-if="authStore.address"
+      :show="myReportsSheetOpen"
+      :address="authStore.address"
+      mode="manage"
+      @close="handleCloseMyReports"
+    />
 
     <!-- Remove account confirmation dialog -->
     <Teleport to="body">

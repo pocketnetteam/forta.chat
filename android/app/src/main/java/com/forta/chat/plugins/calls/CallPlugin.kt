@@ -40,6 +40,12 @@ class CallPlugin : Plugin() {
         CallConnection.onAnswered = { callId ->
             notifyListeners("callAnswered", JSObject().apply {
                 put("callId", callId)
+                // Include roomId: on this homeserver the push payload has
+                // the push event_id in place of the Matrix content.call_id,
+                // so JS can't correlate by callId alone. By the time this
+                // callback fires CallConnection.onAnswer has already set
+                // pendingAnswerRoomId, so read it here.
+                put("roomId", CallConnection.pendingAnswerRoomId ?: "")
             })
         }
         CallConnection.onRejected = { callId ->
@@ -237,9 +243,24 @@ class CallPlugin : Plugin() {
     @PluginMethod
     fun getPendingAnswer(call: PluginCall) {
         val pendingCallId = CallConnection.pendingAnswerCallId
+        val pendingRoomId = CallConnection.pendingAnswerRoomId
         CallConnection.pendingAnswerCallId = null
+        CallConnection.pendingAnswerRoomId = null
         val ret = com.getcapacitor.JSObject()
         ret.put("callId", pendingCallId)
+        ret.put("roomId", pendingRoomId)
+        call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun getPendingReject(call: PluginCall) {
+        val pendingCallId = CallConnection.pendingRejectCallId
+        val pendingRoomId = CallConnection.pendingRejectRoomId
+        CallConnection.pendingRejectCallId = null
+        CallConnection.pendingRejectRoomId = null
+        val ret = com.getcapacitor.JSObject()
+        ret.put("callId", pendingCallId)
+        ret.put("roomId", pendingRoomId)
         call.resolve(ret)
     }
 }

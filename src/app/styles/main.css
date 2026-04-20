@@ -34,6 +34,20 @@
     max-height: 100px;
     opacity: 1;
   }
+  /* Fixed explicit box — isolates layout/paint from scrolling parents (spinners, small loaders) */
+  .contain-strict {
+    contain: strict;
+  }
+}
+
+/* vue-virtual-scroller item-view: isolate layout+paint so mutating one row
+   doesn't invalidate siblings. `size` containment was dropped on purpose:
+   it required an explicit --recycle-item-size, which only ContactList set,
+   and caused visible flicker on other lists (ChannelList, ContactsPanel)
+   plus on every reactive patch to the active list. :item-size from the
+   scroller already supplies positioning height. */
+.vue-recycle-scroller.ready.direction-vertical .vue-recycle-scroller__item-view {
+  contain: layout paint;
 }
 
 @media (max-height: 500px) {

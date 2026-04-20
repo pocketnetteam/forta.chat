@@ -16,7 +16,11 @@ const { isVisible } = useLazyLoad(rootRef);
 
 const user = computed(() => userStore.getUser(props.address));
 
-// Only load profile when element is visible
+// Lazy-load the profile data when element enters viewport, but always render
+// the underlying Avatar — it falls back to a colored initials tile when src/name
+// are empty. Previously we swapped between a gray placeholder div and Avatar on
+// isVisible flip, which produced visible flicker on every RecycleScroller recycle
+// (each recycled row starts with isVisible=false for a frame).
 watch(isVisible, (visible) => {
   if (visible) userStore.loadUserIfMissing(props.address);
 });
@@ -29,20 +33,9 @@ watch(() => props.address, (addr) => {
 <template>
   <div ref="rootRef">
     <Avatar
-      v-if="isVisible"
       :src="user?.image"
       :name="user?.name || address"
       :size="props.size"
-    />
-    <div
-      v-else
-      class="rounded-full bg-neutral-grad-0"
-      :class="{
-        'h-8 w-8': props.size === 'sm',
-        'h-10 w-10': props.size === 'md',
-        'h-14 w-14': props.size === 'lg',
-        'h-20 w-20': props.size === 'xl',
-      }"
     />
   </div>
 </template>

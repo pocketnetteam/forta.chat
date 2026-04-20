@@ -12,6 +12,7 @@ import PostComments from "./PostComments.vue";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 import { useChatStore } from "@/entities/chat";
 import { parseVideoUrl } from "@/shared/lib/video-embed";
+import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
 
 interface Props {
   post: BastyonPostData;
@@ -53,9 +54,7 @@ const isOwnPost = computed(() => props.post.address === authStore.address);
 const isArticle = computed(() => props.post.settings?.v === "a");
 
 const images = computed(() =>
-  (props.post.images || []).map((img) =>
-    img.startsWith("http") ? img : `https://bastyon.com/images/${img}`
-  )
+  (props.post.images || []).map((img) => normalizePocketnetImageUrl(img))
 );
 
 const handleRate = async (value: number) => {

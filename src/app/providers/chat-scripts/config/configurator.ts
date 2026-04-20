@@ -20,6 +20,20 @@ export class PocketnetInstanceConfigurator {
     window.POCKETNETINSTANCE.user.address.value = value;
   }
 
+  /** Clear the global user address + key-pair factory.
+   *  Must be called on logout and before switching accounts — otherwise a
+   *  stale `user.address.value` leaks credentials into the next session
+   *  (two users registering simultaneously could log in as the other). */
+  static clearGlobalUser() {
+    if (typeof window === "undefined" || !window.POCKETNETINSTANCE?.user) return;
+    window.POCKETNETINSTANCE.user.address.value = null;
+    window.POCKETNETINSTANCE.user.keys = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window.POCKETNETINSTANCE.user as any).signature = undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window.POCKETNETINSTANCE.user as any).getstate = undefined;
+  }
+
   static setUserGetKeyPairFc(getKeyPairFc: () => { privateKey: Buffer; publicKey: Buffer }) {
     window.POCKETNETINSTANCE.user.keys = getKeyPairFc;
 

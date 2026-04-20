@@ -21,13 +21,45 @@ const form = ref({
 const avatarUrl = ref(authStore.userInfo?.image ?? "");
 const avatarUploading = ref(false);
 const avatarError = ref("");
+const saveError = ref("");
+
+// Re-sync the form fields when userInfo resolves (right after registration
+// userInfo is initially undefined and arrives async). Without this watch the
+// form stays empty while authStore.userInfo is set, and hasChanges compares
+// typed input to undefined fields, blocking Save forever.
+watch(
+  () => authStore.userInfo,
+  (info) => {
+    if (!info) return;
+    // Only overwrite fields the user hasn't edited yet (still empty).
+    // Initial population fills from info; subsequent changes preserve
+    // the user's edits while letting delayed fields populate.
+    if (!form.value.name) form.value.name = info.name ?? "";
+    if (!form.value.about) form.value.about = info.about ?? "";
+    if (!form.value.site) form.value.site = info.site ?? "";
+    if (!form.value.language) form.value.language = info.language ?? "";
+    if (!avatarUrl.value) avatarUrl.value = info.image ?? "";
+  },
+  { immediate: true, deep: true },
+);
 
 const aboutMaxLength = 140;
 const aboutCount = computed(() => form.value.about.length);
 
 const hasChanges = computed(() => {
   const info = authStore.userInfo;
-  if (!info) return false;
+  if (!info) {
+    // userInfo not loaded yet (e.g. right after fresh registration).
+    // Treat any user input as a change so Save becomes enabled instead of
+    // the old buggy `return false` that left Save disabled forever.
+    return (
+      (form.value.name ?? "").trim().length > 0 ||
+      (form.value.about ?? "").trim().length > 0 ||
+      (form.value.site ?? "").trim().length > 0 ||
+      (form.value.language ?? "").trim().length > 0 ||
+      avatarUrl.value.length > 0
+    );
+  }
   return (
     form.value.name !== (info.name ?? "") ||
     form.value.about !== (info.about ?? "") ||
@@ -40,27 +72,52 @@ const hasChanges = computed(() => {
 const saveSuccess = ref(false);
 
 const handleSave = async () => {
-  await authStore.editUserData({
-    ...authStore.userInfo!,
-    name: form.value.name,
-    about: form.value.about,
-    site: form.value.site,
-    language: form.value.language,
-    image: avatarUrl.value,
-  });
-  // Update the user store cache so avatar/name reflect immediately
-  if (authStore.address) {
-    userStore.setUser(authStore.address, {
-      address: authStore.address,
+  saveError.value = "";
+  try {
+    const result = await authStore.editUserData({
+      ...(authStore.userInfo ?? {
+        address: authStore.address ?? "",
+        name: "",
+        about: "",
+        site: "",
+        language: "",
+        image: "",
+        addresses: [],
+        ref: null,
+        keys: [],
+      }),
       name: form.value.name,
       about: form.value.about,
-      image: avatarUrl.value,
       site: form.value.site,
       language: form.value.language,
-    });
+      image: avatarUrl.value,
+    } as import("@/entities/auth/model/types").UserData);
+
+    // editUserData may return a structured { success, reason } envelope from
+    // app-initializer; surface a user-visible error if it did.
+    if (result && typeof result === "object" && "success" in result && (result as { success: boolean }).success === false) {
+      saveError.value = t("profile.saveFailed");
+      return;
+    }
+
+    // Update the user store cache so avatar/name reflect immediately
+    if (authStore.address) {
+      userStore.setUser(authStore.address, {
+        address: authStore.address,
+        name: form.value.name,
+        about: form.value.about,
+        image: avatarUrl.value,
+        site: form.value.site,
+        language: form.value.language,
+      });
+    }
+    saveSuccess.value = true;
+    setTimeout(() => (saveSuccess.value = false), 2000);
+  } catch (err) {
+    console.error("[UserEditForm] handleSave failed:", err);
+    saveError.value =
+      err instanceof Error ? err.message : t("profile.saveFailed");
   }
-  saveSuccess.value = true;
-  setTimeout(() => (saveSuccess.value = false), 2000);
 };
 
 // Avatar upload
@@ -219,10 +276,13 @@ watch(
         </div>
       </div>
 
+      <!-- Save error (structured error from editUserData: timeout / network / rejected) -->
+      <p v-if="saveError" class="text-center text-xs text-color-bad">{{ saveError }}</p>
+
       <!-- Save button -->
       <button
         type="submit"
-        :disabled="authStore.isEditingUserData || !hasChanges"
+        :disabled="authStore.isEditingUserData || !hasChanges || avatarUploading"
         class="mx-auto flex h-11 w-full max-w-xs items-center justify-center rounded-xl text-sm font-semibold transition-all disabled:opacity-40"
         :class="saveSuccess
           ? 'bg-color-good text-white'

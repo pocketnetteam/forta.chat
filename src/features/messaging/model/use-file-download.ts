@@ -33,6 +33,34 @@ export function invalidateDownloadCache(key: string) {
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 3000, 6000]; // 1s, 3s, 6s
 
+/** Hard timeout for a single fetch attempt. MIUI / Tor routinely keep TCP
+ *  connections open with no data forever — unmitigated this hangs the UI
+ *  indefinitely. 30s is long enough for slow 3G but short enough to surface
+ *  a clear error to the user. */
+const FETCH_TIMEOUT_MS = 30_000;
+
+/** Non-retriable HTTP status codes — fast-fail instead of burning the
+ *  retry budget on a guaranteed-failure response. */
+const NON_RETRIABLE_STATUSES = new Set([400, 401, 403, 404, 410, 415]);
+
+/** Fetch a URL with a hard timeout. Caller's AbortSignal is honored if
+ *  provided. Returns the Response or throws AbortError on timeout. */
+async function fetchWithTimeout(url: string, signal?: AbortSignal): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  const abortOuter = () => ac.abort();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener("abort", abortOuter, { once: true });
+  }
+  try {
+    return await fetch(url, { signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abortOuter);
+  }
+}
+
 /** Download and optionally decrypt a file from the Matrix server.
  *  Retries up to MAX_RETRIES times on transient failures (network, crypto not ready). */
 async function downloadAndDecrypt(
@@ -51,9 +79,15 @@ async function downloadAndDecrypt(
     }
 
     try {
-      // Download the file
-      const response = await fetch(fileInfo.url);
-      if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+      // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls)
+      const response = await fetchWithTimeout(fileInfo.url);
+      if (!response.ok) {
+        const err = new Error(`Download failed: ${response.status}`);
+        // Mark non-retriable codes so the catch block below can throw immediately
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (err as any).status = response.status;
+        throw err;
+      }
       let blob = await response.blob();
 
       // If the file has secrets, we need to decrypt it
@@ -62,13 +96,16 @@ async function downloadAndDecrypt(
         const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
         if (!roomCrypto) throw new Error("No room crypto for decryption");
 
-        // Build event-like object for decryptKey
+        // Build event-like object for decryptKey.
+        // decryptKey reads secrets from either content.keys, content.info.secrets,
+        // or content.pbody.secrets (backward-compat with old bastyon-chat format),
+        // so we surface the secret under both `info` and `pbody` paths to cover
+        // messages written by either schema generation.
         const hexSender = hexEncode(senderId).toLowerCase();
         const event: Record<string, unknown> = {
           content: {
-            pbody: {
-              secrets: fileInfo.secrets,
-            },
+            info: { secrets: fileInfo.secrets },
+            pbody: { secrets: fileInfo.secrets },
           },
           sender: hexSender,
           origin_server_ts: timestamp,
@@ -82,12 +119,18 @@ async function downloadAndDecrypt(
       return blob;
     } catch (e) {
       lastError = e;
-      // Don't retry on permanent errors (missing URL, 404, 403)
+      // Don't retry on permanent errors (missing URL, 4xx client errors)
       if (e instanceof Error) {
         if (e.message === "No file URL") throw e;
-        if (e.message.includes("404") || e.message.includes("403")) throw e;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const status = (e as any).status as number | undefined;
+        if (status !== undefined && NON_RETRIABLE_STATUSES.has(status)) throw e;
+        // Legacy substring match in case status wasn't attached
+        if (e.message.includes("404") || e.message.includes("403") || e.message.includes("415")) {
+          throw e;
+        }
       }
-      // Retry on transient errors (network, crypto not ready, etc.)
+      // Retry on transient errors (network, crypto not ready, timeout, etc.)
     }
   }
 

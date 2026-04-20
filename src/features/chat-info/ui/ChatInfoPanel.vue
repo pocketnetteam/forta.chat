@@ -456,7 +456,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   v-if="isAdmin && room.isGroup"
                   class="absolute inset-0 flex items-center justify-center rounded-full bg-black/40 opacity-0 transition-opacity group-hover:opacity-100"
                 >
-                  <div v-if="uploadingAvatar" class="h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  <div v-if="uploadingAvatar" class="contain-strict h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
                   <svg v-else width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
                     <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                     <circle cx="12" cy="13" r="4" />
@@ -704,7 +704,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 />
                 <div class="max-h-[200px] overflow-y-auto">
                   <div v-if="addIsSearching" class="flex justify-center py-2">
-                    <div class="h-5 w-5 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+                    <div class="contain-strict h-5 w-5 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
                   </div>
                   <button
                     v-for="user in addSearchResults"

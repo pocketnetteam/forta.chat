@@ -50,6 +50,8 @@ vi.mock('@/shared/lib/native-webrtc', () => ({
 
 // Mock native-call-bridge
 const mockRequestAudioPermission = vi.fn();
+const mockStartAudioRouting = vi.fn().mockResolvedValue(undefined);
+const mockStopAudioRouting = vi.fn().mockResolvedValue(undefined);
 vi.mock('@/shared/lib/native-calls', () => ({
   nativeCallBridge: {
     requestAudioPermission: mockRequestAudioPermission,
@@ -58,6 +60,8 @@ vi.mock('@/shared/lib/native-calls', () => ({
     reportCallEnded: vi.fn().mockResolvedValue(undefined),
     reportIncomingCall: vi.fn().mockResolvedValue(undefined),
     wire: vi.fn().mockResolvedValue(undefined),
+    startAudioRouting: mockStartAudioRouting,
+    stopAudioRouting: mockStopAudioRouting,
   },
 }));
 
@@ -297,6 +301,151 @@ describe('call-service permission flow', () => {
       expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
       expect(mockScheduleClearCall).toHaveBeenCalledWith(1500);
       expect(mockAnswer).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('audio routing lifecycle (AudioRouter wiring)', () => {
+    beforeEach(() => {
+      mockStartAudioRouting.mockClear();
+      mockStopAudioRouting.mockClear();
+    });
+
+    it('calls startAudioRouting after placeVoiceCall with callType=voice', async () => {
+      mockRequestAudioPermission.mockResolvedValue({ granted: true });
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      expect(mockPlaceVoiceCall).toHaveBeenCalledOnce();
+      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'voice' });
+    });
+
+    it('calls startAudioRouting after placeVideoCall with callType=video', async () => {
+      mockRequestAudioPermission.mockResolvedValue({ granted: true });
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'video');
+
+      expect(mockPlaceVideoCall).toHaveBeenCalledOnce();
+      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'video' });
+    });
+
+    it('does NOT call startAudioRouting when placeCall throws', async () => {
+      mockRequestAudioPermission.mockResolvedValue({ granted: true });
+      mockPlaceVoiceCall.mockRejectedValueOnce(new Error('fail'));
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      expect(mockStartAudioRouting).not.toHaveBeenCalled();
+    });
+
+    it('does NOT reject the call if startAudioRouting fails (graceful degradation)', async () => {
+      mockRequestAudioPermission.mockResolvedValue({ granted: true });
+      mockStartAudioRouting.mockRejectedValueOnce(new Error('router failed'));
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      // Place call still succeeded, no failed status was set due to routing error
+      expect(mockPlaceVoiceCall).toHaveBeenCalledOnce();
+      // updateStatus should NOT have been called with 'failed' because of routing
+      const failedCalls = mockUpdateStatus.mock.calls.filter(
+        (args) => args[0] === 'failed'
+      );
+      expect(failedCalls).toHaveLength(0);
+    });
+
+    it('calls startAudioRouting after answering incoming call', async () => {
+      mockRequestAudioPermission.mockResolvedValue({ granted: true });
+
+      mockCallStore.matrixCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+      };
+      mockCallStore.activeCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        direction: 'incoming',
+        peerName: 'Peer',
+        status: 'incoming',
+      };
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockAnswer).toHaveBeenCalledOnce();
+      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'voice' });
+    });
+
+    it('calls stopAudioRouting on hangup', async () => {
+      mockCallStore.matrixCall = {
+        callId: 'test-call-id',
+        on: mockOn,
+        off: mockOff,
+        hangup: mockHangup,
+      };
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      service.hangup();
+
+      expect(mockHangup).toHaveBeenCalledOnce();
+      expect(mockStopAudioRouting).toHaveBeenCalledOnce();
+    });
+
+    it('calls stopAudioRouting on rejectCall', async () => {
+      mockCallStore.matrixCall = {
+        callId: 'test-call-id',
+        on: mockOn,
+        off: mockOff,
+        reject: mockReject,
+      };
+      mockCallStore.activeCall = {
+        callId: 'test-call-id',
+        roomId: '!room:matrix.org',
+        peerId: '@peer:matrix.org',
+        peerName: 'Peer',
+        type: 'voice',
+        direction: 'incoming',
+      };
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      service.rejectCall();
+
+      expect(mockReject).toHaveBeenCalledOnce();
+      expect(mockStopAudioRouting).toHaveBeenCalledOnce();
+    });
+
+    it('does not throw when stopAudioRouting fails', async () => {
+      mockStopAudioRouting.mockRejectedValueOnce(new Error('stop failed'));
+      mockCallStore.matrixCall = {
+        callId: 'test-call-id',
+        on: mockOn,
+        off: mockOff,
+        hangup: mockHangup,
+      };
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+
+      expect(() => service.hangup()).not.toThrow();
     });
   });
 
