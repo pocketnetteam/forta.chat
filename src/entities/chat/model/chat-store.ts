@@ -388,6 +388,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // optionally types a caption before shipping the batch.
   const forwardingMessages = ref<Message[]>([]);
   const bulkForwardDrafts = new Map<string, Message[]>();
+  // Per-session toggle: if false, forwarded messages are shipped without
+  // the `forwarded_from` attribution (Telegram "hide sender" option).
+  const bulkForwardWithSenderInfo = ref(true);
   const isDetachedFromLatest = ref(false);
 
   // Shared counter: yields to main thread every 5 decryption calls across ALL
@@ -616,6 +619,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const key = roomId ?? activeRoomId.value;
     if (key) bulkForwardDrafts.delete(key);
     forwardingMessages.value = [];
+    bulkForwardWithSenderInfo.value = true; // reset to default for next session
   };
 
   /** Save current forward to drafts for the given room (called on room switch) */
@@ -6018,6 +6022,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     forwardingMessage,
     forwardingMessages,
     forwardPickerRequested,
+    bulkForwardWithSenderInfo,
     initForward,
     initBulkForward,
     saveBulkForwardDraft,

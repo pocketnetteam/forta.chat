@@ -317,6 +317,8 @@ export const en = {
   "forward.resultSummary": "Forwarded {succeeded} of {total}",
   "forward.bulkTitle": "Forward {count} messages",
   "forward.bulkFrom": "From: {names}",
+  "forward.bulkCancelConfirm.title": "{count} messages",
+  "forward.bulkCancelConfirm.description": "You selected {count} messages from chat with {name}.",
 
   // ── Pinned bar ──
   "pinned.message": "Pinned Message",

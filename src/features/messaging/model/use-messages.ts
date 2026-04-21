@@ -1571,8 +1571,10 @@ export function useMessages() {
   const forwardMessages = async (
     sourceMessageIds: string[],
     targetRoomId: string,
+    opts?: { withSenderInfo?: boolean },
   ): Promise<{ succeeded: number; failed: number }> => {
     if (sourceMessageIds.length === 0) return { succeeded: 0, failed: 0 };
+    const withSenderInfo = opts?.withSenderInfo ?? true;
 
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) {
@@ -1596,7 +1598,7 @@ export function useMessages() {
     const results = await Promise.allSettled(
       collected.map(async (src) => {
         const senderName = chatStore.getDisplayName(src.senderId);
-        const fwdMeta = { senderId: src.senderId, senderName };
+        const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
 
         if (isChatDbReady()) {
           try {
@@ -1611,7 +1613,9 @@ export function useMessages() {
             await dbKit.syncEngine.enqueue(
               "send_message",
               targetRoomId,
-              { content: src.content, forwardedFrom: fwdMeta },
+              fwdMeta
+                ? { content: src.content, forwardedFrom: fwdMeta }
+                : { content: src.content },
               localMsg.clientId,
             );
             return;
@@ -1624,17 +1628,21 @@ export function useMessages() {
         const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
         if (roomCrypto?.canBeEncrypt()) {
           const encrypted = await roomCrypto.encryptEvent(src.content);
-          (encrypted as Record<string, unknown>).forwarded_from = {
-            sender_id: src.senderId,
-            sender_name: senderName,
-          };
+          if (withSenderInfo) {
+            (encrypted as Record<string, unknown>).forwarded_from = {
+              sender_id: src.senderId,
+              sender_name: senderName,
+            };
+          }
           await matrixService.sendEncryptedText(targetRoomId, encrypted);
         } else {
           const payload: Record<string, unknown> = {
             body: src.content,
             msgtype: "m.text",
-            forwarded_from: { sender_id: src.senderId, sender_name: senderName },
           };
+          if (withSenderInfo) {
+            payload.forwarded_from = { sender_id: src.senderId, sender_name: senderName };
+          }
           await matrixService.sendEncryptedText(targetRoomId, payload);
         }
       }),

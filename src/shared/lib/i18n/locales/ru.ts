@@ -319,6 +319,8 @@ export const ru: Record<TranslationKey, string> = {
   "forward.resultSummary": "Переслано {succeeded} из {total}",
   "forward.bulkTitle": "Переслать {count} сообщений",
   "forward.bulkFrom": "От: {names}",
+  "forward.bulkCancelConfirm.title": "{count} сообщений",
+  "forward.bulkCancelConfirm.description": "Вы выбрали {count} сообщений из чата с {name}.",
 
   // ── Pinned bar ──
   "pinned.message": "Закреплённое сообщение",

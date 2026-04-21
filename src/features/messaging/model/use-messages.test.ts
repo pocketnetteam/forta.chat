@@ -417,5 +417,16 @@ describe("useMessages", () => {
       expect(result.failed).toBe(0);
       expect(mockSendEncryptedText).not.toHaveBeenCalled();
     });
+
+    it("omits forwarded_from when withSenderInfo option is false", async () => {
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "anon", senderId: "userA" });
+      chatStore.addMessage("!src:server", m1);
+
+      await messaging.forwardMessages(["$m1"], "!target:server", { withSenderInfo: false });
+
+      const call = (mockSendEncryptedText.mock.calls as unknown[][])[0];
+      const content = call[1] as Record<string, unknown>;
+      expect(content.forwarded_from).toBeUndefined();
+    });
   });
 });
