@@ -2836,6 +2836,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const setActiveRoom = (roomId: string | null) => {
     perfMark("setActiveRoom-start");
+    // Exit multi-select when leaving the room — selection is bound to the
+    // active room's messages, carrying it over to the next chat is never
+    // what the user expects.
+    if (selectionMode.value && roomId !== activeRoomId.value) {
+      selectionMode.value = false;
+      selectedMessageIds.value = new Set();
+    }
     // Flush buffered background writes before switching rooms.
     // After flush completes, bump _liveQueryGen to force liveQuery re-subscribe.
     // This closes the race where buffered messages land in Dexie during the

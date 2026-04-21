@@ -18,7 +18,14 @@ export function useFormatPreview() {
   const formatPreview = (msg: Message | undefined, room: ChatRoom): string => {
     if (!msg) return t("contactList.noMessages");
     if (isEncryptedPlaceholder(msg.content)) return "";
-    if (msg.deleted || (!msg.content && msg.type === MessageType.text && !msg.fileInfo)) {
+    // Legacy Dexie fallbacks that used to stand in for a real body — show the
+    // localised "deleted" label instead of leaking the sentinel into the UI.
+    if (
+      msg.deleted
+      || (!msg.content && msg.type === MessageType.text && !msg.fileInfo)
+      || msg.content === "[message]"
+      || msg.content === "🚫 Message deleted"
+    ) {
       return `🚫 ${t("message.deleted")}`;
     }
     let preview: string;

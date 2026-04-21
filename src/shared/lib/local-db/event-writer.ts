@@ -518,13 +518,14 @@ export class EventWriter {
     if (prevMsg) {
       await this.updateRoomPreviewFromLocal(prevMsg);
     } else {
-      // All messages in room are deleted — show tombstone preview.
-      // Use db.rooms.put-style update to handle rooms not yet in Dexie.
+      // All messages in room are deleted — write an empty preview so the UI
+      // can localise the "deleted" label itself via formatPreview (avoids
+      // bypassing i18n by hard-coding English here).
       const room = await this.roomRepo.getRoom(redaction.roomId);
       if (room) {
         await this.roomRepo.updateLastMessage(
           redaction.roomId,
-          "🚫 Message deleted",
+          "",
           room.updatedAt,
           room.lastMessageSenderId ?? "",
           room.lastMessageType,

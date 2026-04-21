@@ -1537,16 +1537,23 @@ export function useMessages() {
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return;
 
-    // New path: Dexie soft-delete → SyncEngine sends redaction
-    if (isChatDbReady() && forEveryone) {
+    // Dexie path: writeRedaction soft-deletes + cascades to reply refs + updates
+    // the room preview so the sidebar doesn't keep stale text. When forEveryone,
+    // additionally queue a redact op so peers see it gone.
+    if (isChatDbReady()) {
       try {
         const dbKit = getChatDb();
-        await dbKit.messages.softDelete(messageId);
-        await dbKit.syncEngine.enqueue(
-          "delete_message",
+        await dbKit.eventWriter.writeRedaction({
+          redactedEventId: messageId,
           roomId,
-          { eventId: messageId },
-        );
+        });
+        if (forEveryone) {
+          await dbKit.syncEngine.enqueue(
+            "delete_message",
+            roomId,
+            { eventId: messageId },
+          );
+        }
         return;
       } catch (e) {
         console.warn("[use-messages] Dexie deleteMessage failed, falling back:", e);
@@ -1673,21 +1680,29 @@ export function useMessages() {
 
     const results = await Promise.allSettled(
       messageIds.map(async (id) => {
-        if (forEveryone) {
-          if (isChatDbReady()) {
-            try {
-              const dbKit = getChatDb();
-              await dbKit.messages.softDelete(id);
+        // Dexie path: writeRedaction soft-deletes + updates room preview.
+        // forEveryone adds a redact op so peers see the delete too.
+        if (isChatDbReady()) {
+          try {
+            const dbKit = getChatDb();
+            await dbKit.eventWriter.writeRedaction({
+              redactedEventId: id,
+              roomId,
+            });
+            if (forEveryone) {
               await dbKit.syncEngine.enqueue(
                 "delete_message",
                 roomId,
                 { eventId: id },
               );
-              return;
-            } catch (e) {
-              console.warn("[use-messages] Dexie bulk delete failed, falling back:", e);
             }
+            return;
+          } catch (e) {
+            console.warn("[use-messages] Dexie bulk delete failed, falling back:", e);
           }
+        }
+        // Legacy fallback
+        if (forEveryone) {
           await matrixService.redactEvent(roomId, id, "deleted");
         }
         chatStore.removeMessage(roomId, id);
