@@ -601,6 +601,9 @@ export const en = {
   "invite.copied": "Copied!",
   "invite.shareOn": "Share on",
   "invite.fab": "Invite",
+  "invite.accepted": "Invite accepted",
+  "invite.acceptFailed": "Failed to accept invite",
+  "invite.malformed": "Invalid invite link",
 
   // ── Native share ──
   "share.linkCopied": "Link copied to clipboard",

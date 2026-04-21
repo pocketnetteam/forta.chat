@@ -31,6 +31,7 @@ import {
 import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
+import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
 import { PROXY_NODES } from "@/shared/config/constants";
@@ -41,7 +42,7 @@ loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].por
 const isElectron = !!(window as any).electronAPI?.isElectron;
 const { t } = useI18n();
 
-const { message: toastMessage, type: toastType, show: toastShow, close: toastClose } = useToast();
+const { message: toastMessage, type: toastType, show: toastShow, close: toastClose, toast: showToast } = useToast();
 
 provide(EAppProviders.AppRoutes, AppRoutes);
 provide(EAppProviders.AppPages, AppPages);
@@ -120,9 +121,13 @@ const processReferral = async () => {
     const roomId = await getOrCreateRoom(ref);
     if (roomId) {
       router.push({ name: "ChatPage" });
+      showToast(t("invite.accepted"), "success");
+    } else {
+      showToast(t("invite.acceptFailed"), "error");
     }
   } catch (e) {
     console.error("[App] referral processing error:", e);
+    showToast(t("invite.acceptFailed"), "error");
   }
 };
 
@@ -295,6 +300,30 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
 onMounted(async () => {
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", handleGlobalKeydown);
+
+  // Deep-link handlers: Capacitor's appUrlOpen listener is already wired from
+  // main.ts. Now that the router is mounted, install the actual invite/join
+  // callbacks — any URLs buffered during cold-start drain here. We funnel them
+  // through the same localStorage slots that route guards use, so the single
+  // processReferral/processJoinRoom pipeline handles both deep-link sources.
+  registerDeepLinkHandlers({
+    onInvite: ({ address }) => {
+      localStorage.setItem("bastyon-chat-referral", address);
+      if (authStore.isAuthenticated && authStore.matrixReady) {
+        processReferral();
+      }
+    },
+    onJoin: ({ roomId }) => {
+      localStorage.setItem("bastyon-chat-join-room", roomId);
+      if (authStore.isAuthenticated && authStore.matrixReady) {
+        processJoinRoom();
+      }
+    },
+    onMalformed: (rawUrl) => {
+      console.warn("[App] malformed forta deep-link:", rawUrl);
+      showToast(t("invite.malformed"), "error");
+    },
+  });
 
   // Initialize Android hardware back button handler
   initAndroidBackListener();

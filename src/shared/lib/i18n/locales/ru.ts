@@ -603,6 +603,9 @@ export const ru: Record<TranslationKey, string> = {
   "invite.copied": "Скопировано!",
   "invite.shareOn": "Поделиться в",
   "invite.fab": "Пригласить",
+  "invite.accepted": "Приглашение принято",
+  "invite.acceptFailed": "Не удалось принять приглашение",
+  "invite.malformed": "Неверная ссылка приглашения",
 
   // ── Native share ──
   "share.linkCopied": "Ссылка скопирована",
