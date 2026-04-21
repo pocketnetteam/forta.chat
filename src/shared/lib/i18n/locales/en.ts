@@ -262,6 +262,8 @@ export const en = {
   "messageList.typingTwo": "{name1} and {name2} are typing",
   "messageList.typingMany": "{name} and {count} more are typing",
   "messageList.deleteMessage": "Delete message?",
+  "messageList.deleteMessagesTitle": "Delete {count} selected messages?",
+  "messageList.deleteResultSummary": "Deleted {succeeded}, failed {failed}",
   "messageList.deleteForEveryone": "Delete for everyone",
   "messageList.deleteForMe": "Delete for me",
   "messageList.cancel": "Cancel",

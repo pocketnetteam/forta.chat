@@ -264,6 +264,8 @@ export const ru: Record<TranslationKey, string> = {
   "messageList.typingTwo": "{name1} и {name2} печатают",
   "messageList.typingMany": "{name} и ещё {count} печатают",
   "messageList.deleteMessage": "Удалить сообщение?",
+  "messageList.deleteMessagesTitle": "Удалить выбранные сообщения ({count})?",
+  "messageList.deleteResultSummary": "Удалено {succeeded}, не удалось {failed}",
   "messageList.deleteForEveryone": "Удалить у всех",
   "messageList.deleteForMe": "Удалить у меня",
   "messageList.cancel": "Отмена",

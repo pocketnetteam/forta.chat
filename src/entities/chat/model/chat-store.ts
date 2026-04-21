@@ -455,6 +455,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
   const deletingMessage = ref<Message | null>(null);
+  // Bulk-delete state — array form coexists with singular deletingMessage above.
+  // When non-empty, the delete confirmation modal operates on ALL listed messages.
+  const deletingMessages = ref<Message[]>([]);
 
   // User display name cache: address → display name
   const userDisplayNames = ref<Record<string, string>>({});
@@ -5918,6 +5921,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     syncState.value = null;
     editingMessage.value = null;
     deletingMessage.value = null;
+    deletingMessages.value = [];
     userDisplayNames.value = {};
     selectionMode.value = false;
     selectedMessageIds.value = new Set();
@@ -5958,6 +5962,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     cleanup,
     clearDeletedRoom,
     deletingMessage,
+    deletingMessages,
     editingMessage,
     enterDetachedMode,
     enterSelectionMode,

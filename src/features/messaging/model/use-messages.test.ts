@@ -248,4 +248,85 @@ describe("useMessages", () => {
       expect(reply.status).toBe(MessageStatus.failed);
     });
   });
+
+  // ─── deleteMessages (bulk) ────────────────────────────────────
+
+  describe("deleteMessages (bulk)", () => {
+    beforeEach(() => {
+      // Reset mock return values that vi.clearAllMocks() doesn't clear
+      mockIsReady.mockReturnValue(true);
+      mockRedactEvent.mockReset();
+    });
+
+    it("redacts ALL selected messages when forEveryone=true", async () => {
+      const m1 = makeMsg({ roomId: "!room:server", id: "$e1" });
+      const m2 = makeMsg({ roomId: "!room:server", id: "$e2" });
+      const m3 = makeMsg({ roomId: "!room:server", id: "$e3" });
+      chatStore.addMessage("!room:server", m1);
+      chatStore.addMessage("!room:server", m2);
+      chatStore.addMessage("!room:server", m3);
+
+      const result = await messaging.deleteMessages(["$e1", "$e2", "$e3"], true);
+
+      expect(mockRedactEvent).toHaveBeenCalledTimes(3);
+      expect(mockRedactEvent).toHaveBeenCalledWith("!room:server", "$e1", "deleted");
+      expect(mockRedactEvent).toHaveBeenCalledWith("!room:server", "$e2", "deleted");
+      expect(mockRedactEvent).toHaveBeenCalledWith("!room:server", "$e3", "deleted");
+      expect(result.succeeded).toBe(3);
+      expect(result.failed).toBe(0);
+    });
+
+    it("continues on partial failure and reports counts", async () => {
+      mockRedactEvent.mockImplementation(
+        async (_roomId: string, eventId: string): Promise<void> => {
+          if (eventId === "$e2") throw new Error("transient network");
+        },
+      );
+      const m1 = makeMsg({ roomId: "!room:server", id: "$e1" });
+      const m2 = makeMsg({ roomId: "!room:server", id: "$e2" });
+      const m3 = makeMsg({ roomId: "!room:server", id: "$e3" });
+      chatStore.addMessage("!room:server", m1);
+      chatStore.addMessage("!room:server", m2);
+      chatStore.addMessage("!room:server", m3);
+
+      const result = await messaging.deleteMessages(["$e1", "$e2", "$e3"], true);
+
+      expect(result.succeeded).toBe(2);
+      expect(result.failed).toBe(1);
+    });
+
+    it("skips redact and only marks locally deleted when forEveryone=false", async () => {
+      const m1 = makeMsg({ roomId: "!room:server", id: "$e1" });
+      const m2 = makeMsg({ roomId: "!room:server", id: "$e2" });
+      chatStore.addMessage("!room:server", m1);
+      chatStore.addMessage("!room:server", m2);
+
+      const result = await messaging.deleteMessages(["$e1", "$e2"], false);
+
+      expect(mockRedactEvent).not.toHaveBeenCalled();
+      expect(result.succeeded).toBe(2);
+      expect(result.failed).toBe(0);
+      // removeMessage marks as deleted (WhatsApp-style placeholder), doesn't splice
+      const roomMsgs = chatStore.messages["!room:server"];
+      expect(roomMsgs.every((m) => m.deleted === true)).toBe(true);
+    });
+
+    it("handles empty array gracefully", async () => {
+      const result = await messaging.deleteMessages([], true);
+      expect(result.succeeded).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(mockRedactEvent).not.toHaveBeenCalled();
+    });
+
+    it("returns zero on all-fail when matrixService is not ready", async () => {
+      mockIsReady.mockReturnValue(false);
+      const m1 = makeMsg({ roomId: "!room:server", id: "$e1" });
+      chatStore.addMessage("!room:server", m1);
+
+      const result = await messaging.deleteMessages(["$e1"], true);
+      // No redact attempted (service not ready) — treat as no-op
+      expect(mockRedactEvent).not.toHaveBeenCalled();
+      expect(result.failed + result.succeeded).toBe(1);
+    });
+  });
 });

@@ -28,7 +28,7 @@ import UnreadBanner from "./UnreadBanner.vue";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
-const { loadMessages, toggleReaction, deleteMessage, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
+const { loadMessages, toggleReaction, deleteMessage, deleteMessages, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
 const { toast } = useToast();
 const { t } = useI18n();
 
@@ -55,14 +55,48 @@ const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: strin
 const searchQuery = ref("");
 provide("searchQuery", searchQuery);
 
-const handleDeleteForMe = () => {
+// Bulk path takes precedence when deletingMessages is populated.
+const isBulkDelete = computed(() => chatStore.deletingMessages.length > 0);
+const deleteCount = computed(() =>
+  isBulkDelete.value ? chatStore.deletingMessages.length : 1,
+);
+
+const closeDeleteModal = () => {
+  chatStore.deletingMessage = null;
+  chatStore.deletingMessages = [];
+  chatStore.exitSelectionMode();
+};
+
+const handleDeleteForMe = async () => {
+  if (isBulkDelete.value) {
+    const ids = chatStore.deletingMessages.map((m) => m.id);
+    const result = await deleteMessages(ids, false);
+    if (result.failed > 0) {
+      toast(t("messageList.deleteResultSummary", {
+        succeeded: result.succeeded, failed: result.failed,
+      }));
+    }
+    closeDeleteModal();
+    return;
+  }
   if (chatStore.deletingMessage) {
     deleteMessage(chatStore.deletingMessage.id, false);
     chatStore.deletingMessage = null;
   }
 };
 
-const handleDeleteForEveryone = () => {
+const handleDeleteForEveryone = async () => {
+  if (isBulkDelete.value) {
+    const ids = chatStore.deletingMessages.map((m) => m.id);
+    const result = await deleteMessages(ids, true);
+    if (result.failed > 0) {
+      toast(t("messageList.deleteResultSummary", {
+        succeeded: result.succeeded, failed: result.failed,
+      }));
+    }
+    closeDeleteModal();
+    return;
+  }
   if (chatStore.deletingMessage) {
     deleteMessage(chatStore.deletingMessage.id, true);
     chatStore.deletingMessage = null;
@@ -1329,12 +1363,14 @@ defineExpose({ scrollToMessage, setSearchQuery });
     <Teleport to="body">
       <transition name="modal-fade">
         <div
-          v-if="chatStore.deletingMessage"
+          v-if="chatStore.deletingMessage || isBulkDelete"
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          @click.self="chatStore.deletingMessage = null"
+          @click.self="closeDeleteModal"
         >
           <div class="w-full max-w-xs rounded-xl bg-background-total-theme p-5 shadow-xl">
-            <h3 class="mb-4 text-base font-semibold text-text-color">{{ t("messageList.deleteMessage") }}</h3>
+            <h3 class="mb-4 text-base font-semibold text-text-color">
+              {{ isBulkDelete ? t("messageList.deleteMessagesTitle", { count: deleteCount }) : t("messageList.deleteMessage") }}
+            </h3>
             <div class="flex flex-col gap-2">
               <button
                 class="rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
@@ -1350,7 +1386,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
               </button>
               <button
                 class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-                @click="chatStore.deletingMessage = null"
+                @click="closeDeleteModal"
               >
                 {{ t("messageList.cancel") }}
               </button>

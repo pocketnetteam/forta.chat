@@ -1564,6 +1564,52 @@ export function useMessages() {
     }
   };
 
+  /** Delete multiple messages in one batch. Continues on individual failures —
+   *  returns a summary {succeeded, failed} so the caller can show a toast.
+   *  Self-contained (does not wrap single deleteMessage), because the single
+   *  variant swallows errors in try/catch — we need real per-op status here. */
+  const deleteMessages = async (
+    messageIds: string[],
+    forEveryone: boolean,
+  ): Promise<{ succeeded: number; failed: number }> => {
+    if (messageIds.length === 0) return { succeeded: 0, failed: 0 };
+
+    const roomId = chatStore.activeRoomId;
+    if (!roomId) return { succeeded: 0, failed: messageIds.length };
+
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) {
+      return { succeeded: 0, failed: messageIds.length };
+    }
+
+    const results = await Promise.allSettled(
+      messageIds.map(async (id) => {
+        if (forEveryone) {
+          if (isChatDbReady()) {
+            try {
+              const dbKit = getChatDb();
+              await dbKit.messages.softDelete(id);
+              await dbKit.syncEngine.enqueue(
+                "delete_message",
+                roomId,
+                { eventId: id },
+              );
+              return;
+            } catch (e) {
+              console.warn("[use-messages] Dexie bulk delete failed, falling back:", e);
+            }
+          }
+          await matrixService.redactEvent(roomId, id, "deleted");
+        }
+        chatStore.removeMessage(roomId, id);
+      }),
+    );
+
+    const succeeded = results.filter((r) => r.status === "fulfilled").length;
+    const failed = results.length - succeeded;
+    return { succeeded, failed };
+  };
+
   /** Send a PKOIN transfer message.
    *  Uses Dexie optimistic UI (createLocal → syncEngine) so the transfer bubble
    *  appears instantly, just like regular text messages. Falls back to legacy
@@ -2238,6 +2284,7 @@ export function useMessages() {
   return {
     cancelMediaUpload,
     deleteMessage,
+    deleteMessages,
     drainOfflineQueue,
     editMessage,
     endPoll,
