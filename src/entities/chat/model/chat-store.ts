@@ -3,6 +3,7 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
@@ -4092,16 +4093,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const target = msgMap.get(targetId);
       if (target) {
         const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
+        const isEncrypted = newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted";
         let editBody: string;
 
-        if (newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted") {
+        if (isEncrypted) {
           if (roomCrypto) {
-            try {
-              const decrypted = await roomCrypto.decryptEvent(raw);
-              editBody = decrypted.body;
-            } catch {
-              editBody = (newContent?.body as string) ?? (content.body as string) ?? "[decrypt error]";
-            }
+            editBody = await parseEditBody({
+              raw,
+              content,
+              newContent,
+              decryptEvent: (e) => roomCrypto.decryptEvent(e),
+              encryptedPlaceholder: "[encrypted]",
+            });
           } else {
             editBody = "[encrypted]";
           }
@@ -5147,20 +5150,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const editRelatesTo = content["m.relates_to"] as Record<string, unknown> | undefined;
       if (editRelatesTo?.rel_type === "m.replace" && editRelatesTo?.event_id) {
         const targetId = editRelatesTo.event_id as string;
+        const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
+        const isEncrypted = newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted";
         let newBody: string;
 
-        // Edit events in encrypted rooms: m.new_content holds the ciphertext
-        const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
-        if (newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted") {
+        if (isEncrypted) {
           const roomCrypto = await ensureRoomCrypto(roomId);
           if (roomCrypto) {
-            try {
-              await maybeYieldDecrypt();
-              const decrypted = await roomCrypto.decryptEvent(raw);
-              newBody = decrypted.body;
-            } catch {
-              newBody = (newContent?.body as string) ?? (content.body as string) ?? "[decrypt error]";
-            }
+            newBody = await parseEditBody({
+              raw,
+              content,
+              newContent,
+              decryptEvent: async (e) => {
+                await maybeYieldDecrypt();
+                return roomCrypto.decryptEvent(e);
+              },
+              encryptedPlaceholder: "[encrypted]",
+            });
           } else {
             newBody = "[encrypted]";
           }
