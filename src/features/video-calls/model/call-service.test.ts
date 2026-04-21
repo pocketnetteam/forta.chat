@@ -50,11 +50,13 @@ vi.mock('@/shared/lib/native-webrtc', () => ({
 
 // Mock native-call-bridge
 const mockRequestAudioPermission = vi.fn();
+const mockRequestCameraPermission = vi.fn();
 const mockStartAudioRouting = vi.fn().mockResolvedValue(undefined);
 const mockStopAudioRouting = vi.fn().mockResolvedValue(undefined);
 vi.mock('@/shared/lib/native-calls', () => ({
   nativeCallBridge: {
     requestAudioPermission: mockRequestAudioPermission,
+    requestCameraPermission: mockRequestCameraPermission,
     reportOutgoingCall: vi.fn().mockResolvedValue(undefined),
     reportCallConnected: vi.fn().mockResolvedValue(undefined),
     reportCallEnded: vi.fn().mockResolvedValue(undefined),
@@ -62,6 +64,29 @@ vi.mock('@/shared/lib/native-calls', () => ({
     wire: vi.fn().mockResolvedValue(undefined),
     startAudioRouting: mockStartAudioRouting,
     stopAudioRouting: mockStopAudioRouting,
+  },
+  consumePendingAnswerCallId: vi.fn().mockResolvedValue(false),
+  consumePendingRejectCallId: vi.fn().mockResolvedValue(false),
+}));
+
+// Mock permissions — by default resolves ok; individual tests override via
+// mockEnsureCallPermissions.mockRejectedValueOnce(...) when denied paths
+// need to be exercised. This lets call-service tests focus on the flow
+// around ensureCallPermissions, not its internals (covered in permissions.test.ts).
+class MockPermissionDeniedError extends Error {
+  constructor(public readonly device: 'microphone' | 'camera') {
+    super(`Permission denied: ${device}`);
+    this.name = 'PermissionDeniedError';
+  }
+}
+const mockEnsureCallPermissions = vi.fn();
+const mockCallPermissionError: { value: { device: 'microphone' | 'camera' } | null } = { value: null };
+vi.mock('./permissions', () => ({
+  ensureCallPermissions: mockEnsureCallPermissions,
+  PermissionDeniedError: MockPermissionDeniedError,
+  callPermissionError: mockCallPermissionError,
+  clearCallPermissionError: () => {
+    mockCallPermissionError.value = null;
   },
 }));
 
@@ -214,44 +239,78 @@ describe('call-service permission flow', () => {
     mockCallStore.activeCall = null;
     mockCallStore.matrixCall = null;
     mockCallStore.videoMuted = false;
+    // Default: permissions resolve successfully. Individual tests override
+    // with mockRejectedValueOnce(new MockPermissionDeniedError(...)).
+    mockEnsureCallPermissions.mockResolvedValue(undefined);
   });
 
   describe('startCall', () => {
-    it('calls requestAudioPermission before creating MatrixCall on native', async () => {
-      mockRequestAudioPermission.mockResolvedValue({ granted: true });
-
+    it('calls ensureCallPermissions with isVideo=false for voice call', async () => {
       const { useCallService } = await import('./call-service');
       const service = useCallService();
       await service.startCall('!room:matrix.org', 'voice');
 
-      expect(mockRequestAudioPermission).toHaveBeenCalledOnce();
+      expect(mockEnsureCallPermissions).toHaveBeenCalledWith(false);
     });
 
-    it('sets CallStatus.failed and returns early when permission denied', async () => {
-      mockRequestAudioPermission.mockResolvedValue({ granted: false });
+    it('calls ensureCallPermissions with isVideo=true for video call', async () => {
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'video');
+
+      expect(mockEnsureCallPermissions).toHaveBeenCalledWith(true);
+    });
+
+    it('sets CallStatus.failed and returns early when microphone denied', async () => {
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('microphone'),
+      );
 
       const { useCallService } = await import('./call-service');
       const service = useCallService();
       await service.startCall('!room:matrix.org', 'voice');
 
       expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
-      expect(mockScheduleClearCall).toHaveBeenCalledWith(1500);
+      expect(mockScheduleClearCall).toHaveBeenCalled();
       expect(mockPlaceVoiceCall).not.toHaveBeenCalled();
+    });
+
+    it('sets CallStatus.failed and skips placeVideoCall when camera denied for video', async () => {
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('camera'),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'video');
+
+      expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
+      expect(mockPlaceVideoCall).not.toHaveBeenCalled();
+    });
+
+    it('does not start audio routing when permission denied', async () => {
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('microphone'),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      expect(mockStartAudioRouting).not.toHaveBeenCalled();
     });
   });
 
   describe('answerCall', () => {
-    it('calls requestAudioPermission before answering on native', async () => {
-      mockRequestAudioPermission.mockResolvedValue({ granted: true });
-
-      // Simulate incoming call state on shared mock store
+    function seedIncomingCall(type: 'voice' | 'video' = 'voice') {
       mockCallStore.matrixCall = {
         callId: 'incoming-call-id',
         roomId: '!room:matrix.org',
-        type: 'voice',
+        type,
         on: mockOn,
         off: mockOff,
         answer: mockAnswer,
+        reject: mockReject,
         localUsermediaStream: null,
         localScreensharingStream: null,
         remoteUsermediaStream: null,
@@ -261,45 +320,72 @@ describe('call-service permission flow', () => {
       mockCallStore.activeCall = {
         callId: 'incoming-call-id',
         roomId: '!room:matrix.org',
-        type: 'voice',
+        type,
         direction: 'incoming',
         peerName: 'Peer',
         status: 'incoming',
       };
+    }
+
+    it('calls ensureCallPermissions with isVideo=false before answering voice', async () => {
+      seedIncomingCall('voice');
 
       const { useCallService } = await import('./call-service');
       const service = useCallService();
       await service.answerCall();
 
-      expect(mockRequestAudioPermission).toHaveBeenCalledOnce();
+      expect(mockEnsureCallPermissions).toHaveBeenCalledWith(false);
     });
 
-    it('sets CallStatus.failed when permission denied on answer', async () => {
-      mockRequestAudioPermission.mockResolvedValue({ granted: false });
+    it('calls ensureCallPermissions with isVideo=true before answering video', async () => {
+      seedIncomingCall('video');
 
-      mockCallStore.matrixCall = {
-        callId: 'incoming-call-id',
-        roomId: '!room:matrix.org',
-        type: 'voice',
-        on: mockOn,
-        off: mockOff,
-        answer: mockAnswer,
-        localUsermediaStream: null,
-      };
-      mockCallStore.activeCall = {
-        callId: 'incoming-call-id',
-        type: 'voice',
-        direction: 'incoming',
-        peerName: 'Peer',
-        status: 'incoming',
-      };
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockEnsureCallPermissions).toHaveBeenCalledWith(true);
+    });
+
+    it('sets CallStatus.failed when microphone denied on answer and does NOT call SDK answer', async () => {
+      seedIncomingCall('voice');
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('microphone'),
+      );
 
       const { useCallService } = await import('./call-service');
       const service = useCallService();
       await service.answerCall();
 
       expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
-      expect(mockScheduleClearCall).toHaveBeenCalledWith(1500);
+      expect(mockScheduleClearCall).toHaveBeenCalled();
+      expect(mockAnswer).not.toHaveBeenCalled();
+    });
+
+    it('rejects the incoming matrixCall when permission denied so caller stops ringing', async () => {
+      seedIncomingCall('voice');
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('microphone'),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockReject).toHaveBeenCalled();
+    });
+
+    it('sets CallStatus.failed when camera denied during video answer', async () => {
+      seedIncomingCall('video');
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('camera'),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
       expect(mockAnswer).not.toHaveBeenCalled();
     });
   });

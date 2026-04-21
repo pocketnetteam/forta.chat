@@ -485,6 +485,11 @@ export const ru: Record<TranslationKey, string> = {
   "call.you": "Вы",
   "call.screen": "экран",
   "call.callInOtherTab": "Звонок активен в другой вкладке",
+  "call.permissionDenied.title": "Нет доступа к устройству",
+  "call.permissionDenied.microphone": "Доступ к микрофону не разрешён. Без него звонок невозможен: собеседник вас не услышит.",
+  "call.permissionDenied.camera": "Доступ к камере не разрешён. Без него видеозвонок невозможен.",
+  "call.permissionDenied.instructions": "Разрешите доступ в настройках системы: «Настройки → Приложения → Forta Chat → Разрешения».",
+  "call.permissionDenied.close": "Закрыть",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",

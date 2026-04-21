@@ -18,6 +18,7 @@ import {
   consumePendingAnswerCallId,
   consumePendingRejectCallId,
 } from "@/shared/lib/native-calls";
+import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 
 // Install native WebRTC proxy on mobile — must run before any call is placed.
 // This replaces window.RTCPeerConnection so that the Matrix SDK transparently
@@ -442,22 +443,23 @@ export function useCallService() {
 
     callStore.cancelScheduledClear();
 
-    // D-01: JS-side permission check before call start
-    if (isNative) {
-      try {
-        const { granted } = await nativeCallBridge.requestAudioPermission();
-        if (!granted) {
-          // D-03: reject call on denial, D-04: toast shown via onAudioError event
-          callStore.updateStatus(CallStatus.failed);
-          callStore.scheduleClearCall(1500);
-          return;
-        }
-      } catch (e) {
-        console.error("[call-service] requestAudioPermission failed:", e);
-        callStore.updateStatus(CallStatus.failed);
-        callStore.scheduleClearCall(1500);
-        return;
+    // Preflight: mic (+ camera for video). Throws PermissionDeniedError
+    // if the OS denied access, or if getUserMedia returns a stream with
+    // empty tracks. If we skip this and let the SDK's getUserMedia fail
+    // silently, the peer sees an invite, accepts, but there is no media
+    // to exchange — that is the origin of the mass "no audio" reports.
+    try {
+      await ensureCallPermissions(type === "video");
+    } catch (e) {
+      if (e instanceof PermissionDeniedError) {
+        console.warn("[call-service] startCall: permission denied for", e.device);
+        callPermissionError.value = { device: e.device };
+      } else {
+        console.error("[call-service] startCall: ensureCallPermissions failed:", e);
       }
+      callStore.updateStatus(CallStatus.failed);
+      callStore.scheduleClearCall(1500);
+      return;
     }
 
     const matrixService = getMatrixClientService();
@@ -718,23 +720,41 @@ export function useCallService() {
     clearIncomingTimeout();
     stopAllSounds();
 
-    // D-01: JS-side permission check before answering
-    if (isNative) {
-      try {
-        console.log("[call-service] answerCall: requesting audio permission");
-        const { granted } = await nativeCallBridge.requestAudioPermission();
-        console.log("[call-service] answerCall: permission granted=" + granted);
-        if (!granted) {
-          callStore.updateStatus(CallStatus.failed);
-          callStore.scheduleClearCall(1500);
-          return;
-        }
-      } catch (e) {
-        console.error("[call-service] requestAudioPermission failed:", e);
-        callStore.updateStatus(CallStatus.failed);
-        callStore.scheduleClearCall(1500);
-        return;
+    const isVideo = callStore.activeCall?.type === "video";
+
+    // Preflight: mic (+ camera for video) BEFORE any SDK signaling. If
+    // the OS denied permission we must NOT call `call.answer()` — doing
+    // so would let Matrix SDK establish the peer connection with an empty
+    // track and the caller would see "connected" with no audio. Instead
+    // reject the call so the caller stops ringing and receives a clear
+    // `m.call.reject`, then dismiss our own native UI.
+    try {
+      await ensureCallPermissions(isVideo);
+    } catch (e) {
+      if (e instanceof PermissionDeniedError) {
+        console.warn("[call-service] answerCall: permission denied for", e.device);
+        callPermissionError.value = { device: e.device };
+      } else {
+        console.error("[call-service] answerCall: ensureCallPermissions failed:", e);
       }
+      // Detach SDK event listeners FIRST — if we call reject() below while
+      // listeners are still bound, the SDK's State→Ended / Hangup events
+      // would fire our onState/onHangup handlers, double-triggering
+      // scheduleClearCall + duplicate history entry + redundant
+      // dismissCallUI. Mirrors rejectCall()'s ordering.
+      unwireCallEvents(call);
+      try {
+        call.reject();
+      } catch (rejectErr) {
+        console.warn("[call-service] answerCall: reject after permission failure errored:", rejectErr);
+      }
+      callStore.updateStatus(CallStatus.failed);
+      callStore.scheduleClearCall(1500);
+      if (isNative) {
+        NativeWebRTC.dismissCallUI().catch(() => {});
+        nativeCallBridge.reportCallEnded(call.callId).catch(() => {});
+      }
+      return;
     }
 
     callStore.updateStatus(CallStatus.connecting);
@@ -742,8 +762,6 @@ export function useCallService() {
     // Hint stored device IDs (lightweight, sync) — real fix is post-connect
     const client = getClient();
     hintStoredDevices(client);
-
-    const isVideo = callStore.activeCall?.type === "video";
 
     // Launch native call UI when answering incoming call
     if (isNative && callStore.activeCall) {

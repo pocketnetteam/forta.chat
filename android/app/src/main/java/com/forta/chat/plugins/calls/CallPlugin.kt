@@ -19,6 +19,10 @@ import com.getcapacitor.annotation.PermissionCallback
         Permission(
             strings = [android.Manifest.permission.RECORD_AUDIO],
             alias = "microphone"
+        ),
+        Permission(
+            strings = [android.Manifest.permission.CAMERA],
+            alias = "camera"
         )
     ]
 )
@@ -181,6 +185,22 @@ class CallPlugin : Plugin() {
     private fun audioPermissionCallback(call: PluginCall) {
         val granted = getPermissionState("microphone") == PermissionState.GRANTED
         Log.d(TAG, "[WebRTCAudio] requestAudioPermission callback: granted=$granted")
+        call.resolve(JSObject().apply { put("granted", granted) })
+    }
+
+    @PluginMethod
+    fun requestCameraPermission(call: PluginCall) {
+        if (getPermissionState("camera") == PermissionState.GRANTED) {
+            call.resolve(JSObject().apply { put("granted", true) })
+            return
+        }
+        requestPermissionForAlias("camera", call, "cameraPermissionCallback")
+    }
+
+    @PermissionCallback
+    private fun cameraPermissionCallback(call: PluginCall) {
+        val granted = getPermissionState("camera") == PermissionState.GRANTED
+        Log.d(TAG, "[WebRTCAudio] requestCameraPermission callback: granted=$granted")
         call.resolve(JSObject().apply { put("granted", granted) })
     }
 

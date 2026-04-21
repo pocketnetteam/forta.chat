@@ -13,6 +13,7 @@ import TitleBar from "@/widgets/title-bar/TitleBar.vue";
 import IncomingCallModal from "@/features/video-calls/ui/IncomingCallModal.vue";
 import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
+import PermissionDeniedModal from "@/features/video-calls/ui/PermissionDeniedModal.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
@@ -359,6 +360,7 @@ onUnmounted(() => {
     <IncomingCallModal />
     <CallWindow />
     <CallStatusBar />
+    <PermissionDeniedModal />
     <QuickSearchModal
       v-if="showQuickSearch"
       @close="showQuickSearch = false"

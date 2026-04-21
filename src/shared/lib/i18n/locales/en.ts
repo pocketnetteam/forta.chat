@@ -483,6 +483,11 @@ export const en = {
   "call.you": "You",
   "call.screen": "screen",
   "call.callInOtherTab": "Call is active in another tab",
+  "call.permissionDenied.title": "Device access denied",
+  "call.permissionDenied.microphone": "Microphone access is denied. Calls cannot proceed — the other party will not hear you.",
+  "call.permissionDenied.camera": "Camera access is denied. Video calls cannot proceed.",
+  "call.permissionDenied.instructions": "Grant access in your system settings: Settings → Apps → Forta Chat → Permissions.",
+  "call.permissionDenied.close": "Close",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",
