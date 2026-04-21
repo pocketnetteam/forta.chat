@@ -317,6 +317,8 @@ export const ru: Record<TranslationKey, string> = {
   "forward.cancelConfirm.cancel": "Отменить пересылку",
   "forward.resultSuccess": "Переслано: {count}",
   "forward.resultSummary": "Переслано {succeeded} из {total}",
+  "forward.bulkTitle": "Переслать {count} сообщений",
+  "forward.bulkFrom": "От: {names}",
 
   // ── Pinned bar ──
   "pinned.message": "Закреплённое сообщение",

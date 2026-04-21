@@ -315,6 +315,8 @@ export const en = {
   "forward.cancelConfirm.cancel": "Cancel forwarding",
   "forward.resultSuccess": "Forwarded: {count}",
   "forward.resultSummary": "Forwarded {succeeded} of {total}",
+  "forward.bulkTitle": "Forward {count} messages",
+  "forward.bulkFrom": "From: {names}",
 
   // ── Pinned bar ──
   "pinned.message": "Pinned Message",

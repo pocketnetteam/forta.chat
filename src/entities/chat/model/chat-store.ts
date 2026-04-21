@@ -382,9 +382,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const forwardPickerRequested = ref(false);
   const forwardDrafts = new Map<string, ForwardingMessage>();
   // Bulk forward (additive, sits alongside singular `forwardingMessage`).
-  // When non-empty, ForwardPicker routes room-selection through the batch
-  // `forwardMessages(ids, targetRoomId)` API rather than the legacy draft flow.
+  // Mirrors the singular draft-flow (save per-target, restore on room-switch,
+  // preview bar + composer, send on tap) — NOT immediate dispatch. That matches
+  // the Telegram/Element UX where the user lands in the target room first and
+  // optionally types a caption before shipping the batch.
   const forwardingMessages = ref<Message[]>([]);
+  const bulkForwardDrafts = new Map<string, Message[]>();
   const isDetachedFromLatest = ref(false);
 
   // Shared counter: yields to main thread every 5 decryption calls across ALL
@@ -590,6 +593,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (msgs.length === 0) return;
     forwardingMessages.value = [...msgs];
     forwardPickerRequested.value = true;
+  };
+
+  /** Persist the current bulk selection to drafts keyed by target room so it
+   *  survives the room-switch watcher (same trick the singular flow uses). */
+  const saveBulkForwardDraft = (targetRoomId: string) => {
+    if (forwardingMessages.value.length > 0) {
+      bulkForwardDrafts.set(targetRoomId, [...forwardingMessages.value]);
+    } else {
+      bulkForwardDrafts.delete(targetRoomId);
+    }
+  };
+
+  const restoreBulkForwardDraft = (roomId: string) => {
+    const draft = bulkForwardDrafts.get(roomId);
+    forwardingMessages.value = draft ? [...draft] : [];
+  };
+
+  /** Clear the bulk forward — both the in-flight array and any saved draft
+   *  for the given (or active) room. Use after Send or when user cancels. */
+  const cancelBulkForward = (roomId?: string) => {
+    const key = roomId ?? activeRoomId.value;
+    if (key) bulkForwardDrafts.delete(key);
+    forwardingMessages.value = [];
   };
 
   /** Save current forward to drafts for the given room (called on room switch) */
@@ -5994,6 +6020,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     forwardPickerRequested,
     initForward,
     initBulkForward,
+    saveBulkForwardDraft,
+    restoreBulkForwardDraft,
+    cancelBulkForward,
     initExternalShare,
     initPostForward,
     cancelForward,

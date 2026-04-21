@@ -6,9 +6,6 @@ import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name"
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
-import { useMessages } from "@/features/messaging/model/use-messages";
-import { useToast } from "@/shared/lib/use-toast";
-
 type FilterValue = "all" | "personal" | "groups";
 
 interface Props {
@@ -22,8 +19,6 @@ const chatStore = useChatStore();
 const { t } = useI18n();
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const isMobile = useMobile();
-const { forwardMessages } = useMessages();
-const { toast } = useToast();
 
 const isBulkMode = computed(() => chatStore.forwardingMessages.length > 0);
 
@@ -91,21 +86,13 @@ const getRoomSubtitle = (room: ChatRoom): string => {
 };
 
 const selectRoom = async (roomId: string) => {
-  // ── Bulk branch — ships N messages instantly, no detour through the target
-  // room's composer. Singular branch keeps the legacy draft-and-switch UX. ──
+  // ── Bulk branch — lands the user in the target room with a preview bar
+  // so they can optionally type a caption before shipping the batch.
+  // Mirrors the singular draft-and-switch UX (Telegram/Element style). ──
   if (isBulkMode.value) {
-    const ids = chatStore.forwardingMessages.map((m) => m.id);
-    const result = await forwardMessages(ids, roomId);
-    if (result.failed > 0) {
-      toast(t("forward.resultSummary", {
-        succeeded: result.succeeded,
-        total: ids.length,
-      }));
-    } else {
-      toast(t("forward.resultSuccess", { count: result.succeeded }));
-    }
-    chatStore.forwardingMessages = [];
+    chatStore.saveBulkForwardDraft(roomId);
     chatStore.exitSelectionMode();
+    chatStore.setActiveRoom(roomId);
     search.value = "";
     emit("close");
     return;
