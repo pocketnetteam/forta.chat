@@ -36,11 +36,16 @@ echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$TMP_KEYSTORE"
 # `keytool -list -v` prints the full cert chain; we want the SHA256 line for
 # the chosen alias. The value looks like:
 #   SHA256: AA:BB:CC:...:99
+#
+# Use `-storepass:env` so the password is read from an environment variable
+# rather than a command-line argument — otherwise it would appear in
+# `ps aux` output on the CI runner and in any crash dumps.
 FINGERPRINT="$(
+  KEYTOOL_STOREPASS="$ANDROID_KEYSTORE_PASSWORD" \
   keytool -list -v \
     -keystore "$TMP_KEYSTORE" \
     -alias "$ANDROID_KEY_ALIAS" \
-    -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+    -storepass:env KEYTOOL_STOREPASS \
     2>/dev/null \
   | awk -F': ' '/SHA256:/ { print $2; exit }' \
   | tr -d '[:space:]'
