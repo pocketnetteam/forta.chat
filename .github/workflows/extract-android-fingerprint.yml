@@ -1,0 +1,62 @@
+name: Extract Android SHA-256 Fingerprint
+
+# Manual-only. Outputs the SHA-256 fingerprint of the release keystore
+# (the same one used by `android-release.yml` to sign APKs and by `deploy.yml`
+# to stamp `.well-known/assetlinks.json`). Useful for verifying App Links
+# verification on a device, or when cross-checking what Google's App Links
+# verifier sees.
+#
+# The fingerprint itself is NOT secret — it's part of the public assetlinks.json
+# contract. But this workflow still requires repo write access because it
+# decodes the keystore internally.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > keystore.jks
+
+      - name: Extract SHA-256 fingerprint
+        env:
+          KEYTOOL_STOREPASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          FP=$(keytool -list -v \
+                 -keystore keystore.jks \
+                 -alias "$KEY_ALIAS" \
+                 -storepass:env KEYTOOL_STOREPASS \
+                 2>/dev/null \
+               | awk -F': ' '/SHA256:/ { print $2; exit }' \
+               | tr -d '[:space:]')
+          if [ -z "$FP" ]; then
+            echo "Failed to extract fingerprint — check alias/password secrets." >&2
+            exit 1
+          fi
+          {
+            echo "## Android Release Keystore"
+            echo ""
+            echo "**SHA-256 fingerprint** (paste this into \`assetlinks.json\`):"
+            echo ""
+            echo '```'
+            echo "$FP"
+            echo '```'
+            echo ""
+            echo "Also readable at \`https://forta.chat/.well-known/assetlinks.json\` after the next \`master\` deploy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f keystore.jks
