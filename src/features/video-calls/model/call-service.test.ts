@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mocks — must be set up before importing call-service
@@ -387,6 +387,155 @@ describe('call-service permission flow', () => {
 
       expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
       expect(mockAnswer).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H2: call.answer() must signal the peer BEFORE any UX transitions. When
+  // launchCallUI blocks (some OEMs take 300-800ms to bring the Activity up
+  // from background), letting it run before call.answer() means the caller
+  // sees no answer in time and sends m.call.hangup — which manifests as
+  // "his app drops the call" (#310) from the answerer's perspective.
+  // -------------------------------------------------------------------------
+  describe('answerCall SDP ordering (H2)', () => {
+    function seedIncomingCall(type: 'voice' | 'video' = 'voice') {
+      mockCallStore.matrixCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type,
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+      };
+      mockCallStore.activeCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type,
+        direction: 'incoming',
+        peerName: 'Peer',
+        status: 'incoming',
+      };
+    }
+
+    it('calls call.answer BEFORE NativeWebRTC.launchCallUI', async () => {
+      seedIncomingCall('voice');
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockAnswer).toHaveBeenCalledOnce();
+      expect(mockNativeWebRTCMethods.launchCallUI).toHaveBeenCalled();
+      const answerOrder = mockAnswer.mock.invocationCallOrder[0];
+      const launchOrder = mockNativeWebRTCMethods.launchCallUI.mock.invocationCallOrder[0];
+      expect(answerOrder).toBeLessThan(launchOrder);
+    });
+
+    it('calls call.answer BEFORE startAudioRouting', async () => {
+      seedIncomingCall('voice');
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockAnswer).toHaveBeenCalledOnce();
+      expect(mockStartAudioRouting).toHaveBeenCalled();
+      const answerOrder = mockAnswer.mock.invocationCallOrder[0];
+      const routingOrder = mockStartAudioRouting.mock.invocationCallOrder[0];
+      expect(answerOrder).toBeLessThan(routingOrder);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H3: if call.answer never resolves (SDK wedged on peer-connection setup,
+  // network partition, OEM audio routing hang), the call stays "connecting…"
+  // indefinitely and the user perceives it as "crashed" / "hung up" (#268,
+  // #309). A 30s watchdog forces transition to failed with full cleanup.
+  // -------------------------------------------------------------------------
+  describe('answerCall connecting watchdog (H3)', () => {
+    function seedIncomingCall(type: 'voice' | 'video' = 'voice') {
+      mockCallStore.matrixCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type,
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+      };
+      mockCallStore.activeCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type,
+        direction: 'incoming',
+        peerName: 'Peer',
+        status: 'incoming',
+      };
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('transitions status to failed after 30s of stuck connecting', async () => {
+      vi.useFakeTimers();
+      seedIncomingCall('voice');
+      // call.answer never resolves — simulate SDK wedge.
+      mockAnswer.mockReturnValue(new Promise<void>(() => {}));
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      // Start answer flow (do not await — the promise won't settle)
+      void service.answerCall();
+      // Flush microtasks so preflight + updateStatus(connecting) complete.
+      await vi.advanceTimersByTimeAsync(0);
+
+      // At this point we're in connecting, NOT failed.
+      const failedBefore = mockUpdateStatus.mock.calls.filter((c: unknown[]) => c[0] === 'failed');
+      expect(failedBefore).toHaveLength(0);
+
+      // Keep activeCall.status sticky at connecting so the watchdog
+      // interprets the state as actually stuck (without a real store the
+      // updateStatus calls don't propagate back to activeCall).
+      (mockCallStore.activeCall as { status: string }).status = 'connecting';
+
+      // Advance past the watchdog deadline.
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const failedAfter = mockUpdateStatus.mock.calls.filter((c: unknown[]) => c[0] === 'failed');
+      expect(failedAfter.length).toBeGreaterThanOrEqual(1);
+      expect(mockNativeWebRTCMethods.dismissCallUI).toHaveBeenCalled();
+    });
+
+    it('does NOT force failed when the call connected within the watchdog window', async () => {
+      vi.useFakeTimers();
+      seedIncomingCall('voice');
+      mockAnswer.mockResolvedValue(undefined);
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Simulate state transition to connected — watchdog must be cancelled.
+      (mockCallStore.activeCall as { status: string }).status = 'connected';
+
+      // Advance past 30s.
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const failedCalls = mockUpdateStatus.mock.calls.filter((c: unknown[]) => c[0] === 'failed');
+      expect(failedCalls).toHaveLength(0);
     });
   });
 

@@ -176,6 +176,12 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     const status = mapSDKState(newState, direction);
     callStore.updateStatus(status);
 
+    // Any transition out of "connecting" cancels the watchdog — either
+    // we connected successfully or the SDK itself decided to end/fail.
+    if (status !== CallStatus.connecting) {
+      clearConnectingWatchdog();
+    }
+
     if (status === CallStatus.connected) {
       stopAllSounds();
       clearIncomingTimeout();
@@ -239,6 +245,7 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   const onHangup = (() => {
     stopAllSounds();
     clearIncomingTimeout();
+    clearConnectingWatchdog();
     // Also tear down the native surface. Without this, when the remote
     // cancels a call we never answered, or when another of our devices
     // picks up (m.call.select_answer), the SDK fires Hangup but the
@@ -265,6 +272,7 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     }
     stopAllSounds();
     clearIncomingTimeout();
+    clearConnectingWatchdog();
     unwireCallEvents(call);
     if (isNative) {
       import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
@@ -332,6 +340,27 @@ function clearIncomingTimeout() {
   if (incomingTimeoutId !== null) {
     clearTimeout(incomingTimeoutId);
     incomingTimeoutId = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Connecting watchdog (H3)
+// ---------------------------------------------------------------------------
+
+/**
+ * If `call.answer()` resolves but `onState→Connected` never fires (SDK
+ * wedged on peer-connection setup, OEM audio init deadlock, network
+ * partition during ICE), the UI sits in "connecting..." forever. Users
+ * perceive this as the call "crashing" (#268, #309). Force-fail after
+ * 30s with full teardown so the store clears and the user can try again.
+ */
+const CONNECTING_WATCHDOG_MS = 30_000;
+let connectingWatchdogId: ReturnType<typeof setTimeout> | null = null;
+
+function clearConnectingWatchdog() {
+  if (connectingWatchdogId !== null) {
+    clearTimeout(connectingWatchdogId);
+    connectingWatchdogId = null;
   }
 }
 
@@ -763,23 +792,49 @@ export function useCallService() {
     const client = getClient();
     hintStoredDevices(client);
 
-    // Launch native call UI when answering incoming call
-    if (isNative && callStore.activeCall) {
-      NativeWebRTC.launchCallUI({
-        callerName: callStore.activeCall.peerName,
-        callType: callStore.activeCall.type,
-        callId: call.callId,
-        direction: "incoming",
-      }).catch(() => {});
-    }
+    // H3: watchdog — if we stay in "connecting" for 30s, tear the call
+    // down. onState clears this watchdog whenever status transitions
+    // away from connecting; hangup/reject clear it explicitly.
+    clearConnectingWatchdog();
+    connectingWatchdogId = setTimeout(() => {
+      connectingWatchdogId = null;
+      if (callStore.activeCall?.status !== CallStatus.connecting) return;
+      console.warn("[call-service] answerCall: stuck in connecting for 30s, forcing failed");
+      unwireCallEvents(call);
+      try {
+        call.hangup(CallErrorCode.UserHangup, false);
+      } catch { /* ignore */ }
+      callStore.updateStatus(CallStatus.failed);
+      callStore.scheduleClearCall(2000);
+      if (isNative) {
+        NativeWebRTC.dismissCallUI().catch(() => {});
+        nativeCallBridge.reportCallEnded(call.callId).catch(() => {});
+        nativeCallBridge.stopAudioRouting().catch(() => {});
+      }
+    }, CONNECTING_WATCHDOG_MS);
 
     try {
+      // H2: answer the SDK call FIRST so the peer sees m.call.answer
+      // within ~200ms. launchCallUI on some OEMs takes 300-800ms to
+      // bring the native Activity up — running it before call.answer()
+      // meant the caller's timeout fired and they sent m.call.hangup,
+      // which the user perceived as "他 dropped my call" (#310).
       console.log("[call-service] answerCall: calling SDK call.answer(true, " + isVideo + ")");
       await call.answer(true, isVideo);
       console.log("[call-service] answerCall: SDK call.answer resolved");
 
-      // Activate native VoIP audio routing after answering — same reasoning
-      // as startCall: must come AFTER answer, graceful degradation on failure.
+      // Non-blocking native UX transitions.
+      if (isNative && callStore.activeCall) {
+        NativeWebRTC.launchCallUI({
+          callerName: callStore.activeCall.peerName,
+          callType: callStore.activeCall.type,
+          callId: call.callId,
+          direction: "incoming",
+        }).catch((e) => console.warn("[call-service] launchCallUI failed:", e));
+      }
+
+      // Activate native VoIP audio routing after answering. Graceful
+      // degradation on failure — never drop the call for a routing hiccup.
       if (isNative) {
         const callType = isVideo ? "video" : "voice";
         nativeCallBridge.startAudioRouting({ callType }).catch((e) => {
@@ -789,6 +844,7 @@ export function useCallService() {
     } catch (e) {
       console.error("[call-service] Failed to answer call:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });
+      clearConnectingWatchdog();
       unwireCallEvents(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
@@ -801,6 +857,7 @@ export function useCallService() {
     if (!call) return;
 
     clearIncomingTimeout();
+    clearConnectingWatchdog();
     stopAllSounds();
 
     try {
@@ -840,6 +897,7 @@ export function useCallService() {
     if (!call) return;
 
     clearIncomingTimeout();
+    clearConnectingWatchdog();
     stopAllSounds();
 
     try {
