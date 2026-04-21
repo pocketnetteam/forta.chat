@@ -363,9 +363,11 @@ onUnmounted(() => {
 
 <template>
   <div ref="chatWindowRef" class="safe-bottom relative flex h-full flex-col bg-background-total-theme">
-    <!-- Chat header -->
+    <!-- Chat header — rendered also during isRoomLoading so mobile users keep
+         a back button and "chat is loading" chrome while Matrix hydrates the room. -->
     <div
-      v-if="chatStore.activeRoom && !isChannelView"
+      v-if="(chatStore.activeRoom || isRoomLoading) && !isChannelView"
+      data-testid="chat-header"
       class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-3"
     >
       <!-- Back button (mobile) -->
@@ -381,6 +383,7 @@ onUnmounted(() => {
 
       <!-- Room avatar + info (clickable to open info panel) -->
       <button
+        v-if="chatStore.activeRoom"
         class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
         :aria-label="activeRoomTitle.text + ' — ' + t('info.title')"
         @click="showInfoPanel = true"
@@ -405,44 +408,58 @@ onUnmounted(() => {
         </div>
       </button>
 
-      <!-- Search button -->
-      <button
-        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        :title="t('chat.search')"
-        :aria-label="t('chat.search')"
-        @click="showSearch = !showSearch"
+      <!-- Loading placeholder: pulse avatar + pulse title, non-interactive -->
+      <div
+        v-else
+        class="flex min-w-0 flex-1 items-center gap-3"
+        aria-hidden="true"
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-        </svg>
-      </button>
+        <div class="h-8 w-8 shrink-0 animate-pulse rounded-full bg-neutral-grad-2" />
+        <div class="h-4 w-32 animate-pulse rounded bg-neutral-grad-2" />
+      </div>
 
-      <!-- Voice call button (1:1 only) -->
-      <button
-        v-if="!chatStore.activeRoom.isGroup"
-        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        :title="t('call.voiceCall')"
-        :aria-label="t('call.voiceCall')"
-        @click="startCallFromHeader('voice')"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
-        </svg>
-      </button>
+      <!-- Action buttons: only shown once the room is hydrated, since they
+           depend on room data (search target, call peer, info panel). -->
+      <template v-if="chatStore.activeRoom">
+        <!-- Search button -->
+        <button
+          class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+          :title="t('chat.search')"
+          :aria-label="t('chat.search')"
+          @click="showSearch = !showSearch"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+        </button>
 
-      <!-- Info panel button -->
-      <button
-        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-        :title="t('info.title')"
-        :aria-label="t('info.title')"
-        @click="showInfoPanel = !showInfoPanel"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <circle cx="12" cy="5" r="2" />
-          <circle cx="12" cy="12" r="2" />
-          <circle cx="12" cy="19" r="2" />
-        </svg>
-      </button>
+        <!-- Voice call button (1:1 only) -->
+        <button
+          v-if="!chatStore.activeRoom.isGroup"
+          class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+          :title="t('call.voiceCall')"
+          :aria-label="t('call.voiceCall')"
+          @click="startCallFromHeader('voice')"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
+          </svg>
+        </button>
+
+        <!-- Info panel button -->
+        <button
+          class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+          :title="t('info.title')"
+          :aria-label="t('info.title')"
+          @click="showInfoPanel = !showInfoPanel"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="12" cy="5" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="12" cy="19" r="2" />
+          </svg>
+        </button>
+      </template>
 
     </div>
 
