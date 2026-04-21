@@ -1564,6 +1564,87 @@ export function useMessages() {
     }
   };
 
+  /** Forward multiple messages to a target room in one batch. Additive
+   *  counterpart to singular sendForward — keeps the legacy flow intact.
+   *  Messages are replayed in source-timestamp order, each as its own
+   *  `m.room.message` event with a `forwarded_from` attribution field. */
+  const forwardMessages = async (
+    sourceMessageIds: string[],
+    targetRoomId: string,
+  ): Promise<{ succeeded: number; failed: number }> => {
+    if (sourceMessageIds.length === 0) return { succeeded: 0, failed: 0 };
+
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) {
+      return { succeeded: 0, failed: sourceMessageIds.length };
+    }
+
+    // Collect source messages across all rooms (selection may span rooms in theory,
+    // though the current UI path feeds us only the active room's selection).
+    const idSet = new Set(sourceMessageIds);
+    const collected: Array<{ id: string; content: string; senderId: string; timestamp: number }> = [];
+    for (const roomMessages of Object.values(chatStore.messages)) {
+      for (const m of roomMessages) {
+        if (idSet.has(m.id)) {
+          collected.push({ id: m.id, content: m.content, senderId: m.senderId, timestamp: m.timestamp });
+        }
+      }
+    }
+    // Ship in original chronological order so recipients see the conversation flow.
+    collected.sort((a, b) => a.timestamp - b.timestamp);
+
+    const results = await Promise.allSettled(
+      collected.map(async (src) => {
+        const senderName = chatStore.getDisplayName(src.senderId);
+        const fwdMeta = { senderId: src.senderId, senderName };
+
+        if (isChatDbReady()) {
+          try {
+            const dbKit = getChatDb();
+            const localMsg = await dbKit.messages.createLocal({
+              roomId: targetRoomId,
+              senderId: authStore.address ?? "",
+              content: src.content,
+              type: MessageType.text,
+              forwardedFrom: fwdMeta,
+            });
+            await dbKit.syncEngine.enqueue(
+              "send_message",
+              targetRoomId,
+              { content: src.content, forwardedFrom: fwdMeta },
+              localMsg.clientId,
+            );
+            return;
+          } catch (e) {
+            console.warn("[use-messages] Dexie bulk forward failed, falling back:", e);
+          }
+        }
+
+        // Legacy fallback — direct encrypted/plaintext send to target room.
+        const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
+        if (roomCrypto?.canBeEncrypt()) {
+          const encrypted = await roomCrypto.encryptEvent(src.content);
+          (encrypted as Record<string, unknown>).forwarded_from = {
+            sender_id: src.senderId,
+            sender_name: senderName,
+          };
+          await matrixService.sendEncryptedText(targetRoomId, encrypted);
+        } else {
+          const payload: Record<string, unknown> = {
+            body: src.content,
+            msgtype: "m.text",
+            forwarded_from: { sender_id: src.senderId, sender_name: senderName },
+          };
+          await matrixService.sendEncryptedText(targetRoomId, payload);
+        }
+      }),
+    );
+
+    const succeeded = results.filter((r) => r.status === "fulfilled").length;
+    const failed = results.length - succeeded;
+    return { succeeded, failed };
+  };
+
   /** Delete multiple messages in one batch. Continues on individual failures —
    *  returns a summary {succeeded, failed} so the caller can show a toast.
    *  Self-contained (does not wrap single deleteMessage), because the single
@@ -2294,6 +2375,7 @@ export function useMessages() {
     sendAudio,
     sendFile,
     sendForward,
+    forwardMessages,
     sendGif,
     sendImage,
     sendMessage,

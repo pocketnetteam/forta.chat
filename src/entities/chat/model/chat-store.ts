@@ -380,6 +380,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** True only when initForward is called (context menu) — NOT on draft restore */
   const forwardPickerRequested = ref(false);
   const forwardDrafts = new Map<string, ForwardingMessage>();
+  // Bulk forward (additive, sits alongside singular `forwardingMessage`).
+  // When non-empty, ForwardPicker routes room-selection through the batch
+  // `forwardMessages(ids, targetRoomId)` API rather than the legacy draft flow.
+  const forwardingMessages = ref<Message[]>([]);
   const isDetachedFromLatest = ref(false);
 
   // Shared counter: yields to main thread every 5 decryption calls across ALL
@@ -574,6 +578,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const roomId = activeRoomId.value;
     if (roomId) forwardDrafts.delete(roomId);
     forwardingMessage.value = null;
+    // Clear bulk selection too — a single "cancel" should close both modes.
+    forwardingMessages.value = [];
+  };
+
+  /** Start a bulk-forward session with the currently selected messages.
+   *  Does NOT replace the singular flow — legacy single-message forward
+   *  (context menu → ForwardPicker draft → target room input) keeps working. */
+  const initBulkForward = (msgs: Message[]) => {
+    if (msgs.length === 0) return;
+    forwardingMessages.value = [...msgs];
+    forwardPickerRequested.value = true;
   };
 
   /** Save current forward to drafts for the given room (called on room switch) */
@@ -5926,6 +5941,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     selectionMode.value = false;
     selectedMessageIds.value = new Set();
     forwardingMessage.value = null;
+    forwardingMessages.value = [];
     pinnedMessages.value = [];
     pinnedMessageIndex.value = 0;
     pinnedRoomIds.value = new Set();
@@ -5968,8 +5984,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     enterSelectionMode,
     exitSelectionMode,
     forwardingMessage,
+    forwardingMessages,
     forwardPickerRequested,
     initForward,
+    initBulkForward,
     initExternalShare,
     initPostForward,
     cancelForward,

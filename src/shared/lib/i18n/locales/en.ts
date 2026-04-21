@@ -313,6 +313,8 @@ export const en = {
   "forward.cancelConfirm.description": "You selected 1 message from chat with {name}.",
   "forward.cancelConfirm.settings": "Forward settings",
   "forward.cancelConfirm.cancel": "Cancel forwarding",
+  "forward.resultSuccess": "Forwarded: {count}",
+  "forward.resultSummary": "Forwarded {succeeded} of {total}",
 
   // ── Pinned bar ──
   "pinned.message": "Pinned Message",

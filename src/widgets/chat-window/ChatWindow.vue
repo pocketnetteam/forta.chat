@@ -266,6 +266,15 @@ const handleSelectionDelete = () => {
   chatStore.deletingMessages = msgs;
 };
 
+const handleSelectionForward = () => {
+  // Bulk-forward the current multi-select to another chat. Opens ForwardPicker
+  // in bulk mode; singular forward (context menu → draft) is unaffected.
+  const ids = chatStore.selectedMessageIds;
+  const msgs = chatStore.activeMessages.filter(m => ids.has(m.id));
+  if (msgs.length === 0) return;
+  chatStore.initBulkForward(msgs);
+};
+
 /** Typing indicator text */
 const typingText = computed(() => {
   const roomId = chatStore.activeRoomId;
@@ -576,6 +585,7 @@ onUnmounted(() => {
           v-if="chatStore.selectionMode"
           @copy="handleSelectionCopy"
           @delete="handleSelectionDelete"
+          @forward="handleSelectionForward"
         />
         <MessageInput
           v-else

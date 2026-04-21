@@ -315,6 +315,8 @@ export const ru: Record<TranslationKey, string> = {
   "forward.cancelConfirm.description": "Вы выбрали 1 сообщение из чата с {name}.",
   "forward.cancelConfirm.settings": "Настройки пересылки",
   "forward.cancelConfirm.cancel": "Отменить пересылку",
+  "forward.resultSuccess": "Переслано: {count}",
+  "forward.resultSummary": "Переслано {succeeded} из {total}",
 
   // ── Pinned bar ──
   "pinned.message": "Закреплённое сообщение",

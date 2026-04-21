@@ -20,7 +20,9 @@ vi.mock("@/shared/lib/connectivity", () => ({
 // Mock MatrixClientService with all needed methods
 const mockRedactEvent = vi.fn();
 const mockSendReaction = vi.fn(() => "$reaction_event_1");
-const mockSendEncryptedText = vi.fn(() => "$server_event_1");
+const mockSendEncryptedText = vi.fn<
+  (roomId: string, content: Record<string, unknown>, clientId?: string) => string
+>(() => "$server_event_1");
 const mockSendText = vi.fn(() => "$server_event_1");
 const mockSendPollStart = vi.fn(() => "$poll_event_1");
 const mockSendPollResponse = vi.fn();
@@ -327,6 +329,93 @@ describe("useMessages", () => {
       // No redact attempted (service not ready) — treat as no-op
       expect(mockRedactEvent).not.toHaveBeenCalled();
       expect(result.failed + result.succeeded).toBe(1);
+    });
+  });
+
+  // ─── forwardMessages (bulk) ───────────────────────────────────
+
+  describe("forwardMessages (bulk)", () => {
+    beforeEach(() => {
+      mockIsReady.mockReturnValue(true);
+      mockSendEncryptedText.mockReset();
+      mockSendEncryptedText.mockImplementation(() => "$fwd_sent_event");
+    });
+
+    it("forwards N selected messages to the target room", async () => {
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "hi", senderId: "user1" });
+      const m2 = makeMsg({ roomId: "!src:server", id: "$m2", content: "there", senderId: "user1" });
+      chatStore.addMessage("!src:server", m1);
+      chatStore.addMessage("!src:server", m2);
+
+      const result = await messaging.forwardMessages(
+        ["$m1", "$m2"],
+        "!target:server",
+      );
+
+      expect(result.succeeded).toBe(2);
+      expect(result.failed).toBe(0);
+      // All sends went to TARGET room, not the source.
+      const roomIds = (mockSendEncryptedText.mock.calls as unknown[][]).map((c) => c[0]);
+      expect(roomIds.every((r) => r === "!target:server")).toBe(true);
+      expect(roomIds.length).toBe(2);
+    });
+
+    it("preserves source-order by timestamp when ids arrive scrambled", async () => {
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "first", timestamp: 10 });
+      const m2 = makeMsg({ roomId: "!src:server", id: "$m2", content: "second", timestamp: 20 });
+      const m3 = makeMsg({ roomId: "!src:server", id: "$m3", content: "third", timestamp: 30 });
+      chatStore.addMessage("!src:server", m1);
+      chatStore.addMessage("!src:server", m2);
+      chatStore.addMessage("!src:server", m3);
+
+      await messaging.forwardMessages(["$m3", "$m1", "$m2"], "!target:server");
+
+      const bodies = (mockSendEncryptedText.mock.calls as unknown[][]).map(
+        (c) => (c[1] as { body?: string })?.body,
+      );
+      expect(bodies).toEqual(["first", "second", "third"]);
+    });
+
+    it("continues on partial failure and reports counts", async () => {
+      mockSendEncryptedText.mockImplementation(
+        (_roomId: string, content: { body?: string }) => {
+          if (content?.body === "bad") throw new Error("transient");
+          return "$ok";
+        },
+      );
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "good1", timestamp: 1 });
+      const m2 = makeMsg({ roomId: "!src:server", id: "$m2", content: "bad", timestamp: 2 });
+      const m3 = makeMsg({ roomId: "!src:server", id: "$m3", content: "good2", timestamp: 3 });
+      chatStore.addMessage("!src:server", m1);
+      chatStore.addMessage("!src:server", m2);
+      chatStore.addMessage("!src:server", m3);
+
+      const result = await messaging.forwardMessages(
+        ["$m1", "$m2", "$m3"],
+        "!target:server",
+      );
+      expect(result.succeeded).toBe(2);
+      expect(result.failed).toBe(1);
+    });
+
+    it("attaches forwarded_from attribution when sender is known", async () => {
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "orig", senderId: "userA" });
+      chatStore.addMessage("!src:server", m1);
+
+      await messaging.forwardMessages(["$m1"], "!target:server");
+
+      const call = (mockSendEncryptedText.mock.calls as unknown[][])[0];
+      const content = call[1] as Record<string, unknown>;
+      expect(content.forwarded_from).toEqual(
+        expect.objectContaining({ sender_id: "userA" }),
+      );
+    });
+
+    it("handles empty array gracefully", async () => {
+      const result = await messaging.forwardMessages([], "!target:server");
+      expect(result.succeeded).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(mockSendEncryptedText).not.toHaveBeenCalled();
     });
   });
 });
