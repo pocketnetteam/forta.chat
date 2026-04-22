@@ -4,6 +4,7 @@ import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { useFileDownload } from "../model/use-file-download";
+import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import MessageContent from "./MessageContent.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
@@ -183,6 +184,9 @@ const hasFileInfo = computed(() => !!props.message.fileInfo);
 // and images show an infinite spinner.
 const fileCacheKey = computed(() => props.message._key || props.message.id);
 const fileState = computed(() => getState(fileCacheKey.value));
+
+const inlineVideoRef = ref<HTMLVideoElement | null>(null);
+useVideoStatePreservation(inlineVideoRef, fileCacheKey, { dontResumePlay: true });
 
 /** Telegram-style sender colors (same palette as Avatar) */
 const SENDER_COLORS = ["#E17076", "#FAA774", "#A695E7", "#7BC862", "#6EC9CB", "#65AADD", "#EE7AAE"];
@@ -552,7 +556,7 @@ const replyPreviewSender = computed(() => {
           </div>
         </div>
         <div class="relative">
-          <video v-if="fileState.objectUrl" :src="fileState.objectUrl" controls class="block max-h-[360px] max-w-full" preload="metadata" />
+          <video v-if="fileState.objectUrl" ref="inlineVideoRef" :src="fileState.objectUrl" controls playsinline class="block max-h-[360px] max-w-full" preload="metadata" />
           <div v-else-if="fileState.loading" class="flex h-48 w-64 items-center justify-center bg-neutral-grad-0">
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
           </div>

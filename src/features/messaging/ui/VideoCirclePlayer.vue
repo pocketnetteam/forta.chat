@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import type { Message } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
+import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 
 interface Props {
   message: Message;
@@ -47,6 +48,8 @@ const displayTime = computed(() => {
 });
 
 const videoSrc = computed(() => fileState.value.objectUrl);
+
+useVideoStatePreservation(videoEl, fileCacheKey, { dontResumePlay: true });
 
 let observer: IntersectionObserver | null = null;
 

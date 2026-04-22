@@ -184,6 +184,7 @@ function makeTile(
   audioOff: boolean,
   isScreen: boolean,
   mirror: boolean,
+  isLocal: boolean,
 ): TileData {
   return {
     id,
@@ -193,7 +194,11 @@ function makeTile(
     videoOff,
     audioOff,
     muted: true,
-    objectFit: isScreen ? "contain" : "cover",
+    // Local camera stays `cover` so PiP/self-view fills without bars; remote
+    // peer streams use `contain` to avoid cropping when peer camera aspect
+    // doesn't match the container (e.g. landscape peer in portrait phone →
+    // "only top visible" bug).
+    objectFit: isScreen ? "contain" : isLocal ? "cover" : "contain",
     mirror,
   };
 }
@@ -211,6 +216,7 @@ const allTiles = computed<TileData[]>(() => {
       callStore.audioMuted,
       false,
       true,
+      true,
     ),
   );
 
@@ -221,6 +227,7 @@ const allTiles = computed<TileData[]>(() => {
       peerName.value,
       peerAddress.value,
       callStore.remoteVideoMuted,
+      false,
       false,
       false,
       false,
@@ -238,6 +245,7 @@ const allTiles = computed<TileData[]>(() => {
         false,
         true,
         false,
+        true,
       ),
     );
   }
@@ -252,6 +260,7 @@ const allTiles = computed<TileData[]>(() => {
         false,
         false,
         true,
+        false,
         false,
       ),
     );
@@ -566,12 +575,14 @@ const isAnyScreenSharing = computed(
             key="simple"
             class="flex flex-1"
           >
-            <!-- Remote fullscreen -->
+            <!-- Remote fullscreen. object-fit: contain so peer camera aspect
+                 is preserved (fixes "huge peer video, only top visible" bug
+                 when peer camera is landscape and local container portrait). -->
             <VideoTile
               :stream="callStore.remoteStream"
               :video-off="callStore.remoteVideoMuted"
               :address="peerAddress"
-              object-fit="cover"
+              object-fit="contain"
               muted
               class="h-full w-full !rounded-none"
             />
