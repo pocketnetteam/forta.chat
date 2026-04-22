@@ -264,6 +264,8 @@ export const ru: Record<TranslationKey, string> = {
   "messageList.typingTwo": "{name1} и {name2} печатают",
   "messageList.typingMany": "{name} и ещё {count} печатают",
   "messageList.deleteMessage": "Удалить сообщение?",
+  "messageList.deleteMessagesTitle": "Удалить выбранные сообщения ({count})?",
+  "messageList.deleteResultSummary": "Удалено {succeeded}, не удалось {failed}",
   "messageList.deleteForEveryone": "Удалить у всех",
   "messageList.deleteForMe": "Удалить у меня",
   "messageList.cancel": "Отмена",
@@ -313,6 +315,12 @@ export const ru: Record<TranslationKey, string> = {
   "forward.cancelConfirm.description": "Вы выбрали 1 сообщение из чата с {name}.",
   "forward.cancelConfirm.settings": "Настройки пересылки",
   "forward.cancelConfirm.cancel": "Отменить пересылку",
+  "forward.resultSuccess": "Переслано: {count}",
+  "forward.resultSummary": "Переслано {succeeded} из {total}",
+  "forward.bulkTitle": "Переслать {count} сообщений",
+  "forward.bulkFrom": "От: {names}",
+  "forward.bulkCancelConfirm.title": "{count} сообщений",
+  "forward.bulkCancelConfirm.description": "Вы выбрали {count} сообщений из чата с {name}.",
 
   // ── Pinned bar ──
   "pinned.message": "Закреплённое сообщение",
@@ -485,6 +493,11 @@ export const ru: Record<TranslationKey, string> = {
   "call.you": "Вы",
   "call.screen": "экран",
   "call.callInOtherTab": "Звонок активен в другой вкладке",
+  "call.permissionDenied.title": "Нет доступа к устройству",
+  "call.permissionDenied.microphone": "Доступ к микрофону не разрешён. Без него звонок невозможен: собеседник вас не услышит.",
+  "call.permissionDenied.camera": "Доступ к камере не разрешён. Без него видеозвонок невозможен.",
+  "call.permissionDenied.instructions": "Разрешите доступ в настройках системы: «Настройки → Приложения → Forta Chat → Разрешения».",
+  "call.permissionDenied.close": "Закрыть",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",
@@ -598,6 +611,9 @@ export const ru: Record<TranslationKey, string> = {
   "invite.copied": "Скопировано!",
   "invite.shareOn": "Поделиться в",
   "invite.fab": "Пригласить",
+  "invite.accepted": "Приглашение принято",
+  "invite.acceptFailed": "Не удалось принять приглашение",
+  "invite.malformed": "Неверная ссылка приглашения",
 
   // ── Native share ──
   "share.linkCopied": "Ссылка скопирована",

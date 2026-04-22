@@ -5,6 +5,7 @@ import SettingsContentPanel from "@/widgets/sidebar/ui/SettingsContentPanel.vue"
 import { GroupCreationPanel } from "@/features/group-creation";
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
+import { useChannelStore } from "@/entities/channel";
 import { useI18n } from "@/shared/lib/i18n";
 import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
@@ -12,6 +13,7 @@ import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback"
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
+const channelStore = useChannelStore();
 const { t } = useI18n();
 const { settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
 
@@ -23,14 +25,17 @@ const isMobile = ref(window.innerWidth < 768);
 // (e.g. stale push intent) could push them back into a chat they just exited.
 const userForcedSidebar = ref(false);
 
-// Desktop: both panels always visible. Mobile: show sidebar until we have a
-// concrete activeRoom object — not just an activeRoomId. This prevents an
-// empty "Select a chat" screen when a push intent restores activeRoomId
-// before the rooms list has finished syncing.
+// Desktop: both panels always visible. Mobile: hide the sidebar as soon as
+// there is a content intent — either a room the user selected (even if its
+// object is still hydrating; ChatWindow renders MessageSkeleton) or an active
+// channel (ChatWindow renders ChannelView). Watching activeRoom alone missed
+// both cases and left the user staring at the sidebar on mobile.
 const showSidebar = computed(() => {
   if (!isMobile.value) return true;
   if (userForcedSidebar.value) return true;
-  return !chatStore.activeRoom;
+  if (chatStore.activeRoomId) return false;
+  if (channelStore.activeChannelAddress) return false;
+  return true;
 });
 
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -60,36 +65,31 @@ const onSelectRoom = () => {
   userForcedSidebar.value = false;
 };
 
-// When activeRoom actually becomes available (e.g. after rooms sync resolves
-// a pending push-intent roomId), clean up any open panels so ChatWindow
-// shows immediately on mobile.
+// Any external content intent (push notification, deep link, channel open)
+// clears user-forced state and closes overlay panels. We react to both
+// activeRoomId and activeChannelAddress because channels live in a separate
+// store — without this, tapping a channel left the sidebar on top even
+// though ChatWindow was already rendering ChannelView underneath.
 watch(
-  () => chatStore.activeRoom,
-  (room) => {
-    if (room && isMobile.value) {
+  [() => chatStore.activeRoomId, () => channelStore.activeChannelAddress],
+  ([newRoomId, newChannelAddr], [oldRoomId, oldChannelAddr]) => {
+    const roomChanged = newRoomId && newRoomId !== oldRoomId;
+    const channelChanged = newChannelAddr && newChannelAddr !== oldChannelAddr;
+    if (!roomChanged && !channelChanged) return;
+    if (isMobile.value) {
       closeSettingsContent();
       setTab("chats");
-      userForcedSidebar.value = false;
     }
-  },
-);
-
-// Any external nav-intent (push, deep link) clears user-forced state;
-// the activeRoom watcher above will subsequently close panels once the
-// room object resolves. This ensures liveness even if the room never
-// materializes (stale ID, deleted room).
-watch(
-  () => chatStore.activeRoomId,
-  (newId, oldId) => {
-    if (newId && newId !== oldId) {
-      userForcedSidebar.value = false;
-    }
+    userForcedSidebar.value = false;
   },
 );
 
 const onBackToSidebar = () => {
   userForcedSidebar.value = true;
   chatStore.setActiveRoom(null);
+  // Defense-in-depth: ChannelView's own back handler also clears this before
+  // emitting, but we cover the room/empty-state back paths here too. Idempotent.
+  channelStore.clearActiveChannel();
 };
 
 const showGroupCreation = ref(false);

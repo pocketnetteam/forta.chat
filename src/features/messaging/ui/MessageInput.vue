@@ -33,7 +33,7 @@ const emit = defineEmits<{ donate: [] }>();
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
 const { t } = useI18n();
-const { sendMessage, sendFile, sendImage, sendAudio, sendVideoCircle, sendReply, sendForward, editMessage, setTyping, sendPoll, sendGif } = useMessages();
+const { sendMessage, sendFile, sendImage, sendAudio, sendVideoCircle, sendReply, sendForward, forwardMessages, editMessage, setTyping, sendPoll, sendGif } = useMessages();
 const mediaUpload = useMediaUpload();
 const pasteDrop = usePasteDrop({
   onMediaFiles: (files) => mediaUpload.addFiles(files),
@@ -77,13 +77,24 @@ watch(
       if (fwd && fwd.roomId !== oldId) {
         chatStore.saveForwardDraft(oldId);
       }
+      // Mirror the singular rule for the bulk array: if the user is leaving a
+      // room that's NOT the source of the selection, stash the draft for it.
+      if (chatStore.forwardingMessages.length > 0) {
+        const srcId = chatStore.forwardingMessages[0].roomId;
+        if (oldId !== srcId) chatStore.saveBulkForwardDraft(oldId);
+      }
     }
     text.value = newId ? getDraft(newId) : "";
     mention.clearMentions();
     chatStore.editingMessage = null;
     chatStore.replyingTo = null;
-    if (newId) chatStore.restoreForwardDraft(newId);
-    else chatStore.forwardingMessage = null;
+    if (newId) {
+      chatStore.restoreForwardDraft(newId);
+      chatStore.restoreBulkForwardDraft(newId);
+    } else {
+      chatStore.forwardingMessage = null;
+      chatStore.forwardingMessages = [];
+    }
     nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
   },
   { immediate: true }
@@ -170,7 +181,7 @@ const autoResize = autoGrow;
 const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
 
 const handleSend = async () => {
-  if ((!text.value.trim() && !showForwardPreview.value) || !peerKeysOk.value) return;
+  if ((!text.value.trim() && !showForwardPreview.value && !showBulkForwardPreview.value) || !peerKeysOk.value) return;
   const rawText = mention.resolveText();
   const savedText = text.value;
 
@@ -187,6 +198,19 @@ const handleSend = async () => {
     if (isEditing.value) {
       editMessage(chatStore.editingMessage!.id, rawText);
       chatStore.editingMessage = null;
+      inserted = true;
+    } else if (showBulkForwardPreview.value && chatStore.activeRoomId) {
+      // Bulk forward (multi-select) — optional caption first, then the batch.
+      // Telegram-style: caption lands in the target room as its own message,
+      // then all N forwarded messages follow in source-timestamp order.
+      const targetRoomId = chatStore.activeRoomId;
+      const ids = chatStore.forwardingMessages.map((m) => m.id);
+      const withSenderInfo = chatStore.bulkForwardWithSenderInfo;
+      if (rawText.trim()) {
+        await sendMessage(rawText, linkPreview.dismissed.value);
+      }
+      await forwardMessages(ids, targetRoomId, { withSenderInfo });
+      chatStore.cancelBulkForward(targetRoomId);
       inserted = true;
     } else if (chatStore.forwardingMessage) {
       const fwd = chatStore.forwardingMessage;
@@ -336,6 +360,41 @@ const showForwardPreview = computed(() => {
   return chatStore.activeRoomId !== fwd.roomId;
 });
 
+/** Bulk preview appears when the user has picked a target for a multi-select
+ *  forward (Telegram-style: "Forward N messages — From: A, B, C"). Hidden in
+ *  the source room since that's just the selection you came from. */
+const showBulkForwardPreview = computed(() => {
+  const msgs = chatStore.forwardingMessages;
+  if (msgs.length === 0) return false;
+  const srcId = msgs[0].roomId;
+  return chatStore.activeRoomId !== srcId;
+});
+
+const bulkForwardCount = computed(() => chatStore.forwardingMessages.length);
+
+/** Unique sender display names across the selection, truncated for the bar. */
+const bulkForwardSenderNames = computed(() => {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const m of chatStore.forwardingMessages) {
+    const senderId = m.forwardedFrom?.senderId ?? m.senderId;
+    if (seen.has(senderId)) continue;
+    seen.add(senderId);
+    const name = m.forwardedFrom?.senderName ?? chatStore.getDisplayName(senderId);
+    names.push(name);
+    if (names.length >= 3) break; // keep the bar compact
+  }
+  return names.join(", ");
+});
+
+const bulkForwardPreviewText = computed(() => {
+  // First message's body, clipped — gives visual continuity with singular bar.
+  const first = chatStore.forwardingMessages[0];
+  if (!first) return "";
+  const txt = stripBastyonLinks(stripMentionAddresses(first.content));
+  return (txt.length > 100 ? txt.slice(0, 100) + "\u2026" : txt) || "...";
+});
+
 const forwardPreviewText = computed(() => {
   const fwd = chatStore.forwardingMessage;
   if (!fwd) return "";
@@ -351,6 +410,12 @@ const forwardPreviewText = computed(() => {
 // Forward cancel confirmation
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const forwardSourceRoomName = computed(() => {
+  // Bulk takes precedence when active — all selected messages share one source room.
+  if (chatStore.forwardingMessages.length > 0) {
+    const srcId = chatStore.forwardingMessages[0].roomId;
+    const room = chatStore.rooms.find(r => r.id === srcId);
+    return room ? resolveRoomName(room) : "";
+  }
   const fwd = chatStore.forwardingMessage;
   if (!fwd) return "";
   const room = chatStore.rooms.find(r => r.id === fwd.roomId);
@@ -362,9 +427,21 @@ const cancelForward = () => {
   showCancelForwardConfirm.value = true;
 };
 
+// Same confirm-modal UX for bulk — shared flag, bulk branch decided by
+// the presence of forwardingMessages at confirmation time.
+const cancelBulkForward = () => {
+  showCancelForwardConfirm.value = true;
+};
+
+const isCancellingBulkForward = computed(() => chatStore.forwardingMessages.length > 0);
+
 const confirmCancelForward = () => {
   showCancelForwardConfirm.value = false;
-  chatStore.cancelForward();
+  if (isCancellingBulkForward.value) {
+    chatStore.cancelBulkForward();
+  } else {
+    chatStore.cancelForward();
+  }
 };
 
 const dismissCancelForward = () => {
@@ -389,10 +466,23 @@ watch(showForwardOptions, (v) => {
 });
 
 const toggleSenderInfo = () => {
+  // Route to whichever forward session is active. Popup is shared between
+  // singular and bulk preview bars, so the toggle must reflect the right mode.
+  if (showBulkForwardPreview.value) {
+    chatStore.bulkForwardWithSenderInfo = !chatStore.bulkForwardWithSenderInfo;
+    return;
+  }
   if (chatStore.forwardingMessage) {
     chatStore.forwardingMessage.withSenderInfo = !chatStore.forwardingMessage.withSenderInfo;
   }
 };
+
+/** True when sender-info attribution is currently ON for the active forward
+ *  session (bulk takes precedence over singular, matching preview priority). */
+const forwardSenderInfoEnabled = computed(() => {
+  if (showBulkForwardPreview.value) return chatStore.bulkForwardWithSenderInfo;
+  return chatStore.forwardingMessage?.withSenderInfo ?? false;
+});
 
 const changeForwardTarget = () => {
   showForwardOptions.value = false;
@@ -695,15 +785,45 @@ const handleKitchenSelect = async (imageUrl: string) => {
       </div>
     </div>
 
+    <!-- Bulk forward preview bar (Telegram-style: N messages + senders) -->
+    <div class="input-bar-grid" :class="{ 'input-bar-grid--open': !isEditing && !chatStore.replyingTo && !showForwardPreview && showBulkForwardPreview }">
+      <div class="input-bar-grid-inner">
+        <div class="relative mx-auto flex max-w-6xl items-center gap-2 border-b border-neutral-grad-0 px-3 py-2">
+          <button class="flex h-8 w-8 items-center justify-center text-color-bg-ac" @click="openForwardOptions">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+            </svg>
+          </button>
+          <div class="h-8 w-0.5 shrink-0 rounded-full bg-color-bg-ac" />
+          <div class="min-w-0 flex-1 cursor-pointer" @click="openForwardOptions">
+            <div class="truncate text-xs font-medium text-color-bg-ac">
+              {{ t("forward.bulkTitle", { count: bulkForwardCount }) }}
+            </div>
+            <div class="truncate text-xs text-text-on-main-bg-color">
+              <template v-if="chatStore.bulkForwardWithSenderInfo">
+                {{ t("forward.bulkFrom", { names: bulkForwardSenderNames }) }} — {{ bulkForwardPreviewText }}
+              </template>
+              <template v-else>
+                {{ bulkForwardPreviewText }}
+              </template>
+            </div>
+          </div>
+          <button class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="cancelBulkForward">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Forward options popup (outside grid to avoid overflow:hidden clipping) -->
-    <div v-if="showForwardPreview" class="relative">
+    <div v-if="showForwardPreview || showBulkForwardPreview" class="relative">
       <div class="absolute bottom-full left-2 z-50 mb-1" :class="showForwardOptions ? 'visible opacity-100' : 'invisible opacity-0'" style="transition: opacity 0.2s ease, visibility 0.2s ease;">
         <div class="min-w-[220px] rounded-xl bg-background-total-theme py-1 shadow-lg ring-1 ring-neutral-grad-0">
           <button
             class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
             @click="toggleSenderInfo"
           >
-            <svg v-if="chatStore.forwardingMessage?.withSenderInfo" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
+            <svg v-if="forwardSenderInfoEnabled" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
             <span v-else class="inline-block h-4 w-4" />
             {{ t("forward.showSender") }}
           </button>
@@ -711,7 +831,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
             class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
             @click="toggleSenderInfo"
           >
-            <svg v-if="!chatStore.forwardingMessage?.withSenderInfo" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
+            <svg v-if="!forwardSenderInfoEnabled" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-color-bg-ac"><polyline points="20 6 9 17 4 12" /></svg>
             <span v-else class="inline-block h-4 w-4" />
             {{ t("forward.hideSender") }}
           </button>
@@ -738,9 +858,13 @@ const handleKitchenSelect = async (imageUrl: string) => {
           @click.self="dismissCancelForward"
         >
           <div class="mx-4 w-full max-w-sm rounded-2xl bg-background-total-theme p-5 shadow-xl">
-            <div class="mb-1 text-center text-base font-semibold text-text-color">{{ t("forward.cancelConfirm.title") }}</div>
+            <div class="mb-1 text-center text-base font-semibold text-text-color">
+              {{ isCancellingBulkForward ? t("forward.bulkCancelConfirm.title", { count: bulkForwardCount }) : t("forward.cancelConfirm.title") }}
+            </div>
             <div class="mb-5 text-center text-sm text-text-on-main-bg-color">
-              {{ t("forward.cancelConfirm.description", { name: forwardSourceRoomName }) }}
+              {{ isCancellingBulkForward
+                ? t("forward.bulkCancelConfirm.description", { count: bulkForwardCount, name: forwardSourceRoomName })
+                : t("forward.cancelConfirm.description", { name: forwardSourceRoomName }) }}
             </div>
             <div class="flex flex-col gap-2">
               <button

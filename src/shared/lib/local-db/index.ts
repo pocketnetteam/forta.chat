@@ -24,6 +24,11 @@ export type { CachedSearchUser, SearchCacheEntry } from "./search-cache-reposito
 
 export { localToMessage, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "./mappers";
 export { MessageRepository } from "./message-repository";
+export {
+  compareLocalMessagesTimelineAsc,
+  localMessageTimelineId,
+  sortLocalMessagesTimelineAsc,
+} from "./timeline-sort";
 export { RoomRepository } from "./room-repository";
 export type { RoomChange } from "./room-repository";
 export { UserRepository } from "./user-repository";

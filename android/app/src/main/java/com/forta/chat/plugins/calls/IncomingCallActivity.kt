@@ -73,6 +73,22 @@ class IncomingCallActivity : Activity() {
         super.onCreate(savedInstanceState)
         currentInstance = this
 
+        // H1: action extra from notification accept/decline PendingIntents.
+        // The accept/decline actions attached to the CallStyle notification
+        // launch this Activity with `action=accept|decline`; we must NOT
+        // render the ringer UI and instead dispatch immediately. Without
+        // this the user tapped Accept in the shade, saw the full ringer
+        // appear again, and had to tap Accept a second time.
+        val action = intent.getStringExtra("action")
+        if (action == "accept" || action == "decline") {
+            Log.d(TAG, "onCreate: auto-dispatching action=$action, skipping UI")
+            // Suppress the default Activity animation because we finish
+            // immediately — a visible flash of empty content is jarring.
+            overridePendingTransition(0, 0)
+            if (action == "accept") accept() else decline()
+            return
+        }
+
         // Show on lock screen
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)

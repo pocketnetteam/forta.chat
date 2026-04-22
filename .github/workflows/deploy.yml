@@ -29,6 +29,24 @@ jobs:
           VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
           VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
 
+      # Android App Links verification: inject the real SHA-256 fingerprint of
+      # the release keystore into dist/.well-known/assetlinks.json. The repo
+      # file ships with a placeholder so the production fingerprint never sits
+      # in git history. Required for `https://forta.chat/invite?ref=...` to
+      # open the app directly on Android 12+ without a chooser dialog.
+      - name: Set up JDK (for keytool)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Inject Android App Links fingerprint
+        run: ./scripts/inject-assetlinks-fingerprint.sh
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+
       - name: Deploy to server via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:

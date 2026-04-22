@@ -354,14 +354,18 @@ export class RoomRepository {
   }
 
   /** Update inbound read watermark + clear unread (we read messages up to this timestamp).
-   *  Uses atomic modify() to prevent race with concurrent writeMessage() unread increment. */
-  async markAsRead(roomId: string, timestamp: number): Promise<void> {
+   *  Uses atomic modify() to prevent race with concurrent writeMessage() unread increment.
+   *  @returns true if the watermark moved forward (or unread was cleared for a new ts). */
+  async markAsRead(roomId: string, timestamp: number): Promise<boolean> {
+    let advanced = false;
     await this.db.rooms.where("id").equals(roomId)
       .modify((room: LocalRoom) => {
         if (timestamp <= (room.lastReadInboundTs ?? 0)) return; // watermark only moves forward
         room.lastReadInboundTs = timestamp;
         room.unreadCount = 0;
+        advanced = true;
       });
+    return advanced;
   }
 
   /** Update pagination token for a room */

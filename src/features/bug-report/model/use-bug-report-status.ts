@@ -23,11 +23,11 @@ const REPO_URL = 'https://github.com/greenShirtMystery/forta-bugs/issues';
 
 // ─── Boot-trigger policy ───────────────────────────────────────────────
 // The sheet is auto-opened after login when the user has locally-tracked
-// reports AND at least one of: new app version since last check, or
-// >3 days elapsed since last check. Purely local — no network involved.
-const VERSION_KEY = `${APP_NAME}:bug-report-status:last-version`;
+// reports AND >2 days elapsed since last check. Version changes do NOT
+// trigger the sheet — after an update the user needs time to actually use
+// the new build before being asked whether their bug is resolved.
 const CHECKED_AT_KEY = `${APP_NAME}:bug-report-status:last-checked-at`;
-const INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
+const INTERVAL_MS = 2 * 24 * 60 * 60 * 1000;
 
 function readLS<T>(key: string): T | null {
   try {
@@ -38,18 +38,13 @@ function readLS<T>(key: string): T | null {
   }
 }
 
-export function shouldCheckOnBoot(currentVersion: string): boolean {
-  if (!currentVersion) return true;
-  const storedVersion = readLS<string>(VERSION_KEY);
-  if (!storedVersion) return true;
-  if (storedVersion !== currentVersion) return true;
+export function shouldCheckOnBoot(): boolean {
   const lastCheckedAt = readLS<number>(CHECKED_AT_KEY);
   if (typeof lastCheckedAt !== 'number') return true;
   return Date.now() - lastCheckedAt > INTERVAL_MS;
 }
 
-export function markBootCheckCompleted(currentVersion: string): void {
-  localStorage.setItem(VERSION_KEY, JSON.stringify(currentVersion));
+export function markBootCheckCompleted(): void {
   localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(Date.now()));
 }
 

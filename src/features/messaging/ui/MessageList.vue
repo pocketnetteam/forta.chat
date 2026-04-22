@@ -28,7 +28,7 @@ import UnreadBanner from "./UnreadBanner.vue";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
-const { loadMessages, toggleReaction, deleteMessage, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
+const { loadMessages, toggleReaction, deleteMessage, deleteMessages, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
 const { toast } = useToast();
 const { t } = useI18n();
 
@@ -55,14 +55,48 @@ const resolveSystemMsg = (msg: { content: string; systemMeta?: { template: strin
 const searchQuery = ref("");
 provide("searchQuery", searchQuery);
 
-const handleDeleteForMe = () => {
+// Bulk path takes precedence when deletingMessages is populated.
+const isBulkDelete = computed(() => chatStore.deletingMessages.length > 0);
+const deleteCount = computed(() =>
+  isBulkDelete.value ? chatStore.deletingMessages.length : 1,
+);
+
+const closeDeleteModal = () => {
+  chatStore.deletingMessage = null;
+  chatStore.deletingMessages = [];
+  chatStore.exitSelectionMode();
+};
+
+const handleDeleteForMe = async () => {
+  if (isBulkDelete.value) {
+    const ids = chatStore.deletingMessages.map((m) => m.id);
+    const result = await deleteMessages(ids, false);
+    if (result.failed > 0) {
+      toast(t("messageList.deleteResultSummary", {
+        succeeded: result.succeeded, failed: result.failed,
+      }));
+    }
+    closeDeleteModal();
+    return;
+  }
   if (chatStore.deletingMessage) {
     deleteMessage(chatStore.deletingMessage.id, false);
     chatStore.deletingMessage = null;
   }
 };
 
-const handleDeleteForEveryone = () => {
+const handleDeleteForEveryone = async () => {
+  if (isBulkDelete.value) {
+    const ids = chatStore.deletingMessages.map((m) => m.id);
+    const result = await deleteMessages(ids, true);
+    if (result.failed > 0) {
+      toast(t("messageList.deleteResultSummary", {
+        succeeded: result.succeeded, failed: result.failed,
+      }));
+    }
+    closeDeleteModal();
+    return;
+  }
   if (chatStore.deletingMessage) {
     deleteMessage(chatStore.deletingMessage.id, true);
     chatStore.deletingMessage = null;
@@ -204,6 +238,8 @@ interface VirtualItem {
   label?: string;
   index?: number;
   unreadCount?: number;
+  /** Satisfies ChatVirtualScroller ChatVirtualItem index signature */
+  [key: string]: unknown;
 }
 
 const virtualItems = computed<VirtualItem[]>(() => {
@@ -280,16 +316,10 @@ const virtualItems = computed<VirtualItem[]>(() => {
   return items;
 });
 
-/** Reversed for the inverted scroller: newest first (index 0 = visual bottom).
- *  History loading appends to the END of this array = visual TOP = no scroll jump. */
-const reversedItems = computed(() => {
-  const items = virtualItems.value;
-  const reversed = new Array(items.length);
-  for (let i = 0; i < items.length; i++) {
-    reversed[i] = items[items.length - 1 - i];
-  }
-  return reversed;
-});
+/** Newest-first for the inverted scroller (index 0 = visual bottom).
+ *  Requires `activeMessages` / `virtualItems` in chronological order (oldest→newest).
+ *  History loading appends at the chronological end = far end here = visual TOP = no scroll jump. */
+const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().reverse());
 
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
@@ -533,6 +563,23 @@ watch(
       const cacheAge = await chatStore.loadCachedMessages(roomId);
       if (isStale()) return;
 
+      // liveQuery can lag behind a Dexie read in loadCachedMessages — avoid treating
+      // a non-empty local DB as "no cache" and forcing Matrix scrollback + loading spinner.
+      if (isChatDbReady()) {
+        const dbKit = getChatDb();
+        const clearedAtPeek = dbKit.eventWriter.getClearedAtTs(roomId);
+        const peek = await dbKit.messages.getMessages(roomId, 1, undefined, clearedAtPeek);
+        if (peek.length > 0) {
+          const dexieWaitDeadline = Date.now() + 2000;
+          while (Date.now() < dexieWaitDeadline) {
+            if (isStale()) return;
+            const am = chatStore.activeMessages;
+            if (am.length > 0 && am[0]?.roomId === roomId) break;
+            await new Promise<void>(r => setTimeout(r, 10));
+          }
+        }
+      }
+
       if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
         const readyDeadline = Date.now() + 500;
         while (!chatStore.dexieMessagesReady && Date.now() < readyDeadline) {
@@ -717,6 +764,16 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
 
   if (lastAddedIsOwn || isNearBottom.value) {
     scrollToBottom();
+    // Inbound message while at bottom: viewport already shows latest — flush read tracker
+    // without waiting for IntersectionObserver batch (2s) so read markers stay in sync.
+    if (!lastAddedIsOwn && isNearBottom.value) {
+      nextTick(() => {
+        requestAnimationFrame(() => {
+          readTracker.performManualScan();
+          readTracker.flushNow();
+        });
+      });
+    }
   } else {
     newMessageCount.value++;
   }
@@ -1306,12 +1363,14 @@ defineExpose({ scrollToMessage, setSearchQuery });
     <Teleport to="body">
       <transition name="modal-fade">
         <div
-          v-if="chatStore.deletingMessage"
+          v-if="chatStore.deletingMessage || isBulkDelete"
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          @click.self="chatStore.deletingMessage = null"
+          @click.self="closeDeleteModal"
         >
           <div class="w-full max-w-xs rounded-xl bg-background-total-theme p-5 shadow-xl">
-            <h3 class="mb-4 text-base font-semibold text-text-color">{{ t("messageList.deleteMessage") }}</h3>
+            <h3 class="mb-4 text-base font-semibold text-text-color">
+              {{ isBulkDelete ? t("messageList.deleteMessagesTitle", { count: deleteCount }) : t("messageList.deleteMessage") }}
+            </h3>
             <div class="flex flex-col gap-2">
               <button
                 class="rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
@@ -1327,7 +1386,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
               </button>
               <button
                 class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-                @click="chatStore.deletingMessage = null"
+                @click="closeDeleteModal"
               >
                 {{ t("messageList.cancel") }}
               </button>

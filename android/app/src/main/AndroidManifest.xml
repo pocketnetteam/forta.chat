@@ -29,6 +29,32 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- App Links: https://forta.chat/invite and /join open the app directly.
+                 autoVerify triggers Android to fetch /.well-known/assetlinks.json
+                 and skip the disambiguation dialog once the fingerprint matches.
+                 Only paths with a matching parser in parse-invite-url.ts are
+                 listed here — claiming paths we don't handle would silently
+                 swallow them on launch. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="forta.chat" />
+                <data android:host="www.forta.chat" />
+                <data android:pathPrefix="/invite" />
+                <data android:pathPrefix="/join" />
+            </intent-filter>
+
+            <!-- Fallback custom scheme: usable when App Links verification fails
+                 (wrong fingerprint, no network at install, rooted device, etc.). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="forta" />
+            </intent-filter>
+
             <!-- Share Target: receive content from other apps -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

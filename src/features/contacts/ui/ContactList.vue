@@ -200,8 +200,15 @@ function getRoomTitle(room: ChatRoom): DisplayResult {
 function getPreview(room: ChatRoom): DisplayResult {
   // Primary: use room.lastMessage from Dexie LiveRoom
   if (room.lastMessage) {
-    // Deleted message — show explicit "deleted" text
-    if (room.lastMessage.deleted || (!room.lastMessage.content && room.lastMessage.type === MessageType.text)) {
+    const c = room.lastMessage.content;
+    // Explicit deletion markers only. `"[message]"` is a generic "preview
+    // unavailable" sentinel (see format-preview.ts), not a deletion marker —
+    // treating it as deleted here used to mislabel call/media events.
+    if (
+      room.lastMessage.deleted ||
+      (!c && room.lastMessage.type === MessageType.text) ||
+      c === "🚫 Message deleted"
+    ) {
       return { state: "ready", text: `🚫 ${t("message.deleted")}` };
     }
     // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)

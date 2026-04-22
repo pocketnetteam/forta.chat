@@ -3,6 +3,8 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { parseEditBody } from "../lib/parse-edit";
+import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
@@ -379,6 +381,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** True only when initForward is called (context menu) — NOT on draft restore */
   const forwardPickerRequested = ref(false);
   const forwardDrafts = new Map<string, ForwardingMessage>();
+  // Bulk forward (additive, sits alongside singular `forwardingMessage`).
+  // Mirrors the singular draft-flow (save per-target, restore on room-switch,
+  // preview bar + composer, send on tap) — NOT immediate dispatch. That matches
+  // the Telegram/Element UX where the user lands in the target room first and
+  // optionally types a caption before shipping the batch.
+  const forwardingMessages = ref<Message[]>([]);
+  const bulkForwardDrafts = new Map<string, Message[]>();
+  // Per-session toggle: if false, forwarded messages are shipped without
+  // the `forwarded_from` attribution (Telegram "hide sender" option).
+  const bulkForwardWithSenderInfo = ref(true);
   const isDetachedFromLatest = ref(false);
 
   // Shared counter: yields to main thread every 5 decryption calls across ALL
@@ -454,6 +466,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
   const deletingMessage = ref<Message | null>(null);
+  // Bulk-delete state — array form coexists with singular deletingMessage above.
+  // When non-empty, the delete confirmation modal operates on ALL listed messages.
+  const deletingMessages = ref<Message[]>([]);
 
   // User display name cache: address → display name
   const userDisplayNames = ref<Record<string, string>>({});
@@ -570,6 +585,41 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const roomId = activeRoomId.value;
     if (roomId) forwardDrafts.delete(roomId);
     forwardingMessage.value = null;
+    // Clear bulk selection too — a single "cancel" should close both modes.
+    forwardingMessages.value = [];
+  };
+
+  /** Start a bulk-forward session with the currently selected messages.
+   *  Does NOT replace the singular flow — legacy single-message forward
+   *  (context menu → ForwardPicker draft → target room input) keeps working. */
+  const initBulkForward = (msgs: Message[]) => {
+    if (msgs.length === 0) return;
+    forwardingMessages.value = [...msgs];
+    forwardPickerRequested.value = true;
+  };
+
+  /** Persist the current bulk selection to drafts keyed by target room so it
+   *  survives the room-switch watcher (same trick the singular flow uses). */
+  const saveBulkForwardDraft = (targetRoomId: string) => {
+    if (forwardingMessages.value.length > 0) {
+      bulkForwardDrafts.set(targetRoomId, [...forwardingMessages.value]);
+    } else {
+      bulkForwardDrafts.delete(targetRoomId);
+    }
+  };
+
+  const restoreBulkForwardDraft = (roomId: string) => {
+    const draft = bulkForwardDrafts.get(roomId);
+    forwardingMessages.value = draft ? [...draft] : [];
+  };
+
+  /** Clear the bulk forward — both the in-flight array and any saved draft
+   *  for the given (or active) room. Use after Send or when user cancels. */
+  const cancelBulkForward = (roomId?: string) => {
+    const key = roomId ?? activeRoomId.value;
+    if (key) bulkForwardDrafts.delete(key);
+    forwardingMessages.value = [];
+    bulkForwardWithSenderInfo.value = true; // reset to default for next session
   };
 
   /** Save current forward to drafts for the given room (called on room switch) */
@@ -892,6 +942,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         deduped.push(m);
       }
       if (deduped.length !== msgs.length) msgs = deduped;
+    }
+
+    if (msgs.length > 0) {
+      msgs = sortMessagesTimelineAsc(msgs);
     }
 
     _prevActiveOutput = msgs;
@@ -2665,9 +2719,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Matrix event origin_server_ts — used to dedupe successful read_marker POSTs. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const getMatrixEventTimestamp = (event: any): number =>
+    event?.getTs?.() ?? event?.event?.origin_server_ts ?? 0;
+
   /** Per-room cooldown for network receipt sends (local Dexie commit is always instant) */
   const RECEIPT_COOLDOWN_MS = 3000;
   const receiptCooldowns = new Map<string, number>();
+
+  /** Last successful read_marker POST per room (event timestamp). Dexie `lastReadInboundTs`
+   *  can advance without a network send (e.g. room bulkUpsert when server unread=0); network
+   *  dedupe must not rely on `markAsRead` returning true. */
+  const lastReadReceiptSentTs = new Map<string, number>();
 
   /** Atomically commit a read watermark: update Dexie (instant UI) + send
    *  Matrix receipt (server sync) with per-room throttling.
@@ -2678,12 +2742,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
     }
 
+    const lastReceiptTs = lastReadReceiptSentTs.get(roomId) ?? 0;
+    if (timestamp <= lastReceiptTs) {
+      // Server already has a read marker at or past this watermark position.
+      return;
+    }
+
     // 2. SERVER SYNC — throttled per room
     const now = Date.now();
     const lastSent = receiptCooldowns.get(roomId) ?? 0;
     if (now - lastSent < RECEIPT_COOLDOWN_MS) {
-      // Queue for next flush — don't spam the server
-      pendingReadWatermarks.set(roomId, timestamp);
+      // Queue for next flush — don't spam the server (keep highest pending ts)
+      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
+      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
       return;
     }
 
@@ -2692,11 +2763,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       receiptCooldowns.set(roomId, now);
       const success = await sendReadReceiptIfVisible(roomId, event);
       if (success) {
+        const evTs = getMatrixEventTimestamp(event);
+        const appliedTs = evTs > 0 ? evTs : timestamp;
+        lastReadReceiptSentTs.set(
+          roomId,
+          Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
+        );
         pendingReadWatermarks.delete(roomId);
         watermarkQueuedAt.delete(roomId);
       }
     } else {
-      pendingReadWatermarks.set(roomId, timestamp);
+      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
+      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
       if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, Date.now());
     }
   };
@@ -2726,11 +2804,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Snapshot entries to avoid mutation-during-iteration
     const entries = [...pendingReadWatermarks];
     for (const [roomId, timestamp] of entries) {
+      if (timestamp <= (lastReadReceiptSentTs.get(roomId) ?? 0)) {
+        pendingReadWatermarks.delete(roomId);
+        watermarkQueuedAt.delete(roomId);
+        continue;
+      }
       const event = findMatrixEventForTimestamp(roomId, timestamp);
       if (event) {
         receiptCooldowns.set(roomId, now);
         sendReadReceiptIfVisible(roomId, event).then((success) => {
           if (success) {
+            const evTs = getMatrixEventTimestamp(event);
+            const appliedTs = evTs > 0 ? evTs : timestamp;
+            lastReadReceiptSentTs.set(
+              roomId,
+              Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
+            );
             pendingReadWatermarks.delete(roomId);
             watermarkQueuedAt.delete(roomId);
           }
@@ -2747,6 +2836,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const setActiveRoom = (roomId: string | null) => {
     perfMark("setActiveRoom-start");
+    // Exit multi-select when leaving the room — selection is bound to the
+    // active room's messages, carrying it over to the next chat is never
+    // what the user expects.
+    if (selectionMode.value && roomId !== activeRoomId.value) {
+      selectionMode.value = false;
+      selectedMessageIds.value = new Set();
+    }
     // Flush buffered background writes before switching rooms.
     // After flush completes, bump _liveQueryGen to force liveQuery re-subscribe.
     // This closes the race where buffered messages land in Dexie during the
@@ -4034,16 +4130,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const target = msgMap.get(targetId);
       if (target) {
         const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
+        const isEncrypted = newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted";
         let editBody: string;
 
-        if (newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted") {
+        if (isEncrypted) {
           if (roomCrypto) {
-            try {
-              const decrypted = await roomCrypto.decryptEvent(raw);
-              editBody = decrypted.body;
-            } catch {
-              editBody = (newContent?.body as string) ?? (content.body as string) ?? "[decrypt error]";
-            }
+            editBody = await parseEditBody({
+              raw,
+              content,
+              newContent,
+              decryptEvent: (e) => roomCrypto.decryptEvent(e),
+              encryptedPlaceholder: "[encrypted]",
+            });
           } else {
             editBody = "[encrypted]";
           }
@@ -5089,20 +5187,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const editRelatesTo = content["m.relates_to"] as Record<string, unknown> | undefined;
       if (editRelatesTo?.rel_type === "m.replace" && editRelatesTo?.event_id) {
         const targetId = editRelatesTo.event_id as string;
+        const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
+        const isEncrypted = newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted";
         let newBody: string;
 
-        // Edit events in encrypted rooms: m.new_content holds the ciphertext
-        const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
-        if (newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted") {
+        if (isEncrypted) {
           const roomCrypto = await ensureRoomCrypto(roomId);
           if (roomCrypto) {
-            try {
-              await maybeYieldDecrypt();
-              const decrypted = await roomCrypto.decryptEvent(raw);
-              newBody = decrypted.body;
-            } catch {
-              newBody = (newContent?.body as string) ?? (content.body as string) ?? "[decrypt error]";
-            }
+            newBody = await parseEditBody({
+              raw,
+              content,
+              newContent,
+              decryptEvent: async (e) => {
+                await maybeYieldDecrypt();
+                return roomCrypto.decryptEvent(e);
+              },
+              encryptedPlaceholder: "[encrypted]",
+            });
           } else {
             newBody = "[encrypted]";
           }
@@ -5878,10 +5979,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     syncState.value = null;
     editingMessage.value = null;
     deletingMessage.value = null;
+    deletingMessages.value = [];
     userDisplayNames.value = {};
     selectionMode.value = false;
     selectedMessageIds.value = new Set();
     forwardingMessage.value = null;
+    forwardingMessages.value = [];
     pinnedMessages.value = [];
     pinnedMessageIndex.value = 0;
     pinnedRoomIds.value = new Set();
@@ -5899,6 +6002,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     cancelPendingPatches();
     _sortedRoomsRef.value = [];
     messageWindowSize.value = 50;
+    lastReadReceiptSentTs.clear();
 
     // Clear localStorage account data
     localStorage.removeItem(_pinnedKey);
@@ -5917,13 +6021,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     cleanup,
     clearDeletedRoom,
     deletingMessage,
+    deletingMessages,
     editingMessage,
     enterDetachedMode,
     enterSelectionMode,
     exitSelectionMode,
     forwardingMessage,
+    forwardingMessages,
     forwardPickerRequested,
+    bulkForwardWithSenderInfo,
     initForward,
+    initBulkForward,
+    saveBulkForwardDraft,
+    restoreBulkForwardDraft,
+    cancelBulkForward,
     initExternalShare,
     initPostForward,
     cancelForward,

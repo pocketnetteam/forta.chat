@@ -9,6 +9,7 @@ const selectedCount = computed(() => chatStore.selectedMessageIds.size);
 const emit = defineEmits<{
   copy: [];
   delete: [];
+  forward: [];
 }>();
 </script>
 
@@ -37,6 +38,18 @@ const emit = defineEmits<{
         <rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
       </svg>
       <span class="hidden sm:inline">{{ t("selection.copy") }}</span>
+    </button>
+
+    <button
+      class="flex h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-sm text-text-color transition-colors hover:bg-neutral-grad-0 sm:gap-1.5 sm:px-3"
+      :disabled="selectedCount === 0"
+      @click="emit('forward')"
+      :title="t('selection.forward')"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+      </svg>
+      <span class="hidden sm:inline">{{ t("selection.forward") }}</span>
     </button>
 
     <button

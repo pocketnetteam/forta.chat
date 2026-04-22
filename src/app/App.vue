@@ -13,6 +13,7 @@ import TitleBar from "@/widgets/title-bar/TitleBar.vue";
 import IncomingCallModal from "@/features/video-calls/ui/IncomingCallModal.vue";
 import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
+import PermissionDeniedModal from "@/features/video-calls/ui/PermissionDeniedModal.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
@@ -30,6 +31,7 @@ import {
 import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
+import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
 import { PROXY_NODES } from "@/shared/config/constants";
@@ -40,7 +42,7 @@ loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].por
 const isElectron = !!(window as any).electronAPI?.isElectron;
 const { t } = useI18n();
 
-const { message: toastMessage, type: toastType, show: toastShow, close: toastClose } = useToast();
+const { message: toastMessage, type: toastType, show: toastShow, close: toastClose, toast: showToast } = useToast();
 
 provide(EAppProviders.AppRoutes, AppRoutes);
 provide(EAppProviders.AppPages, AppPages);
@@ -119,9 +121,13 @@ const processReferral = async () => {
     const roomId = await getOrCreateRoom(ref);
     if (roomId) {
       router.push({ name: "ChatPage" });
+      showToast(t("invite.accepted"), "success");
+    } else {
+      showToast(t("invite.acceptFailed"), "error");
     }
   } catch (e) {
     console.error("[App] referral processing error:", e);
+    showToast(t("invite.acceptFailed"), "error");
   }
 };
 
@@ -226,41 +232,25 @@ const {
   resetState: resetBugStatus,
 } = useBugReportStatus();
 
-let pendingBugCheckVersion: string | null = null;
+let pendingBugCheck = false;
 
-async function runBugStatusCheck() {
+function runBugStatusCheck() {
   if (!authStore.address) return;
-  let version = "web";
-  if (isNative) {
-    try {
-      const { App } = await import("@capacitor/app");
-      const info = await App.getInfo();
-      version = info.version ?? "native";
-    } catch {
-      version = "native";
-    }
-  } else if ((window as any).electronAPI?.getVersion) {
-    try {
-      version = await (window as any).electronAPI.getVersion();
-    } catch {
-      version = "electron";
-    }
-  }
-  if (!shouldCheckOnBoot(version)) return;
+  if (!shouldCheckOnBoot()) return;
   loadBugIssues(authStore.address);
   if (bugStatusIssues.value.length > 0) {
-    pendingBugCheckVersion = version;
+    pendingBugCheck = true;
     openBugStatusSheet();
   } else {
-    markBootCheckCompleted(version);
+    markBootCheckCompleted();
   }
 }
 
 function handleBugStatusSheetClose() {
   closeBugStatusSheet();
-  if (pendingBugCheckVersion) {
-    markBootCheckCompleted(pendingBugCheckVersion);
-    pendingBugCheckVersion = null;
+  if (pendingBugCheck) {
+    markBootCheckCompleted();
+    pendingBugCheck = false;
   }
 }
 
@@ -270,9 +260,11 @@ watch(
   (addr) => {
     if (addr && !bugStatusCheckTriggered) {
       bugStatusCheckTriggered = true;
-      runBugStatusCheck().catch((e) =>
-        console.warn("[App] bug status check failed:", e),
-      );
+      try {
+        runBugStatusCheck();
+      } catch (e) {
+        console.warn("[App] bug status check failed:", e);
+      }
     }
   },
   { immediate: true },
@@ -308,6 +300,30 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
 onMounted(async () => {
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", handleGlobalKeydown);
+
+  // Deep-link handlers: Capacitor's appUrlOpen listener is already wired from
+  // main.ts. Now that the router is mounted, install the actual invite/join
+  // callbacks — any URLs buffered during cold-start drain here. We funnel them
+  // through the same localStorage slots that route guards use, so the single
+  // processReferral/processJoinRoom pipeline handles both deep-link sources.
+  registerDeepLinkHandlers({
+    onInvite: ({ address }) => {
+      localStorage.setItem("bastyon-chat-referral", address);
+      if (authStore.isAuthenticated && authStore.matrixReady) {
+        processReferral();
+      }
+    },
+    onJoin: ({ roomId }) => {
+      localStorage.setItem("bastyon-chat-join-room", roomId);
+      if (authStore.isAuthenticated && authStore.matrixReady) {
+        processJoinRoom();
+      }
+    },
+    onMalformed: (rawUrl) => {
+      console.warn("[App] malformed forta deep-link:", rawUrl);
+      showToast(t("invite.malformed"), "error");
+    },
+  });
 
   // Initialize Android hardware back button handler
   initAndroidBackListener();
@@ -373,6 +389,7 @@ onUnmounted(() => {
     <IncomingCallModal />
     <CallWindow />
     <CallStatusBar />
+    <PermissionDeniedModal />
     <QuickSearchModal
       v-if="showQuickSearch"
       @close="showQuickSearch = false"

@@ -30,6 +30,7 @@ interface NativeCallNativePlugin {
   reportCallConnected(options: { callId: string }): Promise<void>;
   reportCallEnded(options: { callId: string }): Promise<void>;
   requestAudioPermission(): Promise<{ granted: boolean }>;
+  requestCameraPermission(): Promise<{ granted: boolean }>;
   getAudioDevices(): Promise<{
     active: string;
     devices: Array<{ type: string; name: string }>;
@@ -441,6 +442,11 @@ class NativeCallBridge {
   async requestAudioPermission(): Promise<{ granted: boolean }> {
     if (!isNative) return { granted: true };
     return NativeCall.requestAudioPermission();
+  }
+
+  async requestCameraPermission(): Promise<{ granted: boolean }> {
+    if (!isNative) return { granted: true };
+    return NativeCall.requestCameraPermission();
   }
 
   /**

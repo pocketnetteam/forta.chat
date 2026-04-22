@@ -52,6 +52,21 @@ vi.mock("@/entities/chat", () => ({
   }),
 }));
 
+// ── Mock channel store — ChatPage must react to activeChannelAddress ───
+const fakeActiveChannelAddress = ref<string | null>(null);
+const clearActiveChannelSpy = vi.fn(() => {
+  fakeActiveChannelAddress.value = null;
+});
+
+vi.mock("@/entities/channel", () => ({
+  useChannelStore: () => ({
+    get activeChannelAddress() {
+      return fakeActiveChannelAddress.value;
+    },
+    clearActiveChannel: clearActiveChannelSpy,
+  }),
+}));
+
 // ── Mock auth store (ChatPage only reads from it) ─────────────────
 vi.mock("@/entities/auth", () => ({
   useAuthStore: () => ({
@@ -133,10 +148,12 @@ beforeEach(() => {
   fakeActiveRoomId.value = null;
   fakeRooms.value = [];
   fakeRoomsInitialized.value = false;
+  fakeActiveChannelAddress.value = null;
   settingsSubViewRef.value = null;
   setActiveRoomSpy.mockClear();
   closeSettingsContentSpy.mockClear();
   setTabSpy.mockClear();
+  clearActiveChannelSpy.mockClear();
 });
 
 afterEach(() => {
@@ -151,8 +168,10 @@ const isVisible = (el: HTMLElement | null | undefined): boolean => {
 };
 
 describe("ChatPage — reactive showSidebar", () => {
-  it("shows sidebar on mobile when activeRoomId is set but activeRoom is not loaded", async () => {
-    // Simulate push-intent restoration: activeRoomId set before rooms sync
+  it("hides sidebar on mobile as soon as activeRoomId is set, even before the room object hydrates", async () => {
+    // Push-intent / cold-start: activeRoomId restored before Matrix sync
+    // resolves `rooms`. Before the fix, this kept sidebar on top and the
+    // MessageSkeleton inside ChatWindow was never visible.
     fakeActiveRoomId.value = "!abc:matrix.org";
     fakeRooms.value = []; // room object not available yet
     fakeRoomsInitialized.value = false;
@@ -162,18 +181,17 @@ describe("ChatPage — reactive showSidebar", () => {
 
     const sidebar = wrapper.find('[data-testid="chat-sidebar"]');
     expect(sidebar.exists()).toBe(true);
-    // Must be visible (not hidden by v-show="false")
-    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
 
-    // ChatWindow should NOT be visible — we're still on the list
+    // ChatWindow owns the loading placeholder (MessageSkeleton); must be shown.
     const chatWindow = wrapper.find('[data-testid="chat-window"]');
-    expect(isVisible(chatWindow.element as HTMLElement)).toBe(false);
+    expect(chatWindow.exists()).toBe(true);
+    expect(isVisible(chatWindow.element as HTMLElement)).toBe(true);
 
     wrapper.unmount();
   });
 
-  it("hides sidebar on mobile when activeRoom becomes available", async () => {
-    // Start with push-intent state: id present, room object not yet loaded
+  it("keeps ChatWindow visible after activeRoom finishes hydrating", async () => {
     fakeActiveRoomId.value = "!abc:matrix.org";
     fakeRooms.value = [];
     fakeRoomsInitialized.value = false;
@@ -181,19 +199,57 @@ describe("ChatPage — reactive showSidebar", () => {
     const wrapper = mount(ChatPage, mountOpts);
     await flushPromises();
 
-    // Initially sidebar must be visible because activeRoom is unresolved
     const sidebar = wrapper.find('[data-testid="chat-sidebar"]');
-    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
 
-    // Now rooms finish syncing and the target room appears
     fakeRooms.value = [{ id: "!abc:matrix.org", name: "Test Room" }];
     fakeRoomsInitialized.value = true;
     await flushPromises();
 
-    // Sidebar should now hide and chat window should be visible
     expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
     const chatWindow = wrapper.find('[data-testid="chat-window"]');
     expect(chatWindow.exists()).toBe(true);
+    expect(isVisible(chatWindow.element as HTMLElement)).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("hides sidebar on mobile when a channel becomes active (no activeRoomId)", async () => {
+    // Regression: before the fix, opening a channel set
+    // channelStore.activeChannelAddress but ChatPage only watched
+    // chatStore.activeRoom, so sidebar stayed on top and ChannelView
+    // (rendered inside ChatWindow) was never visible.
+    fakeActiveRoomId.value = null;
+    fakeActiveChannelAddress.value = "PEUYuN8J1...";
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(sidebar.exists()).toBe(true);
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
+
+    const chatWindow = wrapper.find('[data-testid="chat-window"]');
+    expect(chatWindow.exists()).toBe(true);
+    expect(isVisible(chatWindow.element as HTMLElement)).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("hides sidebar when a channel becomes active after mount", async () => {
+    // Start on sidebar (no active room, no active channel)
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+
+    // Simulate user tapping a channel — channel store becomes active
+    fakeActiveChannelAddress.value = "PEUYuN8J1...";
+    await flushPromises();
+
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
+    const chatWindow = wrapper.find('[data-testid="chat-window"]');
     expect(isVisible(chatWindow.element as HTMLElement)).toBe(true);
 
     wrapper.unmount();
@@ -218,9 +274,10 @@ describe("ChatPage — reactive showSidebar", () => {
     chatWindow.vm.$emit("back");
     await flushPromises();
 
-    // activeRoomId should be null
+    // activeRoomId should be cleared; also clears any active channel
     expect(setActiveRoomSpy).toHaveBeenCalledWith(null);
     expect(fakeActiveRoomId.value).toBeNull();
+    expect(clearActiveChannelSpy).toHaveBeenCalled();
 
     // Sidebar should now be visible
     sidebar = wrapper.find('[data-testid="chat-sidebar"]');
@@ -269,7 +326,7 @@ describe("ChatPage — reactive showSidebar", () => {
     const wrapper = mount(ChatPage, mountOpts);
     await flushPromises();
 
-    // User backs out to sidebar — userForcedSidebar becomes true internally
+    // User backs out — userForcedSidebar becomes true internally, activeRoomId null
     const chatWindow = wrapper.findComponent({ name: "ChatWindow" });
     expect(chatWindow.exists()).toBe(true);
     chatWindow.vm.$emit("back");
@@ -278,31 +335,61 @@ describe("ChatPage — reactive showSidebar", () => {
     let sidebar = wrapper.find('[data-testid="chat-sidebar"]');
     expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
 
-    // External push intent: a new activeRoomId arrives while rooms[] doesn't
-    // yet contain the target room. Without the new watcher, userForcedSidebar
-    // would stay true and sidebar would remain stuck visible even after the
-    // room materialises below.
+    // External push intent arrives — even before rooms[] contains the target,
+    // ChatWindow must become visible (it will render MessageSkeleton while the
+    // room hydrates). Without resetting userForcedSidebar, sidebar would stay
+    // stuck on top.
     fakeActiveRoomId.value = "!second:matrix.org";
     await flushPromises();
 
-    // Sidebar still visible because activeRoom is undefined (room not in list)
     sidebar = wrapper.find('[data-testid="chat-sidebar"]');
-    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
+    const chatWindowAfter = wrapper.find('[data-testid="chat-window"]');
+    expect(isVisible(chatWindowAfter.element as HTMLElement)).toBe(true);
 
-    // Now the second room materialises in rooms[] — this is the verification:
-    // if userForcedSidebar had stayed true, sidebar would stay visible. With
-    // the watcher reset, showSidebar falls back to !activeRoom and hides.
+    // Room materialises — ChatWindow remains visible (now with real content)
     fakeRooms.value = [
       ...fakeRooms.value,
       { id: "!second:matrix.org", name: "Second Room" },
     ];
     await flushPromises();
 
-    sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(chatWindowAfter.element as HTMLElement)).toBe(true);
     expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
 
-    const chatWindowAfter = wrapper.find('[data-testid="chat-window"]');
-    expect(isVisible(chatWindowAfter.element as HTMLElement)).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("resets userForcedSidebar when an external channel-open occurs", async () => {
+    // Mount on sidebar, user-forced (nothing active yet)
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    // Force sidebar state by invoking back (userForcedSidebar → true)
+    // Then an external actor activates a channel — sidebar must hide.
+    fakeActiveChannelAddress.value = null;
+    // simulate a prior back press by directly tripping the forced-state:
+    // easiest path is the real back emit after a brief activeRoomId flash.
+    fakeActiveRoomId.value = "!temp:matrix.org";
+    fakeRooms.value = [{ id: "!temp:matrix.org", name: "Temp" }];
+    fakeRoomsInitialized.value = true;
+    await flushPromises();
+
+    const chatWindow = wrapper.findComponent({ name: "ChatWindow" });
+    chatWindow.vm.$emit("back");
+    await flushPromises();
+
+    let sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(true);
+
+    // External channel activation (e.g. deep link)
+    fakeActiveChannelAddress.value = "PEUYuN8J1...";
+    await flushPromises();
+
+    sidebar = wrapper.find('[data-testid="chat-sidebar"]');
+    expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
+    const cw = wrapper.find('[data-testid="chat-window"]');
+    expect(isVisible(cw.element as HTMLElement)).toBe(true);
 
     wrapper.unmount();
   });

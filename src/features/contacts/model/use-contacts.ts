@@ -8,6 +8,7 @@ import { getmatrixid, hexDecode, hexEncode, tetatetid } from "@/shared/lib/matri
 import { MATRIX_SERVER } from "@/shared/config";
 import { isChatDbReady, getChatDb, type CachedSearchUser } from "@/shared/lib/local-db";
 import type { TranslationKey } from "@/shared/lib/i18n";
+import { BASTYON_ADDRESS_RE } from "@/shared/lib/parse-invite-url";
 
 import type { User } from "@/entities/user";
 
@@ -17,13 +18,8 @@ function getAppInit() {
   return _appInit;
 }
 
-/** Bastyon addresses are ~34-char alphanumeric strings (base58-flavoured)
- *  typically starting with "P". We allow `[A-Za-z0-9]{25,40}` as a defensive
- *  filter — wide enough for version drift, strict enough to reject multibyte
- *  Unicode, control bytes, or anything else a malicious homeserver might
- *  inject via the user_directory response (results end up stored in Dexie
- *  and rendered in Vue). */
-const BASTYON_ADDRESS_RE = /^[A-Za-z0-9]{25,40}$/;
+// Bastyon address shape is the canonical `BASTYON_ADDRESS_RE` imported above.
+// Same regex also validates `ref=` in invite deep-links — keep one source of truth.
 
 /** Turn a Matrix user directory result into a local User shape.
  *  Matrix user_id format: @<hex-address>:<server>. We decode the hex back
@@ -348,7 +344,7 @@ export function useContacts() {
       // Step 2: Room is dead (everyone left). Try to delete the old alias and recreate.
       const deleted = await matrixService.deleteAlias(fullAlias);
       if (deleted) {
-        console.log("[useContacts] deleted stale alias, recreating:", fullAlias);
+        console.info("[useContacts] deleted stale alias, recreating:", fullAlias);
         try {
           const result = await matrixService.createRoom({
             room_alias_name: alias,
@@ -365,7 +361,7 @@ export function useContacts() {
           });
 
           const roomId = result.room_id;
-          console.log("[useContacts] recreated room after alias delete, roomId:", roomId);
+          console.info("[useContacts] recreated room after alias delete, roomId:", roomId);
 
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -439,7 +435,7 @@ export function useContacts() {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const vErrcode = (vErr as any)?.errcode ?? (vErr as any)?.data?.errcode;
           if (vErrcode === "M_ROOM_IN_USE") {
-            console.log("[useContacts] version %d also in use, trying next", v);
+            console.info("[useContacts] version %d also in use, trying next", v);
             continue;
           }
           console.error("[useContacts] createRoom v%d failed:", v, vErr);
@@ -457,6 +453,45 @@ export function useContacts() {
     }
   };
 
+  /**
+   * High-level "add by nickname or address" entry point used by the contact
+   * search UI and the invite deep-link accept flow. Collapses four behaviors:
+   *
+   *   1. Blank/self input → `{ status: "not_found" }` (no network).
+   *   2. Input already looks like a bastyon address → create DM directly.
+   *   3. Search finds exactly one user → create DM with that user.
+   *   4. Search finds multiple users → `{ status: "multiple" }`; the caller
+   *      renders `searchResults` so the user can pick. No DM is created.
+   *   5. Search finds nothing → `{ status: "not_found" }` and
+   *      `searchError = "search.userNotFound"`.
+   */
+  const addByNickname = async (query: string): Promise<AddByNicknameResult> => {
+    const trimmed = query.trim();
+    const myAddress = authStore.address ?? "";
+
+    if (!trimmed || trimmed === myAddress) {
+      return { status: "not_found" };
+    }
+
+    // Fast path: the user pasted a full bastyon address — skip search tiers.
+    if (BASTYON_ADDRESS_RE.test(trimmed)) {
+      const roomId = await getOrCreateRoom(trimmed);
+      return roomId ? { status: "created", roomId } : { status: "not_found" };
+    }
+
+    await searchUsers(trimmed);
+    const candidates = searchResults.value;
+
+    if (candidates.length === 0) return { status: "not_found" };
+
+    if (candidates.length === 1) {
+      const roomId = await getOrCreateRoom(candidates[0].address);
+      return roomId ? { status: "created", roomId } : { status: "not_found" };
+    }
+
+    return { status: "multiple", candidates };
+  };
+
   return {
     isSearching,
     isCreatingRoom,
@@ -466,5 +501,11 @@ export function useContacts() {
     searchUsers,
     debouncedSearch,
     getOrCreateRoom,
+    addByNickname,
   };
 }
+
+export type AddByNicknameResult =
+  | { status: "created"; roomId: string }
+  | { status: "not_found" }
+  | { status: "multiple"; candidates: User[] };

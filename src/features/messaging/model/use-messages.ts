@@ -1537,16 +1537,23 @@ export function useMessages() {
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return;
 
-    // New path: Dexie soft-delete → SyncEngine sends redaction
-    if (isChatDbReady() && forEveryone) {
+    // Dexie path: writeRedaction soft-deletes + cascades to reply refs + updates
+    // the room preview so the sidebar doesn't keep stale text. When forEveryone,
+    // additionally queue a redact op so peers see it gone.
+    if (isChatDbReady()) {
       try {
         const dbKit = getChatDb();
-        await dbKit.messages.softDelete(messageId);
-        await dbKit.syncEngine.enqueue(
-          "delete_message",
+        await dbKit.eventWriter.writeRedaction({
+          redactedEventId: messageId,
           roomId,
-          { eventId: messageId },
-        );
+        });
+        if (forEveryone) {
+          await dbKit.syncEngine.enqueue(
+            "delete_message",
+            roomId,
+            { eventId: messageId },
+          );
+        }
         return;
       } catch (e) {
         console.warn("[use-messages] Dexie deleteMessage failed, falling back:", e);
@@ -1562,6 +1569,149 @@ export function useMessages() {
       console.error("Failed to delete message:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.deleteMessage"), error: e });
     }
+  };
+
+  /** Forward multiple messages to a target room in one batch. Additive
+   *  counterpart to singular sendForward — keeps the legacy flow intact.
+   *  Messages are replayed in source-timestamp order, each as its own
+   *  `m.room.message` event with a `forwarded_from` attribution field. */
+  const forwardMessages = async (
+    sourceMessageIds: string[],
+    targetRoomId: string,
+    opts?: { withSenderInfo?: boolean },
+  ): Promise<{ succeeded: number; failed: number }> => {
+    if (sourceMessageIds.length === 0) return { succeeded: 0, failed: 0 };
+    const withSenderInfo = opts?.withSenderInfo ?? true;
+
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) {
+      return { succeeded: 0, failed: sourceMessageIds.length };
+    }
+
+    // Collect source messages across all rooms (selection may span rooms in theory,
+    // though the current UI path feeds us only the active room's selection).
+    const idSet = new Set(sourceMessageIds);
+    const collected: Array<{ id: string; content: string; senderId: string; timestamp: number }> = [];
+    for (const roomMessages of Object.values(chatStore.messages)) {
+      for (const m of roomMessages) {
+        if (idSet.has(m.id)) {
+          collected.push({ id: m.id, content: m.content, senderId: m.senderId, timestamp: m.timestamp });
+        }
+      }
+    }
+    // Ship in original chronological order so recipients see the conversation flow.
+    collected.sort((a, b) => a.timestamp - b.timestamp);
+
+    const results = await Promise.allSettled(
+      collected.map(async (src) => {
+        const senderName = chatStore.getDisplayName(src.senderId);
+        const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
+
+        if (isChatDbReady()) {
+          try {
+            const dbKit = getChatDb();
+            const localMsg = await dbKit.messages.createLocal({
+              roomId: targetRoomId,
+              senderId: authStore.address ?? "",
+              content: src.content,
+              type: MessageType.text,
+              forwardedFrom: fwdMeta,
+            });
+            await dbKit.syncEngine.enqueue(
+              "send_message",
+              targetRoomId,
+              fwdMeta
+                ? { content: src.content, forwardedFrom: fwdMeta }
+                : { content: src.content },
+              localMsg.clientId,
+            );
+            return;
+          } catch (e) {
+            console.warn("[use-messages] Dexie bulk forward failed, falling back:", e);
+          }
+        }
+
+        // Legacy fallback — direct encrypted/plaintext send to target room.
+        const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
+        if (roomCrypto?.canBeEncrypt()) {
+          const encrypted = await roomCrypto.encryptEvent(src.content);
+          if (withSenderInfo) {
+            (encrypted as Record<string, unknown>).forwarded_from = {
+              sender_id: src.senderId,
+              sender_name: senderName,
+            };
+          }
+          await matrixService.sendEncryptedText(targetRoomId, encrypted);
+        } else {
+          const payload: Record<string, unknown> = {
+            body: src.content,
+            msgtype: "m.text",
+          };
+          if (withSenderInfo) {
+            payload.forwarded_from = { sender_id: src.senderId, sender_name: senderName };
+          }
+          await matrixService.sendEncryptedText(targetRoomId, payload);
+        }
+      }),
+    );
+
+    const succeeded = results.filter((r) => r.status === "fulfilled").length;
+    const failed = results.length - succeeded;
+    return { succeeded, failed };
+  };
+
+  /** Delete multiple messages in one batch. Continues on individual failures —
+   *  returns a summary {succeeded, failed} so the caller can show a toast.
+   *  Self-contained (does not wrap single deleteMessage), because the single
+   *  variant swallows errors in try/catch — we need real per-op status here. */
+  const deleteMessages = async (
+    messageIds: string[],
+    forEveryone: boolean,
+  ): Promise<{ succeeded: number; failed: number }> => {
+    if (messageIds.length === 0) return { succeeded: 0, failed: 0 };
+
+    const roomId = chatStore.activeRoomId;
+    if (!roomId) return { succeeded: 0, failed: messageIds.length };
+
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) {
+      return { succeeded: 0, failed: messageIds.length };
+    }
+
+    const results = await Promise.allSettled(
+      messageIds.map(async (id) => {
+        // Dexie path: writeRedaction soft-deletes + updates room preview.
+        // forEveryone adds a redact op so peers see the delete too.
+        if (isChatDbReady()) {
+          try {
+            const dbKit = getChatDb();
+            await dbKit.eventWriter.writeRedaction({
+              redactedEventId: id,
+              roomId,
+            });
+            if (forEveryone) {
+              await dbKit.syncEngine.enqueue(
+                "delete_message",
+                roomId,
+                { eventId: id },
+              );
+            }
+            return;
+          } catch (e) {
+            console.warn("[use-messages] Dexie bulk delete failed, falling back:", e);
+          }
+        }
+        // Legacy fallback
+        if (forEveryone) {
+          await matrixService.redactEvent(roomId, id, "deleted");
+        }
+        chatStore.removeMessage(roomId, id);
+      }),
+    );
+
+    const succeeded = results.filter((r) => r.status === "fulfilled").length;
+    const failed = results.length - succeeded;
+    return { succeeded, failed };
   };
 
   /** Send a PKOIN transfer message.
@@ -2238,6 +2388,7 @@ export function useMessages() {
   return {
     cancelMediaUpload,
     deleteMessage,
+    deleteMessages,
     drainOfflineQueue,
     editMessage,
     endPoll,
@@ -2247,6 +2398,7 @@ export function useMessages() {
     sendAudio,
     sendFile,
     sendForward,
+    forwardMessages,
     sendGif,
     sendImage,
     sendMessage,

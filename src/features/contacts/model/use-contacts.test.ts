@@ -351,4 +351,85 @@ describe("useContacts", () => {
       expect(contacts.searchResults.value.find(u => u.address === MY_ADDR)).toBeUndefined();
     });
   });
+
+  // ─── addByNickname — unified "add contact" entry point ─────────
+
+  describe("addByNickname", () => {
+    beforeEach(() => {
+      mockRpcSearchUsers.mockReset();
+      mockSearchUserDirectory.mockReset();
+      mockCacheGet.mockReset().mockResolvedValue(null);
+      mockCachePut.mockReset().mockResolvedValue(undefined);
+      mockCreateRoom.mockReset();
+      mockGetRooms.mockReset().mockReturnValue([]);
+      mockIsReady.mockReturnValue(true);
+    });
+
+    it("creates a DM directly when the input looks like a bastyon address", async () => {
+      mockCreateRoom.mockResolvedValue({ room_id: "!direct:matrix.pocketnet.app" });
+
+      const result = await contacts.addByNickname(TARGET_ADDR);
+
+      expect(result).toEqual({ status: "created", roomId: "!direct:matrix.pocketnet.app" });
+      // Must not hit the search tiers — we already have a concrete address.
+      expect(mockRpcSearchUsers).not.toHaveBeenCalled();
+      expect(mockCreateRoom).toHaveBeenCalled();
+    });
+
+    it("auto-creates a DM when search returns exactly one match", async () => {
+      mockRpcSearchUsers.mockResolvedValue([
+        { address: "PFoundUser1111111111111111111111AB", name: "Alice", image: "" },
+      ]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+      mockCreateRoom.mockResolvedValue({ room_id: "!alice:matrix.pocketnet.app" });
+
+      const result = await contacts.addByNickname("alice");
+
+      expect(result).toEqual({ status: "created", roomId: "!alice:matrix.pocketnet.app" });
+      expect(mockCreateRoom).toHaveBeenCalled();
+    });
+
+    it("returns not_found when no users match the nickname", async () => {
+      mockRpcSearchUsers.mockResolvedValue([]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      const result = await contacts.addByNickname("ghost_nick_xyz");
+
+      expect(result).toEqual({ status: "not_found" });
+      expect(mockCreateRoom).not.toHaveBeenCalled();
+      expect(contacts.searchError.value).toBe("search.userNotFound");
+    });
+
+    it("returns multiple with candidates when search yields several matches", async () => {
+      mockRpcSearchUsers.mockResolvedValue([
+        { address: "PCand111111111111111111111111111AB", name: "candidate1", image: "" },
+        { address: "PCand222222222222222222222222222AB", name: "candidate2", image: "" },
+      ]);
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+
+      const result = await contacts.addByNickname("cand");
+
+      expect(result.status).toBe("multiple");
+      if (result.status === "multiple") {
+        expect(result.candidates.length).toBe(2);
+      }
+      expect(mockCreateRoom).not.toHaveBeenCalled();
+      // Results remain in searchResults so the existing ContactSearch UI can show them.
+      expect(contacts.searchResults.value.length).toBe(2);
+    });
+
+    it("returns not_found for empty or whitespace-only input", async () => {
+      expect((await contacts.addByNickname("")).status).toBe("not_found");
+      expect((await contacts.addByNickname("   ")).status).toBe("not_found");
+      expect(mockRpcSearchUsers).not.toHaveBeenCalled();
+      expect(mockCreateRoom).not.toHaveBeenCalled();
+    });
+
+    it("does not create a DM with yourself when the input equals own address", async () => {
+      const result = await contacts.addByNickname(MY_ADDR);
+
+      expect(result.status).toBe("not_found");
+      expect(mockCreateRoom).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -17,6 +17,25 @@
     <meta http-equiv="X-Content-Type-Options" content="nosniff" />
     <meta http-equiv="X-Frame-Options" content="DENY" />
 
+    <!--
+      Session 10 fix: inline initial safe-area CSS vars before any bundle.
+      On Android 15/16 edge-to-edge the WebView's first paint happens before
+      native code injects real insets. Inline env() fallbacks prevent the
+      flash of content rendering underneath the status bar.
+      Native code (MainActivity.injectAllCssVars) overwrites these with
+      exact device values as soon as insets become available.
+    -->
+    <style id="initial-safe-area">
+      :root {
+        --safe-area-inset-top: env(safe-area-inset-top, 24px);
+        --safe-area-inset-right: env(safe-area-inset-right, 0px);
+        --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-area-inset-left: env(safe-area-inset-left, 0px);
+        --keyboardheight: 0px;
+        --app-bottom-inset: env(safe-area-inset-bottom, 0px);
+      }
+    </style>
+
     <!-- Open Graph -->
     <meta property="og:title" content="Forta Chat" />
     <meta property="og:description" content="Forta Chat — Decentralized Messenger" />

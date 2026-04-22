@@ -6,7 +6,6 @@ import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name"
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
-
 type FilterValue = "all" | "personal" | "groups";
 
 interface Props {
@@ -20,6 +19,8 @@ const chatStore = useChatStore();
 const { t } = useI18n();
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const isMobile = useMobile();
+
+const isBulkMode = computed(() => chatStore.forwardingMessages.length > 0);
 
 const search = ref("");
 const activeFilter = ref<FilterValue>("all");
@@ -84,7 +85,19 @@ const getRoomSubtitle = (room: ChatRoom): string => {
   return "";
 };
 
-const selectRoom = (roomId: string) => {
+const selectRoom = async (roomId: string) => {
+  // ── Bulk branch — lands the user in the target room with a preview bar
+  // so they can optionally type a caption before shipping the batch.
+  // Mirrors the singular draft-and-switch UX (Telegram/Element style). ──
+  if (isBulkMode.value) {
+    chatStore.saveBulkForwardDraft(roomId);
+    chatStore.exitSelectionMode();
+    chatStore.setActiveRoom(roomId);
+    search.value = "";
+    emit("close");
+    return;
+  }
+
   // Pre-save forward draft to TARGET room so it survives the room-switch watcher
   chatStore.saveForwardDraft(roomId);
   chatStore.setActiveRoom(roomId);

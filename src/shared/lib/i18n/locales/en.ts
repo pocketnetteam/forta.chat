@@ -262,6 +262,8 @@ export const en = {
   "messageList.typingTwo": "{name1} and {name2} are typing",
   "messageList.typingMany": "{name} and {count} more are typing",
   "messageList.deleteMessage": "Delete message?",
+  "messageList.deleteMessagesTitle": "Delete {count} selected messages?",
+  "messageList.deleteResultSummary": "Deleted {succeeded}, failed {failed}",
   "messageList.deleteForEveryone": "Delete for everyone",
   "messageList.deleteForMe": "Delete for me",
   "messageList.cancel": "Cancel",
@@ -311,6 +313,12 @@ export const en = {
   "forward.cancelConfirm.description": "You selected 1 message from chat with {name}.",
   "forward.cancelConfirm.settings": "Forward settings",
   "forward.cancelConfirm.cancel": "Cancel forwarding",
+  "forward.resultSuccess": "Forwarded: {count}",
+  "forward.resultSummary": "Forwarded {succeeded} of {total}",
+  "forward.bulkTitle": "Forward {count} messages",
+  "forward.bulkFrom": "From: {names}",
+  "forward.bulkCancelConfirm.title": "{count} messages",
+  "forward.bulkCancelConfirm.description": "You selected {count} messages from chat with {name}.",
 
   // ── Pinned bar ──
   "pinned.message": "Pinned Message",
@@ -483,6 +491,11 @@ export const en = {
   "call.you": "You",
   "call.screen": "screen",
   "call.callInOtherTab": "Call is active in another tab",
+  "call.permissionDenied.title": "Device access denied",
+  "call.permissionDenied.microphone": "Microphone access is denied. Calls cannot proceed — the other party will not hear you.",
+  "call.permissionDenied.camera": "Camera access is denied. Video calls cannot proceed.",
+  "call.permissionDenied.instructions": "Grant access in your system settings: Settings → Apps → Forta Chat → Permissions.",
+  "call.permissionDenied.close": "Close",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",
@@ -596,6 +609,9 @@ export const en = {
   "invite.copied": "Copied!",
   "invite.shareOn": "Share on",
   "invite.fab": "Invite",
+  "invite.accepted": "Invite accepted",
+  "invite.acceptFailed": "Failed to accept invite",
+  "invite.malformed": "Invalid invite link",
 
   // ── Native share ──
   "share.linkCopied": "Link copied to clipboard",

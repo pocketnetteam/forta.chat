@@ -71,20 +71,20 @@
   --app-margin-bottom: max(env(safe-area-inset-bottom), var(--app-margin-bottom-default));
 }
 
+/*
+ * Safe-area insets:
+ * - Initial values are set inline in index.html (with env() fallbacks) so the
+ *   first paint already clears the status bar on Android 15/16 edge-to-edge.
+ * - Native code (Android: MainActivity.injectAllCssVars; iOS: env() native)
+ *   overwrites these with exact device values on every insets change.
+ * - The fallback below only applies if the inline <style> in index.html was
+ *   stripped for some reason (should never happen in production).
+ */
 :root {
-  --safe-area-inset-top: 0px;
-  --safe-area-inset-right: 0px;
-  --safe-area-inset-bottom: 0px;
-  --safe-area-inset-left: 0px;
-}
-
-@supports (padding-top: env(safe-area-inset-top)) {
-  :root {
-    --safe-area-inset-top: env(safe-area-inset-top, 0);
-    --safe-area-inset-right: env(safe-area-inset-right, 0);
-    --safe-area-inset-bottom: env(safe-area-inset-bottom, 0);
-    --safe-area-inset-left: env(safe-area-inset-left, 0);
-  }
+  --safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --safe-area-inset-right: env(safe-area-inset-right, 0px);
+  --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-inset-left: env(safe-area-inset-left, 0px);
 }
 
 /* Light theme (default) */

@@ -654,6 +654,8 @@ export class Pcrypto {
         const usersinfoArray = Object.values(usersinfo);
         const memberCount = Math.max(serverCount, usersinfoArray.length);
         if (memberCount <= 1 || memberCount >= 50) return false;
+        // Guard against empty-array short-circuit: refuse until peer is loaded.
+        if (usersinfoArray.length < 2) return false;
 
         // ALL participants must have 12 published keys for ECDH to work
         return usersinfoArray.every(u => u.keys && u.keys.length >= m);
@@ -695,6 +697,12 @@ export class Pcrypto {
         const missingKeys = allMembers.filter(u => !u.keys || u.keys.length < m);
         if (missingKeys.length > 0) {
           console.warn("[pcrypto] encryptEvent: " + missingKeys.length + " member(s) missing encryption keys:", missingKeys.map(u => u.id.slice(0, 10)));
+        }
+
+        // Refuse to ship a body encrypted to ZERO recipients (Base64.encode("{}")) —
+        // receiver would only see `emptyforme` / AES-SIV verification failure.
+        if (_users.length === 0) {
+          throw new Error("No recipients with published keys — refusing to encrypt empty body");
         }
 
         const encryptedEvent: Record<string, unknown> = {
