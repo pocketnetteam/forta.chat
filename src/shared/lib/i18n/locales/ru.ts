@@ -451,6 +451,8 @@ export const ru: Record<TranslationKey, string> = {
   "poll.endPoll": "Завершить опрос",
   "poll.finalResults": "Итоговые результаты",
   "poll.votes": "{count} голос(ов)",
+  "poll.voteFailed": "Не удалось отправить голос",
+  "reaction.failed": "Не удалось отправить реакцию",
 
   // ── Video calls ──
   "call.voiceCall": "Голосовой звонок",

@@ -17,6 +17,7 @@ import { withTimeout } from "@/shared/lib/with-timeout";
 import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 
 /** Per-phase media pipeline timeouts. Splitting the old single 5-minute cap
  *  lets us surface phase-specific failures (e.g. crypto hang vs upload stall)
@@ -1236,6 +1237,7 @@ export function useMessages() {
       }
     } catch (e) {
       console.error("[Reaction] Failed to toggle reaction:", e);
+      useToast().toast(tRaw("reaction.failed"), "error");
       useBugReport().open({ context: tRaw("bugReport.ctx.toggleReaction"), error: e });
       await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
     }
@@ -1905,6 +1907,7 @@ export function useMessages() {
       }
     } catch (e) {
       console.error("Failed to vote on poll:", e);
+      useToast().toast(tRaw("poll.voteFailed"), "error");
       useBugReport().open({ context: tRaw("bugReport.ctx.votePoll"), error: e });
     }
   };

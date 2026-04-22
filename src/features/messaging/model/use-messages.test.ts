@@ -12,6 +12,18 @@ vi.mock("@/entities/auth", () => ({
   })),
 }));
 
+// Spy on the toast composable so error flows can be asserted.
+const mockToast = vi.fn();
+vi.mock("@/shared/lib/use-toast", () => ({
+  useToast: () => ({
+    toast: mockToast,
+    close: vi.fn(),
+    message: { value: "" },
+    type: { value: "info" },
+    show: { value: false },
+  }),
+}));
+
 // Mock connectivity
 vi.mock("@/shared/lib/connectivity", () => ({
   useConnectivity: vi.fn(() => ({ isOnline: { value: true } })),
@@ -104,6 +116,20 @@ describe("useMessages", () => {
       expect(mockRedactEvent).toHaveBeenCalledWith("!room:server", "$old_reaction");
       expect(mockSendReaction).toHaveBeenCalledWith("!room:server", msg.id, "😂");
     });
+
+    it("shows toast when sendReaction throws", async () => {
+      mockToast.mockClear();
+      const msg = makeMsg({ roomId: "!room:server" });
+      chatStore.addMessage("!room:server", msg);
+      mockSendReaction.mockImplementationOnce(() => {
+        throw new Error("network error");
+      });
+
+      await messaging.toggleReaction(msg.id, "👍");
+
+      expect(mockToast).toHaveBeenCalled();
+      expect(mockToast.mock.calls[0][1]).toBe("error");
+    });
   });
 
   // ─── sendTransferMessage ──────────────────────────────────────
@@ -163,6 +189,54 @@ describe("useMessages", () => {
       expect(msgs[0].type).toBe(MessageType.poll);
       expect(msgs[0].pollInfo?.question).toBe("Yes or No?");
       expect(msgs[0].pollInfo?.options).toHaveLength(2);
+    });
+  });
+
+  // ─── votePoll ─────────────────────────────────────────────────
+
+  describe("votePoll", () => {
+    it("sends m.poll.response with m.reference relates_to and MSC3381 answers", async () => {
+      await messaging.votePoll("$poll1", "opt-1");
+
+      expect(mockSendPollResponse).toHaveBeenCalledWith("!room:server", {
+        "m.relates_to": {
+          rel_type: "m.reference",
+          event_id: "$poll1",
+        },
+        "org.matrix.msc3381.poll.response": {
+          answers: ["opt-1"],
+        },
+      });
+    });
+
+    it("allows changing vote (MSC3381 last-vote-wins)", async () => {
+      await messaging.votePoll("$poll1", "opt-0");
+      await messaging.votePoll("$poll1", "opt-2");
+
+      expect(mockSendPollResponse).toHaveBeenCalledTimes(2);
+      expect(mockSendPollResponse).toHaveBeenLastCalledWith(
+        "!room:server",
+        expect.objectContaining({
+          "m.relates_to": expect.objectContaining({ event_id: "$poll1" }),
+          "org.matrix.msc3381.poll.response": { answers: ["opt-2"] },
+        }),
+      );
+    });
+
+    it("noops when no active room", async () => {
+      chatStore.activeRoomId = null as unknown as string;
+      await messaging.votePoll("$poll1", "opt-0");
+      expect(mockSendPollResponse).not.toHaveBeenCalled();
+    });
+
+    it("shows toast when sendPollResponse throws", async () => {
+      mockToast.mockClear();
+      mockSendPollResponse.mockRejectedValueOnce(new Error("server error"));
+      await messaging.votePoll("$poll1", "opt-0");
+
+      expect(mockToast).toHaveBeenCalled();
+      const toastArgs = mockToast.mock.calls[0];
+      expect(toastArgs[1]).toBe("error");
     });
   });
 

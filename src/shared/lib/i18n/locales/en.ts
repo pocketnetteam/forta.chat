@@ -449,6 +449,8 @@ export const en = {
   "poll.endPoll": "End poll",
   "poll.finalResults": "Final results",
   "poll.votes": "{count} vote(s)",
+  "poll.voteFailed": "Failed to submit vote",
+  "reaction.failed": "Failed to submit reaction",
 
   // ── Video calls ──
   "call.voiceCall": "Voice call",
