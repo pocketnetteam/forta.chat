@@ -4,6 +4,7 @@ import type { Message } from "@/entities/chat";
 import { useChatStore, MessageType } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 
 interface Props {
   show: boolean;
@@ -44,6 +45,15 @@ const currentUrl = computed(() => {
   const key = currentMessage.value._key || currentMessage.value.id;
   return getState(key).objectUrl;
 });
+
+const videoRef = ref<HTMLVideoElement | null>(null);
+const currentVideoId = computed(() => {
+  const msg = currentMessage.value;
+  if (!msg || msg.type !== MessageType.video) return null;
+  return msg._key || msg.id;
+});
+
+useVideoStatePreservation(videoRef, currentVideoId, { dontResumePlay: true });
 
 const resetTransform = () => {
   scale.value = 1;
@@ -162,8 +172,10 @@ watch(currentMessage, async (msg) => {
           />
           <video
             v-else-if="currentUrl && currentMessage.type === 'video'"
+            ref="videoRef"
             :src="currentUrl"
             controls
+            playsinline
             class="max-h-full max-w-full"
           />
           <div v-else class="flex items-center justify-center">

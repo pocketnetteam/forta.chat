@@ -28,7 +28,7 @@ function close() {
         aria-labelledby="perm-denied-title"
         @click.self="close"
       >
-        <div class="perm-modal-card mx-4 max-w-sm rounded-xl bg-color-bg p-5 shadow-2xl">
+        <div class="perm-modal-card mx-4 max-w-sm rounded-xl bg-background-main p-5 shadow-2xl">
           <div class="mb-3 flex items-start gap-3">
             <div class="perm-modal-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-full">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -40,16 +40,16 @@ function close() {
               </svg>
             </div>
             <div class="flex-1">
-              <h3 id="perm-denied-title" class="text-base font-semibold text-color-text">
+              <h3 id="perm-denied-title" class="text-base font-semibold text-text-color">
                 {{ t("call.permissionDenied.title") }}
               </h3>
-              <p class="mt-1 text-sm text-color-text-muted">
+              <p class="mt-1 text-sm text-text-on-main-bg-color">
                 {{ deviceMessage }}
               </p>
             </div>
           </div>
 
-          <p class="mb-4 text-sm text-color-text-muted">
+          <p class="mb-4 text-sm text-text-on-main-bg-color">
             {{ t("call.permissionDenied.instructions") }}
           </p>
 

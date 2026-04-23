@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { Message } from "@/entities/chat";
 import { useThemeStore } from "@/entities/theme";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
@@ -67,7 +67,19 @@ const menuItems = computed<ContextMenuItem[]>(() => {
   return items;
 });
 
+// Anti-double-fire: guards the mobile BottomSheet quick-reaction row where
+// a rapid double-tap would otherwise send two identical reactions before the
+// menu finishes closing. Instance-scoped so multiple menus don't cross-cancel.
+const DOUBLE_FIRE_WINDOW_MS = 400;
+const lastReactionEmoji = ref<string | null>(null);
+const lastReactionAt = ref(0);
+
 const handleReaction = (emoji: string) => {
+  const now = Date.now();
+  if (lastReactionEmoji.value === emoji && now - lastReactionAt.value < DOUBLE_FIRE_WINDOW_MS) return;
+  lastReactionEmoji.value = emoji;
+  lastReactionAt.value = now;
+
   if (props.message) {
     emit("react", emoji, props.message);
   }
@@ -107,12 +119,14 @@ const onBottomSheetAction = (action: string) => {
       <button
         v-for="emoji in themeStore.quickReactions"
         :key="emoji"
+        type="button"
         class="text-2xl p-2 rounded-full hover:bg-neutral-grad-0/50 active:scale-90 transition-transform"
         @click="handleReaction(emoji)"
       >
         {{ emoji }}
       </button>
       <button
+        type="button"
         class="p-2 rounded-full hover:bg-neutral-grad-0/50"
         :title="t('contextMenu.moreReactions')"
         @click="handleOpenEmojiPicker"
