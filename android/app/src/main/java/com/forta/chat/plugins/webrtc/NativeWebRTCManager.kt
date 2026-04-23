@@ -10,6 +10,28 @@ import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
+ * Signals that libwebrtc refused to create the AudioSource/AudioTrack used for
+ * the outgoing microphone feed. Typical causes:
+ *   - Another app is holding AudioRecord (phone call, voice recorder, MIUI
+ *     privacy shield with "restrict mic" toggle).
+ *   - OEM firmware (Xiaomi MIUI, Huawei EMUI, Realme UI) rejected the
+ *     VOICE_COMMUNICATION session because MODE_IN_COMMUNICATION wasn't
+ *     re-applied fast enough after its async reset.
+ *   - AudioDeviceModule failed to init (HW AEC crash) — should not happen
+ *     after the broken-AEC vendor fallback, but included for completeness.
+ *
+ * Thrown from [NativeWebRTCManager.startLocalAudio]; caught by
+ * [WebRTCPlugin.startLocalMedia] which turns it into `call.reject`. The JS
+ * proxy then rethrows as a DOMException so the Matrix SDK bails out of the
+ * call setup instead of sending an invite/answer with an empty track.
+ */
+class AudioInitException(
+    val reason: String,
+    message: String,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
+
+/**
  * Manages multiple native WebRTC peer connections with hardware-accelerated
  * video encoding/decoding via Google's libwebrtc.
  *
@@ -471,9 +493,20 @@ class NativeWebRTCManager(private val context: Context) {
 
         localAudioSource = factory?.createAudioSource(audioConstraints)
         if (localAudioSource == null) {
+            // Fire the diagnostic event first so JS listeners (bug reports,
+            // telemetry) can observe the failure cause before we unwind.
             Log.e("WebRTCAudio", "startLocalAudio: AudioSource creation FAILED — factory=$factory")
             onAudioError?.invoke("audio_source_failed", "AudioSource creation failed")
-            return
+            // Bail out of the call setup. Prior behaviour was to `return` here,
+            // which let the SDK continue with an empty-track PC and produced
+            // the mass "no audio after connected" reports (#169, #432, #391,
+            // #392, #398, #404, #406, #408). Surfacing the exception causes
+            // WebRTCPlugin to reject the PluginCall, which propagates to the
+            // JS proxy's nativeGetUserMedia and aborts call.placeCall/answer.
+            throw AudioInitException(
+                reason = "audio_source_failed",
+                message = "AudioSource creation failed (factory returned null)",
+            )
         }
         Log.d("WebRTCAudio", "startLocalAudio: AudioSource created OK")
 
@@ -481,7 +514,15 @@ class NativeWebRTCManager(private val context: Context) {
         if (localAudioTrack == null) {
             Log.e("WebRTCAudio", "startLocalAudio: AudioTrack creation FAILED")
             onAudioError?.invoke("audio_source_failed", "AudioTrack creation failed")
-            return
+            // Clean up the half-built AudioSource before unwinding so it does
+            // not leak into a future startLocalAudio retry (the early-return
+            // guard above reads `localAudioTrack != null`, not AudioSource).
+            try { localAudioSource?.dispose() } catch (_: Exception) {}
+            localAudioSource = null
+            throw AudioInitException(
+                reason = "audio_source_failed",
+                message = "AudioTrack creation failed",
+            )
         }
         localAudioTrack?.setEnabled(true)
         Log.d("WebRTCAudio", "startLocalAudio: AudioTrack created and enabled")

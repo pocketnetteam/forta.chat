@@ -684,6 +684,113 @@ describe('call-service permission flow', () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Session 01 / H1 + H7: audioRouter lifecycle must be idempotent on error.
+  //
+  // Before this fix, when `call.answer()` threw inside answerCall (OEM audio
+  // deadlock, BT routing conflict with CallActivity's duplicate AudioRouter),
+  // the catch block did NOT call stopAudioRouting. MODE_IN_COMMUNICATION would
+  // stay set, BT SCO would remain held, and the device's earpiece could be
+  // stuck in "phone call" state until reboot. Symmetric problem on startCall
+  // when placeVoiceCall/placeVideoCall throws.
+  //
+  // The fix: catch block (or finally equivalent) always calls stopAudioRouting.
+  // Native side is idempotent, so a no-op stop is safe even if start was never
+  // reached. This closes the #442/#443/#408 class of bugs where the mic or
+  // earpiece gets stuck between calls.
+  // -------------------------------------------------------------------------
+  describe('audioRouter lifecycle on error (H1/H7)', () => {
+    beforeEach(() => {
+      mockStartAudioRouting.mockClear();
+      mockStopAudioRouting.mockClear();
+    });
+
+    it('calls stopAudioRouting in catch when call.answer() throws', async () => {
+      mockCallStore.matrixCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+      };
+      mockCallStore.activeCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        direction: 'incoming',
+        peerName: 'Peer',
+        status: 'incoming',
+      };
+      mockAnswer.mockRejectedValueOnce(new Error('SDK answer deadlock'));
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      expect(mockStopAudioRouting).toHaveBeenCalled();
+    });
+
+    it('calls stopAudioRouting in catch when placeVoiceCall throws', async () => {
+      mockPlaceVoiceCall.mockRejectedValueOnce(new Error('place failed'));
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      expect(mockStopAudioRouting).toHaveBeenCalled();
+    });
+
+    it('calls stopAudioRouting in catch when placeVideoCall throws', async () => {
+      mockPlaceVideoCall.mockRejectedValueOnce(new Error('place failed'));
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'video');
+
+      expect(mockStopAudioRouting).toHaveBeenCalled();
+    });
+
+    it('does not throw even if stopAudioRouting itself rejects during catch', async () => {
+      mockAnswer.mockRejectedValueOnce(new Error('answer failed'));
+      mockStopAudioRouting.mockRejectedValueOnce(new Error('stop failed'));
+      mockCallStore.matrixCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+      };
+      mockCallStore.activeCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        direction: 'incoming',
+        peerName: 'Peer',
+        status: 'incoming',
+      };
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      // Must not propagate the stopAudioRouting error to the caller —
+      // UI layer can't recover from a routing cleanup failure anyway.
+      await expect(service.answerCall()).resolves.toBeUndefined();
+    });
+  });
+
   describe('onAudioError listener', () => {
     it('registers onAudioError listener on module load for native', async () => {
       // Module-level code runs once at first import. Since vi.clearAllMocks()

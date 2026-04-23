@@ -1,6 +1,13 @@
 package com.forta.chat.plugins.calls
 
+import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 import android.telecom.TelecomManager
 import android.util.Log
@@ -63,9 +70,13 @@ class CallPlugin : Plugin() {
             })
         }
 
-        // Initialize AudioRouter for JS-side audio control
-        audioRouter = AudioRouter(context)
-        audioRouter?.setListener(object : AudioRouter.Listener {
+        // Shared AudioRouter instance — same one CallActivity attaches its
+        // UI listener to via setUiListener. Prior to Session 01 CallPlugin
+        // and CallActivity each constructed their own AudioRouter; the two
+        // competed on setCommunicationDevice/MODE_IN_COMMUNICATION and
+        // silently undid each other's routing, producing #355/#442 symptoms.
+        audioRouter = AudioRouter.getSharedInstance(context)
+        audioRouter?.setCoreListener(object : AudioRouter.Listener {
             override fun onAudioDeviceChanged(state: AudioRouter.AudioDeviceState) {
                 val data = JSObject().apply {
                     put("active", state.active.name.lowercase())
@@ -179,6 +190,131 @@ class CallPlugin : Plugin() {
             return
         }
         requestPermissionForAlias("microphone", call, "audioPermissionCallback")
+    }
+
+    /**
+     * Real-stream probe for the microphone, to be called by JS right after
+     * `requestAudioPermission` resolved with `granted=true`. The Capacitor
+     * permission check only reports the Android package-level state and
+     * will happily say `granted` if permission was granted at any point in
+     * this process's lifetime — even if another app (phone dialer, voice
+     * recorder) currently holds AudioRecord, or the OEM firmware gave us a
+     * ghost permission that AudioRecord will nevertheless reject.
+     *
+     * We:
+     *   1. Enumerate input devices via AudioManager.getDevices — catches the
+     *      "no mic attached" case (rare, but happens on Chromebook tablets
+     *      and a handful of older Android TV boxes).
+     *   2. Try to initialize an AudioRecord with VOICE_COMMUNICATION source at
+     *      16 kHz mono PCM. If it reports STATE_INITIALIZED we can safely
+     *      proceed; anything else means the actual mic acquisition will fail
+     *      and call setup should abort before sending invite/answer.
+     *   3. On API 29+ we also enumerate active recording configurations so
+     *      the UI can hint which app is holding the mic.
+     *
+     * Returns `{available, hasInput, canInit, conflicting[]}`. The JS side
+     * throws PermissionDeniedError with reason=audio_source_busy or
+     * no_input_device based on which flag is false.
+     */
+    @PluginMethod
+    fun probeAudioAvailability(call: PluginCall) {
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            val hasInputDevice = inputs.any { info ->
+                info.type == AudioDeviceInfo.TYPE_BUILTIN_MIC ||
+                info.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                info.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                info.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                info.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                info.type == AudioDeviceInfo.TYPE_USB_DEVICE
+            }
+
+            val canInit = tryInitAudioRecord()
+
+            // Enumerate active recording configurations so JS can surface
+            // "X app is using your microphone" instead of a generic error.
+            // Only meaningful on Android 10 (API 29)+.
+            val conflicting = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                am.activeRecordingConfigurations
+                    .mapNotNull { config ->
+                        // Own app's package isn't exposed here (API surface
+                        // limitation: `clientPackageName` is hidden). We
+                        // still pass audio source as a hint — "VOICE_CALL"
+                        // means the phone app, "MIC" means a generic
+                        // recorder, etc.
+                        audioSourceLabel(config.clientAudioSource)
+                    }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
+            } else emptyList()
+
+            val result = JSObject().apply {
+                put("available", hasInputDevice && canInit)
+                put("hasInput", hasInputDevice)
+                put("canInit", canInit)
+                val arr = org.json.JSONArray()
+                for (c in conflicting) arr.put(c)
+                put("conflicting", arr)
+            }
+            Log.d(
+                TAG,
+                "[WebRTCAudio] probeAudioAvailability: hasInput=$hasInputDevice canInit=$canInit conflicting=$conflicting"
+            )
+            call.resolve(result)
+        } catch (e: Exception) {
+            // Failure to probe should not itself block the call. JS treats
+            // an error as "assume available" (same shape as the old bridge),
+            // matching requestAudioPermission's graceful fallback style.
+            Log.w(TAG, "probeAudioAvailability failed — returning optimistic result", e)
+            call.resolve(JSObject().apply {
+                put("available", true)
+                put("hasInput", true)
+                put("canInit", true)
+                put("conflicting", org.json.JSONArray())
+            })
+        }
+    }
+
+    private fun tryInitAudioRecord(): Boolean {
+        var rec: AudioRecord? = null
+        return try {
+            val sampleRate = 16_000
+            val bufSize = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            if (bufSize <= 0) {
+                Log.w(TAG, "tryInitAudioRecord: getMinBufferSize returned $bufSize — treating as not-available")
+                return false
+            }
+            rec = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufSize,
+            )
+            val ok = rec.state == AudioRecord.STATE_INITIALIZED
+            if (!ok) Log.w(TAG, "tryInitAudioRecord: state=${rec.state}, mic is busy or unavailable")
+            ok
+        } catch (e: Exception) {
+            Log.w(TAG, "tryInitAudioRecord threw", e)
+            false
+        } finally {
+            try { rec?.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun audioSourceLabel(source: Int): String = when (source) {
+        MediaRecorder.AudioSource.VOICE_CALL -> "voice_call"
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "voice_communication"
+        MediaRecorder.AudioSource.VOICE_RECOGNITION -> "voice_recognition"
+        MediaRecorder.AudioSource.MIC -> "mic"
+        MediaRecorder.AudioSource.CAMCORDER -> "camcorder"
+        MediaRecorder.AudioSource.DEFAULT -> "default"
+        else -> "other_$source"
     }
 
     @PermissionCallback

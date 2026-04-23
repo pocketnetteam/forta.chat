@@ -481,8 +481,16 @@ export function useCallService() {
       await ensureCallPermissions(type === "video");
     } catch (e) {
       if (e instanceof PermissionDeniedError) {
-        console.warn("[call-service] startCall: permission denied for", e.device);
-        callPermissionError.value = { device: e.device };
+        console.warn(
+          "[call-service] startCall: permission denied for",
+          e.device,
+          "reason=" + e.reason,
+        );
+        callPermissionError.value = {
+          device: e.device,
+          reason: e.reason,
+          conflicting: e.conflicting,
+        };
       } else {
         console.error("[call-service] startCall: ensureCallPermissions failed:", e);
       }
@@ -586,6 +594,14 @@ export function useCallService() {
         import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
           nativeCallBridge.reportCallEnded(call.callId);
         }).catch(() => {});
+        // H1 guard: always tear down audio routing on failure. The native
+        // side of startAudioRouting may have already bumped the phone into
+        // MODE_IN_COMMUNICATION (it is queued sync with placeCall), so
+        // omitting stopAudioRouting here can leave the device stuck in VoIP
+        // mode — symptom: ringer silent, earpiece half-on, until the user
+        // places+cancels another call. Native stopAudioRouting is idempotent,
+        // so calling it when start never ran is a no-op + one warn log.
+        nativeCallBridge.stopAudioRouting().catch(() => {});
       }
     }
   }
@@ -761,8 +777,16 @@ export function useCallService() {
       await ensureCallPermissions(isVideo);
     } catch (e) {
       if (e instanceof PermissionDeniedError) {
-        console.warn("[call-service] answerCall: permission denied for", e.device);
-        callPermissionError.value = { device: e.device };
+        console.warn(
+          "[call-service] answerCall: permission denied for",
+          e.device,
+          "reason=" + e.reason,
+        );
+        callPermissionError.value = {
+          device: e.device,
+          reason: e.reason,
+          conflicting: e.conflicting,
+        };
       } else {
         console.error("[call-service] answerCall: ensureCallPermissions failed:", e);
       }
@@ -782,6 +806,11 @@ export function useCallService() {
       if (isNative) {
         NativeWebRTC.dismissCallUI().catch(() => {});
         nativeCallBridge.reportCallEnded(call.callId).catch(() => {});
+        // Idempotent teardown — permission check itself did not reach
+        // startAudioRouting, but a previous accept attempt in this session
+        // might have. Calling stopAudioRouting on an already-stopped router
+        // is a no-op in native.
+        nativeCallBridge.stopAudioRouting().catch(() => {});
       }
       return;
     }
@@ -848,7 +877,16 @@ export function useCallService() {
       unwireCallEvents(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
-      if (isNative) NativeWebRTC.dismissCallUI().catch(() => {});
+      if (isNative) {
+        NativeWebRTC.dismissCallUI().catch(() => {});
+        // H1 + H7: always tear down audio routing on answer failure. If
+        // call.answer threw *after* nativeCallBridge.startAudioRouting
+        // queued (it's fire-and-forget under `.catch()`), MODE_IN_COMMUNICATION
+        // may already be set. Prior to this guard the device could stay
+        // locked in VoIP mode with BT SCO held open until reboot (#442,
+        // #443 symptom class). Idempotent on the native side.
+        nativeCallBridge.stopAudioRouting().catch(() => {});
+      }
     }
   }
 

@@ -21,12 +21,55 @@ import android.util.Log
  * - Selects active device via setCommunicationDevice (API 31+) or legacy APIs
  * - Auto-switches to Bluetooth when connected during a call
  * - Auto-fallback when Bluetooth disconnects
- * - Notifies listeners on device changes for UI updates
+ * - Notifies core (JS/CallPlugin) and UI (CallActivity) listeners independently
+ *
+ * **Single instance per app** — obtained via [getSharedInstance]. Prior to this
+ * Session 01 fix both [com.forta.chat.plugins.calls.CallPlugin] and
+ * [com.forta.chat.plugins.calls.CallActivity] created their own AudioRouter.
+ * Two AudioRouters each registered an AudioDeviceCallback and each issued their
+ * own `setCommunicationDevice` on BT hot-swap, racing against each other — the
+ * second call could silently undo the first, leaving the phone stuck on
+ * earpiece while the user expected BT (#355, #442, #365). The shared instance
+ * keeps a single AudioManager/mode state machine; [setCoreListener] /
+ * [setUiListener] fan state updates out to JS and the call Activity in parallel.
  */
-class AudioRouter(private val context: Context) {
+class AudioRouter private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "AudioRouter"
+        private const val LIFECYCLE_TAG = "AudioLifecycle"
+
+        @Volatile
+        private var INSTANCE: AudioRouter? = null
+
+        /**
+         * Return the process-wide AudioRouter singleton, lazily creating it
+         * with the application context. We deliberately use `applicationContext`
+         * so the router survives CallActivity tear-down without leaking the
+         * Activity — the router outlives any single UI surface.
+         */
+        fun getSharedInstance(context: Context): AudioRouter {
+            val existing = INSTANCE
+            if (existing != null) return existing
+            return synchronized(this) {
+                val local = INSTANCE
+                if (local != null) return local
+                val created = AudioRouter(context.applicationContext)
+                INSTANCE = created
+                created
+            }
+        }
+
+        /**
+         * Force a fresh instance. Only used in unit tests to clear state
+         * between runs; production code must go through [getSharedInstance].
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun resetForTests() {
+            synchronized(this) {
+                INSTANCE = null
+            }
+        }
     }
 
     enum class Device(val label: String) {
@@ -47,7 +90,14 @@ class AudioRouter(private val context: Context) {
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var listener: Listener? = null
+    // coreListener is owned by CallPlugin (JS-facing). uiListener is owned by
+    // CallActivity. Keeping them separate means onDestroy in the Activity does
+    // not tear down the JS-facing callback registered earlier by CallPlugin.
+    // Both @Volatile because notifyListener reads them from the main-handler
+    // thread while setCoreListener/setUiListener may be invoked from Capacitor
+    // plugin threads that don't share a happens-before with the main handler.
+    @Volatile private var coreListener: Listener? = null
+    @Volatile private var uiListener: Listener? = null
     private var activeDevice: Device = Device.EARPIECE
     private var isActive = false
     private var callType = "voice"
@@ -84,17 +134,27 @@ class AudioRouter(private val context: Context) {
     }
 
     fun start(callType: String) {
+        // Idempotent: second start() in the same call cycle (e.g. JS side
+        // hits startAudioRouting twice because of renegotiation) must not
+        // re-register device callbacks or the same callback would fire
+        // twice per device add/remove.
+        if (isActive) {
+            Log.w(LIFECYCLE_TAG, "start($callType) — already active, no-op (current callType=${this.callType})")
+            return
+        }
+
         this.callType = callType
         this.isActive = true
 
         activeDevice = if (callType == "video") Device.SPEAKER else Device.EARPIECE
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        Log.d(LIFECYCLE_TAG, "start($callType): set mode=MODE_IN_COMMUNICATION, initial active=$activeDevice")
 
         // OEM fix: Some Chinese ROMs (MIUI, RealmeUI, XOS) reset audio mode
         // asynchronously after init. Re-apply after a short delay to catch resets.
         mainHandler.postDelayed({
             if (isActive && audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
-                Log.w(TAG, "Audio mode was reset by system — re-applying MODE_IN_COMMUNICATION")
+                Log.w(LIFECYCLE_TAG, "Audio mode was reset by system — re-applying MODE_IN_COMMUNICATION")
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             }
         }, 500)
@@ -113,10 +173,20 @@ class AudioRouter(private val context: Context) {
             setDeviceInternal(activeDevice)
         }
 
-        Log.d(TAG, "Started for $callType call, active=$activeDevice, available=$available")
+        Log.d(LIFECYCLE_TAG, "start($callType) complete: active=$activeDevice, available=$available")
     }
 
     fun stop() {
+        // Idempotent: every call lifecycle path ends with stopAudioRouting
+        // (hangup, reject, SDK state=Ended, answer-errored, permission-denied),
+        // so calling stop twice happens routinely. Without the guard we would
+        // unregisterAudioDeviceCallback on an already-unregistered callback
+        // and log a spurious warning.
+        if (!isActive) {
+            Log.w(LIFECYCLE_TAG, "stop() — already inactive, no-op")
+            return
+        }
+
         isActive = false
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
 
@@ -136,11 +206,36 @@ class AudioRouter(private val context: Context) {
         audioManager.mode = AudioManager.MODE_NORMAL
         @Suppress("DEPRECATION")
         audioManager.isSpeakerphoneOn = false
-        Log.d(TAG, "Stopped")
+        Log.d(LIFECYCLE_TAG, "stop(): set mode=MODE_NORMAL, cleared comm device")
     }
 
+    /**
+     * Register the core (non-UI) listener. Owned by [com.forta.chat.plugins.calls.CallPlugin];
+     * it fans state changes out to JS via notifyListeners("audioDevicesChanged").
+     * Survives across call UI tear-down.
+     */
+    fun setCoreListener(listener: Listener?) {
+        this.coreListener = listener
+    }
+
+    /**
+     * Register the UI-facing listener. Owned by [com.forta.chat.plugins.calls.CallActivity];
+     * updates the in-call speakerphone/BT icon. Attach on Activity onCreate,
+     * detach on onDestroy — do not call [stop] from the Activity, that is
+     * driven by the call lifecycle in JS (`nativeCallBridge.stopAudioRouting`).
+     */
+    fun setUiListener(listener: Listener?) {
+        this.uiListener = listener
+    }
+
+    /**
+     * Back-compat: existing callers (tests, older code paths) that do not
+     * distinguish core vs UI can still use the single-listener API. Maps to
+     * the core listener slot since that is what external consumers treated
+     * as the "real" one.
+     */
     fun setListener(listener: Listener?) {
-        this.listener = listener
+        setCoreListener(listener)
     }
 
     fun getAvailableDevices(): List<Device> {
@@ -243,9 +338,9 @@ class AudioRouter(private val context: Context) {
 
         if (target != null) {
             val success = audioManager.setCommunicationDevice(target)
-            Log.d(TAG, "setCommunicationDevice(${deviceTypeToString(target.type)}): $success")
+            Log.d(LIFECYCLE_TAG, "setCommunicationDevice(${deviceTypeToString(target.type)}): $success")
         } else {
-            Log.w(TAG, "Target device $device not found in available communication devices")
+            Log.w(LIFECYCLE_TAG, "Target device $device not found in available communication devices")
             audioManager.clearCommunicationDevice()
         }
     }
@@ -305,7 +400,21 @@ class AudioRouter(private val context: Context) {
 
     private fun notifyListener() {
         mainHandler.post {
-            listener?.onAudioDeviceChanged(getState())
+            val state = getState()
+            // Fan out to both slots. Either may be null — core is null before
+            // CallPlugin has loaded (very early app boot); ui is null outside
+            // an active CallActivity. Exceptions thrown by one listener must
+            // not stop the other from being notified.
+            coreListener?.let {
+                try { it.onAudioDeviceChanged(state) } catch (e: Exception) {
+                    Log.e(TAG, "coreListener threw", e)
+                }
+            }
+            uiListener?.let {
+                try { it.onAudioDeviceChanged(state) } catch (e: Exception) {
+                    Log.e(TAG, "uiListener threw", e)
+                }
+            }
         }
     }
 

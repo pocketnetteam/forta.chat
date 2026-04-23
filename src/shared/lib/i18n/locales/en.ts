@@ -496,6 +496,9 @@ export const en = {
   "call.permissionDenied.title": "Device access denied",
   "call.permissionDenied.microphone": "Microphone access is denied. Calls cannot proceed — the other party will not hear you.",
   "call.permissionDenied.camera": "Camera access is denied. Video calls cannot proceed.",
+  "call.permissionDenied.audioBusy": "Microphone is currently used by another app. Close it and try again.",
+  "call.permissionDenied.audioBusyWithApps": "Microphone is in use by: {apps}. Close that app and try again.",
+  "call.permissionDenied.noInputDevice": "No microphone was found. Connect a headset or microphone and try again.",
   "call.permissionDenied.instructions": "Grant access in your system settings: Settings → Apps → Forta Chat → Permissions.",
   "call.permissionDenied.close": "Close",
 

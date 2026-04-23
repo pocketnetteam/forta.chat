@@ -126,8 +126,18 @@ class CallActivity : Activity(), SensorEventListener {
     private var callDurationSeconds = 0
     private var isConnected = false
 
-    // Audio routing
+    // Shared audio router — obtained via AudioRouter.getSharedInstance in
+    // onCreate; lifecycle-wise the Activity only attaches / detaches its UI
+    // listener. Actual start() / stop() is driven by the call state machine
+    // in JS (`nativeCallBridge.startAudioRouting` / `stopAudioRouting`), so
+    // the router keeps running across CallActivity recreation (e.g. after
+    // PiP resize) without tearing MODE_IN_COMMUNICATION mid-call.
     private lateinit var audioRouter: AudioRouter
+    private val audioRouterUiListener = object : AudioRouter.Listener {
+        override fun onAudioDeviceChanged(state: AudioRouter.AudioDeviceState) {
+            runOnUiThread { updateAudioRouteUI(state) }
+        }
+    }
 
     // Sensors & Power
     private var sensorManager: SensorManager? = null
@@ -217,14 +227,18 @@ class CallActivity : Activity(), SensorEventListener {
             startPulseAnimation()
         }
 
-        // Audio routing
-        audioRouter = AudioRouter(this)
-        audioRouter.setListener(object : AudioRouter.Listener {
-            override fun onAudioDeviceChanged(state: AudioRouter.AudioDeviceState) {
-                runOnUiThread { updateAudioRouteUI(state) }
-            }
-        })
-        audioRouter.start(callType)
+        // Attach to the shared AudioRouter. DO NOT construct a new one and
+        // DO NOT call start() here — the call lifecycle in JS already brought
+        // routing up via nativeCallBridge.startAudioRouting right after
+        // placeCall/answer. Starting a second time would be a no-op (guarded)
+        // but constructing a second router would re-create the earlier
+        // "two callbacks racing setCommunicationDevice" bug (#355, #442).
+        audioRouter = AudioRouter.getSharedInstance(this)
+        audioRouter.setUiListener(audioRouterUiListener)
+        // Paint the current state immediately so the speaker/BT icon doesn't
+        // flicker into the default pose while we wait for the first
+        // onAudioDeviceChanged callback.
+        updateAudioRouteUI(audioRouter.getState())
 
         // Proximity sensor (for voice calls)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -322,7 +336,12 @@ class CallActivity : Activity(), SensorEventListener {
             Log.e(TAG, "Error releasing renderers", e)
         }
 
-        audioRouter.stop()
+        // Detach only — do NOT call audioRouter.stop(). Actual routing
+        // teardown is owned by the JS call lifecycle (hangup / reject /
+        // Ended). Stopping here would prematurely restore MODE_NORMAL while
+        // the call might still be rebuilding the Activity after PiP exit
+        // or screen-off recreation.
+        audioRouter.setUiListener(null)
 
         super.onDestroy()
     }

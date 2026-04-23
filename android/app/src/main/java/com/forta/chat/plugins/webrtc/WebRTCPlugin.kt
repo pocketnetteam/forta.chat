@@ -347,7 +347,24 @@ class WebRTCPlugin : Plugin() {
         logAudioManagerState()  // D-07: one-time AudioManager state dump before audio start
         val peerId = call.getString("peerId") ?: ""
         val hasVideo = call.getBoolean("hasVideo", true) ?: true
-        mgr.startLocalAudio(peerId)
+
+        try {
+            mgr.startLocalAudio(peerId)
+        } catch (e: AudioInitException) {
+            // Surfacing AudioSource init failure up to JS. Previously the
+            // native side silently continued with no audio track; the peer
+            // saw "connected" but heard silence (#169, #432, etc.). We
+            // reject the PluginCall with the concrete reason so the proxy
+            // can translate it into a DOMException for the Matrix SDK,
+            // which will then abort call setup cleanly.
+            Log.e(TAG, "[WebRTCAudio] startLocalAudio threw AudioInitException: ${e.reason}", e)
+            notifyListeners("onAudioError", JSObject().apply {
+                put("type", e.reason)
+                put("message", e.message ?: "audio init failed")
+            })
+            call.reject(e.message ?: "audio init failed", e.reason, e)
+            return
+        }
         Log.d("WebRTCAudio", "doStartLocalMedia: audio started for peerId=$peerId, hasVideo=$hasVideo")
 
         if (hasVideo) {

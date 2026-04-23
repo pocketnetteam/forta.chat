@@ -498,6 +498,9 @@ export const ru: Record<TranslationKey, string> = {
   "call.permissionDenied.title": "Нет доступа к устройству",
   "call.permissionDenied.microphone": "Доступ к микрофону не разрешён. Без него звонок невозможен: собеседник вас не услышит.",
   "call.permissionDenied.camera": "Доступ к камере не разрешён. Без него видеозвонок невозможен.",
+  "call.permissionDenied.audioBusy": "Микрофон сейчас занят другим приложением. Закройте его и попробуйте снова.",
+  "call.permissionDenied.audioBusyWithApps": "Микрофон использует: {apps}. Закройте это приложение и попробуйте снова.",
+  "call.permissionDenied.noInputDevice": "Микрофон не найден. Подключите гарнитуру или микрофон и попробуйте снова.",
   "call.permissionDenied.instructions": "Разрешите доступ в настройках системы: «Настройки → Приложения → Forta Chat → Разрешения».",
   "call.permissionDenied.close": "Закрыть",
 

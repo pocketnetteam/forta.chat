@@ -635,7 +635,34 @@ async function nativeGetUserMedia(
   const hasVideo = !!constraints?.video;
   console.log("[NativeRTCProxy] getUserMedia, video:", hasVideo);
 
-  await NativeWebRTC.startLocalMedia({ hasVideo });
+  try {
+    await NativeWebRTC.startLocalMedia({ hasVideo });
+  } catch (e: unknown) {
+    // Session 01 / H0: the native side rejects `startLocalMedia` with code
+    // `audio_source_failed` when libwebrtc's createAudioSource/Track returns
+    // null (OEM audio deadlock, mic held by another app, AudioRecord refused
+    // by firmware). Previously we swallowed this and returned a stream with
+    // only the dummy oscillator track — the Matrix SDK saw tracks present,
+    // kept the call going, and peers heard silence. Turn the reject into a
+    // real DOMException so the SDK's getUserMediaClone → placeCall / answer
+    // bails out and our call-service catch block fails the call visibly.
+    const err = e as { code?: string; errorMessage?: string; message?: string } | undefined;
+    const code = err?.code ?? "audio_source_failed";
+    const message = err?.errorMessage ?? err?.message ?? "Native audio init failed";
+    console.error(
+      "[NativeRTCProxy] startLocalMedia rejected:",
+      code,
+      message,
+    );
+    // NotFoundError is what the Matrix SDK / callers treat as
+    // "device missing / cannot acquire" — see Calls.js `_createGetUserMedia`
+    // upstream. Using it keeps the existing failure-handling path correct
+    // without introducing new error codes.
+    throw new DOMException(
+      `Native audio unavailable: ${message}`,
+      "NotFoundError",
+    );
+  }
 
   // Return a MediaStream with dummy tracks so the SDK sees non-empty streams.
   // The SDK checks track count to determine if media is available.

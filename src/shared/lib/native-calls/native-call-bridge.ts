@@ -2,6 +2,22 @@ import { registerPlugin } from '@capacitor/core';
 import { isNative } from '@/shared/lib/platform';
 import { NativeWebRTC } from '@/shared/lib/native-webrtc/native-webrtc-bridge';
 
+/**
+ * Shape returned by `NativeCall.probeAudioAvailability`. See
+ * {@link NativeCallBridge.probeAudioAvailability} for semantics.
+ */
+export interface AudioProbeResult {
+  available: boolean;
+  hasInput: boolean;
+  canInit: boolean;
+  /**
+   * Hint of what may be holding the mic. Populated on Android 10+ from
+   * AudioManager.getActiveRecordingConfigurations. Empty array when no
+   * conflicting use is detected, or the platform cannot enumerate it.
+   */
+  conflicting?: string[];
+}
+
 interface NativeCallNativePlugin {
   reportIncomingCall(options: {
     callId: string;
@@ -31,6 +47,16 @@ interface NativeCallNativePlugin {
   reportCallEnded(options: { callId: string }): Promise<void>;
   requestAudioPermission(): Promise<{ granted: boolean }>;
   requestCameraPermission(): Promise<{ granted: boolean }>;
+  /**
+   * Real-stream probe. Runs AudioRecord init + input-device enumeration to
+   * confirm the microphone can actually be opened right now. See
+   * `CallPlugin.probeAudioAvailability` in Kotlin for the rationale.
+   *
+   * Older builds of the native plugin don't ship this method; callers must
+   * go through {@link NativeCallBridge.probeAudioAvailability} which has a
+   * safe-by-default fallback for that case.
+   */
+  probeAudioAvailability(): Promise<AudioProbeResult>;
   getAudioDevices(): Promise<{
     active: string;
     devices: Array<{ type: string; name: string }>;
@@ -447,6 +473,50 @@ class NativeCallBridge {
   async requestCameraPermission(): Promise<{ granted: boolean }> {
     if (!isNative) return { granted: true };
     return NativeCall.requestCameraPermission();
+  }
+
+  /**
+   * Confirm the microphone is actually usable *right now*. Unlike
+   * `requestAudioPermission`, this bypasses the per-app permission cache
+   * and probes the real AudioRecord/AudioManager state:
+   *
+   *   - Enumerates input devices (catches "no mic attached" on tablets /
+   *     some Chromebooks / rare Android TV boxes).
+   *   - Attempts `AudioRecord(VOICE_COMMUNICATION, 16kHz, mono, PCM_16)`
+   *     and checks `state == STATE_INITIALIZED` (catches Xiaomi/Huawei
+   *     OEM ghost permissions, MIUI privacy shield, mic-held-by-other-app).
+   *   - Returns currently-active recording sources on Android 10+ for the
+   *     UI to show "X is using your microphone".
+   *
+   * Safe fallbacks:
+   *   - Non-native (web, Electron): always reports available.
+   *   - Older native builds without this method: treated as available too —
+   *     we are strictly additive and must not regress web users whose
+   *     plugin is pre-Session-01.
+   */
+  async probeAudioAvailability(): Promise<AudioProbeResult> {
+    if (!isNative) {
+      return { available: true, hasInput: true, canInit: true, conflicting: [] };
+    }
+    try {
+      const res = await NativeCall.probeAudioAvailability();
+      return {
+        available: !!res?.available,
+        hasInput: !!res?.hasInput,
+        canInit: !!res?.canInit,
+        conflicting: Array.isArray(res?.conflicting) ? res.conflicting : [],
+      };
+    } catch (e) {
+      // The method may be missing on older APKs — Capacitor rejects with
+      // "No method registered". Treat as optimistic: don't block call setup
+      // just because the probe itself failed, otherwise an app update would
+      // break calls for users whose older-build native plugin refuses to
+      // answer. The subsequent SDK getUserMedia path still fails-fast if
+      // AudioRecord genuinely cannot init thanks to the AudioInitException
+      // plumbing in NativeWebRTCManager.
+      console.warn('[NativeCallBridge] probeAudioAvailability unavailable:', e);
+      return { available: true, hasInput: true, canInit: true, conflicting: [] };
+    }
   }
 
   /**
