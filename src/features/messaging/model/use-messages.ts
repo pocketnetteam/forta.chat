@@ -3,7 +3,7 @@ import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normaliz
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
-import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
@@ -251,6 +251,12 @@ export function useMessages() {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
         serverEventId = await matrixService.sendEncryptedText(roomId, encrypted);
       } else {
+        // Defense in depth: the Dexie path already gates via peerKeysOk,
+        // but this legacy fallback runs when chatDb is unavailable. Refuse
+        // rather than ship cleartext into a private room.
+        if (roomCrypto?.requiresEncryption()) {
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — sendMessage legacy path`);
+        }
         serverEventId = await matrixService.sendText(roomId, trimmed);
       }
       if (serverEventId) {
@@ -283,6 +289,12 @@ export function useMessages() {
           const encrypted = await roomCrypto.encryptEvent(msg.content);
           serverEventId = await matrixService.sendEncryptedText(msg.roomId, encrypted);
         } else {
+          // Defense in depth: offline queue replay must not silently
+          // downgrade to plaintext if peer keys are gone by the time we
+          // come back online.
+          if (roomCrypto?.requiresEncryption()) {
+            throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — offline queue drain`);
+          }
           serverEventId = await matrixService.sendText(msg.roomId, msg.content);
         }
         if (serverEventId) {
@@ -1458,6 +1470,11 @@ export function useMessages() {
         if (fwdMeta) (encrypted as Record<string, unknown>)["forwarded_from"] = fwdMeta;
         await matrixService.sendEncryptedText(roomId, encrypted);
       } else {
+        // Defense in depth: a forwarded text is still a plaintext body
+        // shipped to the target room — guard the fallback the same way.
+        if (roomCrypto?.requiresEncryption()) {
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — sendForward legacy path`);
+        }
         const content: Record<string, unknown> = { body: trimmed, msgtype: "m.text" };
         if (fwdMeta) content["forwarded_from"] = fwdMeta;
         await matrixService.sendEncryptedText(roomId, content);
@@ -1520,6 +1537,13 @@ export function useMessages() {
         };
         await matrixService.sendEncryptedText(roomId, encContent);
       } else {
+        // Defense in depth: a plaintext edit retroactively exposes the
+        // original ciphertext bubble. Refuse to replace a ciphertext with
+        // its cleartext just because the peer key race flipped between
+        // original send and this edit.
+        if (roomCrypto?.requiresEncryption()) {
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — editMessage legacy path`);
+        }
         await matrixService.sendEncryptedText(roomId, editContent);
       }
 
@@ -1645,6 +1669,12 @@ export function useMessages() {
           }
           await matrixService.sendEncryptedText(targetRoomId, encrypted);
         } else {
+          // Defense in depth: bulk forward multiplies the leak across N
+          // target rooms — Promise.allSettled below keeps the others
+          // going so one locked room does not block the others.
+          if (roomCrypto?.requiresEncryption()) {
+            throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — bulk forward to ${targetRoomId}`);
+          }
           const payload: Record<string, unknown> = {
             body: src.content,
             msgtype: "m.text",
@@ -1806,6 +1836,13 @@ export function useMessages() {
         const encrypted = await roomCrypto.encryptEvent(transferBody);
         serverEventId = await matrixService.sendEncryptedText(roomId, encrypted);
       } else {
+        // Defense in depth: transfer body JSON contains txId + recipient
+        // address. Shipping it plaintext into a private room exposes
+        // financial metadata that users reasonably expect to stay inside
+        // the encryption envelope.
+        if (roomCrypto?.requiresEncryption()) {
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — sendTransferMessage legacy path`);
+        }
         serverEventId = await matrixService.sendText(roomId, transferBody);
       }
       if (serverEventId) {

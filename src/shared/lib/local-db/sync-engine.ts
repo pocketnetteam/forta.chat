@@ -2,7 +2,7 @@ import type { ChatDatabase, PendingOperation, LocalMessage } from "./schema";
 import type { MessageRepository } from "./message-repository";
 import type { RoomRepository } from "./room-repository";
 import { getMatrixClientService } from "@/entities/matrix";
-import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 
 type GetRoomCryptoFn = (roomId: string) => Promise<PcryptoRoomInstance | undefined>;
 type OnChangeCallback = (roomId: string) => void;
@@ -338,6 +338,14 @@ export class SyncEngine {
 
       serverEventId = await matrixService.sendEncryptedText(op.roomId, encrypted, op.clientId);
     } else {
+      // Defense in depth: refuse to leak plaintext into a private room.
+      // UI already blocks the compose via peerKeysOk, but a stale op in
+      // the queue (e.g. background retry after peer lost keys) must not
+      // silently downgrade. Public / "open channel" rooms fall through.
+      if (roomCrypto?.requiresEncryption()) {
+        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncSendMessage`);
+      }
+
       const content: Record<string, unknown> = {
         msgtype: "m.text",
         body: payload.content,
@@ -393,6 +401,11 @@ export class SyncEngine {
       mxcUrl = await matrixService.uploadContentMxc(encrypted.file);
       secrets = encrypted.secrets;
     } else {
+      // Defense in depth: refuse to upload a plaintext attachment into a
+      // private room. Same rationale as syncSendMessage.
+      if (roomCrypto?.requiresEncryption()) {
+        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncSendFile upload`);
+      }
       mxcUrl = await matrixService.uploadContentMxc(attachment.localBlob);
     }
 
@@ -448,6 +461,12 @@ export class SyncEngine {
       content.version = (encrypted as Record<string, unknown>).version;
       content["m.new_content"] = encrypted;
     } else {
+      // Defense in depth: a plaintext edit would replace a ciphertext
+      // bubble with the original text (server-visible), leaking the
+      // message even if the original send was encrypted.
+      if (roomCrypto?.requiresEncryption()) {
+        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncEditMessage`);
+      }
       content.msgtype = "m.text";
       content.body = `* ${payload.newContent}`;
       content["m.new_content"] = {
@@ -561,6 +580,11 @@ export class SyncEngine {
       const encrypted = await roomCrypto.encryptEvent(transferBody);
       serverEventId = await matrixService.sendEncryptedText(op.roomId, encrypted, op.clientId);
     } else {
+      // Defense in depth: transfer bodies carry a txId + recipient address
+      // and must never land in the clear inside a private room.
+      if (roomCrypto?.requiresEncryption()) {
+        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncSendTransfer`);
+      }
       serverEventId = await matrixService.sendText(op.roomId, transferBody, op.clientId);
     }
 

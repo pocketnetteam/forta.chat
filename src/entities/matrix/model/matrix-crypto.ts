@@ -173,8 +173,19 @@ interface CryptoUserInfo {
 
 // ---- PcryptoRoom interface ----
 
+/** Shared error tag for every plaintext-fallback guard. Centralised so log
+ *  grep + telemetry matching stays stable no matter which send path threw. */
+export const ENCRYPTION_REQUIRED_NO_KEYS =
+  "encryption required but peer keys unavailable";
+
 export interface PcryptoRoomInstance {
   canBeEncrypt(): boolean;
+  /** Whether the room mandates encryption (i.e. private, non-public). When
+   *  true and canBeEncrypt() is false, callers must NOT fall back to
+   *  plaintext — the sender has to wait for keys or fail the op. Public /
+   *  "open channel" style rooms return false here; plaintext is OK for
+   *  those by design. */
+  requiresEncryption(): boolean;
   prepare(): Promise<PcryptoRoomInstance>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _encrypt(userid: string, text: string, v?: number): Promise<{ encrypted: string; nonce: string }>;
@@ -640,6 +651,15 @@ export class Pcrypto {
 
     // ---- Room interface ----
     const room: PcryptoRoomInstance = {
+      requiresEncryption(): boolean {
+        // Private (non-public) rooms mandate encryption. Public rooms are
+        // allowed to send plaintext by design — Bastyon convention for
+        // open channels. Keep this in lockstep with canBeEncrypt()'s own
+        // publicChat gate so the two signals can never diverge.
+        const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
+        return !publicChat;
+      },
+
       canBeEncrypt(): boolean {
         const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
         if (publicChat) return false;
