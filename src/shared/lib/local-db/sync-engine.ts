@@ -3,12 +3,46 @@ import type { MessageRepository } from "./message-repository";
 import type { RoomRepository } from "./room-repository";
 import { getMatrixClientService } from "@/entities/matrix";
 import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { withTimeout } from "@/shared/lib/with-timeout";
 
 type GetRoomCryptoFn = (roomId: string) => Promise<PcryptoRoomInstance | undefined>;
 type OnChangeCallback = (roomId: string) => void;
 
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
+
+/** Per-phase media pipeline timeouts. Splitting one 5-minute cap into
+ *  per-phase caps lets retries surface phase-specific failures (e.g. crypto
+ *  hang vs. upload stall) instead of a generic "timed out" after 5 min. */
+const MEDIA_ENCRYPT_TIMEOUT_MS = 30_000;
+const MEDIA_UPLOAD_TIMEOUT_MS = 4 * 60_000;
+const MEDIA_SEND_EVENT_TIMEOUT_MS = 20_000;
+
+/** Throttle for upload-progress Dexie writes. A 20MB upload over a slow
+ *  link produces hundreds of progress callbacks per second; unthrottled
+ *  writes saturate the IDB lock on older Android WebViews. Always flush
+ *  the terminal "100%" so the UI never sticks at 97%. */
+const UPLOAD_PROGRESS_WRITE_INTERVAL_MS = 500;
+
+function makeThrottledProgress(
+  write: (percent: number) => void,
+): (p: { loaded: number; total: number }) => void {
+  let lastWriteAt = 0;
+  let lastPercent = -1;
+  return (progress) => {
+    const percent =
+      progress.total > 0
+        ? Math.round((progress.loaded / progress.total) * 100)
+        : 0;
+    const now = Date.now();
+    const isFinal = percent === 100 && lastPercent !== 100;
+    if (!isFinal && now - lastWriteAt < UPLOAD_PROGRESS_WRITE_INTERVAL_MS) return;
+    if (percent === lastPercent) return;
+    lastWriteAt = now;
+    lastPercent = percent;
+    write(percent);
+  };
+}
 
 function computeBackoff(retries: number): number {
   const base = Math.min(MIN_BACKOFF_MS * 2 ** retries, MAX_BACKOFF_MS);
@@ -33,6 +67,11 @@ export class SyncEngine {
   private scheduled = false;
   private disposed = false;
   private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
+  /** AbortControllers for in-flight media uploads, keyed by clientId.
+   *  Populated by syncSendFile at the start of each execution, drained in
+   *  its finally block. cancelMediaUpload() signals through this map to
+   *  abort a running upload mid-flight. */
+  private activeUploads = new Map<string, AbortController>();
   /** Becomes true the first time setOnline() is called with `true`.
    *  Guards against the "app started offline from a previous session and
    *  wakes up online without ever seeing setOnline(false)" case, where
@@ -382,62 +421,128 @@ export class SyncEngine {
       mimeType: string;
       msgtype: string;
       attachmentId: number;
+      /** Optional human-readable body. When omitted, syncSendFile writes
+       *  the legacy JSON-encoded `{name,type,size}` body used by m.file
+       *  messages. m.image / m.audio senders override this with the
+       *  caption or a short tag string ("Image" / "Audio"). */
+      body?: string;
+      /** Optional pre-computed info object (image dimensions, audio duration,
+       *  etc.). Merged into `content.info` with secrets appended. Keeps the
+       *  per-type metadata intact without forcing syncSendFile to re-inspect
+       *  the blob. */
+      eventInfo?: Record<string, unknown>;
+      /** Optional top-level event fields merged after msgtype — e.g.
+       *  caption / captionAbove / bastyon-specific flags. */
+      eventExtras?: Record<string, unknown>;
     };
     const matrixService = getMatrixClientService();
 
-    // Get the attachment blob from DB
+    // --- Acquire blob -------------------------------------------------------
     const attachment = await this.db.attachments.get(payload.attachmentId);
     if (!attachment?.localBlob) {
       throw new Error("Attachment blob not found");
     }
 
-    // Upload file
-    const roomCrypto = await this.getRoomCrypto(op.roomId);
-    let mxcUrl: string;
-    let secrets: Record<string, unknown> | undefined;
+    // Register an AbortController for this upload so cancelMediaUpload(clientId)
+    // can interrupt the in-flight fetch.
+    const controller = new AbortController();
+    this.activeUploads.set(op.clientId, controller);
 
-    if (roomCrypto?.canBeEncrypt()) {
-      const encrypted = await roomCrypto.encryptFile(attachment.localBlob);
-      mxcUrl = await matrixService.uploadContentMxc(encrypted.file);
-      secrets = encrypted.secrets;
-    } else {
-      // Defense in depth: refuse to upload a plaintext attachment into a
-      // private room. Same rationale as syncSendMessage.
-      if (roomCrypto?.requiresEncryption()) {
+    try {
+      if (controller.signal.aborted) {
+        throw new DOMException("Upload cancelled", "AbortError");
+      }
+
+      // --- Phase 1: encrypt (fast, fails loudly) ----------------------------
+      const roomCrypto = await this.getRoomCrypto(op.roomId);
+      let fileToUpload: Blob = attachment.localBlob;
+      let secrets: Record<string, unknown> | undefined;
+
+      if (roomCrypto?.canBeEncrypt()) {
+        const encrypted = await withTimeout(
+          roomCrypto.encryptFile(attachment.localBlob),
+          MEDIA_ENCRYPT_TIMEOUT_MS,
+          "Media encrypt",
+        );
+        fileToUpload = encrypted.file;
+        secrets = encrypted.secrets;
+      } else if (roomCrypto?.requiresEncryption()) {
+        // Defense in depth: refuse to upload a plaintext attachment into a
+        // private room. Same rationale as syncSendMessage.
         throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncSendFile upload`);
       }
-      mxcUrl = await matrixService.uploadContentMxc(attachment.localBlob);
+
+      await this.db.attachments.update(attachment.id!, {
+        status: "uploading",
+        encryptionSecrets: secrets,
+      });
+
+      // --- Phase 2: upload (longest — big files on slow links) --------------
+      if (controller.signal.aborted) {
+        throw new DOMException("Upload cancelled", "AbortError");
+      }
+      const onProgress = makeThrottledProgress((percent) => {
+        // fire-and-forget; progress is advisory and must not stall upload
+        void this.messageRepo.updateUploadProgress(op.clientId, percent);
+      });
+      const url = await withTimeout(
+        matrixService.uploadContent(fileToUpload, onProgress, controller.signal),
+        MEDIA_UPLOAD_TIMEOUT_MS,
+        "Media upload",
+      );
+
+      await this.db.attachments.update(attachment.id!, {
+        status: "uploaded",
+        remoteUrl: url,
+      });
+
+      // --- Phase 3: send event (short, just a Matrix PUT) --------------------
+      if (controller.signal.aborted) {
+        throw new DOMException("Upload cancelled", "AbortError");
+      }
+
+      // Prefer structured fileInfo body (matches sendFile's JSON shape) so
+      // existing viewers keep rendering. Callers that need richer metadata
+      // (m.image with dimensions, m.audio with duration) pass eventInfo /
+      // eventExtras which merge on top.
+      const content: Record<string, unknown> = {
+        msgtype: payload.msgtype,
+        body:
+          payload.body ??
+          JSON.stringify({
+            name: payload.fileName,
+            type: payload.mimeType,
+            size: attachment.size,
+          }),
+        url,
+        ...(payload.eventExtras ?? {}),
+      };
+      if (payload.eventInfo) {
+        content.info = {
+          ...payload.eventInfo,
+          ...(secrets ? { secrets } : {}),
+        };
+      } else if (secrets) {
+        content.secrets = secrets;
+      }
+
+      const serverEventId = await withTimeout(
+        matrixService.sendEncryptedText(op.roomId, content, op.clientId),
+        MEDIA_SEND_EVENT_TIMEOUT_MS,
+        "Media send event",
+      );
+
+      await this.messageRepo.confirmSent(op.clientId, serverEventId);
+      await this.roomRepo.updateRoom(op.roomId, {
+        lastMessageLocalStatus: "synced" as import("./schema").LocalMessageStatus,
+        lastMessageEventId: serverEventId,
+      });
+    } finally {
+      // Release the controller slot regardless of outcome so a retry can
+      // register a fresh one.
+      const current = this.activeUploads.get(op.clientId);
+      if (current === controller) this.activeUploads.delete(op.clientId);
     }
-
-    // Update attachment status
-    await this.db.attachments.update(attachment.id!, {
-      status: "uploaded",
-      remoteUrl: mxcUrl,
-      encryptionSecrets: secrets,
-    });
-
-    // Send message event with file metadata
-    const content: Record<string, unknown> = {
-      msgtype: payload.msgtype,
-      body: JSON.stringify({
-        name: payload.fileName,
-        type: payload.mimeType,
-        size: attachment.size,
-      }),
-      url: mxcUrl,
-    };
-    if (secrets) {
-      content.secrets = secrets;
-    }
-
-    // Pass op.clientId as the Matrix txnId so the homeserver dedupes
-    // multi-tab/retry sends into a single event (matches syncSendMessage).
-    const serverEventId = await matrixService.sendEncryptedText(op.roomId, content, op.clientId);
-    await this.messageRepo.confirmSent(op.clientId, serverEventId);
-    await this.roomRepo.updateRoom(op.roomId, {
-      lastMessageLocalStatus: "synced" as import("./schema").LocalMessageStatus,
-      lastMessageEventId: serverEventId,
-    });
   }
 
   private async syncEditMessage(op: PendingOperation): Promise<void> {
@@ -664,6 +769,26 @@ export class SyncEngine {
     const pending = await this.db.pendingOps.where("status").equals("pending").count();
     const failed = await this.db.pendingOps.where("status").equals("failed").count();
     return { pending, failed };
+  }
+
+  /**
+   * Cancel an in-flight media upload by clientId. Aborts the signal so the
+   * Matrix SDK tears down the XHR, then removes the pending op so the
+   * scheduler does not resume it after restart. The message row itself
+   * stays untouched — the caller (use-messages cancelMediaUpload) owns
+   * flipping status to "cancelled" / revoking the preview blob URL.
+   */
+  async cancelMediaUpload(clientId: string): Promise<void> {
+    this.activeUploads.get(clientId)?.abort();
+    this.activeUploads.delete(clientId);
+    // Narrow the delete to send_file ops. clientId is not unique across
+    // op types (a send_message op could share it), so a broad delete
+    // could clobber unrelated queued sends.
+    await this.db.pendingOps
+      .where("clientId")
+      .equals(clientId)
+      .filter((op) => op.type === "send_file")
+      .delete();
   }
 
   /** Cancel a pending/failed operation and clean up */
