@@ -114,14 +114,23 @@ export class PcryptoFile {
     return new File([encrypted], "encrypted", { type: "application/octet-stream" });
   }
 
-  async decryptFile(file: Blob, secret: string): Promise<File> {
+  /**
+   * Decrypt a ciphertext blob.
+   *
+   * @param originalMime — MIME type of the plaintext. New writers always
+   *   store ciphertext as application/octet-stream and pass the real MIME
+   *   via fileInfo.type, so prefer this argument. When omitted we fall
+   *   back to stripping the legacy "encrypted/" prefix from file.type so
+   *   messages written by old clients still open.
+   */
+  async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
     const buffer = await readFile(file);
     const decrypted = await this.decrypt(buffer, secret);
-    // Strip the legacy "encrypted/" prefix if the ciphertext was produced by
-    // an older client version; fall back to generic binary otherwise.
-    const type = file.type.startsWith("encrypted/")
-      ? file.type.replace("encrypted/", "")
-      : "application/octet-stream";
+    const type = originalMime
+      ? originalMime
+      : file.type.startsWith("encrypted/")
+        ? file.type.replace("encrypted/", "")
+        : "application/octet-stream";
     return new File([decrypted], "decrypted", { type });
   }
 }
@@ -198,7 +207,7 @@ export interface PcryptoRoomInstance {
   getOrCreateCommonKey(): Promise<{ key: string; hash: string; block: number }>;
   sendCommonKey(): Promise<{ key: string; hash: string; block: number }>;
   encryptFile(file: Blob): Promise<{ file: File; secrets: Record<string, unknown> }>;
-  decryptFile(file: Blob, secret: string): Promise<File>;
+  decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File>;
   encryptKey(key: string): Promise<{ block: number; keys: string; v: number }>;
   decryptKey(event: Record<string, unknown>): Promise<string>;
   clear(): void;
@@ -1062,8 +1071,8 @@ export class Pcrypto {
         return { file: encryptedFile, secrets };
       },
 
-      async decryptFile(file: Blob, secret: string): Promise<File> {
-        return pcrypto.pcryptoFile.decryptFile(file as File, secret);
+      async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
+        return pcrypto.pcryptoFile.decryptFile(file as File, secret, originalMime);
       },
 
       async encryptKey(key: string): Promise<{ block: number; keys: string; v: number }> {
