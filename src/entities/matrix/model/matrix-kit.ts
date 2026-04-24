@@ -10,6 +10,51 @@ import type { MatrixClientService } from "./matrix-client";
 
 const cacheStorage: Record<string, string> = {};
 
+export type JoinRule = "public" | "invite" | "knock" | "restricted" | string;
+
+/**
+ * Read `m.room.join_rules` as the single source of truth.
+ *
+ * Matrix JS SDK exposes two shapes depending on arity of `getStateEvents`:
+ *   - `getStateEvents(type, stateKey)` returns a single MatrixEvent | null
+ *   - `getStateEvents(type)` returns a MatrixEvent[]
+ *
+ * Historically chat-store.isRoomPublic and matrix-kit.chatIsPublic read
+ * these through different paths → split-brain state. Consolidate here so
+ * UI and business logic agree on the rule.
+ *
+ * Defaults to "invite" (Matrix spec default) when the event is missing or
+ * unreadable.
+ */
+export function readJoinRule(room: Record<string, unknown>): JoinRule {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cs = (room as any)?.currentState;
+    if (!cs || typeof cs.getStateEvents !== "function") return "invite";
+
+    // Preferred path: explicit state_key="" returns a single event
+    const single = cs.getStateEvents("m.room.join_rules", "");
+    if (single && typeof single.getContent === "function") {
+      const rule = single.getContent()?.join_rule;
+      if (typeof rule === "string" && rule.length > 0) return rule;
+    }
+
+    // Fallback path: array shape on some SDK versions
+    const arr = cs.getStateEvents("m.room.join_rules");
+    if (Array.isArray(arr)) {
+      for (const ev of arr) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const e = ev as any;
+        const rule = e?.event?.content?.join_rule ?? e?.getContent?.()?.join_rule;
+        if (typeof rule === "string" && rule.length > 0) return rule;
+      }
+    }
+  } catch {
+    /* fall through to default */
+  }
+  return "invite";
+}
+
 export class MatrixKit {
   private matrixService: MatrixClientService;
 
@@ -137,16 +182,10 @@ export class MatrixKit {
     return hash;
   }
 
-  /** Check if chat is public */
+  /** Check if chat is public. Delegates to the shared readJoinRule helper so
+   *  chat-store and this class never diverge on how join_rules is read. */
   chatIsPublic(room: Record<string, unknown>): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const roomAny = room as any;
-    const joinRules = (roomAny.currentState?.getStateEvents?.("m.room.join_rules") ?? []) as unknown[];
-    return joinRules.some((v: unknown) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rule = (v as any)?.event;
-      return rule?.content?.join_rule === "public";
-    });
+    return readJoinRule(room) === "public";
   }
 
   /** Get room members — combines currentState.members + summary.members
