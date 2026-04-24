@@ -663,10 +663,22 @@ export class Pcrypto {
       requiresEncryption(): boolean {
         // Private (non-public) rooms mandate encryption. Public rooms are
         // allowed to send plaintext by design — Bastyon convention for
-        // open channels. Keep this in lockstep with canBeEncrypt()'s own
-        // publicChat gate so the two signals can never diverge.
+        // open channels.
         const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
-        return !publicChat;
+        if (publicChat) return false;
+
+        // Large rooms (≥50 members) also fall back to plaintext by design —
+        // E2E group-key exchange is not workable at that scale, and
+        // canBeEncrypt() explicitly returns false for them. requiresEncryption()
+        // must mirror that same gate or the two signals diverge and every
+        // send in a large private group throws ENCRYPTION_REQUIRED_NO_KEYS,
+        // permanently stranding messages in the outbound queue.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const serverCount = (chat as any).getJoinedMemberCount?.() ?? 0;
+        const memberCount = Math.max(serverCount, Object.keys(usersinfo).length);
+        if (memberCount >= 50) return false;
+
+        return true;
       },
 
       canBeEncrypt(): boolean {
