@@ -1,12 +1,14 @@
 <div align="center">
 
+**English · [Русский](README.ru.md)**
+
 <a href="https://forta.chat">
   <img src="public/forta-icon.png" alt="Forta Chat" width="120" height="120" />
 </a>
 
 # Forta Chat
 
-**Децентрализованный мессенджер на протоколе Matrix с интеграцией Bastyon**
+**Decentralized messenger on the Matrix protocol with Bastyon integration**
 
 [![Latest Release](https://img.shields.io/github/v/release/pocketnetteam/forta.chat?style=flat-square&color=%232ea44f)](https://github.com/pocketnetteam/forta.chat/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/pocketnetteam/forta.chat/total?style=flat-square)](https://github.com/pocketnetteam/forta.chat/releases)
@@ -17,7 +19,7 @@
 [![Capacitor](https://img.shields.io/badge/Capacitor-8.2-119EFF?style=flat-square&logo=capacitor&logoColor=white)](https://capacitorjs.com/)
 [![Electron](https://img.shields.io/badge/Electron-40-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org/)
 
-### [🌐 forta.chat](https://forta.chat) · [📥 Скачать](https://github.com/pocketnetteam/forta.chat/releases/latest) · [📖 Документация](#документация) · [🐛 Баги](https://github.com/pocketnetteam/forta.chat/issues) · [🔐 Bastyon](https://bastyon.com)
+### [🌐 forta.chat](https://forta.chat) · [📥 Download](https://github.com/pocketnetteam/forta.chat/releases/latest) · [📖 Docs](#documentation) · [🐛 Issues](https://github.com/pocketnetteam/forta.chat/issues) · [🔐 Bastyon](https://bastyon.com)
 
 <br />
 
@@ -29,57 +31,57 @@
 
 ---
 
-## О проекте
+## About
 
-**Forta Chat** — это end-to-end шифрованный мессенджер с архитектурой **local-first**: все сообщения, медиа и метаданные хранятся в IndexedDB на вашем устройстве, а синхронизация с Matrix-сервером идёт в фоне. Авторизация выполняется через приватный ключ аккаунта [Bastyon](https://bastyon.com) — никаких логинов и паролей.
+**Forta Chat** is an end-to-end encrypted messenger built on a **local-first** architecture: every message, media file, and piece of metadata lives in IndexedDB on your device, while background workers sync with a Matrix server. You sign in with the private key of your [Bastyon](https://bastyon.com) account — no usernames, no passwords.
 
-Работает в вебе на [forta.chat](https://forta.chat), на десктопе (Windows / macOS / Linux) и на Android.
+Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / macOS / Linux), and on Android.
 
-## Возможности
+## Features
 
-- 🔒 **E2E-шифрование** личных и групповых чатов (Matrix Olm/Megolm через `matrix-js-sdk-bastyon`)
-- 📴 **Local-first**: Dexie (IndexedDB) как единственный источник правды, оффлайн-первая отправка через `SyncEngine` (FIFO + exponential backoff)
-- 📞 **Видеозвонки** 1:1 и групповые через WebRTC — см. [docs/webrtc-architecture.md](docs/webrtc-architecture.md)
-- 🎙 **Медиа**: фото, видео, голосовые, видеокружки, файлы с crash-recovery загрузкой
-- 🌐 **Публичные комнаты и инвайт-ссылки**, реакции, опросы, read-watermarks, редактирование/удаление
-- 🔑 **Вход через Bastyon**: приватный ключ Bastyon-аккаунта — см. [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
-- 🖥 **Кросс-платформенность**: Web, Electron (Windows/macOS/Linux), Android 7.0+ (API 24+)
+- 🔒 **End-to-end encryption** for direct and group chats (Matrix Olm/Megolm via `matrix-js-sdk-bastyon`)
+- 📴 **Local-first storage**: Dexie (IndexedDB) as the single source of truth, offline-first outbound queue via `SyncEngine` (FIFO + exponential backoff)
+- 📞 **Video calls** — 1:1 and group WebRTC — see [docs/webrtc-architecture.md](docs/webrtc-architecture.md)
+- 🎙 **Rich media**: photos, videos, voice notes, video circles, and files with crash-recovery uploads
+- 🌐 **Public rooms & invite links**, reactions, polls, read watermarks, edit/redact
+- 🔑 **Sign in with Bastyon** — use your existing Bastyon private key — see [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
+- 🖥 **Cross-platform**: Web, Electron (Windows / macOS / Linux), Android 7.0+ (API 24+)
 
-## Скачать
+## Download
 
-| Платформа | Ссылка |
-|-----------|--------|
+| Platform | Link |
+|----------|------|
 | 🌐 **Web** | [forta.chat](https://forta.chat) |
 | 🤖 **Android (APK)** | [releases/latest](https://github.com/pocketnetteam/forta.chat/releases/latest) |
-| 🪟 **Windows** | собирается локально — см. [Electron](#electron-десктоп) |
-| 🍎 **macOS** | собирается локально — см. [Electron](#electron-десктоп) |
-| 🐧 **Linux** | собирается локально — см. [Electron](#electron-десктоп) |
+| 🪟 **Windows** | build locally — see [Electron](#electron-desktop) |
+| 🍎 **macOS** | build locally — see [Electron](#electron-desktop) |
+| 🐧 **Linux** | build locally — see [Electron](#electron-desktop) |
 
-## Технологический стек
+## Tech stack
 
-| Слой | Технология |
-|------|-----------|
+| Layer | Technology |
+|-------|-----------|
 | UI | Vue 3 (Composition API, `<script setup>`) + TailwindCSS |
 | State | Pinia |
-| Роутинг | Vue Router 4 |
-| Сборка | Vite 5 |
-| Типы | TypeScript 5.5 (strict) + `vue-tsc` |
-| Тесты | Vitest + `@vue/test-utils` + happy-dom + fake-indexeddb |
-| Хранилище | Dexie 4 (IndexedDB) |
-| Чат-протокол | `matrix-js-sdk-bastyon` (Matrix fork от Bastyon) |
-| Звонки | WebRTC |
-| Десктоп | Electron 40 + electron-builder |
-| Мобильный | Capacitor 8 (Android) |
-| Крипто | `@noble/secp256k1`, `miscreant` (AEAD), `pbkdf2` |
+| Routing | Vue Router 4 |
+| Bundler | Vite 5 |
+| Types | TypeScript 5.5 (strict) + `vue-tsc` |
+| Tests | Vitest + `@vue/test-utils` + happy-dom + fake-indexeddb |
+| Storage | Dexie 4 (IndexedDB) |
+| Chat protocol | `matrix-js-sdk-bastyon` (Matrix fork maintained by Bastyon) |
+| Calls | WebRTC |
+| Desktop | Electron 40 + electron-builder |
+| Mobile | Capacitor 8 (Android) |
+| Crypto | `@noble/secp256k1`, `miscreant` (AEAD), `pbkdf2` |
 
-## Быстрый старт
+## Quick start
 
-### Пререквизиты
+### Prerequisites
 
 - Node.js 18+
 - npm 7+
 
-### Установка
+### Install
 
 ```bash
 git clone https://github.com/pocketnetteam/forta.chat.git
@@ -87,124 +89,124 @@ cd forta.chat
 npm install
 ```
 
-### Dev-режим (web)
+### Dev mode (web)
 
 ```bash
 npm run dev
 ```
 
-Откроется `http://localhost:5173`. Для авторизации понадобится приватный ключ Bastyon — инструкция: [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md).
+Opens `http://localhost:5173`. You'll need a Bastyon private key to sign in — see [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md).
 
-### Production-сборка
+### Production build
 
 ```bash
-npm run build       # vue-tsc + vite build + минификация public JS
-npm run preview     # превью собранной версии
+npm run build       # vue-tsc + vite build + public JS minification
+npm run preview     # preview the built bundle
 ```
 
-### Тесты
+### Tests
 
 ```bash
 npm run test        # one-shot
-npm run test:watch  # watch-режим
+npm run test:watch  # watch mode
 ```
 
-## Сборка для платформ
+## Building per platform
 
-### Electron (десктоп)
+### Electron (desktop)
 
 ```bash
-npm run electron:dev              # dev (vite + electron одновременно)
-npm run electron:preview          # preview собранной версии в Electron
-npm run electron:build            # сборка под текущую ОС
+npm run electron:dev              # dev (vite + electron together)
+npm run electron:preview          # preview built bundle in Electron
+npm run electron:build            # build for the current OS
 npm run electron:build:win        # Windows
 npm run electron:build:mac        # macOS
 npm run electron:build:linux      # Linux
 ```
 
-Конфигурация — [electron-builder.json](electron-builder.json), main-процесс — [electron/main.cjs](electron/main.cjs).
+Build config — [electron-builder.json](electron-builder.json), main process — [electron/main.cjs](electron/main.cjs).
 
 ### Android (Capacitor)
 
 ```bash
 npm run cap:build   # vite build + cap sync android
-npm run cap:open    # открыть проект в Android Studio
-npm run cap:run     # запустить на подключённом устройстве
+npm run cap:open    # open the project in Android Studio
+npm run cap:run     # run on a connected device
 ```
 
-Полная инструкция по локальной сборке APK (debug/release, keystore, переменные окружения) — [docs/android-local-build.md](docs/android-local-build.md).
+Full APK build guide (debug/release, keystore, env vars) — [docs/android-local-build.md](docs/android-local-build.md).
 
-Capacitor-конфиг: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
+Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
 
-## Архитектура
+## Architecture
 
-Проект организован по **Feature-Sliced Design**:
+The project follows **Feature-Sliced Design**:
 
 ```
 src/
-├── app/         # точка входа, провайдеры, роутинг, boot
-├── pages/       # route-контейнеры
-├── widgets/     # композиции фич (ChatSidebar, ChatWindow, layouts)
+├── app/         # entry, providers, routing, boot
+├── pages/       # route containers
+├── widgets/     # composed surfaces (ChatSidebar, ChatWindow, layouts)
 ├── features/    # messaging, auth, contacts, video-calls, search, ...
 ├── entities/    # auth, chat, matrix, user, call, channel, media, ...
 └── shared/      # ui, lib, composables, local-db (Dexie), config
 ```
 
-Ключевые абстракции:
+Key abstractions:
 
-- **`shared/lib/local-db/ChatDatabase`** — Dexie-схема, репозитории (`MessageRepository`, `RoomRepository`, `UserRepository`)
-- **`shared/lib/local-db/sync-engine.ts`** — offline-first FIFO-очередь отправки
-- **`shared/lib/local-db/event-writer.ts`** — транзакционная запись Matrix-событий в Dexie
-- **`shared/lib/local-db/decryption-worker.ts`** — фоновая дешифровка с retry
-- **`shared/ui/ChatVirtualScroller.vue`** — кастомный виртуальный скролл (column-reverse)
+- **`shared/lib/local-db/ChatDatabase`** — Dexie schema, repositories (`MessageRepository`, `RoomRepository`, `UserRepository`)
+- **`shared/lib/local-db/sync-engine.ts`** — offline-first FIFO outbound queue
+- **`shared/lib/local-db/event-writer.ts`** — transactional Matrix-event writes into Dexie
+- **`shared/lib/local-db/decryption-worker.ts`** — background decryption with retry
+- **`shared/ui/ChatVirtualScroller.vue`** — custom virtual scroll (column-reverse)
 
-Глубокие описания:
+Deep dives:
 
 - [docs/local-first-architecture.md](docs/local-first-architecture.md) — Dexie, SyncEngine, EventWriter, decryption
-- [docs/architecture-data-flow.md](docs/architecture-data-flow.md) — потоки данных, реактивность, жизненный цикл
-- [docs/webrtc-architecture.md](docs/webrtc-architecture.md) — звонки, signaling, AudioRouter
-- [docs/ux-specification.md](docs/ux-specification.md) — UX-спецификация экранов и потоков
+- [docs/architecture-data-flow.md](docs/architecture-data-flow.md) — data flow, reactivity, lifecycle
+- [docs/webrtc-architecture.md](docs/webrtc-architecture.md) — calls, signaling, AudioRouter
+- [docs/ux-specification.md](docs/ux-specification.md) — UX spec for screens and flows
 
-## Документация
+## Documentation
 
-| Файл | О чём |
+| File | Topic |
 |------|-------|
-| [CLAUDE.md](CLAUDE.md) | Правила для разработки (стек, архитектура, конвенции, верификация) |
+| [CLAUDE.md](CLAUDE.md) | Development rules (stack, architecture, conventions, verification) |
 | [docs/local-first-architecture.md](docs/local-first-architecture.md) | Local-first: Dexie, SyncEngine, EventWriter |
-| [docs/architecture-data-flow.md](docs/architecture-data-flow.md) | Потоки данных и реактивность |
-| [docs/ux-specification.md](docs/ux-specification.md) | UX-спецификация |
-| [docs/webrtc-architecture.md](docs/webrtc-architecture.md) | Архитектура звонков |
-| [docs/webrtc-calls-troubleshooting.md](docs/webrtc-calls-troubleshooting.md) | Траблшутинг звонков |
-| [docs/webrtc-logs-analysis.md](docs/webrtc-logs-analysis.md) | Разбор логов WebRTC |
-| [docs/webrtc-solution-proposal.md](docs/webrtc-solution-proposal.md) | Предложения по улучшению звонков |
-| [docs/android-local-build.md](docs/android-local-build.md) | Локальная сборка Android APK |
-| [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md) | Как получить приватный ключ Bastyon |
-| [docs/plans/](docs/plans/) | Дизайн-документы и планы фич |
+| [docs/architecture-data-flow.md](docs/architecture-data-flow.md) | Data flow and reactivity |
+| [docs/ux-specification.md](docs/ux-specification.md) | UX specification |
+| [docs/webrtc-architecture.md](docs/webrtc-architecture.md) | Call architecture |
+| [docs/webrtc-calls-troubleshooting.md](docs/webrtc-calls-troubleshooting.md) | Call troubleshooting |
+| [docs/webrtc-logs-analysis.md](docs/webrtc-logs-analysis.md) | WebRTC log analysis |
+| [docs/webrtc-solution-proposal.md](docs/webrtc-solution-proposal.md) | WebRTC improvement proposals |
+| [docs/android-local-build.md](docs/android-local-build.md) | Local Android APK build |
+| [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md) | How to obtain a Bastyon private key |
+| [docs/plans/](docs/plans/) | Design docs and feature plans |
 
-## Разработка
+## Development
 
-Перед коммитом обязательно прогнать полную верификацию:
+Before each commit, run the full verification pipeline:
 
 ```bash
-npm run build              # сборка (vue-tsc + vite)
-npx vue-tsc --noEmit       # проверка типов
-npm run test               # тесты
+npm run build              # build (vue-tsc + vite)
+npx vue-tsc --noEmit       # type-check
+npm run test               # tests
 ```
 
-Конвенции, правила по изоляции через git worktrees, TDD, code review и прочее — в [CLAUDE.md](CLAUDE.md).
+Conventions, git-worktree isolation, TDD, code review and the rest — in [CLAUDE.md](CLAUDE.md).
 
-Коммит-сообщения: [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 
-## Юридическая информация
+## Legal
 
-- [Политика конфиденциальности](https://forta.chat/privacy.html)
-- [Условия использования](https://forta.chat/terms.html)
+- [Privacy Policy](https://forta.chat/privacy.html)
+- [Terms of Use](https://forta.chat/terms.html)
 
-## Ссылки
+## Links
 
-- 🌐 Сайт: [forta.chat](https://forta.chat)
-- 📦 Репозиторий: [github.com/pocketnetteam/forta.chat](https://github.com/pocketnetteam/forta.chat)
-- 📥 Релизы: [github.com/pocketnetteam/forta.chat/releases](https://github.com/pocketnetteam/forta.chat/releases)
+- 🌐 Website: [forta.chat](https://forta.chat)
+- 📦 Repository: [github.com/pocketnetteam/forta.chat](https://github.com/pocketnetteam/forta.chat)
+- 📥 Releases: [github.com/pocketnetteam/forta.chat/releases](https://github.com/pocketnetteam/forta.chat/releases)
 - 🐛 Issues: [github.com/pocketnetteam/forta.chat/issues](https://github.com/pocketnetteam/forta.chat/issues)
 - 🔐 Bastyon: [bastyon.com](https://bastyon.com)
 
