@@ -75,6 +75,17 @@ const roomPublic = computed(() => {
   return chatStore.isRoomPublic(room.value.id);
 });
 
+// A broader "shareable" signal: includes world_readable broadcast rooms,
+// where the `join_rule` is still `"invite"` but anyone with the id can
+// peek and the owners typically expect the link to be copyable. This is
+// what most Bastyon release-note / announcement channels look like.
+const roomShareable = computed(() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  stateMarker.value;
+  if (!room.value?.isGroup) return false;
+  return chatStore.isRoomShareableByLink(room.value.id);
+});
+
 // Path-based URL (NOT hash-based) — AndroidManifest pathPrefix="/join"
 // matches path, not fragment. Using a hash URL means the Android App Link
 // intent-filter never fires and the link opens in the browser.
@@ -637,8 +648,10 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               </button>
             </div>
 
-            <!-- Invite link section (group only, admin or already public) -->
-            <div v-if="room.isGroup && (isAdmin || roomPublic)" class="border-t border-neutral-grad-0 px-4 py-3">
+            <!-- Invite link section: any group that is public, world-readable,
+                 or administrable. World-readable broadcast channels use
+                 `join_rule=invite` but are still safe to share by link. -->
+            <div v-if="room.isGroup && (isAdmin || roomShareable)" class="border-t border-neutral-grad-0 px-4 py-3">
               <div class="mb-2 flex items-center justify-between">
                 <div class="flex items-center gap-2">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
@@ -653,7 +666,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 </div>
               </div>
 
-              <template v-if="roomPublic">
+              <template v-if="roomShareable">
                 <div class="flex items-center gap-2">
                   <input
                     :value="inviteLink"

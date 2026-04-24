@@ -3453,6 +3453,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** True when the room is shareable by link — either a public join_rule or a
+   *  world_readable broadcast/stream room. Broadcast channels on Bastyon
+   *  commonly use `history_visibility=world_readable` even when their
+   *  `join_rule` is still `"invite"`, and members reasonably expect to be
+   *  able to hand the link to someone else. */
+  const isRoomShareableByLink = (roomId: string): boolean => {
+    try {
+      const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+      if (!matrixRoom) return false;
+      if (readJoinRule(matrixRoom as Record<string, unknown>) === "public") return true;
+      const hv = getHistoryVisibilityFromMatrixRoom(matrixRoom);
+      return isStreamHistoryVisibility(hv);
+    } catch {
+      return false;
+    }
+  };
+
   /** Toggle room between public/private join rules (admin only).
    *  Up-front power-level check avoids sending a doomed state event, and
    *  when enabling public we also set history_visibility=world_readable
@@ -6154,6 +6173,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     inviteMember,
     isDetachedFromLatest,
     isRoomPublic,
+    isRoomShareableByLink,
     joinRoomById,
     peekRoom,
     bindAccountKeys,
