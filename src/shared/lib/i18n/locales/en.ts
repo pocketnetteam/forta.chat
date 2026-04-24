@@ -636,6 +636,25 @@ export const en = {
   "shareGroup.joinFailed": "Failed to join group",
   "shareGroup.joined": "Joined successfully",
   "shareGroup.alreadyMember": "You are already a member",
+  "shareGroup.copyFailed": "Couldn't copy the link",
+  "shareGroup.toggleFailed": "Couldn't change group settings. You may lack permission.",
+  "shareGroup.shareTitle": "Forta Chat invite",
+  "shareGroup.shareText": "Join the \"{name}\" group on Forta Chat",
+
+  // ── Join-room preview & errors ──
+  "joinRoom.loading": "Loading room info…",
+  "joinRoom.privateTitle": "Private room",
+  "joinRoom.privateHint": "We can't preview this room. A member may need to invite you.",
+  "joinRoom.tryAnyway": "Try anyway",
+  "joinRoom.unnamed": "Unnamed",
+  "joinRoom.encrypted": "End-to-end encrypted",
+  "joinRoom.join": "Join",
+  "joinRoom.success": "You joined the room",
+  "joinRoom.errorBanned": "You are banned from this room",
+  "joinRoom.errorForbidden": "This is a private room. A member must invite you.",
+  "joinRoom.errorNotFound": "Room not found or removed",
+  "joinRoom.errorInvalidId": "Invalid room identifier",
+  "joinRoom.errorUnknown": "Couldn't join the room",
 
   // ── Quick search ──
   "quickSearch.placeholder": "Go to chat...",

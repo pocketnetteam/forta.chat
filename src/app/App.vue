@@ -15,6 +15,7 @@ import CallWindow from "@/features/video-calls/ui/CallWindow.vue";
 import CallStatusBar from "@/features/video-calls/ui/CallStatusBar.vue";
 import PermissionDeniedModal from "@/features/video-calls/ui/PermissionDeniedModal.vue";
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
+import { JoinRoomPreviewModal } from "@/features/join-room";
 import { handleSdkSync } from "@/features/sync-status";
 import { isNative } from "@/shared/lib/platform";
 import { useRouter } from "vue-router";
@@ -83,22 +84,63 @@ const handleRetryUsername = async (newName: string) => {
   }
 };
 
-const processJoinRoom = async () => {
+// Pending roomId consumed from deep-link storage — the preview modal driver.
+const pendingJoinRoomId = ref<string | null>(null);
+
+const processJoinRoom = () => {
   if (!authStore.isAuthenticated || !authStore.matrixReady) return;
 
   const roomId = localStorage.getItem("bastyon-chat-join-room");
   if (!roomId) return;
-
   localStorage.removeItem("bastyon-chat-join-room");
 
-  try {
-    const ok = await chatStore.joinRoomById(roomId);
-    if (ok) {
-      router.push({ name: "ChatPage" });
-    }
-  } catch (e) {
-    console.error("[App] join room error:", e);
+  // If the user is already in this room, skip the preview and jump straight
+  // there — opening a modal would be jarring.
+  const existing = chatStore.rooms.find((r) => r.id === roomId);
+  if (existing) {
+    chatStore.setActiveRoom(roomId);
+    router.push({ name: "ChatPage" });
+    return;
   }
+
+  pendingJoinRoomId.value = roomId;
+};
+
+const confirmJoinRoom = async () => {
+  const roomId = pendingJoinRoomId.value;
+  if (!roomId) return;
+  pendingJoinRoomId.value = null;
+
+  const result = await chatStore.joinRoomById(roomId);
+  if (result.ok) {
+    router.push({ name: "ChatPage" });
+    showToast(t("joinRoom.success"), "success");
+    return;
+  }
+  // Map the typed reason to a canned i18n key. Only the "unknown" branch
+  // keeps the raw SDK message — everything else gets a localized toast.
+  let message: string;
+  switch (result.reason) {
+    case "banned":
+      message = t("joinRoom.errorBanned");
+      break;
+    case "forbidden":
+      message = t("joinRoom.errorForbidden");
+      break;
+    case "not_found":
+      message = t("joinRoom.errorNotFound");
+      break;
+    case "invalid_id":
+      message = t("joinRoom.errorInvalidId");
+      break;
+    default:
+      message = result.errorMessage || t("joinRoom.errorUnknown");
+  }
+  showToast(message, "error");
+};
+
+const cancelJoinRoom = () => {
+  pendingJoinRoomId.value = null;
 };
 
 const processReferral = async () => {
@@ -394,6 +436,12 @@ onUnmounted(() => {
       v-if="showQuickSearch"
       @close="showQuickSearch = false"
       @select-room="showQuickSearch = false"
+    />
+    <JoinRoomPreviewModal
+      :show="pendingJoinRoomId !== null"
+      :room-id="pendingJoinRoomId ?? ''"
+      @join="confirmJoinRoom"
+      @cancel="cancelJoinRoom"
     />
     <BugReportStatusSheet
       v-if="authStore.address"

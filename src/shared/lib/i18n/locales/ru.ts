@@ -638,6 +638,25 @@ export const ru: Record<TranslationKey, string> = {
   "shareGroup.joinFailed": "Не удалось присоединиться",
   "shareGroup.joined": "Вы присоединились",
   "shareGroup.alreadyMember": "Вы уже участник",
+  "shareGroup.copyFailed": "Не удалось скопировать ссылку",
+  "shareGroup.toggleFailed": "Не удалось изменить настройки группы. Возможно, у вас нет прав.",
+  "shareGroup.shareTitle": "Приглашение в Forta Chat",
+  "shareGroup.shareText": "Присоединяйтесь к группе «{name}» в Forta Chat",
+
+  // ── Join-room preview & errors ──
+  "joinRoom.loading": "Загружаем информацию о комнате…",
+  "joinRoom.privateTitle": "Комната приватная",
+  "joinRoom.privateHint": "Мы не можем показать превью. Возможно, вас должен пригласить участник.",
+  "joinRoom.tryAnyway": "Всё равно попробовать",
+  "joinRoom.unnamed": "Без названия",
+  "joinRoom.encrypted": "Сообщения зашифрованы",
+  "joinRoom.join": "Присоединиться",
+  "joinRoom.success": "Вы присоединились к комнате",
+  "joinRoom.errorBanned": "Вы заблокированы в этой комнате",
+  "joinRoom.errorForbidden": "Комната приватная. Вас должен пригласить участник.",
+  "joinRoom.errorNotFound": "Комната не найдена или удалена",
+  "joinRoom.errorInvalidId": "Неверный идентификатор комнаты",
+  "joinRoom.errorUnknown": "Не удалось присоединиться к комнате",
 
   // ── Quick search ──
   "quickSearch.placeholder": "Перейти к чату...",
