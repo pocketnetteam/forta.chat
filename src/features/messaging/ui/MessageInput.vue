@@ -57,6 +57,17 @@ const sending = ref(false);
 let typingTimeout: ReturnType<typeof setTimeout> | null = null;
 let lastTypingSent = 0;
 const TYPING_THROTTLE_MS = 3000;
+const TYPING_IDLE_STOP_MS = 3000;
+
+/** Cancel the pending idle stop and clear throttle so the next input
+ *  immediately re-arms a fresh typing window. */
+const resetTypingTimers = () => {
+  if (typingTimeout) {
+    clearTimeout(typingTimeout);
+    typingTimeout = null;
+  }
+  lastTypingSent = 0;
+};
 
 // --- Drafts ---
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -73,6 +84,13 @@ watch(
   (newId, oldId) => {
     if (oldId) {
       saveDraft(oldId, text.value);
+      // Stop typing in the room we're leaving — otherwise the indicator
+      // hangs on peers' screens until the server-side timeout (~20–30s).
+      // Pass oldId explicitly: chatStore.activeRoomId already points to newId here.
+      if (typingTimeout || lastTypingSent > 0) {
+        setTyping(false, oldId);
+        resetTypingTimers();
+      }
       // Don't save forward back to the source room — forward travels to target only
       const fwd = chatStore.forwardingMessage;
       if (fwd && fwd.roomId !== oldId) {
@@ -109,6 +127,11 @@ const saveDraftOnBlur = () => {
 onBeforeUnmount(() => {
   const roomId = chatStore.activeRoomId;
   if (roomId) saveDraft(roomId, text.value);
+  // Stop typing on unmount — same reason as in the activeRoomId watcher.
+  if (roomId && (typingTimeout || lastTypingSent > 0)) {
+    setTyping(false, roomId);
+  }
+  resetTypingTimers();
   // Clean up any lingering recording mouse/move listeners
   document.removeEventListener("mouseup", handleGlobalMouseUp);
   document.removeEventListener("mousemove", handleGlobalMouseMove);
@@ -192,6 +215,7 @@ const handleSend = async () => {
   const roomId = chatStore.activeRoomId;
   if (roomId) clearDraft(roomId);
   setTyping(false);
+  resetTypingTimers();
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
 
   let inserted: boolean | undefined;
@@ -286,7 +310,11 @@ const handleInput = () => {
     setTyping(true);
   }
   if (typingTimeout) clearTimeout(typingTimeout);
-  typingTimeout = setTimeout(() => { setTyping(false); lastTypingSent = 0; }, 5000);
+  typingTimeout = setTimeout(() => {
+    setTyping(false);
+    lastTypingSent = 0;
+    typingTimeout = null;
+  }, TYPING_IDLE_STOP_MS);
 };
 
 // --- Attachment/polls ---

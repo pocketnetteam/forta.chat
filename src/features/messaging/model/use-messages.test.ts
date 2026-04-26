@@ -40,6 +40,7 @@ const mockSendPollStart = vi.fn(() => "$poll_event_1");
 const mockSendPollResponse = vi.fn();
 const mockSendPollEnd = vi.fn();
 const mockIsReady = vi.fn(() => true);
+const mockSetTyping = vi.fn();
 
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
@@ -49,7 +50,7 @@ vi.mock("@/entities/matrix", () => ({
     sendEncryptedText: mockSendEncryptedText,
     redactEvent: mockRedactEvent,
     sendReaction: mockSendReaction,
-    setTyping: vi.fn(),
+    setTyping: mockSetTyping,
     uploadContent: vi.fn(() => "mxc://server/uploaded"),
     sendPollStart: mockSendPollStart,
     sendPollResponse: mockSendPollResponse,
@@ -501,6 +502,30 @@ describe("useMessages", () => {
       const call = (mockSendEncryptedText.mock.calls as unknown[][])[0];
       const content = call[1] as Record<string, unknown>;
       expect(content.forwarded_from).toBeUndefined();
+    });
+  });
+
+  // ─── setTyping ──────────────────────────────────────────────────
+
+  describe("setTyping", () => {
+    it("uses chatStore.activeRoomId when no override is given", () => {
+      chatStore.activeRoomId = "!room:server";
+      messaging.setTyping(true);
+      expect(mockSetTyping).toHaveBeenCalledWith("!room:server", true);
+    });
+
+    it("uses the explicit roomId override even when activeRoomId differs", () => {
+      // The user has switched to a new chat; we still need to stop typing
+      // in the OLD one whose id activeRoomId no longer holds.
+      chatStore.activeRoomId = "!new:server";
+      messaging.setTyping(false, "!old:server");
+      expect(mockSetTyping).toHaveBeenCalledWith("!old:server", false);
+    });
+
+    it("noops when neither override nor activeRoomId are set", () => {
+      chatStore.activeRoomId = null;
+      messaging.setTyping(true);
+      expect(mockSetTyping).not.toHaveBeenCalled();
     });
   });
 });

@@ -40,7 +40,6 @@ export class MatrixClientService {
   private db: ChatStorageInstance | null = null;
   private sdk = sdk;
   store: Record<string, unknown> | null = null;
-  private typingTimers = new Map<string, number>();
   private torProxyUrl: string = '';
 
   setTorProxyUrl(url: string) {
@@ -430,41 +429,6 @@ export class MatrixClientService {
       this.onTyping?.(event, member);
     });
 
-    // Listen for sendToDevice typing events (workaround for broken /typing endpoint)
-    this.client.on("toDeviceEvent", (event: unknown) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ev = event as any;
-      if (ev?.getType?.() !== MatrixClientService.TYPING_EVENT_TYPE) return;
-      const content = ev.getContent?.() ?? {};
-      const roomId = content.room_id as string;
-      const isTyping = content.typing as boolean;
-      const senderId = ev.getSender?.() as string;
-      if (!roomId || !senderId || senderId === userId) return;
-
-      // Build a member-like object matching what onTyping expects
-      const member = { roomId, userId: senderId, typing: isTyping };
-      this.onTyping?.(event, member);
-
-      // Auto-clear typing after 5s if no "stop typing" received
-      if (isTyping) {
-        const key = `${roomId}:${senderId}`;
-        if (this.typingTimers.has(key)) {
-          clearTimeout(this.typingTimers.get(key)!);
-        }
-        this.typingTimers.set(key, window.setTimeout(() => {
-          this.typingTimers.delete(key);
-          const fakeMember = { roomId, userId: senderId, typing: false };
-          this.onTyping?.(null, fakeMember);
-        }, 5000));
-      } else {
-        const key = `${roomId}:${senderId}`;
-        if (this.typingTimers.has(key)) {
-          clearTimeout(this.typingTimers.get(key)!);
-          this.typingTimers.delete(key);
-        }
-      }
-    });
-
     this.client.on("Room.receipt", (event: unknown, room: unknown) => {
       if (!this.chatsReady) return;
       this.onReceipt?.(event, room);
@@ -809,39 +773,15 @@ export class MatrixClientService {
     return client.http.authedRequest("PUT", path, undefined, body);
   }
 
-  /** Custom typing event type for sendToDevice fallback */
-  private static TYPING_EVENT_TYPE = "com.bastyon.typing";
-
-  /** Set typing indicator via sendToDevice (bypasses broken /typing endpoint).
-   *  Sends typing state directly to other room members' devices. */
+  /** Set typing indicator via standard Matrix API
+   *  (PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}). */
   async setTyping(roomId: string, isTyping: boolean): Promise<void> {
     if (!this.client) return;
     try {
-      const myUserId = this.getUserId();
-      if (!myUserId) return;
-
-      const room = this.client.getRoom(roomId);
-      if (!room) return;
-
-      // Get joined members, exclude self
-      const members: unknown[] = room.getJoinedMembers?.() ?? [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const otherMembers = members.filter((m: any) => m.userId !== myUserId);
-      if (otherMembers.length === 0) return;
-
-      // Build contentMap: Map<userId, Map<deviceId, content>>
-      const contentMap = new Map<string, Map<string, Record<string, unknown>>>();
-      for (const member of otherMembers) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const userId = (member as any).userId as string;
-        const deviceMap = new Map<string, Record<string, unknown>>();
-        deviceMap.set("*", { room_id: roomId, typing: isTyping });
-        contentMap.set(userId, deviceMap);
-      }
-
-      await this.client.sendToDevice(MatrixClientService.TYPING_EVENT_TYPE, contentMap);
+      const TYPING_TIMEOUT_MS = 20_000;
+      await this.client.sendTyping(roomId, isTyping, isTyping ? TYPING_TIMEOUT_MS : 0);
     } catch (e) {
-      console.warn("[matrix-client] setTyping (toDevice) error:", e);
+      console.warn("[matrix-client] setTyping error:", e);
     }
   }
 
@@ -963,11 +903,6 @@ export class MatrixClientService {
       this.client.removeAllListeners();
       this.client.stopClient();
     }
-    // Clear typing timers
-    for (const timer of this.typingTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.typingTimers.clear();
     this.chatsReady = false;
     this.ready = false;
     this.error = false;

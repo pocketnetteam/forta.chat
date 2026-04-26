@@ -742,9 +742,11 @@ export function useMessages() {
     await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
   };
 
-  /** Set typing indicator */
-  const setTyping = (isTyping: boolean) => {
-    const roomId = chatStore.activeRoomId;
+  /** Set typing indicator. Pass `roomIdOverride` to target a specific room
+   *  (e.g. when leaving a chat and we need to stop typing in the OLD room
+   *  while activeRoomId already points to the new one). */
+  const setTyping = (isTyping: boolean, roomIdOverride?: string) => {
+    const roomId = roomIdOverride ?? chatStore.activeRoomId;
     if (!roomId) return;
     const matrixService = getMatrixClientService();
     matrixService.setTyping(roomId, isTyping);
