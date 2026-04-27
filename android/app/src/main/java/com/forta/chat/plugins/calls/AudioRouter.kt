@@ -90,6 +90,11 @@ class AudioRouter private constructor(private val context: Context) {
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
+    // Single monitor for start/stop/forceStop so a watchdog forceStop
+    // cannot interleave with a concurrent start (would otherwise leave
+    // the router with isActive=true but mode=NORMAL — exactly the stuck
+    // state Session 23 is trying to prevent).
+    private val lifecycleLock = Any()
     // coreListener is owned by CallPlugin (JS-facing). uiListener is owned by
     // CallActivity. Keeping them separate means onDestroy in the Activity does
     // not tear down the JS-facing callback registered earlier by CallPlugin.
@@ -133,14 +138,16 @@ class AudioRouter private constructor(private val context: Context) {
         }
     }
 
-    fun start(callType: String) {
+    fun start(callType: String) = synchronized(lifecycleLock) {
         // Idempotent: second start() in the same call cycle (e.g. JS side
         // hits startAudioRouting twice because of renegotiation) must not
         // re-register device callbacks or the same callback would fire
         // twice per device add/remove.
+        // Synchronized with stop()/forceStop() so a watchdog forceStop
+        // racing a fresh start() cannot interleave half-set state.
         if (isActive) {
             Log.w(LIFECYCLE_TAG, "start($callType) — already active, no-op (current callType=${this.callType})")
-            return
+            return@synchronized
         }
 
         this.callType = callType
@@ -176,7 +183,7 @@ class AudioRouter private constructor(private val context: Context) {
         Log.d(LIFECYCLE_TAG, "start($callType) complete: active=$activeDevice, available=$available")
     }
 
-    fun stop() {
+    fun stop() = synchronized(lifecycleLock) {
         // Idempotent: every call lifecycle path ends with stopAudioRouting
         // (hangup, reject, SDK state=Ended, answer-errored, permission-denied),
         // so calling stop twice happens routinely. Without the guard we would
@@ -184,7 +191,7 @@ class AudioRouter private constructor(private val context: Context) {
         // and log a spurious warning.
         if (!isActive) {
             Log.w(LIFECYCLE_TAG, "stop() — already inactive, no-op")
-            return
+            return@synchronized
         }
 
         isActive = false
@@ -272,7 +279,7 @@ class AudioRouter private constructor(private val context: Context) {
      * the foreground service) and the device is stuck in
      * MODE_IN_COMMUNICATION.
      */
-    fun forceStop() {
+    fun forceStop() = synchronized(lifecycleLock) {
         Log.w(LIFECYCLE_TAG, "forceStop() — bypassing guards, brute reset")
         isActive = false
 

@@ -37,6 +37,13 @@ class CallPlugin : Plugin() {
 
     companion object {
         private const val TAG = "CallPlugin"
+        // Dedicated executor for routing teardown so the Capacitor plugin
+        // thread is not blocked by AudioRouter.stop() — that path can wait
+        // up to 500ms for the SCO_DISCONNECTED broadcast on API < 31, and
+        // serializing every plugin call behind that wait risks ANRs on
+        // slow OEMs (Xiaomi/Realme/INFINIX).
+        private val cleanupExecutor: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newSingleThreadExecutor()
     }
 
     private var audioRouter: AudioRouter? = null
@@ -392,8 +399,19 @@ class CallPlugin : Plugin() {
 
     @PluginMethod
     fun stopAudioRouting(call: PluginCall) {
-        audioRouter?.stop()
-        call.resolve()
+        // Dispatch to a dedicated executor so the Capacitor plugin thread
+        // is freed immediately. AudioRouter.stop() blocks up to 500ms
+        // waiting for SCO_DISCONNECTED on API < 31; running it on the
+        // plugin thread would serialize every other native call (push,
+        // status bar, share) and risk ANRs.
+        cleanupExecutor.execute {
+            try {
+                audioRouter?.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "stopAudioRouting threw", e)
+            }
+            call.resolve()
+        }
     }
 
     /**
@@ -403,12 +421,19 @@ class CallPlugin : Plugin() {
      * inactive but the system is still in MODE_IN_COMMUNICATION.
      *
      * Called by the JS app-resume watchdog when it detects a stuck
-     * VoIP audio mode without an active call.
+     * VoIP audio mode without an active call. Runs on cleanupExecutor
+     * for the same ANR-avoidance reason as stopAudioRouting above.
      */
     @PluginMethod
     fun forceStopAudio(call: PluginCall) {
-        AudioRouter.getSharedInstance(context).forceStop()
-        call.resolve()
+        cleanupExecutor.execute {
+            try {
+                AudioRouter.getSharedInstance(context).forceStop()
+            } catch (e: Exception) {
+                Log.e(TAG, "forceStopAudio threw", e)
+            }
+            call.resolve()
+        }
     }
 
     /**
