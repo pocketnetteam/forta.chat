@@ -27,20 +27,85 @@ interface ArticleBlock {
   data?: Record<string, unknown>;
 }
 
-/** Try to parse JSON; return null if malformed or not an Editor.js doc. */
+/**
+ * Repair common corruption in real-world Bastyon Editor.js JSON:
+ *  - Unescaped " inside string values (e.g. raw `<a href="...">` HTML).
+ *  - Literal CR/LF/TAB inside string values (Editor.js sometimes embeds them).
+ * Walks input character by character with a string/non-string state machine.
+ * Heuristic: a " inside a string is "closing" only if the next non-whitespace
+ * character is one of `, } ] :` or end-of-input. Otherwise it's escaped to \".
+ */
+function repairJsonStrings(input: string): string {
+  let out = "";
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i];
+    if (escapeNext) {
+      out += c;
+      escapeNext = false;
+      continue;
+    }
+    if (c === "\\") {
+      out += c;
+      escapeNext = true;
+      continue;
+    }
+    if (c === '"') {
+      if (!inString) {
+        inString = true;
+        out += c;
+      } else {
+        // Look ahead past whitespace; if next char is JSON terminator, this is closing.
+        let j = i + 1;
+        while (j < input.length && /\s/.test(input[j])) j++;
+        const next = j < input.length ? input[j] : "";
+        if (next === "," || next === "}" || next === "]" || next === ":" || next === "") {
+          inString = false;
+          out += c;
+        } else {
+          out += '\\"';
+        }
+      }
+      continue;
+    }
+    if (inString) {
+      if (c === "\n") { out += "\\n"; continue; }
+      if (c === "\r") { out += "\\r"; continue; }
+      if (c === "\t") { out += "\\t"; continue; }
+    }
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * Try to parse Editor.js JSON. First attempts strict JSON.parse; on failure
+ * falls back to repaired JSON (handles unescaped quotes / literal newlines
+ * commonly seen in Bastyon article posts).
+ */
 function tryParseBlocks(input: string): ParsedArticle | null {
   if (!input || typeof input !== "string") return null;
   const trimmed = input.trim();
   if (!trimmed.startsWith("{")) return null;
+
   try {
     const parsed = JSON.parse(trimmed);
-    if (parsed && Array.isArray(parsed.blocks)) {
-      return parsed as ParsedArticle;
-    }
-    return null;
+    if (parsed && Array.isArray(parsed.blocks)) return parsed as ParsedArticle;
   } catch {
-    return null;
+    // fall through to repair attempt
   }
+
+  try {
+    const repaired = repairJsonStrings(trimmed);
+    const parsed = JSON.parse(repaired);
+    if (parsed && Array.isArray(parsed.blocks)) return parsed as ParsedArticle;
+  } catch {
+    // repair failed — give up
+  }
+
+  return null;
 }
 
 export function isArticleJson(input: string): boolean {
@@ -120,7 +185,15 @@ export function renderArticleText(input: string, opts: RenderTextOptions = {}): 
         if (caption) lines.push(caption);
         break;
       }
-      // delimiter, embed, table → skip in text mode
+      case "linkTool": {
+        const meta = (d.meta ?? {}) as Record<string, unknown>;
+        const title = typeof meta.title === "string" ? stripHtml(meta.title) : "";
+        const link = typeof d.link === "string" ? d.link : "";
+        if (title) lines.push(title);
+        else if (link) lines.push(link);
+        break;
+      }
+      // delimiter, embed, table, raw → skip in text mode
       default:
         break;
     }
@@ -335,6 +408,26 @@ export function renderArticleHtml(input: string): string {
       case "delimiter":
         parts.push('<hr class="article-hr"/>');
         break;
+      case "linkTool": {
+        const link = typeof d.link === "string" ? d.link : "";
+        if (!link || !SAFE_URL_RE.test(link)) break;
+        const meta = (d.meta ?? {}) as Record<string, unknown>;
+        const title = typeof meta.title === "string" ? meta.title : link;
+        const description = typeof meta.description === "string" ? meta.description : "";
+        const image = ((meta.image ?? {}) as Record<string, unknown>);
+        const imageUrl = typeof image.url === "string" && /^https?:\/\//i.test(image.url) ? image.url : "";
+
+        const titleHtml = `<a href="${escapeAttr(link)}" target="_blank" rel="noopener noreferrer" class="article-link-title">${escapeHtml(title)}</a>`;
+        const descHtml = description
+          ? `<div class="article-link-desc">${escapeHtml(description.slice(0, 200))}${description.length > 200 ? "…" : ""}</div>`
+          : "";
+        const imgHtml = imageUrl
+          ? `<img src="${escapeAttr(imageUrl)}" alt="" class="article-link-img" loading="lazy"/>`
+          : "";
+
+        parts.push(`<div class="article-link">${imgHtml}<div class="article-link-body">${titleHtml}${descHtml}</div></div>`);
+        break;
+      }
       // embed, table, raw → skipped (no whitelist)
       default:
         break;

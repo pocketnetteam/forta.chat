@@ -24,6 +24,18 @@ describe("isArticleJson", () => {
     expect(isArticleJson("{not json")).toBe(false);
   });
 
+  it("recovers from unescaped quotes in <a href> (real Bastyon corruption)", () => {
+    // This is the exact pattern seen in production: href values are not
+    // escaped, breaking strict JSON.parse but recoverable via the repair path.
+    const broken = '{"blocks":[{"type":"paragraph","data":{"text":"see <a href=\"https://x.com\">link</a>"}}]}';
+    expect(isArticleJson(broken)).toBe(true);
+  });
+
+  it("recovers from literal newlines inside string values", () => {
+    const broken = '{"blocks":[{"type":"paragraph","data":{"text":"line one\nline two\nline three"}}]}';
+    expect(isArticleJson(broken)).toBe(true);
+  });
+
   it("returns false for JSON without blocks array", () => {
     expect(isArticleJson('{"foo":"bar"}')).toBe(false);
   });
@@ -143,6 +155,32 @@ describe("renderArticleText (preview, plain text)", () => {
     const out = renderArticleText(long, { maxLength: 100 });
     expect(out).toHaveLength(103);
     expect(out.endsWith("...")).toBe(true);
+  });
+
+  it("renders linkTool block as title text", () => {
+    const input = json([
+      { type: "linkTool", data: { link: "https://x.com", meta: { title: "Article Title", description: "..." } } },
+    ]);
+    expect(renderArticleText(input)).toBe("Article Title");
+  });
+
+  it("falls back to link URL when linkTool has no title", () => {
+    const input = json([{ type: "linkTool", data: { link: "https://x.com" } }]);
+    expect(renderArticleText(input)).toBe("https://x.com");
+  });
+
+  it("recovers broken JSON with unescaped href quotes (renders text)", () => {
+    const broken = '{"blocks":[{"type":"paragraph","data":{"text":"see <a href=\"https://x.com\">link</a>"}}]}';
+    const result = renderArticleText(broken);
+    expect(result).toContain("see");
+    expect(result).toContain("link");
+    expect(result).not.toContain('"blocks"');
+  });
+
+  it("recovers broken JSON with literal newlines inside descriptions", () => {
+    const broken = '{"blocks":[{"type":"linkTool","data":{"link":"https://x.com","meta":{"title":"Hi","description":"line1\nline2\nline3"}}}]}';
+    const result = renderArticleText(broken);
+    expect(result).toBe("Hi");
   });
 
   it("does not cleave emoji surrogate pairs when truncating", () => {
@@ -375,6 +413,32 @@ describe("renderArticleHtml (full render, sanitized)", () => {
     expect(html.toLowerCase()).not.toContain("<json>");
     expect(html).toContain("not");
     expect(html).toContain("&amp;");
+  });
+
+  it("renders linkTool as <a> with safe href and rel=noopener", () => {
+    const input = json([
+      { type: "linkTool", data: { link: "https://x.com", meta: { title: "Title", description: "Description" } } },
+    ]);
+    const html = renderArticleHtml(input);
+    expect(html).toContain('href="https://x.com"');
+    expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toContain("Title");
+    expect(html).toContain("Description");
+  });
+
+  it("drops linkTool with javascript: link", () => {
+    const input = json([
+      { type: "linkTool", data: { link: "javascript:alert(1)", meta: { title: "evil" } } },
+    ]);
+    const html = renderArticleHtml(input);
+    expect(html.toLowerCase()).not.toContain("javascript:");
+  });
+
+  it("recovers broken JSON in renderArticleHtml (real Bastyon pattern)", () => {
+    const broken = '{"blocks":[{"type":"paragraph","data":{"text":"<a href=\"https://x.com\">link</a>"}}]}';
+    const html = renderArticleHtml(broken);
+    expect(html).toContain('href="https://x.com"');
+    expect(html).not.toContain('"blocks"');
   });
 
   it("skips empty paragraph blocks", () => {
