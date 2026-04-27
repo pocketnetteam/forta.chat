@@ -42,7 +42,11 @@ export interface CallTelemetryEvent {
 type TelemetryListener = (event: CallTelemetryEvent) => void;
 
 const FINALIZE_GC_MS = 30_000;
-const finalizedCalls = new Map<string, ReturnType<typeof setTimeout>>();
+// `null` value means "in progress, not yet GC-eligible". Once finalize
+// completes (any outcome — success or all steps failed), the entry is
+// rearmed with a real GC timeout so a fresh call with the same callId
+// can re-finalize after the GC window passes.
+const finalizedCalls = new Map<string, ReturnType<typeof setTimeout> | null>();
 const telemetryListeners = new Set<TelemetryListener>();
 
 function emit(event: CallTelemetryEvent): void {
@@ -64,40 +68,58 @@ async function safeStep(name: string, callId: string, step: () => Promise<unknow
 }
 
 export async function finalizeCall(reason: FinalizeReason, callId: string): Promise<void> {
-  if (!callId) {
-    console.warn("[finalize-call] missing callId, skipping cleanup (reason=" + reason + ")");
-    return;
+  // Outer try/catch ensures a sync throw (e.g. broken bridge import,
+  // listener loop bug) cannot escape as an unhandled promise rejection.
+  try {
+    if (!callId) {
+      console.warn("[finalize-call] missing callId, skipping cleanup (reason=" + reason + ")");
+      return;
+    }
+    if (finalizedCalls.has(callId)) {
+      console.log("[finalize-call] duplicate finalize for " + callId + " (reason=" + reason + "), skipping");
+      return;
+    }
+    // Reserve idempotency slot synchronously, before any await — a
+    // second concurrent finalizeCall for the same callId must see the
+    // slot occupied. We park `null` in the map for the duration of the
+    // cleanup; the real GC timer is armed only after all steps run.
+    // This avoids the race where a slow cleanup (>30s) had its slot
+    // GC'd while still in progress, allowing a re-entry to restart
+    // step 1 and double-cleanup audio routing.
+    finalizedCalls.set(callId, null);
+
+    try {
+      emit({ type: "call_finalize_start", reason, callId });
+
+      // Step 1: stop audio routing (mode → NORMAL, clearCommunicationDevice)
+      await safeStep("stopAudioRouting", callId, () => nativeCallBridge.stopAudioRouting());
+
+      // Step 2: report call ended → CallConnection cleanup
+      await safeStep("reportCallEnded", callId, () => nativeCallBridge.reportCallEnded(callId));
+
+      // Step 3: dismiss UI + stop foreground service (abandons audio focus, releases wake lock)
+      if (isNative) {
+        await safeStep("dismissCallUI", callId, () => NativeWebRTC.dismissCallUI());
+      }
+
+      // Step 4: close peer connections + dispose media (release mic AudioRecord)
+      if (isNative) {
+        await safeStep("closeAllPeerConnections", callId, () => NativeWebRTC.closeAllPeerConnections());
+      }
+
+      emit({ type: "call_finalized", reason, callId });
+    } finally {
+      // Arm the GC timer only after all steps complete. Until this point
+      // the slot stayed `null` (in-progress); a 30-second-too-late
+      // duplicate would have been blocked from re-running step 1.
+      const gcTimer = setTimeout(() => {
+        finalizedCalls.delete(callId);
+      }, FINALIZE_GC_MS);
+      finalizedCalls.set(callId, gcTimer);
+    }
+  } catch (e) {
+    console.warn("[finalize-call] unexpected sync error:", e);
   }
-  if (finalizedCalls.has(callId)) {
-    console.log("[finalize-call] duplicate finalize for " + callId + " (reason=" + reason + "), skipping");
-    return;
-  }
-  // Reserve idempotency slot before any await — duplicate calls within
-  // the same microtask scheduler tick must see the slot taken.
-  const gcTimer = setTimeout(() => {
-    finalizedCalls.delete(callId);
-  }, FINALIZE_GC_MS);
-  finalizedCalls.set(callId, gcTimer);
-
-  emit({ type: "call_finalize_start", reason, callId });
-
-  // Step 1: stop audio routing (mode → NORMAL, clearCommunicationDevice)
-  await safeStep("stopAudioRouting", callId, () => nativeCallBridge.stopAudioRouting());
-
-  // Step 2: report call ended → CallConnection cleanup
-  await safeStep("reportCallEnded", callId, () => nativeCallBridge.reportCallEnded(callId));
-
-  // Step 3: dismiss UI + stop foreground service (abandons audio focus, releases wake lock)
-  if (isNative) {
-    await safeStep("dismissCallUI", callId, () => NativeWebRTC.dismissCallUI());
-  }
-
-  // Step 4: close peer connections + dispose media (release mic AudioRecord)
-  if (isNative) {
-    await safeStep("closeAllPeerConnections", callId, () => NativeWebRTC.closeAllPeerConnections());
-  }
-
-  emit({ type: "call_finalized", reason, callId });
 }
 
 /**
@@ -120,7 +142,7 @@ export function onCallTelemetry(listener: TelemetryListener): () => void {
 /** Test-only: clear the in-memory finalized-callId set between tests. */
 export function __resetFinalizeCallStateForTests(): void {
   for (const timer of finalizedCalls.values()) {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
   finalizedCalls.clear();
   telemetryListeners.clear();

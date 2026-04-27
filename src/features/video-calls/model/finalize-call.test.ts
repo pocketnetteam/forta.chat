@@ -131,6 +131,46 @@ describe("finalizeCall — central call cleanup", () => {
     expect(mockCloseAllPeerConnections).toHaveBeenCalledTimes(1);
   });
 
+  it("dedups two concurrent finalize calls for the same callId without await", async () => {
+    // Realistic race: SDK fires Hangup synchronously inside its
+    // State→Ended handler in some paths, so onState→ended and onHangup
+    // both call finalizeCall in the same JS event loop tick. The Set
+    // guard must run before any `await` to dedup correctly.
+    const { finalizeCall } = await import("./finalize-call");
+    const p1 = finalizeCall("sdk-ended", "concurrent-id");
+    const p2 = finalizeCall("sdk-ended", "concurrent-id");
+    await Promise.all([p1, p2]);
+
+    expect(mockStopAudioRouting).toHaveBeenCalledTimes(1);
+    expect(mockReportCallEnded).toHaveBeenCalledTimes(1);
+    expect(mockDismissCallUI).toHaveBeenCalledTimes(1);
+    expect(mockCloseAllPeerConnections).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a finalize re-enter while still in progress (long-running cleanup)", async () => {
+    // Simulate stopAudioRouting hanging for >GC window. Without the
+    // in-progress sentinel, a re-entry within the GC delay would skip
+    // step 1 of the second call (Set membership) but the slow first
+    // call would still be running step 1 — overlap. With the sentinel
+    // the second call sees the slot occupied and short-circuits.
+    let resolveFirst: () => void = () => {};
+    mockStopAudioRouting.mockReturnValueOnce(
+      new Promise<void>((resolve) => { resolveFirst = resolve; }),
+    );
+
+    const { finalizeCall } = await import("./finalize-call");
+    const p1 = finalizeCall("hangup", "long-call");
+    // Yield once so finalizeCall runs its sync prologue (sets slot).
+    await Promise.resolve();
+    // Second call hits the slot and short-circuits.
+    await finalizeCall("hangup", "long-call");
+    expect(mockStopAudioRouting).toHaveBeenCalledTimes(1);
+
+    resolveFirst();
+    await p1;
+    expect(mockReportCallEnded).toHaveBeenCalledTimes(1);
+  });
+
   it("does NOT skip a finalize for a different callId", async () => {
     const { finalizeCall } = await import("./finalize-call");
     await finalizeCall("hangup", "first-call");
