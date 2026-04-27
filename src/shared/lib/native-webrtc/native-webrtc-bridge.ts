@@ -48,6 +48,13 @@ export interface NativeWebRTCPlugin {
   stopScreenShare(): Promise<{ sharing: boolean }>;
 
   closePeerConnection(options: { peerId: string }): Promise<void>;
+  /**
+   * Close every PeerConnection AND dispose local AudioSource /
+   * VideoSource so the backing AudioRecord / camera handle is released.
+   * Used during call finalization — closing PCs alone is not enough,
+   * a leaked AudioSource keeps the microphone busy device-wide.
+   */
+  closeAllPeerConnections(): Promise<void>;
   getConnectionState(options: { peerId: string }): Promise<{ state: string }>;
 
   // ICE restart — perform a native ICE restart on the given PeerConnection.

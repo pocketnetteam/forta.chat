@@ -498,6 +498,21 @@ class WebRTCPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * Session 23: close every PeerConnection AND dispose local
+     * AudioSource/VideoSource. Used during call finalization — closing
+     * the PCs alone is not enough; a leaked AudioSource keeps the
+     * underlying AudioRecord alive and locks the microphone for the
+     * whole device until the OS process exits.
+     *
+     * Idempotent: calling on an already-cleaned manager is a no-op.
+     */
+    @PluginMethod
+    fun closeAllPeerConnections(call: PluginCall) {
+        manager?.closeAllPeerConnections()
+        call.resolve()
+    }
+
     @PluginMethod
     fun getConnectionState(call: PluginCall) {
         val peerId = call.getString("peerId") ?: ""
