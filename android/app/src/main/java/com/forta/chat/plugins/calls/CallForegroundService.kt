@@ -299,6 +299,24 @@ class CallForegroundService : Service() {
             audioManager?.abandonAudioFocusRequest(it)
             audioFocusRequest = null
         }
+        // Session 23 / D-09: restore the user's previous voice-call
+        // volume here, in addition to the existing AUDIOFOCUS_GAIN
+        // listener path. When we self-abandon the focus (call ended
+        // normally) the focus change listener does not fire — without
+        // this explicit restore the voice-call volume could stay at
+        // the ducked level set by an earlier focus change.
+        if (savedVoiceCallVolume >= 0) {
+            try {
+                audioManager?.setStreamVolume(
+                    AudioManager.STREAM_VOICE_CALL,
+                    savedVoiceCallVolume,
+                    0,
+                )
+            } catch (e: Exception) {
+                Log.w("WebRTCAudio", "Failed to restore voice call volume", e)
+            }
+            savedVoiceCallVolume = -1
+        }
     }
 
     // -----------------------------------------------------------------------
