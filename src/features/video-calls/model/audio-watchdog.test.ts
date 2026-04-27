@@ -40,6 +40,7 @@ vi.mock("@/shared/lib/native-calls", () => ({
 
 const mockCallStore: Record<string, unknown> = {
   activeCall: null,
+  matrixCall: null,
 };
 
 vi.mock("@/entities/call", () => ({
@@ -60,6 +61,7 @@ describe("setupAudioWatchdog — app resume audio recovery", () => {
     vi.clearAllMocks();
     appStateChangeHandler = null;
     mockCallStore.activeCall = null;
+    mockCallStore.matrixCall = null;
     mockIsNative.value = true;
     mockGetAudioStatus.mockReset();
     mockForceStopAudio.mockReset().mockResolvedValue(undefined);
@@ -109,6 +111,25 @@ describe("setupAudioWatchdog — app resume audio recovery", () => {
       isBtScoOn: false,
     });
     mockCallStore.activeCall = { callId: "live-call", status: "connected" };
+
+    const { setupAudioWatchdog } = await reload();
+    await setupAudioWatchdog();
+    await appStateChangeHandler!({ isActive: true });
+
+    expect(mockForceStopAudio).not.toHaveBeenCalled();
+  });
+
+  it("does NOT trigger forceStopAudio when matrixCall is set but activeCall is null (mid-setup)", async () => {
+    // Window during incoming call setup: handleIncomingCall on native sets
+    // matrixCall first, then setActiveCall is gated behind user accept.
+    // Watchdog must not kill audio during this gap.
+    mockGetAudioStatus.mockResolvedValue({
+      mode: "MODE_IN_COMMUNICATION",
+      isSpeakerOn: false,
+      isBtScoOn: false,
+    });
+    mockCallStore.activeCall = null;
+    mockCallStore.matrixCall = { callId: "mid-setup", roomId: "!r:m" };
 
     const { setupAudioWatchdog } = await reload();
     await setupAudioWatchdog();

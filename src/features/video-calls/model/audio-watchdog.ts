@@ -29,10 +29,21 @@ export async function setupAudioWatchdog(): Promise<void> {
 
     try {
       const callStore = useCallStore();
-      if (callStore.activeCall) return;
+      // Gate on BOTH activeCall and matrixCall. There is a window during
+      // call setup where the SDK has a MatrixCall but `activeCall` is
+      // still null (e.g. handleIncomingCall on native skips setActiveCall
+      // until the user actually answers). Without the matrixCall gate
+      // a watchdog tick during that window would forceStopAudio under a
+      // call that is mid-setup — exactly the regression the watchdog is
+      // meant to prevent.
+      if (callStore.activeCall || callStore.matrixCall) return;
 
       const status = await nativeCallBridge.getAudioStatus();
       if (status.mode !== "MODE_IN_COMMUNICATION") return;
+
+      // Re-check state right before the destructive action — an incoming
+      // call may have started during the awaited getAudioStatus.
+      if (callStore.activeCall || callStore.matrixCall) return;
 
       console.warn(
         "[audio-watchdog] App resumed but mode=IN_COMM with no active call → forceStopAudio",
