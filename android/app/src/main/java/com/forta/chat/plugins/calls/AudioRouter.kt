@@ -188,25 +188,113 @@ class AudioRouter private constructor(private val context: Context) {
         }
 
         isActive = false
-        audioManager.unregisterAudioDeviceCallback(deviceCallback)
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+        // Session 23: previously a single call chain. If
+        // unregisterAudioDeviceCallback or BT SCO teardown threw, the
+        // mode=NORMAL / clearCommunicationDevice path was skipped and
+        // the device stayed in MODE_IN_COMMUNICATION until reboot —
+        // music played at low volume through the earpiece, new calls
+        // had zero-way audio. try/finally guarantees the audio mode is
+        // always restored regardless of any exception above it.
+        try {
             try {
-                context.unregisterReceiver(btScoReceiver)
+                audioManager.unregisterAudioDeviceCallback(deviceCallback)
+            } catch (e: Exception) {
+                Log.w(LIFECYCLE_TAG, "unregisterAudioDeviceCallback threw", e)
+            }
+
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                try {
+                    context.unregisterReceiver(btScoReceiver)
+                } catch (_: Exception) {}
+                stopBluetoothScoSafely()
+            }
+        } finally {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    audioManager.clearCommunicationDevice()
+                }
+            } catch (e: Exception) {
+                Log.w(LIFECYCLE_TAG, "clearCommunicationDevice threw", e)
+            }
+
+            try {
+                audioManager.mode = AudioManager.MODE_NORMAL
+            } catch (e: Exception) {
+                Log.w(LIFECYCLE_TAG, "setMode(MODE_NORMAL) threw", e)
+            }
+
+            try {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = false
             } catch (_: Exception) {}
 
-            if (audioManager.isBluetoothScoOn) {
-                audioManager.isBluetoothScoOn = false
-                audioManager.stopBluetoothSco()
+            Log.d(LIFECYCLE_TAG, "stop(): set mode=MODE_NORMAL, cleared comm device")
+        }
+    }
+
+    /**
+     * On API < 31 stopBluetoothSco is asynchronous: the audio framework
+     * tears down the SCO link via a broadcast. Resetting audio mode
+     * before that broadcast arrives leaves routing in an inconsistent
+     * state — the next stream lands on SCO mono (silent or distorted).
+     *
+     * Wait for STATE_DISCONNECTED with a 500ms upper bound so a stuck
+     * BT stack cannot block hangup forever.
+     */
+    private fun stopBluetoothScoSafely() {
+        if (!audioManager.isBluetoothScoOn) return
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                val state = i?.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1) ?: return
+                if (state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED) latch.countDown()
             }
-        } else {
-            audioManager.clearCommunicationDevice()
         }
 
-        audioManager.mode = AudioManager.MODE_NORMAL
+        try {
+            context.registerReceiver(receiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+            audioManager.isBluetoothScoOn = false
+            audioManager.stopBluetoothSco()
+            latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            Log.w(LIFECYCLE_TAG, "stopBluetoothScoSafely threw", e)
+        } finally {
+            try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Public force-reset. Bypasses the [isActive] guard and brute-force
+     * restores audio state. Used by the app-resume watchdog when a
+     * previous call's cleanup never ran (JS process killed, OEM stopped
+     * the foreground service) and the device is stuck in
+     * MODE_IN_COMMUNICATION.
+     */
+    fun forceStop() {
+        Log.w(LIFECYCLE_TAG, "forceStop() — bypassing guards, brute reset")
+        isActive = false
+
+        try { audioManager.unregisterAudioDeviceCallback(deviceCallback) } catch (_: Exception) {}
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            try { context.unregisterReceiver(btScoReceiver) } catch (_: Exception) {}
+            try {
+                if (audioManager.isBluetoothScoOn) {
+                    audioManager.isBluetoothScoOn = false
+                    audioManager.stopBluetoothSco()
+                }
+            } catch (_: Exception) {}
+        } else {
+            try { audioManager.clearCommunicationDevice() } catch (_: Exception) {}
+        }
+
+        try { audioManager.mode = AudioManager.MODE_NORMAL } catch (_: Exception) {}
         @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = false
-        Log.d(LIFECYCLE_TAG, "stop(): set mode=MODE_NORMAL, cleared comm device")
+        try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
+
+        Log.d(LIFECYCLE_TAG, "forceStop() complete")
     }
 
     /**
