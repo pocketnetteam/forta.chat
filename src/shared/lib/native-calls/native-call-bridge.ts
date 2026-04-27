@@ -64,6 +64,21 @@ interface NativeCallNativePlugin {
   setAudioDevice(options: { type: string }): Promise<void>;
   startAudioRouting(options: { callType: string }): Promise<void>;
   stopAudioRouting(): Promise<void>;
+  /**
+   * Brute-force reset of audio state without going through the
+   * lifecycle guards. Used by the app-resume watchdog when the device
+   * is stuck in MODE_IN_COMMUNICATION but no call is live.
+   */
+  forceStopAudio(): Promise<void>;
+  /**
+   * Snapshot of the current AudioManager state. Used by the app-resume
+   * watchdog to detect a stuck VoIP audio mode.
+   */
+  getAudioStatus(): Promise<{
+    mode: string;
+    isSpeakerOn: boolean;
+    isBtScoOn: boolean;
+  }>;
   addListener(event: 'callAnswered', cb: (data: { callId: string; roomId?: string }) => void): Promise<{ remove: () => void }>;
   addListener(event: 'callDeclined', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
   addListener(event: 'callEnded', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
@@ -548,6 +563,49 @@ class NativeCallBridge {
       await NativeCall.stopAudioRouting();
     } catch (e) {
       console.warn('[NativeCallBridge] stopAudioRouting failed:', e);
+    }
+  }
+
+  /**
+   * Brute-force reset of audio state. Bypasses the lifecycle guards in
+   * AudioRouter — used by the app-resume watchdog to recover from a
+   * crashed call where the normal cleanup path never ran (JS process
+   * killed mid-call, OEM stopped the foreground service, etc.).
+   *
+   * Symmetric to {@link stopAudioRouting} but unconditional: always
+   * resets mode → NORMAL and clears the communication device.
+   */
+  async forceStopAudio(): Promise<void> {
+    if (!isNative) return;
+    try {
+      await NativeCall.forceStopAudio();
+    } catch (e) {
+      console.warn('[NativeCallBridge] forceStopAudio failed:', e);
+    }
+  }
+
+  /**
+   * Read current AudioManager mode and routing flags from native.
+   * Returns mode = "MODE_NORMAL" when no call active or
+   * "MODE_IN_COMMUNICATION" while a VoIP call is in progress.
+   *
+   * On non-native or older native builds without this method we report
+   * an optimistic NORMAL — the watchdog treats anything other than
+   * MODE_IN_COMMUNICATION as healthy, so an unavailable probe is safe.
+   */
+  async getAudioStatus(): Promise<{
+    mode: string;
+    isSpeakerOn: boolean;
+    isBtScoOn: boolean;
+  }> {
+    if (!isNative) {
+      return { mode: 'MODE_NORMAL', isSpeakerOn: false, isBtScoOn: false };
+    }
+    try {
+      return await NativeCall.getAudioStatus();
+    } catch (e) {
+      console.warn('[NativeCallBridge] getAudioStatus unavailable:', e);
+      return { mode: 'MODE_NORMAL', isSpeakerOn: false, isBtScoOn: false };
     }
   }
 }

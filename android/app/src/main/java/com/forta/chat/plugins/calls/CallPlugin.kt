@@ -396,6 +396,49 @@ class CallPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * Session 23: brute-force reset of audio state. Bypasses
+     * [AudioRouter.isActive] guard so the device's audio mode is reset
+     * even when the lifecycle bookkeeping says routing is already
+     * inactive but the system is still in MODE_IN_COMMUNICATION.
+     *
+     * Called by the JS app-resume watchdog when it detects a stuck
+     * VoIP audio mode without an active call.
+     */
+    @PluginMethod
+    fun forceStopAudio(call: PluginCall) {
+        AudioRouter.getSharedInstance(context).forceStop()
+        call.resolve()
+    }
+
+    /**
+     * Session 23: snapshot of current AudioManager state. Consumed by
+     * the JS watchdog to decide whether to forceStopAudio on app
+     * resume. Returns mode as a string identifier so JS does not have
+     * to hardcode the Android numeric constants.
+     */
+    @PluginMethod
+    fun getAudioStatus(call: PluginCall) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val modeStr = when (am.mode) {
+            AudioManager.MODE_NORMAL -> "MODE_NORMAL"
+            AudioManager.MODE_IN_COMMUNICATION -> "MODE_IN_COMMUNICATION"
+            AudioManager.MODE_RINGTONE -> "MODE_RINGTONE"
+            AudioManager.MODE_IN_CALL -> "MODE_IN_CALL"
+            else -> "UNKNOWN(${am.mode})"
+        }
+        @Suppress("DEPRECATION")
+        val isBtScoOn = am.isBluetoothScoOn
+        @Suppress("DEPRECATION")
+        val isSpeakerOn = am.isSpeakerphoneOn
+        val result = JSObject().apply {
+            put("mode", modeStr)
+            put("isSpeakerOn", isSpeakerOn)
+            put("isBtScoOn", isBtScoOn)
+        }
+        call.resolve(result)
+    }
+
     @PluginMethod
     fun getPendingAnswer(call: PluginCall) {
         val pendingCallId = CallConnection.pendingAnswerCallId
