@@ -19,6 +19,7 @@ import {
   consumePendingRejectCallId,
 } from "@/shared/lib/native-calls";
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
+import { finalizeCall } from "./finalize-call";
 
 // Install native WebRTC proxy on mobile — must run before any call is placed.
 // This replaces window.RTCPeerConnection so that the Matrix SDK transparently
@@ -210,14 +211,13 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       playEndTone();
       callStore.stopTimer();
       unwireCallEvents(call);
-      // Notify native ConnectionService that call ended + dismiss native UI +
-      // tear down VoIP audio routing (restore MODE_NORMAL, clear comm device).
+      // Single point of native cleanup. Idempotent per callId — if
+      // hangup() / rejectCall() already finalized this call, this is a
+      // no-op. Steps (stopAudioRouting → reportCallEnded → dismissCallUI
+      // → closeAllPeerConnections) run in order with isolated error
+      // handling so a leaked AudioRecord is always disposed.
       if (isNative) {
-        import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
-          nativeCallBridge.reportCallEnded(call.callId);
-          nativeCallBridge.stopAudioRouting().catch(() => {});
-        }).catch(() => {});
-        NativeWebRTC.dismissCallUI().catch(() => {});
+        void finalizeCall("sdk-ended", call.callId);
       }
       const activeCall = callStore.activeCall;
       if (activeCall) {
@@ -252,12 +252,10 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     // native IncomingCallActivity + shade notification stay up forever.
     // onState → ended eventually does the same cleanup, but we can't
     // rely on it: the SDK sometimes fires Hangup before State transitions
-    // for rejected-while-ringing cases.
+    // for rejected-while-ringing cases. finalizeCall is idempotent per
+    // callId so a follow-up onState→ended will be a no-op.
     if (isNative) {
-      import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
-        nativeCallBridge.reportCallEnded(call.callId);
-      }).catch(() => {});
-      NativeWebRTC.dismissCallUI().catch(() => {});
+      void finalizeCall("sdk-ended", call.callId);
     }
   }) as CallEventHandlerMap[CallEvent.Hangup];
 
@@ -275,11 +273,7 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     clearConnectingWatchdog();
     unwireCallEvents(call);
     if (isNative) {
-      import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
-        nativeCallBridge.reportCallEnded(call.callId);
-        nativeCallBridge.stopAudioRouting().catch(() => {});
-      }).catch(() => {});
-      NativeWebRTC.dismissCallUI().catch(() => {});
+      void finalizeCall("error", call.callId);
     }
     callStore.updateStatus(CallStatus.failed);
     const activeCall = callStore.activeCall;
@@ -590,18 +584,14 @@ export function useCallService() {
       unwireCallEvents(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
+      // H1/H7 + Session 23: native side of startAudioRouting may have
+      // already bumped the phone into MODE_IN_COMMUNICATION (it is queued
+      // sync with placeCall). finalizeCall always runs the full teardown
+      // chain (stop routing → report ended → dismiss UI → close PCs);
+      // each step is idempotent on the native side, so calling it when
+      // startAudioRouting never ran is just a no-op + one warn log.
       if (isNative) {
-        import('@/shared/lib/native-calls').then(({ nativeCallBridge }) => {
-          nativeCallBridge.reportCallEnded(call.callId);
-        }).catch(() => {});
-        // H1 guard: always tear down audio routing on failure. The native
-        // side of startAudioRouting may have already bumped the phone into
-        // MODE_IN_COMMUNICATION (it is queued sync with placeCall), so
-        // omitting stopAudioRouting here can leave the device stuck in VoIP
-        // mode — symptom: ringer silent, earpiece half-on, until the user
-        // places+cancels another call. Native stopAudioRouting is idempotent,
-        // so calling it when start never ran is a no-op + one warn log.
-        nativeCallBridge.stopAudioRouting().catch(() => {});
+        void finalizeCall("error", call.callId);
       }
     }
   }
@@ -803,14 +793,11 @@ export function useCallService() {
       }
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(1500);
+      // Idempotent teardown — permission check itself did not reach
+      // startAudioRouting, but a previous accept attempt in this session
+      // might have. finalizeCall is a no-op when nothing is set up yet.
       if (isNative) {
-        NativeWebRTC.dismissCallUI().catch(() => {});
-        nativeCallBridge.reportCallEnded(call.callId).catch(() => {});
-        // Idempotent teardown — permission check itself did not reach
-        // startAudioRouting, but a previous accept attempt in this session
-        // might have. Calling stopAudioRouting on an already-stopped router
-        // is a no-op in native.
-        nativeCallBridge.stopAudioRouting().catch(() => {});
+        void finalizeCall("permission-denied", call.callId);
       }
       return;
     }
@@ -836,9 +823,7 @@ export function useCallService() {
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       if (isNative) {
-        NativeWebRTC.dismissCallUI().catch(() => {});
-        nativeCallBridge.reportCallEnded(call.callId).catch(() => {});
-        nativeCallBridge.stopAudioRouting().catch(() => {});
+        void finalizeCall("watchdog-timeout", call.callId);
       }
     }, CONNECTING_WATCHDOG_MS);
 
@@ -877,15 +862,15 @@ export function useCallService() {
       unwireCallEvents(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
+      // H1 + H7 + Session 23: always tear down audio routing on answer
+      // failure. If call.answer threw *after* startAudioRouting queued
+      // (it's fire-and-forget), MODE_IN_COMMUNICATION may already be
+      // set. Prior to centralized finalize, the device could stay locked
+      // in VoIP mode with BT SCO held open until reboot. finalizeCall
+      // also dismisses the native UI and disposes peer-connection media
+      // so a leaked AudioRecord cannot lock the mic device-wide.
       if (isNative) {
-        NativeWebRTC.dismissCallUI().catch(() => {});
-        // H1 + H7: always tear down audio routing on answer failure. If
-        // call.answer threw *after* nativeCallBridge.startAudioRouting
-        // queued (it's fire-and-forget under `.catch()`), MODE_IN_COMMUNICATION
-        // may already be set. Prior to this guard the device could stay
-        // locked in VoIP mode with BT SCO held open until reboot (#442,
-        // #443 symptom class). Idempotent on the native side.
-        nativeCallBridge.stopAudioRouting().catch(() => {});
+        void finalizeCall("error", call.callId);
       }
     }
   }
@@ -904,12 +889,12 @@ export function useCallService() {
       console.warn("[call-service] reject error:", e);
     }
 
-    // Tear down audio routing — we never entered MODE_IN_COMMUNICATION cleanly
-    // for incoming calls that start from ringing, but starting the router on
-    // answer means a rejected call after a prior answer attempt must also
-    // clean up. Idempotent on native side.
+    // Centralized native cleanup — release audio routing, dismiss UI,
+    // close any peer connections that were started during a prior answer
+    // attempt. Idempotent on native side; safe even if the router never
+    // started for an incoming call that began from ringing.
     if (isNative) {
-      nativeCallBridge.stopAudioRouting().catch(() => {});
+      void finalizeCall("reject", call.callId);
     }
 
     unwireCallEvents(call);
@@ -944,12 +929,13 @@ export function useCallService() {
       console.warn("[call-service] hangup error:", e);
     }
 
-    // Tear down VoIP audio routing eagerly. The SDK's Ended state also
-    // triggers stopAudioRouting, but we call it here too so the user's
-    // earpiece/speaker is released immediately even if Ended is delayed.
-    // Idempotent on the native side.
+    // Tear down everything eagerly. The SDK's Ended state also calls
+    // finalizeCall, but we run it here too so the user's earpiece /
+    // speaker / mic / wake lock release immediately — even if Ended is
+    // delayed by 200-500ms while the SDK negotiates. Idempotent per
+    // callId, so the follow-up Ended is a no-op.
     if (isNative) {
-      nativeCallBridge.stopAudioRouting().catch(() => {});
+      void finalizeCall("hangup", call.callId);
     }
 
     // Fallback cleanup if SDK doesn't fire Ended event (#11)

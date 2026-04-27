@@ -232,7 +232,7 @@ vi.mock('./call-tab-lock', () => ({
 // ---------------------------------------------------------------------------
 
 describe('call-service permission flow', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     // Reset shared mock store state
     mockCallStore.isInCall = false;
@@ -242,6 +242,12 @@ describe('call-service permission flow', () => {
     // Default: permissions resolve successfully. Individual tests override
     // with mockRejectedValueOnce(new MockPermissionDeniedError(...)).
     mockEnsureCallPermissions.mockResolvedValue(undefined);
+    // Clear finalize-call's per-callId idempotency map between tests —
+    // many tests reuse the same callId ('test-call-id', 'incoming-call-id'),
+    // and a leftover finalized entry would short-circuit the cleanup
+    // chain on the next run.
+    const { __resetFinalizeCallStateForTests } = await import('./finalize-call');
+    __resetFinalizeCallStateForTests();
   });
 
   describe('startCall', () => {
