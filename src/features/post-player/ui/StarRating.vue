@@ -45,7 +45,9 @@ function stateFor(star: number): StarState {
   if (hasMyVote.value) {
     return star <= (props.modelValue as number) ? "my-fill" : "empty";
   }
-  const avgFilled = Math.floor(props.average);
+  // Round-half-up so the visible filled count matches the rounded label
+  // ("5.0" must show 5 stars, not 4 — toFixed(1) rounds 4.99 → "5.0").
+  const avgFilled = Math.round(props.average);
   return star <= avgFilled ? "avg-line" : "empty";
 }
 

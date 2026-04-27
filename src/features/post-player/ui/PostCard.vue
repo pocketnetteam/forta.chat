@@ -9,6 +9,7 @@ import { useToast } from "@/shared/lib/use-toast";
 import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
+import { renderArticleText } from "@/shared/lib/article-blocks";
 import { useChatStore } from "@/entities/chat";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 
@@ -51,12 +52,11 @@ const firstImage = computed(() => {
   return normalizePocketnetImageUrl(post.value.images[0]);
 });
 
+/** Plain-text preview that handles both Editor.js JSON (articles) and plain messages. */
 const truncatedMessage = computed(() => {
-  if (!post.value?.message) return "";
-  const limit = 200;
-  return post.value.message.length > limit
-    ? post.value.message.slice(0, limit) + "..."
-    : post.value.message;
+  const raw = post.value?.message ?? "";
+  if (!raw) return "";
+  return renderArticleText(raw, { maxLength: 200 });
 });
 
 const authorAvatarError = ref(false);

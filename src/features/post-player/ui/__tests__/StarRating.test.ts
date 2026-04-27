@@ -33,9 +33,9 @@ describe("StarRating three-state visual", () => {
     });
   });
 
-  it("average=3.5 totalVotes=4 modelValue=null → first 3 outline gold, last 2 grey", () => {
+  it("average=3.4 totalVotes=4 modelValue=null → first 3 outline gold, last 2 grey", () => {
     const w = mount(StarRating, {
-      props: { average: 3.5, totalVotes: 4, modelValue: null },
+      props: { average: 3.4, totalVotes: 4, modelValue: null },
     });
     const svgs = stars(w);
     [0, 1, 2].forEach((i) => {
@@ -46,6 +46,30 @@ describe("StarRating three-state visual", () => {
       expect(svgs[i].classes()).toContain(NO_FILL);
       expect(svgs[i].classes()).not.toContain(TEXT_GOLD);
     });
+  });
+
+  it("average=3.5 rounds half-up → 4 outline gold (matches '3.5' label)", () => {
+    const w = mount(StarRating, {
+      props: { average: 3.5, totalVotes: 4, modelValue: null },
+    });
+    const svgs = stars(w);
+    [0, 1, 2, 3].forEach((i) => {
+      expect(svgs[i].classes()).toContain(NO_FILL);
+      expect(svgs[i].classes()).toContain(TEXT_GOLD);
+    });
+    expect(svgs[4].classes()).not.toContain(TEXT_GOLD);
+  });
+
+  it("average=4.99 rounds to 5 outline gold (matches '5.0' label, not 4 / mismatch)", () => {
+    // Real-world bug: average 4.99 was rendering as label "5.0" but only 4 outline stars
+    const w = mount(StarRating, {
+      props: { average: 4.99, totalVotes: 100, modelValue: null },
+    });
+    stars(w).forEach((s) => {
+      expect(s.classes()).toContain(NO_FILL);
+      expect(s.classes()).toContain(TEXT_GOLD);
+    });
+    expect(w.text()).toContain("5.0");
   });
 
   it("modelValue=4 (I voted) → first 4 FILLED gold, last 1 grey", () => {
