@@ -9,6 +9,7 @@ import StarRating from "./StarRating.vue";
 import PostAuthor from "./PostAuthor.vue";
 import PostActions from "./PostActions.vue";
 import PostComments from "./PostComments.vue";
+import ArticleBody from "./ArticleBody.vue";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 import { useChatStore } from "@/entities/chat";
 import { parseVideoUrl } from "@/shared/lib/video-embed";
@@ -157,9 +158,11 @@ onUnmounted(() => {
               {{ post.caption }}
             </h2>
 
-            <p v-if="post.message" class="whitespace-pre-wrap text-sm leading-relaxed text-text-color/80">
-              {{ post.message }}
-            </p>
+            <ArticleBody
+              v-if="post.message"
+              :raw="post.message"
+              class="text-sm leading-relaxed text-text-color/80"
+            />
 
             <div v-if="post.tags.length" class="flex flex-wrap gap-1.5">
               <span
