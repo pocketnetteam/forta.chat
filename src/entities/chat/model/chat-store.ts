@@ -38,6 +38,9 @@ if (typeof globalThis !== "undefined") {
       (globalThis as Record<string, unknown>).__chatListDebug = true;
     }
   } catch { /* SSR / restricted contexts */ }
+  // Boot marker — confirms the v24 code is loaded after `git pull`.
+  // eslint-disable-next-line no-console
+  console.log("[chat-store v24] loaded — single-writer unreadCount + buildLastMessage helpers active");
 }
 
 /** Extract raw event data from a MatrixEvent object */
@@ -798,7 +801,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (dexieMatch && inMemMatch) {
       if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
         // eslint-disable-next-line no-console
-        console.debug(`[unread] noop ${source} ${roomId.slice(0,12)} count=${safeCount}`);
+        console.log(`[unread] noop ${source} ${roomId.slice(0,12)} count=${safeCount}`);
       }
       return;
     }
@@ -806,7 +809,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
       const prev = lr?.unreadCount ?? inMemRoom?.unreadCount ?? 0;
       // eslint-disable-next-line no-console
-      console.debug(`[unread] WRITE ${source} ${roomId.slice(0,12)} ${prev} → ${safeCount}`, new Error("trace").stack?.split("\n").slice(2,5).join(" | "));
+      console.log(`[unread] WRITE ${source} ${roomId.slice(0,12)} ${prev} → ${safeCount}`, new Error("trace").stack?.split("\n").slice(2,5).join(" | "));
     }
 
     if (inMemRoom && inMemRoom.unreadCount !== safeCount) {
@@ -1241,14 +1244,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       perfCount("sortedRooms:patch-noop");
       if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
         // eslint-disable-next-line no-console
-        console.debug(`[patcher] noop (${dedup.size} rooms, all cache-hit)`);
+        console.log(`[patcher] noop (${dedup.size} rooms, all cache-hit)`);
       }
       return;
     }
     perfCount("sortedRooms:effective-patch");
     if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
       // eslint-disable-next-line no-console
-      console.debug(`[patcher] EFFECTIVE patch (${dedup.size} rooms changed)`, [...dedup.keys()].map(id => id.slice(0,12)));
+      console.log(`[patcher] EFFECTIVE patch (${dedup.size} rooms changed)`, [...dedup.keys()].map(id => id.slice(0,12)));
     }
     _sortedRoomsRef.value = arr;
   };
@@ -1403,10 +1406,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               if (prev.lastMessagePreview !== r.lastMessagePreview) diffs.push(`preview≠`);
               if (diffs.length > 0) {
                 // eslint-disable-next-line no-console
-                console.debug(`[dexie-delta] ${r.id.slice(0,12)} ${diffs.join(" ")}`);
+                console.log(`[dexie-delta] ${r.id.slice(0,12)} ${diffs.join(" ")}`);
               } else {
                 // eslint-disable-next-line no-console
-                console.debug(`[dexie-delta] ${r.id.slice(0,12)} REDUNDANT (no fields changed)`);
+                console.log(`[dexie-delta] ${r.id.slice(0,12)} REDUNDANT (no fields changed)`);
               }
             }
           }
@@ -3734,7 +3737,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (room) {
       if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
         // eslint-disable-next-line no-console
-        console.debug(`[addMessage] ${roomId.slice(0,12)} sender=${message.senderId.slice(0,8)} active=${roomId === activeRoomId.value} status=${message.status}`);
+        console.log(`[addMessage] ${roomId.slice(0,12)} sender=${message.senderId.slice(0,8)} active=${roomId === activeRoomId.value} status=${message.status}`);
       }
       room.lastMessage = lastMessageFromMessage(message, dexieRoomMap.get(roomId));
       room.updatedAt = message.timestamp;
