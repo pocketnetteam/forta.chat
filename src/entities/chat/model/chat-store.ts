@@ -29,20 +29,6 @@ import { MessageStatus, MessageType } from "./types";
 
 const NAMESPACE = "chat";
 
-// Boot-time chat-list debug toggle.
-// Enable via DevTools console: `window.__chatListDebug = true` (instant)
-// Or persist across reloads: `localStorage.setItem('__debug_chat_list', '1')`.
-if (typeof globalThis !== "undefined") {
-  try {
-    if (typeof localStorage !== "undefined" && localStorage.getItem("__debug_chat_list") === "1") {
-      (globalThis as Record<string, unknown>).__chatListDebug = true;
-    }
-  } catch { /* SSR / restricted contexts */ }
-  // Boot marker — confirms the v24 code is loaded after `git pull`.
-  // eslint-disable-next-line no-console
-  console.log("[chat-store v24] loaded — single-writer unreadCount + buildLastMessage helpers active");
-}
-
 /** Extract raw event data from a MatrixEvent object */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getRawEvent(matrixEvent: any): Record<string, unknown> | null {
@@ -822,19 +808,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Diff guard: skip when nothing would change
     const dexieMatch = !lr || lr.unreadCount === safeCount;
     const inMemMatch = !inMemRoom || inMemRoom.unreadCount === safeCount;
-    if (dexieMatch && inMemMatch) {
-      if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
-        // eslint-disable-next-line no-console
-        console.log(`[unread] noop ${source} ${roomId.slice(0,12)} count=${safeCount}`);
-      }
-      return;
-    }
-
-    if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
-      const prev = lr?.unreadCount ?? inMemRoom?.unreadCount ?? 0;
-      // eslint-disable-next-line no-console
-      console.log(`[unread] WRITE ${source} ${roomId.slice(0,12)} ${prev} → ${safeCount}`, new Error("trace").stack?.split("\n").slice(2,5).join(" | "));
-    }
+    if (dexieMatch && inMemMatch) return;
 
     if (inMemRoom && inMemRoom.unreadCount !== safeCount) {
       inMemRoom.unreadCount = safeCount;
@@ -1103,10 +1077,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // diffs), causing redundant cache invalidations + sortedRooms patches
     // + sidebar re-renders + visible badge flicker on neighboring rooms.
     const effectiveSortKey = ts > 0 ? ts : (lr.updatedAt ?? 0);
-    if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
-      // eslint-disable-next-line no-console
-      console.log(`[mapLR] ${lr.id.slice(0,12)} ls=${lr.lastMessageLocalStatus} ts=${lr.lastMessageTimestamp} readOut=${lr.lastReadOutboundTs} preview="${(lr.lastMessagePreview ?? "").slice(0,30)}" ev=${(lr.lastMessageEventId ?? "").slice(0,8)}`);
-    }
     // Resolve effective preview: prefer decrypted cache over raw Dexie value
     const decryptedPreview = decryptedPreviewCache.get(lr.id);
     const effectivePreview = resolveLastMessagePreview(lr.lastMessagePreview, decryptedPreview);
@@ -1277,17 +1247,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     if (!mutated) {
       perfCount("sortedRooms:patch-noop");
-      if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
-        // eslint-disable-next-line no-console
-        console.log(`[patcher] noop (${dedup.size} rooms, all cache-hit)`);
-      }
       return;
     }
     perfCount("sortedRooms:effective-patch");
-    if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
-      // eslint-disable-next-line no-console
-      console.log(`[patcher] EFFECTIVE patch (${dedup.size} rooms changed)`, [...dedup.keys()].map(id => id.slice(0,12)));
-    }
     _sortedRoomsRef.value = arr;
   };
 
@@ -1439,7 +1401,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   const applyDexieDeltas = (changes: RoomChange[]) => {
-    const debug = typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug;
     // Always update dexieRoomMap (ground truth), but defer sort when suppressed
     const relevantChanges: RoomChange[] = [];
     for (const c of changes) {
@@ -1454,24 +1415,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (!r.updatedAt) r.updatedAt = r.lastMessageTimestamp || 1;
           const prev = dexieRoomMap.get(r.id);
           const visible = !prev || hasVisibleRoomChange(prev, r);
-          if (debug && prev) {
-            const diffs: string[] = [];
-            if (prev.unreadCount !== r.unreadCount) diffs.push(`unread:${prev.unreadCount}→${r.unreadCount}`);
-            if (prev.lastMessageLocalStatus !== r.lastMessageLocalStatus) diffs.push(`status:${prev.lastMessageLocalStatus}→${r.lastMessageLocalStatus}`);
-            if (prev.lastReadInboundTs !== r.lastReadInboundTs) diffs.push(`readIn:${prev.lastReadInboundTs}→${r.lastReadInboundTs}`);
-            if (prev.lastReadOutboundTs !== r.lastReadOutboundTs) diffs.push(`readOut:${prev.lastReadOutboundTs}→${r.lastReadOutboundTs}`);
-            if (prev.lastMessageTimestamp !== r.lastMessageTimestamp) diffs.push(`ts:${prev.lastMessageTimestamp}→${r.lastMessageTimestamp}`);
-            if (prev.updatedAt !== r.updatedAt) diffs.push(`upd:${prev.updatedAt}→${r.updatedAt}`);
-            if (prev.lastMessagePreview !== r.lastMessagePreview) diffs.push(`preview≠`);
-            const tag = visible ? "" : " INVISIBLE-skip";
-            if (diffs.length > 0) {
-              // eslint-disable-next-line no-console
-              console.log(`[dexie-delta] ${r.id.slice(0,12)} ${diffs.join(" ")}${tag}`);
-            } else {
-              // eslint-disable-next-line no-console
-              console.log(`[dexie-delta] ${r.id.slice(0,12)} REDUNDANT (no fields changed)`);
-            }
-          }
           // Always refresh ground truth, but only push a sortedRooms patch
           // when something visible changed.
           dexieRoomMap.set(r.id, r);
@@ -3796,10 +3739,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Update room's last message and timestamp
     const room = getRoomById(roomId);
     if (room) {
-      if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
-        // eslint-disable-next-line no-console
-        console.log(`[addMessage] ${roomId.slice(0,12)} sender=${message.senderId.slice(0,8)} active=${roomId === activeRoomId.value} status=${message.status}`);
-      }
       room.lastMessage = lastMessageFromMessage(message, dexieRoomMap.get(roomId));
       room.updatedAt = message.timestamp;
       triggerRef(rooms);
