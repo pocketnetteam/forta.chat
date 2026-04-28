@@ -940,16 +940,18 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
               <span v-else class="truncate text-sm text-text-on-main-bg-color">
                 <span v-if="(item as ChatRoom).lastMessageReaction" class="mr-0.5">{{ (item as ChatRoom).lastMessageReaction!.emoji }}</span>{{ formatPreview((item as ChatRoom).lastMessage, item as ChatRoom) }}
               </span>
-              <transition name="badge-pop">
-                <span
-                  v-if="(item as ChatRoom).unreadCount > 0"
-                  class="flex h-[20px] min-w-[20px] shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium text-white"
-                  :class="chatStore.mutedRoomIds.has((item as ChatRoom).id) ? 'bg-neutral-grad-2' : 'bg-color-bg-ac'"
-                  :aria-label="`${(item as ChatRoom).unreadCount} unread messages`"
-                >
-                  {{ (item as ChatRoom).unreadCount > 99 ? "99+" : (item as ChatRoom).unreadCount }}
-                </span>
-              </transition>
+              <!-- No <transition> wrapper: RecycleScroller mounts/unmounts
+                   each row's span as it recycles slots, which would replay
+                   the bounce-in animation on every sortedRooms patch and
+                   produce visible badge flicker. CSS-driven mount = instant. -->
+              <span
+                v-if="(item as ChatRoom).unreadCount > 0"
+                class="flex h-[20px] min-w-[20px] shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium text-white"
+                :class="chatStore.mutedRoomIds.has((item as ChatRoom).id) ? 'bg-neutral-grad-2' : 'bg-color-bg-ac'"
+                :aria-label="`${(item as ChatRoom).unreadCount} unread messages`"
+              >
+                {{ (item as ChatRoom).unreadCount > 99 ? "99+" : (item as ChatRoom).unreadCount }}
+              </span>
             </div>
           </div>
         </button>
@@ -999,21 +1001,9 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
 </template>
 
 <style scoped>
-.badge-pop-enter-active {
-  animation: badge-bounce-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.badge-pop-leave-active {
-  transition: transform 0.15s ease-in, opacity 0.15s ease-in;
-}
-.badge-pop-leave-to {
-  opacity: 0;
-  transform: scale(0);
-}
-@keyframes badge-bounce-in {
-  0%   { transform: scale(0); }
-  60%  { transform: scale(1.2); }
-  100% { transform: scale(1); }
-}
+/* Removed .badge-pop-* / @keyframes badge-bounce-in — they replayed on
+   every RecycleScroller slot recycle, causing visible badge flicker
+   during sortedRooms patches (chat-list-flicker investigation). */
 .check-pop-enter-active {
   transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.1s ease;
 }
