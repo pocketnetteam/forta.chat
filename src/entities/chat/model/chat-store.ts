@@ -1072,6 +1072,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // ---------------------------------------------------------------------------
   const mapLocalRoomToChatRoom = (lr: LocalRoom): ChatRoom => {
     const ts = lr.lastMessageTimestamp ?? 0;
+    // Effective sort key: lastMessageTimestamp wins, fall back to updatedAt
+    // only when there is no message yet. Matches getSortKey logic.
+    // Don't track raw `updatedAt` — it gets bumped on writes that don't
+    // change anything visible (see [dexie-delta] upd:T1→T2 with no other
+    // diffs), causing redundant cache invalidations + sortedRooms patches
+    // + sidebar re-renders + visible badge flicker on neighboring rooms.
+    const effectiveSortKey = ts > 0 ? ts : (lr.updatedAt ?? 0);
     // Resolve effective preview: prefer decrypted cache over raw Dexie value
     const decryptedPreview = decryptedPreviewCache.get(lr.id);
     const effectivePreview = resolveLastMessagePreview(lr.lastMessagePreview, decryptedPreview);
@@ -1084,7 +1091,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (
       cached &&
       cached.ts === ts &&
-      cached.updatedAt === lr.updatedAt &&
+      cached.updatedAt === effectiveSortKey &&
       cached.unread === lr.unreadCount &&
       cached.name === lr.name &&
       cached.membership === lr.membership &&
@@ -1111,7 +1118,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       lastMessage: buildLastMessage(lr, decryptedPreview),
       lastMessageReaction: lr.lastMessageReaction ?? undefined,
     } as ChatRoom;
-    _chatRoomFromDexieCache.set(lr.id, { ts, updatedAt: lr.updatedAt, unread: lr.unreadCount, name: lr.name, membership: lr.membership, preview: effectivePreview, senderId: lastMsgSenderId, eventId: lr.lastMessageEventId ?? "", localStatus, readOutboundTs, lastMsgDecryptionStatus, room });
+    _chatRoomFromDexieCache.set(lr.id, { ts, updatedAt: effectiveSortKey, unread: lr.unreadCount, name: lr.name, membership: lr.membership, preview: effectivePreview, senderId: lastMsgSenderId, eventId: lr.lastMessageEventId ?? "", localStatus, readOutboundTs, lastMsgDecryptionStatus, room });
     return room;
   };
 
@@ -1379,6 +1386,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     });
   };
 
+  /** Returns true when the delta would change something visible in the
+   *  sidebar (preview, status, unread, name, …). Pure-metadata writes
+   *  like Dexie's `updatedAt`/`syncedAt` bumps return false — they
+   *  should refresh dexieRoomMap (ground truth) WITHOUT scheduling a
+   *  patch, otherwise sidebar re-renders for nothing and neighbouring
+   *  rows visually flicker (RecycleScroller recycle + CSS transitions). */
+  const hasVisibleRoomChange = (prev: LocalRoom, next: LocalRoom): boolean => {
+    return prev.unreadCount !== next.unreadCount
+      || prev.lastMessageLocalStatus !== next.lastMessageLocalStatus
+      || prev.lastMessagePreview !== next.lastMessagePreview
+      || prev.lastMessageTimestamp !== next.lastMessageTimestamp
+      || prev.lastReadOutboundTs !== next.lastReadOutboundTs
+      || prev.lastReadInboundTs !== next.lastReadInboundTs
+      || prev.name !== next.name
+      || prev.avatar !== next.avatar
+      || prev.membership !== next.membership
+      || prev.lastMessageSenderId !== next.lastMessageSenderId
+      || prev.lastMessageEventId !== next.lastMessageEventId
+      || prev.lastMessageDecryptionStatus !== next.lastMessageDecryptionStatus
+      || prev.lastMessageReaction !== next.lastMessageReaction
+      || prev.isDeleted !== next.isDeleted
+      || prev.topic !== next.topic;
+  };
+
   const applyDexieDeltas = (changes: RoomChange[]) => {
     const debug = typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug;
     // Always update dexieRoomMap (ground truth), but defer sort when suppressed
@@ -1393,28 +1424,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const r = c.room;
         if ((r.membership === "join" || r.membership === "invite") && !r.isDeleted) {
           if (!r.updatedAt) r.updatedAt = r.lastMessageTimestamp || 1;
-          if (debug) {
-            const prev = dexieRoomMap.get(r.id);
-            if (prev) {
-              const diffs: string[] = [];
-              if (prev.unreadCount !== r.unreadCount) diffs.push(`unread:${prev.unreadCount}→${r.unreadCount}`);
-              if (prev.lastMessageLocalStatus !== r.lastMessageLocalStatus) diffs.push(`status:${prev.lastMessageLocalStatus}→${r.lastMessageLocalStatus}`);
-              if (prev.lastReadInboundTs !== r.lastReadInboundTs) diffs.push(`readIn:${prev.lastReadInboundTs}→${r.lastReadInboundTs}`);
-              if (prev.lastReadOutboundTs !== r.lastReadOutboundTs) diffs.push(`readOut:${prev.lastReadOutboundTs}→${r.lastReadOutboundTs}`);
-              if (prev.lastMessageTimestamp !== r.lastMessageTimestamp) diffs.push(`ts:${prev.lastMessageTimestamp}→${r.lastMessageTimestamp}`);
-              if (prev.updatedAt !== r.updatedAt) diffs.push(`upd:${prev.updatedAt}→${r.updatedAt}`);
-              if (prev.lastMessagePreview !== r.lastMessagePreview) diffs.push(`preview≠`);
-              if (diffs.length > 0) {
-                // eslint-disable-next-line no-console
-                console.log(`[dexie-delta] ${r.id.slice(0,12)} ${diffs.join(" ")}`);
-              } else {
-                // eslint-disable-next-line no-console
-                console.log(`[dexie-delta] ${r.id.slice(0,12)} REDUNDANT (no fields changed)`);
-              }
+          const prev = dexieRoomMap.get(r.id);
+          const visible = !prev || hasVisibleRoomChange(prev, r);
+          if (debug && prev) {
+            const diffs: string[] = [];
+            if (prev.unreadCount !== r.unreadCount) diffs.push(`unread:${prev.unreadCount}→${r.unreadCount}`);
+            if (prev.lastMessageLocalStatus !== r.lastMessageLocalStatus) diffs.push(`status:${prev.lastMessageLocalStatus}→${r.lastMessageLocalStatus}`);
+            if (prev.lastReadInboundTs !== r.lastReadInboundTs) diffs.push(`readIn:${prev.lastReadInboundTs}→${r.lastReadInboundTs}`);
+            if (prev.lastReadOutboundTs !== r.lastReadOutboundTs) diffs.push(`readOut:${prev.lastReadOutboundTs}→${r.lastReadOutboundTs}`);
+            if (prev.lastMessageTimestamp !== r.lastMessageTimestamp) diffs.push(`ts:${prev.lastMessageTimestamp}→${r.lastMessageTimestamp}`);
+            if (prev.updatedAt !== r.updatedAt) diffs.push(`upd:${prev.updatedAt}→${r.updatedAt}`);
+            if (prev.lastMessagePreview !== r.lastMessagePreview) diffs.push(`preview≠`);
+            const tag = visible ? "" : " INVISIBLE-skip";
+            if (diffs.length > 0) {
+              // eslint-disable-next-line no-console
+              console.log(`[dexie-delta] ${r.id.slice(0,12)} ${diffs.join(" ")}${tag}`);
+            } else {
+              // eslint-disable-next-line no-console
+              console.log(`[dexie-delta] ${r.id.slice(0,12)} REDUNDANT (no fields changed)`);
             }
           }
+          // Always refresh ground truth, but only push a sortedRooms patch
+          // when something visible changed.
           dexieRoomMap.set(r.id, r);
-          relevantChanges.push(c);
+          if (visible) relevantChanges.push(c);
         } else if (dexieRoomMap.has(r.id)) {
           dexieRoomMap.delete(r.id);
           relevantChanges.push({ type: "delete", roomId: r.id });
