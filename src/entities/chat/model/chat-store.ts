@@ -134,16 +134,40 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   let lastMessage: Message | undefined;
   let lastSystemMessage: Message | undefined; // fallback: member/call events
   let lastTs = 0;
+  // An edit (m.replace relation) is a separate event whose origin_server_ts
+  // is the *edit time*, not the original send time. Treating it as the
+  // room's "last event" inflates lastMessageTimestamp past lastReadOutboundTs
+  // and breaks the read-status invariant: peer already read the original
+  // message, but the inflated timestamp makes the sidebar report `sent`
+  // instead of `read` after every edit.
+  //
+  // For unencrypted events the m.relates_to lives on outer content. For
+  // encrypted events the relation is inside the ciphertext, but Matrix
+  // servers expose server-side aggregation under unsigned["m.relations"].
+  const isEditEvent = (raw: Record<string, unknown>): boolean => {
+    const c = raw.content as Record<string, unknown> | undefined;
+    const outerRel = c?.["m.relates_to"] as Record<string, unknown> | undefined;
+    if (outerRel?.rel_type === "m.replace") return true;
+    // Server-side aggregation hint for encrypted edits
+    const unsigned = raw.unsigned as Record<string, unknown> | undefined;
+    const relations = unsigned?.["m.relations"] as Record<string, unknown> | undefined;
+    if (relations?.["m.replace"]) return true;
+    return false;
+  };
   for (let i = timelineEvents.length - 1; i >= 0; i--) {
     const raw = getRawEvent(timelineEvents[i]);
     if (!raw) continue;
     // Use timestamp from latest content event — skip reactions, receipts,
-    // typing, and other ephemeral events that shouldn't affect room sort order.
-    if (!lastTs && raw.origin_server_ts && raw.type !== "m.reaction" && raw.type !== "m.receipt" && raw.type !== "m.typing" && raw.type !== "m.presence") {
+    // typing, edits (m.replace), and other ephemeral events that shouldn't
+    // affect room sort order or the outbound read-status derivation.
+    const isContentEvent = raw.type === "m.room.message" || raw.type === "m.room.encrypted";
+    if (!lastTs && raw.origin_server_ts && raw.type !== "m.reaction" && raw.type !== "m.receipt" && raw.type !== "m.typing" && raw.type !== "m.presence" && !(isContentEvent && isEditEvent(raw))) {
       lastTs = raw.origin_server_ts as number;
     }
-    // Find last actual message (including redacted/deleted)
-    if (!lastMessage && raw.type === "m.room.message") {
+    // Find last actual message (including redacted/deleted) — but never
+    // treat an edit event itself as the message; edits modify their target
+    // in-place via the EventWriter path.
+    if (!lastMessage && raw.type === "m.room.message" && !isEditEvent(raw)) {
       // Redacted message — content stripped by server
       const isRedacted = !raw.content
         || (typeof raw.content === "object" && Object.keys(raw.content as object).length === 0)
