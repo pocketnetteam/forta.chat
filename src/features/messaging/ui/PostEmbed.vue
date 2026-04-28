@@ -3,6 +3,7 @@ import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
 import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
 import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
+import { renderArticleText } from "@/shared/lib/article-blocks";
 
 interface Props {
   txid: string;
@@ -28,14 +29,23 @@ const firstImage = computed(() => {
   return normalizePocketnetImageUrl(post.value.images[0]);
 });
 
-const truncatedMessage = computed(() => {
-  if (!post.value?.message) return "";
-  return post.value.message.length > 160
-    ? post.value.message.slice(0, 160) + "..."
-    : post.value.message;
+const isArticle = computed(() => post.value?.settings?.v === "a");
+
+/** Full plain text (without truncation) — parses Editor.js JSON for articles. */
+const renderedFull = computed(() => {
+  const raw = post.value?.message ?? "";
+  if (!raw) return "";
+  return renderArticleText(raw);
 });
 
-const isArticle = computed(() => post.value?.settings?.v === "a");
+/** Truncated preview derived from the cached full render (no double parsing). */
+const truncatedMessage = computed(() => {
+  const full = renderedFull.value;
+  if (!full) return "";
+  return full.length > 160 ? full.slice(0, 160) + "..." : full;
+});
+
+const hasMore = computed(() => renderedFull.value.length > 160);
 
 const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
 
@@ -184,12 +194,12 @@ const openVideo = (e: Event) => {
       <!-- Message body -->
       <div
         v-if="truncatedMessage"
-        class="text-xs leading-relaxed"
+        class="whitespace-pre-wrap break-words text-xs leading-relaxed"
         :class="isOwn ? 'text-white/70' : 'text-text-color/70'"
       >
         {{ truncatedMessage }}
         <a
-          v-if="post.message.length > 160"
+          v-if="hasMore"
           :href="postUrl"
           class="font-medium"
           :class="isOwn ? 'text-white/90' : 'text-color-txt-ac'"

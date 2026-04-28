@@ -496,6 +496,9 @@ export const en = {
   "call.permissionDenied.title": "Device access denied",
   "call.permissionDenied.microphone": "Microphone access is denied. Calls cannot proceed — the other party will not hear you.",
   "call.permissionDenied.camera": "Camera access is denied. Video calls cannot proceed.",
+  "call.permissionDenied.audioBusy": "Microphone is currently used by another app. Close it and try again.",
+  "call.permissionDenied.audioBusyWithApps": "Microphone is in use by: {apps}. Close that app and try again.",
+  "call.permissionDenied.noInputDevice": "No microphone was found. Connect a headset or microphone and try again.",
   "call.permissionDenied.instructions": "Grant access in your system settings: Settings → Apps → Forta Chat → Permissions.",
   "call.permissionDenied.close": "Close",
 
@@ -633,6 +636,25 @@ export const en = {
   "shareGroup.joinFailed": "Failed to join group",
   "shareGroup.joined": "Joined successfully",
   "shareGroup.alreadyMember": "You are already a member",
+  "shareGroup.copyFailed": "Couldn't copy the link",
+  "shareGroup.toggleFailed": "Couldn't change group settings. You may lack permission.",
+  "shareGroup.shareTitle": "Forta Chat invite",
+  "shareGroup.shareText": "Join the \"{name}\" group on Forta Chat",
+
+  // ── Join-room preview & errors ──
+  "joinRoom.loading": "Loading room info…",
+  "joinRoom.privateTitle": "Private room",
+  "joinRoom.privateHint": "We can't preview this room. A member may need to invite you.",
+  "joinRoom.tryAnyway": "Try anyway",
+  "joinRoom.unnamed": "Unnamed",
+  "joinRoom.encrypted": "End-to-end encrypted",
+  "joinRoom.join": "Join",
+  "joinRoom.success": "You joined the room",
+  "joinRoom.errorBanned": "You are banned from this room",
+  "joinRoom.errorForbidden": "This is a private room. A member must invite you.",
+  "joinRoom.errorNotFound": "Room not found or removed",
+  "joinRoom.errorInvalidId": "Invalid room identifier",
+  "joinRoom.errorUnknown": "Couldn't join the room",
 
   // ── Quick search ──
   "quickSearch.placeholder": "Go to chat...",

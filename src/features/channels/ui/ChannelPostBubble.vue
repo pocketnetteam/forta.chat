@@ -2,6 +2,8 @@
 import type { ChannelPost } from "@/entities/channel";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { normalizePocketnetImageUrl } from "@/shared/lib/image-url";
+import { renderArticleText } from "@/shared/lib/article-blocks";
+import StarRating from "@/features/post-player/ui/StarRating.vue";
 
 interface Props {
   post: ChannelPost;
@@ -31,62 +33,30 @@ const displayImages = computed(() => {
   return props.post.images.slice(0, 4).map((img) => normalizePocketnetImageUrl(img));
 });
 
-/** Parse message text — for articles (EditorJS JSON), extract paragraph text */
-const messageText = computed(() => {
-  const raw = props.post.caption || props.post.message || "";
-  if (!raw) return "";
-
-  // If article, try to parse EditorJS JSON
-  if (isArticle.value && raw.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed.blocks && Array.isArray(parsed.blocks)) {
-        const texts = parsed.blocks
-          .filter((b: any) => b.type === "paragraph" && b.data?.text)
-          .map((b: any) => stripHtml(b.data.text))
-          .filter(Boolean);
-        return texts.join("\n").slice(0, 500);
-      }
-    } catch {
-      // Not valid JSON, use as-is
-    }
-  }
-
-  return raw;
-});
-
-/** Caption displayed separately when both caption and message exist */
+/** Caption displayed separately when both caption and message exist. */
 const captionText = computed(() => {
   if (!props.post.caption || !props.post.message) return "";
   return props.post.caption;
 });
 
-/** Body text: message when caption exists, or the combined text */
+/**
+ * Body text preview. Uses shared Editor.js parser so article posts
+ * render readable plain text instead of raw JSON. Falls back to raw
+ * for non-article messages.
+ */
 const bodyText = computed(() => {
-  if (props.post.caption && props.post.message) {
-    // For articles, parse message as EditorJS
-    if (isArticle.value && props.post.message.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(props.post.message);
-        if (parsed.blocks && Array.isArray(parsed.blocks)) {
-          const texts = parsed.blocks
-            .filter((b: any) => b.type === "paragraph" && b.data?.text)
-            .map((b: any) => stripHtml(b.data.text))
-            .filter(Boolean);
-          return texts.join("\n").slice(0, 500);
-        }
-      } catch {
-        // fallback
-      }
-    }
-    return props.post.message;
-  }
-  return messageText.value;
+  const raw = props.post.caption && props.post.message
+    ? props.post.message
+    : props.post.caption || props.post.message || "";
+  if (!raw) return "";
+  return renderArticleText(raw, { maxLength: 500 });
 });
 
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, "").trim();
-}
+const averageScore = computed(() => {
+  const cnt = props.post.scoreCnt ?? 0;
+  if (cnt <= 0) return 0;
+  return (props.post.scoreSum ?? 0) / cnt;
+});
 </script>
 
 <template>
@@ -166,13 +136,15 @@ function stripHtml(html: string): string {
       <div class="mt-1.5 flex items-center gap-3 text-xs text-text-on-main-bg-color">
         <span>{{ timeText }}</span>
 
-        <!-- Score -->
-        <span v-if="post.scoreSum" class="flex items-center gap-0.5">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
-            <path d="M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11zm19.83-7.12c.11-.25.17-.52.17-.8V11c0-1.1-.9-2-2-2h-5.5l.92-4.65c.05-.22.02-.46-.08-.66-.23-.45-.52-.86-.88-1.22L14 2 7.59 8.41C7.21 8.79 7 9.3 7 9.83v7.84C7 18.95 8.05 20 9.34 20h8.11c.7 0 1.36-.37 1.72-.97l2.66-6.15z" />
-          </svg>
-          {{ post.scoreSum }}
-        </span>
+        <!-- Score (community average — outline gold when not voted) -->
+        <StarRating
+          v-if="post.scoreCnt > 0"
+          :average="averageScore"
+          :total-votes="post.scoreCnt"
+          :model-value="null"
+          readonly
+          compact
+        />
 
         <!-- Comments -->
         <button

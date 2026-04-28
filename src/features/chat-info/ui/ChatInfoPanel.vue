@@ -15,6 +15,9 @@ import Toggle from "@/shared/ui/toggle/Toggle.vue";
 import ChatInfoGallery from "./ChatInfoGallery.vue";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { openBastyonProfile } from "@/shared/lib/open-profile-url";
+import { copyToClipboard, shareLink } from "@/shared/lib/share-link";
+import { useToast } from "@/shared/lib/use-toast";
+import { getMatrixClientService } from "@/entities/matrix";
 
 interface Props {
   show: boolean;
@@ -56,41 +59,135 @@ const fileCount = computed(() => {
 });
 
 // ── Invite link (group sharing) ──
-const roomPublic = ref(false);
+// `stateMarker` ticks whenever this room's state events change. It exists so
+// `roomPublic` / `inviteLink` can read from the Matrix SDK directly while
+// remaining reactive — updating the moment another admin toggles public,
+// without a manual refresh call.
+const stateMarker = ref(0);
 const togglingPublic = ref(false);
 const linkCopied = ref(false);
+const { toast: showToast } = useToast();
 
-const refreshRoomPublic = () => {
-  if (room.value?.isGroup) {
-    roomPublic.value = chatStore.isRoomPublic(room.value.id);
-  }
-};
+const roomPublic = computed(() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  stateMarker.value;
+  if (!room.value?.isGroup) return false;
+  return chatStore.isRoomPublic(room.value.id);
+});
 
-watch(room, refreshRoomPublic, { immediate: true });
+// A broader "shareable" signal: includes world_readable broadcast rooms,
+// where the `join_rule` is still `"invite"` but anyone with the id can
+// peek and the owners typically expect the link to be copyable. This is
+// what most Bastyon release-note / announcement channels look like.
+const roomShareable = computed(() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  stateMarker.value;
+  if (!room.value?.isGroup) return false;
+  return chatStore.isRoomShareableByLink(room.value.id);
+});
+
+// Path-based URL (NOT hash-based) — AndroidManifest pathPrefix="/join"
+// matches path, not fragment. Using a hash URL means the Android App Link
+// intent-filter never fires and the link opens in the browser.
+const inviteLink = computed(() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  stateMarker.value;
+  if (!room.value) return "";
+  return `${APP_PUBLIC_URL}/join?room=${encodeURIComponent(room.value.id)}`;
+});
+
+// Subscribe to RoomState.events so toggles by *other* admins appear
+// immediately in our UI.
+let unsubscribeState: (() => void) | null = null;
+
+watch(
+  () => room.value?.id,
+  (roomId) => {
+    unsubscribeState?.();
+    unsubscribeState = null;
+    if (!roomId) return;
+    try {
+      const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const clientAny = matrixService.client as any;
+      if (!clientAny?.on || !clientAny?.off) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handler = (event: any) => {
+        try {
+          if (event?.getRoomId?.() !== roomId) return;
+          const type = event?.getType?.();
+          if (type === "m.room.join_rules" || type === "m.room.history_visibility") {
+            stateMarker.value++;
+          }
+        } catch {
+          /* defensive: SDK sometimes emits without full accessors */
+        }
+      };
+      clientAny.on("RoomState.events", handler);
+      // Capture client ref at subscribe time; detach defensively against the
+      // case where the client instance was torn down (logout → login in the
+      // same session) — optional-chaining the off() silences "not a function".
+      unsubscribeState = () => {
+        try {
+          clientAny?.off?.("RoomState.events", handler);
+        } catch {
+          /* already destroyed — nothing to unwire */
+        }
+      };
+    } catch {
+      /* swallow — reactive marker isn't load-bearing for correctness */
+    }
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  unsubscribeState?.();
+  unsubscribeState = null;
+});
 
 // Refresh encryption status when panel opens or room changes
 watch([room, () => props.show], async ([r, visible]) => {
   if (r && visible) await chatStore.checkPeerKeys(r.id);
 }, { immediate: true });
 
-const inviteLink = computed(() => {
-  if (!room.value) return "";
-  return `${APP_PUBLIC_URL}/#/join?room=${encodeURIComponent(room.value.id)}`;
-});
-
 const togglePublic = async () => {
   if (!room.value || togglingPublic.value) return;
   togglingPublic.value = true;
   const newVal = !roomPublic.value;
   const ok = await chatStore.setRoomPublic(room.value.id, newVal);
-  if (ok) roomPublic.value = newVal;
+  if (!ok) {
+    showToast(t("shareGroup.toggleFailed"), "error");
+  }
+  // No optimistic update — RoomState.events fires after sendStateEvent and
+  // the computed will flip on its own. This keeps the UI consistent with
+  // what the server actually accepted.
   togglingPublic.value = false;
 };
 
 const copyInviteLink = async () => {
-  await navigator.clipboard.writeText(inviteLink.value);
-  linkCopied.value = true;
-  setTimeout(() => linkCopied.value = false, 2000);
+  try {
+    await copyToClipboard(inviteLink.value);
+    linkCopied.value = true;
+    setTimeout(() => linkCopied.value = false, 2000);
+  } catch {
+    showToast(t("shareGroup.copyFailed"), "error");
+  }
+};
+
+const shareInviteLink = async () => {
+  try {
+    await shareLink({
+      url: inviteLink.value,
+      title: t("shareGroup.shareTitle"),
+      text: t("shareGroup.shareText", { name: room.value?.name ?? "" }),
+    });
+  } catch (e) {
+    // AbortError fires when user dismisses the share sheet — silently ignore.
+    if (e instanceof Error && e.name === "AbortError") return;
+    // Web Share unavailable or native share failed — fall back to copy.
+    await copyInviteLink();
+  }
 };
 
 // ── Mute state ──
@@ -551,8 +648,10 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               </button>
             </div>
 
-            <!-- Invite link section (group only, admin or already public) -->
-            <div v-if="room.isGroup && (isAdmin || roomPublic)" class="border-t border-neutral-grad-0 px-4 py-3">
+            <!-- Invite link section: any group that is public, world-readable,
+                 or administrable. World-readable broadcast channels use
+                 `join_rule=invite` but are still safe to share by link. -->
+            <div v-if="room.isGroup && (isAdmin || roomShareable)" class="border-t border-neutral-grad-0 px-4 py-3">
               <div class="mb-2 flex items-center justify-between">
                 <div class="flex items-center gap-2">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-on-main-bg-color">
@@ -567,7 +666,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 </div>
               </div>
 
-              <template v-if="roomPublic">
+              <template v-if="roomShareable">
                 <div class="flex items-center gap-2">
                   <input
                     :value="inviteLink"
@@ -580,6 +679,19 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                     @click="copyInviteLink"
                   >
                     {{ linkCopied ? t("shareGroup.copied") : t("shareGroup.copyLink") }}
+                  </button>
+                  <button
+                    class="shrink-0 flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-grad-0 text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+                    :aria-label="t('shareGroup.share')"
+                    @click="shareInviteLink"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="18" cy="5" r="3" />
+                      <circle cx="6" cy="12" r="3" />
+                      <circle cx="18" cy="19" r="3" />
+                      <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                      <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                    </svg>
                   </button>
                 </div>
                 <p class="mt-1.5 text-[11px] text-text-on-main-bg-color">{{ t("shareGroup.publicGroupHint") }}</p>

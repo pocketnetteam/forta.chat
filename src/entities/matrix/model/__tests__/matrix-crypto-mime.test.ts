@@ -39,4 +39,45 @@ describe("PcryptoFile.encryptFile — MIME type", () => {
 
     expect(Array.from(bytes)).toEqual(Array.from(plaintext));
   }, TEST_TIMEOUT);
+
+  it("decryptFile honours originalMime argument when provided", async () => {
+    const { PcryptoFile } = await import("../matrix-crypto");
+    const pf = new PcryptoFile();
+    const plaintext = new Uint8Array([1, 2, 3]);
+    const input = new File([plaintext], "data.bin", { type: "image/png" });
+
+    const encrypted = await pf.encryptFile(input, "mime-secret");
+    // Ciphertext blob has application/octet-stream. Caller knows the real
+    // mimetype from fileInfo.type and passes it explicitly.
+    const decrypted = await pf.decryptFile(encrypted, "mime-secret", "image/png");
+
+    expect(decrypted.type).toBe("image/png");
+  }, TEST_TIMEOUT);
+
+  it("decryptFile falls back to legacy encrypted/* prefix if originalMime omitted", async () => {
+    const { PcryptoFile } = await import("../matrix-crypto");
+    const pf = new PcryptoFile();
+    // Simulate a blob written by the OLD client that stamped an invalid
+    // compound MIME like encrypted/image/png. The decrypt must strip the
+    // prefix so older messages still open.
+    const blob = new Blob([new Uint8Array([1, 2])], { type: "encrypted/image/png" });
+    // We only care about the MIME-restore logic here — use a stub key path
+    // by piggybacking on a real encrypt/decrypt cycle.
+    const realEncrypted = await pf.encryptFile(
+      new File([new Uint8Array([99])], "x.png", { type: "image/png" }),
+      "legacy-secret",
+    );
+    // Re-wrap the ciphertext bytes in a legacy-mime Blob
+    const legacyShaped = new File([await realEncrypted.arrayBuffer()], "legacy", {
+      type: "encrypted/image/png",
+    });
+
+    const decrypted = await pf.decryptFile(legacyShaped, "legacy-secret");
+    // Without originalMime, the restored MIME must be the stripped form
+    // (not "application/octet-stream" — that would regress older previews).
+    expect(decrypted.type).toBe("image/png");
+
+    // Touch the unused `blob` to keep the compiler honest.
+    expect(blob.size).toBe(2);
+  }, TEST_TIMEOUT);
 });

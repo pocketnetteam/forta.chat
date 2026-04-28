@@ -671,6 +671,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             console.warn("[auth] Failed to init native call bridge:", err);
           }
 
+          // App-resume audio watchdog. Recovers from a stuck VoIP audio
+          // mode when a previous call's finalize did not complete (JS
+          // process killed, OEM stopped the foreground service, etc.).
+          // setupAudioWatchdog is internally idempotent.
+          try {
+            const { setupAudioWatchdog } = await import('@/features/video-calls/model/audio-watchdog');
+            await setupAudioWatchdog();
+          } catch (err) {
+            console.warn("[auth] Failed to set up audio watchdog:", err);
+          }
+
           // Switch background sync interval when app goes to background
           // Guard: only register once (prevent leak on account switch → re-init)
           if (!_appStateHandle) {

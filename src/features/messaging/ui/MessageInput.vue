@@ -20,6 +20,7 @@ import MentionAutocomplete from "./MentionAutocomplete.vue";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { shouldSendOnEnter } from "../model/enter-key-behavior";
+import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
 import { isNative } from "@/shared/lib/platform";
 
 const isMobile = useMobile();
@@ -56,6 +57,17 @@ const sending = ref(false);
 let typingTimeout: ReturnType<typeof setTimeout> | null = null;
 let lastTypingSent = 0;
 const TYPING_THROTTLE_MS = 3000;
+const TYPING_IDLE_STOP_MS = 3000;
+
+/** Cancel the pending idle stop and clear throttle so the next input
+ *  immediately re-arms a fresh typing window. */
+const resetTypingTimers = () => {
+  if (typingTimeout) {
+    clearTimeout(typingTimeout);
+    typingTimeout = null;
+  }
+  lastTypingSent = 0;
+};
 
 // --- Drafts ---
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -72,6 +84,13 @@ watch(
   (newId, oldId) => {
     if (oldId) {
       saveDraft(oldId, text.value);
+      // Stop typing in the room we're leaving — otherwise the indicator
+      // hangs on peers' screens until the server-side timeout (~20–30s).
+      // Pass oldId explicitly: chatStore.activeRoomId already points to newId here.
+      if (typingTimeout || lastTypingSent > 0) {
+        setTyping(false, oldId);
+        resetTypingTimers();
+      }
       // Don't save forward back to the source room — forward travels to target only
       const fwd = chatStore.forwardingMessage;
       if (fwd && fwd.roomId !== oldId) {
@@ -108,6 +127,11 @@ const saveDraftOnBlur = () => {
 onBeforeUnmount(() => {
   const roomId = chatStore.activeRoomId;
   if (roomId) saveDraft(roomId, text.value);
+  // Stop typing on unmount — same reason as in the activeRoomId watcher.
+  if (roomId && (typingTimeout || lastTypingSent > 0)) {
+    setTyping(false, roomId);
+  }
+  resetTypingTimers();
   // Clean up any lingering recording mouse/move listeners
   document.removeEventListener("mouseup", handleGlobalMouseUp);
   document.removeEventListener("mousemove", handleGlobalMouseMove);
@@ -191,6 +215,7 @@ const handleSend = async () => {
   const roomId = chatStore.activeRoomId;
   if (roomId) clearDraft(roomId);
   setTyping(false);
+  resetTypingTimers();
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
 
   let inserted: boolean | undefined;
@@ -285,7 +310,11 @@ const handleInput = () => {
     setTyping(true);
   }
   if (typingTimeout) clearTimeout(typingTimeout);
-  typingTimeout = setTimeout(() => { setTyping(false); lastTypingSent = 0; }, 5000);
+  typingTimeout = setTimeout(() => {
+    setTyping(false);
+    lastTypingSent = 0;
+    typingTimeout = null;
+  }, TYPING_IDLE_STOP_MS);
 };
 
 // --- Attachment/polls ---
@@ -369,6 +398,21 @@ const showBulkForwardPreview = computed(() => {
   const srcId = msgs[0].roomId;
   return chatStore.activeRoomId !== srcId;
 });
+
+const sendButtonVisible = computed(() => isSendButtonVisible({
+  text: text.value,
+  sending: sending.value,
+  showForwardPreview: showForwardPreview.value,
+  showBulkForwardPreview: showBulkForwardPreview.value,
+  peerKeysOk: peerKeysOk.value,
+}));
+const sendButtonDisabled = computed(() => isSendButtonDisabled({
+  text: text.value,
+  sending: sending.value,
+  showForwardPreview: showForwardPreview.value,
+  showBulkForwardPreview: showBulkForwardPreview.value,
+  peerKeysOk: peerKeysOk.value,
+}));
 
 const bulkForwardCount = computed(() => chatStore.forwardingMessages.length);
 
@@ -974,9 +1018,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
         <!-- Send OR record button -->
         <transition name="btn-morph" mode="out-in">
-          <button v-if="text.trim() || sending || showForwardPreview" key="send"
+          <button v-if="sendButtonVisible" key="send"
             class="send-btn flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full bg-color-bg-ac text-white transition-all hover:bg-color-bg-ac-1 disabled:opacity-50"
-            :disabled="(!text.trim() && !showForwardPreview) || sending || !peerKeysOk" @click="handleSend">
+            :disabled="sendButtonDisabled" @click="handleSend">
             <svg v-if="sending" class="contain-strict h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" viewBox="0 0 24 24" />
             <svg v-else-if="isEditing" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
             <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>

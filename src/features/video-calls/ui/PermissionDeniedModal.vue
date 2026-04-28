@@ -6,10 +6,41 @@ const { t } = useI18n();
 
 const show = computed(() => callPermissionError.value !== null);
 
+/**
+ * Session 01 — reason-aware message selection. The legacy modal showed the
+ * same "permission denied" copy regardless of whether the OS truly denied
+ * access, another app was holding the mic, or no microphone device existed.
+ * Users (rightly) interpreted "permission denied" as a settings problem and
+ * spent time toggling it in Settings — leaving the mic still held by another
+ * app. Split the copy so each failure mode gets actionable guidance.
+ */
 const deviceMessage = computed(() => {
-  const device = callPermissionError.value?.device;
-  if (device === "camera") return t("call.permissionDenied.camera");
+  const err = callPermissionError.value;
+  if (!err) return "";
+  if (err.device === "camera") return t("call.permissionDenied.camera");
+
+  // Microphone with specific probe reason takes precedence over the generic
+  // "denied" message. Older bridges / web paths default reason to "denied".
+  if (err.reason === "audio_source_busy") {
+    const apps = err.conflicting?.filter((a) => a && a.length > 0) ?? [];
+    if (apps.length > 0) {
+      return t("call.permissionDenied.audioBusyWithApps", { apps: apps.join(", ") });
+    }
+    return t("call.permissionDenied.audioBusy");
+  }
+  if (err.reason === "no_input_device") {
+    return t("call.permissionDenied.noInputDevice");
+  }
   return t("call.permissionDenied.microphone");
+});
+
+// Instructions row is only useful when the problem is a settings-level
+// denial. If the mic is busy or missing, showing a "go to settings" hint
+// confuses users — the root cause is not a permission toggle. Hide it.
+const showInstructions = computed(() => {
+  const err = callPermissionError.value;
+  if (!err) return false;
+  return err.device === "camera" || err.reason === "denied";
 });
 
 function close() {
@@ -49,7 +80,7 @@ function close() {
             </div>
           </div>
 
-          <p class="mb-4 text-sm text-text-on-main-bg-color">
+          <p v-if="showInstructions" class="mb-4 text-sm text-text-on-main-bg-color">
             {{ t("call.permissionDenied.instructions") }}
           </p>
 

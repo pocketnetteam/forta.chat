@@ -498,6 +498,9 @@ export const ru: Record<TranslationKey, string> = {
   "call.permissionDenied.title": "Нет доступа к устройству",
   "call.permissionDenied.microphone": "Доступ к микрофону не разрешён. Без него звонок невозможен: собеседник вас не услышит.",
   "call.permissionDenied.camera": "Доступ к камере не разрешён. Без него видеозвонок невозможен.",
+  "call.permissionDenied.audioBusy": "Микрофон сейчас занят другим приложением. Закройте его и попробуйте снова.",
+  "call.permissionDenied.audioBusyWithApps": "Микрофон использует: {apps}. Закройте это приложение и попробуйте снова.",
+  "call.permissionDenied.noInputDevice": "Микрофон не найден. Подключите гарнитуру или микрофон и попробуйте снова.",
   "call.permissionDenied.instructions": "Разрешите доступ в настройках системы: «Настройки → Приложения → Forta Chat → Разрешения».",
   "call.permissionDenied.close": "Закрыть",
 
@@ -635,6 +638,25 @@ export const ru: Record<TranslationKey, string> = {
   "shareGroup.joinFailed": "Не удалось присоединиться",
   "shareGroup.joined": "Вы присоединились",
   "shareGroup.alreadyMember": "Вы уже участник",
+  "shareGroup.copyFailed": "Не удалось скопировать ссылку",
+  "shareGroup.toggleFailed": "Не удалось изменить настройки группы. Возможно, у вас нет прав.",
+  "shareGroup.shareTitle": "Приглашение в Forta Chat",
+  "shareGroup.shareText": "Присоединяйтесь к группе «{name}» в Forta Chat",
+
+  // ── Join-room preview & errors ──
+  "joinRoom.loading": "Загружаем информацию о комнате…",
+  "joinRoom.privateTitle": "Комната приватная",
+  "joinRoom.privateHint": "Мы не можем показать превью. Возможно, вас должен пригласить участник.",
+  "joinRoom.tryAnyway": "Всё равно попробовать",
+  "joinRoom.unnamed": "Без названия",
+  "joinRoom.encrypted": "Сообщения зашифрованы",
+  "joinRoom.join": "Присоединиться",
+  "joinRoom.success": "Вы присоединились к комнате",
+  "joinRoom.errorBanned": "Вы заблокированы в этой комнате",
+  "joinRoom.errorForbidden": "Комната приватная. Вас должен пригласить участник.",
+  "joinRoom.errorNotFound": "Комната не найдена или удалена",
+  "joinRoom.errorInvalidId": "Неверный идентификатор комнаты",
+  "joinRoom.errorUnknown": "Не удалось присоединиться к комнате",
 
   // ── Quick search ──
   "quickSearch.placeholder": "Перейти к чату...",

@@ -5,12 +5,32 @@ import { nativeCallBridge } from "@/shared/lib/native-calls";
 export type PermissionDevice = "microphone" | "camera";
 
 /**
+ * Why the permission gate rejected the call.
+ *   - `denied` — OS-level permission is off (user said no / revoked in settings).
+ *   - `audio_source_busy` — permission is granted but AudioRecord init failed,
+ *     typically because another app is holding the mic. UI shows "mic is busy".
+ *   - `no_input_device` — no microphone hardware visible. UI says
+ *     "connect a mic/headset".
+ *
+ * The reason drives which {@link PermissionDeniedModal} copy is shown so the
+ * user gets an actionable message instead of a generic "grant permission".
+ */
+export type PermissionDeniedReason =
+  | "denied"
+  | "audio_source_busy"
+  | "no_input_device";
+
+/**
  * Reactive pointer to the last call-permission error, consumed by
  * {@link PermissionDeniedModal} to show a UI banner. Cleared by the user
  * closing the modal. Deliberately module-local (not in a Pinia store)
  * because it is read-only UX state with no cross-store concerns.
  */
-export const callPermissionError: Ref<{ device: PermissionDevice } | null> = ref(null);
+export const callPermissionError: Ref<{
+  device: PermissionDevice;
+  reason: PermissionDeniedReason;
+  conflicting?: string[];
+} | null> = ref(null);
 
 export function clearCallPermissionError(): void {
   callPermissionError.value = null;
@@ -23,14 +43,27 @@ export function clearCallPermissionError(): void {
  * (modal with deep-link to system settings) and suppress any further
  * SDK calls — otherwise Matrix would invite/answer with an empty track
  * and the peer would appear "connected" but with no media.
+ *
+ * Carries both the failing `device` and a finer-grained `reason` so the
+ * UI can tell the user *why* — "denied in settings", "another app is
+ * holding the mic", "no mic found". Pre-Session-01 callers constructed
+ * `new PermissionDeniedError('microphone')`; `reason` defaults to
+ * `"denied"` for that shape so existing code keeps working.
  */
 export class PermissionDeniedError extends Error {
   readonly device: PermissionDevice;
+  readonly reason: PermissionDeniedReason;
+  readonly conflicting: string[];
 
-  constructor(device: PermissionDevice) {
+  constructor(
+    device: PermissionDevice,
+    options?: { reason?: PermissionDeniedReason; conflicting?: string[] },
+  ) {
     super(`Permission denied: ${device}`);
     this.name = "PermissionDeniedError";
     this.device = device;
+    this.reason = options?.reason ?? "denied";
+    this.conflicting = options?.conflicting ?? [];
   }
 }
 
@@ -66,12 +99,35 @@ export async function ensureCallPermissions(isVideo: boolean): Promise<void> {
 async function ensureNativePermissions(isVideo: boolean): Promise<void> {
   const audio = await nativeCallBridge.requestAudioPermission();
   if (!audio.granted) {
-    throw new PermissionDeniedError("microphone");
+    throw new PermissionDeniedError("microphone", { reason: "denied" });
   }
+
+  // H0-preflight. Permission being `granted` is necessary but not sufficient
+  // for call setup: between this point and the SDK's getUserMedia (which
+  // runs milliseconds later) the OEM may reject AudioRecord init, or another
+  // app may already be holding the mic. Probe the real AudioRecord state
+  // before letting the call flow continue — otherwise Matrix sends an
+  // invite/answer with an empty audio track and the peer hears silence.
+  //
+  // This replicates what bastyon-calls does via `BSTMedia.permissions` on
+  // Cordova: the native plugin does not resolve until real acquisition
+  // succeeded. Our native Capacitor plugin surfaces the check as an explicit
+  // probe method (see `CallPlugin.probeAudioAvailability`).
+  const probe = await nativeCallBridge.probeAudioAvailability();
+  if (!probe.available) {
+    const reason: PermissionDeniedReason = probe.hasInput
+      ? "audio_source_busy"
+      : "no_input_device";
+    throw new PermissionDeniedError("microphone", {
+      reason,
+      conflicting: probe.conflicting,
+    });
+  }
+
   if (!isVideo) return;
   const video = await nativeCallBridge.requestCameraPermission();
   if (!video.granted) {
-    throw new PermissionDeniedError("camera");
+    throw new PermissionDeniedError("camera", { reason: "denied" });
   }
 }
 

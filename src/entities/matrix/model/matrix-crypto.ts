@@ -114,14 +114,23 @@ export class PcryptoFile {
     return new File([encrypted], "encrypted", { type: "application/octet-stream" });
   }
 
-  async decryptFile(file: Blob, secret: string): Promise<File> {
+  /**
+   * Decrypt a ciphertext blob.
+   *
+   * @param originalMime — MIME type of the plaintext. New writers always
+   *   store ciphertext as application/octet-stream and pass the real MIME
+   *   via fileInfo.type, so prefer this argument. When omitted we fall
+   *   back to stripping the legacy "encrypted/" prefix from file.type so
+   *   messages written by old clients still open.
+   */
+  async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
     const buffer = await readFile(file);
     const decrypted = await this.decrypt(buffer, secret);
-    // Strip the legacy "encrypted/" prefix if the ciphertext was produced by
-    // an older client version; fall back to generic binary otherwise.
-    const type = file.type.startsWith("encrypted/")
-      ? file.type.replace("encrypted/", "")
-      : "application/octet-stream";
+    const type = originalMime
+      ? originalMime
+      : file.type.startsWith("encrypted/")
+        ? file.type.replace("encrypted/", "")
+        : "application/octet-stream";
     return new File([decrypted], "decrypted", { type });
   }
 }
@@ -173,8 +182,19 @@ interface CryptoUserInfo {
 
 // ---- PcryptoRoom interface ----
 
+/** Shared error tag for every plaintext-fallback guard. Centralised so log
+ *  grep + telemetry matching stays stable no matter which send path threw. */
+export const ENCRYPTION_REQUIRED_NO_KEYS =
+  "encryption required but peer keys unavailable";
+
 export interface PcryptoRoomInstance {
   canBeEncrypt(): boolean;
+  /** Whether the room mandates encryption (i.e. private, non-public). When
+   *  true and canBeEncrypt() is false, callers must NOT fall back to
+   *  plaintext — the sender has to wait for keys or fail the op. Public /
+   *  "open channel" style rooms return false here; plaintext is OK for
+   *  those by design. */
+  requiresEncryption(): boolean;
   prepare(): Promise<PcryptoRoomInstance>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _encrypt(userid: string, text: string, v?: number): Promise<{ encrypted: string; nonce: string }>;
@@ -187,7 +207,7 @@ export interface PcryptoRoomInstance {
   getOrCreateCommonKey(): Promise<{ key: string; hash: string; block: number }>;
   sendCommonKey(): Promise<{ key: string; hash: string; block: number }>;
   encryptFile(file: Blob): Promise<{ file: File; secrets: Record<string, unknown> }>;
-  decryptFile(file: Blob, secret: string): Promise<File>;
+  decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File>;
   encryptKey(key: string): Promise<{ block: number; keys: string; v: number }>;
   decryptKey(event: Record<string, unknown>): Promise<string>;
   clear(): void;
@@ -640,6 +660,27 @@ export class Pcrypto {
 
     // ---- Room interface ----
     const room: PcryptoRoomInstance = {
+      requiresEncryption(): boolean {
+        // Private (non-public) rooms mandate encryption. Public rooms are
+        // allowed to send plaintext by design — Bastyon convention for
+        // open channels.
+        const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
+        if (publicChat) return false;
+
+        // Large rooms (≥50 members) also fall back to plaintext by design —
+        // E2E group-key exchange is not workable at that scale, and
+        // canBeEncrypt() explicitly returns false for them. requiresEncryption()
+        // must mirror that same gate or the two signals diverge and every
+        // send in a large private group throws ENCRYPTION_REQUIRED_NO_KEYS,
+        // permanently stranding messages in the outbound queue.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const serverCount = (chat as any).getJoinedMemberCount?.() ?? 0;
+        const memberCount = Math.max(serverCount, Object.keys(usersinfo).length);
+        if (memberCount >= 50) return false;
+
+        return true;
+      },
+
       canBeEncrypt(): boolean {
         const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
         if (publicChat) return false;
@@ -1042,8 +1083,8 @@ export class Pcrypto {
         return { file: encryptedFile, secrets };
       },
 
-      async decryptFile(file: Blob, secret: string): Promise<File> {
-        return pcrypto.pcryptoFile.decryptFile(file as File, secret);
+      async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
+        return pcrypto.pcryptoFile.decryptFile(file as File, secret, originalMime);
       },
 
       async encryptKey(key: string): Promise<{ block: number; keys: string; v: number }> {

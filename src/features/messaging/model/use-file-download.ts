@@ -6,6 +6,7 @@ import { hexEncode } from "@/shared/lib/matrix/functions";
 import { isNative, isElectron } from "@/shared/lib/platform";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
+import { enqueueDecrypt } from "./decrypt-queue";
 
 interface FileDownloadState {
   loading: boolean;
@@ -62,25 +63,32 @@ async function fetchWithTimeout(url: string, signal?: AbortSignal): Promise<Resp
 }
 
 /** Download and optionally decrypt a file from the Matrix server.
- *  Retries up to MAX_RETRIES times on transient failures (network, crypto not ready). */
+ *  Retries up to MAX_RETRIES times on transient failures (network, crypto not ready).
+ *
+ *  @param signal — optional external AbortSignal. When this signal aborts
+ *                  the in-flight fetch is torn down immediately and no
+ *                  further retry attempts are made. */
 async function downloadAndDecrypt(
   fileInfo: FileInfo,
   roomId: string,
   senderId: string,
   timestamp: number,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   if (!fileInfo.url) throw new Error("No file URL");
+  if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
 
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
     if (attempt > 0) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 1] ?? 6000));
     }
 
     try {
       // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls)
-      const response = await fetchWithTimeout(fileInfo.url);
+      const response = await fetchWithTimeout(fileInfo.url, signal);
       if (!response.ok) {
         const err = new Error(`Download failed: ${response.status}`);
         // Mark non-retriable codes so the catch block below can throw immediately
@@ -112,13 +120,22 @@ async function downloadAndDecrypt(
         };
 
         const decryptKey = await roomCrypto.decryptKey(event);
-        const decryptedFile = await roomCrypto.decryptFile(blob, decryptKey);
+        // Serialise decryption: parallel decryptFile calls on low-end
+        // Android WebViews saturate the CPU and freeze the UI.
+        // Pass the declared plaintext MIME so new ciphertexts (stored as
+        // application/octet-stream) restore with the right type instead
+        // of falling through to a generic binary fallback.
+        const decryptedFile = await enqueueDecrypt(() =>
+          roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+        );
         blob = decryptedFile;
       }
 
       return blob;
     } catch (e) {
       lastError = e;
+      // User cancel is terminal — no retries.
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
       // Don't retry on permanent errors (missing URL, 4xx client errors)
       if (e instanceof Error) {
         if (e.message === "No file URL") throw e;
@@ -234,8 +251,11 @@ export function useFileDownload() {
     return states.value[eventId];
   };
 
-  /** Download (and decrypt if needed) a file message */
-  const download = async (message: Message) => {
+  /** Download (and decrypt if needed) a file message.
+   *  @param signal — optional AbortSignal. Callers that want the download
+   *                  to stop when their scope unmounts (e.g. MediaGrid on
+   *                  chat switch) should pass `onScopeDispose`-tied signal. */
+  const download = async (message: Message, signal?: AbortSignal) => {
     if (!message.fileInfo) return null;
 
     // Use _key (stable clientId) if available, otherwise fall back to id.
@@ -261,6 +281,7 @@ export function useFileDownload() {
         message.roomId,
         message.senderId,
         message.timestamp,
+        signal,
       );
       const mimeType = message.fileInfo.type || "application/octet-stream";
       const typedBlob = new Blob([blob], { type: mimeType });
@@ -272,6 +293,11 @@ export function useFileDownload() {
 
       return url;
     } catch (e) {
+      // User-initiated cancel is not an error for bug reporting — just bail.
+      if (e instanceof DOMException && e.name === "AbortError") {
+        state.error = null;
+        return null;
+      }
       console.error("[use-file-download] download error:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.fileDownload"), error: e });
       state.error = String(e);

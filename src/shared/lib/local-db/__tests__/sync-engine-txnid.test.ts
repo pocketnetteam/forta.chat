@@ -32,6 +32,14 @@ const mockMatrix = {
     async () => undefined,
   ),
   uploadContentMxc: vi.fn<(blob: Blob) => Promise<string>>(async () => "mxc://server/file"),
+  // syncSendFile goes through the progress-aware upload path (not uploadContentMxc).
+  uploadContent: vi.fn<
+    (
+      blob: Blob,
+      progress?: (p: { loaded: number; total: number }) => void,
+      signal?: AbortSignal,
+    ) => Promise<string>
+  >(async () => "https://server/_matrix/media/r0/download/server/abc123"),
 };
 
 vi.mock("@/entities/matrix", () => ({
@@ -65,11 +73,12 @@ class TestDb extends Dexie {
       messages:
         "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
       rooms: "id, updatedAt, membership, isDeleted",
-      pendingOps: "++id, [roomId+createdAt], status",
+      pendingOps:
+        "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
       attachments: "++id, messageLocalId, status",
       users: "address, updatedAt",
       syncState: "key",
-      decryptionQueue: "++id, status",
+      decryptionQueue: "++id, status, [status+nextAttemptAt]",
       listenedMessages: "messageId",
     });
   }
@@ -139,6 +148,9 @@ async function seedOp(
     maxRetries: 5,
     createdAt: Date.now(),
     clientId: "cli_fixed_for_test",
+    // Required for the [status+nextAttemptAt] compound index —
+    // Dexie skips rows with undefined indexed keys.
+    nextAttemptAt: 0,
     ...overrides,
   } as PendingOperation);
 }

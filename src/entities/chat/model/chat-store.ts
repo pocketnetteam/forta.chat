@@ -6,6 +6,8 @@ import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, 
 import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
+import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
+import { readJoinRule } from "@/entities/matrix/model/matrix-kit";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
 import { useAuthStore } from "@/entities/auth/model/stores";
@@ -3437,28 +3439,79 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return room?.members.length ?? 0;
   };
 
-  /** Check if room has public join rules */
+  /** Check if room has public join rules. Delegates to the shared
+   *  readJoinRule helper so matrix-kit.chatIsPublic and this function never
+   *  diverge on how `m.room.join_rules` is read. */
   const isRoomPublic = (roomId: string): boolean => {
     try {
       const matrixService = getMatrixClientService();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
+      const matrixRoom = matrixService.getRoom(roomId);
       if (!matrixRoom) return false;
-      const joinEvent = matrixRoom.currentState?.getStateEvents?.("m.room.join_rules", "");
-      const rule = joinEvent?.getContent?.()?.join_rule ?? joinEvent?.event?.content?.join_rule;
-      return rule === "public";
+      return readJoinRule(matrixRoom as unknown as Record<string, unknown>) === "public";
     } catch {
       return false;
     }
   };
 
-  /** Toggle room between public/private join rules (admin only) */
+  /** True when the room is shareable by link — either a public join_rule or a
+   *  world_readable broadcast/stream room. Broadcast channels on Bastyon
+   *  commonly use `history_visibility=world_readable` even when their
+   *  `join_rule` is still `"invite"`, and members reasonably expect to be
+   *  able to hand the link to someone else. */
+  const isRoomShareableByLink = (roomId: string): boolean => {
+    try {
+      const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+      if (!matrixRoom) return false;
+      if (readJoinRule(matrixRoom as Record<string, unknown>) === "public") return true;
+      const hv = getHistoryVisibilityFromMatrixRoom(matrixRoom);
+      return isStreamHistoryVisibility(hv);
+    } catch {
+      return false;
+    }
+  };
+
+  /** Toggle room between public/private join rules (admin only).
+   *  Up-front power-level check avoids sending a doomed state event, and
+   *  when enabling public we also set history_visibility=world_readable
+   *  (required for newly-joined users to see prior messages). */
   const setRoomPublic = async (roomId: string, isPublic: boolean): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matrixRoom = matrixService.getRoom(roomId) as any;
+
+      // Up-front PL check — PowerLevelsEventContent may declare a per-event
+      // requirement; fall back to state_default or 50 per Matrix spec.
+      const plEvent = matrixRoom?.currentState?.getStateEvents?.("m.room.power_levels", "");
+      const plContent = plEvent?.getContent?.() ?? plEvent?.event?.content ?? {};
+      const requiredPl = plContent?.events?.["m.room.join_rules"] ?? plContent?.state_default ?? 50;
+      const myUserId = matrixService.getUserId() ?? "";
+      const myPl = plContent?.users?.[myUserId] ?? plContent?.users_default ?? 0;
+      if (myPl < requiredPl) {
+        console.warn("[chat-store] setRoomPublic: insufficient power level", { myPl, requiredPl });
+        return false;
+      }
+
       await matrixService.sendStateEvent(roomId, "m.room.join_rules", {
         join_rule: isPublic ? "public" : "invite",
       }, "");
+
+      // Public rooms need world_readable history so users can browse the log
+      // before joining. Skip the write if it's already set — avoids a
+      // redundant state event on every toggle.
+      if (isPublic) {
+        const hvEvent = matrixRoom?.currentState?.getStateEvents?.("m.room.history_visibility", "");
+        const currentHv =
+          hvEvent?.getContent?.()?.history_visibility ??
+          hvEvent?.event?.content?.history_visibility;
+        if (currentHv !== "world_readable") {
+          await matrixService.sendStateEvent(roomId, "m.room.history_visibility", {
+            history_visibility: "world_readable",
+          }, "");
+        }
+      }
       return true;
     } catch (e) {
       console.warn("[chat-store] setRoomPublic error:", e);
@@ -3466,24 +3519,91 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Join a room by ID (for invite link flow) */
-  const joinRoomById = async (roomId: string): Promise<boolean> => {
+  /** Join a room by ID (for invite link flow). Returns a typed JoinRoomResult
+   *  so callers can render a localized toast per failure mode instead of
+   *  silently swallowing the error into a boolean. */
+  const joinRoomById = async (roomId: string): Promise<JoinRoomResult> => {
+    // Identity translator — store returns i18n keys; App.vue renders via t().
+    const keyTranslator = (k: string): string => k;
+    if (!validateRoomId(roomId)) {
+      return {
+        ok: false,
+        reason: "invalid_id",
+        errorMessage: keyTranslator("joinRoom.errorInvalidId"),
+      };
+    }
     try {
       const matrixService = getMatrixClientService();
+      const myUserId = matrixService.getUserId() ?? "";
       // Security (best-effort): block join if local state shows user is banned.
       // Authoritative enforcement is server-side; this avoids a wasted network call.
-      const myUserId = matrixService.getUserId() ?? "";
       if (isUserBanned(roomId, myUserId)) {
         console.warn("[chat-store] joinRoomById blocked: user is banned from room", roomId);
-        return false;
+        return {
+          ok: false,
+          reason: "banned",
+          errorMessage: keyTranslator("joinRoom.errorBanned"),
+        };
       }
       await matrixService.joinRoom(roomId);
       await refreshRoomsNow();
-      setActiveRoom(roomId);
-      return true;
+      // Defer active-room flip to next microtask so room-cleanup / zombie
+      // healing in this tick doesn't race with the fresh join.
+      queueMicrotask(() => setActiveRoom(roomId));
+      return { ok: true };
     } catch (e) {
       console.warn("[chat-store] joinRoomById error:", e);
-      return false;
+      // The Matrix server returns M_FORBIDDEN for BOTH private rooms and
+      // banned users. If local state shows ban, prefer that label over the
+      // generic "private room" message to avoid misleading the user.
+      try {
+        const matrixService = getMatrixClientService();
+        const myUserId = matrixService.getUserId() ?? "";
+        if (isUserBanned(roomId, myUserId)) {
+          return {
+            ok: false,
+            reason: "banned",
+            errorMessage: keyTranslator("joinRoom.errorBanned"),
+          };
+        }
+      } catch { /* fall through to categorization */ }
+      return categorizeJoinError(e, keyTranslator);
+    }
+  };
+
+  /** Peek room state without joining. Used to render a preview modal so the
+   *  user sees name/topic/memberCount before committing. Returns null if the
+   *  homeserver denies peek (private room) or the SDK lacks peekInRoom. */
+  const peekRoom = async (roomId: string): Promise<{
+    name?: string;
+    topic?: string;
+    avatar?: string | null;
+    memberCount?: number;
+    isEncrypted?: boolean;
+  } | null> => {
+    if (!validateRoomId(roomId)) return null;
+    try {
+      const matrixService = getMatrixClientService();
+      const client = matrixService.client;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const clientAny = client as any;
+      if (!clientAny || typeof clientAny.peekInRoom !== "function") return null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const room = (await clientAny.peekInRoom(roomId)) as any;
+      if (!room) return null;
+      const topic =
+        room.currentState?.getStateEvents?.("m.room.topic", "")?.getContent?.()?.topic ?? undefined;
+      const avatar = typeof room.getAvatarUrl === "function" ? room.getAvatarUrl() : null;
+      return {
+        name: room.name,
+        topic,
+        avatar,
+        memberCount: room.currentState?.getJoinedMemberCount?.() ?? 0,
+        isEncrypted: !!room.currentState?.getStateEvents?.("m.room.encryption", ""),
+      };
+    } catch (e) {
+      console.warn("[chat-store] peekRoom failed:", e);
+      return null;
     }
   };
 
@@ -6053,7 +6173,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     inviteMember,
     isDetachedFromLatest,
     isRoomPublic,
+    isRoomShareableByLink,
     joinRoomById,
+    peekRoom,
     bindAccountKeys,
     banMember,
     getBannedMembers,
