@@ -29,6 +29,17 @@ import { MessageStatus, MessageType } from "./types";
 
 const NAMESPACE = "chat";
 
+// Boot-time chat-list debug toggle.
+// Enable via DevTools console: `window.__chatListDebug = true` (instant)
+// Or persist across reloads: `localStorage.setItem('__debug_chat_list', '1')`.
+if (typeof globalThis !== "undefined") {
+  try {
+    if (typeof localStorage !== "undefined" && localStorage.getItem("__debug_chat_list") === "1") {
+      (globalThis as Record<string, unknown>).__chatListDebug = true;
+    }
+  } catch { /* SSR / restricted contexts */ }
+}
+
 /** Extract raw event data from a MatrixEvent object */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getRawEvent(matrixEvent: any): Record<string, unknown> | null {
@@ -784,7 +795,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Diff guard: skip when nothing would change
     const dexieMatch = !lr || lr.unreadCount === safeCount;
     const inMemMatch = !inMemRoom || inMemRoom.unreadCount === safeCount;
-    if (dexieMatch && inMemMatch) return;
+    if (dexieMatch && inMemMatch) {
+      if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
+        // eslint-disable-next-line no-console
+        console.debug(`[unread] noop ${source} ${roomId.slice(0,12)} count=${safeCount}`);
+      }
+      return;
+    }
+
+    if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
+      const prev = lr?.unreadCount ?? inMemRoom?.unreadCount ?? 0;
+      // eslint-disable-next-line no-console
+      console.debug(`[unread] WRITE ${source} ${roomId.slice(0,12)} ${prev} → ${safeCount}`, new Error("trace").stack?.split("\n").slice(2,5).join(" | "));
+    }
 
     if (inMemRoom && inMemRoom.unreadCount !== safeCount) {
       inMemRoom.unreadCount = safeCount;
@@ -1216,9 +1239,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     if (!mutated) {
       perfCount("sortedRooms:patch-noop");
+      if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
+        // eslint-disable-next-line no-console
+        console.debug(`[patcher] noop (${dedup.size} rooms, all cache-hit)`);
+      }
       return;
     }
     perfCount("sortedRooms:effective-patch");
+    if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
+      // eslint-disable-next-line no-console
+      console.debug(`[patcher] EFFECTIVE patch (${dedup.size} rooms changed)`, [...dedup.keys()].map(id => id.slice(0,12)));
+    }
     _sortedRoomsRef.value = arr;
   };
 
@@ -1346,6 +1377,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   const applyDexieDeltas = (changes: RoomChange[]) => {
+    const debug = typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug;
     // Always update dexieRoomMap (ground truth), but defer sort when suppressed
     const relevantChanges: RoomChange[] = [];
     for (const c of changes) {
@@ -1358,6 +1390,26 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const r = c.room;
         if ((r.membership === "join" || r.membership === "invite") && !r.isDeleted) {
           if (!r.updatedAt) r.updatedAt = r.lastMessageTimestamp || 1;
+          if (debug) {
+            const prev = dexieRoomMap.get(r.id);
+            if (prev) {
+              const diffs: string[] = [];
+              if (prev.unreadCount !== r.unreadCount) diffs.push(`unread:${prev.unreadCount}→${r.unreadCount}`);
+              if (prev.lastMessageLocalStatus !== r.lastMessageLocalStatus) diffs.push(`status:${prev.lastMessageLocalStatus}→${r.lastMessageLocalStatus}`);
+              if (prev.lastReadInboundTs !== r.lastReadInboundTs) diffs.push(`readIn:${prev.lastReadInboundTs}→${r.lastReadInboundTs}`);
+              if (prev.lastReadOutboundTs !== r.lastReadOutboundTs) diffs.push(`readOut:${prev.lastReadOutboundTs}→${r.lastReadOutboundTs}`);
+              if (prev.lastMessageTimestamp !== r.lastMessageTimestamp) diffs.push(`ts:${prev.lastMessageTimestamp}→${r.lastMessageTimestamp}`);
+              if (prev.updatedAt !== r.updatedAt) diffs.push(`upd:${prev.updatedAt}→${r.updatedAt}`);
+              if (prev.lastMessagePreview !== r.lastMessagePreview) diffs.push(`preview≠`);
+              if (diffs.length > 0) {
+                // eslint-disable-next-line no-console
+                console.debug(`[dexie-delta] ${r.id.slice(0,12)} ${diffs.join(" ")}`);
+              } else {
+                // eslint-disable-next-line no-console
+                console.debug(`[dexie-delta] ${r.id.slice(0,12)} REDUNDANT (no fields changed)`);
+              }
+            }
+          }
           dexieRoomMap.set(r.id, r);
           relevantChanges.push(c);
         } else if (dexieRoomMap.has(r.id)) {
@@ -3680,6 +3732,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Update room's last message and timestamp
     const room = getRoomById(roomId);
     if (room) {
+      if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
+        // eslint-disable-next-line no-console
+        console.debug(`[addMessage] ${roomId.slice(0,12)} sender=${message.senderId.slice(0,8)} active=${roomId === activeRoomId.value} status=${message.status}`);
+      }
       room.lastMessage = lastMessageFromMessage(message, dexieRoomMap.get(roomId));
       room.updatedAt = message.timestamp;
       triggerRef(rooms);
