@@ -1079,6 +1079,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // diffs), causing redundant cache invalidations + sortedRooms patches
     // + sidebar re-renders + visible badge flicker on neighboring rooms.
     const effectiveSortKey = ts > 0 ? ts : (lr.updatedAt ?? 0);
+    if (typeof globalThis !== "undefined" && (globalThis as any).__chatListDebug) {
+      // eslint-disable-next-line no-console
+      console.log(`[mapLR] ${lr.id.slice(0,12)} ls=${lr.lastMessageLocalStatus} ts=${lr.lastMessageTimestamp} readOut=${lr.lastReadOutboundTs} preview="${(lr.lastMessagePreview ?? "").slice(0,30)}" ev=${(lr.lastMessageEventId ?? "").slice(0,8)}`);
+    }
     // Resolve effective preview: prefer decrypted cache over raw Dexie value
     const decryptedPreview = decryptedPreviewCache.get(lr.id);
     const effectivePreview = resolveLastMessagePreview(lr.lastMessagePreview, decryptedPreview);
