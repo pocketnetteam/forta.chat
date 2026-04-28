@@ -3,6 +3,7 @@ import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
@@ -760,9 +761,63 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     persistRoomSets();
   };
 
+  /** Single writer for unreadCount across ALL update paths.
+   *
+   *  WHY: previously 7+ direct mutations (`room.unreadCount = X`,
+   *  `inMemRoom.unreadCount = 0`, `dexieRoom.unreadCount = 0`, …) raced each
+   *  other through markRoomAsRead, setActiveRoom, addMessage, Matrix sync, and
+   *  Dexie observer paths. This caused visible badge flicker (1 → 0 → 1 → 0)
+   *  when several writers fired within the same animation frame.
+   *
+   *  Now: every caller routes through this method, which:
+   *    1. Diff-guards no-op writes (skips when count unchanged).
+   *    2. Synchronously syncs in-memory `rooms` + `dexieRoomMap` for instant UI.
+   *    3. Schedules a sortedRooms patch (rAF-coalesced).
+   *    4. Persists to Dexie as single source of truth.
+   *
+   *  Direct mutations to `unreadCount` are forbidden outside this helper. */
+  const _setUnreadCount = (roomId: string, count: number, source: string) => {
+    const safeCount = Math.max(0, count);
+    const lr = dexieRoomMap.get(roomId);
+    const inMemRoom = getRoomById(roomId);
+
+    // Diff guard: skip when nothing would change
+    const dexieMatch = !lr || lr.unreadCount === safeCount;
+    const inMemMatch = !inMemRoom || inMemRoom.unreadCount === safeCount;
+    if (dexieMatch && inMemMatch) return;
+
+    if (inMemRoom && inMemRoom.unreadCount !== safeCount) {
+      inMemRoom.unreadCount = safeCount;
+      triggerRef(rooms);
+    }
+    if (lr && lr.unreadCount !== safeCount) {
+      lr.unreadCount = safeCount;
+      _dexieRoomMapVersion.value++;
+      patchSortedRooms([{ type: "upsert", room: lr }]);
+    }
+    perfCount(`unreadCount:${source}`);
+
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.db.rooms.update(roomId, { unreadCount: safeCount })
+        .catch((e: unknown) => console.warn(`[chat-store] _setUnreadCount(${source}) Dexie write failed:`, e));
+    }
+  };
+
+  /** Bump unreadCount by `delta` (default +1). Used for incoming messages. */
+  const bumpUnreadCount = (roomId: string, delta = 1) => {
+    const lr = dexieRoomMap.get(roomId);
+    const inMemRoom = getRoomById(roomId);
+    const current = lr?.unreadCount ?? inMemRoom?.unreadCount ?? 0;
+    _setUnreadCount(roomId, current + delta, "bump");
+  };
+
+  /** Sync unreadCount from Matrix SDK's notification count (cross-device reconciliation). */
+  const setUnreadCountFromMatrix = (roomId: string, serverCount: number) => {
+    _setUnreadCount(roomId, serverCount, "matrix-sync");
+  };
+
   const markRoomAsRead = (roomId: string) => {
-    const room = getRoomById(roomId);
-    if (room) room.unreadCount = 0;
+    _setUnreadCount(roomId, 0, "markAsRead");
 
     const myAddr = useAuthStore().address;
 
@@ -967,8 +1022,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   // Cache: reuse ChatRoom objects when LocalRoom hasn't changed (reduces GC pressure).
   // Invalidated by fields that affect display: timestamp, unread, name, membership.
+  // `updatedAt` is in the key because `getSortKey` falls back to it when
+  // `lastMessageTimestamp = 0` (rooms with no messages yet) — without it,
+  // updatedAt changes wouldn't invalidate the cache and the diff guard in
+  // applyPatchSortedRooms would skip a needed re-sort.
   const _chatRoomFromDexieCache = new Map<string, {
     ts: number;
+    updatedAt: number;
     unread: number;
     name: string;
     membership: string;
@@ -987,11 +1047,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const mapLocalRoomToChatRoom = (lr: LocalRoom): ChatRoom => {
     const ts = lr.lastMessageTimestamp ?? 0;
     // Resolve effective preview: prefer decrypted cache over raw Dexie value
-    let effectivePreview = lr.lastMessagePreview;
-    if (effectivePreview != null && (effectivePreview === "[encrypted]" || effectivePreview === "m.bad.encrypted" || effectivePreview.startsWith("** Unable to decrypt"))) {
-      const decrypted = decryptedPreviewCache.get(lr.id);
-      if (decrypted) effectivePreview = decrypted;
-    }
+    const decryptedPreview = decryptedPreviewCache.get(lr.id);
+    const effectivePreview = resolveLastMessagePreview(lr.lastMessagePreview, decryptedPreview);
 
     const localStatus = lr.lastMessageLocalStatus;
     const readOutboundTs = lr.lastReadOutboundTs ?? 0;
@@ -1001,6 +1058,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (
       cached &&
       cached.ts === ts &&
+      cached.updatedAt === lr.updatedAt &&
       cached.unread === lr.unreadCount &&
       cached.name === lr.name &&
       cached.membership === lr.membership &&
@@ -1024,25 +1082,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       unreadCount: lr.unreadCount,
       topic: lr.topic,
       updatedAt: lr.updatedAt,
-      lastMessage: effectivePreview != null ? {
-        id: "",
-        roomId: lr.id,
-        senderId: lr.lastMessageSenderId ?? "",
-        content: effectivePreview,
-        timestamp: ts,
-        status: deriveOutboundStatus(
-            lr.lastMessageLocalStatus ?? "synced",
-            ts,
-            lr.lastReadOutboundTs ?? 0,
-          ),
-        type: lr.lastMessageType ?? MessageType.text,
-        decryptionStatus: lr.lastMessageDecryptionStatus,
-        callInfo: lr.lastMessageCallInfo,
-        systemMeta: lr.lastMessageSystemMeta,
-      } as Message : undefined,
+      lastMessage: buildLastMessage(lr, decryptedPreview),
       lastMessageReaction: lr.lastMessageReaction ?? undefined,
     } as ChatRoom;
-    _chatRoomFromDexieCache.set(lr.id, { ts, unread: lr.unreadCount, name: lr.name, membership: lr.membership, preview: effectivePreview, senderId: lastMsgSenderId, eventId: lr.lastMessageEventId ?? "", localStatus, readOutboundTs, lastMsgDecryptionStatus, room });
+    _chatRoomFromDexieCache.set(lr.id, { ts, updatedAt: lr.updatedAt, unread: lr.unreadCount, name: lr.name, membership: lr.membership, preview: effectivePreview, senderId: lastMsgSenderId, eventId: lr.lastMessageEventId ?? "", localStatus, readOutboundTs, lastMsgDecryptionStatus, room });
     return room;
   };
 
@@ -1136,10 +1179,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     const arr = [..._sortedRoomsRef.value];
     const pinned = pinnedRoomIds.value;
+    let mutated = false;
     for (const change of dedup.values()) {
       if (change.type === "delete") {
         const idx = arr.findIndex(r => r.id === change.roomId);
-        if (idx !== -1) arr.splice(idx, 1);
+        if (idx !== -1) {
+          arr.splice(idx, 1);
+          mutated = true;
+        }
         _chatRoomFromDexieCache.delete(change.roomId);
       } else {
         if (shouldExcludeLocalRoomFromSidebar(change.room)) {
@@ -1147,18 +1194,31 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (oldIdx !== -1) {
             arr.splice(oldIdx, 1);
             _chatRoomFromDexieCache.delete(change.room.id);
+            mutated = true;
           }
           continue;
         }
         const chatRoom = mapLocalRoomToChatRoom(change.room);
         const oldIdx = arr.findIndex(r => r.id === change.room.id);
+        // Diff guard: cache returned the same ChatRoom reference, nothing
+        // visible about this room changed (status, unread, name, preview, ts).
+        // The sort key is also unchanged because it derives from those same
+        // fields, so position stays valid. Skip splice + triggerRef.
+        // Pinned changes flow through a separate watcher → scheduleFullSortedRebuild.
+        if (oldIdx !== -1 && arr[oldIdx] === chatRoom) continue;
         if (oldIdx !== -1) arr.splice(oldIdx, 1);
         const key = getSortKey(chatRoom);
         const isPinned = pinned.has(change.room.id);
         const newIdx = binarySearchDesc(arr, key, pinned, isPinned);
         arr.splice(newIdx, 0, chatRoom);
+        mutated = true;
       }
     }
+    if (!mutated) {
+      perfCount("sortedRooms:patch-noop");
+      return;
+    }
+    perfCount("sortedRooms:effective-patch");
     _sortedRoomsRef.value = arr;
   };
 
@@ -2572,7 +2632,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       if (updates.length === 0) return;
 
-      // Bulk update Dexie
+      // Route every update through the single writer — bulks Dexie writes
+      // into one transaction and patches in-memory state synchronously.
       await dbKit.db.transaction("rw", dbKit.db.rooms, async () => {
         for (const { id, count } of updates) {
           await dbKit.db.rooms.update(id, { unreadCount: count });
@@ -2581,14 +2642,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       console.log(`[chat-store] synced unreadCount from Matrix for ${updates.length} room(s)`);
 
-      // Force delta propagation so UI updates immediately
-      _dexieRoomMapVersion.value++;
+      // Sync in-memory state through the unified writer so dexieRoomMap,
+      // rooms ref, and sortedRooms all update consistently (the Dexie write
+      // above already happened in a single tx for atomicity).
       for (const { id, count } of updates) {
-        const lr = dexieRoomMap.get(id);
-        if (lr) {
-          lr.unreadCount = count;
-          patchSortedRooms([{ type: "upsert", room: lr }]);
-        }
+        setUnreadCountFromMatrix(id, count);
       }
     } catch (e) {
       console.warn("[chat-store] syncAllUnreadFromMatrix failed:", e);
@@ -2931,18 +2989,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (chatDbKitRef.value) {
         chatDbKitRef.value.eventWriter.clearUnread(roomId);
       }
-      // Also clear in-memory immediately so sidebar updates without waiting for Dexie delta
-      const inMemRoom = getRoomById(roomId);
-      if (inMemRoom && inMemRoom.unreadCount > 0) {
-        inMemRoom.unreadCount = 0;
-        // Patch sortedRooms so sidebar reflects change instantly
-        const dexieRoom = dexieRoomMap.get(roomId);
-        if (dexieRoom && dexieRoom.unreadCount > 0) {
-          dexieRoom.unreadCount = 0;
-          _dexieRoomMapVersion.value++;
-          patchSortedRooms([{ type: "upsert", room: dexieRoom }]);
-        }
-      }
+      // Also clear in-memory + Dexie cache immediately so sidebar updates
+      // without waiting for the eventWriter.clearUnread → Dexie delta cycle.
+      // Single writer route — diff-guards no-op when count already 0.
+      _setUnreadCount(roomId, 0, "setActiveRoom");
     }
     perfMark("setActiveRoom-end");
     perfMeasure("setActiveRoom", "setActiveRoom-start", "setActiveRoom-end");
@@ -3630,12 +3680,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Update room's last message and timestamp
     const room = getRoomById(roomId);
     if (room) {
-      room.lastMessage = message;
+      room.lastMessage = lastMessageFromMessage(message, dexieRoomMap.get(roomId));
       room.updatedAt = message.timestamp;
-      if (roomId !== activeRoomId.value && message.senderId !== useAuthStore().address) {
-        room.unreadCount++;
-      }
       triggerRef(rooms);
+      if (roomId !== activeRoomId.value && message.senderId !== useAuthStore().address) {
+        // Single writer — keeps Dexie + dexieRoomMap + sortedRooms in lock-step
+        bumpUnreadCount(roomId, 1);
+      }
     }
 
     // Update decrypted preview cache so refreshRoomsImmediate() preserves this preview
@@ -3683,7 +3734,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const lastMsg = msgs[msgs.length - 1];
         // Always sync lastMessage so sidebar reflects correct read/sent status
         if (!room.lastMessage || room.lastMessage.id === lastMsg.id || lastMsg.timestamp >= (room.lastMessage.timestamp || 0)) {
-          room.lastMessage = { ...lastMsg };
+          room.lastMessage = lastMessageFromMessage({ ...lastMsg }, dexieRoomMap.get(roomId));
           triggerRef(rooms);
         }
       }
@@ -3721,7 +3772,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Sync sidebar: update room.lastMessage if this was the last message
         const room = getRoomById(roomId);
         if (room?.lastMessage && room.lastMessage.id === tempId) {
-          room.lastMessage = { ...updated };
+          room.lastMessage = lastMessageFromMessage({ ...updated }, dexieRoomMap.get(roomId));
           triggerRef(rooms);
         }
       }
@@ -3750,7 +3801,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     const room = getRoomById(roomId);
     if (room?.lastMessage && (room.lastMessage.id === tempId || room.lastMessage.id === serverId)) {
-      room.lastMessage = { ...updated };
+      // Single-source override — Dexie's lastMessageLocalStatus wins. The
+      // explicit `status` arg here may already be stale relative to Dexie
+      // (e.g. SyncEngine wrote `synced` between caller's status calc and
+      // here). Prevents sidebar flicker when observeRoomChanges later
+      // rebuilds via deriveOutboundStatus.
+      room.lastMessage = lastMessageFromMessage({ ...updated }, dexieRoomMap.get(roomId));
       triggerRef(rooms);
     }
   };
@@ -3777,7 +3833,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Sync sidebar: update room.lastMessage if this message is the last one
         const room = getRoomById(roomId);
         if (room?.lastMessage && room.lastMessage.id === messageId) {
-          room.lastMessage = { ...updated };
+          // Single-source override — see updateMessageIdAndStatus for rationale.
+          room.lastMessage = lastMessageFromMessage({ ...updated }, dexieRoomMap.get(roomId));
           triggerRef(rooms);
         }
       }
@@ -3797,7 +3854,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         // Sync sidebar: update room.lastMessage if this was the last message
         const room = getRoomById(roomId);
         if (room?.lastMessage && room.lastMessage.id === messageId) {
-          room.lastMessage = { ...msg };
+          room.lastMessage = lastMessageFromMessage({ ...msg }, dexieRoomMap.get(roomId));
           triggerRef(rooms);
         }
       }
@@ -5644,9 +5701,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             // Own receipt from another device → advance inbound read watermark.
             // This is the key cross-device sync path: when desktop reads a message,
             // mobile receives our own receipt via /sync and clears unread here.
-            // Also clear in-memory unread for immediate reactivity
-            const inMemRoom = getRoomById(roomId);
-            if (inMemRoom) inMemRoom.unreadCount = 0;
+            // Single writer — clears in-memory + Dexie cache + sortedRooms patch
+            // in one consistent pass (avoids race with the async markAsRead below).
+            _setUnreadCount(roomId, 0, "ownReceipt");
 
             // Async: resolve precise timestamp, then commit watermark to Dexie
             resolveReceiptTimestamp(roomId, eventId, receiptTs).then(timestamp => {
@@ -5949,22 +6006,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         unreadCount: lr.unreadCount,
         topic: lr.topic,
         updatedAt: lr.updatedAt,
-        lastMessage: lr.lastMessagePreview != null ? {
-          id: lr.lastMessageEventId ?? "",
-          roomId: lr.id,
-          senderId: lr.lastMessageSenderId ?? "",
-          content: lr.lastMessagePreview,
-          timestamp: lr.lastMessageTimestamp ?? lr.updatedAt ?? 0,
-          status: deriveOutboundStatus(
-            lr.lastMessageLocalStatus ?? "synced",
-            lr.lastMessageTimestamp ?? 0,
-            lr.lastReadOutboundTs ?? 0,
-          ),
-          type: lr.lastMessageType ?? MessageType.text,
-          decryptionStatus: lr.lastMessageDecryptionStatus,
-          callInfo: lr.lastMessageCallInfo,
-          systemMeta: lr.lastMessageSystemMeta,
-        } as Message : undefined,
+        lastMessage: buildLastMessage(lr, decryptedPreviewCache.get(lr.id)),
         lastMessageReaction: lr.lastMessageReaction ?? undefined,
       } as ChatRoom));
 
