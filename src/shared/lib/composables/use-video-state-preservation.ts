@@ -73,8 +73,18 @@ export function useVideoStatePreservation(
   function saveStateFrom(el: HTMLVideoElement | null) {
     const key = currentId();
     if (!el || !key) return;
+    const newTime = sanitizeTime(el.currentTime);
+    // Android WebViews briefly zero currentTime AND drop readyState below
+    // HAVE_CURRENT_DATA (2) while re-laying out on rotation. That signature
+    // distinguishes a transient WebView reset from a deliberate user seek
+    // (which keeps readyState >= 2). Only suppress the 0-write in the
+    // reset case so user-initiated rewinds and pauses still persist.
+    if (newTime === 0 && el.readyState < 2) {
+      const cached = stateCache.get(key);
+      if (cached && cached.currentTime > 0) return;
+    }
     cachePut(key, {
-      currentTime: sanitizeTime(el.currentTime),
+      currentTime: newTime,
       paused: el.paused,
       volume: sanitizeVolume(el.volume),
       muted: !!el.muted,
@@ -134,10 +144,36 @@ export function useVideoStatePreservation(
     }
   }
 
+  // Capture state proactively when the device rotates. Vue's mount/unmount
+  // cycle and the auto-save interval can both lose up to ~1s of progress in
+  // the window between an orientation event and the next sample. Hooking the
+  // event directly closes that gap before the WebView starts re-laying out.
+  let orientationCleanup: (() => void) | null = null;
+
+  function setupOrientationListener() {
+    if (typeof window === "undefined") return;
+    const handler = () => saveState();
+    window.addEventListener("orientationchange", handler);
+
+    const screenOrientation =
+      typeof screen !== "undefined" && screen.orientation ? screen.orientation : null;
+    if (screenOrientation && typeof screenOrientation.addEventListener === "function") {
+      screenOrientation.addEventListener("change", handler);
+    }
+
+    orientationCleanup = () => {
+      window.removeEventListener("orientationchange", handler);
+      if (screenOrientation && typeof screenOrientation.removeEventListener === "function") {
+        screenOrientation.removeEventListener("change", handler);
+      }
+    };
+  }
+
   onMounted(() => {
     const el = videoRef.value;
     if (el) attachRestoreHandler(el);
     startAutoSave();
+    setupOrientationListener();
   });
 
   watch(videoRef, (el, prev) => {
@@ -150,6 +186,8 @@ export function useVideoStatePreservation(
   onScopeDispose(() => {
     saveState();
     stopAutoSave();
+    orientationCleanup?.();
+    orientationCleanup = null;
   });
 
   return { saveState, restoreState };
