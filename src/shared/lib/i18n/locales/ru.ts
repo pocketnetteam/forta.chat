@@ -503,6 +503,9 @@ export const ru: Record<TranslationKey, string> = {
   "call.permissionDenied.noInputDevice": "Микрофон не найден. Подключите гарнитуру или микрофон и попробуйте снова.",
   "call.permissionDenied.instructions": "Разрешите доступ в настройках системы: «Настройки → Приложения → Forta Chat → Разрешения».",
   "call.permissionDenied.close": "Закрыть",
+  "call.warning.noInboundAudio": "Нет входящего звука — возможно, проблема с микрофоном собеседника.",
+  "call.warning.noOutboundAudio": "Нет исходящего звука — проверьте микрофон.",
+  "call.error.connectionLost": "Соединение со звонком потеряно.",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",

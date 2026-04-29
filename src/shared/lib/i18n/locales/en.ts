@@ -501,6 +501,9 @@ export const en = {
   "call.permissionDenied.noInputDevice": "No microphone was found. Connect a headset or microphone and try again.",
   "call.permissionDenied.instructions": "Grant access in your system settings: Settings → Apps → Forta Chat → Permissions.",
   "call.permissionDenied.close": "Close",
+  "call.warning.noInboundAudio": "No incoming audio — the other party may have a microphone problem.",
+  "call.warning.noOutboundAudio": "No outgoing audio — check your microphone.",
+  "call.error.connectionLost": "Call connection lost.",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",

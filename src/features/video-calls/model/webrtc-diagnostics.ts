@@ -29,7 +29,21 @@ const POLL_INTERVAL_MS = 3_000;
 const MAX_ENTRIES = 200;
 const ZERO_AUDIO_ALERT_THRESHOLD = 3; // 3 consecutive polls = 9s
 
-class WebRTCDiagnostics {
+/**
+ * Session 03: typed warning payloads emitted on the "warning" event so
+ * call-service / UI can surface a user-visible toast instead of relying
+ * on console.error. Each type fires at most once per attach() — we don't
+ * spam the user every poll.
+ */
+export type DiagnosticsWarningType =
+  | "no_inbound_audio"
+  | "no_outbound_audio";
+
+export interface DiagnosticsWarningDetail {
+  type: DiagnosticsWarningType;
+}
+
+class WebRTCDiagnostics extends EventTarget {
   private entries: DiagnosticEntry[] = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pc: RTCPeerConnection | null = null;
@@ -38,6 +52,7 @@ class WebRTCDiagnostics {
   private zeroSentStreak = 0;
   private zeroRecvStreak = 0;
   private iceCandidatesLog: string[] = [];
+  private emittedWarnings: Set<DiagnosticsWarningType> = new Set();
 
   // Marker placed on a PC we've already wrapped, so a second attach on
   // the same pc is a no-op. Without this, and with our handlers stored
@@ -63,6 +78,8 @@ class WebRTCDiagnostics {
     this.zeroSentStreak = 0;
     this.zeroRecvStreak = 0;
     this.iceCandidatesLog = [];
+    // New attach == new call; allow each warning type to fire again.
+    this.emittedWarnings.clear();
 
     // Capture each original handler in a LOCAL CLOSURE variable rather
     // than `this.origXxx`. Closure-binding the original means wrapper
@@ -259,12 +276,14 @@ class WebRTCDiagnostics {
         dtlsState,
       };
 
-      // Real-time zero-audio detection
+      // Real-time zero-audio detection. We log to console (kept for bug
+      // reports) AND emit a typed "warning" event for the UI layer.
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
         if (audioBytesSent === this.prevAudioBytesSent) {
           this.zeroSentStreak++;
           if (this.zeroSentStreak === ZERO_AUDIO_ALERT_THRESHOLD) {
             console.error("[WebRTC-Diag] OUTBOUND AUDIO DEAD for 9s — mic may be muted or track not flowing");
+            this.emitWarning("no_outbound_audio");
           }
         } else {
           this.zeroSentStreak = 0;
@@ -274,6 +293,7 @@ class WebRTCDiagnostics {
           this.zeroRecvStreak++;
           if (this.zeroRecvStreak === ZERO_AUDIO_ALERT_THRESHOLD) {
             console.error("[WebRTC-Diag] INBOUND AUDIO DEAD for 9s — remote not sending or TURN relay broken");
+            this.emitWarning("no_inbound_audio");
           }
         } else {
           this.zeroRecvStreak = 0;
@@ -300,6 +320,17 @@ class WebRTCDiagnostics {
     } catch (e) {
       console.warn("[WebRTC-Diag] getStats error:", e);
     }
+  }
+
+  /**
+   * Fire the "warning" event at most once per type per attach() so the UI
+   * shows a single toast instead of repeating every poll.
+   */
+  private emitWarning(type: DiagnosticsWarningType): void {
+    if (this.emittedWarnings.has(type)) return;
+    this.emittedWarnings.add(type);
+    const detail: DiagnosticsWarningDetail = { type };
+    this.dispatchEvent(new CustomEvent("warning", { detail }));
   }
 }
 
