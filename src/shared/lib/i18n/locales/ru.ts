@@ -126,6 +126,13 @@ export const ru: Record<TranslationKey, string> = {
   "bugReport.ctx.videoRecord": "Не удалось начать запись видеокружка",
   "bugReport.ctx.fileDownload": "Не удалось скачать файл",
   "bugReport.ctx.audioPlayback": "Не удалось воспроизвести аудиосообщение",
+  "chat.decryptError.title": "Файл не удалось расшифровать",
+  "chat.decryptError.askResend": "Попросите отправителя прислать файл снова.",
+  "chat.decryptError.askSelf": "Попробуйте отправить файл заново с этого устройства.",
+  "chat.decryptError.retry": "Повторить",
+  "chat.decryptError.reportProblem": "Сообщить о проблеме",
+  "chat.downloadError.networkTitle": "Не удалось загрузить файл",
+  "chat.downloadError.networkHint": "Проверьте подключение и повторите попытку.",
   "bugReportStatus.viewOnGithub": "Открыть на GitHub",
   "bugReportStatus.notResolvedReasonLabel": "Что именно не так?",
   "bugReportStatus.notResolvedReasonPlaceholder": "Коротко опишите, что всё ещё не работает",
@@ -503,6 +510,9 @@ export const ru: Record<TranslationKey, string> = {
   "call.permissionDenied.noInputDevice": "Микрофон не найден. Подключите гарнитуру или микрофон и попробуйте снова.",
   "call.permissionDenied.instructions": "Разрешите доступ в настройках системы: «Настройки → Приложения → Forta Chat → Разрешения».",
   "call.permissionDenied.close": "Закрыть",
+  "call.warning.noInboundAudio": "Нет входящего звука — возможно, проблема с микрофоном собеседника.",
+  "call.warning.noOutboundAudio": "Нет исходящего звука — проверьте микрофон.",
+  "call.error.connectionLost": "Соединение со звонком потеряно.",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",

@@ -642,12 +642,13 @@ export class EventWriter {
     type: MessageType,
     content: string,
     transferAmount?: number,
+    fileInfo?: { name?: string },
   ): string {
     if (type === MessageType.image) return tRaw("message.photo");
     if (type === MessageType.video) return tRaw("message.video");
     if (type === MessageType.audio) return tRaw("message.voiceMessage");
     if (type === MessageType.videoCircle) return tRaw("message.videoMessage");
-    if (type === MessageType.file) return tRaw("message.file");
+    if (type === MessageType.file) return fileInfo?.name || tRaw("message.file");
     if (type === MessageType.poll) return tRaw("message.poll");
     if (type === MessageType.transfer) return `${tRaw("message.transfer")} ${transferAmount ?? 0} PKOIN`;
     return content;
@@ -664,6 +665,7 @@ export class EventWriter {
         parsed.type,
         parsed.content,
         parsed.transferInfo?.amount,
+        parsed.fileInfo,
       );
     } catch (err) {
       console.error("[EventWriter] getPreviewText failed, using fallback:", parsed.eventId, err);
@@ -728,6 +730,7 @@ export class EventWriter {
         msg.type,
         msg.content,
         msg.transferInfo?.amount,
+        msg.fileInfo,
       );
     } catch (err) {
       console.error("[EventWriter] getPreviewText failed for local msg:", msg.eventId ?? msg.clientId, err);

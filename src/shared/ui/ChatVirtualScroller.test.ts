@@ -348,3 +348,161 @@ describe("ChatVirtualScroller — will-change lifecycle", () => {
     wrapper!.unmount();
   });
 });
+
+// ───────────────── getVisibleRange ─────────────────
+
+/**
+ * Helper that builds a ChatVirtualScroller and stubs the viewport rect on the
+ * container plus per-item rects on the Vue-rendered children matching `itemRects`.
+ * Items not listed in `itemRects` keep their default zero-rect (effectively
+ * outside the viewport in happy-dom).
+ */
+function mountWithLayout(itemCount: number, layout: { containerTop: number; containerBottom: number; itemRects: Array<{ id: string; top: number; bottom: number }> }) {
+  const items = makeItems(itemCount);
+  const wrapper = mount(ChatVirtualScroller, {
+    props: { items },
+    slots: { default: "<div></div>" },
+  });
+
+  const containerEl = wrapper.element as HTMLElement;
+  // Stub container rect
+  containerEl.getBoundingClientRect = () => ({
+    top: layout.containerTop,
+    bottom: layout.containerBottom,
+    left: 0,
+    right: 0,
+    width: 0,
+    height: layout.containerBottom - layout.containerTop,
+    x: 0,
+    y: layout.containerTop,
+    toJSON: () => ({}),
+  } as DOMRect);
+
+  // Stub rects on Vue-rendered children (those carry data-virtual-id="msg-i")
+  for (const rect of layout.itemRects) {
+    const child = containerEl.querySelector(`[data-virtual-id="${rect.id}"]`) as HTMLElement | null;
+    if (!child) {
+      throw new Error(`Test setup error: no Vue-rendered child for ${rect.id}`);
+    }
+    child.getBoundingClientRect = () => ({
+      top: rect.top,
+      bottom: rect.bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: rect.bottom - rect.top,
+      x: 0,
+      y: rect.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+  }
+
+  return wrapper;
+}
+
+describe("ChatVirtualScroller — getVisibleRange (column-reverse)", () => {
+  it("Test 12: returns { start: top idx, end: bottom idx } for column-reverse layout", () => {
+    // Container = viewport y=[0..800].
+    // Items in column-reverse: idx 0 is rendered first but appears at the BOTTOM of the screen.
+    // We simulate 7 items, each 100px tall, visible from y=0 (top, larger idx) to y=800 (bottom, smaller idx).
+    const wrapper = mountWithLayout(7, {
+      containerTop: 0,
+      containerBottom: 800,
+      itemRects: [
+        // idx 0 (newest, at visual bottom)
+        { id: "msg-0", top: 700, bottom: 800 },
+        // idx 1
+        { id: "msg-1", top: 600, bottom: 700 },
+        // idx 2
+        { id: "msg-2", top: 500, bottom: 600 },
+        // idx 3
+        { id: "msg-3", top: 400, bottom: 500 },
+        // idx 4
+        { id: "msg-4", top: 300, bottom: 400 },
+        // idx 5
+        { id: "msg-5", top: 200, bottom: 300 },
+        // idx 6 (oldest, at visual top)
+        { id: "msg-6", top: 100, bottom: 200 },
+      ],
+    });
+
+    const exposed = wrapper.vm as unknown as { getVisibleRange: () => { start: number; end: number } | null };
+    const range = exposed.getVisibleRange();
+
+    // All 7 are inside the viewport.
+    // top = larger idx (oldest, near top of screen) = 6
+    // bottom = smaller idx (newest, near bottom of screen) = 0
+    expect(range).toEqual({ start: 6, end: 0 });
+
+    wrapper.unmount();
+  });
+
+  it("Test 13: returns subset when items extend beyond viewport (top + bottom clipped)", () => {
+    // Viewport y=[0..400]. 7 items each 100px.
+    // idx 0..3 visible, idx 4..6 above viewport (clipped).
+    const wrapper = mountWithLayout(7, {
+      containerTop: 0,
+      containerBottom: 400,
+      itemRects: [
+        { id: "msg-0", top: 300, bottom: 400 },   // visible (bottom)
+        { id: "msg-1", top: 200, bottom: 300 },   // visible
+        { id: "msg-2", top: 100, bottom: 200 },   // visible
+        { id: "msg-3", top: 0,   bottom: 100 },   // visible (top)
+        { id: "msg-4", top: -100, bottom: 0 },    // clipped above
+        { id: "msg-5", top: -200, bottom: -100 }, // clipped above
+        { id: "msg-6", top: -300, bottom: -200 }, // clipped above
+      ],
+    });
+
+    const exposed = wrapper.vm as unknown as { getVisibleRange: () => { start: number; end: number } | null };
+    const range = exposed.getVisibleRange();
+    expect(range).toEqual({ start: 3, end: 0 });
+
+    wrapper.unmount();
+  });
+
+  it("Test 14: returns null when no items are visible", () => {
+    const wrapper = mountWithLayout(2, {
+      containerTop: 0,
+      containerBottom: 400,
+      itemRects: [
+        // Both clipped above viewport
+        { id: "msg-0", top: -200, bottom: -100 },
+        { id: "msg-1", top: -400, bottom: -300 },
+      ],
+    });
+
+    const exposed = wrapper.vm as unknown as { getVisibleRange: () => { start: number; end: number } | null };
+    const range = exposed.getVisibleRange();
+    expect(range).toBeNull();
+
+    wrapper.unmount();
+  });
+
+  it("Test 15: when scrolled past banner — bottom items only — start < bannerIdx (the user-below-banner case)", () => {
+    // Banner is at idx 5. Viewport shows idx 0..3 only — banner is above viewport.
+    const wrapper = mountWithLayout(8, {
+      containerTop: 0,
+      containerBottom: 400,
+      itemRects: [
+        { id: "msg-0", top: 300, bottom: 400 }, // visible
+        { id: "msg-1", top: 200, bottom: 300 }, // visible
+        { id: "msg-2", top: 100, bottom: 200 }, // visible
+        { id: "msg-3", top: 0,   bottom: 100 }, // visible (top of viewport)
+        { id: "msg-4", top: -100, bottom: 0 },  // clipped (banner)
+        { id: "msg-5", top: -200, bottom: -100 },
+        { id: "msg-6", top: -300, bottom: -200 },
+        { id: "msg-7", top: -400, bottom: -300 },
+      ],
+    });
+
+    const exposed = wrapper.vm as unknown as { getVisibleRange: () => { start: number; end: number } | null };
+    const range = exposed.getVisibleRange();
+    // start = 3 (top of viewport, larger idx)
+    // bannerIdx = 5
+    // 3 < 5 → user is below banner ✓
+    expect(range).toEqual({ start: 3, end: 0 });
+
+    wrapper.unmount();
+  });
+});

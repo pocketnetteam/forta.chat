@@ -124,9 +124,47 @@ const isNearBottom = (threshold = 50): boolean => {
   return Math.abs(el.scrollTop) <= threshold;
 };
 
+/**
+ * Compute the index range of items currently visible in the viewport.
+ *
+ * Coordinate model — column-reverse layout:
+ *   - `start` = top of viewport (visually highest item) → LARGER idx (older)
+ *   - `end`   = bottom of viewport (visually lowest item) → SMALLER idx (newer)
+ *   - invariant when non-empty: start ≥ end
+ *
+ * Returns null when nothing is visible (e.g. before first paint, or scroller
+ * scrolled completely off-screen). Callers must handle the null case.
+ *
+ * Implementation: walks DOM children with [data-virtual-id] and intersects each
+ * rect with the container rect. O(n) over rendered items, but the inverted
+ * scroller never holds more than ~200 items so this stays cheap.
+ */
+const getVisibleRange = (): { start: number; end: number } | null => {
+  const el = containerRef.value;
+  if (!el) return null;
+
+  const containerRect = el.getBoundingClientRect();
+  let topIdx = -1;     // largest visible idx (top of viewport in column-reverse)
+  let bottomIdx = -1;  // smallest visible idx (bottom of viewport)
+
+  for (let i = 0; i < props.items.length; i++) {
+    const id = props.items[i].id;
+    const child = el.querySelector(`[data-virtual-id="${CSS.escape(id)}"]`) as HTMLElement | null;
+    if (!child) continue;
+    const rect = child.getBoundingClientRect();
+    const isVisible = rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+    if (!isVisible) continue;
+    if (bottomIdx < 0 || i < bottomIdx) bottomIdx = i;
+    if (i > topIdx) topIdx = i;
+  }
+
+  if (topIdx < 0) return null;
+  return { start: topIdx, end: bottomIdx };
+};
+
 /** Expose container element as a getter so the parent always gets the raw HTMLElement. */
 const getContainerEl = () => containerRef.value;
-defineExpose({ scrollToBottom, scrollToIndex, getContainerEl, isNearBottom });
+defineExpose({ scrollToBottom, scrollToIndex, getContainerEl, isNearBottom, getVisibleRange });
 
 // ───────────────── New-message scroll anchoring ─────────────────
 // When a new message arrives at index 0 (visual bottom) while the user

@@ -4,6 +4,8 @@ import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { useFileDownload } from "../model/use-file-download";
+import { useBugReport } from "@/features/bug-report";
+import { tRaw } from "@/shared/lib/i18n";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import MessageContent from "./MessageContent.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
@@ -243,7 +245,19 @@ const retryDownload = () => {
   // Clear stale error so download() can run again
   const state = getState(fileCacheKey.value);
   state.error = null;
+  state.errorKind = null;
   download(props.message);
+};
+
+/** Manual escape hatch for crypto/decryption errors: the auto-bug-report
+ *  pipeline blacklists those failures (#290–300), so the user explicitly
+ *  opens the modal from the friendly error UI when they really want to
+ *  report it. */
+const reportDownloadProblem = () => {
+  useBugReport().open({
+    context: tRaw("bugReport.ctx.fileDownload"),
+    error: fileState.value.error ?? "Unknown file-download error",
+  });
 };
 
 const handleVideoAudioLoad = () => {
@@ -413,6 +427,18 @@ const replyPreviewSender = computed(() => {
             :style="imagePlaceholderStyle"
           >
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+          </div>
+          <div
+            v-else-if="fileState.error && fileState.errorKind === 'crypto'"
+            class="flex flex-col items-center justify-center gap-1 bg-neutral-grad-0 px-3 py-2 text-center text-xs text-color-bad"
+            :style="imagePlaceholderStyle"
+          >
+            <span class="font-medium">{{ t('chat.decryptError.title') }}</span>
+            <span class="text-[10px] opacity-70">{{ isOwn ? t('chat.decryptError.askSelf') : t('chat.decryptError.askResend') }}</span>
+            <div class="mt-1 flex items-center gap-2">
+              <button type="button" class="rounded-md bg-color-bg-ac px-2 py-0.5 text-[11px] font-medium text-text-on-bg-ac-color" @click.stop="retryDownload">{{ t('chat.decryptError.retry') }}</button>
+              <button type="button" class="text-[10px] underline opacity-70" @click.stop="reportDownloadProblem">{{ t('chat.decryptError.reportProblem') }}</button>
+            </div>
           </div>
           <div
             v-else-if="fileState.error"
@@ -721,7 +747,15 @@ const replyPreviewSender = computed(() => {
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
           </svg>
         </button>
-        <p v-if="fileState.error" class="mt-1 text-xs text-color-bad">{{ fileState.error }}</p>
+        <div v-if="fileState.error && fileState.errorKind === 'crypto'" class="mt-1 flex flex-col gap-0.5">
+          <p class="text-xs font-medium text-color-bad">{{ t('chat.decryptError.title') }}</p>
+          <p class="text-[11px] opacity-70">{{ isOwn ? t('chat.decryptError.askSelf') : t('chat.decryptError.askResend') }}</p>
+          <div class="mt-0.5 flex items-center gap-3">
+            <button type="button" class="text-xs font-medium text-color-bg-ac" @click.stop="retryDownload">{{ t('chat.decryptError.retry') }}</button>
+            <button type="button" class="text-[11px] opacity-60 underline" @click.stop="reportDownloadProblem">{{ t('chat.decryptError.reportProblem') }}</button>
+          </div>
+        </div>
+        <p v-else-if="fileState.error" class="mt-1 text-xs text-color-bad">{{ fileState.error }}</p>
         <!-- Upload progress with cancel for file -->
         <div v-if="isUploading" class="mt-1 flex items-center gap-2">
           <button class="relative flex h-8 w-8 shrink-0 items-center justify-center" @click.stop="emit('cancelUpload', message)">

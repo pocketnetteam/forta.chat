@@ -9,10 +9,13 @@ import type { CallFeed } from "matrix-js-sdk-bastyon/lib/webrtc/callFeed";
 import { playRingtone, playDialtone, playEndTone, stopAllSounds } from "./call-sounds";
 import { checkOtherTabHasCall } from "./call-tab-lock";
 import { webrtcDiagnostics } from "./webrtc-diagnostics";
+import type { DiagnosticsWarningDetail } from "./webrtc-diagnostics";
 import { isNative } from "@/shared/lib/platform";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { installNativeWebRTCProxy, NativeWebRTC } from "@/shared/lib/native-webrtc";
+import { onConnectivityChange } from "@/shared/lib/connectivity";
+import { useToast } from "@/shared/lib/use-toast";
 import {
   nativeCallBridge,
   consumePendingAnswerCallId,
@@ -20,6 +23,11 @@ import {
 } from "@/shared/lib/native-calls";
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall } from "./finalize-call";
+
+// Module-scope handle for the connectivity subscription so we don't stack
+// listeners on HMR / repeated module evaluation. Declared above the
+// `if (isNative)` block so the function can read it without hitting TDZ.
+let _networkChangeUnsubscribe: (() => void) | null = null;
 
 // Install native WebRTC proxy on mobile — must run before any call is placed.
 // This replaces window.RTCPeerConnection so that the Matrix SDK transparently
@@ -33,6 +41,67 @@ if (isNative) {
     if (data.type === "permission_denied") {
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(1500);
+    }
+  });
+
+  // Session 03: WiFi↔cellular handover does not reliably fire
+  // window.online/offline on Android WebView. We subscribe to
+  // @capacitor/network instead so transport flips during a live call
+  // trigger an explicit ICE restart instead of waiting for the SDK's
+  // sentinel timeout (by which time the call has already dropped).
+  //
+  // Idempotent registration: HMR / repeated module evaluation must not
+  // stack listeners. We hold the unsubscribe handle so a future teardown
+  // path (e.g. a hot reload helper) can call it; right now we only need
+  // the once-per-process guarantee.
+  registerNetworkChangeRestart();
+}
+
+function registerNetworkChangeRestart(): void {
+  if (_networkChangeUnsubscribe) return;
+  _networkChangeUnsubscribe = onConnectivityChange((change) => {
+    if (!change.connected) return;
+    if (change.previousType === change.type) return;
+
+    const callStore = useCallStore();
+    const matrixCall = callStore.matrixCall as MatrixCall | null;
+    if (!matrixCall) return;
+    const pc = (matrixCall as unknown as { peerConn?: RTCPeerConnection })
+      .peerConn;
+    if (!pc) return;
+
+    // Don't restart while the SDK is mid-glare (have-local-offer /
+    // have-remote-offer / have-local-pranswer / have-remote-pranswer):
+    // a second restartIce in that window leaves libwebrtc with mismatched
+    // SDP state and we end up wedged in "checking" forever — exactly the
+    // failure mode this code is meant to prevent. The proxy's
+    // restartIce() also debounces concurrent calls, but the cheaper
+    // check here is to skip the call entirely if signaling is unstable.
+    if (pc.signalingState !== "stable") {
+      console.log(
+        `[call-service] skip restartIce on network change (${change.previousType}→${change.type}); signalingState=${pc.signalingState}`,
+      );
+      return;
+    }
+
+    const state = pc.iceConnectionState;
+    if (
+      state === "connected" ||
+      state === "completed" ||
+      state === "disconnected" ||
+      state === "checking"
+    ) {
+      console.warn(
+        `[call-service] network ${change.previousType}→${change.type}, restartIce`,
+      );
+      try {
+        pc.restartIce();
+      } catch (e) {
+        console.error(
+          "[call-service] restartIce on network change failed:",
+          e,
+        );
+      }
     }
   });
 }
@@ -154,8 +223,20 @@ let boundHandlers: {
   onError: CallEventHandlerMap[CallEvent.Error];
 } | null = null;
 
+// Listener bound on the diagnostics singleton when a PC is wrapped — kept
+// at module scope so unwireCallEvents can detach it without holding a
+// reference inside boundHandlers (we only get a PC from the SDK).
+let diagnosticsWarningListener: EventListener | null = null;
+
 function unwireCallEvents(call: MatrixCall) {
   webrtcDiagnostics.detach();
+  if (diagnosticsWarningListener) {
+    webrtcDiagnostics.removeEventListener(
+      "warning",
+      diagnosticsWarningListener,
+    );
+    diagnosticsWarningListener = null;
+  }
   cleanupRemoteFeedListener();
   if (!boundHandlers) return;
   try {
@@ -309,6 +390,50 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     if ((pc as unknown as Record<string, unknown>).__callServiceDiagAttached) return;
     (pc as unknown as Record<string, unknown>).__callServiceDiagAttached = true;
     webrtcDiagnostics.attach(pc);
+
+    // Session 03: the proxy fires "connectiondead" when ICE has been
+    // failed for 20s after a restart attempt. At that point the call is
+    // unrecoverable, so hang up cleanly with a user-visible toast
+    // instead of leaving the user staring at a frozen UI.
+    pc.addEventListener("connectiondead", () => {
+      console.error("[call-service] PC connectiondead → hangup");
+      try {
+        useToast().toast(tRaw("call.error.connectionLost"), "error", 4000);
+      } catch (e) {
+        console.warn("[call-service] toast failed:", e);
+      }
+      try {
+        call.hangup(CallErrorCode.IceFailed, false);
+      } catch (e) {
+        console.error(
+          "[call-service] hangup after connectiondead failed:",
+          e,
+        );
+      }
+    });
+
+    // Session 03: surface diagnostics warnings (no inbound/outbound
+    // audio) as toasts. The diagnostics singleton emits each warning
+    // type at most once per attach so the user sees one toast, not a
+    // flood. Stored on a module ref so unwireCallEvents removes it.
+    diagnosticsWarningListener = ((ev: Event) => {
+      const detail = (ev as CustomEvent<DiagnosticsWarningDetail>).detail;
+      if (!detail) return;
+      const key =
+        detail.type === "no_inbound_audio"
+          ? "call.warning.noInboundAudio"
+          : "call.warning.noOutboundAudio";
+      try {
+        useToast().toast(tRaw(key), "info", 5000);
+      } catch (e) {
+        console.warn(
+          "[call-service] toast failed for",
+          detail.type,
+          e,
+        );
+      }
+    }) as EventListener;
+    webrtcDiagnostics.addEventListener("warning", diagnosticsWarningListener);
   };
   if (typeof (call as any).on === "function" && (CallEvent as any).PeerConnectionCreated) {
     call.on((CallEvent as any).PeerConnectionCreated, onPeerConnectionCreated);

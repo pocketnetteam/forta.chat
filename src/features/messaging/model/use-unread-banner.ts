@@ -63,7 +63,18 @@ export function useUnreadBanner() {
     bannerState.value = { frozenLastReadId: null, frozenUnreadCount: 0 };
   }
 
-  /** Force dismiss — for room leave or explicit user action. Ignores grace period. */
+  /**
+   * Force dismiss — ignores `dismissLocked` grace period.
+   *
+   * Used when the user has explicitly indicated they no longer need the banner:
+   *   - room switch (cleared in MessageList.vue room watcher)
+   *   - FAB clicked while user is already below the banner (Telegram-like jump-to-bottom)
+   *   - scroll-past-banner detected by maybeAutoDismissBanner (>= 200ms since open)
+   *
+   * The grace period guards against the room-switch race where checkScroll()
+   * fires before the banner has had a chance to render. None of those callers
+   * have that race, so they bypass the lock.
+   */
   function forceDismiss() {
     session++;
     dismissLocked = true;

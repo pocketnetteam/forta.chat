@@ -8,11 +8,109 @@ import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { enqueueDecrypt } from "./decrypt-queue";
 
+/** Coarse classification of a download/decrypt failure for UI branching.
+ *  - `crypto` — AES-SIV / membership / decryption failure; the user should
+ *               ask the sender to resend. Not an actionable bug.
+ *  - `network` — fetch / timeout / 5xx; usually transient.
+ *  - `unknown` — anything else (default before classification). */
+export type FileDownloadErrorKind = "crypto" | "network" | "unknown" | null;
+
 interface FileDownloadState {
   loading: boolean;
   error: string | null;
+  errorKind: FileDownloadErrorKind;
   objectUrl: string | null;
   blob: Blob | null;
+}
+
+/** Errors that mean "this ciphertext cannot be decrypted with the keys we
+ *  have" — the sender's room state and ours diverged, or they encrypted to
+ *  the wrong recipient set. Surfacing these as bug-reports drowns the actual
+ *  signal: the user should retry or ask the sender to resend, not file a bug.
+ *
+ *  Source patterns (informational, not exhaustive):
+ *   - `AES-SIV: ciphertext verification failure!` — miscreant.SIV.open()
+ *   - `ciphertext verification` — generic miscreant phrasing
+ *   - `emptyforme` — body has no entry for this user (stale recipient set)
+ *   - `no encrypted payload for this user` — same condition, friendlier text */
+const CRYPTO_ERROR_PATTERNS: RegExp[] = [
+  /AES-SIV/i,
+  /ciphertext verification/i,
+  /\bemptyforme\b/i,
+  /no encrypted payload for this user/i,
+];
+
+function isCryptoError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return CRYPTO_ERROR_PATTERNS.some((re) => re.test(msg));
+}
+
+/** Coarse 5xx / fetch-failure / timeout classifier. We deliberately *don't*
+ *  match the bare word "network" — too many unrelated error messages mention
+ *  it in passing. Instead we rely on:
+ *   - `DOMException(AbortError)` — fetch timeout / user-cancel.
+ *   - `TypeError: Failed to fetch` (Chrome) / `NetworkError when attempting to
+ *     fetch resource` (Firefox) / `Load failed` (Safari) — connectivity loss.
+ *   - 5xx HTTP responses — server-side transient failure. */
+function isNetworkError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof TypeError) {
+    return /failed to fetch|networkerror|load failed/i.test(err.message);
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Download failed:\s*5\d{2}|timeout/i.test(msg);
+}
+
+function classifyError(err: unknown): FileDownloadErrorKind {
+  if (isCryptoError(err)) return "crypto";
+  if (isNetworkError(err)) return "network";
+  return "unknown";
+}
+
+/** Stable hash of an error for dedup keys — short, message-only. */
+function errorHash(err: unknown): string {
+  if (err instanceof Error) return `${err.name}:${err.message.slice(0, 80)}`;
+  return String(err).slice(0, 80);
+}
+
+/** Per-message dedup window for automatic bug-reports. One real failure
+ *  used to fan out into 12 identical reports (issues #290–300, #312)
+ *  through retry + visibilitychange + re-mount paths. */
+const BUG_REPORT_DEDUP_WINDOW_MS = 5 * 60_000;
+/** Soft cap before prune kicks in. The map only holds (messageKey, errorHash)
+ *  → timestamp; 500 entries is ~70 KB. Long-running Electron sessions could
+ *  otherwise grow this unbounded across hours. */
+const BUG_REPORT_DEDUP_PRUNE_THRESHOLD = 500;
+const bugReportDedupMap = new Map<string, number>();
+
+/** Drop entries whose timestamp is older than the dedup window. Cheap O(N)
+ *  pass triggered only when the map exceeds the soft cap, so the common path
+ *  stays O(1). */
+function pruneDedupMap(): void {
+  if (bugReportDedupMap.size < BUG_REPORT_DEDUP_PRUNE_THRESHOLD) return;
+  const cutoff = Date.now() - BUG_REPORT_DEDUP_WINDOW_MS;
+  for (const [key, ts] of bugReportDedupMap) {
+    if (ts < cutoff) bugReportDedupMap.delete(key);
+  }
+}
+
+/** Decide whether a download error should auto-open the bug-report modal.
+ *  Returns false for crypto failures (always user-actionable, never a bug)
+ *  and for repeats of the same (messageId, error) within the dedup window. */
+function shouldAutoReport(messageKey: string, err: unknown): boolean {
+  if (isCryptoError(err)) return false;
+  pruneDedupMap();
+  const key = `${messageKey}:${errorHash(err)}`;
+  const last = bugReportDedupMap.get(key) ?? 0;
+  const now = Date.now();
+  if (now - last < BUG_REPORT_DEDUP_WINDOW_MS) return false;
+  bugReportDedupMap.set(key, now);
+  return true;
+}
+
+/** TEST-ONLY: clear the dedup map between test cases. */
+export function _resetBugReportDedupForTests(): void {
+  bugReportDedupMap.clear();
 }
 
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
@@ -136,6 +234,12 @@ async function downloadAndDecrypt(
       lastError = e;
       // User cancel is terminal — no retries.
       if (e instanceof DOMException && e.name === "AbortError") throw e;
+      // Crypto failures (AES-SIV MAC, emptyforme, etc.) are deterministic for a
+      // given ciphertext + key set. Retrying burns 1+3+6=10s of spinner UI on
+      // top of an already failed decrypt — and the retry will produce the same
+      // error. Fast-fail so the friendly "ask sender to resend" UX appears
+      // immediately.
+      if (isCryptoError(e)) throw e;
       // Don't retry on permanent errors (missing URL, 4xx client errors)
       if (e instanceof Error) {
         if (e.message === "No file URL") throw e;
@@ -244,6 +348,7 @@ export function useFileDownload() {
       states.value[eventId] = {
         loading: false,
         error: null,
+        errorKind: null,
         objectUrl: cache.get(eventId) ?? null,
         blob: null,
       };
@@ -274,6 +379,7 @@ export function useFileDownload() {
 
     state.loading = true;
     state.error = null;
+    state.errorKind = null;
 
     try {
       const blob = await downloadAndDecrypt(
@@ -296,11 +402,18 @@ export function useFileDownload() {
       // User-initiated cancel is not an error for bug reporting — just bail.
       if (e instanceof DOMException && e.name === "AbortError") {
         state.error = null;
+        state.errorKind = null;
         return null;
       }
       console.error("[use-file-download] download error:", e);
-      useBugReport().open({ context: tRaw("bugReport.ctx.fileDownload"), error: e });
+      state.errorKind = classifyError(e);
       state.error = String(e);
+      // Skip auto-report for crypto failures (user-actionable, not a bug) and
+      // for duplicates within the dedup window. Manual reporting is still
+      // available via the bug-report button in the friendly error UI.
+      if (shouldAutoReport(cacheKey, e)) {
+        useBugReport().open({ context: tRaw("bugReport.ctx.fileDownload"), error: e });
+      }
       return null;
     } finally {
       state.loading = false;

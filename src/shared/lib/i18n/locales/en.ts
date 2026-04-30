@@ -124,6 +124,13 @@ export const en = {
   "bugReport.ctx.videoRecord": "Failed to start video circle recording",
   "bugReport.ctx.fileDownload": "Failed to download file",
   "bugReport.ctx.audioPlayback": "Failed to play audio message",
+  "chat.decryptError.title": "Couldn't decrypt this file",
+  "chat.decryptError.askResend": "Ask the sender to share it again.",
+  "chat.decryptError.askSelf": "Try sending the file again from this device.",
+  "chat.decryptError.retry": "Retry",
+  "chat.decryptError.reportProblem": "Report a problem",
+  "chat.downloadError.networkTitle": "Couldn't download this file",
+  "chat.downloadError.networkHint": "Check your connection and try again.",
   "bugReportStatus.viewOnGithub": "Open on GitHub",
   "bugReportStatus.notResolvedReasonLabel": "What's still wrong?",
   "bugReportStatus.notResolvedReasonPlaceholder": "A short note about what still doesn't work",
@@ -501,6 +508,9 @@ export const en = {
   "call.permissionDenied.noInputDevice": "No microphone was found. Connect a headset or microphone and try again.",
   "call.permissionDenied.instructions": "Grant access in your system settings: Settings → Apps → Forta Chat → Permissions.",
   "call.permissionDenied.close": "Close",
+  "call.warning.noInboundAudio": "No incoming audio — the other party may have a microphone problem.",
+  "call.warning.noOutboundAudio": "No outgoing audio — check your microphone.",
+  "call.error.connectionLost": "Call connection lost.",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",

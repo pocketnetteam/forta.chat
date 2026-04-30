@@ -870,15 +870,12 @@ export class Pcrypto {
         const usersList = [...new Set([...bodyUserIds, sender])];
 
 
-        // Try legacy approach first (null usersIds → preparedUsers), matching encrypt path.
-        // If that fails, fall back to explicit usersList (preparedUsersById) for cases
-        // where time-based filtering excludes valid users.
-        let decrypted: string;
-        try {
-          decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, null, eventVersion);
-        } catch {
-          decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, usersList, eventVersion);
-        }
+        // Always decrypt with the EXPLICIT usersList from the body keys + sender.
+        // This is the canonical user set the sender encrypted to — using anything
+        // else (e.g. preparedUsers(time, v) via null) yields a different ECDH
+        // cuhash and an AES-SIV MAC failure when web's lazy-loaded m.room.member
+        // events haven't fully synced. Matches bastyon-chat/src/application/pcrypto.js.
+        const decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, usersList, eventVersion);
 
         const data = {
           body: decrypted,
@@ -1187,12 +1184,11 @@ export class Pcrypto {
           throw new Error("emptyforme");
         }
 
-        // Try legacy approach first (null usersIds), fall back to explicit usersList
-        try {
-          return await room._decrypt(keyindex!, body[bodyindex], time, block, null, v);
-        } catch {
-          return room._decrypt(keyindex!, body[bodyindex], time, block, usersList, v);
-        }
+        // Always decrypt with the EXPLICIT usersList from the body keys + sender.
+        // See decryptEvent above for the rationale; this is the bastyon-chat
+        // parity fix that resolves AES-SIV ciphertext verification failures
+        // after a web tab refresh.
+        return room._decrypt(keyindex!, body[bodyindex], time, block, usersList, v);
       },
 
       clear() {

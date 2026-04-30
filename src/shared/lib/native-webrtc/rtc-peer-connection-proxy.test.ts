@@ -25,6 +25,21 @@ function getBridgeMethod(name: string): BridgeMethod {
   return bridgeMethods[name];
 }
 
+// Capture native event handlers so tests can simulate native callbacks
+// (e.g. fire onIceConnectionStateChange to drive the proxy through state transitions).
+type NativeListener = (data: unknown) => void;
+const nativeListeners: Record<string, Set<NativeListener>> = {};
+
+function fireNativeEvent(event: string, data: unknown): void {
+  nativeListeners[event]?.forEach((handler) => handler(data));
+}
+
+function clearNativeListeners(): void {
+  for (const k of Object.keys(nativeListeners)) {
+    nativeListeners[k].clear();
+  }
+}
+
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
     isNativePlatform: () => true,
@@ -35,9 +50,15 @@ vi.mock("@capacitor/core", () => ({
       get: (_t, prop: string) => {
         if (prop === "addListener") {
           return vi.fn().mockImplementation(
-            async (_event: string, _handler: unknown): Promise<PluginListenerHandle> => ({
-              remove: async () => {},
-            })
+            async (event: string, handler: NativeListener): Promise<PluginListenerHandle> => {
+              if (!nativeListeners[event]) nativeListeners[event] = new Set();
+              nativeListeners[event].add(handler);
+              return {
+                remove: async () => {
+                  nativeListeners[event]?.delete(handler);
+                },
+              };
+            }
           );
         }
         return getBridgeMethod(prop);
@@ -60,6 +81,7 @@ describe("NativeRTCPeerConnection proxy", () => {
     for (const k of Object.keys(bridgeMethods)) {
       bridgeMethods[k].mockClear();
     }
+    clearNativeListeners();
     installNativeWebRTCProxy();
   });
 
@@ -194,6 +216,219 @@ describe("NativeRTCPeerConnection proxy", () => {
       const stats = await pc.getStats();
       expect(stats).toBeInstanceOf(Map);
       expect(stats.size).toBe(0);
+
+      pc.close();
+    });
+  });
+
+  describe("ICE watchdog (Session 03)", () => {
+    // These tests use fake timers to drive disconnected/failed → restartIce
+    // and the 20s dead-connection escalation.
+    let restartIceMock: BridgeMethod;
+    let createPcMock: BridgeMethod;
+
+    async function newPcAndPeerId(): Promise<{
+      pc: RTCPeerConnection;
+      peerId: string;
+    }> {
+      const pc = new window.RTCPeerConnection();
+      // Flush microtasks so _initNative completes (createPeerConnection +
+      // addListener calls) under fake timers.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      const arg = createPcMock.mock.calls.at(-1)?.[0] as { peerId: string };
+      return { pc, peerId: arg.peerId };
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      restartIceMock = getBridgeMethod("restartIce");
+      createPcMock = getBridgeMethod("createPeerConnection");
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("calls restartIce after 10s of sustained disconnected state", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "disconnected",
+      });
+
+      // Just before 10s — no restart yet.
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(restartIceMock).not.toHaveBeenCalled();
+
+      // After 10s — restart must fire.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(restartIceMock).toHaveBeenCalledOnce();
+
+      pc.close();
+    });
+
+    it("does NOT call restartIce when disconnected recovers to connected within 10s", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "disconnected",
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // Recover before timeout.
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "connected",
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(restartIceMock).not.toHaveBeenCalled();
+
+      pc.close();
+    });
+
+    it("calls restartIce immediately when ICE state transitions to failed", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "failed",
+      });
+      // Allow microtasks to drain so restartIce delegate fires.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(restartIceMock).toHaveBeenCalledOnce();
+
+      pc.close();
+    });
+
+    it("dispatches 'connectiondead' event 20s after failed without recovery", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      const deadHandler = vi.fn();
+      pc.addEventListener("connectiondead", deadHandler);
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "failed",
+      });
+      // Restart fires, ICE remains failed (we never simulate recovery).
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(deadHandler).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(deadHandler).toHaveBeenCalledOnce();
+
+      pc.close();
+    });
+
+    it("does NOT dispatch 'connectiondead' if ICE recovers after failed", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      const deadHandler = vi.fn();
+      pc.addEventListener("connectiondead", deadHandler);
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "failed",
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "connected",
+      });
+      await vi.advanceTimersByTimeAsync(25_000);
+
+      expect(deadHandler).not.toHaveBeenCalled();
+
+      pc.close();
+    });
+
+    it("clears watchdog timers on close so no late restart fires", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "disconnected",
+      });
+
+      pc.close();
+      restartIceMock.mockClear();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(restartIceMock).not.toHaveBeenCalled();
+    });
+
+    it("debounces back-to-back restartIce calls within 3s", async () => {
+      const { pc } = await newPcAndPeerId();
+
+      pc.restartIce();
+      pc.restartIce();
+      pc.restartIce();
+      await vi.advanceTimersByTimeAsync(50);
+
+      // Three callers, one native call.
+      expect(restartIceMock).toHaveBeenCalledTimes(1);
+
+      // After the debounce window expires, a fresh request goes through.
+      await vi.advanceTimersByTimeAsync(3_500);
+      pc.restartIce();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(restartIceMock).toHaveBeenCalledTimes(2);
+
+      pc.close();
+    });
+
+    it("escalates sustained disconnected to connectiondead at ~30s (10s wait + 20s dead)", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+      const deadHandler = vi.fn();
+      pc.addEventListener("connectiondead", deadHandler);
+
+      fireNativeEvent("onIceConnectionStateChange", {
+        peerId,
+        state: "disconnected",
+      });
+
+      // 10s tick → restartIce, dead timer armed, but no event yet.
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(restartIceMock).toHaveBeenCalledOnce();
+      expect(deadHandler).not.toHaveBeenCalled();
+
+      // No recovery — fire connectiondead 20s later.
+      await vi.advanceTimersByTimeAsync(21_000);
+      expect(deadHandler).toHaveBeenCalledOnce();
+
+      pc.close();
+    });
+
+    it("does NOT re-arm the dead timer when ICE flaps between failed and disconnected", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+      const deadHandler = vi.fn();
+      pc.addEventListener("connectiondead", deadHandler);
+
+      // Initial failed → dead timer armed.
+      fireNativeEvent("onIceConnectionStateChange", { peerId, state: "failed" });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Flap to disconnected then failed every few seconds. If the dead
+      // timer were re-armed each time, the 20s deadline would never fire.
+      for (let i = 0; i < 4; i++) {
+        await vi.advanceTimersByTimeAsync(4_000);
+        fireNativeEvent("onIceConnectionStateChange", {
+          peerId,
+          state: i % 2 === 0 ? "disconnected" : "failed",
+        });
+      }
+
+      // Total elapsed: 0 + 4 + 4 + 4 + 4 = 16s; dead timer was armed at 0.
+      // Advance past 20s to ensure it fires once.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deadHandler).toHaveBeenCalledOnce();
 
       pc.close();
     });

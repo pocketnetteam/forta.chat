@@ -99,6 +99,27 @@ class NativeRTCPeerConnection extends EventTarget {
   private _closed = false;
   private _iceGatheringTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Session 03 — ICE watchdog timers.
+  // `_disconnectTimer` waits 10s after a "disconnected" before forcing
+  // restartIce — sometimes ICE recovers on its own (transient packet loss),
+  // so we don't want to thrash the connection.
+  // `_deadConnectionTimer` is armed when we hit "failed": we trigger an
+  // immediate restartIce and give the negotiation 20s to land us back in
+  // "connected"/"completed". If it doesn't, the call is unrecoverable and
+  // we dispatch "connectiondead" so call-service can hang up cleanly
+  // instead of leaving the user staring at a frozen UI.
+  private _disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _deadConnectionTimer: ReturnType<typeof setTimeout> | null = null;
+  // Timestamp of the last restartIce attempt — used to debounce. Multiple
+  // sources can trigger restartIce concurrently (the watchdog on a `failed`
+  // transition, the call-service network-change handler, and the SDK's own
+  // glare resolution). Two back-to-back native restarts while signaling is
+  // mid-offer reliably wedge libwebrtc on Android — we must collapse them.
+  private _lastRestartIceAt = 0;
+  private static readonly DISCONNECT_RESTART_DELAY_MS = 10_000;
+  private static readonly DEAD_CONNECTION_TIMEOUT_MS = 20_000;
+  private static readonly RESTART_ICE_DEBOUNCE_MS = 3_000;
+
   constructor(config?: RTCConfiguration) {
     super();
     this._peerId = `pc_${++peerIdCounter}_${Date.now()}`;
@@ -193,24 +214,7 @@ class NativeRTCPeerConnection extends EventTarget {
           "onIceConnectionStateChange",
           (data) => {
             if (this._closed || data.peerId !== this._peerId) return;
-            this._iceConnectionState =
-              ICE_STATE_MAP[data.state] ?? "new";
-            // Map to connection state too
-            if (data.state === "connected" || data.state === "completed") {
-              this._connectionState = "connected";
-            } else if (data.state === "failed") {
-              this._connectionState = "failed";
-            } else if (data.state === "disconnected") {
-              this._connectionState = "disconnected";
-            } else if (data.state === "closed") {
-              this._connectionState = "closed";
-            }
-            const event = new Event("iceconnectionstatechange");
-            this.oniceconnectionstatechange?.(event);
-            this._fireEvent(event);
-            const connEvent = new Event("connectionstatechange");
-            this.onconnectionstatechange?.(connEvent);
-            this._fireEvent(connEvent);
+            this._handleIceConnectionStateChange(data.state);
           }
         )
       );
@@ -496,6 +500,18 @@ class NativeRTCPeerConnection extends EventTarget {
     // so we can't propagate the async failure — log it and move on. Guard
     // against close() racing with init so we don't call native on a
     // torn-down peer.
+    if (this._closed) return;
+    const now = Date.now();
+    const sinceLast = now - this._lastRestartIceAt;
+    if (sinceLast < NativeRTCPeerConnection.RESTART_ICE_DEBOUNCE_MS) {
+      console.log(
+        "[NativeRTCProxy] restartIce debounced (last call",
+        sinceLast,
+        "ms ago)",
+      );
+      return;
+    }
+    this._lastRestartIceAt = now;
     this._waitReady()
       .then(() => {
         if (this._closed) return;
@@ -546,6 +562,16 @@ class NativeRTCPeerConnection extends EventTarget {
     this._connectionState = "closed";
     this._signalingState = "closed";
     if (this._iceGatheringTimer) clearTimeout(this._iceGatheringTimer);
+    // Drop watchdog timers so a disconnect/failed scheduled before close()
+    // can't trigger restartIce or fire connectiondead on a torn-down peer.
+    if (this._disconnectTimer) {
+      clearTimeout(this._disconnectTimer);
+      this._disconnectTimer = null;
+    }
+    if (this._deadConnectionTimer) {
+      clearTimeout(this._deadConnectionTimer);
+      this._deadConnectionTimer = null;
+    }
 
     console.log("[NativeRTCProxy] close, peerId:", this._peerId);
     NativeWebRTC.closePeerConnection({ peerId: this._peerId }).catch(() => {});
@@ -554,6 +580,131 @@ class NativeRTCPeerConnection extends EventTarget {
       handle.remove();
     }
     this.listeners = [];
+  }
+
+  // -----------------------------------------------------------------------
+  // ICE connection state + Session 03 watchdog
+  // -----------------------------------------------------------------------
+
+  /**
+   * Handle a native ICE state transition: update state, fire SDK events,
+   * and drive the resilience watchdog (auto-restart on disconnected/failed,
+   * dead-connection escalation).
+   */
+  private _handleIceConnectionStateChange(state: string): void {
+    this._iceConnectionState = ICE_STATE_MAP[state] ?? "new";
+    if (state === "connected" || state === "completed") {
+      this._connectionState = "connected";
+    } else if (state === "failed") {
+      this._connectionState = "failed";
+    } else if (state === "disconnected") {
+      this._connectionState = "disconnected";
+    } else if (state === "closed") {
+      this._connectionState = "closed";
+    }
+
+    const event = new Event("iceconnectionstatechange");
+    this.oniceconnectionstatechange?.(event);
+    this._fireEvent(event);
+    const connEvent = new Event("connectionstatechange");
+    this.onconnectionstatechange?.(connEvent);
+    this._fireEvent(connEvent);
+
+    this._driveWatchdog(state);
+  }
+
+  /**
+   * Session 03: ICE resilience watchdog.
+   *
+   * Why: Android WebView does not always fire `online/offline` on
+   * WiFi↔cellular handover, and even when it does the SDK's restartIce
+   * call needs a healthy ICE agent on both sides. Without these timers
+   * a momentary packet loss or network swap leaves ICE wedged in
+   * "disconnected"/"failed" forever; the user sees the call freeze, then
+   * eventually drop with no useful feedback. We:
+   *
+   *  - Wait 10s on "disconnected" before forcing restartIce — short
+   *    transients self-heal and we don't want to thrash the connection.
+   *    Once the timer is armed, repeated "disconnected" events do NOT
+   *    re-arm it: the goal is to escalate after sustained instability,
+   *    not to extend the patience window every time the state retoggles.
+   *  - On "failed" we hit restartIce immediately. Both paths arm the
+   *    same 20s dead-connection timer (idempotent — once armed, repeated
+   *    failed↔disconnected oscillation will NOT push out the deadline,
+   *    otherwise a flapping peer could postpone connectiondead forever).
+   *    If ICE has not reached connected/completed when the timer fires,
+   *    the call is unrecoverable and we dispatch "connectiondead" so
+   *    call-service can hang up cleanly with a user-visible message.
+   *  - Successful recovery (connected/completed) clears both timers.
+   */
+  private _driveWatchdog(state: string): void {
+    if (this._closed) return;
+
+    if (state === "connected" || state === "completed") {
+      if (this._disconnectTimer) {
+        clearTimeout(this._disconnectTimer);
+        this._disconnectTimer = null;
+      }
+      if (this._deadConnectionTimer) {
+        clearTimeout(this._deadConnectionTimer);
+        this._deadConnectionTimer = null;
+      }
+      return;
+    }
+
+    if (state === "disconnected") {
+      // Once-armed, do not extend the window if disconnected fires again
+      // — we want a strict 10s ceiling on instability before forcing a
+      // restart, not a sliding window that a flapping peer can exploit.
+      if (this._disconnectTimer) return;
+      this._disconnectTimer = setTimeout(() => {
+        this._disconnectTimer = null;
+        if (this._closed) return;
+        if (this._iceConnectionState !== "disconnected") return;
+        console.warn(
+          "[NativeRTCProxy] ICE stuck disconnected for",
+          NativeRTCPeerConnection.DISCONNECT_RESTART_DELAY_MS,
+          "ms → restartIce",
+        );
+        this.restartIce();
+        // After the recovery attempt, give it 20s to land on
+        // connected/completed before declaring the call dead.
+        this._armDeadConnectionTimer();
+      }, NativeRTCPeerConnection.DISCONNECT_RESTART_DELAY_MS);
+      return;
+    }
+
+    if (state === "failed") {
+      console.warn("[NativeRTCProxy] ICE failed → immediate restartIce");
+      this.restartIce();
+      this._armDeadConnectionTimer();
+      return;
+    }
+  }
+
+  /**
+   * Arm the dead-connection timer iff one isn't already running. Idempotent
+   * on purpose: failed↔disconnected oscillation must not keep pushing the
+   * deadline outwards. Once we decide "we're trying to recover", we give
+   * a single 20s budget regardless of how the broken state cycles.
+   */
+  private _armDeadConnectionTimer(): void {
+    if (this._closed) return;
+    if (this._deadConnectionTimer) return;
+    this._deadConnectionTimer = setTimeout(() => {
+      this._deadConnectionTimer = null;
+      if (this._closed) return;
+      const stuck =
+        this._iceConnectionState === "failed" ||
+        this._iceConnectionState === "disconnected";
+      if (!stuck) return;
+      console.error(
+        "[NativeRTCProxy] ICE dead",
+        NativeRTCPeerConnection.DEAD_CONNECTION_TIMEOUT_MS,
+        "ms — emitting connectiondead",
+      );
+      this._fireEvent(new Event("connectiondead"));
+    }, NativeRTCPeerConnection.DEAD_CONNECTION_TIMEOUT_MS);
   }
 
   // -----------------------------------------------------------------------
