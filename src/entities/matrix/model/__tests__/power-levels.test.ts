@@ -143,7 +143,8 @@ describe("canSendStateEvent — SDK-based permission check for legacy compat", (
     expect(canSendStateEvent(room, "m.room.join_rules", "@me:foo")).toBe(true);
   });
 
-  it("delegates to currentState.maySendStateEvent (false case)", () => {
+  it("delegates to currentState.maySendStateEvent (false case — non-creator regular user)", () => {
+    // SDK says no AND user is not the creator — guard correctly blocks.
     const room = roomStub({
       maySendStateEventMap: { "m.room.join_rules:@me:foo": false },
     });
@@ -175,6 +176,87 @@ describe("canSendStateEvent — SDK-based permission check for legacy compat", (
       },
     };
     expect(canSendStateEvent(room, "m.room.join_rules", "@me:foo")).toBe(false);
+  });
+
+  it("returns true for creator when SDK says no but creator-implicit PL covers required level", () => {
+    // The Форта Чат scenario: SDK's maySendStateEvent returns false because
+    // it reads users[creator] = undefined and falls back to users_default = 0.
+    // Our canSendStateEvent additionally computes effective PL (with creator
+    // implicit) and compares against the required level. Server is final
+    // arbiter, but client must not pre-block legitimate creator actions.
+    const room = {
+      getMember: (id: string) =>
+        id === "@daniel:matrix.pocketnet.app" ? { powerLevel: 0 } : null,
+      currentState: {
+        maySendStateEvent: () => false,
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type === "m.room.create" && stateKey === "") {
+            return { getContent: () => ({ creator: "@daniel:matrix.pocketnet.app" }), getSender: () => null };
+          }
+          if (type === "m.room.power_levels" && stateKey === "") {
+            return { getContent: () => ({}) };
+          }
+          return stateKey !== undefined ? null : [];
+        },
+      },
+    };
+    expect(canSendStateEvent(room, "m.room.join_rules", "@daniel:matrix.pocketnet.app")).toBe(true);
+  });
+
+  it("returns false for non-creator regular user even when power_levels is empty", () => {
+    // Same room shape (empty power_levels) but the user is NOT the creator —
+    // creator-implicit doesn't help, both stages return false. Guard blocks.
+    const room = {
+      getMember: () => null,
+      currentState: {
+        maySendStateEvent: () => false,
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type === "m.room.create" && stateKey === "") {
+            return { getContent: () => ({ creator: "@daniel:matrix.pocketnet.app" }), getSender: () => null };
+          }
+          if (type === "m.room.power_levels" && stateKey === "") {
+            return { getContent: () => ({}) };
+          }
+          return stateKey !== undefined ? null : [];
+        },
+      },
+    };
+    expect(canSendStateEvent(room, "m.room.join_rules", "@stranger:matrix.pocketnet.app")).toBe(false);
+  });
+
+  it("respects per-event PL override — creator (PL 100 implicit) can do PL change (req 100)", () => {
+    // m.room.power_levels itself usually requires PL 100. Creator has implicit
+    // 100, so this should pass.
+    const room = {
+      getMember: () => null,
+      currentState: {
+        maySendStateEvent: () => false,
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type === "m.room.create" && stateKey === "") {
+            return { getContent: () => ({ creator: "@daniel:matrix.pocketnet.app" }), getSender: () => null };
+          }
+          if (type === "m.room.power_levels" && stateKey === "") {
+            return {
+              getContent: () => ({
+                events: { "m.room.power_levels": 100 },
+                state_default: 50,
+              }),
+            };
+          }
+          return stateKey !== undefined ? null : [];
+        },
+      },
+    };
+    expect(canSendStateEvent(room, "m.room.power_levels", "@daniel:matrix.pocketnet.app")).toBe(true);
+  });
+
+  it("regression — SDK true short-circuits without expensive client-side compute", () => {
+    // When SDK already answered yes, we don't need to do anything else.
+    // No m.room.create event present in stub — confirms we didn't fall through.
+    const room = roomStub({
+      maySendStateEventMap: { "m.room.join_rules:@me:foo": true },
+    });
+    expect(canSendStateEvent(room, "m.room.join_rules", "@me:foo")).toBe(true);
   });
 });
 

@@ -205,13 +205,26 @@ export function getMyPowerLevel(
 }
 
 /**
- * Check whether a user can send a state event of `eventType` via matrix-js-sdk's
- * `RoomState.maySendStateEvent`. Wraps the SDK's canonical permission resolver
- * (it accounts for `users[userId]`, `users_default`, `events[eventType]`, and
- * `state_default` per Matrix spec).
+ * Check whether a user can send a state event of `eventType`. Two-stage:
  *
- * Used to gate UI actions like "make group public" without rolling our own
- * power-level math — which historically diverged from the SDK on legacy rooms.
+ * 1. **SDK canonical**: `RoomState.maySendStateEvent`. Authoritative for
+ *    rooms whose `power_levels.users` is correctly populated. Short-circuits
+ *    on `true`.
+ *
+ * 2. **Client-side compute with creator implicit**: when SDK says `false`,
+ *    re-check with our extended PL resolution (which knows about creator
+ *    implicit PL=100, fuzzy hex matches across domains, etc.). If our
+ *    effective PL clears the required level for `eventType`, return `true`
+ *    and let the server arbitrate. Without this stage, creators of groups
+ *    with empty `power_levels.users` get pre-blocked client-side and never
+ *    even reach the server — UI buttons silently no-op.
+ *
+ * The required level for an event type is per Matrix spec:
+ *   `power_levels.events[eventType] ?? state_default ?? 50`.
+ *
+ * Note: this is intentionally optimistic — if the homeserver does not honour
+ * the implicit-creator rule, the action will fail server-side with a 403 and
+ * the user sees the actual error rather than a silent no-op.
  */
 export function canSendStateEvent(
   room: Record<string, unknown> | null | undefined,
@@ -219,17 +232,42 @@ export function canSendStateEvent(
   myUserId: string,
 ): boolean {
   if (!room || !myUserId) return false;
+
+  // Stage 1: SDK canonical check.
   try {
     const cs = (room as {
       currentState?: { maySendStateEvent?: (type: string, userId: string) => boolean };
     }).currentState;
     if (cs && typeof cs.maySendStateEvent === "function") {
-      return cs.maySendStateEvent(eventType, myUserId) === true;
+      if (cs.maySendStateEvent(eventType, myUserId) === true) return true;
     }
   } catch {
     /* fall through */
   }
-  return false;
+
+  // Stage 2: client-side compute with extended PL resolution.
+  try {
+    const myLevel = getMyPowerLevel(room, myUserId);
+    if (myLevel <= 0) return false;
+    const cs2 = (room as {
+      currentState?: { getStateEvents?: (t: string, k?: string) => unknown };
+    }).currentState;
+    let required = 50;
+    if (cs2 && typeof cs2.getStateEvents === "function") {
+      const ev = cs2.getStateEvents("m.room.power_levels", "");
+      const content = (ev as { getContent?: () => Record<string, unknown> } | null)?.getContent?.() ?? {};
+      const eventLevels = (content as { events?: Record<string, number> }).events ?? {};
+      if (typeof eventLevels[eventType] === "number") {
+        required = eventLevels[eventType];
+      } else {
+        const stateDefault = (content as { state_default?: number }).state_default;
+        if (typeof stateDefault === "number") required = stateDefault;
+      }
+    }
+    return myLevel >= required;
+  } catch {
+    return false;
+  }
 }
 
 /**
