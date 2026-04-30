@@ -13,6 +13,102 @@ const cacheStorage: Record<string, string> = {};
 export type JoinRule = "public" | "invite" | "knock" | "restricted" | string;
 
 /**
+ * Read my power level in a room via matrix-js-sdk's `Room.getMember(...).powerLevel`.
+ *
+ * Why this matters for legacy bastyon-chat compat:
+ *   In old groups, `m.room.power_levels.users` may key admins by a different
+ *   Matrix domain (e.g. `@HEX:matrix.bastyon.com`) than the user's current
+ *   logged-in domain (`@HEX:matrix.pocketnet.app`). matrix-js-sdk resolves the
+ *   member via the `m.room.member` event's `state_key` — which always matches
+ *   the user's actual logged-in ID — and `RoomMember.powerLevel` then reads
+ *   the canonical level from `power_levels.users[member.userId]`.
+ *
+ *   The previous Forta implementation did `users[myUserId]` exact-match,
+ *   which silently returned `users_default` (usually 0) for legacy rooms.
+ *
+ * Falls back to `users_default` then `0` when no RoomMember exists.
+ */
+export function getMyPowerLevel(
+  room: Record<string, unknown> | null | undefined,
+  myUserId: string,
+): number {
+  if (!room || !myUserId) return 0;
+  try {
+    const getMember = (room as { getMember?: (id: string) => { powerLevel?: number } | null }).getMember;
+    const member = typeof getMember === "function" ? getMember.call(room, myUserId) : null;
+    if (member && typeof member.powerLevel === "number") {
+      return member.powerLevel;
+    }
+  } catch {
+    /* fall through to default */
+  }
+  // Fallback: read users_default from m.room.power_levels (SDK couldn't resolve
+  // a member, but the room may still have a meaningful default for outsiders).
+  try {
+    const cs = (room as { currentState?: { getStateEvents?: (t: string, k?: string) => unknown } }).currentState;
+    if (cs && typeof cs.getStateEvents === "function") {
+      const ev = cs.getStateEvents("m.room.power_levels", "");
+      const content = (ev as { getContent?: () => Record<string, unknown> } | null)?.getContent?.() ?? {};
+      const usersDefault = (content as { users_default?: number }).users_default;
+      if (typeof usersDefault === "number") return usersDefault;
+    }
+  } catch {
+    /* fall through to default */
+  }
+  return 0;
+}
+
+/**
+ * Check whether a user can send a state event of `eventType` via matrix-js-sdk's
+ * `RoomState.maySendStateEvent`. Wraps the SDK's canonical permission resolver
+ * (it accounts for `users[userId]`, `users_default`, `events[eventType]`, and
+ * `state_default` per Matrix spec).
+ *
+ * Used to gate UI actions like "make group public" without rolling our own
+ * power-level math — which historically diverged from the SDK on legacy rooms.
+ */
+export function canSendStateEvent(
+  room: Record<string, unknown> | null | undefined,
+  eventType: string,
+  myUserId: string,
+): boolean {
+  if (!room || !myUserId) return false;
+  try {
+    const cs = (room as {
+      currentState?: { maySendStateEvent?: (type: string, userId: string) => boolean };
+    }).currentState;
+    if (cs && typeof cs.maySendStateEvent === "function") {
+      return cs.maySendStateEvent(eventType, myUserId) === true;
+    }
+  } catch {
+    /* fall through */
+  }
+  return false;
+}
+
+/**
+ * Read another room member's power level via SDK's `RoomMember.powerLevel`.
+ * Returns 0 if the member is not in the room (consistent with bastyon-chat's
+ * `role()` helper, which treated absent members as default-level).
+ */
+export function getMemberPowerLevel(
+  room: Record<string, unknown> | null | undefined,
+  matrixUserId: string,
+): number {
+  if (!room || !matrixUserId) return 0;
+  try {
+    const getMember = (room as { getMember?: (id: string) => { powerLevel?: number } | null }).getMember;
+    const member = typeof getMember === "function" ? getMember.call(room, matrixUserId) : null;
+    if (member && typeof member.powerLevel === "number") {
+      return member.powerLevel;
+    }
+  } catch {
+    /* fall through */
+  }
+  return 0;
+}
+
+/**
  * Read `m.room.join_rules` as the single source of truth.
  *
  * Matrix JS SDK exposes two shapes depending on arity of `getStateEvents`:

@@ -208,10 +208,14 @@ const powerLevels = computed(() => {
 
 const isAdmin = computed(() => powerLevels.value.myLevel >= 50);
 
-// room.members stores hex-encoded IDs — build Matrix ID directly without re-encoding
+// room.members stores hex-encoded IDs. Resolve through chat-store → SDK
+// `RoomMember.powerLevel` so legacy bastyon-chat groups (where the raw
+// `power_levels.users` map may key admins by a different domain) still
+// surface the correct admin/moderator badge.
 const getMemberPowerLevel = (hexId: string): number => {
+  if (!room.value) return 0;
   const matrixId = `@${hexId}:${MATRIX_SERVER}`;
-  return powerLevels.value.levels[matrixId] ?? 0;
+  return chatStore.getMemberPowerLevelById(room.value.id, matrixId);
 };
 
 const isMemberAdmin = (hexId: string): boolean => getMemberPowerLevel(hexId) >= 50;

@@ -8,7 +8,12 @@ import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
-import { readJoinRule } from "@/entities/matrix/model/matrix-kit";
+import {
+  readJoinRule,
+  getMyPowerLevel,
+  canSendStateEvent,
+  getMemberPowerLevel as readMemberPowerLevel,
+} from "@/entities/matrix/model/matrix-kit";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/lib/cache/chat-cache";
 import { useAuthStore } from "@/entities/auth/model/stores";
@@ -3351,10 +3356,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Kick a single user from a room (requires admin power level).
-   *  @param address — raw Bastyon address (will be hex-encoded for Matrix ID) */
+   *  @param address — raw Bastyon address (will be hex-encoded for Matrix ID)
+   *
+   *  Permission gate uses SDK's `maySendStateEvent('m.room.member', myUserId)`
+   *  rather than self-rolled `users[myUserId] >= 50` math — see
+   *  setRoomPublic for why this matters in legacy bastyon-chat groups. */
   const kickMember = async (roomId: string, address: string): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      const myUserId = matrixService.getUserId() ?? "";
+
+      if (!canSendStateEvent(matrixRoom, "m.room.member", myUserId)) {
+        console.warn("[chat-store] kickMember: insufficient power level (SDK)");
+        return false;
+      }
+
       const hexId = hexEncode(address).toLowerCase();
       const targetMatrixId = matrixService.matrixId(hexId);
       // Security: reset power level before kick to prevent resurrection with elevated PL
@@ -3374,15 +3391,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Set power level for a user in a room */
+  /** Set power level for a user in a room.
+   *
+   *  Gate via SDK's `maySendStateEvent('m.room.power_levels', myUserId)` —
+   *  the canonical Matrix-spec check that legacy bastyon-chat groups also
+   *  honour. */
   const setMemberPowerLevel = async (roomId: string, address: string, level: number): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      const myUserId = matrixService.getUserId() ?? "";
+
+      if (!canSendStateEvent(matrixRoom, "m.room.power_levels", myUserId)) {
+        console.warn("[chat-store] setMemberPowerLevel: insufficient power level (SDK)");
+        return false;
+      }
+
       const targetMatrixId = matrixService.matrixId(hexEncode(address).toLowerCase());
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
-      if (!matrixRoom) return false;
-      const powerEvent = matrixRoom.currentState?.getStateEvents?.("m.room.power_levels");
+      const powerEvent = (matrixRoom as any)?.currentState?.getStateEvents?.("m.room.power_levels");
       if (!powerEvent?.length) return false;
       await matrixService.setPowerLevel(roomId, targetMatrixId, level, powerEvent[0]);
       return true;
@@ -3392,10 +3419,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Upload and set a new room avatar (group chats) */
+  /** Upload and set a new room avatar (group chats).
+   *
+   *  Gate via SDK's `maySendStateEvent('m.room.avatar', myUserId)`. Mirrors
+   *  the legacy-compat fix in setRoomPublic — without this, legacy
+   *  bastyon-chat admins waste an upload on a server-rejected state write. */
   const setRoomAvatar = async (roomId: string, file: File): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      const myUserId = matrixService.getUserId() ?? "";
+
+      if (!canSendStateEvent(matrixRoom, "m.room.avatar", myUserId)) {
+        console.warn("[chat-store] setRoomAvatar: insufficient power level (SDK)");
+        return false;
+      }
+
       const mxcUrl = await matrixService.uploadContentMxc(file);
       await matrixService.sendStateEvent(roomId, "m.room.avatar", { url: mxcUrl }, "");
       const httpUrl = matrixService.mxcToHttp(mxcUrl);
@@ -3408,10 +3447,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Set or clear the room topic/description */
+  /** Set or clear the room topic/description.
+   *
+   *  Gate via SDK's `maySendStateEvent('m.room.topic', myUserId)`. */
   const setRoomTopic = async (roomId: string, topic: string): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      const myUserId = matrixService.getUserId() ?? "";
+
+      if (!canSendStateEvent(matrixRoom, "m.room.topic", myUserId)) {
+        console.warn("[chat-store] setRoomTopic: insufficient power level (SDK)");
+        return false;
+      }
+
       await matrixService.setRoomTopic(roomId, topic);
       const room = getRoomById(roomId);
       if (room) room.topic = topic;
@@ -3422,10 +3471,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Ban a user from a room */
+  /** Ban a user from a room.
+   *
+   *  Gate via SDK's `maySendStateEvent('m.room.member', myUserId)`. */
   const banMember = async (roomId: string, address: string): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      const myUserId = matrixService.getUserId() ?? "";
+
+      if (!canSendStateEvent(matrixRoom, "m.room.member", myUserId)) {
+        console.warn("[chat-store] banMember: insufficient power level (SDK)");
+        return false;
+      }
+
       const hexId = hexEncode(address).toLowerCase();
       const targetMatrixId = matrixService.matrixId(hexId);
       // Security: reset power level before ban
@@ -3443,10 +3502,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Unban a user from a room */
+  /** Unban a user from a room.
+   *
+   *  Gate via SDK's `maySendStateEvent('m.room.member', myUserId)`. */
   const unbanMember = async (roomId: string, userId: string): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      const myUserId = matrixService.getUserId() ?? "";
+
+      if (!canSendStateEvent(matrixRoom, "m.room.member", myUserId)) {
+        console.warn("[chat-store] unbanMember: insufficient power level (SDK)");
+        return false;
+      }
+
       await matrixService.unban(roomId, userId);
       return true;
     } catch (e) {
@@ -3513,22 +3582,45 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Get power levels for a room. Returns map of matrixId → power level. */
+  /** Get power levels for a room.
+   *
+   *  Reads `myLevel` via the SDK's `RoomMember.powerLevel` (`getMyPowerLevel`)
+   *  so legacy bastyon-chat groups — where `power_levels.users` may be keyed
+   *  by a different Matrix domain — still resolve correctly. The previous
+   *  exact-match `users[myUserId]` returned `users_default` (0) for any
+   *  legacy admin and silently disabled all admin actions.
+   *
+   *  `levels` (the raw users map) is exposed for diagnostic UI but should NOT
+   *  be relied on for permission checks — use `canSendStateEvent` /
+   *  `getMemberPowerLevelById` instead, which delegate to the SDK. */
   const getRoomPowerLevels = (roomId: string): { myLevel: number; levels: Record<string, number> } => {
     try {
       const matrixService = getMatrixClientService();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
       if (!matrixRoom) return { myLevel: 0, levels: {} };
-      const powerEvent = matrixRoom.currentState?.getStateEvents?.("m.room.power_levels", "");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const powerEvent = (matrixRoom as any).currentState?.getStateEvents?.("m.room.power_levels", "");
       const content = powerEvent?.getContent?.() ?? powerEvent?.event?.content ?? {};
       const users = (content.users ?? {}) as Record<string, number>;
-      const defaultLevel = (content.users_default ?? 0) as number;
       const myUserId = matrixService.getUserId() ?? "";
-      const myLevel = users[myUserId] ?? defaultLevel;
+      const myLevel = getMyPowerLevel(matrixRoom, myUserId);
       return { myLevel, levels: users };
     } catch {
       return { myLevel: 0, levels: {} };
+    }
+  };
+
+  /** Read another member's power level by Matrix user ID using the SDK's
+   *  `RoomMember.powerLevel`. Used by UI (ChatInfoPanel) to colour admins/
+   *  moderators correctly in legacy rooms where the raw `users` map key may
+   *  not match the local Matrix-ID format. */
+  const getMemberPowerLevelById = (roomId: string, matrixUserId: string): number => {
+    try {
+      const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
+      return readMemberPowerLevel(matrixRoom, matrixUserId);
+    } catch {
+      return 0;
     }
   };
 
@@ -3582,24 +3674,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Toggle room between public/private join rules (admin only).
-   *  Up-front power-level check avoids sending a doomed state event, and
-   *  when enabling public we also set history_visibility=world_readable
+   *
+   *  The up-front PL check now delegates to matrix-js-sdk's
+   *  `RoomState.maySendStateEvent` (via `canSendStateEvent`) instead of
+   *  rolling our own `users[myUserId] >= requiredPl` math. The self-rolled
+   *  variant silently failed in legacy bastyon-chat groups whose
+   *  `power_levels.users` map was keyed by a different Matrix domain —
+   *  admins saw the toggle button but every click was a no-op.
+   *
+   *  When enabling public we also set history_visibility=world_readable
    *  (required for newly-joined users to see prior messages). */
   const setRoomPublic = async (roomId: string, isPublic: boolean): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
-
-      // Up-front PL check — PowerLevelsEventContent may declare a per-event
-      // requirement; fall back to state_default or 50 per Matrix spec.
-      const plEvent = matrixRoom?.currentState?.getStateEvents?.("m.room.power_levels", "");
-      const plContent = plEvent?.getContent?.() ?? plEvent?.event?.content ?? {};
-      const requiredPl = plContent?.events?.["m.room.join_rules"] ?? plContent?.state_default ?? 50;
+      const matrixRoom = matrixService.getRoom(roomId) as Record<string, unknown> | null;
       const myUserId = matrixService.getUserId() ?? "";
-      const myPl = plContent?.users?.[myUserId] ?? plContent?.users_default ?? 0;
-      if (myPl < requiredPl) {
-        console.warn("[chat-store] setRoomPublic: insufficient power level", { myPl, requiredPl });
+
+      if (!canSendStateEvent(matrixRoom, "m.room.join_rules", myUserId)) {
+        console.warn("[chat-store] setRoomPublic: insufficient power level (SDK)");
         return false;
       }
 
@@ -3611,7 +3703,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // before joining. Skip the write if it's already set — avoids a
       // redundant state event on every toggle.
       if (isPublic) {
-        const hvEvent = matrixRoom?.currentState?.getStateEvents?.("m.room.history_visibility", "");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const hvEvent = (matrixRoom as any)?.currentState?.getStateEvents?.("m.room.history_visibility", "");
         const currentHv =
           hvEvent?.getContent?.()?.history_visibility ??
           hvEvent?.event?.content?.history_visibility;
@@ -6264,6 +6357,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getDisplayName,
     getRoomMemberCount,
     getRoomPowerLevels,
+    getMemberPowerLevelById,
     getTypingUsers,
     handleKicked,
     handleRoomAccountData,
