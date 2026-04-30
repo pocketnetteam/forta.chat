@@ -13,49 +13,128 @@ const cacheStorage: Record<string, string> = {};
 export type JoinRule = "public" | "invite" | "knock" | "restricted" | string;
 
 /**
- * Read my power level in a room via matrix-js-sdk's `Room.getMember(...).powerLevel`.
+ * Read the raw `m.room.power_levels` event content from a room.
+ * Internal helper — used by the resolution chain below.
+ */
+function readPowerLevelsContent(
+  room: Record<string, unknown> | null | undefined,
+): { users: Record<string, number>; usersDefault: number } | null {
+  if (!room) return null;
+  try {
+    const cs = (room as { currentState?: { getStateEvents?: (t: string, k?: string) => unknown } }).currentState;
+    if (!cs || typeof cs.getStateEvents !== "function") return null;
+    const ev = cs.getStateEvents("m.room.power_levels", "");
+    const content = (ev as { getContent?: () => Record<string, unknown> } | null)?.getContent?.() ?? {};
+    return {
+      users: ((content as { users?: Record<string, number> }).users ?? {}) as Record<string, number>,
+      usersDefault: typeof (content as { users_default?: number }).users_default === "number"
+        ? (content as { users_default: number }).users_default
+        : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the local-part (hex/address before `:`) from a Matrix user ID.
+ * Returns `null` if the input doesn't look like a Matrix ID.
+ */
+function extractLocalPart(matrixId: string): string | null {
+  if (!matrixId || matrixId[0] !== "@") return null;
+  const colon = matrixId.indexOf(":");
+  if (colon < 2) return null; // need at least "@x:..."
+  return matrixId.slice(1, colon);
+}
+
+/**
+ * Fuzzy-match a power level by hex local-part across all keys in
+ * `m.room.power_levels.users`, regardless of domain.
  *
- * Why this matters for legacy bastyon-chat compat:
- *   In old groups, `m.room.power_levels.users` may key admins by a different
- *   Matrix domain (e.g. `@HEX:matrix.bastyon.com`) than the user's current
- *   logged-in domain (`@HEX:matrix.pocketnet.app`). matrix-js-sdk resolves the
- *   member via the `m.room.member` event's `state_key` — which always matches
- *   the user's actual logged-in ID — and `RoomMember.powerLevel` then reads
- *   the canonical level from `power_levels.users[member.userId]`.
+ * Why: legacy bastyon-chat groups may key admins under a different Matrix
+ * homeserver domain (e.g. `@HEX:matrix.bastyon.com`) than Forta currently
+ * constructs (`@HEX:matrix.pocketnet.app`). matrix-js-sdk does NOT alias
+ * member IDs across domains, so `Room.getMember(...).powerLevel` returns 0
+ * for cross-domain admins and the badge stays hidden.
  *
- *   The previous Forta implementation did `users[myUserId]` exact-match,
- *   which silently returned `users_default` (usually 0) for legacy rooms.
+ * This helper bridges that gap: it scans every entry in `users`, extracts the
+ * local-part of each key, and returns the level when the local-part matches
+ * (case-insensitively) the supplied `hexId`. If multiple keys match (same hex
+ * across domains with different PLs), the highest level wins so an admin
+ * downgraded on one domain isn't lost.
  *
- * Falls back to `users_default` then `0` when no RoomMember exists.
+ * Falls back to `users_default` when no key matches, then `0`.
+ */
+export function getPowerLevelByHexId(
+  room: Record<string, unknown> | null | undefined,
+  hexId: string,
+): number {
+  if (!room || !hexId) return 0;
+  const pl = readPowerLevelsContent(room);
+  if (!pl) return 0;
+
+  const wantHex = hexId.toLowerCase();
+  let best: number | null = null;
+
+  for (const key in pl.users) {
+    const local = extractLocalPart(key);
+    if (local && local.toLowerCase() === wantHex) {
+      const level = pl.users[key];
+      if (typeof level === "number") {
+        if (best === null || level > best) best = level;
+      }
+    }
+  }
+
+  return best ?? pl.usersDefault;
+}
+
+/**
+ * Read my power level in a room with three-stage resolution:
+ *
+ * 1. **SDK direct**: `Room.getMember(myUserId).powerLevel` — the canonical
+ *    path. Works for current-domain admins and Forta-created rooms.
+ *
+ * 2. **Fuzzy hex match**: scan `m.room.power_levels.users` keys for any
+ *    entry whose local-part matches the hex of `myUserId`, regardless of
+ *    domain. Salvages legacy bastyon-chat admins whose power_levels entry
+ *    was written under a foreign domain (`matrix.bastyon.com`,
+ *    `matrix.bastyon.io`, etc.). matrix-js-sdk does no cross-domain alias
+ *    resolution, so this final-mile fallback is necessary for badge
+ *    correctness in old rooms.
+ *
+ * 3. **`users_default`**: when nothing matches, return the room's default
+ *    level (0 in standard rooms, sometimes 50 in legacy bastyon-chat groups
+ *    that opted into broader baseline permissions).
  */
 export function getMyPowerLevel(
   room: Record<string, unknown> | null | undefined,
   myUserId: string,
 ): number {
   if (!room || !myUserId) return 0;
+  // Stage 1: canonical SDK path.
   try {
     const getMember = (room as { getMember?: (id: string) => { powerLevel?: number } | null }).getMember;
     const member = typeof getMember === "function" ? getMember.call(room, myUserId) : null;
-    if (member && typeof member.powerLevel === "number") {
+    if (member && typeof member.powerLevel === "number" && member.powerLevel !== 0) {
       return member.powerLevel;
     }
-  } catch {
-    /* fall through to default */
-  }
-  // Fallback: read users_default from m.room.power_levels (SDK couldn't resolve
-  // a member, but the room may still have a meaningful default for outsiders).
-  try {
-    const cs = (room as { currentState?: { getStateEvents?: (t: string, k?: string) => unknown } }).currentState;
-    if (cs && typeof cs.getStateEvents === "function") {
-      const ev = cs.getStateEvents("m.room.power_levels", "");
-      const content = (ev as { getContent?: () => Record<string, unknown> } | null)?.getContent?.() ?? {};
-      const usersDefault = (content as { users_default?: number }).users_default;
-      if (typeof usersDefault === "number") return usersDefault;
+    // Stage 2: SDK has the member but at default level — try fuzzy match
+    //          before settling for default. This catches legacy admins
+    //          whose elevated PL is stored under a foreign-domain key.
+    const localPart = extractLocalPart(myUserId);
+    if (localPart) {
+      const fuzzy = getPowerLevelByHexId(room, localPart);
+      if (fuzzy !== 0) return fuzzy;
     }
+    // SDK said 0 and fuzzy found 0 — that's the actual answer.
+    if (member && typeof member.powerLevel === "number") return member.powerLevel;
   } catch {
-    /* fall through to default */
+    /* fall through */
   }
-  return 0;
+  // Stage 3: read users_default as last resort (no member, no fuzzy match).
+  const pl = readPowerLevelsContent(room);
+  return pl?.usersDefault ?? 0;
 }
 
 /**
@@ -87,21 +166,31 @@ export function canSendStateEvent(
 }
 
 /**
- * Read another room member's power level via SDK's `RoomMember.powerLevel`.
- * Returns 0 if the member is not in the room (consistent with bastyon-chat's
- * `role()` helper, which treated absent members as default-level).
+ * Read another room member's power level. Mirrors `getMyPowerLevel`'s
+ * three-stage resolution so admin badges render correctly for cross-domain
+ * legacy admins (see `getMyPowerLevel` for the rationale).
  */
 export function getMemberPowerLevel(
   room: Record<string, unknown> | null | undefined,
   matrixUserId: string,
 ): number {
   if (!room || !matrixUserId) return 0;
+  // Stage 1: SDK direct. Use this when it returns elevated PL — the SDK is
+  //          authoritative for current-domain members.
   try {
     const getMember = (room as { getMember?: (id: string) => { powerLevel?: number } | null }).getMember;
     const member = typeof getMember === "function" ? getMember.call(room, matrixUserId) : null;
-    if (member && typeof member.powerLevel === "number") {
+    if (member && typeof member.powerLevel === "number" && member.powerLevel !== 0) {
       return member.powerLevel;
     }
+    // Stage 2: SDK gave default-level — try fuzzy hex match in case the
+    //          member's elevated PL is stored under a foreign-domain key.
+    const localPart = extractLocalPart(matrixUserId);
+    if (localPart) {
+      const fuzzy = getPowerLevelByHexId(room, localPart);
+      if (fuzzy !== 0) return fuzzy;
+    }
+    if (member && typeof member.powerLevel === "number") return member.powerLevel;
   } catch {
     /* fall through */
   }

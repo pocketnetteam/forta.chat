@@ -3,6 +3,7 @@ import {
   getMyPowerLevel,
   canSendStateEvent,
   getMemberPowerLevel,
+  getPowerLevelByHexId,
 } from "../matrix-kit";
 
 /**
@@ -200,5 +201,206 @@ describe("getMemberPowerLevel — SDK-based read for displaying others", () => {
       },
     };
     expect(getMemberPowerLevel(room, "@a:b")).toBe(0);
+  });
+
+  it("falls back to power_levels.users via SDK getMember alias path", () => {
+    // Realistic case: SDK has a RoomMember keyed by Matrix-ID, but its
+    // .powerLevel is undefined because the SDK couldn't resolve the entry.
+    // Caller must still get a sensible 0.
+    const room = {
+      getMember: () => ({}),
+    };
+    expect(getMemberPowerLevel(room, "@a:b")).toBe(0);
+  });
+});
+
+describe("getPowerLevelByHexId — fuzzy cross-domain hex match", () => {
+  // The user reported on 2026-04-30 that admins of legacy bastyon-chat groups
+  // still showed without the badge in ChatInfoPanel after the first SDK fix.
+  // Root cause: m.room.power_levels.users may key the admin under a different
+  // Matrix domain (e.g. @HEX:matrix.bastyon.com) than ChatInfoPanel constructs
+  // (@HEX:matrix.pocketnet.app via hardcoded MATRIX_SERVER). SDK does no
+  // cross-domain alias resolution, so RoomMember.powerLevel returns 0 and the
+  // badge stays hidden. Fuzzy match by hex local-part is the pragmatic fix.
+
+  function plRoom(usersMap: Record<string, number>, usersDefault = 0) {
+    return {
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type !== "m.room.power_levels") return stateKey !== undefined ? null : [];
+          if (stateKey === "") {
+            return { getContent: () => ({ users: usersMap, users_default: usersDefault }) };
+          }
+          return [{ getContent: () => ({ users: usersMap, users_default: usersDefault }) }];
+        },
+      },
+    };
+  }
+
+  it("matches hex local-part against the default-domain key", () => {
+    const room = plRoom({ "@deadbeef:matrix.pocketnet.app": 100 });
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(100);
+  });
+
+  it("matches hex local-part across legacy bastyon.com domain (H1 fix)", () => {
+    const room = plRoom({ "@deadbeef:matrix.bastyon.com": 100 });
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(100);
+  });
+
+  it("matches hex local-part across legacy bastyon.io domain", () => {
+    const room = plRoom({ "@deadbeef:matrix.bastyon.io": 50 });
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(50);
+  });
+
+  it("matches case-insensitively (some legacy clients uppercased hex)", () => {
+    const room = plRoom({ "@DEADBEEF:matrix.bastyon.com": 100 });
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(100);
+  });
+
+  it("returns users_default when hex not found in any key", () => {
+    const room = plRoom({ "@somebodyelse:matrix.bastyon.com": 100 }, 25);
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(25);
+  });
+
+  it("returns 0 when no match and no users_default", () => {
+    const room = plRoom({});
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(0);
+  });
+
+  it("returns 0 when room is null/undefined", () => {
+    expect(getPowerLevelByHexId(null as unknown as Record<string, unknown>, "x")).toBe(0);
+  });
+
+  it("returns 0 when hexId is empty (defensive — never falsy-match)", () => {
+    const room = plRoom({ "@:matrix.foo": 100 });
+    expect(getPowerLevelByHexId(room, "")).toBe(0);
+  });
+
+  it("handles getStateEvents throwing without crashing", () => {
+    const room = {
+      currentState: {
+        getStateEvents: () => {
+          throw new Error("boom");
+        },
+      },
+    };
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(0);
+  });
+
+  it("multiple matching keys — picks the highest level (admin wins over moderator)", () => {
+    // Edge case: same hex appears under two domains with different levels.
+    // We pick the highest so an admin downgraded on one domain doesn't lose
+    // their elevated status from the other.
+    const room = plRoom({
+      "@deadbeef:matrix.bastyon.com": 100,
+      "@deadbeef:matrix.pocketnet.app": 50,
+    });
+    expect(getPowerLevelByHexId(room, "deadbeef")).toBe(100);
+  });
+});
+
+describe("ChatInfoPanel scenario — Daniel_Satchkov admin badge in legacy bastyon-chat group", () => {
+  // Direct repro of the 2026-04-30 user report:
+  //   "у Daniel_Satchkov нет admin badge на ChatInfoPanel хотя он admin
+  //    в legacy bastyon-chat группе"
+  //
+  // Pre-fix: ChatInfoPanel did `users[@hex:matrix.pocketnet.app]` exact-match,
+  // legacy room had key `@hex:matrix.bastyon.com`, lookup returned undefined,
+  // badge hidden.
+  //
+  // After SDK delegation (first commit): same problem because SDK does no
+  // cross-domain alias resolution — getMember(@hex:matrix.pocketnet.app)
+  // returned a member object but its powerLevel cached from
+  // power_levels.users[@hex:matrix.pocketnet.app] which was undefined.
+  //
+  // After fuzzy-hex fallback (this commit): scan keys for hex local-part,
+  // find `@hex:matrix.bastyon.com`, return 100. Badge shown.
+
+  it("shows admin (100) for legacy admin keyed under matrix.bastyon.com", () => {
+    const room = {
+      // SDK has the member under the current pocketnet.app domain (Daniel
+      // re-joined or sent a message after Forta migration), but with the
+      // default level because power_levels never updated to point at his
+      // pocketnet.app ID — only the legacy bastyon.com ID was elevated.
+      getMember: (id: string) =>
+        id === "@deadbeefcafe:matrix.pocketnet.app" ? { powerLevel: 0 } : null,
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type !== "m.room.power_levels") return stateKey !== undefined ? null : [];
+          if (stateKey === "") {
+            return {
+              getContent: () => ({
+                users: { "@deadbeefcafe:matrix.bastyon.com": 100 },
+                users_default: 0,
+              }),
+            };
+          }
+          return null;
+        },
+      },
+    };
+    expect(getMemberPowerLevel(room, "@deadbeefcafe:matrix.pocketnet.app")).toBe(100);
+  });
+
+  it("shows admin for legacy admin who never re-joined (SDK has no member entry under current domain)", () => {
+    // Even harder edge case: member only exists under bastyon.com state_key.
+    // getMember(@hex:matrix.pocketnet.app) returns null entirely.
+    const room = {
+      getMember: () => null,
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type !== "m.room.power_levels") return stateKey !== undefined ? null : [];
+          if (stateKey === "") {
+            return {
+              getContent: () => ({
+                users: { "@deadbeefcafe:matrix.bastyon.com": 100 },
+                users_default: 0,
+              }),
+            };
+          }
+          return null;
+        },
+      },
+    };
+    expect(getMemberPowerLevel(room, "@deadbeefcafe:matrix.pocketnet.app")).toBe(100);
+  });
+});
+
+describe("getMyPowerLevel — final fallback to fuzzy hex match", () => {
+  // After SDK getMember and users_default both fail, fall back to fuzzy
+  // hex matching. This is the final safety net for legacy admins whose
+  // power_levels.users entry was written under a foreign domain.
+
+  function legacyRoom(plUsers: Record<string, number>, members: Record<string, { powerLevel?: number }>, usersDefault = 0) {
+    return {
+      getMember: (id: string) => members[id] ?? null,
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type !== "m.room.power_levels") return stateKey !== undefined ? null : [];
+          if (stateKey === "") {
+            return { getContent: () => ({ users: plUsers, users_default: usersDefault }) };
+          }
+          return [{ getContent: () => ({ users: plUsers, users_default: usersDefault }) }];
+        },
+      },
+    };
+  }
+
+  it("when SDK member lacks elevated PL but power_levels has cross-domain entry, fuzzy-matches", () => {
+    // SDK has a member entry but its powerLevel is the default (0) because
+    // the user's RoomMember.userId doesn't match the legacy domain key.
+    const room = legacyRoom(
+      { "@deadbeef:matrix.bastyon.com": 100 },
+      { "@deadbeef:matrix.pocketnet.app": { powerLevel: 0 } },
+    );
+    expect(getMyPowerLevel(room, "@deadbeef:matrix.pocketnet.app")).toBe(100);
+  });
+
+  it("regression — current-domain admin still resolves directly via SDK (no fuzzy needed)", () => {
+    const room = legacyRoom(
+      { "@deadbeef:matrix.pocketnet.app": 100 },
+      { "@deadbeef:matrix.pocketnet.app": { powerLevel: 100 } },
+    );
+    expect(getMyPowerLevel(room, "@deadbeef:matrix.pocketnet.app")).toBe(100);
   });
 });
