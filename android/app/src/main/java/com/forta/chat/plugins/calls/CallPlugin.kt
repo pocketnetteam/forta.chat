@@ -464,6 +464,32 @@ class CallPlugin : Plugin() {
         call.resolve(result)
     }
 
+    /**
+     * Session 25 / S3-S4: return the last N FCM `m.call.invite` records
+     * for the JS bug-reporter envelope. Callers should treat the result
+     * as best-effort: an empty list simply means no invites have been
+     * received in this process lifetime.
+     *
+     * Used by the JS bug-reporter to surface the recent delivery-latency
+     * pattern in user reports — lets us distinguish S1 (accept-crash)
+     * from S3 (FCM throttle / Doze) without asking the user to reproduce.
+     */
+    @PluginMethod
+    fun getInviteThrottleSnapshot(call: PluginCall) {
+        val records = com.forta.chat.FortaFirebaseMessagingService.inviteTracker.snapshot()
+        val arr = org.json.JSONArray()
+        for (r in records) {
+            arr.put(org.json.JSONObject().apply {
+                put("receivedAtMs", r.receivedAtMs)
+                put("sentAtMs", r.sentAtMs)
+                put("deliveryLatencyMs", r.deliveryLatencyMs)
+                put("expired", r.expired)
+                put("callId", r.callId ?: "")
+            })
+        }
+        call.resolve(JSObject().apply { put("records", arr) })
+    }
+
     @PluginMethod
     fun getPendingAnswer(call: PluginCall) {
         val pendingCallId = CallConnection.pendingAnswerCallId

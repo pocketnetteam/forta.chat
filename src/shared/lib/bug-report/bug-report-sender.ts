@@ -189,6 +189,41 @@ async function formatBody(
     }
   }
 
+  // Session 25 / S3-S4: call-pipeline diagnostics. Rendered only when
+  // present so non-call bug reports stay short. Layout chosen so triage
+  // can scan delivery-latency at a glance and reach for the issue label
+  // (`s4-stale-invite`, `s3-fcm-throttle`, etc.) without a repro.
+  const diag = input.callDiagnostics;
+  if (diag) {
+    lines.push(
+      '',
+      '## Call diagnostics',
+      '| Field | Value |',
+      '|-------|-------|',
+      `| Audio mode | ${diag.audioMode} |`,
+      `| Speaker on | ${diag.isSpeakerOn ? 'yes' : 'no'} |`,
+      `| BT SCO on | ${diag.isBtScoOn ? 'yes' : 'no'} |`,
+      `| Recent invites | ${diag.inviteHistory.length} |`,
+      `| Expired invites | ${diag.expiredInviteCount} |`,
+    );
+    if (diag.inviteHistory.length > 0) {
+      lines.push(
+        '',
+        '<details><summary>FCM invite history</summary>',
+        '',
+        '| # | callId | latency (ms) | expired |',
+        '|---|--------|--------------|---------|',
+      );
+      diag.inviteHistory.forEach((r, i) => {
+        const callIdShort = r.callId ? r.callId.slice(0, 12) : '(none)';
+        lines.push(
+          `| ${i + 1} | \`${callIdShort}\` | ${r.deliveryLatencyMs} | ${r.expired ? 'yes' : 'no'} |`,
+        );
+      });
+      lines.push('</details>');
+    }
+  }
+
   return lines.join('\n');
 }
 

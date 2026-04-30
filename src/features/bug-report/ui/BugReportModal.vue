@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import {
   collectEnvironment,
+  collectCallDiagnostics,
   sendBugReport,
   trackCreatedIssue,
 } from "@/shared/lib/bug-report";
-import type { AppEnvironment } from "@/shared/lib/bug-report";
+import type {
+  AppEnvironment,
+  BugReportCallDiagnostics,
+} from "@/shared/lib/bug-report";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { isNative } from "@/shared/lib/platform";
 import { useAuthStore } from "@/entities/auth";
@@ -21,6 +25,7 @@ const sent = ref(false);
 const errorMsg = ref("");
 const fileInput = ref<HTMLInputElement>();
 const environment = ref<AppEnvironment>();
+const callDiagnostics = ref<BugReportCallDiagnostics>();
 const showExamples = ref(false);
 
 watch(isOpen, async (val) => {
@@ -41,6 +46,11 @@ watch(isOpen, async (val) => {
     errorMsg.value = "";
     showExamples.value = false;
     environment.value = await collectEnvironment();
+    // Session 25: pull call diagnostics in parallel with environment.
+    // Non-throwing — collectCallDiagnostics swallows native plugin
+    // failures so a missing throttle snapshot can never block the
+    // bug-report flow itself.
+    callDiagnostics.value = await collectCallDiagnostics();
   }
 });
 
@@ -108,6 +118,7 @@ const handleSend = async () => {
       environment: environment.value,
       screenshots: screenshots.value.map((s) => s.base64),
       reporterAddress: authStore.address ?? undefined,
+      callDiagnostics: callDiagnostics.value,
     });
     console.log("[BugReport] created issue #", result.issueNumber, "url:", result.issueUrl);
     if (authStore.address && result.issueNumber) {
