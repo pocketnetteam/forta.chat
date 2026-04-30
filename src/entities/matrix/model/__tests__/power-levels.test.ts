@@ -4,6 +4,7 @@ import {
   canSendStateEvent,
   getMemberPowerLevel,
   getPowerLevelByHexId,
+  getRoomCreator,
 } from "../matrix-kit";
 
 /**
@@ -296,6 +297,142 @@ describe("getPowerLevelByHexId — fuzzy cross-domain hex match", () => {
       "@deadbeef:matrix.pocketnet.app": 50,
     });
     expect(getPowerLevelByHexId(room, "deadbeef")).toBe(100);
+  });
+});
+
+describe("getRoomCreator — m.room.create.creator extraction", () => {
+  function createRoom(content: Record<string, unknown> | null, sender?: string) {
+    return {
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type !== "m.room.create") return stateKey !== undefined ? null : [];
+          if (stateKey === "") {
+            if (!content && !sender) return null;
+            return {
+              getContent: () => content ?? {},
+              getSender: () => sender ?? null,
+            };
+          }
+          return null;
+        },
+      },
+    };
+  }
+
+  it("returns creator field for room versions ≤ 10", () => {
+    const room = createRoom({ creator: "@deadbeef:matrix.pocketnet.app", room_version: "10" });
+    expect(getRoomCreator(room)).toBe("@deadbeef:matrix.pocketnet.app");
+  });
+
+  it("falls back to sender when creator field is absent (room version 11+)", () => {
+    const room = createRoom({ room_version: "11" }, "@v11creator:matrix.pocketnet.app");
+    expect(getRoomCreator(room)).toBe("@v11creator:matrix.pocketnet.app");
+  });
+
+  it("prefers creator field over sender when both present", () => {
+    const room = createRoom({ creator: "@deadbeef:matrix.pocketnet.app" }, "@other:foo");
+    expect(getRoomCreator(room)).toBe("@deadbeef:matrix.pocketnet.app");
+  });
+
+  it("returns null when no m.room.create event present", () => {
+    expect(getRoomCreator(createRoom(null))).toBeNull();
+  });
+
+  it("returns null when room is null/undefined", () => {
+    expect(getRoomCreator(null as unknown as Record<string, unknown>)).toBeNull();
+  });
+
+  it("handles getStateEvents throwing without crashing", () => {
+    const room = {
+      currentState: {
+        getStateEvents: () => {
+          throw new Error("boom");
+        },
+      },
+    };
+    expect(getRoomCreator(room)).toBeNull();
+  });
+});
+
+describe("Creator-implicit PL — empty m.room.power_levels but m.room.create has creator", () => {
+  // Direct repro of the 2026-04-30 user-debug-log:
+  //   "Форта Чат" group: rawPlContent: {}, createEventContent.creator: <Daniel_hex>
+  // Per Matrix spec, when power_levels.users is empty, the creator has
+  // implicit PL 100. matrix-js-sdk's RoomMember.powerLevel does NOT compute
+  // this — it just reads users[userId] ?? users_default ?? 0 — so the badge
+  // never lights up for the creator. Three-stage resolution must include a
+  // creator check.
+
+  function emptyPlRoomWithCreator(creatorId: string, members: Record<string, { powerLevel?: number }>) {
+    return {
+      getMember: (id: string) => members[id] ?? null,
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type === "m.room.create" && stateKey === "") {
+            return { getContent: () => ({ creator: creatorId, room_version: "10" }), getSender: () => null };
+          }
+          if (type === "m.room.power_levels" && stateKey === "") {
+            return { getContent: () => ({}) };
+          }
+          return stateKey !== undefined ? null : [];
+        },
+      },
+    };
+  }
+
+  it("getMyPowerLevel returns 100 for creator when power_levels.users is empty", () => {
+    const room = emptyPlRoomWithCreator(
+      "@daniel:matrix.pocketnet.app",
+      { "@daniel:matrix.pocketnet.app": { powerLevel: 0 } },
+    );
+    expect(getMyPowerLevel(room, "@daniel:matrix.pocketnet.app")).toBe(100);
+  });
+
+  it("getMyPowerLevel returns 0 for non-creator when power_levels is empty", () => {
+    const room = emptyPlRoomWithCreator(
+      "@daniel:matrix.pocketnet.app",
+      { "@stranger:matrix.pocketnet.app": { powerLevel: 0 } },
+    );
+    expect(getMyPowerLevel(room, "@stranger:matrix.pocketnet.app")).toBe(0);
+  });
+
+  it("getMemberPowerLevel returns 100 for creator member (badge in member list)", () => {
+    const room = emptyPlRoomWithCreator(
+      "@daniel:matrix.pocketnet.app",
+      { "@daniel:matrix.pocketnet.app": { powerLevel: 0 } },
+    );
+    expect(getMemberPowerLevel(room, "@daniel:matrix.pocketnet.app")).toBe(100);
+  });
+
+  it("creator with cross-domain mismatch — local-part hex still wins", () => {
+    // Creator stored in m.room.create as @hex:matrix.bastyon.com,
+    // but member looked up as @hex:matrix.pocketnet.app — same hex,
+    // different domain. Should still resolve as creator.
+    const room = emptyPlRoomWithCreator(
+      "@deadbeef:matrix.bastyon.com",
+      { "@deadbeef:matrix.pocketnet.app": { powerLevel: 0 } },
+    );
+    expect(getMemberPowerLevel(room, "@deadbeef:matrix.pocketnet.app")).toBe(100);
+  });
+
+  it("explicit power_levels.users overrides creator implicit (admin demoted creator)", () => {
+    // Edge case: creator was explicitly demoted — power_levels.users[creator]=10
+    // The explicit value should win over the implicit 100.
+    const room = {
+      getMember: () => null,
+      currentState: {
+        getStateEvents: (type: string, stateKey?: string) => {
+          if (type === "m.room.create" && stateKey === "") {
+            return { getContent: () => ({ creator: "@daniel:matrix.pocketnet.app" }), getSender: () => null };
+          }
+          if (type === "m.room.power_levels" && stateKey === "") {
+            return { getContent: () => ({ users: { "@daniel:matrix.pocketnet.app": 10 } }) };
+          }
+          return stateKey !== undefined ? null : [];
+        },
+      },
+    };
+    expect(getMyPowerLevel(room, "@daniel:matrix.pocketnet.app")).toBe(10);
   });
 });
 

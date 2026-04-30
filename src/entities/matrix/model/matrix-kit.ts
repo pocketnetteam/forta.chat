@@ -90,7 +90,56 @@ export function getPowerLevelByHexId(
 }
 
 /**
- * Read my power level in a room with three-stage resolution:
+ * Read the creator of a room from `m.room.create`.
+ *
+ * For room versions ≤ 10, the creator is the `creator` field in the event
+ * content. For room version 11+, the field was removed and the creator is
+ * inferred from the event sender (which is always the creator since
+ * `m.room.create` is the first event in the room).
+ *
+ * Why this matters: per Matrix spec, when `m.room.power_levels.users` does
+ * not list a user, that user gets `users_default` — UNLESS they are the
+ * creator and the room either has no power_levels event or the event was
+ * created with empty `users`. Some legacy bastyon-chat groups (and even
+ * some new Forta-created rooms with `room_version: "10"` we observed in
+ * production) end up with an empty power_levels.users, leaving the creator
+ * with PL 0 unless we apply the implicit-creator rule ourselves.
+ * matrix-js-sdk's RoomMember.powerLevel does not perform this fallback.
+ */
+export function getRoomCreator(
+  room: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!room) return null;
+  try {
+    const cs = (room as { currentState?: { getStateEvents?: (t: string, k?: string) => unknown } }).currentState;
+    if (!cs || typeof cs.getStateEvents !== "function") return null;
+    const ev = cs.getStateEvents("m.room.create", "");
+    if (!ev) return null;
+    const content = (ev as { getContent?: () => Record<string, unknown> }).getContent?.() ?? {};
+    const creatorField = (content as { creator?: string }).creator;
+    if (typeof creatorField === "string" && creatorField.length > 0) return creatorField;
+    // Room version 11+ — creator inferred from event sender.
+    const sender = (ev as { getSender?: () => string | null }).getSender?.() ?? null;
+    if (typeof sender === "string" && sender.length > 0) return sender;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compare two Matrix user IDs by their hex local-part (case-insensitive).
+ * Cross-domain safe — `@hex:matrix.bastyon.com` matches `@hex:matrix.pocketnet.app`.
+ */
+function sameUserByHexLocal(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const la = extractLocalPart(a)?.toLowerCase();
+  const lb = extractLocalPart(b)?.toLowerCase();
+  return !!la && !!lb && la === lb;
+}
+
+/**
+ * Read my power level in a room with four-stage resolution:
  *
  * 1. **SDK direct**: `Room.getMember(myUserId).powerLevel` — the canonical
  *    path. Works for current-domain admins and Forta-created rooms.
@@ -103,7 +152,12 @@ export function getPowerLevelByHexId(
  *    resolution, so this final-mile fallback is necessary for badge
  *    correctness in old rooms.
  *
- * 3. **`users_default`**: when nothing matches, return the room's default
+ * 3. **Creator implicit**: per Matrix spec, when `power_levels.users` does
+ *    not list the creator (including the empty-map case), the creator gets
+ *    PL 100. matrix-js-sdk does not apply this rule via RoomMember.powerLevel.
+ *    Compared by hex local-part so cross-domain creator IDs match.
+ *
+ * 4. **`users_default`**: when nothing matches, return the room's default
  *    level (0 in standard rooms, sometimes 50 in legacy bastyon-chat groups
  *    that opted into broader baseline permissions).
  */
@@ -113,26 +167,39 @@ export function getMyPowerLevel(
 ): number {
   if (!room || !myUserId) return 0;
   // Stage 1: canonical SDK path.
+  let sdkLevel: number | null = null;
   try {
     const getMember = (room as { getMember?: (id: string) => { powerLevel?: number } | null }).getMember;
     const member = typeof getMember === "function" ? getMember.call(room, myUserId) : null;
-    if (member && typeof member.powerLevel === "number" && member.powerLevel !== 0) {
-      return member.powerLevel;
+    if (member && typeof member.powerLevel === "number") {
+      sdkLevel = member.powerLevel;
+      if (sdkLevel !== 0) return sdkLevel;
     }
-    // Stage 2: SDK has the member but at default level — try fuzzy match
-    //          before settling for default. This catches legacy admins
-    //          whose elevated PL is stored under a foreign-domain key.
+  } catch {
+    /* fall through */
+  }
+  // Stage 2: fuzzy hex match across power_levels.users (cross-domain admins).
+  try {
     const localPart = extractLocalPart(myUserId);
     if (localPart) {
       const fuzzy = getPowerLevelByHexId(room, localPart);
       if (fuzzy !== 0) return fuzzy;
     }
-    // SDK said 0 and fuzzy found 0 — that's the actual answer.
-    if (member && typeof member.powerLevel === "number") return member.powerLevel;
   } catch {
     /* fall through */
   }
-  // Stage 3: read users_default as last resort (no member, no fuzzy match).
+  // Stage 3: implicit creator. Per Matrix spec, creator has PL 100 when
+  // power_levels.users does not list them — including the empty-map case
+  // we observed in production for some legacy and even some new groups.
+  try {
+    const creator = getRoomCreator(room);
+    if (sameUserByHexLocal(creator, myUserId)) return 100;
+  } catch {
+    /* fall through */
+  }
+  // Stage 4: SDK had the member with explicit 0 → respect that.
+  if (sdkLevel !== null) return sdkLevel;
+  // Stage 5: read users_default as last resort.
   const pl = readPowerLevelsContent(room);
   return pl?.usersDefault ?? 0;
 }
@@ -167,34 +234,46 @@ export function canSendStateEvent(
 
 /**
  * Read another room member's power level. Mirrors `getMyPowerLevel`'s
- * three-stage resolution so admin badges render correctly for cross-domain
- * legacy admins (see `getMyPowerLevel` for the rationale).
+ * four-stage resolution (SDK → fuzzy hex → implicit creator → 0) so admin
+ * badges render correctly for cross-domain legacy admins and creators of
+ * groups whose `m.room.power_levels.users` ended up empty.
  */
 export function getMemberPowerLevel(
   room: Record<string, unknown> | null | undefined,
   matrixUserId: string,
 ): number {
   if (!room || !matrixUserId) return 0;
-  // Stage 1: SDK direct. Use this when it returns elevated PL — the SDK is
-  //          authoritative for current-domain members.
+  // Stage 1: SDK direct.
+  let sdkLevel: number | null = null;
   try {
     const getMember = (room as { getMember?: (id: string) => { powerLevel?: number } | null }).getMember;
     const member = typeof getMember === "function" ? getMember.call(room, matrixUserId) : null;
-    if (member && typeof member.powerLevel === "number" && member.powerLevel !== 0) {
-      return member.powerLevel;
+    if (member && typeof member.powerLevel === "number") {
+      sdkLevel = member.powerLevel;
+      if (sdkLevel !== 0) return sdkLevel;
     }
-    // Stage 2: SDK gave default-level — try fuzzy hex match in case the
-    //          member's elevated PL is stored under a foreign-domain key.
+  } catch {
+    /* fall through */
+  }
+  // Stage 2: fuzzy hex match (cross-domain admins).
+  try {
     const localPart = extractLocalPart(matrixUserId);
     if (localPart) {
       const fuzzy = getPowerLevelByHexId(room, localPart);
       if (fuzzy !== 0) return fuzzy;
     }
-    if (member && typeof member.powerLevel === "number") return member.powerLevel;
   } catch {
     /* fall through */
   }
-  return 0;
+  // Stage 3: implicit creator (empty power_levels case).
+  try {
+    const creator = getRoomCreator(room);
+    if (sameUserByHexLocal(creator, matrixUserId)) return 100;
+  } catch {
+    /* fall through */
+  }
+  // Stage 4: SDK explicit 0 if we saw it; otherwise 0 as default.
+  return sdkLevel ?? 0;
 }
 
 /**
