@@ -23,6 +23,7 @@ import ChatVirtualScroller from "@/shared/ui/ChatVirtualScroller.vue";
 import { useI18n } from "@/shared/lib/i18n";
 import { useUnreadBanner } from "../model/use-unread-banner";
 import { useReadTracker } from "../model/use-read-tracker";
+import { decideFabAction, shouldAutoDismissBanner } from "../model/fab-decision";
 import UnreadBanner from "./UnreadBanner.vue";
 
 const chatStore = useChatStore();
@@ -205,7 +206,12 @@ const handleEmojiSelect = (emoji: string) => {
 const lastReactionEmoji = ref<string | null>(null);
 
 const listRef = ref<HTMLElement>();
-const scrollerRef = ref<{ scrollToBottom: () => void; scrollToIndex: (idx: number, opts?: { align?: "start" | "center" | "end" }) => void; getContainerEl: () => HTMLElement | null }>();
+const scrollerRef = ref<{
+  scrollToBottom: () => void;
+  scrollToIndex: (idx: number, opts?: { align?: "start" | "center" | "end" }) => void;
+  getContainerEl: () => HTMLElement | null;
+  getVisibleRange?: () => { start: number; end: number } | null;
+}>();
 const isNearBottom = ref(true);
 const showScrollFab = ref(false);
 const loading = ref(false);
@@ -216,6 +222,13 @@ const refreshingStaleCache = ref(false); // true when showing stale cached messa
 const loadEverAttempted = ref(false); // true only after at least one load cycle ran for the current room
 const hasMore = ref(true);
 const newMessageCount = ref(0);
+/** Timestamp (performance.now) of the last room open. Used to gate auto-dismiss
+ *  against the room-switch race in shouldAutoDismissBanner. Only stamped on
+ *  *new* rooms — same-room re-invocations of the watcher (e.g. during store
+ *  init) reuse the prior timestamp so the grace window stays anchored to the
+ *  user-visible open. */
+let roomOpenedAt = 0;
+let lastRoomIdSeen: string | null = null;
 
 const fabBadgeCount = computed(() => {
   const c = hasBanner() ? bannerState.value.frozenUnreadCount : newMessageCount.value;
@@ -321,6 +334,10 @@ const virtualItems = computed<VirtualItem[]>(() => {
  *  History loading appends at the chronological end = far end here = visual TOP = no scroll jump. */
 const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().reverse());
 
+/** Index of the unread banner in `reversedItems`, or -1 when not present.
+ *  Cached so per-frame scroll handlers don't repeat the linear scan. */
+const bannerIdx = computed(() => reversedItems.value.findIndex(item => item.type === "unread-banner"));
+
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
   return scrollerRef.value?.getContainerEl?.() ?? listRef.value ?? null;
@@ -380,6 +397,21 @@ const handleReturnToLatest = async () => {
   scrollToBottom();
 };
 
+/** Auto-dismiss the unread banner once the user scrolls past it downward.
+ *  Sanity-guarded by msSinceRoomOpen >= 200ms to avoid races during room switch. */
+const maybeAutoDismissBanner = () => {
+  if (!hasBanner()) return;
+  const visibleRange = scrollerRef.value?.getVisibleRange?.() ?? null;
+  if (shouldAutoDismissBanner({
+    hasBanner: true,
+    bannerIdx: bannerIdx.value,
+    visibleRange,
+    msSinceRoomOpen: performance.now() - roomOpenedAt,
+  })) {
+    forceDismiss();
+  }
+};
+
 /** Check if user is scrolled near the bottom.
  *  In column-reverse: scrollTop=0 means at the bottom (newest messages).
  *  Chrome returns negative scrollTop for column-reverse — use abs. */
@@ -425,19 +457,35 @@ const resetStableTimer = (onSettled?: () => void) => {
   }, 300);
 };
 
-/** Two-step FAB: first press → first unread, second press → bottom */
+/**
+ * Telegram-like FAB: position-aware target.
+ *  - User above (or at) banner → scroll to banner.
+ *  - User below banner (already passed it) → scroll to bottom + force-dismiss banner.
+ *  - No banner: detached → returnToLatest, otherwise → scroll to bottom.
+ */
 const handleFabClick = () => {
-  if (hasBanner()) {
-    const bannerIdx = reversedItems.value.findIndex(item => item.type === "unread-banner");
-    if (bannerIdx >= 0) {
-      scrollerRef.value?.scrollToIndex(bannerIdx, { align: "start" });
+  const visibleRange = scrollerRef.value?.getVisibleRange?.() ?? null;
+  const action = decideFabAction({
+    hasBanner: hasBanner(),
+    bannerIdx: bannerIdx.value,
+    visibleRange,
+    isDetachedFromLatest: chatStore.isDetachedFromLatest,
+  });
+
+  switch (action.kind) {
+    case "scroll-to-banner":
+      scrollerRef.value?.scrollToIndex(action.bannerIdx, { align: "start" });
       return;
-    }
-  }
-  if (chatStore.isDetachedFromLatest) {
-    handleReturnToLatest();
-  } else {
-    scrollToBottom(true);
+    case "scroll-to-bottom-and-dismiss":
+      scrollToBottom(true);
+      forceDismiss();
+      return;
+    case "return-to-latest":
+      handleReturnToLatest();
+      return;
+    case "scroll-to-bottom":
+      scrollToBottom(true);
+      return;
   }
 };
 
@@ -495,6 +543,10 @@ watch(
       pendingSettledTimeout = null;
     }
     forceDismiss();
+    if (roomId !== lastRoomIdSeen) {
+      roomOpenedAt = performance.now();
+      lastRoomIdSeen = roomId;
+    }
     readTracker.stopTracking();
 
     // ═══ PHASE 2: DETERMINE ANCHOR ═══
@@ -946,6 +998,7 @@ const onScrollThrottled = () => {
   if (switching.value) return;
   checkScroll();
   updateFloatingDate();
+  maybeAutoDismissBanner();
 
   const container = getScrollContainer();
   if (!container) return;
