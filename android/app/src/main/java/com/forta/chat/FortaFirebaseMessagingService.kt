@@ -13,6 +13,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.forta.chat.plugins.calls.CallConnectionService
 import com.forta.chat.plugins.calls.IncomingCallActivity
+import com.forta.chat.plugins.calls.InviteThrottleGuard
+import com.forta.chat.plugins.calls.InviteThrottleTracker
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -137,6 +139,45 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 forwardToJs(data)
                 return
             }
+
+            // Session 25 / S4: stale-invite filter. When FCM degrades
+            // (foreground service abuse marks, Doze, rate-limit), the
+            // homeserver retains the invite and the FCM service flushes
+            // it minutes later — we receive the push for a call the
+            // caller already cancelled. Without this guard, the user is
+            // woken up by the full-screen IncomingCallActivity for a
+            // call that no longer exists; once they hit Accept the SDK
+            // immediately fires Hangup (its own lifetime timer fires)
+            // and the call collapses.
+            //
+            // `RemoteMessage.sentTime` is the homeserver's send time —
+            // a reasonable proxy for `event.origin_server_ts` for the
+            // FCM-delivered invite. The lifetime override comes from
+            // `data["lifetime"]` if the homeserver populates it; we
+            // fall back to the SDK's 60s default otherwise.
+            val sentTime = message.sentTime
+            val lifetimeMs = data["lifetime"]?.toLongOrNull()
+            val nowMs = System.currentTimeMillis()
+            val expired = InviteThrottleGuard.isExpired(sentTime, nowMs, lifetimeMs)
+            inviteTracker.append(
+                InviteThrottleTracker.Record(
+                    receivedAtMs = nowMs,
+                    sentAtMs = sentTime,
+                    expired = expired,
+                    callId = callId.takeIf { it.isNotEmpty() },
+                )
+            )
+            if (expired) {
+                Log.w(TAG, "Stale call invite suppressed (S4): callId=$callId sentTime=$sentTime " +
+                    "ageMs=${nowMs - sentTime} lifetime=$lifetimeMs")
+                // Forward to JS for telemetry/diagnostics but do NOT
+                // launch the ringer. JS sees the push and the app
+                // re-syncs Matrix — if the invite is genuinely live the
+                // SDK's normal flow will deliver it via /sync.
+                forwardToJs(data)
+                return
+            }
+
             lastRingingCallId = callId.takeIf { it.isNotEmpty() }
 
             // Cancel any existing message notification for this room
@@ -321,6 +362,15 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
          * select_answer for the same id (or the process dies).
          */
         private var lastRingingCallId: String? = null
+
+        /**
+         * Session 25 / S3-S4: rolling tracker for the last 5 FCM call
+         * invites. Exposed via [com.forta.chat.plugins.calls.CallPlugin.getInviteThrottleSnapshot]
+         * so the JS bug-reporter can attach the recent delivery-latency
+         * pattern to its envelope. Lets us split S1 (accept-crash) from
+         * S3 (FCM throttle) when triaging user reports.
+         */
+        val inviteTracker: InviteThrottleTracker = InviteThrottleTracker(maxRecords = 5)
 
         fun cacheRoomName(context: Context, roomId: String, name: String) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

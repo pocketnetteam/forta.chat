@@ -1,6 +1,7 @@
 import { registerPlugin } from '@capacitor/core';
 import { isNative } from '@/shared/lib/platform';
 import { NativeWebRTC } from '@/shared/lib/native-webrtc/native-webrtc-bridge';
+import { isInviteEventExpired } from './invite-ttl';
 
 /**
  * Shape returned by `NativeCall.probeAudioAvailability`. See
@@ -16,6 +17,27 @@ export interface AudioProbeResult {
    * conflicting use is detected, or the platform cannot enumerate it.
    */
   conflicting?: string[];
+}
+
+/**
+ * Single FCM `m.call.invite` record for the JS bug-reporter. See
+ * `InviteThrottleTracker.kt` for the data source.
+ */
+export interface InviteThrottleRecord {
+  /** When the FCM service handled the push (System.currentTimeMillis()). */
+  receivedAtMs: number;
+  /** RemoteMessage.sentTime — homeserver send time. */
+  sentAtMs: number;
+  /** Convenience field for envelope readers. */
+  deliveryLatencyMs: number;
+  /** Was the invite already past its lifetime when received? */
+  expired: boolean;
+  /** `call_id` from the FCM payload, "" when missing. */
+  callId: string;
+}
+
+export interface InviteThrottleSnapshot {
+  records: InviteThrottleRecord[];
 }
 
 interface NativeCallNativePlugin {
@@ -79,6 +101,11 @@ interface NativeCallNativePlugin {
     isSpeakerOn: boolean;
     isBtScoOn: boolean;
   }>;
+  /**
+   * Session 25 / S3-S4: snapshot of the last N FCM `m.call.invite`
+   * records. Surfaced by {@link NativeCallBridge.getInviteThrottleSnapshot}.
+   */
+  getInviteThrottleSnapshot(): Promise<InviteThrottleSnapshot>;
   addListener(event: 'callAnswered', cb: (data: { callId: string; roomId?: string }) => void): Promise<{ remove: () => void }>;
   addListener(event: 'callDeclined', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
   addListener(event: 'callEnded', cb: (data: { callId: string }) => void): Promise<{ remove: () => void }>;
@@ -419,7 +446,7 @@ class NativeCallBridge {
     try {
       const { getMatrixClientService } = await import('@/entities/matrix');
       const client = getMatrixClientService().client as
-        | { callEventHandler?: { onRoomTimeline: (e: unknown) => void; onSync: () => void }; getRooms?: () => Array<{ getLiveTimeline?: () => { getEvents?: () => Array<{ getType: () => string; getContent: () => Record<string, unknown> }> } }> }
+        | { callEventHandler?: { onRoomTimeline: (e: unknown) => void; onSync: () => void }; getRooms?: () => Array<{ getLiveTimeline?: () => { getEvents?: () => Array<{ getType: () => string; getTs?: () => number; getContent: () => Record<string, unknown> }> } }> }
         | undefined;
       if (!client?.callEventHandler || !client.getRooms) return false;
 
@@ -430,6 +457,27 @@ class NativeCallBridge {
           if (type !== 'm.call.invite' && !type.startsWith('org.matrix.call.')) continue;
           const content = event.getContent();
           if ((content as { call_id?: string }).call_id !== callId) continue;
+
+          // Session 25 / S4: stale-invite filter. The SDK's own
+          // initWithInvite arms a timer that fires Hangup the moment the
+          // invite age exceeds `content.lifetime`, but feeding the same
+          // event into onRoomTimeline still triggers a one-tick UI flash
+          // (Vue ringer template renders, then collapses) AND a native
+          // CallActivity launch on Android. On the cold-start-from-push
+          // path this manifests as the user opening the app to find a
+          // brief "ringing" surface for a call the caller cancelled
+          // minutes ago. Skip expired invites here so the recovery path
+          // does not republish them into the active surface.
+          const originServerTs = typeof event.getTs === 'function' ? event.getTs() : 0;
+          const lifetime = (content as { lifetime?: number | null }).lifetime ?? null;
+          if (isInviteEventExpired({ originServerTs, lifetime })) {
+            console.warn(
+              '[NativeCallBridge] feedMissedInviteToSDK: skipping expired invite',
+              { callId, originServerTs, lifetime },
+            );
+            return false;
+          }
+
           // Push into the handler's buffer and force it to process.
           client.callEventHandler.onRoomTimeline(event);
           client.callEventHandler.onSync();
@@ -606,6 +654,24 @@ class NativeCallBridge {
     } catch (e) {
       console.warn('[NativeCallBridge] getAudioStatus unavailable:', e);
       return { mode: 'MODE_NORMAL', isSpeakerOn: false, isBtScoOn: false };
+    }
+  }
+
+  /**
+   * Session 25 / S3-S4: pull the last N FCM `m.call.invite` records for
+   * the bug-reporter envelope. Returns an empty list on non-native
+   * platforms or when the native plugin is older than this build (the
+   * Capacitor bridge surfaces a "method not registered" error there).
+   */
+  async getInviteThrottleSnapshot(): Promise<InviteThrottleSnapshot> {
+    if (!isNative) return { records: [] };
+    try {
+      const res = await NativeCall.getInviteThrottleSnapshot();
+      const records = Array.isArray(res?.records) ? res.records : [];
+      return { records };
+    } catch (e) {
+      console.warn('[NativeCallBridge] getInviteThrottleSnapshot unavailable:', e);
+      return { records: [] };
     }
   }
 }
