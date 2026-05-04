@@ -3675,15 +3675,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Toggle room between public/private join rules (admin only).
    *
-   *  The up-front PL check now delegates to matrix-js-sdk's
+   *  The up-front PL check delegates to matrix-js-sdk's
    *  `RoomState.maySendStateEvent` (via `canSendStateEvent`) instead of
    *  rolling our own `users[myUserId] >= requiredPl` math. The self-rolled
    *  variant silently failed in legacy bastyon-chat groups whose
    *  `power_levels.users` map was keyed by a different Matrix domain —
    *  admins saw the toggle button but every click was a no-op.
    *
-   *  When enabling public we also set history_visibility=world_readable
-   *  (required for newly-joined users to see prior messages). */
+   *  Public group keeps default `history_visibility=shared`. The marker
+   *  `world_readable` is reserved for broadcast/stream rooms (Bastyon
+   *  channels) and the sidebar filter `isStreamHistoryVisibility` excludes
+   *  such rooms — writing it for a regular public group would hide it from
+   *  the chat list. Non-joined preview before join is handled by
+   *  `JoinRoomPreviewModal` (Session 21) which reads name/topic/member
+   *  count via the Matrix preview API. */
   const setRoomPublic = async (roomId: string, isPublic: boolean): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
@@ -3699,18 +3704,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         join_rule: isPublic ? "public" : "invite",
       }, "");
 
-      // Public rooms need world_readable history so users can browse the log
-      // before joining. Skip the write if it's already set — avoids a
-      // redundant state event on every toggle.
-      if (isPublic) {
+      if (!isPublic) {
+        // Toggling back to private: revert any legacy `world_readable` to
+        // `shared` so previously-affected public groups (created between
+        // PR #71 and this fix) become visible in the sidebar again.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const hvEvent = (matrixRoom as any)?.currentState?.getStateEvents?.("m.room.history_visibility", "");
         const currentHv =
           hvEvent?.getContent?.()?.history_visibility ??
           hvEvent?.event?.content?.history_visibility;
-        if (currentHv !== "world_readable") {
+        if (currentHv === "world_readable") {
           await matrixService.sendStateEvent(roomId, "m.room.history_visibility", {
-            history_visibility: "world_readable",
+            history_visibility: "shared",
           }, "");
         }
       }
