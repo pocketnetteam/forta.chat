@@ -102,9 +102,29 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   const isGroup = !kit.isTetatetChat(room);
   const membership = (room.selfMembership ?? room.getMyMembership?.()) as "join" | "invite" | undefined;
 
-  // Get members
+  // Get members. `getRoomMembers` returns ALL membership states (join,
+  // invite, leave, ban) — that's intentional for tetatet-detection
+  // (`isTetatetChat`), but the UI needs joined and invited surfaced
+  // separately:
+  //   - "join"   → `members` (default render: kick/admin actions visible)
+  //   - "invite" → `invitedMembers` (rendered with "Invited" badge,
+  //     same actions but a refresh won't resurrect a kicked invitee
+  //     because the optimistic mutation now hits both arrays)
+  //   - "leave" / "ban" → excluded from both (banned tracked separately
+  //     via getBannedMembers)
+  // Without the split, kick of an invited member appeared to "do nothing"
+  // because the next `matrixRoomToChatRoom` pass would re-add him from
+  // his still-`invite` membership state. See Session 29 research.
   const members = kit.getRoomMembers(room);
-  const memberIds = members.map((m: Record<string, unknown>) => getmatrixid(m.userId as string));
+  const memberIds: string[] = [];
+  const invitedMemberIds: string[] = [];
+  for (const m of members) {
+    const id = getmatrixid(m.userId as string);
+    const membership = (m.membership as string | undefined) ?? "leave";
+    if (membership === "join") memberIds.push(id);
+    else if (membership === "invite") invitedMemberIds.push(id);
+    // leave / ban — drop
+  }
 
   // Unread notification count
   const unreadCount = (room.getUnreadNotificationCount?.("total") as number) ?? 0;
@@ -331,6 +351,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
     lastMessage,
     unreadCount,
     members: memberIds,
+    invitedMembers: invitedMemberIds,
     isGroup,
     updatedAt: lastTs || (() => {
       // For invites, try to extract origin_server_ts from the invite event itself
@@ -1899,11 +1920,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const prevNameMap = new Map<string, string>();
     const prevLastMessageMap = new Map<string, Message | undefined>();
     const prevMembersMap = new Map<string, string[]>();
+    const prevInvitedMembersMap = new Map<string, string[]>();
     const prevAvatarMap = new Map<string, string>();
     for (const r of rooms.value) {
       prevNameMap.set(r.id, r.name);
       prevLastMessageMap.set(r.id, r.lastMessage);
       prevMembersMap.set(r.id, r.members);
+      if (r.invitedMembers && r.invitedMembers.length > 0) {
+        prevInvitedMembersMap.set(r.id, r.invitedMembers);
+      }
       if (r.avatar) prevAvatarMap.set(r.id, r.avatar);
     }
     const prevActiveRoom = activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
@@ -1926,6 +1951,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           room.members = prevMembers;
           const prevAvatar = prevAvatarMap.get(room.id);
           if (prevAvatar) room.avatar = prevAvatar;
+        }
+        // Same lazy-load shrink protection for pending invitations.
+        const prevInvited = prevInvitedMembersMap.get(room.id);
+        const newInvitedLen = room.invitedMembers?.length ?? 0;
+        if (prevInvited && prevInvited.length > newInvitedLen) {
+          room.invitedMembers = prevInvited;
         }
         newRooms.push(room);
       }
@@ -3378,10 +3409,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await resetPowerLevel(roomId, targetMatrixId);
       await matrixService.kick(roomId, targetMatrixId);
 
-      // Optimistic: remove member from local room data immediately
+      // Optimistic: remove member from BOTH joined and invited lists.
+      // Matrix `kick` API works for invited members too — server-side
+      // it withdraws the invite. Without invitedMembers cleanup the
+      // user reappeared after the next `matrixRoomToChatRoom` pass
+      // (his membership state was still `invite` if `kick` raced).
       const room = getRoomById(roomId);
       if (room) {
         room.members = room.members.filter(m => m !== hexId);
+        if (room.invitedMembers) {
+          room.invitedMembers = room.invitedMembers.filter(m => m !== hexId);
+        }
       }
 
       return true;
@@ -3490,10 +3528,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Security: reset power level before ban
       await resetPowerLevel(roomId, targetMatrixId);
       await matrixService.ban(roomId, targetMatrixId);
-      // Optimistic: remove from members
+      // Optimistic: remove from both joined and invited lists.
+      // Matrix `ban` works for invited users too (server treats it as
+      // disinvite + ban), so we must clear both arrays — otherwise the
+      // banned user lingers as "invited" until the next full refresh.
       const room = getRoomById(roomId);
       if (room) {
         room.members = room.members.filter(m => m !== hexId);
+        if (room.invitedMembers) {
+          room.invitedMembers = room.invitedMembers.filter(m => m !== hexId);
+        }
       }
       return true;
     } catch (e) {
@@ -3569,10 +3613,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       await matrixService.invite(roomId, targetMatrixId);
 
-      // Optimistic: add member to local room data immediately
+      // Optimistic: stage the invitee under invitedMembers (NOT members).
+      // They only land in `members` once they accept and the SDK reports
+      // their membership as "join". Surfacing them as joined immediately
+      // (the old behaviour) was the root of the "phantom member" bug —
+      // user appeared in the list, could be assigned admin / kicked, but
+      // operations seemed to silently no-op until the next refresh.
       const room = getRoomById(roomId);
-      if (room && !room.members.includes(hexId)) {
-        room.members = [...room.members, hexId];
+      if (room) {
+        const alreadyJoined = room.members.includes(hexId);
+        const existing = room.invitedMembers ?? [];
+        if (!alreadyJoined && !existing.includes(hexId)) {
+          room.invitedMembers = [...existing, hexId];
+        }
       }
 
       return true;

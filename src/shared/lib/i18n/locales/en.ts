@@ -392,6 +392,7 @@ export const en = {
   "info.unban": "Unban",
   "info.banned": "Banned ({count})",
   "info.muted": "muted",
+  "info.invited": "Invited",
   "info.editDescription": "Edit description",
   "info.addDescription": "Add description",
   "info.changePhoto": "Change photo",

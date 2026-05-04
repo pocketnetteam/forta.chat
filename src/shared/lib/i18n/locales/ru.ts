@@ -394,6 +394,7 @@ export const ru: Record<TranslationKey, string> = {
   "info.unban": "Разблокировать",
   "info.banned": "Заблокированные ({count})",
   "info.muted": "заглушён",
+  "info.invited": "Приглашён",
   "info.editDescription": "Изменить описание",
   "info.addDescription": "Добавить описание",
   "info.changePhoto": "Изменить фото",

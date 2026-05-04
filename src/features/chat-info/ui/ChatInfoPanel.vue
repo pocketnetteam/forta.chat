@@ -462,10 +462,16 @@ const handleMoreAction = (action: string) => {
 };
 
 // ── Peer info (1:1 DM) ──
+// In a DM the peer can be either joined or still pending invitation. Search
+// across both lists so we can show the peer's profile even before they accept.
 const peerAddress = computed(() => {
   if (!room.value || room.value.isGroup) return null;
   const myHex = myHexId.value;
-  const other = room.value.members.find(m => m !== myHex);
+  const candidates = [
+    ...room.value.members,
+    ...(room.value.invitedMembers ?? []),
+  ];
+  const other = candidates.find(m => m !== myHex);
   return other ? hexDecode(other) : null;
 });
 
@@ -843,11 +849,12 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 </div>
               </div>
 
-              <!-- Member list -->
+              <!-- Member list — joined first, invited (pending) below with badge -->
               <div class="flex flex-col gap-1">
+                <!-- Joined members -->
                 <div
                   v-for="member in room.members"
-                  :key="member"
+                  :key="`join-${member}`"
                   class="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors"
                   :class="isAdmin && member !== myHexId ? 'cursor-pointer hover:bg-neutral-grad-0' : ''"
                   @click="(e: MouseEvent) => openMemberMenu(e, member)"
@@ -867,6 +874,27 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                     class="shrink-0 rounded bg-color-bg-ac/15 px-1.5 py-0.5 text-[10px] font-medium text-color-bg-ac"
                   >
                     {{ t("info.admin") }}
+                  </span>
+                </div>
+
+                <!-- Invited (pending) members. Same menu — Matrix `kick` API
+                     is server-side disinvite for invitees, so admin can
+                     cancel an invitation through the existing flow. -->
+                <div
+                  v-for="member in (room.invitedMembers ?? [])"
+                  :key="`invite-${member}`"
+                  class="flex items-center gap-3 rounded-lg px-2 py-2 opacity-60 transition-colors"
+                  :class="isAdmin ? 'cursor-pointer hover:bg-neutral-grad-0' : ''"
+                  @click="(e: MouseEvent) => openMemberMenu(e, member)"
+                >
+                  <UserAvatar :address="hexDecode(member)" size="sm" />
+                  <span class="min-w-0 flex-1 truncate text-sm text-text-color">
+                    {{ chatStore.getDisplayName(member) }}
+                  </span>
+                  <span
+                    class="shrink-0 rounded bg-yellow-500/15 px-1.5 py-0.5 text-[10px] font-medium text-yellow-600"
+                  >
+                    {{ t("info.invited") }}
                   </span>
                 </div>
               </div>

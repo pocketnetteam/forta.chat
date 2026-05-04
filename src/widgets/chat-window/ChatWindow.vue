@@ -141,11 +141,15 @@ const isAdmin = computed(() => {
 
 const { resolve: resolveRoomName } = useResolvedRoomName();
 
-/** Trigger lazy-loading of missing user profiles for active room members */
+/** Trigger lazy-loading of missing user profiles for active room members.
+ *  Walks both joined and invited so the DM header / chat title can resolve a
+ *  pending invitee's name before they accept (otherwise getDisplayName would
+ *  fall back to the raw hex id). */
 function _ensureActiveMembers(room: NonNullable<typeof chatStore.activeRoom>): void {
   const myHex = authStore.address ? hexEncode(authStore.address) : "";
-  const otherMembers = room.members.filter(m => m !== myHex);
-  for (const hexId of otherMembers) {
+  const allHexIds = [...room.members, ...(room.invitedMembers ?? [])];
+  for (const hexId of allHexIds) {
+    if (hexId === myHex) continue;
     const addr = hexDecode(hexId);
     if (/^[A-Za-z0-9]+$/.test(addr)) userStore.loadUserIfMissing(addr);
   }
@@ -219,12 +223,15 @@ const openUserProfile = (address: string) => {
 provide("openUserProfile", openUserProfile);
 
 /** Get the other member's Pocketnet address in a 1:1 chat.
- *  room.members stores hex-encoded addresses; we compare in hex then decode to Base58. */
+ *  room.members stores hex-encoded addresses (joined only); invitedMembers
+ *  carries pending invitations. Look in both so the chat header can show
+ *  the peer name even before they accept the invite. */
 const otherMemberAddress = computed(() => {
   const room = chatStore.activeRoom;
   if (!room || room.isGroup) return "";
   const myHex = authStore.address ? hexEncode(authStore.address) : "";
-  const hexAddr = room.members.find((m) => m !== myHex) ?? "";
+  const candidates = [...room.members, ...(room.invitedMembers ?? [])];
+  const hexAddr = candidates.find((m) => m !== myHex) ?? "";
   return hexAddr ? hexDecode(hexAddr) : "";
 });
 

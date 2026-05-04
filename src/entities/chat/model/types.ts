@@ -3,7 +3,13 @@ export interface ChatRoom {
   name: string;
   lastMessage?: Message;
   unreadCount: number;
+  /** Joined members only — UI default rendering (kick/admin actions visible).
+   *  Filtered from `getRoomMembers` by `membership === "join"` in `matrixRoomToChatRoom`. */
   members: string[];
+  /** Pending invitations — rendered separately with "Invited" badge.
+   *  Optional for backwards-compat with cached/Dexie ChatRoom records that
+   *  predate Session 29. Treat absent as empty array at the read site. */
+  invitedMembers?: string[];
   avatar?: string;
   isGroup: boolean;
   updatedAt: number;
