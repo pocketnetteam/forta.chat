@@ -8,6 +8,7 @@ import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
+import { preservePendingRooms } from "../lib/preserve-pending-rooms";
 import {
   readJoinRule,
   getMyPowerLevel,
@@ -1943,6 +1944,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (prevActiveRoom && !newRooms.some(r => r.id === prevActiveRoom.id)) {
         newRooms.push(prevActiveRoom);
       }
+      // Preserve recently-added rooms not yet in the SDK snapshot — covers
+      // the race between local createGroup/addRoom and Matrix /sync arrival.
+      // Without this, a freshly created group disappears from the sidebar
+      // as soon as the user switches active chat (because prevActiveRoom is
+      // no longer the new room and the SDK hasn't caught up).
+      const newRoomIds = new Set(newRooms.map(r => r.id));
+      const preserved = preservePendingRooms({
+        existingRooms: rooms.value,
+        incomingRoomIds: newRoomIds,
+        nowMs: Date.now(),
+      });
+      if (preserved.length > 0) newRooms.push(...preserved);
       rooms.value = newRooms;
       rebuildRoomsMap();
     }
