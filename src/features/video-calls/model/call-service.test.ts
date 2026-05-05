@@ -205,10 +205,24 @@ vi.mock('@/entities/matrix', () => ({
   })),
 }));
 
+// Hoisted user-store mock so individual tests can stage cold-cache and
+// late-arriving-profile scenarios for resolvePeerInfo. Default behaviour
+// matches the pre-Session-30 contract: profile is already cached, no
+// network round-trip needed. Tests that exercise the timeout/late-update
+// path call `mockGetUser.mockReturnValueOnce(undefined)` to force a miss
+// and then resolve `mockLoadUsersBatch` to simulate the network reply.
+const mockLoadUsersBatch = vi.fn().mockResolvedValue(undefined);
+// Explicit return-type union so individual tests can return undefined to
+// simulate a cold cache miss without TS rejecting the override. The real
+// userStore.getUser signature is also nullable.
+const mockGetUser = vi.fn<(addr: string) => { name: string } | undefined>(
+  () => ({ name: 'Peer' }),
+);
 vi.mock('@/entities/user', () => ({
   useUserStore: () => ({
     loadUserIfMissing: vi.fn(),
-    getUser: vi.fn(() => ({ name: 'Peer' })),
+    loadUsersBatch: mockLoadUsersBatch,
+    getUser: mockGetUser,
   }),
 }));
 
@@ -242,6 +256,14 @@ describe('call-service permission flow', () => {
     // Default: permissions resolve successfully. Individual tests override
     // with mockRejectedValueOnce(new MockPermissionDeniedError(...)).
     mockEnsureCallPermissions.mockResolvedValue(undefined);
+    // Reset user-store stubs to the default cached-profile shape so
+    // tests that don't care about the resolvePeerInfo path don't have
+    // to re-stage the mocks. Tests that exercise cold cache override
+    // these via mockReturnValueOnce within the test body.
+    mockGetUser.mockReset();
+    mockGetUser.mockReturnValue({ name: 'Peer' });
+    mockLoadUsersBatch.mockReset();
+    mockLoadUsersBatch.mockResolvedValue(undefined);
     // Clear finalize-call's per-callId idempotency map between tests —
     // many tests reuse the same callId ('test-call-id', 'incoming-call-id'),
     // and a leftover finalized entry would short-circuit the cleanup
@@ -820,6 +842,115 @@ describe('call-service permission flow', () => {
         (call: unknown[]) => call[0] === 'onAudioError'
       );
       expect(audioErrorCall).toBeTruthy();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Session 30: resolvePeerInfo / refreshPeerNameAsync — close #645.
+  //
+  // Pre-Session-30 the peer's profile was loaded fire-and-forget and the
+  // result was read on the next line, so cold-cache calls fell through to
+  // the raw blockchain address — rendered as "Unknown" by the native
+  // ringer and as a long opaque string in Vue surfaces. We now race a real
+  // loadUsersBatch against a 500ms timer for the initial setActiveCall and
+  // patch the name in via a follow-up update once the network reply lands.
+  // -------------------------------------------------------------------------
+  describe('peer profile resolution (#645)', () => {
+    it('uses the cached profile name when the user is already in the store', async () => {
+      mockGetUser.mockReturnValue({ name: 'Cached Peer' });
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      // Hot cache: initial setActiveCall must already carry the real name,
+      // not the address fallback. (loadUsersBatch may still fire from the
+      // background refreshPeerNameAsync — that path is exercised by the
+      // late-arriving-profile test below.)
+      const initialCall = mockSetActiveCall.mock.calls.find(
+        ([info]) => (info as { peerName?: string }).peerName === 'Cached Peer',
+      );
+      expect(initialCall).toBeTruthy();
+    });
+
+    it('waits for loadUsersBatch and uses the fetched name when cache is cold', async () => {
+      // First read returns no cached profile, second read (after the await
+      // inside resolvePeerInfo) finds the freshly-fetched profile. This
+      // mirrors what the real userStore does: the batch updates the same
+      // ref the getter reads from.
+      mockGetUser
+        .mockReturnValueOnce(undefined)
+        .mockReturnValue({ name: 'Fetched Peer' });
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      expect(mockLoadUsersBatch).toHaveBeenCalledWith(['@peer:matrix.org']);
+      const setCall = mockSetActiveCall.mock.calls.find(
+        ([info]) => (info as { peerName?: string }).peerName === 'Fetched Peer',
+      );
+      expect(setCall).toBeTruthy();
+    });
+
+    it('falls back to the address when loadUsersBatch resolves without a name (network failure path)', async () => {
+      // Cold cache, batch resolves, but the profile still has no name —
+      // userStore returns {name: ''} after a failed/empty backend reply.
+      mockGetUser.mockReturnValue({ name: '' });
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      // peerName falls back to peerAddress (= matrixId in this mock).
+      const setCall = mockSetActiveCall.mock.calls.find(
+        ([info]) => (info as { peerName?: string }).peerName === '@peer:matrix.org',
+      );
+      expect(setCall).toBeTruthy();
+    });
+
+    it('patches activeCall.peerName via setActiveCall when a late profile arrives', async () => {
+      // Initial resolvePeerInfo: cold cache, batch resolves with empty
+      // name → setActiveCall fires once with the address fallback. The
+      // background refresh runs after that, and on its read we return a
+      // populated profile — that is the late-arrival signal that should
+      // patch peerName in.
+      mockGetUser
+        .mockReturnValueOnce(undefined) // resolvePeerInfo: cache check
+        .mockReturnValueOnce({ name: '' }) // resolvePeerInfo: post-await read (still cold)
+        .mockReturnValue({ name: 'Late Peer' }); // refreshPeerNameAsync read
+
+      // Wire the mock store so setActiveCall actually mutates activeCall.
+      // Without this, the refreshPeerNameAsync guard
+      // (`active.callId !== callId`) would never see the activeCall that
+      // startCall just wrote — and the test would either fail or pass
+      // for the wrong reason (a stale hand-set fixture). Doing the wire
+      // here also makes the call-sequence assertion below meaningful:
+      // we're verifying ordered writes against the real store contract.
+      mockSetActiveCall.mockImplementation((info: unknown) => {
+        mockCallStore.activeCall = info as Record<string, unknown>;
+      });
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      // Wait one microtask flush so the deferred refreshPeerNameAsync
+      // promise can settle (it does its store patching synchronously
+      // after the loadUsersBatch promise resolves).
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Sequence check: first setActiveCall is the initial activeCall
+      // with the address fallback; the second is the late-arriving
+      // patch with the resolved name. Asserting the order (rather than
+      // just .find) catches regressions where a future refactor accidentally
+      // sets the late name first or fires only one write.
+      expect(mockSetActiveCall.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(mockSetActiveCall.mock.calls[0][0]).toMatchObject({
+        peerName: '@peer:matrix.org',
+      });
+      const lastCall = mockSetActiveCall.mock.calls[mockSetActiveCall.mock.calls.length - 1][0];
+      expect(lastCall).toMatchObject({ peerName: 'Late Peer' });
     });
   });
 });

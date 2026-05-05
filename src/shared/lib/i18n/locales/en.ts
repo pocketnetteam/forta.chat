@@ -512,6 +512,7 @@ export const en = {
   "call.warning.noInboundAudio": "No incoming audio — the other party may have a microphone problem.",
   "call.warning.noOutboundAudio": "No outgoing audio — check your microphone.",
   "call.error.connectionLost": "Call connection lost.",
+  "call.error.legacyWebView": "Your device's browser engine is too old for stable calls. Update Android System WebView from the Play Store.",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",

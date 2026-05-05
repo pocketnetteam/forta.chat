@@ -7,10 +7,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
@@ -165,7 +167,36 @@ class CallForegroundService : Service() {
 
     private fun startForegroundWithNotification(status: String) {
         val notification = buildNotification(status)
-        startForeground(NOTIFICATION_ID, notification)
+        // Android 14+ (API 34) requires the foreground-service type bitmask
+        // at startForeground time. Without it the platform throws
+        // ForegroundServiceTypeException and the process crashes immediately
+        // when the user accepts a call (#640, #623, #624).
+        // We declare both microphone and phoneCall so the OS recognises the
+        // service as a real call surface AND a legitimate audio capturer —
+        // either flag alone is rejected on Pixel 6 Pro / Samsung A05 / etc.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL,
+                )
+            } catch (e: SecurityException) {
+                // RECORD_AUDIO permission revoked between accept and FGS
+                // start — fall back to the call-only type so the notification
+                // still appears and the user can hang up. AudioRouter will
+                // surface the missing-mic error through the JS bridge.
+                Log.e(TAG, "FGS_TYPE_MICROPHONE rejected, falling back to phoneCall-only", e)
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL,
+                )
+            }
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun updateNotification(status: String) {

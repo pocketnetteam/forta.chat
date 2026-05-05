@@ -514,6 +514,7 @@ export const ru: Record<TranslationKey, string> = {
   "call.warning.noInboundAudio": "Нет входящего звука — возможно, проблема с микрофоном собеседника.",
   "call.warning.noOutboundAudio": "Нет исходящего звука — проверьте микрофон.",
   "call.error.connectionLost": "Соединение со звонком потеряно.",
+  "call.error.legacyWebView": "Браузерный движок устройства слишком старый для стабильных звонков. Обновите «Android System WebView» в Play Store.",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",

@@ -116,9 +116,17 @@
             android:supportsPictureInPicture="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
+        <!--
+          Android 14+ (API 34) forces every foreground service that captures
+          audio to declare BOTH the FOREGROUND_SERVICE_MICROPHONE permission
+          AND a foregroundServiceType including "microphone" — without it
+          startForeground() throws SecurityException at accept time and the
+          process crashes (#640 / #623 / #624). We keep "phoneCall" so the
+          notification still shows the in-call CallStyle UI on API 31+.
+        -->
         <service
             android:name="com.forta.chat.plugins.calls.CallForegroundService"
-            android:foregroundServiceType="phoneCall"
+            android:foregroundServiceType="microphone|phoneCall"
             android:exported="false" />
 
         <service
@@ -139,6 +147,7 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />

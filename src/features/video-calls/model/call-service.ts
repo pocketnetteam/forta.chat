@@ -23,6 +23,29 @@ import {
 } from "@/shared/lib/native-calls";
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall } from "./finalize-call";
+import { isLegacyWebView, MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC } from "./webview-compatibility";
+
+/**
+ * One-shot guard so the legacy-WebView toast fires only once per process,
+ * not every time the user changes networks during a single call. Reset
+ * implicitly by a full app restart, which is correct: the user may have
+ * updated WebView in the meantime.
+ */
+let legacyWebViewToastShown = false;
+
+function maybeWarnLegacyWebView(): void {
+  if (legacyWebViewToastShown) return;
+  legacyWebViewToastShown = true;
+  try {
+    // The shared toast surface only models info/success/error severities.
+    // We use "info" with an extended duration (6s) so the user has time
+    // to read the Play Store update hint without it feeling like a hard
+    // error — the call may still complete on best-effort signaling.
+    useToast().toast(tRaw("call.error.legacyWebView"), "info", 6000);
+  } catch (e) {
+    console.warn("[call-service] legacy WebView toast failed:", e);
+  }
+}
 
 // Module-scope handle for the connectivity subscription so we don't stack
 // listeners on HMR / repeated module evaluation. Declared above the
@@ -91,6 +114,34 @@ function registerNetworkChangeRestart(): void {
       state === "disconnected" ||
       state === "checking"
     ) {
+      // Session 30: Huawei Android 10 (HONOR 8X / STK-LX1) and similar
+      // GMS-stripped devices ship Chromium ~83-96 in Android System WebView.
+      // restartIce on those builds wedges signalingState in "have-local-offer"
+      // because the rollback path for ICE renegotiation was buggy until
+      // Chromium 100. Skip the recovery and let the SDK end the call
+      // gracefully — far better UX than a frozen "connecting…" loop. We
+      // surface a one-time toast so the user can update WebView from Play
+      // Store; calling that out here (during a real network event) is
+      // higher signal than at call start where most users dismiss it.
+      // C1: WebView-engine guard only applies to web/Electron callers. On
+      // native (Android/iOS), `installNativeWebRTCProxy` swaps the SDK's
+      // RTCPeerConnection for a native bridge — `pc.restartIce()` here
+      // forwards to the platform's bundled libwebrtc, not the WebView's.
+      // `navigator.userAgent` reports the WebView Chrome version which has
+      // no bearing on the actual ICE engine. Running the guard on native
+      // would falsely block recovery on devices whose bundled libwebrtc
+      // is fine, while doing nothing for the very devices the guard was
+      // meant to help (since their Vue UI never drives this code path on
+      // the bug-report flow). The native side has its own connectiondead
+      // path (see [call-service.ts onPeerConnectionCreated]) which already
+      // surfaces a typed error to the user.
+      if (!isNative && isLegacyWebView()) {
+        console.warn(
+          `[call-service] skip restartIce on network change (${change.previousType}→${change.type}); legacy WebView (Chromium <${MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC})`,
+        );
+        maybeWarnLegacyWebView();
+        return;
+      }
       console.warn(
         `[call-service] network ${change.previousType}→${change.type}, restartIce`,
       );
@@ -548,15 +599,96 @@ async function applySavedDevicesExact(call: MatrixCall) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function resolvePeerInfo(peerId: string): { peerAddress: string; peerName: string } {
+/**
+ * Maximum wall-clock the call setup will wait for the peer's profile
+ * before falling back to the blockchain address. Keeps the answer→media
+ * negotiation inside the SDK's 1s window — exceeding that lets the caller's
+ * timeout fire first and the user perceives the call as "dropped".
+ */
+const PEER_PROFILE_LOOKUP_TIMEOUT_MS = 500;
+
+/**
+ * Resolve the opponent's display name for the call surfaces.
+ *
+ * Pre-Session-30 this was synchronous: `loadUserIfMissing` was fired-and-
+ * forgotten, then `getUser` was read on the next line — so profiles that
+ * weren't already cached fell through to the raw blockchain address. The
+ * native ringer rendered that address as "Unknown" and Vue surfaces showed
+ * a long opaque string (#645).
+ *
+ * The fix is bounded: race a real `loadUsersBatch` against a 500ms timer.
+ * Cached hits return instantly; cold lookups get a half-second window which
+ * is enough on 4G to fetch a single profile via dedupe + the existing
+ * profilePool. Even if we fall through, [refreshPeerNameAsync] below
+ * subscribes for the late update so Vue UI eventually shows the right name.
+ */
+async function resolvePeerInfo(peerId: string): Promise<{ peerAddress: string; peerName: string }> {
   const peerAddress = matrixIdToAddress(peerId);
   const userStore = useUserStore();
-  userStore.loadUserIfMissing(peerAddress);
+
+  // Fast path: profile already cached with a name. Avoids the timer hop
+  // for the common case where the caller has been seen recently.
+  const cached = userStore.getUser(peerAddress);
+  if (cached?.name) {
+    return { peerAddress, peerName: cached.name };
+  }
+
+  // Bounded wait — `loadUsersBatch` is dedupe-aware so concurrent calls do
+  // not multiply network requests. Suppress its rejection because a network
+  // failure must not break call setup; we always have the address fallback.
+  await Promise.race([
+    userStore.loadUsersBatch([peerAddress]).catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, PEER_PROFILE_LOOKUP_TIMEOUT_MS)),
+  ]);
+
   const user = userStore.getUser(peerAddress);
   return {
     peerAddress,
     peerName: user?.name || peerAddress,
   };
+}
+
+/**
+ * Late-arriving profile update for an already-active call.
+ *
+ * If [resolvePeerInfo]'s 500ms window expired without a profile, the call
+ * surfaces show the blockchain address. This helper continues the load in
+ * the background and patches `activeCall.peerName` once a real name lands,
+ * but only if the same call is still active — guards against races where
+ * the user hung up and started a new call before the profile arrived.
+ *
+ * Scope: Vue store only. The native CallActivity / IncomingCallActivity
+ * read `callerName` from Intent extras at launch and there is no Kotlin
+ * bridge to update them mid-call yet. So this helper fixes the JS-side
+ * surfaces (CallStatusBar, CallWindow, IncomingCallModal) but the native
+ * ringer / in-call screen will continue to show whatever name was passed
+ * to `launchCallUI`. Adding a Kotlin updateCallerInfo bridge is tracked
+ * separately — flagged in the call-service.ts handleIncomingCall branches.
+ *
+ * Pre-condition: the caller MUST have already invoked `setActiveCall`
+ * with a matching callId before scheduling this. Branches that keep
+ * activeCall null (the native non-fast-path) will never satisfy the
+ * guard inside, so calling this from there is a no-op and a wasted
+ * network round-trip.
+ */
+function refreshPeerNameAsync(callId: string, peerAddress: string): void {
+  const userStore = useUserStore();
+  const callStore = useCallStore();
+  userStore
+    .loadUsersBatch([peerAddress])
+    .then(() => {
+      const user = userStore.getUser(peerAddress);
+      const name = user?.name;
+      if (!name) return;
+      const active = callStore.activeCall;
+      if (!active || active.callId !== callId) return;
+      if (active.peerName === name) return;
+      callStore.setActiveCall({ ...active, peerName: name });
+    })
+    .catch(() => {
+      // Network failure — call already shows the address fallback, no UX
+      // regression. Logged at debug level only to avoid spamming Sentry.
+    });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -645,7 +777,7 @@ export function useCallService() {
     const members: Array<{ userId: string }> = room?.getJoinedMembers() ?? [];
     const peer = members.find((m) => m.userId !== myUserId);
     const peerId = peer?.userId ?? "";
-    const { peerAddress, peerName } = resolvePeerInfo(peerId);
+    const { peerAddress, peerName } = await resolvePeerInfo(peerId);
 
     const callInfo: CallInfo = {
       callId: call.callId,
@@ -664,6 +796,15 @@ export function useCallService() {
     callStore.setMatrixCall(call);
     callStore.videoMuted = type === "voice";
     wireCallEvents(call, "outgoing");
+
+    // Late-arriving profile patch — only schedule when resolvePeerInfo's
+    // 500ms timer fell through to the raw address (peerName === peerAddress
+    // means no profile name was found). Skipping the no-op refresh in the
+    // hot-cache path avoids a duplicate dedupe-pool round trip and a
+    // redundant store write.
+    if (peerAddress && peerName === peerAddress) {
+      refreshPeerNameAsync(call.callId, peerAddress);
+    }
 
     playDialtone();
 
@@ -768,7 +909,7 @@ export function useCallService() {
     callStore.cancelScheduledClear();
 
     const peerId = matrixCall.getOpponentMember()?.userId ?? "";
-    const { peerAddress, peerName } = resolvePeerInfo(peerId);
+    const { peerAddress, peerName } = await resolvePeerInfo(peerId);
     const isVideo = matrixCall.type === "video";
 
     const callInfo: CallInfo = {
@@ -787,6 +928,13 @@ export function useCallService() {
     callStore.setMatrixCall(matrixCall);
     callStore.videoMuted = !isVideo;
     wireCallEvents(matrixCall, "incoming");
+
+    // NOTE: refreshPeerNameAsync is intentionally not scheduled here.
+    // The Vue store guard inside the helper checks `activeCall.callId ===
+    // callId`, but on the native non-fast-path we deliberately keep
+    // activeCall null until answerCall (so the Vue ringer doesn't double
+    // up over the native one — see line ~963 below). The refresh is
+    // scheduled at each branch where setActiveCall actually runs.
 
     // Fast-path: the user already tapped Answer on the FCM/push ringer
     // before Matrix even delivered this invite. Don't re-show our own
@@ -807,6 +955,17 @@ export function useCallService() {
       // path to silently skip the actual SDK answer, leaving the
       // caller stuck on "connecting…" forever.
       callStore.setActiveCall(callInfo);
+      // Late-arriving profile patch — only schedules a network roundtrip
+      // when peerName fell back to the raw address. The store patch will
+      // update Vue surfaces (CallStatusBar, CallWindow). The native
+      // CallActivity caller-name does NOT refresh from this — it reads
+      // its callerName from launchCallUI's Intent extras at start and
+      // there's no updateCallerInfo bridge yet. That's a follow-up:
+      // patching native surfaces requires a Kotlin-side BroadcastReceiver
+      // and is tracked separately from this Session 30 fix.
+      if (peerAddress && peerName === peerAddress) {
+        refreshPeerNameAsync(matrixCall.callId, peerAddress);
+      }
       // Launch the native in-call surface right away. The native
       // CallActivity covers the Vue UI, so the user doesn't see the
       // incoming-ring screen flash through before answerCall() sets
@@ -840,8 +999,19 @@ export function useCallService() {
     if (isNative) {
       // activeCall stays cleared so no Vue ringer. matrixCall is set
       // above so rejectCall()/answerCall() can find it.
+      // #645 follow-up: when activeCall is null we have nowhere to patch
+      // the resolved name into. The native ringer was launched by the
+      // FCM handler with whatever name was in the push payload — fixing
+      // that path needs a Kotlin-side updateCallerInfo bridge.
     } else {
       callStore.setActiveCall(callInfo);
+      // Web ringer is showing the Vue UI — schedule the late patch so
+      // CallStatusBar / IncomingCallModal flip from address to real name
+      // once the profile loads. Same conditional as fast-path: skip when
+      // resolvePeerInfo already had a hot-cache hit.
+      if (peerAddress && peerName === peerAddress) {
+        refreshPeerNameAsync(matrixCall.callId, peerAddress);
+      }
       playRingtone();
     }
 
