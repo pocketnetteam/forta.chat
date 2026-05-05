@@ -833,6 +833,11 @@ export const en = {
   "banner.androidTitle": "Forta Chat is available as an Android app",
   "banner.androidCta": "Download APK",
   "banner.androidDismiss": "Continue in browser",
+
+  // ── Media / network errors (Session 32) ──
+  "errors.mediaUnavailable": "Media unavailable. Please try again later.",
+  "errors.networkBlocked": "Server unreachable. Try enabling Tor or a VPN.",
+  "errors.cryptoNotReady": "Encryption keys are still loading. Please wait.",
 } as const;
 
 export type TranslationKey = keyof typeof en;

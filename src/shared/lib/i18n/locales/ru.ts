@@ -835,4 +835,9 @@ export const ru: Record<TranslationKey, string> = {
   "banner.androidTitle": "Forta Chat доступен как Android-приложение",
   "banner.androidCta": "Скачать APK",
   "banner.androidDismiss": "Продолжить в браузере",
+
+  // ── Ошибки загрузки медиа / сети (Session 32) ──
+  "errors.mediaUnavailable": "Медиа недоступно. Попробуйте позже.",
+  "errors.networkBlocked": "Сервер недоступен. Попробуйте включить Tor или VPN.",
+  "errors.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
 };

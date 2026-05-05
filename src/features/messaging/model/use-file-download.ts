@@ -6,6 +6,14 @@ import { hexEncode } from "@/shared/lib/matrix/functions";
 import { isNative, isElectron } from "@/shared/lib/platform";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
+import {
+  CryptoNotReadyError,
+  isNetworkBlocked,
+  MediaUnavailableError,
+  NetworkBlockedError,
+} from "@/shared/lib/network/typed-network-errors";
+import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
 
 /** Coarse classification of a download/decrypt failure for UI branching.
@@ -54,6 +62,13 @@ function isCryptoError(err: unknown): boolean {
  *   - 5xx HTTP responses — server-side transient failure. */
 function isNetworkError(err: unknown): boolean {
   if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (
+    err instanceof NetworkBlockedError ||
+    err instanceof MediaUnavailableError ||
+    err instanceof CryptoNotReadyError
+  ) {
+    return true;
+  }
   if (err instanceof TypeError) {
     return /failed to fetch|networkerror|load failed/i.test(err.message);
   }
@@ -95,10 +110,19 @@ function pruneDedupMap(): void {
 }
 
 /** Decide whether a download error should auto-open the bug-report modal.
- *  Returns false for crypto failures (always user-actionable, never a bug)
- *  and for repeats of the same (messageId, error) within the dedup window. */
+ *  Returns false for crypto failures (always user-actionable, never a bug),
+ *  for our own typed transient/region errors (those already show a clear
+ *  user message — auto-bug-report on top is just noise), and for repeats of
+ *  the same (messageId, error) within the dedup window. */
 function shouldAutoReport(messageKey: string, err: unknown): boolean {
   if (isCryptoError(err)) return false;
+  if (
+    err instanceof CryptoNotReadyError ||
+    err instanceof NetworkBlockedError ||
+    err instanceof MediaUnavailableError
+  ) {
+    return false;
+  }
   pruneDedupMap();
   const key = `${messageKey}:${errorHash(err)}`;
   const last = bugReportDedupMap.get(key) ?? 0;
@@ -111,6 +135,30 @@ function shouldAutoReport(messageKey: string, err: unknown): boolean {
 /** TEST-ONLY: clear the dedup map between test cases. */
 export function _resetBugReportDedupForTests(): void {
   bugReportDedupMap.clear();
+}
+
+/** Toast duration for typed transient errors. 5s gives the user enough time
+ *  to read the message but doesn't dwell so long that it overlaps with the
+ *  next action they take. */
+const TYPED_ERROR_TOAST_MS = 5_000;
+
+/** Show a localised toast when a download failure resolves to one of our
+ *  typed transient errors. Silent for everything else — generic errors are
+ *  still surfaced via the in-bubble retry UI and the auto-bug-report flow. */
+function surfaceTypedErrorToast(err: unknown): void {
+  let key: "errors.networkBlocked" | "errors.cryptoNotReady" | "errors.mediaUnavailable" | null = null;
+  if (err instanceof NetworkBlockedError) key = "errors.networkBlocked";
+  else if (err instanceof CryptoNotReadyError) key = "errors.cryptoNotReady";
+  else if (err instanceof MediaUnavailableError) key = "errors.mediaUnavailable";
+  if (!key) return;
+  try {
+    useToast().toast(tRaw(key), "error", TYPED_ERROR_TOAST_MS);
+  } catch (toastErr) {
+    // useToast() requires a Vue effect scope; in unusual runtime paths
+    // (worker contexts, headless tests without scope) it may throw.
+    // Don't let a failed toast mask the original download error.
+    console.warn("[use-file-download] toast surface failed:", toastErr);
+  }
 }
 
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
@@ -141,6 +189,68 @@ const FETCH_TIMEOUT_MS = 30_000;
 /** Non-retriable HTTP status codes — fast-fail instead of burning the
  *  retry budget on a guaranteed-failure response. */
 const NON_RETRIABLE_STATUSES = new Set([400, 401, 403, 404, 410, 415]);
+
+/** Monotonic counter so two cache-bust values produced inside the same
+ *  millisecond (Date.now() granularity) still differ. Without this, fast
+ *  back-to-back retries can collide on the same `cb=` value, defeating the
+ *  Service-Worker / CDN bust. */
+let cacheBustCounter = 0;
+
+/** Append a cache-bust query parameter on retry attempts. The first attempt
+ *  (`attempt === 0`) is left pristine: server-side caches only matter once
+ *  we've already seen a confirmed miss, and polluting the canonical URL
+ *  hurts CDN hit rates. Retries (`attempt >= 1`) get a unique `cb=` so
+ *  Service Workers, browser HTTP cache, and intermediate proxies all
+ *  re-resolve instead of replaying the prior failure. */
+export function appendCacheBust(url: string, attempt: number): string {
+  if (attempt <= 0) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}cb=${Date.now()}_${++cacheBustCounter}`;
+}
+
+/** True for failures that look like a network/server issue we should label
+ *  as such (5xx, timeouts, AbortError, fetch-network errors). Used to scope
+ *  `wrapTransientError`: only network-shaped errors get re-cast into
+ *  `MediaUnavailableError`. Generic application errors (e.g. QuotaExceeded,
+ *  unexpected exceptions inside the decrypt path) pass through unchanged so
+ *  the auto-bug-report flow still fires for them. */
+function looksLikeNetworkTransient(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof TypeError) {
+    // \bload failed\b prevents accidental matches against our own
+    // "Download failed: 5xx" path-style errors.
+    return /failed to fetch|networkerror|\bload failed\b/i.test(err.message);
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Download failed:\s*5\d{2}|timeout/i.test(msg);
+}
+
+/** Wrap a final transient failure (after retries are exhausted) into a typed
+ *  error so callers can branch on instanceof checks instead of regexing
+ *  message strings.
+ *
+ *   - `NetworkBlockedError` — "request never reached the server" (region /
+ *     firewall / offline).
+ *   - `CryptoNotReadyError` — keys still loading; bubbles through unchanged
+ *     so the UI can show "wait" UX.
+ *   - `MediaUnavailableError` — 5xx / timeout / AbortError persisting after
+ *     retries.
+ *
+ *  Anything else is *not* wrapped: a generic `Error("QuotaExceeded")` from
+ *  the decrypt path is more useful as itself than re-cast as media-
+ *  unavailable, both for `console.error` traces and for bug-report dedup. */
+export function wrapTransientError(err: unknown, mxcUrl: string): Error {
+  if (
+    err instanceof NetworkBlockedError ||
+    err instanceof MediaUnavailableError ||
+    err instanceof CryptoNotReadyError
+  ) {
+    return err;
+  }
+  if (isNetworkBlocked(err)) return new NetworkBlockedError(err);
+  if (looksLikeNetworkTransient(err)) return new MediaUnavailableError(mxcUrl, err);
+  return err instanceof Error ? err : new Error(String(err));
+}
 
 /** Fetch a URL with a hard timeout. Caller's AbortSignal is honored if
  *  provided. Returns the Response or throws AbortError on timeout. */
@@ -185,8 +295,11 @@ async function downloadAndDecrypt(
     }
 
     try {
-      // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls)
-      const response = await fetchWithTimeout(fileInfo.url, signal);
+      // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls).
+      // On retry attempts, append a cache-bust so Service Workers / CDN edges
+      // don't replay the prior failure response (issues #648, #641, #637).
+      const fetchUrl = appendCacheBust(fileInfo.url, attempt);
+      const response = await fetchWithTimeout(fetchUrl, signal);
       if (!response.ok) {
         const err = new Error(`Download failed: ${response.status}`);
         // Mark non-retriable codes so the catch block below can throw immediately
@@ -196,11 +309,18 @@ async function downloadAndDecrypt(
       }
       let blob = await response.blob();
 
-      // If the file has secrets, we need to decrypt it
+      // If the file has secrets, we need to decrypt it.
+      // Race against Matrix sync: if the user opens an E2E chat right after
+      // login, `pcrypto.rooms[roomId]` may not yet be populated. Park briefly
+      // for it to materialise instead of immediately failing the attempt
+      // (issue #616). On timeout, CryptoNotReadyError bubbles up and the
+      // outer retry loop gets one more shot.
       if (fileInfo.secrets?.keys) {
         const authStore = useAuthStore();
-        const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-        if (!roomCrypto) throw new Error("No room crypto for decryption");
+        const roomCrypto = await waitForRoomCrypto(
+          roomId,
+          () => authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined,
+        );
 
         // Build event-like object for decryptKey.
         // decryptKey reads secrets from either content.keys, content.info.secrets,
@@ -240,6 +360,12 @@ async function downloadAndDecrypt(
       // error. Fast-fail so the friendly "ask sender to resend" UX appears
       // immediately.
       if (isCryptoError(e)) throw e;
+      // Crypto-not-ready already paid 5 s of polling inside waitForRoomCrypto.
+      // Re-entering the outer retry loop would burn another 1+3+6 s × 5 s of
+      // polling = up to ~40 s before the user sees an error. Fast-fail and
+      // let the user pull-to-refresh once Matrix sync has actually settled —
+      // the toast tells them what's going on.
+      if (e instanceof CryptoNotReadyError) throw e;
       // Don't retry on permanent errors (missing URL, 4xx client errors)
       if (e instanceof Error) {
         if (e.message === "No file URL") throw e;
@@ -255,7 +381,10 @@ async function downloadAndDecrypt(
     }
   }
 
-  throw lastError;
+  // Retries exhausted — surface a typed error so the UI can show the right
+  // message (region-block UX vs. generic media-unavailable UX) instead of
+  // a bare TypeError stringified into the toast.
+  throw wrapTransientError(lastError, fileInfo.url);
 }
 
 /** Convert Blob to base64 data string (without the data:...;base64, prefix) */
@@ -408,6 +537,11 @@ export function useFileDownload() {
       console.error("[use-file-download] download error:", e);
       state.errorKind = classifyError(e);
       state.error = String(e);
+      // Surface a localised toast for our typed transient failures so the
+      // user sees a clear "what to do next" message (region/firewall vs.
+      // media-gone vs. keys-still-syncing) instead of just an in-bubble
+      // retry button.
+      surfaceTypedErrorToast(e);
       // Skip auto-report for crypto failures (user-actionable, not a bug) and
       // for duplicates within the dedup window. Manual reporting is still
       // available via the bug-report button in the friendly error UI.
