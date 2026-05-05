@@ -741,7 +741,14 @@ export const en = {
 
   // ── Misc ──
   "chat.messageNotFound": "Message not found",
-  "chat.peerKeysMissing": "Peer hasn't published encryption keys yet. Messaging is temporarily unavailable.",
+  "chat.peerKeysMissing": "Peer hasn't published encryption keys yet — your messages will stay unencrypted until they do. You can retry now or republish your own keys.",
+  "chat.peerKeysRetry": "Retry",
+  "chat.republishKeys": "Republish my keys",
+  "chat.republishKeysInProgress": "Republishing…",
+  "chat.republishKeysSuccess": "Encryption keys republished",
+  "chat.republishKeysError": "Failed to republish keys",
+  "chat.republishKeysAlreadyOk": "Your keys are already published",
+  "chat.republishKeysNeedsFunds": "Not enough PKOIN to broadcast keys",
   "chat.unencryptedRoom": "Messages in this room are not encrypted",
   "tor.disable": "Disable Tor",
   "register.registrationFailed": "Registration failed",
@@ -833,6 +840,11 @@ export const en = {
   "banner.androidTitle": "Forta Chat is available as an Android app",
   "banner.androidCta": "Download APK",
   "banner.androidDismiss": "Continue in browser",
+
+  // ── Media / network errors (Session 32) ──
+  "errors.mediaUnavailable": "Media unavailable. Please try again later.",
+  "errors.networkBlocked": "Server unreachable. Try enabling Tor or a VPN.",
+  "errors.cryptoNotReady": "Encryption keys are still loading. Please wait.",
 } as const;
 
 export type TranslationKey = keyof typeof en;

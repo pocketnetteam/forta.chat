@@ -837,6 +837,79 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** UI-safe variant of {@link verifyAndRepublishKeys}. Same verify step,
+   *  but on a republish-needed path it broadcasts directly without flipping
+   *  `registrationPending` (which would mount RegistrationStepper over the
+   *  running session — see App.vue). Caller-friendly result lets the UI
+   *  show a toast instead of swallowing state changes. */
+  type RepublishResult =
+    | { state: "already-ok"; keys: number }
+    | { state: "republished" }
+    | { state: "needs-funds" }
+    | { state: "broadcast-failed"; reason: string }
+    | { state: "skipped"; reason: string };
+
+  const republishKeysFromUi = async (): Promise<RepublishResult> => {
+    if (!address.value || !privateKey.value) {
+      return { state: "skipped", reason: "no-credentials" };
+    }
+    if (registrationPending.value || pendingRegProfile.value) {
+      return { state: "skipped", reason: "registration-in-progress" };
+    }
+
+    const userData = appInitializer.getUserData(address.value);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cachedKeys: string[] = (userData as any)?.keys ?? [];
+    if (cachedKeys.length >= 12) {
+      return { state: "already-ok", keys: cachedKeys.length };
+    }
+
+    let blockchainKeys: string[] = [];
+    try {
+      const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+      const rawProfile = rawProfiles[0];
+      if (rawProfile) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
+        if (Array.isArray(rawKeys)) {
+          blockchainKeys = rawKeys.filter((k: string) => k);
+        } else if (typeof rawKeys === "string" && rawKeys) {
+          blockchainKeys = rawKeys.split(",").filter((k: string) => k);
+        }
+      }
+    } catch (e) {
+      return { state: "broadcast-failed", reason: e instanceof Error ? e.message : "rpc-failed" };
+    }
+    if (blockchainKeys.length >= 12) {
+      return { state: "already-ok", keys: blockchainKeys.length };
+    }
+
+    const hasUnspents = await appInitializer.checkUnspents(address.value);
+    if (!hasUnspents) {
+      return { state: "needs-funds" };
+    }
+
+    const encKeys = generateEncryptionKeys(privateKey.value);
+    const encPublicKeys = encKeys.map(k => k.public);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const name = (userData as any)?.name ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const language = (userData as any)?.language ?? "en";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const about = (userData as any)?.about ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const image = (userData as any)?.image ?? "";
+
+    try {
+      await appInitializer.syncNodeTime();
+      await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
+      return { state: "republished" };
+    } catch (e) {
+      console.error("[auth] republishKeysFromUi broadcast failed:", e);
+      return { state: "broadcast-failed", reason: e instanceof Error ? e.message : "broadcast-failed" };
+    }
+  };
+
   const { execute: login, isLoading: isLoggingIn } = useAsyncOperation(
     async (cryptoCredential: string) => {
       try {
@@ -1583,6 +1656,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     submitCaptcha,
     submitComment,
     submitUpvote,
-    userInfo
+    userInfo,
+    republishKeysFromUi
   };
 });

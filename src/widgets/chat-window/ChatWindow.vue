@@ -99,11 +99,73 @@ const peerKeysMissing = computed(() => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return false;
   const status = chatStore.peerKeysStatus.get(roomId);
-  // Show warning only when peers lack keys (not for public/large rooms)
+  // Show warning only when peers lack keys (not for public/large rooms).
+  // Mirror the same suppression that MessageInput.vue applies to peerKeysOk —
+  // group AND public rooms must both stay banner-free, otherwise the user sees
+  // an enabled send button next to a "messaging unavailable" warning.
   if (chatStore.activeRoom?.isGroup) return false;
+  if (chatStore.isRoomPublic(roomId)) return false;
   return status === "missing";
 });
 
+const { toast } = useToast();
+const { t } = useI18n();
+
+// Retry/republish handlers for the peer-keys banner. The banner is no longer
+// a hard blocker (regression #597/#598/#639) — it now offers two escape
+// hatches so a stuck "missing" state never traps the user.
+const peerKeysRetrying = ref(false);
+const peerKeysRepublishing = ref(false);
+
+const retryPeerKeys = async () => {
+  const roomId = chatStore.activeRoomId;
+  if (!roomId || peerKeysRetrying.value) return;
+  peerKeysRetrying.value = true;
+  try {
+    const roomCrypto = authStore.pcrypto?.rooms[roomId];
+    if (roomCrypto) await roomCrypto.prepare();
+    await chatStore.checkPeerKeys(roomId);
+  } catch (e) {
+    console.warn("[ChatWindow] peer-keys retry failed:", e);
+  } finally {
+    peerKeysRetrying.value = false;
+  }
+};
+
+const republishMyKeys = async () => {
+  if (peerKeysRepublishing.value) return;
+  peerKeysRepublishing.value = true;
+  try {
+    const result = await authStore.republishKeysFromUi();
+    if (result.state === "republished" || result.state === "already-ok") {
+      const roomId = chatStore.activeRoomId;
+      if (roomId) {
+        const roomCrypto = authStore.pcrypto?.rooms[roomId];
+        if (roomCrypto) await roomCrypto.prepare();
+        await chatStore.checkPeerKeys(roomId);
+      }
+      toast(
+        result.state === "already-ok"
+          ? t("chat.republishKeysAlreadyOk")
+          : t("chat.republishKeysSuccess"),
+        "success",
+      );
+    } else if (result.state === "needs-funds") {
+      toast(t("chat.republishKeysNeedsFunds"), "error");
+    } else if (result.state === "broadcast-failed") {
+      console.error("[ChatWindow] republish keys broadcast failed:", result.reason);
+      toast(t("chat.republishKeysError"), "error");
+    } else {
+      // skipped (no creds / registration in progress) — show generic error
+      toast(t("chat.republishKeysError"), "error");
+    }
+  } catch (e) {
+    console.error("[ChatWindow] republish keys failed:", e);
+    toast(t("chat.republishKeysError"), "error");
+  } finally {
+    peerKeysRepublishing.value = false;
+  }
+};
 
 watch(() => chatStore.activeRoomId, async (roomId) => {
   if (roomId) {
@@ -130,9 +192,6 @@ watch(() => chatStore.activeRoomId, (roomId) => {
     }
   }, 30_000);
 }, { immediate: true });
-const { toast } = useToast();
-
-const { t } = useI18n();
 
 const isAdmin = computed(() => {
   if (!chatStore.activeRoom) return false;
@@ -581,11 +640,31 @@ onUnmounted(() => {
           />
         </transition>
         <PinnedBar :is-admin="isAdmin" @scroll-to="handleScrollToMessage" />
-        <div v-if="peerKeysMissing" class="mx-4 my-2 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-4 py-3 text-sm text-amber-800 dark:text-amber-200 flex items-center gap-2">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-amber-500">
+        <div v-if="peerKeysMissing" class="mx-4 my-2 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-4 py-3 text-sm text-amber-800 dark:text-amber-200 flex items-start gap-2">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 mt-0.5 text-amber-500">
             <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
           </svg>
-          <span>{{ t("chat.peerKeysMissing") }}</span>
+          <div class="flex-1 min-w-0">
+            <p class="leading-snug">{{ t("chat.peerKeysMissing") }}</p>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                :disabled="peerKeysRetrying"
+                @click="retryPeerKeys"
+              >
+                {{ t("chat.peerKeysRetry") }}
+              </button>
+              <button
+                type="button"
+                class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                :disabled="peerKeysRepublishing"
+                @click="republishMyKeys"
+              >
+                {{ peerKeysRepublishing ? t("chat.republishKeysInProgress") : t("chat.republishKeys") }}
+              </button>
+            </div>
+          </div>
         </div>
         <MessageList ref="messageListRef" />
         <SelectionBar

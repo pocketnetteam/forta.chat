@@ -743,7 +743,14 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Misc ──
   "chat.messageNotFound": "Сообщение не найдено",
-  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования. Отправка сообщений временно недоступна.",
+  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования — пока не опубликует, сообщения отправятся без шифрования. Можно попробовать снова или переопубликовать свои ключи.",
+  "chat.peerKeysRetry": "Повторить",
+  "chat.republishKeys": "Опубликовать мои ключи",
+  "chat.republishKeysInProgress": "Публикуем…",
+  "chat.republishKeysSuccess": "Ключи шифрования опубликованы",
+  "chat.republishKeysError": "Не удалось опубликовать ключи",
+  "chat.republishKeysAlreadyOk": "Ваши ключи уже опубликованы",
+  "chat.republishKeysNeedsFunds": "Недостаточно PKOIN для публикации ключей",
   "chat.unencryptedRoom": "Сообщения в этой комнате не шифруются",
   "tor.disable": "Отключить Tor",
   "register.registrationFailed": "Ошибка регистрации",
@@ -835,4 +842,9 @@ export const ru: Record<TranslationKey, string> = {
   "banner.androidTitle": "Forta Chat доступен как Android-приложение",
   "banner.androidCta": "Скачать APK",
   "banner.androidDismiss": "Продолжить в браузере",
+
+  // ── Ошибки загрузки медиа / сети (Session 32) ──
+  "errors.mediaUnavailable": "Медиа недоступно. Попробуйте позже.",
+  "errors.networkBlocked": "Сервер недоступен. Попробуйте включить Tor или VPN.",
+  "errors.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
 };

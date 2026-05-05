@@ -66,6 +66,7 @@ vi.mock("@/entities/chat", async () => {
       getTypingUsers: vi.fn(() => []),
       getDisplayName: vi.fn(() => ""),
       getRoomMemberCount: vi.fn(() => 0),
+      isRoomPublic: vi.fn(() => false),
     }),
   };
 });
