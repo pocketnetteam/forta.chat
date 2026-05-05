@@ -21,7 +21,10 @@ import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { shouldSendOnEnter } from "../model/enter-key-behavior";
 import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
+import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
+
+const PEER_KEYS_GRACE_MS = 2000;
 
 const isMobile = useMobile();
 
@@ -132,6 +135,10 @@ onBeforeUnmount(() => {
     setTyping(false, roomId);
   }
   resetTypingTimers();
+  if (peerKeysGraceTimer) {
+    clearTimeout(peerKeysGraceTimer);
+    peerKeysGraceTimer = null;
+  }
   // Clean up any lingering recording mouse/move listeners
   document.removeEventListener("mouseup", handleGlobalMouseUp);
   document.removeEventListener("mousemove", handleGlobalMouseMove);
@@ -160,13 +167,38 @@ watch(() => chatStore.forwardingMessage, (fwd) => {
   if (fwd) nextTick(() => textareaRef.value?.focus({ preventScroll: true }));
 });
 
+// Grace period after switching rooms: peer-keys may still be loading,
+// so don't gate the button on `peerKeysStatus` for the first PEER_KEYS_GRACE_MS.
+// Without this the user perceives the button as permanently broken every time
+// the peer-keys propagation lags (regression #597/#598/#639 after 1.10.16).
+const peerKeysGraceActive = ref(false);
+let peerKeysGraceTimer: ReturnType<typeof setTimeout> | null = null;
+watch(() => chatStore.activeRoomId, (roomId) => {
+  if (peerKeysGraceTimer) {
+    clearTimeout(peerKeysGraceTimer);
+    peerKeysGraceTimer = null;
+  }
+  if (!roomId) {
+    peerKeysGraceActive.value = false;
+    return;
+  }
+  peerKeysGraceActive.value = true;
+  peerKeysGraceTimer = setTimeout(() => {
+    peerKeysGraceActive.value = false;
+    peerKeysGraceTimer = null;
+  }, PEER_KEYS_GRACE_MS);
+}, { immediate: true });
+
 const peerKeysOk = computed(() => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return true;
-  const status = chatStore.peerKeysStatus.get(roomId);
-  // Block send only when peers are missing keys in a private room.
-  // "not-encrypted" rooms (public / large) allow plain-text send.
-  return status !== "missing";
+  const room = chatStore.activeRoom;
+  const isGroupOrPublic = !!room?.isGroup || chatStore.isRoomPublic(roomId);
+  return isPeerKeysOk({
+    status: chatStore.peerKeysStatus.get(roomId),
+    isGroupOrPublic,
+    inGracePeriod: peerKeysGraceActive.value,
+  });
 });
 
 const isEditing = computed(() => !!chatStore.editingMessage);

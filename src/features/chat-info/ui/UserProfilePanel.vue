@@ -61,7 +61,9 @@ const copyAddress = async () => {
 const navigateToChat = () => {
   const hexAddr = hexEncode(props.address).toLowerCase();
   const existingRoom = chatStore.sortedRooms.find(
-    (r) => !r.isGroup && r.members.includes(hexAddr),
+    (r) =>
+      !r.isGroup &&
+      (r.members.includes(hexAddr) || (r.invitedMembers ?? []).includes(hexAddr)),
   );
   if (existingRoom) {
     chatStore.setActiveRoom(existingRoom.id);
@@ -72,7 +74,9 @@ const navigateToChat = () => {
 const startCall = (type: "voice" | "video") => {
   const hexAddr = hexEncode(props.address).toLowerCase();
   const existingRoom = chatStore.sortedRooms.find(
-    (r) => !r.isGroup && r.members.includes(hexAddr),
+    (r) =>
+      !r.isGroup &&
+      (r.members.includes(hexAddr) || (r.invitedMembers ?? []).includes(hexAddr)),
   );
   if (existingRoom) {
     callService.startCall(existingRoom.id, type);

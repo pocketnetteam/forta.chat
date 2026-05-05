@@ -71,6 +71,8 @@ export const ru: Record<TranslationKey, string> = {
   "channels.retry": "Повторить",
   "channels.openInApp": "Открыть",
   "channels.address": "Адрес канала",
+  "channels.listGlitch": "Список каналов отображается некорректно",
+  "channels.resetCache": "Обновить",
 
   // ── Settings panel ──
   "settings.title": "Настройки",
@@ -394,6 +396,7 @@ export const ru: Record<TranslationKey, string> = {
   "info.unban": "Разблокировать",
   "info.banned": "Заблокированные ({count})",
   "info.muted": "заглушён",
+  "info.invited": "Приглашён",
   "info.editDescription": "Изменить описание",
   "info.addDescription": "Добавить описание",
   "info.changePhoto": "Изменить фото",
@@ -513,6 +516,7 @@ export const ru: Record<TranslationKey, string> = {
   "call.warning.noInboundAudio": "Нет входящего звука — возможно, проблема с микрофоном собеседника.",
   "call.warning.noOutboundAudio": "Нет исходящего звука — проверьте микрофон.",
   "call.error.connectionLost": "Соединение со звонком потеряно.",
+  "call.error.legacyWebView": "Браузерный движок устройства слишком старый для стабильных звонков. Обновите «Android System WebView» в Play Store.",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",
@@ -742,7 +746,14 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Misc ──
   "chat.messageNotFound": "Сообщение не найдено",
-  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования. Отправка сообщений временно недоступна.",
+  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования — пока не опубликует, сообщения отправятся без шифрования. Можно попробовать снова или переопубликовать свои ключи.",
+  "chat.peerKeysRetry": "Повторить",
+  "chat.republishKeys": "Опубликовать мои ключи",
+  "chat.republishKeysInProgress": "Публикуем…",
+  "chat.republishKeysSuccess": "Ключи шифрования опубликованы",
+  "chat.republishKeysError": "Не удалось опубликовать ключи",
+  "chat.republishKeysAlreadyOk": "Ваши ключи уже опубликованы",
+  "chat.republishKeysNeedsFunds": "Недостаточно PKOIN для публикации ключей",
   "chat.unencryptedRoom": "Сообщения в этой комнате не шифруются",
   "tor.disable": "Отключить Tor",
   "register.registrationFailed": "Ошибка регистрации",
@@ -834,4 +845,9 @@ export const ru: Record<TranslationKey, string> = {
   "banner.androidTitle": "Forta Chat доступен как Android-приложение",
   "banner.androidCta": "Скачать APK",
   "banner.androidDismiss": "Продолжить в браузере",
+
+  // ── Ошибки загрузки медиа / сети (Session 32) ──
+  "errors.mediaUnavailable": "Медиа недоступно. Попробуйте позже.",
+  "errors.networkBlocked": "Сервер недоступен. Попробуйте включить Tor или VPN.",
+  "errors.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
 };

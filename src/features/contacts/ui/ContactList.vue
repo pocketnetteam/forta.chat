@@ -116,9 +116,16 @@ function cachedHexDecode(hex: string): string {
 
 /** Resolve member names — checks Pocketnet profiles first, then Matrix displaynames.
  *  Matrix displaynames come from m.room.member state events (free, already in sync)
- *  and are available instantly without any RPC call. */
+ *  and are available instantly without any RPC call.
+ *
+ *  Walks BOTH joined and invited, otherwise the contact list shows a blank
+ *  name for DMs whose peer hasn't accepted the invite yet (`members` would
+ *  only contain the inviter). */
 function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string[] {
-  const otherMembers = room.members.filter(m => m !== myHexId);
+  const otherMembers = [
+    ...room.members,
+    ...(room.invitedMembers ?? []),
+  ].filter(m => m !== myHexId);
 
   const names: string[] = [];
   for (const hexId of otherMembers) {

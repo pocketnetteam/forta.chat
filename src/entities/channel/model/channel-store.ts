@@ -5,6 +5,8 @@ import { useAuthStore } from "@/entities/auth";
 
 import type { Channel, ChannelPost } from "./types";
 
+const CHANNELS_PAGE_SIZE = 20;
+
 function tryDecode(val: unknown): string {
   if (typeof val !== "string") return "";
   try {
@@ -98,7 +100,7 @@ export const useChannelStore = defineStore("channel", () => {
         addr,
         blockHeight.value,
         channelsPage.value,
-        20
+        CHANNELS_PAGE_SIZE
       );
 
       if (!result) {
@@ -107,15 +109,38 @@ export const useChannelStore = defineStore("channel", () => {
       }
 
       blockHeight.value = result.height ?? blockHeight.value;
-      const parsed = (result.channels ?? []).map((raw: any) => parseChannel(raw));
 
-      if (reset) {
-        channels.value = parsed;
-      } else {
-        channels.value = [...channels.value, ...parsed];
+      // Drop entries with empty address or name (treated as broken-output,
+      // not "channel without a display name"). RecycleScroller uses address
+      // as key-field; empty / duplicate keys collide and Vue stops rendering
+      // the duplicates, leaving phantom empty slots in the list.
+      const rawList = (result.channels ?? []) as Array<Record<string, unknown>>;
+      const rawParsed = rawList.map((raw) => parseChannel(raw));
+      const parsed = rawParsed.filter((c) => Boolean(c.address) && Boolean(c.name));
+      // Use the raw page size, not the filtered size, so a partially-broken
+      // page doesn't prematurely stop pagination.
+      const pageHadFullCount = rawParsed.length >= CHANNELS_PAGE_SIZE;
+
+      // Dedup-by-address — page 0 and page 1 may overlap when a new channel
+      // appears between requests and shifts the offset, producing the same
+      // address in both pages.
+      const existingAddrs = new Set(
+        reset ? [] : channels.value.map((c) => c.address)
+      );
+      const fresh: Channel[] = [];
+      for (const channel of parsed) {
+        if (existingAddrs.has(channel.address)) continue;
+        existingAddrs.add(channel.address);
+        fresh.push(channel);
       }
 
-      hasMoreChannels.value = parsed.length >= 20;
+      if (reset) {
+        channels.value = fresh;
+      } else {
+        channels.value = [...channels.value, ...fresh];
+      }
+
+      hasMoreChannels.value = pageHadFullCount;
       channelsPage.value += 1;
     } catch (e) {
       console.error("[channel-store] fetchChannels error:", e);

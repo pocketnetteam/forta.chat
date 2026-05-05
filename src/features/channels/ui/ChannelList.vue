@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useChannelStore } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
 import { useChatStore } from "@/entities/chat";
@@ -23,6 +23,14 @@ onMounted(() => {
     nextTick(prefetchVisiblePosts);
   }
   attachScrollListener();
+});
+
+// Defensive: if duplicate addresses ever leak past channel-store dedup,
+// RecycleScroller renders empty slots for the duplicates. Surface a "refresh"
+// affordance so the user can self-recover without reinstalling the app.
+const hasDetectedDuplicates = computed(() => {
+  const addrs = channelStore.channels.map((c) => c.address);
+  return new Set(addrs).size !== addrs.length;
 });
 
 const handleSelect = (channel: Channel) => {
@@ -145,6 +153,21 @@ onUnmounted(() => {
       </div>
       <p class="text-sm text-text-on-main-bg-color">{{ t("channels.noChannels") }}</p>
       <p class="text-xs text-text-on-main-bg-color/60">{{ t("channels.noChannelsHint") }}</p>
+    </div>
+
+    <!-- Defensive recovery banner — visible only if duplicate addresses
+         somehow slipped past channel-store dedup. Hidden in normal use. -->
+    <div
+      v-if="hasDetectedDuplicates"
+      class="mx-3 mt-2 flex items-center justify-between gap-2 rounded-lg bg-color-bad/10 px-3 py-2 text-xs text-color-bad"
+    >
+      <span class="truncate">{{ t("channels.listGlitch") }}</span>
+      <button
+        class="shrink-0 rounded-md bg-color-bad/15 px-2 py-1 text-[11px] font-medium hover:bg-color-bad/25"
+        @click="channelStore.fetchChannels(true)"
+      >
+        {{ t("channels.resetCache") }}
+      </button>
     </div>
 
     <!-- Channel list -->

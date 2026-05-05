@@ -2,6 +2,7 @@ import { ref, computed } from "vue";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { useChatStore } from "@/entities/chat";
 import { getMatrixClientService } from "@/entities/matrix";
+import { waitForRoomInSdk } from "@/entities/matrix/model/matrix-room-sync";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
 
@@ -115,6 +116,22 @@ export function useGroupCreation() {
       });
 
       const roomId = result.room_id;
+
+      // Wait for the SDK to receive the new room via /sync. Without this,
+      // `fullRoomRefresh` can drop the optimistic addRoom entry as soon as
+      // the user switches active chat (the SDK snapshot doesn't include
+      // the new room yet, and only `prevActiveRoom` is preserved). The
+      // 30s grace window in `preservePendingRooms` is the read-side
+      // safety net; this wait is the primary defence so the sidebar shows
+      // the room immediately after creation.
+      try {
+        await waitForRoomInSdk((id) => matrixService.getRoom(id), roomId, 5000);
+      } catch (waitErr) {
+        console.warn(
+          "[useGroupCreation] room not in SDK after 5s, relying on grace window:",
+          waitErr,
+        );
+      }
 
       // Add room to local store
       const memberHexIds = [...selectedMembers.value.values()].map(
