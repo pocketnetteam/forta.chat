@@ -532,11 +532,52 @@ export class SyncEngine {
         "Media send event",
       );
 
-      await this.messageRepo.confirmSent(op.clientId, serverEventId);
-      await this.roomRepo.updateRoom(op.roomId, {
-        lastMessageLocalStatus: "synced" as import("./schema").LocalMessageStatus,
-        lastMessageEventId: serverEventId,
-      });
+      // Persist the mxc URL on the local message. Without this the bubble
+      // keeps a blob: URL that becomes invalid the moment the document is
+      // unloaded — closing the chat or reloading the app paints a broken
+      // image (issues #655, #629, #636). confirmMediaSent also clears
+      // localBlobUrl and updates the room preview status atomically.
+      const existing = await this.messageRepo.getByClientId(op.clientId);
+      const baseFileInfo: LocalMessage["fileInfo"] = existing?.fileInfo ?? {
+        name: payload.fileName,
+        type: payload.mimeType,
+        size: attachment.size,
+        url,
+      };
+      const serverFileInfo: LocalMessage["fileInfo"] = {
+        ...baseFileInfo,
+        url,
+        ...(secrets
+          ? { secrets: secrets as { block: number; keys: string; v: number } }
+          : {}),
+      };
+      await this.messageRepo.confirmMediaSent(
+        op.clientId,
+        serverEventId,
+        serverFileInfo,
+        op.roomId,
+      );
+
+      // Release the optimistic blob URL after a short grace window so any
+      // in-flight render with that source can complete before the browser
+      // invalidates it. Without this revoke the blob lingers in memory for
+      // the lifetime of the document and slowly leaks as users send more
+      // photos in the same session.
+      const optimisticBlob = existing?.localBlobUrl;
+      if (
+        optimisticBlob &&
+        typeof URL !== "undefined" &&
+        typeof URL.revokeObjectURL === "function"
+      ) {
+        setTimeout(() => {
+          try {
+            URL.revokeObjectURL(optimisticBlob);
+          } catch {
+            // Some test envs (e.g. happy-dom without object URLs) throw —
+            // best-effort cleanup, ignore.
+          }
+        }, 5_000);
+      }
     } finally {
       // Release the controller slot regardless of outcome so a retry can
       // register a fresh one.

@@ -23,6 +23,7 @@ import { shouldSendOnEnter } from "../model/enter-key-behavior";
 import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
+import { readShareUriAsBlob } from "@/shared/lib/share-target";
 
 const PEER_KEYS_GRACE_MS = 2000;
 
@@ -43,7 +44,7 @@ const pasteDrop = usePasteDrop({
   onMediaFiles: (files) => mediaUpload.addFiles(files),
   onOtherFiles: async (files) => {
     sending.value = true;
-    try { for (const file of files) await sendFile(file); }
+    try { await Promise.allSettled(files.map((file) => sendFile(file))); }
     finally { sending.value = false; }
   },
 });
@@ -272,13 +273,20 @@ const handleSend = async () => {
     } else if (chatStore.forwardingMessage) {
       const fwd = chatStore.forwardingMessage;
 
-      // External share with file: send file directly instead of text forward
+      // External share with file: send file directly instead of text forward.
+      // Android Share Sheet hands us a content:// URI that the WebView's
+      // fetch() can't open directly — readShareUriAsBlob routes through the
+      // Capacitor Filesystem bridge so the upload pipeline gets real bytes
+      // instead of a TypeError (#650).
       if (fwd.isExternalShare && fwd.fileInfo?.url) {
         try {
-          const response = await fetch(fwd.fileInfo.url);
-          const blob = await response.blob();
+          const mime = fwd.fileInfo.type || "application/octet-stream";
+          const blob = await readShareUriAsBlob(fwd.fileInfo.url, mime);
           const fileName = fwd.fileInfo.name || "shared_file";
-          const file = new File([blob], fileName, { type: fwd.fileInfo.type || blob.type });
+          // Prefer the explicit mime we already had — `blob.type` from the
+          // web fetch fallback can downgrade Bastyon-served URLs to
+          // application/octet-stream which then poisons messageTypeFromMime.
+          const file = new File([blob], fileName, { type: mime || blob.type });
 
           if (fwd.type === MessageType.image) {
             inserted = await sendImage(file);
@@ -379,8 +387,12 @@ const handleFileSelect = async (e: Event) => {
   const target = e.target as HTMLInputElement;
   if (!target.files?.length) return;
   sending.value = true;
-  try { for (const file of Array.from(target.files)) await sendFile(file); }
-  finally { sending.value = false; target.value = ""; }
+  try {
+    // Multi-pick: kick off every send concurrently. Each call only does an
+    // optimistic Dexie insert + enqueue; the real upload is serialised by
+    // SyncEngine. allSettled keeps one failed enqueue from blocking the rest.
+    await Promise.allSettled(Array.from(target.files).map((file) => sendFile(file)));
+  } finally { sending.value = false; target.value = ""; }
 };
 
 const handleMediaSend = async () => {
@@ -388,14 +400,17 @@ const handleMediaSend = async () => {
   mediaUpload.sending.value = true;
   try {
     const files = mediaUpload.files.value;
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const isLast = i === files.length - 1;
-      const captionOpts = isLast && mediaUpload.caption.value
-        ? { caption: mediaUpload.caption.value, captionAbove: mediaUpload.captionAbove.value } : {};
-      if (f.type === "image") await sendImage(f.file, captionOpts);
-      else await sendFile(f.file);
-    }
+    // Caption travels on the LAST file so the chat reads as a single
+    // gallery; precompute the index here and dispatch the rest in parallel.
+    const lastIdx = files.length - 1;
+    await Promise.allSettled(
+      files.map((f, i) => {
+        const captionOpts = i === lastIdx && mediaUpload.caption.value
+          ? { caption: mediaUpload.caption.value, captionAbove: mediaUpload.captionAbove.value }
+          : {};
+        return f.type === "image" ? sendImage(f.file, captionOpts) : sendFile(f.file);
+      }),
+    );
   } finally { mediaUpload.clear(); }
 };
 
@@ -766,7 +781,7 @@ defineExpose({
   addMediaFiles: (files: File[]) => mediaUpload.addFiles(files),
   sendOtherFiles: async (files: File[]) => {
     sending.value = true;
-    try { for (const file of files) await sendFile(file); }
+    try { await Promise.allSettled(files.map((file) => sendFile(file))); }
     finally { sending.value = false; }
   },
 });
