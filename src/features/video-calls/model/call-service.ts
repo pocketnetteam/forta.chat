@@ -24,6 +24,11 @@ import {
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall } from "./finalize-call";
 import { isLegacyWebView, MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC } from "./webview-compatibility";
+import {
+  isIncomingCallSeen,
+  markIncomingCallSeen,
+  clearIncomingCallSeen,
+} from "./incoming-call-dedup";
 
 /**
  * One-shot guard so the legacy-WebView toast fires only once per process,
@@ -289,6 +294,10 @@ function unwireCallEvents(call: MatrixCall) {
     diagnosticsWarningListener = null;
   }
   cleanupRemoteFeedListener();
+  // Session 31: release the dedup slot so a future invite with the same
+  // callId (e.g. caller re-invited after the original was rejected) is
+  // routed normally instead of being silently dropped.
+  if (call.callId) clearIncomingCallSeen(call.callId);
   if (!boundHandlers) return;
   try {
     call.off(CallEvent.State, boundHandlers.onState);
@@ -869,6 +878,36 @@ export function useCallService() {
       ", type=" + matrixCall.type,
     );
 
+    // Session 31 — Bastyon ↔ Forta interop dedup.
+    //
+    // Multi-client setups (Bastyon installed alongside Forta on the same
+    // device, same Matrix user) and FCM-ringer-vs-sync races can cause the
+    // SDK to emit Call.incoming twice for the same callId. Without this
+    // guard the user sees a phantom second incoming-call UI on top of the
+    // first — exactly what #644 reports on Xiaomi 12X / 14T.
+    //
+    // We silently skip duplicates instead of calling matrixCall.reject():
+    // the original MatrixCall object (which the user can still answer via
+    // the first ringer) handles the protocol-level lifecycle. Calling
+    // reject() on the duplicate object would queue a redundant m.call.hangup
+    // that the homeserver might fan out and confuse the caller's client.
+    // The dedup window auto-clears after CALL_TIMEOUT_MS so a legitimate
+    // re-invite minutes later still rings.
+    if (matrixCall.callId && isIncomingCallSeen(matrixCall.callId)) {
+      console.debug(
+        "[call-service] duplicate Call.incoming ignored:",
+        matrixCall.callId,
+      );
+      // Drop SDK-internal listeners on the orphan duplicate MatrixCall so
+      // it can be GC'd promptly instead of waiting on the SDK's idle timer.
+      try {
+        (matrixCall as unknown as { removeAllListeners?: () => void })
+          .removeAllListeners?.();
+      } catch { /* ignore */ }
+      return;
+    }
+    if (matrixCall.callId) markIncomingCallSeen(matrixCall.callId);
+
     // Check FIRST whether the user already declined this call in the
     // native ringer (before JS was running). If so, send the rejection
     // straight back to Matrix so the caller actually stops ringing.
@@ -889,6 +928,10 @@ export function useCallService() {
         } catch (e) {
           console.error("[call-service] matrixCall.reject() failed:", e);
         }
+        // Keep the dedup slot held: the user explicitly declined this
+        // callId via the native ringer, so a stray SDK re-emit should
+        // remain silent for the dedup window. The slot still auto-expires
+        // after CALL_TIMEOUT_MS, which lets a determined caller redial.
         return;
       }
     }
@@ -896,6 +939,11 @@ export function useCallService() {
     if (callStore.isInCall) {
       console.log("[call-service] handleIncomingCall: already in call, rejecting");
       matrixCall.reject();
+      // Release the dedup slot: when the current call ends the user is
+      // available again, and a legitimate re-invite from the same caller
+      // (rare same-callId retry) should ring through instead of being
+      // silently swallowed by the 60s window.
+      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
       return;
     }
 
@@ -903,6 +951,10 @@ export function useCallService() {
     if (otherTabActive) {
       console.warn("[call-service] Another tab already has an active call, rejecting incoming");
       matrixCall.reject();
+      // Same rationale as the isInCall branch: ownership of the call is
+      // delegated to the other tab — releasing our dedup slot lets a
+      // future invite ring through normally if that tab closes.
+      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
       return;
     }
 

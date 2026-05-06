@@ -394,6 +394,18 @@ class CallPlugin : Plugin() {
     fun startAudioRouting(call: PluginCall) {
         val callType = call.getString("callType") ?: "voice"
         audioRouter?.start(callType)
+
+        // Session 31 (#644): bind MainActivity's hardware volume keys to
+        // STREAM_VOICE_CALL for the duration of the call. CallActivity sets
+        // its own volumeControlStream in onCreate(), but the user can navigate
+        // back to the Vue/MainActivity surface (e.g. minimised call window)
+        // and still expect the volume rocker to control the call. Per-Activity
+        // setting, applied on the UI thread.
+        bridge?.activity?.let { activity ->
+            activity.runOnUiThread {
+                activity.volumeControlStream = AudioManager.STREAM_VOICE_CALL
+            }
+        }
         call.resolve()
     }
 
@@ -410,6 +422,20 @@ class CallPlugin : Plugin() {
             } catch (e: Exception) {
                 Log.e(TAG, "stopAudioRouting threw", e)
             }
+
+            // Session 31 (#644): restore the activity's volume rocker AFTER
+            // AudioRouter.stop() has flipped the system back to MODE_NORMAL.
+            // Done in this order so a volume-key press during the teardown
+            // window still lands on STREAM_VOICE_CALL while the call is
+            // technically alive — flipping it earlier would lose the binding
+            // mid-call. Posted to the UI thread because volumeControlStream
+            // must be touched there.
+            bridge?.activity?.let { activity ->
+                activity.runOnUiThread {
+                    activity.volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+                }
+            }
+
             call.resolve()
         }
     }
@@ -432,6 +458,17 @@ class CallPlugin : Plugin() {
             } catch (e: Exception) {
                 Log.e(TAG, "forceStopAudio threw", e)
             }
+
+            // Session 31 (#644): unbind the activity's volume rocker after
+            // the brute-force audio reset. Same ordering as stopAudioRouting:
+            // restore happens once the system is back to MODE_NORMAL so a
+            // racing volume-key press never lands on a half-torn-down state.
+            bridge?.activity?.let { activity ->
+                activity.runOnUiThread {
+                    activity.volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+                }
+            }
+
             call.resolve()
         }
     }
