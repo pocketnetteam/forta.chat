@@ -108,6 +108,12 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             Log.d(TAG, "Call ended remotely (type=$msgType), tearing down incoming UI")
             IncomingCallActivity.dismissIfShowing()
             com.forta.chat.plugins.calls.CallConnectionService.dismissIncomingCallNotification(this)
+            // Session 41: Telecom helper above only cancels its own id 9999;
+            // the FSI ringer notification posted by showSimpleCallNotification
+            // lives at ("call_$roomId".hashCode()) and would keep ringing
+            // (setOngoing=true blocks swipe-dismiss) until process death
+            // without an explicit cancel.
+            dismissPushCallNotification(this, roomId)
             try {
                 com.forta.chat.plugins.calls.CallConnectionService.currentConnection
                     ?.onDisconnect()
@@ -159,6 +165,12 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             val lifetimeMs = data["lifetime"]?.toLongOrNull()
             val nowMs = System.currentTimeMillis()
             val expired = InviteThrottleGuard.isExpired(sentTime, nowMs, lifetimeMs)
+            // Session 41 diagnostic: lets us split timestamp-loss reports
+            // (Huawei HMS-stub, FCM collapse) from genuinely stale invites
+            // without needing a custom build for the user.
+            Log.i(TAG, "Call invite: callId=$callId, eventId=${data["event_id"]}, " +
+                "sentTime=$sentTime, lifetime=$lifetimeMs, expired=$expired, " +
+                "age=${nowMs - sentTime}ms, buildSdk=${Build.VERSION.SDK_INT}")
             inviteTracker.append(
                 InviteThrottleTracker.Record(
                     receivedAtMs = nowMs,
@@ -261,7 +273,20 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
     private fun showCallNotification(roomId: String, callerName: String, data: Map<String, String>) {
         val callId = data["call_id"] ?: data["event_id"] ?: ""
 
-        // Always show IncomingCallActivity directly — TelecomManager often rejects self-managed calls
+        // Session 41: post the full-screen-intent notification FIRST.
+        // This is the only ringer path that survives Android 10+ killed-app
+        // background-startActivity restrictions (no exception thrown — the
+        // launch is silently dropped). Posting the notification with
+        // setFullScreenIntent + CHANNEL_CALLS (IMPORTANCE_MAX, ringtone)
+        // wakes the screen and rings reliably from the locked screen on
+        // every device the system grants USE_FULL_SCREEN_INTENT to.
+        showSimpleCallNotification(roomId, callerName)
+
+        // Best-effort additional path: when the process is in foreground or
+        // recently stopped, startActivity succeeds and the user gets the
+        // richer IncomingCallActivity surface immediately. When it's blocked
+        // (Android 10+ killed app), the notification posted above keeps
+        // ringing — no silent miss.
         try {
             val intent = Intent(this, com.forta.chat.plugins.calls.IncomingCallActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -273,8 +298,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             startActivity(intent)
             Log.d(TAG, "Started IncomingCallActivity for $callerName")
         } catch (e: Exception) {
-            Log.w(TAG, "Could not start IncomingCallActivity: $e")
-            showSimpleCallNotification(roomId, callerName)
+            Log.w(TAG, "IncomingCallActivity.startActivity blocked, notification fallback active", e)
         }
 
         // Also try TelecomManager for system integration (call log, Bluetooth headset, etc.)
@@ -384,6 +408,22 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 .edit()
                 .putString("sender_name_$sender", name)
                 .apply()
+        }
+
+        /**
+         * Dismiss the FSI ringer notification for [roomId] posted by
+         * [showSimpleCallNotification]. Idempotent — safe to call from
+         * multiple cleanup paths.
+         *
+         * Mirror of [CallConnectionService.dismissIncomingCallNotification]
+         * but for the push-side notification. Without this, the
+         * full-screen-intent ringer keeps ringing after the caller hangs
+         * up, after the user accepts, or after they decline — because
+         * the Telecom dismiss helper only cancels its own ID 9999.
+         */
+        fun dismissPushCallNotification(context: Context, roomId: String) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(NOTIF_TAG, "call_$roomId".hashCode())
         }
     }
 }

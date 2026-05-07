@@ -299,8 +299,11 @@ class PushService {
 
     // Handle calls
     if (data.msg_type === 'm.call.invite') {
+      // Prefer the stable Matrix call_id over event_id: caller clients
+      // resend m.call.invite with a new event_id each retry while keeping
+      // the call_id constant. Session 41.
       this.onCallPush?.({
-        callId: data.event_id || '',
+        callId: data.call_id || data.event_id || '',
         callerName: data.sender_display_name || tRaw('push.unknownSender'),
         roomId,
         hasVideo: false,
