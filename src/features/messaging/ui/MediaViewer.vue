@@ -15,8 +15,9 @@ interface Props {
 const props = defineProps<Props>();
 const emit = defineEmits<{ close: [] }>();
 
+const { t } = useI18n();
 const chatStore = useChatStore();
-const { getState, download } = useFileDownload();
+const { getState, download, saveFile } = useFileDownload();
 
 // Android back: close media viewer (highest overlay priority)
 useAndroidBackHandler("media-viewer", 100, () => {
@@ -161,6 +162,13 @@ watch(currentMessage, async (msg) => {
     await download(msg);
   }
 });
+
+const handleSaveCurrent = async () => {
+  const msg = currentMessage.value;
+  const url = currentUrl.value;
+  if (!msg || !msg.fileInfo || !url) return;
+  await saveFile(url, msg.fileInfo.name, msg.fileInfo.type);
+};
 </script>
 
 <template>
@@ -185,7 +193,20 @@ watch(currentMessage, async (msg) => {
           <span class="text-sm text-white/60">
             {{ currentIndex + 1 }} / {{ mediaMessages.length }}
           </span>
-          <div class="w-6" />
+          <button
+            data-testid="media-save"
+            class="text-white/80 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            :disabled="!currentUrl"
+            :title="t('media.save')"
+            :aria-label="t('media.save')"
+            @click="handleSaveCurrent"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
         </div>
 
         <!-- Media content -->

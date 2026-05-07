@@ -338,6 +338,7 @@ export const en = {
   "media.addCaption": "Add a caption...",
   "media.captionBelow": "Caption below",
   "media.captionAbove": "Caption above",
+  "media.save": "Save",
 
   // ── Drop overlay ──
   "drop.title": "Drop files here to send",
