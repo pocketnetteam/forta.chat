@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, computed, onBeforeUnmount } from "vue";
+import { ref, nextTick, watch, computed, onBeforeUnmount, onMounted } from "vue";
 import { useChatStore, MessageType } from "@/entities/chat";
 import { useThemeStore } from "@/entities/theme";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
@@ -143,6 +143,11 @@ onBeforeUnmount(() => {
   // Clean up any lingering recording mouse/move listeners
   document.removeEventListener("mouseup", handleGlobalMouseUp);
   document.removeEventListener("mousemove", handleGlobalMouseMove);
+  // Stop tracking input bar height + clear the CSS custom property so the
+  // picker doesn't reference a stale value on the next chat mount.
+  inputResizeObserver?.disconnect();
+  inputResizeObserver = null;
+  document.documentElement.style.removeProperty("--message-input-height");
 });
 
 // --- Edit/reply ---
@@ -764,6 +769,20 @@ const handleRecordMouseDown = (e: MouseEvent) => {
 // Root ref for overlay positioning
 const inputRootRef = ref<HTMLElement | null>(null);
 
+// Expose input bar height as a CSS custom property so the emoji picker can
+// dock above it on mobile instead of overlapping the textarea.
+let inputResizeObserver: ResizeObserver | null = null;
+onMounted(() => {
+  if (!inputRootRef.value) return;
+  const update = () => {
+    const h = inputRootRef.value?.getBoundingClientRect().height ?? 0;
+    document.documentElement.style.setProperty("--message-input-height", `${h}px`);
+  };
+  update();
+  inputResizeObserver = new ResizeObserver(update);
+  inputResizeObserver.observe(inputRootRef.value);
+});
+
 // Video circle overlay
 const overlayVideoRef = ref<HTMLVideoElement | null>(null);
 watch(() => videoRecorder.videoStream.value, (stream) => {
@@ -795,6 +814,16 @@ const insertEmoji = (emoji: string) => {
     nextTick(() => { el.selectionStart = el.selectionEnd = start + emoji.length; el.focus({ preventScroll: true }); autoResize(); });
   } else { text.value += emoji; }
   themeStore.addRecentEmoji(emoji);
+};
+
+const toggleEmojiPicker = (e: MouseEvent) => {
+  // Blur the textarea so the soft keyboard collapses before the picker opens —
+  // otherwise the picker has to fight the keyboard for the lower half of the
+  // screen and the textarea is hidden anyway.
+  textareaRef.value?.blur();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  emojiPickerPos.value = { x: rect.left, y: rect.top };
+  showEmojiPicker.value = !showEmojiPicker.value;
 };
 
 const handleGifSelect = async (gif: { gifUrl: string; width: number; height: number; title: string }) => {
@@ -1023,7 +1052,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
         <button
           class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
           :title="t('message.emoji')"
-          @click="(e: MouseEvent) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); emojiPickerPos = { x: rect.left, y: rect.top }; showEmojiPicker = !showEmojiPicker; }"
+          @click="toggleEmojiPicker"
         >
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />

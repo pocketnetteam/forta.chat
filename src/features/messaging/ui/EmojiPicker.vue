@@ -3,15 +3,13 @@ import { ref, computed, watch, nextTick } from "vue";
 import { useThemeStore } from "@/entities/theme";
 import { EMOJI_CATEGORIES, searchEmojis } from "@/shared/lib/emoji-data";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { computePanelStyle } from "./emoji-picker-layout";
 import EmojiKitchenBar from "./EmojiKitchenBar.vue";
 import GifPicker from "./GifPicker.vue";
 import type { TenorGif } from "@/shared/lib/tenor";
 
 const isMobile = useMobile();
-
-const PANEL_W = 370;
-const PANEL_H = 420;
-const PAD = 8;
 
 interface Props {
   show: boolean;
@@ -60,53 +58,18 @@ watch(() => props.show, (v) => {
   }
 });
 
-// Responsive panel: clamp to viewport on small screens
-const panelStyle = computed(() => {
-  const vw = typeof window !== "undefined" ? window.innerWidth : 800;
-  const vh = typeof window !== "undefined" ? window.innerHeight : 600;
-
-  // Mobile: full-width bottom panel (use CSS units for resize/rotation reactivity)
-  if (isMobile.value) {
-    return {
-      left: "0px",
-      top: "auto",
-      bottom: "0px",
-      width: "100%",
-      height: "min(55dvh, 420px)",
-      borderRadius: "16px 16px 0 0",
-    };
-  }
-
-  const panelW = Math.min(PANEL_W, vw - PAD * 2);
-  const panelH = Math.min(PANEL_H, vh - PAD * 2);
-
-  let left = Math.max(PAD, Math.min(props.x, vw - panelW - PAD));
-
-  const spaceAbove = props.y - PAD;
-  const spaceBelow = vh - props.y - PAD;
-
-  let top: number;
-  if (spaceAbove >= panelH) {
-    top = props.y - panelH;
-  } else if (spaceBelow >= panelH) {
-    top = props.y;
-  } else {
-    if (spaceAbove >= spaceBelow) {
-      top = PAD;
-    } else {
-      top = vh - panelH - PAD;
-    }
-  }
-
-  top = Math.max(PAD, Math.min(top, vh - panelH - PAD));
-
-  return {
-    left: `${left}px`,
-    top: `${top}px`,
-    width: `${panelW}px`,
-    height: `${panelH}px`,
-  };
-});
+// Responsive panel: clamp to viewport on small screens. The actual math lives
+// in `./emoji-picker-layout.ts` so it can be unit-tested without mounting.
+const panelStyle = computed(() =>
+  computePanelStyle({
+    isMobile: isMobile.value,
+    mode: props.mode,
+    x: props.x,
+    y: props.y,
+    vw: typeof window !== "undefined" ? window.innerWidth : 800,
+    vh: typeof window !== "undefined" ? window.innerHeight : 600,
+  }),
+);
 
 const filteredEmojis = computed(() => {
   if (!search.value) return null;
@@ -169,6 +132,16 @@ const onGridScroll = () => {
 const setSectionRef = (el: any, idx: number) => {
   if (el) sectionRefs.value[idx] = el as HTMLElement;
 };
+
+// Android back: close the picker first, instead of leaving the chat. Two
+// EmojiPicker instances (input + reaction) co-exist in the chat tree, so the
+// id is mode-scoped to keep both handlers registered. Priority 90 matches
+// other bottom-sheet/modal overlays.
+useAndroidBackHandler(`emoji-picker-${props.mode}`, 90, () => {
+  if (!props.show) return false;
+  emit("close");
+  return true;
+});
 </script>
 
 <template>
