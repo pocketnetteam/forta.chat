@@ -4,6 +4,7 @@ import { createAppInitializer } from "@/app/providers/initializers/app-initializ
 import { ProfileLoader, PROFILE_LOADER_BATCH_ACTIVE } from "@/shared/lib/profile-loader";
 import { PromisePool } from "@/shared/lib/promise-pool";
 
+import { mergeUserUpdate } from "./merge-user-update";
 import type { User } from "./types";
 
 const NAMESPACE = "user";
@@ -117,15 +118,14 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         await appInit.initApi();
         const userData = await appInit.loadUserData([address]);
         if (userData) {
-          users.value[address] = {
+          users.value[address] = mergeUserUpdate(users.value[address], {
             address,
             name: userData.name ?? "",
             about: userData.about ?? "",
             image: userData.image ?? "",
             site: userData.site ?? "",
             language: userData.language ?? "",
-            cachedAt: Date.now(),
-          };
+          });
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
@@ -176,15 +176,14 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         for (const addr of uncached) {
           const userData = appInit.getUserData(addr);
           if (userData) {
-            users.value[addr] = {
+            users.value[addr] = mergeUserUpdate(users.value[addr], {
               address: addr,
               name: userData.name ?? "",
               about: userData.about ?? "",
               image: userData.image ?? "",
               site: userData.site ?? "",
               language: userData.language ?? "",
-              cachedAt: Date.now(),
-            };
+            });
             updated = true;
           }
         }
@@ -238,15 +237,14 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           for (const addr of chunk) {
             const userData = appInit.getUserData(addr);
             if (userData) {
-              users.value[addr] = {
+              users.value[addr] = mergeUserUpdate(users.value[addr], {
                 address: addr,
                 name: userData.name ?? "",
                 about: userData.about ?? "",
                 image: userData.image ?? "",
                 site: userData.site ?? "",
                 language: userData.language ?? "",
-                cachedAt: Date.now(),
-              };
+              });
               updated = true;
             }
           }
@@ -300,15 +298,14 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         for (const addr of batch) {
           const userData = appInit.getUserData(addr);
           if (userData) {
-            users.value[addr] = {
+            users.value[addr] = mergeUserUpdate(users.value[addr], {
               address: addr,
               name: userData.name ?? "",
               about: userData.about ?? "",
               image: userData.image ?? "",
               site: userData.site ?? "",
               language: userData.language ?? "",
-              cachedAt: now,
-            };
+            }, now);
             updated = true;
           }
         }
