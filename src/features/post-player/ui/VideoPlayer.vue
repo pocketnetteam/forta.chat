@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { App as CapacitorApp, type PluginListenerHandle } from "@capacitor/app";
 import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
+import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
 interface Props {
   url: string;
@@ -13,12 +13,9 @@ const videoInfo = computed(() => parseVideoUrl(props.url));
 const playing = ref(false);
 const error = ref(false);
 const peertubeThumb = ref("");
-const iframeRef = ref<HTMLIFrameElement | null>(null);
 const isFullscreen = ref(false);
 
 const thumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.thumbUrl || "");
-
-let backListener: PluginListenerHandle | null = null;
 
 const onFullscreenChange = () => {
   isFullscreen.value = !!document.fullscreenElement;
@@ -26,19 +23,6 @@ const onFullscreenChange = () => {
 
 onMounted(async () => {
   document.addEventListener("fullscreenchange", onFullscreenChange);
-
-  // Android back: while iframe is in fullscreen, exit FS instead of closing post.
-  // Capacitor App is web-shim safe, but wrap defensively for test/SSR envs.
-  try {
-    backListener = await CapacitorApp.addListener("backButton", (e) => {
-      if (isFullscreen.value && document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-        e.canGoBack = false;
-      }
-    });
-  } catch {
-    // no-op: Capacitor plugin not available (e.g. unit tests, plain web preview)
-  }
 
   const info = videoInfo.value;
   if (info?.type === "peertube" && info.apiUrl) {
@@ -48,8 +32,16 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener("fullscreenchange", onFullscreenChange);
-  backListener?.remove().catch(() => {});
-  backListener = null;
+});
+
+// Android back: exit iframe fullscreen instead of closing the post.
+// Priority 100 matches other full-screen overlays (MediaViewer, CallWindow).
+useAndroidBackHandler("post-video-fullscreen", 100, () => {
+  if (isFullscreen.value && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+    return true;
+  }
+  return false;
 });
 
 const play = () => {
@@ -70,7 +62,6 @@ const onIframeError = () => {
   >
     <iframe
       v-if="playing && !error"
-      ref="iframeRef"
       :src="videoInfo.embedUrl + '?autoplay=1'"
       class="absolute inset-0 h-full w-full"
       frameborder="0"
