@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { App as CapacitorApp, type PluginListenerHandle } from "@capacitor/app";
 import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
 
 interface Props {
@@ -12,15 +13,43 @@ const videoInfo = computed(() => parseVideoUrl(props.url));
 const playing = ref(false);
 const error = ref(false);
 const peertubeThumb = ref("");
+const iframeRef = ref<HTMLIFrameElement | null>(null);
+const isFullscreen = ref(false);
 
 const thumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.thumbUrl || "");
 
-// Fetch PeerTube thumbnail via API
+let backListener: PluginListenerHandle | null = null;
+
+const onFullscreenChange = () => {
+  isFullscreen.value = !!document.fullscreenElement;
+};
+
 onMounted(async () => {
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+
+  // Android back: while iframe is in fullscreen, exit FS instead of closing post.
+  // Capacitor App is web-shim safe, but wrap defensively for test/SSR envs.
+  try {
+    backListener = await CapacitorApp.addListener("backButton", (e) => {
+      if (isFullscreen.value && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+        e.canGoBack = false;
+      }
+    });
+  } catch {
+    // no-op: Capacitor plugin not available (e.g. unit tests, plain web preview)
+  }
+
   const info = videoInfo.value;
   if (info?.type === "peertube" && info.apiUrl) {
     peertubeThumb.value = await fetchPeerTubeThumb(info.apiUrl);
   }
+});
+
+onUnmounted(() => {
+  document.removeEventListener("fullscreenchange", onFullscreenChange);
+  backListener?.remove().catch(() => {});
+  backListener = null;
 });
 
 const play = () => {
@@ -41,10 +70,12 @@ const onIframeError = () => {
   >
     <iframe
       v-if="playing && !error"
+      ref="iframeRef"
       :src="videoInfo.embedUrl + '?autoplay=1'"
       class="absolute inset-0 h-full w-full"
       frameborder="0"
-      allow="autoplay; fullscreen; picture-in-picture"
+      sandbox="allow-same-origin allow-scripts allow-presentation allow-forms allow-popups"
+      allow="autoplay; picture-in-picture; fullscreen"
       allowfullscreen
       @error="onIframeError"
     />
