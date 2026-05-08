@@ -31,6 +31,14 @@ interface FileDownloadState {
   blob: Blob | null;
 }
 
+/** Options for `download()`. `forceRefetch` is the retry-after-watchdog
+ *  escape hatch: when a stuck encrypted blob never reaches loadedmetadata,
+ *  the user clicks retry and the call site sets this flag to drop the
+ *  cached objectUrl and rerun fetch + decrypt with a fresh URL. */
+export interface DownloadOpts {
+  forceRefetch?: boolean;
+}
+
 /** Errors that mean "this ciphertext cannot be decrypted with the keys we
  *  have" — the sender's room state and ours diverged, or they encrypted to
  *  the wrong recipient set. Surfacing these as bug-reports drowns the actual
@@ -488,13 +496,39 @@ export function useFileDownload() {
   /** Download (and decrypt if needed) a file message.
    *  @param signal — optional AbortSignal. Callers that want the download
    *                  to stop when their scope unmounts (e.g. MediaGrid on
-   *                  chat switch) should pass `onScopeDispose`-tied signal. */
-  const download = async (message: Message, signal?: AbortSignal) => {
+   *                  chat switch) should pass `onScopeDispose`-tied signal.
+   *  @param opts.forceRefetch — when true, drops the cached objectUrl,
+   *                  revokes the prior blob URL, and re-runs the full
+   *                  fetch + decrypt pipeline. Used by the voice-message
+   *                  retry button after a watchdog timeout (Session 44). */
+  const download = async (
+    message: Message,
+    signal?: AbortSignal,
+    opts: DownloadOpts = {},
+  ) => {
     if (!message.fileInfo) return null;
 
     // Use _key (stable clientId) if available, otherwise fall back to id.
     // This prevents cache misses when id flips from clientId to eventId after send confirmation.
     const cacheKey = message._key || message.id;
+
+    // forceRefetch — drop the prior cache entry and revoke the old blob URL
+    // before re-running the pipeline. Without revoking, the previous
+    // objectUrl would leak (no one else holds a reference to it).
+    if (opts.forceRefetch) {
+      const previousUrl = cache.get(cacheKey);
+      if (previousUrl) {
+        try { URL.revokeObjectURL(previousUrl); } catch { /* ignore */ }
+      }
+      cache.delete(cacheKey);
+      const existingState = states.value[cacheKey];
+      if (existingState) {
+        existingState.objectUrl = null;
+        existingState.blob = null;
+        existingState.error = null;
+        existingState.errorKind = null;
+      }
+    }
 
     // Already cached
     if (cache.has(cacheKey)) {
