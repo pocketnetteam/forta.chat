@@ -9,6 +9,17 @@ vi.mock("@/shared/lib/platform", () => ({
   isWeb: true,
 }));
 
+// Mock bug-report so we can assert that the watchdog path doesn't fire it.
+const mockBugReportOpen = vi.fn();
+vi.mock("@/features/bug-report", () => ({
+  useBugReport: () => ({ open: mockBugReportOpen }),
+}));
+
+// Mock i18n to keep error-context lookups deterministic.
+vi.mock("@/shared/lib/i18n", () => ({
+  tRaw: (k: string) => k,
+}));
+
 // --- Mock Audio (must use regular function for `new` operator) ---
 const mockPlay = vi.fn(() => Promise.resolve());
 const mockPause = vi.fn();
@@ -357,10 +368,13 @@ describe("useAudioPlayback watchdog (Session 44)", () => {
     vi.useFakeTimers();
     playback = useAudioPlayback();
     playback.stop();
+    // Reset rate so tests don't inherit cycleSpeed leftovers from other blocks.
+    playback.playbackRate.value = 1;
     mockPlay.mockClear();
     mockPause.mockClear();
     mockLoad.mockClear();
     mockRemoveAttribute.mockClear();
+    mockBugReportOpen.mockClear();
     (Audio as unknown as Mock).mockClear();
   });
 
@@ -412,5 +426,37 @@ describe("useAudioPlayback watchdog (Session 44)", () => {
 
     // Watchdog must only flip state when it's still "loading".
     expect(playback.state.value).toBe("paused");
+  });
+
+  it("does not open the bug-report modal when the watchdog wins the race", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Simulate the encrypted-blob hang: play() never resolves on its own.
+    // After the watchdog calls pause()/removeAttribute("src")/load(), the
+    // browser would normally reject the play() promise with AbortError.
+    let rejectPlay: (e: Error) => void = () => {};
+    mockPlay.mockReturnValue(new Promise((_, reject) => { rejectPlay = reject; }));
+
+    void playback.play(baseInfo);
+    await Promise.resolve();
+    expect(playback.state.value).toBe("loading");
+
+    // Watchdog fires.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(playback.state.value).toBe("failed");
+
+    // Now the browser rejects play() (deferred AbortError after src cleared).
+    rejectPlay(new DOMException("The play() request was interrupted", "AbortError"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Must not show a bug-report modal — the watchdog already surfaced
+    // the failure, and the AbortError is its own doing.
+    expect(mockBugReportOpen).not.toHaveBeenCalled();
+    expect(playback.state.value).toBe("failed");
+
+    consoleSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
   });
 });

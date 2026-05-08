@@ -255,8 +255,14 @@ export function useAudioPlayback() {
         console.error("[audio] User gesture likely expired before play(). " +
           "Ensure no async operations between click and play().");
       }
-      useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
-      state.value = "failed";
+      // If the watchdog already flipped state to "failed", the play() promise
+      // rejection that follows is the watchdog's own abort (pause +
+      // removeAttribute("src") + load()). Don't open a duplicate bug-report
+      // modal in that case — the user already sees the retry UI.
+      if (state.value !== "failed") {
+        useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
+        state.value = "failed";
+      }
     }
   }
 
