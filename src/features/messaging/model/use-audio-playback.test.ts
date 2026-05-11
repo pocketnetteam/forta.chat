@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 
 // Mock platform detection
 vi.mock("@/shared/lib/platform", () => ({
@@ -7,6 +7,17 @@ vi.mock("@/shared/lib/platform", () => ({
   isAndroid: false,
   isElectron: false,
   isWeb: true,
+}));
+
+// Mock bug-report so we can assert that the watchdog path doesn't fire it.
+const mockBugReportOpen = vi.fn();
+vi.mock("@/features/bug-report", () => ({
+  useBugReport: () => ({ open: mockBugReportOpen }),
+}));
+
+// Mock i18n to keep error-context lookups deterministic.
+vi.mock("@/shared/lib/i18n", () => ({
+  tRaw: (k: string) => k,
 }));
 
 // --- Mock Audio (must use regular function for `new` operator) ---
@@ -340,5 +351,112 @@ describe("checkCodecSupport", () => {
     expect(support).toHaveProperty("wav");
     expect(support).toHaveProperty("aac");
     expect(typeof support.mp3).toBe("boolean");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Watchdog regression — Session 44
+// Reproduces issues #695, #671: voice message gets stuck in loading state
+// when the encrypted blob's <audio> never reaches loadedmetadata. Without a
+// watchdog, the user sees an infinite spinner; the cure is an 8s timeout
+// that flips state → "failed" so the retry button is shown.
+// ---------------------------------------------------------------------------
+describe("useAudioPlayback watchdog (Session 44)", () => {
+  let playback: ReturnType<typeof useAudioPlayback>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    playback = useAudioPlayback();
+    playback.stop();
+    // Reset rate so tests don't inherit cycleSpeed leftovers from other blocks.
+    playback.playbackRate.value = 1;
+    mockPlay.mockClear();
+    mockPause.mockClear();
+    mockLoad.mockClear();
+    mockRemoveAttribute.mockClear();
+    mockBugReportOpen.mockClear();
+    (Audio as unknown as Mock).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("transitions to 'failed' if loadedmetadata never fires within 8s", async () => {
+    // Simulate hung encrypted blob: play() returns a never-resolving promise.
+    mockPlay.mockReturnValue(new Promise(() => {}));
+
+    // Don't await — play() will hang on the never-resolving promise.
+    void playback.play(baseInfo);
+    // Allow the synchronous part of play() to run (state = "loading", el = new Audio()).
+    await Promise.resolve();
+    expect(playback.state.value).toBe("loading");
+
+    // Advance past the 8s watchdog threshold.
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(playback.state.value).toBe("failed");
+  });
+
+  it("does not transition to 'failed' if loadedmetadata fires before 8s", async () => {
+    mockPlay.mockResolvedValueOnce(undefined);
+
+    await playback.play(baseInfo);
+    expect(playback.state.value).toBe("playing");
+
+    // Fire loadedmetadata to clear the watchdog.
+    const onloaded = lastAudio.onloadedmetadata as ((this: unknown) => void) | null;
+    onloaded?.call(lastAudio);
+
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(playback.state.value).not.toBe("failed");
+    expect(playback.state.value).toBe("playing");
+  });
+
+  it("does not transition to 'failed' on watchdog if state has already moved on", async () => {
+    mockPlay.mockResolvedValueOnce(undefined);
+
+    await playback.play(baseInfo);
+    // play() resolved → state = "playing"; user pauses before watchdog fires.
+    playback.pause();
+    expect(playback.state.value).toBe("paused");
+
+    await vi.advanceTimersByTimeAsync(8000);
+
+    // Watchdog must only flip state when it's still "loading".
+    expect(playback.state.value).toBe("paused");
+  });
+
+  it("does not open the bug-report modal when the watchdog wins the race", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Simulate the encrypted-blob hang: play() never resolves on its own.
+    // After the watchdog calls pause()/removeAttribute("src")/load(), the
+    // browser would normally reject the play() promise with AbortError.
+    let rejectPlay: (e: Error) => void = () => {};
+    mockPlay.mockReturnValue(new Promise((_, reject) => { rejectPlay = reject; }));
+
+    void playback.play(baseInfo);
+    await Promise.resolve();
+    expect(playback.state.value).toBe("loading");
+
+    // Watchdog fires.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(playback.state.value).toBe("failed");
+
+    // Now the browser rejects play() (deferred AbortError after src cleared).
+    rejectPlay(new DOMException("The play() request was interrupted", "AbortError"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Must not show a bug-report modal — the watchdog already surfaced
+    // the failure, and the AbortError is its own doing.
+    expect(mockBugReportOpen).not.toHaveBeenCalled();
+    expect(playback.state.value).toBe("failed");
+
+    consoleSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
   });
 });

@@ -169,6 +169,15 @@ class CallActivity : Activity(), SensorEventListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Session 31 (#644 Xiaomi 12X / 14T): bind hardware volume keys to
+        // STREAM_VOICE_CALL while the in-call surface is on screen. Without
+        // this the keys default to STREAM_MUSIC and pressing volume-up/down
+        // during a VoIP call is silently ignored — the in-call audio volume
+        // can only be changed via the system slider, which most users never
+        // discover. setVolumeControlStream is per-Activity and is reset
+        // automatically when this Activity is destroyed.
+        volumeControlStream = AudioManager.STREAM_VOICE_CALL
+
         // Keep screen on, show over lock screen
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {

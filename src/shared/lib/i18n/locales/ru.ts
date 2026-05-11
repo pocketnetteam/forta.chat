@@ -340,6 +340,7 @@ export const ru: Record<TranslationKey, string> = {
   "media.addCaption": "Добавить подпись...",
   "media.captionBelow": "Подпись снизу",
   "media.captionAbove": "Подпись сверху",
+  "media.save": "Сохранить",
 
   // ── Drop overlay ──
   "drop.title": "Перетащите файлы сюда",

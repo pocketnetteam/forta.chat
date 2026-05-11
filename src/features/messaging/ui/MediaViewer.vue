@@ -5,6 +5,7 @@ import { useChatStore, MessageType } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
+import { touchDistance, nextScale, MIN_SCALE } from "../model/pinch-zoom";
 
 interface Props {
   show: boolean;
@@ -14,8 +15,9 @@ interface Props {
 const props = defineProps<Props>();
 const emit = defineEmits<{ close: [] }>();
 
+const { t } = useI18n();
 const chatStore = useChatStore();
-const { getState, download } = useFileDownload();
+const { getState, download, saveFile } = useFileDownload();
 
 // Android back: close media viewer (highest overlay priority)
 useAndroidBackHandler("media-viewer", 100, () => {
@@ -75,12 +77,23 @@ const goPrev = () => {
   }
 };
 
-// Swipe navigation
+// Swipe navigation + pinch-to-zoom. Two-finger gestures take priority; one-
+// finger swipes only run when not zoomed so a horizontal pan inside a zoomed
+// image doesn't accidentally jump to the previous/next photo.
 let touchStartX = 0;
 let touchStartY = 0;
 let touchDeltaX = 0;
+let pinchLastDistance = 0;
 
 const onTouchstart = (e: TouchEvent) => {
+  if (e.touches.length === 2) {
+    pinchLastDistance = touchDistance(
+      [e.touches[0].clientX, e.touches[0].clientY],
+      [e.touches[1].clientX, e.touches[1].clientY],
+    );
+    touchDeltaX = 0;
+    return;
+  }
   if (scale.value > 1) return; // Don't swipe when zoomed
   touchStartX = e.touches[0].clientX;
   touchStartY = e.touches[0].clientY;
@@ -88,6 +101,15 @@ const onTouchstart = (e: TouchEvent) => {
 };
 
 const onTouchmove = (e: TouchEvent) => {
+  if (e.touches.length === 2) {
+    const d = touchDistance(
+      [e.touches[0].clientX, e.touches[0].clientY],
+      [e.touches[1].clientX, e.touches[1].clientY],
+    );
+    scale.value = nextScale(scale.value, pinchLastDistance, d);
+    pinchLastDistance = d;
+    return;
+  }
   if (scale.value > 1) return;
   touchDeltaX = e.touches[0].clientX - touchStartX;
   const deltaY = e.touches[0].clientY - touchStartY;
@@ -99,7 +121,14 @@ const onTouchmove = (e: TouchEvent) => {
   }
 };
 
-const onTouchend = () => {
+const onTouchend = (e: TouchEvent) => {
+  // Reset pinch tracker once one finger lifts so the next two-finger touch
+  // starts fresh instead of inheriting the previous distance.
+  if (e.touches.length < 2) pinchLastDistance = 0;
+  // Snap back to 1x if a tiny over-pinch left a barely-visible scale change.
+  if (scale.value < MIN_SCALE + 0.05 && scale.value !== MIN_SCALE) {
+    resetTransform();
+  }
   if (scale.value > 1) return;
   if (touchDeltaX > 60) goPrev();
   else if (touchDeltaX < -60) goNext();
@@ -133,6 +162,13 @@ watch(currentMessage, async (msg) => {
     await download(msg);
   }
 });
+
+const handleSaveCurrent = async () => {
+  const msg = currentMessage.value;
+  const url = currentUrl.value;
+  if (!msg || !msg.fileInfo || !url) return;
+  await saveFile(url, msg.fileInfo.name, msg.fileInfo.type);
+};
 </script>
 
 <template>
@@ -157,7 +193,20 @@ watch(currentMessage, async (msg) => {
           <span class="text-sm text-white/60">
             {{ currentIndex + 1 }} / {{ mediaMessages.length }}
           </span>
-          <div class="w-6" />
+          <button
+            data-testid="media-save"
+            class="text-white/80 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            :disabled="!currentUrl"
+            :title="t('media.save')"
+            :aria-label="t('media.save')"
+            @click="handleSaveCurrent"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
         </div>
 
         <!-- Media content -->

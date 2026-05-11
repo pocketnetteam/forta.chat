@@ -109,7 +109,22 @@ const playbackRate = ref(1);
 
 let onEndedCallback: ((messageId: string, roomId: string) => void) | null = null;
 
+// Watchdog timeout for the loading → playing transition. encrypted blobs
+// occasionally hang `<audio>` such that neither loadedmetadata nor an error
+// event fires (issues #695, #671). 8s is long enough for slow Tor / 3G
+// pipelines but short enough for the user to retry without confusion.
+const LOADING_WATCHDOG_MS = 8_000;
+let loadingWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+function clearLoadingWatchdog() {
+  if (loadingWatchdog !== null) {
+    clearTimeout(loadingWatchdog);
+    loadingWatchdog = null;
+  }
+}
+
 function cleanup() {
+  clearLoadingWatchdog();
   if (audio.value) {
     audio.value.pause();
     audio.value.removeAttribute("src");
@@ -137,6 +152,7 @@ function setupAudioListeners(el: HTMLAudioElement) {
     }
   };
   el.onerror = () => {
+    clearLoadingWatchdog();
     const err = el.error;
     console.error("[audio] playback error:", {
       code: err?.code,
@@ -149,6 +165,7 @@ function setupAudioListeners(el: HTMLAudioElement) {
     state.value = "failed";
   };
   el.onloadedmetadata = () => {
+    clearLoadingWatchdog();
     // Only update if finite — Chromium reports Infinity for webm blobs
     if (Number.isFinite(el.duration) && el.duration > 0) {
       duration.value = el.duration;
@@ -197,6 +214,24 @@ export function useAudioPlayback() {
     currentRoomId.value = info.roomId;
     duration.value = info.duration;
 
+    // Arm a watchdog before the play() promise — if loadedmetadata / error
+    // never fires (encrypted blob race, sw cache miss), flip to "failed" so
+    // the retry UI surfaces instead of an indefinite spinner.
+    loadingWatchdog = setTimeout(() => {
+      loadingWatchdog = null;
+      if (state.value === "loading") {
+        console.warn(
+          "[audio] watchdog: loading > 8s, marking failed (msg=" + info.messageId + ")",
+        );
+        state.value = "failed";
+        if (audio.value) {
+          try { audio.value.pause(); } catch { /* ignore */ }
+          try { audio.value.removeAttribute("src"); } catch { /* ignore */ }
+          try { audio.value.load(); } catch { /* ignore */ }
+        }
+      }
+    }, LOADING_WATCHDOG_MS);
+
     try {
       const el = new Audio();
       el.playbackRate = playbackRate.value;
@@ -207,8 +242,10 @@ export function useAudioPlayback() {
       // The browser binds the play() Promise to the current user activation.
       el.src = info.objectUrl;
       await el.play();
+      clearLoadingWatchdog();
       state.value = "playing";
     } catch (e: unknown) {
+      clearLoadingWatchdog();
       const err = e as Error;
       console.error("[audio] play() rejected:", err.name, err.message);
 
@@ -218,8 +255,14 @@ export function useAudioPlayback() {
         console.error("[audio] User gesture likely expired before play(). " +
           "Ensure no async operations between click and play().");
       }
-      useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
-      state.value = "failed";
+      // If the watchdog already flipped state to "failed", the play() promise
+      // rejection that follows is the watchdog's own abort (pause +
+      // removeAttribute("src") + load()). Don't open a duplicate bug-report
+      // modal in that case — the user already sees the retry UI.
+      if (state.value !== "failed") {
+        useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
+        state.value = "failed";
+      }
     }
   }
 

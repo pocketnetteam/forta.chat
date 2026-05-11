@@ -590,4 +590,91 @@ describe("useFileDownload", () => {
       scope.stop();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // forceRefetch — Session 44
+  // Voice-message retry button needs to bypass the per-message media cache
+  // so a stuck encrypted blob can be re-fetched + re-decrypted with a fresh
+  // objectUrl (issues #695, #671).
+  // -------------------------------------------------------------------------
+  describe("download — forceRefetch (Session 44)", () => {
+    const baseMessage = {
+      id: "$evt_force",
+      _key: "client_force",
+      roomId: "!room:server",
+      senderId: "@u:server",
+      content: "voice.ogg",
+      timestamp: Date.now(),
+      status: "sent",
+      type: "audio",
+      fileInfo: {
+        name: "voice.ogg",
+        type: "audio/ogg",
+        size: 512,
+        url: "https://example.com/voice.ogg",
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    beforeEach(() => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+    });
+
+    it("returns the cached objectUrl on a second call without forceRefetch", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+
+        const first = await download(baseMessage);
+        const callsAfterFirst = (global.fetch as Mock).mock.calls.length;
+
+        const second = await download(baseMessage);
+
+        expect(second).toBe(first);
+        // Cache hit — no extra fetch.
+        expect((global.fetch as Mock).mock.calls.length).toBe(callsAfterFirst);
+      });
+      scope.stop();
+    });
+
+    it("bypasses the cache and re-fetches when forceRefetch=true", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+
+        await download(baseMessage);
+        const callsAfterFirst = (global.fetch as Mock).mock.calls.length;
+
+        await download(baseMessage, undefined, { forceRefetch: true });
+
+        expect((global.fetch as Mock).mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      });
+      scope.stop();
+    });
+
+    it("revokes the prior objectUrl and produces a fresh one when forceRefetch=true", async () => {
+      const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      try {
+        const scope = effectScope();
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+
+          const first = await download(baseMessage);
+          revokeSpy.mockClear();
+
+          const second = await download(baseMessage, undefined, { forceRefetch: true });
+
+          expect(revokeSpy).toHaveBeenCalledWith(first);
+          expect(second).not.toBe(first);
+        });
+        scope.stop();
+      } finally {
+        revokeSpy.mockRestore();
+      }
+    });
+  });
 });

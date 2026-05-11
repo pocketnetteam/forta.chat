@@ -42,6 +42,7 @@ import {
   saveMnemonic,
   loadMnemonic,
   clearMnemonic,
+  syncProfileToMatrix,
 } from "../lib";
 import { createKeyPair } from "./key-pair";
 
@@ -252,11 +253,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const { execute: editUserData, isLoading: isEditingUserData } =
-    useAsyncOperation((userData: UserData) => {
-      return appInitializer.editUserData({
+    useAsyncOperation(async (userData: UserData) => {
+      const result = await appInitializer.editUserData({
         address: address.value!,
         userData: mergeObjects(userInfo.value!, userData)
       });
+
+      // Best-effort Matrix profile sync — ensures peers see the user's chosen
+      // nickname + avatar instead of a truncated wallet address. Pocketnet
+      // remains the authoritative source.
+      //
+      // Fire-and-forget: keeping it inside the await would extend the visible
+      // "Saving..." state by however long fetch + uploadContent + setAvatar
+      // take on the Matrix homeserver (potentially many seconds over Tor).
+      // The helper swallows its own errors; .catch is here only so an
+      // unexpected throw doesn't bubble up as an unhandled rejection.
+      if (result?.success === true && matrixReady.value) {
+        void syncProfileToMatrix(getMatrixClientService(), {
+          name: userData.name,
+          image: userData.image,
+        }).catch((e) => console.warn("[auth] Matrix profile sync failed:", e));
+      }
+
+      return result;
     });
 
   /** Initialize Matrix client, kit and crypto after login */

@@ -72,6 +72,15 @@ class CallConnectionService : ConnectionService() {
 
         currentConnection = connection
 
+        // Session 41: Telecom is about to post its own FSI ringer notification
+        // (CHANNEL_INCOMING_CALLS, id 9999). The FCM service already posted
+        // one on the push path (CHANNEL_CALLS, "call_$roomId".hashCode()) —
+        // dismiss it now so we don't ring twice from two different channels.
+        if (roomId.isNotEmpty()) {
+            com.forta.chat.FortaFirebaseMessagingService
+                .dismissPushCallNotification(applicationContext, roomId)
+        }
+
         // Show native incoming call UI
         showIncomingCallUI(callId, callerName, hasVideo)
 

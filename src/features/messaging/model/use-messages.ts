@@ -317,18 +317,22 @@ export function useMessages() {
     });
   }
 
-  /** Send a file/image/video/audio message */
-  const sendFile = async (file: File) => {
+  /** Send a file/image/video/audio message.
+   *  Returns true if an optimistic message landed in the UI (the user sees
+   *  it, even when subsequent enqueue fails), false when the call was
+   *  silently dropped before any visible side effect (caller can then
+   *  preserve the share/forward intent or restore the input). */
+  const sendFile = async (file: File): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) return false;
 
     if (file.size > MAX_UPLOAD_SIZE) {
       console.warn(`[use-messages] File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
-      return;
+      return false;
     }
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!matrixService.isReady()) return false;
 
     // Determine message type from MIME (with fallback for HEIC/extension-only files)
     const mime = normalizeMime(resolveMime(file));
@@ -341,7 +345,7 @@ export function useMessages() {
       // safer than leaking a never-completing toast on a dead pipeline.
       console.error("[use-messages] sendFile: chat DB not ready");
       URL.revokeObjectURL(localBlobUrl);
-      return;
+      return false;
     }
 
     const dbKit = getChatDb();
@@ -381,15 +385,20 @@ export function useMessages() {
       },
       localMsg.clientId,
     );
+    return true;
   };
 
-  /** Send an image message (m.image event — compatible with bastyon-chat) */
-  const sendImage = async (file: File, options: { caption?: string; captionAbove?: boolean } = {}) => {
+  /** Send an image message (m.image event — compatible with bastyon-chat).
+   *  See sendFile for the boolean return contract. */
+  const sendImage = async (
+    file: File,
+    options: { caption?: string; captionAbove?: boolean } = {},
+  ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) return false;
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!matrixService.isReady()) return false;
 
     const dimensions = await getImageDimensions(file);
     const imageMime = resolveMime(file);
@@ -398,7 +407,7 @@ export function useMessages() {
     if (!isChatDbReady()) {
       console.error("[use-messages] sendImage: chat DB not ready");
       URL.revokeObjectURL(localBlobUrl);
-      return;
+      return false;
     }
 
     const dbKit = getChatDb();
@@ -450,15 +459,20 @@ export function useMessages() {
       },
       localMsg.clientId,
     );
+    return true;
   };
 
-  /** Send an audio/voice message (m.audio event — compatible with bastyon-chat) */
-  const sendAudio = async (file: File, options: { duration?: number; waveform?: number[] } = {}) => {
+  /** Send an audio/voice message (m.audio event — compatible with bastyon-chat).
+   *  See sendFile for the boolean return contract. */
+  const sendAudio = async (
+    file: File,
+    options: { duration?: number; waveform?: number[] } = {},
+  ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) return false;
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!matrixService.isReady()) return false;
 
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
@@ -466,7 +480,7 @@ export function useMessages() {
     if (!isChatDbReady()) {
       console.error("[use-messages] sendAudio: chat DB not ready");
       URL.revokeObjectURL(localBlobUrl);
-      return;
+      return false;
     }
 
     const dbKit = getChatDb();
@@ -516,6 +530,7 @@ export function useMessages() {
       },
       localMsg.clientId,
     );
+    return true;
   };
 
   /** Send a video circle (video note) message — circular video like Telegram */

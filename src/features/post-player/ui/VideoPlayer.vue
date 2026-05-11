@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
+import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
 interface Props {
   url: string;
@@ -12,15 +13,35 @@ const videoInfo = computed(() => parseVideoUrl(props.url));
 const playing = ref(false);
 const error = ref(false);
 const peertubeThumb = ref("");
+const isFullscreen = ref(false);
 
 const thumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.thumbUrl || "");
 
-// Fetch PeerTube thumbnail via API
+const onFullscreenChange = () => {
+  isFullscreen.value = !!document.fullscreenElement;
+};
+
 onMounted(async () => {
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+
   const info = videoInfo.value;
   if (info?.type === "peertube" && info.apiUrl) {
     peertubeThumb.value = await fetchPeerTubeThumb(info.apiUrl);
   }
+});
+
+onUnmounted(() => {
+  document.removeEventListener("fullscreenchange", onFullscreenChange);
+});
+
+// Android back: exit iframe fullscreen instead of closing the post.
+// Priority 100 matches other full-screen overlays (MediaViewer, CallWindow).
+useAndroidBackHandler("post-video-fullscreen", 100, () => {
+  if (isFullscreen.value && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+    return true;
+  }
+  return false;
 });
 
 const play = () => {
@@ -44,7 +65,8 @@ const onIframeError = () => {
       :src="videoInfo.embedUrl + '?autoplay=1'"
       class="absolute inset-0 h-full w-full"
       frameborder="0"
-      allow="autoplay; fullscreen; picture-in-picture"
+      sandbox="allow-same-origin allow-scripts allow-presentation allow-forms allow-popups"
+      allow="autoplay; picture-in-picture; fullscreen"
       allowfullscreen
       @error="onIframeError"
     />

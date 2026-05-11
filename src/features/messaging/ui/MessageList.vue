@@ -8,6 +8,7 @@ import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-help
 import { formatDate } from "@/shared/lib/format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
+import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { useToast } from "@/shared/lib/use-toast";
@@ -30,6 +31,7 @@ const chatStore = useChatStore();
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
 const { loadMessages, toggleReaction, deleteMessage, deleteMessages, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
+const { getState: getFileState, download: downloadFile, saveFile } = useFileDownload();
 const { toast } = useToast();
 const { t } = useI18n();
 
@@ -149,8 +151,22 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
     case "unpin":
       chatStore.unpinMessage(message.id);
       break;
+    case "save":
+      handleSaveMedia(message);
+      break;
   }
   closeContextMenu();
+};
+
+const handleSaveMedia = async (message: import("@/entities/chat").Message) => {
+  if (!message.fileInfo) return;
+  // Match the cache key used by MessageBubble + MediaViewer: stable clientId
+  // when available so an in-flight upload's blob URL is reused instead of
+  // re-decrypting the just-rendered file.
+  const cacheKey = message._key || message.id;
+  const url = getFileState(cacheKey).objectUrl ?? (await downloadFile(message));
+  if (!url) return;
+  await saveFile(url, message.fileInfo.name, message.fileInfo.type);
 };
 
 const handlePollVote = (messageId: string, optionId: string) => {

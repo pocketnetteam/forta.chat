@@ -562,6 +562,28 @@ export class MatrixClientService {
     return res.content_uri;
   }
 
+  /** Set the user's Matrix display name (m.room.member.displayname).
+   *  Peers receive this via room state events on next sync; required so other
+   *  users see the nickname instead of a truncated wallet address. */
+  async setDisplayName(name: string): Promise<void> {
+    if (!this.client) throw new Error("Client not initialized");
+    await this.client.setDisplayName(name);
+  }
+
+  /** Upload an avatar blob and return the raw mxc:// URI for use in setAvatarMxc. */
+  async uploadAvatar(blob: Blob): Promise<string> {
+    if (!this.client) throw new Error("Client not initialized");
+    const res = await this.client.uploadContent(blob, { type: blob.type });
+    return res.content_uri;
+  }
+
+  /** Set the user's Matrix avatar URL (m.room.member.avatar_url).
+   *  Pass an mxc:// URI returned by uploadAvatar. */
+  async setAvatarMxc(mxcUrl: string): Promise<void> {
+    if (!this.client) throw new Error("Client not initialized");
+    await this.client.setAvatarUrl(mxcUrl);
+  }
+
   /** Convert an mxc:// URI to an HTTP URL */
   mxcToHttp(mxcUrl: string): string | null {
     if (!this.client) return null;

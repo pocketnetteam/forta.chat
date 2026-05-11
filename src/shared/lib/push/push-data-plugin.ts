@@ -11,6 +11,10 @@ export interface PushPayload {
   sender?: string;
   unread?: string;
   missed_calls?: string;
+  /** Stable Matrix m.call.* call_id. Persists across invite retries (each
+   *  retry has a new event_id). Prefer this over event_id for call
+   *  correlation. Session 41. */
+  call_id?: string;
 }
 
 interface PushDataPlugin extends Plugin {

@@ -9,7 +9,10 @@ import org.junit.Test
  * dependencies, runs as part of `./gradlew test` (JVM unit tests).
  *
  * Mirrors `src/shared/lib/native-calls/__tests__/invite-ttl.test.ts`
- * so JS and native sides agree on the staleness window.
+ * for the lifetime/staleness window. Diverges on missing-timestamp
+ * handling: JS-side `originServerTs <= 0` is corrupt-event (treated
+ * expired); Kotlin-side `sentTime <= 0` is HMS-stub / FCM-collapse
+ * (treated live — Session 41).
  */
 class InviteThrottleGuardTest {
 
@@ -67,9 +70,25 @@ class InviteThrottleGuardTest {
     }
 
     @Test
-    fun nonPositiveTimestampTreatedAsExpired() {
-        assertTrue(InviteThrottleGuard.isExpired(sentTimeMs = 0L, nowMs = now))
-        assertTrue(InviteThrottleGuard.isExpired(sentTimeMs = -1L, nowMs = now))
+    fun `sentTime zero is treated as live invite (Huawei HMS-stub or FCM collapse)`() {
+        // Some delivery paths erase the timestamp:
+        //   - Huawei HMS-stub builds set RemoteMessage.sentTime to 0
+        //   - FCM collapse_key dedup discards origin time on the second delivery
+        // Treating these as expired silently dropped valid invites — Session 41
+        // restores them as live. The lifetime check still applies once a real
+        // sentTime is present, so this only relaxes the malformed-timestamp
+        // edge-case, not the staleness window itself.
+        assertFalse(
+            "sentTime=0 must be treated as live (FCM collapsed or HMS stub)",
+            InviteThrottleGuard.isExpired(sentTimeMs = 0L, nowMs = now, lifetimeMs = 60_000L)
+        )
+    }
+
+    @Test
+    fun `negative sentTime is treated as live invite`() {
+        assertFalse(
+            InviteThrottleGuard.isExpired(sentTimeMs = -1L, nowMs = now, lifetimeMs = 60_000L)
+        )
     }
 
     @Test

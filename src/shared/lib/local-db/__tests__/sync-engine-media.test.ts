@@ -99,6 +99,7 @@ interface Harness {
   engine: SyncEngine;
   messageRepo: {
     confirmSent: ReturnType<typeof vi.fn>;
+    confirmMediaSent: ReturnType<typeof vi.fn>;
     updateStatus: ReturnType<typeof vi.fn>;
     getByEventId: ReturnType<typeof vi.fn>;
     updateReactions: ReturnType<typeof vi.fn>;
@@ -109,14 +110,19 @@ interface Harness {
   getRoomCrypto: ReturnType<typeof vi.fn>;
 }
 
-function makeHarness(name: string, encrypted: boolean): Harness {
+function makeHarness(
+  name: string,
+  encrypted: boolean,
+  opts: { existingMsg?: Partial<LocalMessage> } = {},
+): Harness {
   const db = new TestDb(name);
   const messageRepo = {
     confirmSent: vi.fn(async () => undefined),
+    confirmMediaSent: vi.fn(async () => undefined),
     updateStatus: vi.fn(async () => undefined),
     getByEventId: vi.fn(async () => undefined),
     updateReactions: vi.fn(async () => undefined),
-    getByClientId: vi.fn(async () => undefined),
+    getByClientId: vi.fn(async (..._args: unknown[]) => opts.existingMsg as LocalMessage | undefined),
     updateUploadProgress: vi.fn(async () => undefined),
   };
   const roomRepo = { updateRoom: vi.fn(async () => undefined) };
@@ -281,10 +287,66 @@ describe("SyncEngine.syncSendFile — full media pipeline", () => {
     expect(att?.status).toBe("uploaded");
     expect(att?.remoteUrl).toMatch(/^https?:\/\//);
 
-    expect(h.messageRepo.confirmSent).toHaveBeenCalledWith(
-      "cli_ok",
-      "$server_event_id",
+    // Media path uses confirmMediaSent (which atomically clears localBlobUrl
+    // and persists the mxc URL into fileInfo) — not confirmSent, which would
+    // leave the bubble pointing at a soon-to-be-revoked blob: URL.
+    expect(h.messageRepo.confirmSent).not.toHaveBeenCalled();
+    expect(h.messageRepo.confirmMediaSent).toHaveBeenCalledTimes(1);
+    const [clientId, eventId, fileInfo, roomId] =
+      h.messageRepo.confirmMediaSent.mock.calls[0];
+    expect(clientId).toBe("cli_ok");
+    expect(eventId).toBe("$server_event_id");
+    expect(roomId).toBe("!room:server");
+    expect((fileInfo as { url: string }).url).toMatch(/^https?:\/\//);
+  });
+
+  it("preserves per-type fileInfo metadata (w/h/duration) and overwrites only url + secrets", async () => {
+    h = makeHarness(
+      `media-fileinfo-${Date.now()}-${Math.random()}`,
+      true,
+      {
+        existingMsg: {
+          clientId: "cli_image",
+          fileInfo: {
+            name: "photo.jpg",
+            type: "image/jpeg",
+            size: 300,
+            url: "blob:http://localhost/abc",
+            w: 1920,
+            h: 1080,
+            caption: "Sunset",
+            captionAbove: false,
+          },
+          localBlobUrl: "blob:http://localhost/abc",
+        } as Partial<LocalMessage>,
+      },
     );
+    await h.db.open();
+
+    const attachmentId = await seedAttachment(h.db);
+    await seedFileOp(h.db, {
+      clientId: "cli_image",
+      encrypted: true,
+      attachmentId,
+    });
+
+    await h.engine.processQueue();
+    await waitForProcessed(h.db);
+
+    expect(h.messageRepo.confirmMediaSent).toHaveBeenCalledTimes(1);
+    const [, , fileInfo] = h.messageRepo.confirmMediaSent.mock.calls[0];
+    const fi = fileInfo as Record<string, unknown>;
+    // url replaced with the mxc/server URL
+    expect(typeof fi.url).toBe("string");
+    expect(fi.url as string).not.toMatch(/^blob:/);
+    expect(fi.url as string).toMatch(/^https?:\/\//);
+    // metadata retained
+    expect(fi.w).toBe(1920);
+    expect(fi.h).toBe(1080);
+    expect(fi.caption).toBe("Sunset");
+    expect(fi.captionAbove).toBe(false);
+    // encrypted upload attaches secrets
+    expect(fi.secrets).toBeDefined();
   });
 });
 
@@ -337,10 +399,9 @@ describe("SyncEngine.recoverStrandedOps — send_file crash recovery", () => {
     await waitForProcessed(h.db);
 
     expect(mockMatrix.uploadContent).toHaveBeenCalledTimes(1);
-    expect(h.messageRepo.confirmSent).toHaveBeenCalledWith(
-      "cli_crashed",
-      "$server_event_id",
-    );
+    expect(h.messageRepo.confirmMediaSent).toHaveBeenCalledTimes(1);
+    expect(h.messageRepo.confirmMediaSent.mock.calls[0][0]).toBe("cli_crashed");
+    expect(h.messageRepo.confirmMediaSent.mock.calls[0][1]).toBe("$server_event_id");
   });
 });
 

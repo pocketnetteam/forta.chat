@@ -151,17 +151,23 @@ const generateWaveform = async (url: string) => {
 // (line 38-48), so objectUrl should be available by the time user taps play.
 // If not yet ready, we kick off the download and return — user taps again.
 const handleTogglePlay = async () => {
-  // If playback previously failed, reset error state on retry
-  if (playback.state.value === "failed" && playback.currentMessageId.value === stableId.value) {
+  const playbackFailed =
+    playback.state.value === "failed" &&
+    playback.currentMessageId.value === stableId.value;
+  // Retry path: a stuck blob (watchdog timed out, decode failed) gets a
+  // fresh fetch + decrypt with cache-bust. Without this, retry hits the
+  // cached objectUrl that was stuck in the first place.
+  const forceRefetch = playbackFailed || !!fileState.value.error;
+
+  if (playbackFailed) {
     playback.stop();
   }
 
-  let url = fileState.value.objectUrl;
+  let url = forceRefetch ? null : fileState.value.objectUrl;
 
   if (!url) {
-    // File not yet downloaded — trigger download and auto-play when done
-    const downloadedUrl = await download(props.message);
-    if (!downloadedUrl) return; // Download failed — error state is shown via fileState.error
+    const downloadedUrl = await download(props.message, undefined, { forceRefetch });
+    if (!downloadedUrl) return;
     url = downloadedUrl;
   }
 

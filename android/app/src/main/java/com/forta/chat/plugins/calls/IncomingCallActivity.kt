@@ -22,6 +22,7 @@ import android.util.Log
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.forta.chat.FortaFirebaseMessagingService
 import com.forta.chat.MainActivity
 import com.forta.chat.R
 import com.forta.chat.plugins.locale.LocaleHelper
@@ -72,6 +73,16 @@ class IncomingCallActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         currentInstance = this
+
+        // Session 41: now that the FCM service posts the FSI notification
+        // unconditionally, both the channel ringtone and the activity's
+        // own startRingtone() would otherwise play in parallel. Dismiss
+        // the FSI as soon as the activity has surfaced — the activity
+        // itself is now the sole ringer source. Idempotent if it was
+        // never posted (no-op cancel).
+        intent.getStringExtra("roomId")?.let { rId ->
+            FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+        }
 
         // H1: action extra from notification accept/decline PendingIntents.
         // The accept/decline actions attached to the CallStyle notification
@@ -214,6 +225,12 @@ class IncomingCallActivity : Activity() {
         startActivity(appBootIntent)
 
         CallConnectionService.dismissIncomingCallNotification(this)
+        // Belt-and-braces in case onCreate's dismiss missed (e.g. action=accept
+        // path that returned early before the dismiss block, or a race with the
+        // notification being re-posted by a retry push). Idempotent.
+        intent.getStringExtra("roomId")?.let { rId ->
+            FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+        }
         finish()
     }
 
@@ -258,6 +275,9 @@ class IncomingCallActivity : Activity() {
         }
 
         CallConnectionService.dismissIncomingCallNotification(this)
+        intent.getStringExtra("roomId")?.let { rId ->
+            FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+        }
         finish()
     }
 
@@ -270,6 +290,9 @@ class IncomingCallActivity : Activity() {
         CallConnection.pendingAnswerCallId = null
         CallConnection.pendingAnswerRoomId = null
         CallConnectionService.dismissIncomingCallNotification(this)
+        intent.getStringExtra("roomId")?.let { rId ->
+            FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+        }
         finish()
     }
 

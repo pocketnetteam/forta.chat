@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, computed, onBeforeUnmount } from "vue";
+import { ref, nextTick, watch, computed, onBeforeUnmount, onMounted } from "vue";
 import { useChatStore, MessageType } from "@/entities/chat";
 import { useThemeStore } from "@/entities/theme";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
@@ -23,6 +23,7 @@ import { shouldSendOnEnter } from "../model/enter-key-behavior";
 import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
+import { readShareUriAsBlob } from "@/shared/lib/share-target";
 
 const PEER_KEYS_GRACE_MS = 2000;
 
@@ -43,7 +44,7 @@ const pasteDrop = usePasteDrop({
   onMediaFiles: (files) => mediaUpload.addFiles(files),
   onOtherFiles: async (files) => {
     sending.value = true;
-    try { for (const file of files) await sendFile(file); }
+    try { await Promise.allSettled(files.map((file) => sendFile(file))); }
     finally { sending.value = false; }
   },
 });
@@ -142,6 +143,11 @@ onBeforeUnmount(() => {
   // Clean up any lingering recording mouse/move listeners
   document.removeEventListener("mouseup", handleGlobalMouseUp);
   document.removeEventListener("mousemove", handleGlobalMouseMove);
+  // Stop tracking input bar height + clear the CSS custom property so the
+  // picker doesn't reference a stale value on the next chat mount.
+  inputResizeObserver?.disconnect();
+  inputResizeObserver = null;
+  document.documentElement.style.removeProperty("--message-input-height");
 });
 
 // --- Edit/reply ---
@@ -272,13 +278,20 @@ const handleSend = async () => {
     } else if (chatStore.forwardingMessage) {
       const fwd = chatStore.forwardingMessage;
 
-      // External share with file: send file directly instead of text forward
+      // External share with file: send file directly instead of text forward.
+      // Android Share Sheet hands us a content:// URI that the WebView's
+      // fetch() can't open directly — readShareUriAsBlob routes through the
+      // Capacitor Filesystem bridge so the upload pipeline gets real bytes
+      // instead of a TypeError (#650).
       if (fwd.isExternalShare && fwd.fileInfo?.url) {
         try {
-          const response = await fetch(fwd.fileInfo.url);
-          const blob = await response.blob();
+          const mime = fwd.fileInfo.type || "application/octet-stream";
+          const blob = await readShareUriAsBlob(fwd.fileInfo.url, mime);
           const fileName = fwd.fileInfo.name || "shared_file";
-          const file = new File([blob], fileName, { type: fwd.fileInfo.type || blob.type });
+          // Prefer the explicit mime we already had — `blob.type` from the
+          // web fetch fallback can downgrade Bastyon-served URLs to
+          // application/octet-stream which then poisons messageTypeFromMime.
+          const file = new File([blob], fileName, { type: mime || blob.type });
 
           if (fwd.type === MessageType.image) {
             inserted = await sendImage(file);
@@ -379,8 +392,12 @@ const handleFileSelect = async (e: Event) => {
   const target = e.target as HTMLInputElement;
   if (!target.files?.length) return;
   sending.value = true;
-  try { for (const file of Array.from(target.files)) await sendFile(file); }
-  finally { sending.value = false; target.value = ""; }
+  try {
+    // Multi-pick: kick off every send concurrently. Each call only does an
+    // optimistic Dexie insert + enqueue; the real upload is serialised by
+    // SyncEngine. allSettled keeps one failed enqueue from blocking the rest.
+    await Promise.allSettled(Array.from(target.files).map((file) => sendFile(file)));
+  } finally { sending.value = false; target.value = ""; }
 };
 
 const handleMediaSend = async () => {
@@ -388,14 +405,17 @@ const handleMediaSend = async () => {
   mediaUpload.sending.value = true;
   try {
     const files = mediaUpload.files.value;
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const isLast = i === files.length - 1;
-      const captionOpts = isLast && mediaUpload.caption.value
-        ? { caption: mediaUpload.caption.value, captionAbove: mediaUpload.captionAbove.value } : {};
-      if (f.type === "image") await sendImage(f.file, captionOpts);
-      else await sendFile(f.file);
-    }
+    // Caption travels on the LAST file so the chat reads as a single
+    // gallery; precompute the index here and dispatch the rest in parallel.
+    const lastIdx = files.length - 1;
+    await Promise.allSettled(
+      files.map((f, i) => {
+        const captionOpts = i === lastIdx && mediaUpload.caption.value
+          ? { caption: mediaUpload.caption.value, captionAbove: mediaUpload.captionAbove.value }
+          : {};
+        return f.type === "image" ? sendImage(f.file, captionOpts) : sendFile(f.file);
+      }),
+    );
   } finally { mediaUpload.clear(); }
 };
 
@@ -749,6 +769,20 @@ const handleRecordMouseDown = (e: MouseEvent) => {
 // Root ref for overlay positioning
 const inputRootRef = ref<HTMLElement | null>(null);
 
+// Expose input bar height as a CSS custom property so the emoji picker can
+// dock above it on mobile instead of overlapping the textarea.
+let inputResizeObserver: ResizeObserver | null = null;
+onMounted(() => {
+  if (!inputRootRef.value) return;
+  const update = () => {
+    const h = inputRootRef.value?.getBoundingClientRect().height ?? 0;
+    document.documentElement.style.setProperty("--message-input-height", `${h}px`);
+  };
+  update();
+  inputResizeObserver = new ResizeObserver(update);
+  inputResizeObserver.observe(inputRootRef.value);
+});
+
 // Video circle overlay
 const overlayVideoRef = ref<HTMLVideoElement | null>(null);
 watch(() => videoRecorder.videoStream.value, (stream) => {
@@ -766,7 +800,7 @@ defineExpose({
   addMediaFiles: (files: File[]) => mediaUpload.addFiles(files),
   sendOtherFiles: async (files: File[]) => {
     sending.value = true;
-    try { for (const file of files) await sendFile(file); }
+    try { await Promise.allSettled(files.map((file) => sendFile(file))); }
     finally { sending.value = false; }
   },
 });
@@ -780,6 +814,16 @@ const insertEmoji = (emoji: string) => {
     nextTick(() => { el.selectionStart = el.selectionEnd = start + emoji.length; el.focus({ preventScroll: true }); autoResize(); });
   } else { text.value += emoji; }
   themeStore.addRecentEmoji(emoji);
+};
+
+const toggleEmojiPicker = (e: MouseEvent) => {
+  // Blur the textarea so the soft keyboard collapses before the picker opens —
+  // otherwise the picker has to fight the keyboard for the lower half of the
+  // screen and the textarea is hidden anyway.
+  textareaRef.value?.blur();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  emojiPickerPos.value = { x: rect.left, y: rect.top };
+  showEmojiPicker.value = !showEmojiPicker.value;
 };
 
 const handleGifSelect = async (gif: { gifUrl: string; width: number; height: number; title: string }) => {
@@ -1008,7 +1052,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
         <button
           class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color/60 transition-colors hover:text-text-on-main-bg-color"
           :title="t('message.emoji')"
-          @click="(e: MouseEvent) => { const rect = (e.currentTarget as HTMLElement).getBoundingClientRect(); emojiPickerPos = { x: rect.left, y: rect.top }; showEmojiPicker = !showEmojiPicker; }"
+          @click="toggleEmojiPicker"
         >
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />

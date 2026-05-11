@@ -91,10 +91,12 @@ interface Harness {
   engine: SyncEngine;
   messageRepo: {
     confirmSent: ReturnType<typeof vi.fn>;
+    confirmMediaSent: ReturnType<typeof vi.fn>;
     updateStatus: ReturnType<typeof vi.fn>;
     getByEventId: ReturnType<typeof vi.fn>;
     updateReactions: ReturnType<typeof vi.fn>;
     getByClientId: ReturnType<typeof vi.fn>;
+    updateUploadProgress: ReturnType<typeof vi.fn>;
   };
   roomRepo: { updateRoom: ReturnType<typeof vi.fn> };
   getRoomCrypto: ReturnType<typeof vi.fn>;
@@ -104,10 +106,12 @@ function makeHarness(name: string, opts: { encrypted: boolean }): Harness {
   const db = new TestDb(name);
   const messageRepo = {
     confirmSent: vi.fn(async () => undefined),
+    confirmMediaSent: vi.fn(async () => undefined),
     updateStatus: vi.fn(async () => undefined),
     getByEventId: vi.fn(async () => undefined),
     updateReactions: vi.fn(async () => undefined),
     getByClientId: vi.fn(async () => undefined),
+    updateUploadProgress: vi.fn(async () => undefined),
   };
   const roomRepo = { updateRoom: vi.fn(async () => undefined) };
   const roomCrypto = opts.encrypted
