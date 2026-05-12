@@ -11,6 +11,14 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
+/** Watchdog tick interval. The watchdog is a safety net for cases where the
+ *  connectivity layer fails to deliver a "back online" signal — most commonly
+ *  Android WebView after device sleep+wake, where `window.online` may never
+ *  fire even though `navigator.onLine` has already flipped to true. Once per
+ *  tick we look for stuck pending ops and resume the queue if the underlying
+ *  network is actually available. */
+const WATCHDOG_INTERVAL_MS = 30_000;
+
 /** Per-phase media pipeline timeouts. Splitting one 5-minute cap into
  *  per-phase caps lets retries surface phase-specific failures (e.g. crypto
  *  hang vs. upload stall) instead of a generic "timed out" after 5 min. */
@@ -67,6 +75,9 @@ export class SyncEngine {
   private scheduled = false;
   private disposed = false;
   private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Watchdog interval handle. Drains stuck queues even when no
+   *  connectivity transition signal arrives (Android WebView sleep+wake). */
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   /** AbortControllers for in-flight media uploads, keyed by clientId.
    *  Populated by syncSendFile at the start of each execution, drained in
    *  its finally block. cancelMediaUpload() signals through this map to
@@ -89,6 +100,7 @@ export class SyncEngine {
   ) {
     this.getRoomCrypto = getRoomCrypto;
     this.onChange = onChange;
+    this.startWatchdog();
   }
 
   /** Update online/offline state. Resumes queue on reconnect and
@@ -181,7 +193,56 @@ export class SyncEngine {
       clearTimeout(this.scheduledTimer);
       this.scheduledTimer = null;
     }
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     this.scheduled = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Watchdog — last-resort recovery when no connectivity signal arrives
+  // ---------------------------------------------------------------------------
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer || this.disposed) return;
+    this.watchdogTimer = setInterval(() => {
+      if (this.disposed) return;
+      this.watchdogCheck().catch((e) =>
+        console.warn("[SyncEngine] watchdog tick failed:", e),
+      );
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  /**
+   * Per-tick safety check. Three states matter:
+   *  1. No queued work — nothing to do.
+   *  2. Engine thinks it is offline but `navigator.onLine` is true — the
+   *     connectivity transition was missed (Android sleep+wake bug);
+   *     force `setOnline(true)` so retryAllFailed + processQueue run.
+   *  3. Engine is online but scheduler is idle — probably a race where a
+   *     wake-up timer was cleared; kick a fresh tick.
+   */
+  private async watchdogCheck(): Promise<void> {
+    const pending = await this.db.pendingOps
+      .where("status")
+      .anyOf(["pending", "syncing"])
+      .count();
+    if (pending === 0) return;
+
+    if (!this.online) {
+      if (typeof navigator !== "undefined" && navigator.onLine) {
+        console.info(
+          `[SyncEngine] watchdog: ${pending} ops stuck while navigator.onLine=true, forcing setOnline(true)`,
+        );
+        this.setOnline(true);
+      }
+      return;
+    }
+
+    if (!this.scheduled && !this.processing) {
+      this.kickScheduler(0);
+    }
   }
 
   /** Schedule processTick after `delayMs` unless a tick is already pending. */

@@ -32,12 +32,18 @@ vi.mock("@/entities/matrix", () => ({
 
 describe("SyncEngine.setOnline — retryAllFailed on transition to online", () => {
   let db: TestDb;
+  let engine: SyncEngine | null = null;
 
   beforeEach(() => {
     db = new TestDb();
+    engine = null;
   });
 
   afterEach(async () => {
+    // Dispose first so the watchdog interval stops touching the DB before we
+    // close it — otherwise vitest surfaces a stray DatabaseClosedError from a
+    // tick scheduled after teardown.
+    engine?.dispose();
     await db.delete();
   });
 
@@ -79,7 +85,7 @@ describe("SyncEngine.setOnline — retryAllFailed on transition to online", () =
       updateRoom: vi.fn(),
     };
 
-    const engine = new SyncEngine(
+    engine = new SyncEngine(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       db as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

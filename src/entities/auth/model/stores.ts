@@ -21,6 +21,7 @@ import { clearQueue } from "@/shared/lib/offline-queue";
 import { deleteLegacyCache } from "@/shared/lib/cache/chat-cache";
 import { clearAccountLocalStorage } from "@/shared/lib/clear-account-storage";
 import { isNative } from "@/shared/lib/platform";
+import { onConnectivityChange } from "@/shared/lib/connectivity";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
 import { mergeObjects } from "@/shared/lib/merge-objects";
@@ -129,8 +130,13 @@ function extractErrorCode(err: unknown): number | null {
 export type RegistrationPhase = 'init' | 'broadcasting' | 'confirming' | 'done' | 'error';
 
 // Store-level references for cleanup on logout
-let _onlineHandler: (() => void) | null = null;
-let _offlineHandler: (() => void) | null = null;
+//
+// _connectivityUnsub: unified subscription to onConnectivityChange (which
+// fans in @capacitor/network on native + window.online/offline on web).
+// Replaces the previous raw window.online/offline listeners — those alone
+// did not fire reliably on Android WebView after device sleep+wake, leaving
+// the SyncEngine stuck offline forever (#705, #496).
+let _connectivityUnsub: (() => void) | null = null;
 let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
 // Per-room debounce timers for peer-keys recheck after member events.
@@ -413,16 +419,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       );
       chatStore.setChatDbKit(chatDbKit);
 
-      // Wire SyncEngine connectivity (store refs for cleanup on logout)
-      if (typeof window !== "undefined") {
-        // Remove previous listeners if any (re-login without full page reload)
-        if (_onlineHandler) window.removeEventListener("online", _onlineHandler);
-        if (_offlineHandler) window.removeEventListener("offline", _offlineHandler);
-        _onlineHandler = () => chatDbKit.syncEngine.setOnline(true);
-        _offlineHandler = () => chatDbKit.syncEngine.setOnline(false);
-        window.addEventListener("online", _onlineHandler);
-        window.addEventListener("offline", _offlineHandler);
+      // Wire SyncEngine connectivity through the unified connectivity layer.
+      // onConnectivityChange fires on @capacitor/network transitions as well
+      // as window.online/offline, so Android WebView wake-ups and WiFi↔cellular
+      // handovers both feed the engine. Drop any prior subscription first
+      // (re-login without a full page reload).
+      if (_connectivityUnsub) {
+        _connectivityUnsub();
+        _connectivityUnsub = null;
       }
+      _connectivityUnsub = onConnectivityChange(({ connected }) => {
+        chatDbKit.syncEngine.setOnline(connected);
+      });
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
       // Wire Pcrypto key-load → decryption retry + peer-keys banner refresh.
@@ -987,11 +995,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       pcrypto.value = null;
     }
 
-    // ── 3. Clean up window listeners & intervals ──
-    if (typeof window !== "undefined") {
-      if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-      if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-    }
+    // ── 3. Clean up listeners & intervals ──
+    if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
@@ -1580,10 +1585,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
 
       // Cleanup listeners
-      if (typeof window !== "undefined") {
-        if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-        if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-      }
+      if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
       for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
       _peerKeysRecheckTimers.clear();
