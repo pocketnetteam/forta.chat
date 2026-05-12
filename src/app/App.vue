@@ -32,6 +32,7 @@ import {
 import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
+import { useIOSKeyboardCssVar } from "@/shared/lib/composables/use-ios-keyboard-css-var";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
@@ -372,6 +373,11 @@ onMounted(async () => {
 
   // Android keyboard: auto-scroll to focused input + inset cross-check
   useKeyboardFallback();
+
+  // iOS keyboard: drive --keyboardheight + --app-bottom-inset +
+  // --safe-area-inset-bottom from @capacitor/keyboard events. Android
+  // already drives these from MainActivity; this is a no-op there.
+  useIOSKeyboardCssVar();
 
   // Initialize Android Share Target listener
   initShareTargetListener((data) => processExternalShare(data));
