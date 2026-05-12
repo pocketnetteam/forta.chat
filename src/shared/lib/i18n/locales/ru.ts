@@ -39,6 +39,15 @@ export const ru: Record<TranslationKey, string> = {
   "contactList.cancel": "Отмена",
   "contactList.draft": "Черновик",
 
+  // ── Contact alias (local "rename contact") ──
+  "contact.renameTitle": "Переименовать контакт",
+  "contact.addAlias": "Задать имя",
+  "contact.editAlias": "Изменить имя",
+  "contact.removeAlias": "Сбросить",
+  "contact.aliasPlaceholder": "Например, Дядя Петя",
+  "contact.aliasHint": "Имя видно только вам, синхронизируется между вашими устройствами.",
+  "contact.save": "Сохранить",
+
   // ── Contact search ──
   "contactSearch.placeholder": "Поиск чатов или пользователей...",
   "contactSearch.placeholderShort": "Поиск",

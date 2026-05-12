@@ -82,6 +82,7 @@ const {
   revokeAllFileUrls,
   appendCacheBust,
   wrapTransientError,
+  _resetToastDedupForTests,
 } = await import("./use-file-download");
 const { MediaUnavailableError, NetworkBlockedError } = await import(
   "@/shared/lib/network/typed-network-errors"
@@ -104,6 +105,8 @@ describe("useFileDownload", () => {
     // Reset crypto stub so tests that do not touch encryption see no
     // pcrypto (matches the original mock default).
     setMockPcrypto(null);
+    // Reset toast dedup so repeated-failure tests start from a clean slate.
+    _resetToastDedupForTests();
   });
 
   describe("saveFile — web platform", () => {
@@ -421,6 +424,49 @@ describe("useFileDownload", () => {
       });
       scope.stop();
     }, 30_000);
+
+    it("does NOT re-surface the same toast on repeated failures for the same message (Session 51 follow-up)", async () => {
+      // Regression: a user reported the 'Server unreachable. Try enabling
+      // Tor or a VPN.' toast firing every time they saved or removed a
+      // contact alias. Root cause: re-renders (virtual scroller recycling,
+      // parent reactivity cascades) triggered MessageBubble.onMounted /
+      // watch(message.id), which re-invoked download() on already-failed
+      // media. Each retry surfaced a fresh toast. Dedup window of 60 s
+      // collapses these into one user-visible notification.
+      (global.fetch as Mock).mockRejectedValue(new TypeError("Failed to fetch"));
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_dedup_blocked",
+          _key: "client_dedup_blocked",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "https://example.com/dedup.pdf",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+        await download(message);
+        await download(message);
+
+        const networkBlockedToasts = mockToast.mock.calls.filter(
+          (call: unknown[]) => call[0] === "errors.networkBlocked",
+        );
+        expect(networkBlockedToasts.length).toBe(1);
+      });
+      scope.stop();
+    }, 60_000);
 
     it("after retry exhaustion, exposes errorKind='network' to the UI", async () => {
       (global.fetch as Mock).mockRejectedValue(new TypeError("Failed to fetch"));

@@ -150,15 +150,49 @@ export function _resetBugReportDedupForTests(): void {
  *  next action they take. */
 const TYPED_ERROR_TOAST_MS = 5_000;
 
+/** Toast dedup window — keyed by (cacheKey, errorKey). Surface the same
+ *  user-facing toast at most once per window per message. Without dedup,
+ *  Vue re-renders (e.g. virtual scroller recycling, parent re-key cascades
+ *  from unrelated reactive updates like a chat-list refresh) call download()
+ *  again for already-failed media, and each failure re-fires the toast —
+ *  visible as repeated "Server unreachable" notifications during routine
+ *  navigation. */
+const TOAST_DEDUP_WINDOW_MS = 60_000;
+const TOAST_DEDUP_PRUNE_THRESHOLD = 500;
+const toastDedupMap = new Map<string, number>();
+
+function pruneToastDedup(): void {
+  if (toastDedupMap.size < TOAST_DEDUP_PRUNE_THRESHOLD) return;
+  const cutoff = Date.now() - TOAST_DEDUP_WINDOW_MS;
+  for (const [k, ts] of toastDedupMap) {
+    if (ts < cutoff) toastDedupMap.delete(k);
+  }
+}
+
+/** TEST-ONLY: clear the toast dedup map between test cases. */
+export function _resetToastDedupForTests(): void {
+  toastDedupMap.clear();
+}
+
 /** Show a localised toast when a download failure resolves to one of our
  *  typed transient errors. Silent for everything else — generic errors are
- *  still surfaced via the in-bubble retry UI and the auto-bug-report flow. */
-function surfaceTypedErrorToast(err: unknown): void {
+ *  still surfaced via the in-bubble retry UI and the auto-bug-report flow.
+ *  Deduped per (cacheKey, errorKey) within TOAST_DEDUP_WINDOW_MS so that
+ *  repeated re-attempts during the same network glitch do not spam the user. */
+function surfaceTypedErrorToast(err: unknown, cacheKey: string): void {
   let key: "errors.networkBlocked" | "errors.cryptoNotReady" | "errors.mediaUnavailable" | null = null;
   if (err instanceof NetworkBlockedError) key = "errors.networkBlocked";
   else if (err instanceof CryptoNotReadyError) key = "errors.cryptoNotReady";
   else if (err instanceof MediaUnavailableError) key = "errors.mediaUnavailable";
   if (!key) return;
+
+  pruneToastDedup();
+  const dedupKey = `${cacheKey}:${key}`;
+  const now = Date.now();
+  const last = toastDedupMap.get(dedupKey) ?? 0;
+  if (now - last < TOAST_DEDUP_WINDOW_MS) return;
+  toastDedupMap.set(dedupKey, now);
+
   try {
     useToast().toast(tRaw(key), "error", TYPED_ERROR_TOAST_MS);
   } catch (toastErr) {
@@ -618,8 +652,9 @@ export function useFileDownload() {
       // Surface a localised toast for our typed transient failures so the
       // user sees a clear "what to do next" message (region/firewall vs.
       // media-gone vs. keys-still-syncing) instead of just an in-bubble
-      // retry button.
-      surfaceTypedErrorToast(e);
+      // retry button. Deduped per (cacheKey, errorKey) so background
+      // re-attempts during the same glitch do not spam.
+      surfaceTypedErrorToast(e, cacheKey);
       // Skip auto-report for crypto failures (user-actionable, not a bug) and
       // for duplicates within the dedup window. Manual reporting is still
       // available via the bug-report button in the friendly error UI.
