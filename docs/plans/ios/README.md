@@ -47,21 +47,36 @@ Do not skip to a sub-plan without internalising the roadmap — sub-plans assume
 
 ### Step 1 — One-time external setup (do this BEFORE any code)
 
-These cannot be done from CI; they require human action in external tools. Block out a half-day.
+These cannot be done from CI; they require human action in external tools. Block out a half-day of hands-on work plus 1–3 days of waiting for Apple Developer enrollment approval.
+
+**Authoritative sub-documents** (read in this order, then execute):
+
+| File | Purpose |
+|---|---|
+| [`STEP-1-CHECKLIST.md`](./STEP-1-CHECKLIST.md) | The canonical task checklist for Step 1. Sections A–H map to enrollment, App ID, App Group, APNs `.p8`, Firebase, AASA, Sygnal, App Store Connect. Tick boxes as you complete them. |
+| [`SECRETS-MANIFEST.md`](./SECRETS-MANIFEST.md) | What is secret vs confidential vs public, where each artefact lives, who has access. **Read before touching the `.p8` or `GoogleService-Info.plist`.** |
+| [`aasa-template.json`](./aasa-template.json) | Ready-to-deploy AASA JSON with `<TEAM_ID>` placeholder. Hand to web team. |
+| [`aasa-DEPLOYMENT.md`](./aasa-DEPLOYMENT.md) | Deployment instructions for the web team (HTTP requirements, web-server config snippets, copy-paste cover note). |
+| [`SYGNAL-CONFIG-REQUEST.md`](./SYGNAL-CONFIG-REQUEST.md) | Configuration request for the homeserver/Sygnal admin team — two pushers (`fortaios`, `fortaios.voip`) with payload schemas + Apple constraints + copy-paste email body. |
+
+**Quick summary** (canonical list lives in `STEP-1-CHECKLIST.md`; do not duplicate decisions here):
 
 1. **macOS + Xcode 16+** on a machine you can keep around for the duration of the port. iOS builds *cannot* run on Windows or Linux.
-2. **Apple Developer Program** ($99/year). Enroll the legal entity that owns Forta Chat (organization or individual). Allow 1–3 days for Apple to approve.
-3. **App ID** — `com.forta.chat`. Create in Apple Developer → Identifiers → App IDs. Enable capabilities:
-   - Push Notifications
-   - App Groups (`group.com.forta.chat`)
-   - Associated Domains
-   - SiriKit (optional, for v2 direct-share)
-4. **APNs Auth Key (`.p8`)** — Apple Developer → Keys → New Key → APNs. Download once, store in 1Password. Note Key ID + Team ID — you will need these for Firebase.
-5. **Firebase iOS app** — in the same Firebase project as Android. Bundle ID `com.forta.chat`. Upload the `.p8` key + Key ID + Team ID. Download `GoogleService-Info.plist`.
-6. **Apple App Site Association (AASA)** — coordinate with the web-team to host `https://forta.chat/.well-known/apple-app-site-association`. Content + format is in [`2026-05-12-ios-universal-links.md`](./2026-05-12-ios-universal-links.md) Task 1.
-7. **App Store Connect listing** — at minimum: app name "Forta Chat", primary language, SKU, privacy URL pointing at the existing privacy.html. Full metadata can wait until TestFlight. App ID for the `apps.apple.com/app/idXXXXX` link (Banner Task 8 of simple-tasks plan needs it).
+2. **Apple Developer Program** — see `STEP-1-CHECKLIST.md` Section A.
+3. **App ID** `com.forta.chat` — see `STEP-1-CHECKLIST.md` Section B.
+4. **App Group** `group.com.forta.chat` — see `STEP-1-CHECKLIST.md` Section C.
+5. **APNs Auth Key (`.p8`)** — see `STEP-1-CHECKLIST.md` Section D + `SECRETS-MANIFEST.md` "A. APNs Auth Key".
+6. **Firebase iOS app** in the same project as Android — see `STEP-1-CHECKLIST.md` Section E + `SECRETS-MANIFEST.md` "D. Firebase iOS".
+7. **Apple App Site Association (AASA)** — hand `aasa-template.json` + `aasa-DEPLOYMENT.md` to the web team. Format spec also in [`2026-05-12-ios-universal-links.md`](./2026-05-12-ios-universal-links.md) Task 1.
+8. **Sygnal pushers** (`fortaios`, `fortaios.voip`) — hand `SYGNAL-CONFIG-REQUEST.md` to the homeserver admin.
+9. **App Store Connect listing** — see `STEP-1-CHECKLIST.md` Section H. Minimal listing only — full metadata waits until Step 10.
 
-Output of this step: `.p8` key in the secrets vault, `GoogleService-Info.plist` ready to drop into the project, AASA file live and verified with `swcutil dl -d forta.chat`.
+Output of this step (a.k.a. "what `STEP-1-CHECKLIST.md` "Final pre-Step-2 verification" verifies):
+- `.p8` APNs key in 1Password, never on disk.
+- `GoogleService-Info.plist` staged in 1Password (or `tmp/`), ready to drop into `ios/App/App/` once Step 2 creates that folder.
+- AASA file live at `forta.chat` and `www.forta.chat`, returns 200 + `application/json`, verified with `swcutil dl -d forta.chat` (when a Mac is available).
+- Sygnal `app_id: fortaios` and `app_id: fortaios.voip` configured.
+- Recorded placeholders: `<TEAM_ID>`, `<APNS_KEY_ID>`, `<APP_STORE_ID>`.
 
 ---
 
