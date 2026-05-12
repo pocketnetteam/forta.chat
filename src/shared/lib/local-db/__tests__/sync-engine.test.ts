@@ -295,6 +295,9 @@ describe("SyncEngine — transactional op claim", () => {
     await waitTicks(5);
 
     expect(mockMatrix.sendEncryptedText).toHaveBeenCalledTimes(1);
+    // engineB lives outside the harness; dispose it so its watchdog interval
+    // stops before afterEach closes the DB.
+    engineB.dispose();
   });
 });
 

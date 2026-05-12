@@ -181,6 +181,9 @@ describe("SyncEngine txnId propagation (regression)", () => {
   });
 
   afterEach(async () => {
+    // Stop the watchdog interval before the DB closes so any pending tick
+    // doesn't surface as an unhandled DatabaseClosedError after teardown.
+    h.engine.dispose();
     await h.db.delete();
   });
 

@@ -646,6 +646,7 @@ export const en = {
   "share.linkCopied": "Link copied to clipboard",
   "share.copyFailed": "Failed to copy link",
   "share.nativeShare": "Share via...",
+  "share.sendFailed": "Failed to send file",
 
   // ── Share group link ──
   "shareGroup.inviteLink": "Invite Link",
