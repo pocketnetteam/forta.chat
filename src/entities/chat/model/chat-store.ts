@@ -533,6 +533,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  driven by the m.bastyon.contact_aliases global account_data event. */
   const localAliases = ref<Record<string, string>>({});
 
+  /** In-memory timestamp cache for alias entries (raw address → ms).
+   *  Mirrors Dexie users.aliasUpdatedAt so cross-device LWW conflict
+   *  resolution still works in test/dev contexts where Dexie is not wired. */
+  const aliasUpdatedAtCache = ref<Record<string, number>>({});
+
   /** Look up a user's display name; falls back to truncated address.
    *  Accepts both raw Bastyon addresses and hex-encoded IDs (from room.members).
    *  Resolution order:
@@ -603,9 +608,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (!kit) return;
     try {
       const all = await kit.users.getAllAliases();
-      const next: Record<string, string> = {};
-      for (const [addr, { alias }] of Object.entries(all)) next[addr] = alias;
-      localAliases.value = next;
+      const nameNext: Record<string, string> = {};
+      const tsNext: Record<string, number> = {};
+      for (const [addr, { alias, updatedAt }] of Object.entries(all)) {
+        nameNext[addr] = alias;
+        tsNext[addr] = updatedAt;
+      }
+      localAliases.value = nameNext;
+      aliasUpdatedAtCache.value = tsNext;
     } catch (e) {
       console.warn("[chat-store] loadLocalAliases failed:", e);
     }
@@ -632,6 +642,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (raw !== address) delete next[raw];
     }
     localAliases.value = next;
+    // Mirror timestamp so LWW conflict resolution sees this write
+    aliasUpdatedAtCache.value = { ...aliasUpdatedAtCache.value, [raw]: now };
 
     // Dexie (single source of truth \u2014 keyed by raw address)
     const kit = chatDbKitRef.value;
@@ -6282,6 +6294,65 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Handle global per-user account_data events — cross-device sync for
+   *  contact aliases (Session 51). LWW conflict resolution by embedded
+   *  `updatedAt` timestamp: only newer-than-local entries are applied.
+   *  Tombstones (empty name + newer ts) clear the local alias.
+   *
+   *  Wired from auth/stores.ts to:
+   *    - The SDK's "accountData" event (live cross-device updates).
+   *    - A one-shot replay on login (cold-start hydration before /sync). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleAccountDataEvent = async (event: any): Promise<void> => {
+    if (event?.getType?.() !== "m.bastyon.contact_aliases") return;
+    const content = event.getContent?.() as {
+      aliases?: Record<string, { name: string; updatedAt: number }>;
+    } | null;
+    if (!content?.aliases) return;
+    const kit = chatDbKitRef.value;
+
+    const memUpdates: Record<string, string | null> = {};
+    for (const [addr, entry] of Object.entries(content.aliases)) {
+      if (!addr || !entry || typeof entry.updatedAt !== "number") continue;
+      const incomingName = typeof entry.name === "string" ? entry.name.trim() : "";
+      const incomingTs = entry.updatedAt;
+
+      // LWW: take the newer of persisted-Dexie-ts and in-memory-ts. The
+      // in-memory cache covers the early-boot window before Dexie is
+      // hydrated and also test contexts where the kit is absent.
+      let dexieTs = 0;
+      if (kit) {
+        try {
+          dexieTs = await kit.users.getAliasUpdatedAt(addr);
+        } catch (e) {
+          console.warn("[chat-store] handleAccountDataEvent: getAliasUpdatedAt failed for", addr, e);
+        }
+      }
+      const memTs = aliasUpdatedAtCache.value[addr] ?? 0;
+      const existingTs = Math.max(dexieTs, memTs);
+      if (incomingTs <= existingTs) continue;
+
+      const nextValue = incomingName || null;
+      if (kit) {
+        try {
+          await kit.users.setAlias(addr, nextValue, incomingTs);
+        } catch (e) {
+          console.warn("[chat-store] handleAccountDataEvent: setAlias failed for", addr, e);
+        }
+      }
+      memUpdates[addr] = nextValue;
+      aliasUpdatedAtCache.value = { ...aliasUpdatedAtCache.value, [addr]: incomingTs };
+    }
+
+    if (Object.keys(memUpdates).length === 0) return;
+    const merged = { ...localAliases.value };
+    for (const [addr, name] of Object.entries(memUpdates)) {
+      if (name) merged[addr] = name;
+      else delete merged[addr];
+    }
+    localAliases.value = merged;
+  };
+
   /** Revive a tombstoned room (used when rejoining a previously-deleted room) */
   const clearDeletedRoom = (roomId: string) => {
     if (chatDbKitRef.value) {
@@ -6469,6 +6540,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     deletingMessages.value = [];
     userDisplayNames.value = {};
     localAliases.value = {};
+    aliasUpdatedAtCache.value = {};
     selectionMode.value = false;
     selectedMessageIds.value = new Set();
     forwardingMessage.value = null;
@@ -6538,6 +6610,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getRoomPowerLevels,
     getMemberPowerLevelById,
     getTypingUsers,
+    handleAccountDataEvent,
     handleKicked,
     handleRoomAccountData,
     handleReceiptEvent,

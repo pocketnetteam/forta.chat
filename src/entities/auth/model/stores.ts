@@ -413,6 +413,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       );
       chatStore.setChatDbKit(chatDbKit);
 
+      // Contact aliases (Session 51): hydrate cache from Dexie immediately so
+      // chat list / headers do not flash raw addresses before /sync. The live
+      // account_data listener (onAccountData) takes over from there.
+      chatStore.loadLocalAliases().catch((e) => {
+        console.warn("[auth] loadLocalAliases failed:", e);
+      });
+
       // Wire SyncEngine connectivity (store refs for cleanup on logout)
       if (typeof window !== "undefined") {
         // Remove previous listeners if any (re-login without full page reload)
@@ -536,6 +543,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         onRoomAccountData: (event: unknown, room: unknown) => {
           chatStore.handleRoomAccountData(event, room);
         },
+        onAccountData: (event: unknown) => {
+          // Cross-device contact-alias sync (Session 51) — and any other
+          // future global account_data hooks. Errors are swallowed inside.
+          chatStore.handleAccountDataEvent(event).catch((e) => {
+            console.warn("[auth] handleAccountDataEvent failed:", e);
+          });
+        },
         onIncomingCall: (call: unknown) => {
           try {
             const callService = useCallService();
@@ -566,6 +580,23 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+
+        // Replay any contact_aliases already in the SDK's account_data cache
+        // (Session 51). The live "accountData" listener catches future
+        // changes; this covers the cold-start window before that fires.
+        try {
+          const initialAliases = matrixService.getAccountData("m.bastyon.contact_aliases");
+          if (initialAliases) {
+            chatStore.handleAccountDataEvent({
+              getType: () => "m.bastyon.contact_aliases",
+              getContent: () => initialAliases,
+            }).catch((e) => {
+              console.warn("[auth] initial contact_aliases replay failed:", e);
+            });
+          }
+        } catch (e) {
+          console.warn("[auth] contact_aliases cold-start read failed:", e);
+        }
 
         // Cache connection info for background sync
         const client = matrixService.client;
