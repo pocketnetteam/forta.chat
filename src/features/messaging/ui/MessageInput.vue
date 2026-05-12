@@ -307,8 +307,22 @@ const handleSend = async () => {
         const forwardMeta = fwd.withSenderInfo
           ? { senderId: fwd.senderId, senderName: fwd.senderName }
           : undefined;
-        const forwardContent = rawText || fwd.content || forwardPreviewText.value;
-        inserted = await sendForward(forwardContent, forwardMeta);
+        const isMedia = fwd.type !== MessageType.text && !!fwd.fileInfo;
+        if (isMedia) {
+          // Media forward — re-upload the original blob so the recipient
+          // receives a real m.image/m.file/m.audio event instead of a text
+          // body «Image» without attachment (the pre-fix bug behind #311,
+          // #702). The caption (if user typed any) lands as the body.
+          inserted = await sendForward(rawText, forwardMeta, {
+            type: fwd.type,
+            fileInfo: fwd.fileInfo!,
+            sourceMessageId: fwd.id,
+            roomId: fwd.roomId,
+          });
+        } else {
+          const forwardContent = rawText || fwd.content || forwardPreviewText.value;
+          inserted = await sendForward(forwardContent, forwardMeta);
+        }
         if (inserted !== false) chatStore.cancelForward();
       }
     } else if (chatStore.replyingTo) {
