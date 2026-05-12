@@ -7,6 +7,7 @@ import { getDraft, saveDraft, clearDraft } from "@/shared/lib/drafts";
 import { useMessages } from "../model/use-messages";
 import { useLinkPreview } from "../model/use-link-preview";
 import { useI18n } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { useMediaUpload } from "../model/use-media-upload";
 import { usePasteDrop } from "../model/use-paste-drop";
 import EmojiPicker from "./EmojiPicker.vue";
@@ -38,6 +39,7 @@ const emit = defineEmits<{ donate: [] }>();
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
 const { t } = useI18n();
+const { toast } = useToast();
 const { sendMessage, sendFile, sendImage, sendAudio, sendVideoCircle, sendReply, sendForward, forwardMessages, editMessage, setTyping, sendPoll, sendGif } = useMessages();
 const mediaUpload = useMediaUpload();
 const pasteDrop = usePasteDrop({
@@ -319,6 +321,13 @@ const handleSend = async () => {
             sourceMessageId: fwd.id,
             roomId: fwd.roomId,
           });
+          if (inserted === false) {
+            // sendForward returns false when the source blob is unavailable
+            // (revoked local URL, missing decryption keys, network/region
+            // block on the mxc download). Tell the user explicitly — the
+            // forward sheet just closed and they'd otherwise think it worked.
+            toast(t("forward.mediaFailed"), "error", 5000);
+          }
         } else {
           const forwardContent = rawText || fwd.content || forwardPreviewText.value;
           inserted = await sendForward(forwardContent, forwardMeta);
