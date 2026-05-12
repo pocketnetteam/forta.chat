@@ -13,6 +13,11 @@ const config: CapacitorConfig = {
       keystoreAlias: undefined,
     },
   },
+  ios: {
+    contentInset: 'never',
+    scrollEnabled: false,
+    backgroundColor: '#000000',
+  },
   plugins: {
     Keyboard: {
       resize: "none",
