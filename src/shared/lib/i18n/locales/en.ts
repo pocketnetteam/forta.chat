@@ -37,6 +37,15 @@ export const en = {
   "contactList.cancel": "Cancel",
   "contactList.draft": "Draft",
 
+  // ── Contact alias (local "rename contact") ──
+  "contact.renameTitle": "Rename contact",
+  "contact.addAlias": "Add name",
+  "contact.editAlias": "Edit name",
+  "contact.removeAlias": "Remove",
+  "contact.aliasPlaceholder": "e.g. Uncle Pete",
+  "contact.aliasHint": "Visible only to you. Syncs across your devices.",
+  "contact.save": "Save",
+
   // ── Contact search ──
   "contactSearch.placeholder": "Search chats or users...",
   "contactSearch.placeholderShort": "Search",
