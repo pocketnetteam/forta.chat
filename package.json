@@ -21,6 +21,9 @@
     "cap:build": "vite build && cap sync android",
     "cap:open": "cap open android",
     "cap:run": "cap run android",
+    "cap:build:ios": "vite build && cap sync ios",
+    "cap:open:ios": "cap open ios",
+    "cap:run:ios": "cap run ios",
     "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\""
   },
   "dependencies": {
@@ -34,6 +37,7 @@
     "@capacitor/device": "^8.0.2",
     "@capacitor/filesystem": "^8.1.2",
     "@capacitor/haptics": "^8.0.1",
+    "@capacitor/ios": "^8.3.3",
     "@capacitor/local-notifications": "^8.0.2",
     "@capacitor/network": "^8.0.1",
     "@capacitor/push-notifications": "^8.0.2",
