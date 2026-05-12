@@ -150,7 +150,7 @@ npm run cap:run:ios     # запустить в симуляторе / на ус
 
 Push, звонки и Universal Links требуют реального устройства — на симуляторе доступна только проверка текстового чата.
 
-Полный план iOS-порта: [docs/plans/ios/README.md](docs/plans/ios/README.md).
+Полная инструкция по локальной сборке: [docs/ios-local-build.md](docs/ios-local-build.md). Многоэтапный план iOS-порта: [docs/plans/ios/README.md](docs/plans/ios/README.md).
 
 #### Известные отличия iOS
 

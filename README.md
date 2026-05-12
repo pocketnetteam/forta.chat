@@ -150,7 +150,7 @@ npm run cap:run:ios     # run on simulator / connected device
 
 Push notifications, calls, and Universal Links require a real device — the simulator only exercises text-chat parity.
 
-Full iOS port plan: [docs/plans/ios/README.md](docs/plans/ios/README.md).
+Full local-build instructions: [docs/ios-local-build.md](docs/ios-local-build.md). Multi-phase iOS port plan: [docs/plans/ios/README.md](docs/plans/ios/README.md).
 
 #### Known iOS differences
 
