@@ -6,6 +6,7 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   server: {
     androidScheme: 'https',
+    iosScheme: 'forta-app',
   },
   android: {
     buildOptions: {
@@ -20,8 +21,17 @@ const config: CapacitorConfig = {
   },
   plugins: {
     Keyboard: {
-      resize: "none",
+      resize: 'none',
+      resizeOnFullScreen: false,
       scrollPadding: false,
+    },
+    CapacitorShareTarget: {
+      appGroupId: 'group.com.forta.chat',
+    },
+    IncomingCallKit: {
+      callKitName: 'Forta Chat',
+      ringtone: 'ringtone.caf',
+      enableAndroid: false,
     },
   },
 };
