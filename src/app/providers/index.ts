@@ -36,20 +36,42 @@ export const setupProviders = async (app: App) => {
     // Configure status bar for proper safe area insets
     const { StatusBar, Style } = await import('@capacitor/status-bar');
     const { useThemeStore } = await import('@/entities/theme');
-    await StatusBar.setOverlaysWebView({ overlay: true });
+    try {
+      await StatusBar.setOverlaysWebView({ overlay: true });
+    } catch (e) {
+      console.warn('[StatusBar] setOverlaysWebView failed:', e);
+    }
 
-    // Sync status bar color with app theme
+    // Sync status bar color with app theme.
+    //
+    // Capacitor's Style semantics are platform-consistent:
+    //   Style.Dark  → light text/icons (use on dark backgrounds)
+    //   Style.Light → dark text/icons  (use on light backgrounds)
+    //
+    // setBackgroundColor is an Android-only API; on iOS the plugin
+    // throws "not implemented for ios". Wrap each call in try/catch
+    // so a single failure doesn't break the theme switch.
     const themeStore = useThemeStore();
-    const syncStatusBar = () => {
+    const syncStatusBar = async () => {
       const isDark = themeStore.isDarkMode;
-      StatusBar.setStyle({ style: isDark ? Style.Dark : Style.Light });
+      try {
+        await StatusBar.setStyle({ style: isDark ? Style.Dark : Style.Light });
+      } catch (e) {
+        console.warn('[StatusBar] setStyle failed:', e);
+      }
       // Read --background-total-theme CSS variable (RGB triplet)
       const rgb = getComputedStyle(document.documentElement)
         .getPropertyValue('--background-total-theme').trim();
       if (rgb) {
         const parts = rgb.split(',').map((s: string) => parseInt(s.trim()));
         const hex = '#' + parts.map((v: number) => v.toString(16).padStart(2, '0')).join('');
-        StatusBar.setBackgroundColor({ color: hex });
+        try {
+          await StatusBar.setBackgroundColor({ color: hex });
+        } catch {
+          // iOS: setBackgroundColor is not implemented — the status bar is
+          // transparent over the WebView, so the underlying CSS background
+          // already paints through. Silently skip.
+        }
       }
     };
     // Run once now and watch for changes
