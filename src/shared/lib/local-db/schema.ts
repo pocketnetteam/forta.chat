@@ -150,6 +150,14 @@ export interface LocalUser {
   image?: string;                // Avatar URL
   updatedAt: number;
   syncedAt: number;              // Last fetched from server
+
+  /** User-set local nickname (Telegram-style "rename contact").
+   *  Visible only to the local user, synced across own devices via Matrix
+   *  account_data ("m.bastyon.contact_aliases"). NEVER sent as Matrix
+   *  room displayname — the peer must not see it. */
+  localAlias?: string;
+  /** Epoch-ms of the last `localAlias` change (LWW conflict resolution). */
+  aliasUpdatedAt?: number;
 }
 
 /** Queued operation for sync */
@@ -586,6 +594,21 @@ export class ChatDatabase extends Dexie {
       return tx.table("pendingOps").toCollection().modify(op => {
         if (op.nextAttemptAt === undefined) op.nextAttemptAt = 0;
       });
+    });
+
+    // Version 13: add aliasUpdatedAt index to users for fast LWW conflict
+    // resolution when applying inbound m.bastyon.contact_aliases account_data.
+    // The localAlias field itself is not indexed (read via getAllAliases scan).
+    this.version(13).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
     });
   }
 }
