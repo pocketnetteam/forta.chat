@@ -17,30 +17,49 @@ function cachedHexDecode(hex: string): string {
   return result;
 }
 
-/** Resolve member names for a room from the user store */
-function resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string[] {
+/** Resolve member names for a room. Honors user-set local aliases (Session 51)
+ *  before falling back to Pocketnet profile names — otherwise the alias gets
+ *  silently overridden by the Pocketnet displayname in the chat list/header.
+ *  `aliases` is read so Vue tracks reactivity at the calling computed. */
+function resolveMemberNames(
+  room: ChatRoom,
+  allUsers: Record<string, any>,
+  myHexId: string,
+  aliases: Record<string, string>,
+): string[] {
   const otherMembers = room.members.filter(m => m !== myHexId);
   const names: string[] = [];
   for (const hexId of otherMembers) {
     const addr = cachedHexDecode(hexId);
     if (/^[A-Za-z0-9]+$/.test(addr)) {
+      const alias = aliases[addr];
+      if (alias) { names.push(alias); continue; }
       const user = allUsers[addr];
       if (user?.name) { names.push(user.name); continue; }
     }
   }
-  // Fallback: try avatar address
+  // Fallback: try avatar address (single-peer DMs with empty members list)
   if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
     const avatarAddr = room.avatar.slice("__pocketnet__:".length);
-    const user = allUsers[avatarAddr];
-    if (user?.name && user.name !== avatarAddr) names.push(user.name);
+    const alias = aliases[avatarAddr];
+    if (alias) names.push(alias);
+    else {
+      const user = allUsers[avatarAddr];
+      if (user?.name && user.name !== avatarAddr) names.push(user.name);
+    }
   }
   return names;
 }
 
 /** Resolve a single room's display name, returning empty string if unresolved */
-function resolveRoom(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string {
+function resolveRoom(
+  room: ChatRoom,
+  allUsers: Record<string, any>,
+  myHexId: string,
+  aliases: Record<string, string>,
+): string {
   if (!room.isGroup) {
-    const names = resolveMemberNames(room, allUsers, myHexId);
+    const names = resolveMemberNames(room, allUsers, myHexId, aliases);
     if (names.length > 0) return names.join(", ");
     // Fallback: address from avatar
     if (room.avatar?.startsWith("__pocketnet__:")) {
@@ -53,9 +72,11 @@ function resolveRoom(room: ChatRoom, allUsers: Record<string, any>, myHexId: str
     }
     return cleanMatrixIds(room.name);
   }
+  // Group rooms: respect Matrix room name unless it is itself unresolved.
+  // Aliases of individual members don't change the group's overall name.
   if (room.name?.startsWith("@")) return room.name.slice(1);
   if (!isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
-  const names = resolveMemberNames(room, allUsers, myHexId);
+  const names = resolveMemberNames(room, allUsers, myHexId, aliases);
   if (names.length > 0) return names.join(", ");
   return cleanMatrixIds(room.name);
 }
@@ -68,13 +89,15 @@ function resolveRoom(room: ChatRoom, allUsers: Record<string, any>, myHexId: str
 export function useResolvedRoomName() {
   const userStore = useUserStore();
   const authStore = useAuthStore();
+  const chatStore = useChatStore();
 
   const myHexId = computed(() => authStore.address ? hexEncode(authStore.address) : "");
 
-  /** Resolve a room name reactively (depends on userStore.users) */
+  /** Resolve a room name reactively. Tracks userStore.users AND
+   *  chatStore.localAliases so changes to either trigger re-render. */
   function resolve(room: ChatRoom | null | undefined): string {
     if (!room) return "";
-    return resolveRoom(room, userStore.users, myHexId.value);
+    return resolveRoom(room, userStore.users, myHexId.value, chatStore.localAliases);
   }
 
   /** Check if a resolved name is still unresolved (should show skeleton) */

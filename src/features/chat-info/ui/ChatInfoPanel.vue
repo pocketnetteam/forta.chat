@@ -423,6 +423,7 @@ const BROOM_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" 
 const BAN_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>';
 const LOGOUT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>';
 const TRASH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+const RENAME_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 
 const moreMenuItems = computed<ContextMenuItem[]>(() => {
   const items: ContextMenuItem[] = [];
@@ -434,6 +435,14 @@ const moreMenuItems = computed<ContextMenuItem[]>(() => {
   });
   if (!room.value?.isGroup) {
     items.push({ label: t("chatInfo.videoCall"), icon: VIDEO_ICON, action: "videoCall" });
+    // Rename contact lives here for DMs — keeps the main panel uncluttered.
+    if (peerAddress.value && peerAddress.value !== myAddress.value) {
+      items.push({
+        label: chatStore.hasLocalAlias(peerAddress.value) ? t("contact.editAlias") : t("contact.addAlias"),
+        icon: RENAME_ICON,
+        action: "rename",
+      });
+    }
   }
   items.push({ label: t("chatInfo.clearHistory"), icon: BROOM_ICON, action: "clearHistory" });
   if (!room.value?.isGroup) {
@@ -454,6 +463,7 @@ const handleMoreAction = (action: string) => {
     case "search": emit("close"); emit("openSearch"); break;
     case "toggleMute": toggleMute(); break;
     case "videoCall": startCall("video"); break;
+    case "rename": if (peerAddress.value) openRenameDialog(peerAddress.value); break;
     case "clearHistory": confirmAction.value = "clear"; break;
     case "block": confirmAction.value = "block"; break;
     case "deleteChat": confirmAction.value = "delete"; break;
@@ -774,19 +784,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   {{ t("chatInfo.viewProfile") }}
                 </button>
               </div>
-              <!-- Rename contact (local alias) -->
-              <div v-if="peerAddress && peerAddress !== myAddress" class="mt-3">
-                <button
-                  class="inline-flex items-center gap-2 text-sm text-color-txt-ac hover:underline"
-                  @click="openRenameDialog(peerAddress)"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 20h9" />
-                    <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-                  </svg>
-                  {{ chatStore.hasLocalAlias(peerAddress) ? t("contact.editAlias") : t("contact.addAlias") }}
-                </button>
-              </div>
+              <!-- Rename contact (local alias) lives in the 3-dot More menu — see moreMenuItems. -->
             </div>
 
             <!-- Notifications toggle -->
