@@ -21,6 +21,11 @@ const config: CapacitorConfig = {
   },
   plugins: {
     Keyboard: {
+      // 'none' tells iOS to fire keyboardWill{Show,Hide} events without
+      // resizing the WebView. Our CSS shell shrinks/grows via the
+      // --keyboardheight variable that JS drives from those events.
+      // Matches the Android architecture where MainActivity injects the
+      // same variable from WindowInsetsCompat.
       resize: 'none',
       resizeOnFullScreen: false,
       scrollPadding: false,
