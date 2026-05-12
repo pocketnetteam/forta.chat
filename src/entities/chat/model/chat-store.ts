@@ -558,9 +558,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       } catch { /* not a valid hex string */ }
     }
-    // 1) Local alias — top priority, overrides everything (including Matrix name)
-    const alias = localAliases.value[address]
-      ?? (resolvedAddr !== address ? localAliases.value[resolvedAddr] : undefined);
+    // 1) Local alias — top priority, overrides everything (including Matrix name).
+    //    Aliases are always keyed by raw address; `resolvedAddr` was just
+    //    normalized above, so a single lookup is enough.
+    const alias = localAliases.value[resolvedAddr];
     if (alias) return alias;
     // 2) Matrix displayName cache — direct (raw) lookup, then decoded
     const cached = userDisplayNames.value[address];
@@ -592,11 +593,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Get the local alias for an address (or null if none).
-   *  Accepts both raw and hex-encoded address forms. */
+   *  Accepts both raw and hex-encoded address forms — keys are always raw. */
   const getLocalAlias = (address: string): string | null => {
     if (!address) return null;
     const raw = resolveRawAddress(address);
-    return localAliases.value[address] ?? localAliases.value[raw] ?? null;
+    return localAliases.value[raw] ?? null;
   };
 
   /** True iff a local alias is set for the address (raw or hex form). */
@@ -632,15 +633,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const now = Date.now();
     const raw = resolveRawAddress(address);
 
-    // Optimistic UI \u2014 key by both raw and hex form so any callsite sees it
+    // Optimistic UI \u2014 always key by raw form. Hex callsites normalize via
+    // resolveRawAddress() inside getDisplayName / getLocalAlias, so a single
+    // canonical key avoids stale entries when clearing through a different form.
     const next = { ...localAliases.value };
-    if (trimmed) {
-      next[address] = trimmed;
-      if (raw !== address) next[raw] = trimmed;
-    } else {
-      delete next[address];
-      if (raw !== address) delete next[raw];
-    }
+    if (trimmed) next[raw] = trimmed;
+    else delete next[raw];
     localAliases.value = next;
     // Mirror timestamp so LWW conflict resolution sees this write
     aliasUpdatedAtCache.value = { ...aliasUpdatedAtCache.value, [raw]: now };
@@ -6312,8 +6310,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const kit = chatDbKitRef.value;
 
     const memUpdates: Record<string, string | null> = {};
-    for (const [addr, entry] of Object.entries(content.aliases)) {
-      if (!addr || !entry || typeof entry.updatedAt !== "number") continue;
+    for (const [rawIncoming, entry] of Object.entries(content.aliases)) {
+      if (!rawIncoming || !entry || typeof entry.updatedAt !== "number") continue;
+      // Defense in depth: normalize even though writers should always send
+      // raw addresses. Guards against bad payloads from older / forked clients.
+      const addr = resolveRawAddress(rawIncoming);
       const incomingName = typeof entry.name === "string" ? entry.name.trim() : "";
       const incomingTs = entry.updatedAt;
 

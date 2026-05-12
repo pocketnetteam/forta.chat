@@ -903,7 +903,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   </span>
                   <button
                     v-if="member !== myHexId"
-                    class="shrink-0 rounded p-1 text-text-on-main-bg-color opacity-0 transition-opacity hover:bg-neutral-grad-2/40 hover:text-text-color group-hover:opacity-100"
+                    class="rename-member-btn shrink-0 rounded p-1 text-text-on-main-bg-color transition-opacity hover:bg-neutral-grad-2/40 hover:text-text-color"
                     :title="chatStore.hasLocalAlias(member) ? t('contact.editAlias') : t('contact.addAlias')"
                     :aria-label="chatStore.hasLocalAlias(member) ? t('contact.editAlias') : t('contact.addAlias')"
                     @click.stop="openRenameDialog(member)"
@@ -1183,5 +1183,24 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
 .panel-slide-enter-from,
 .panel-slide-leave-to {
   transform: translateX(100%);
+}
+
+/* Per-member rename button:
+ *  - Pointer:fine (mouse) — hover-reveal so the row stays uncluttered.
+ *  - Pointer:coarse (touch / Android) — always visible at low opacity so it
+ *    remains tappable. Hover doesn't work reliably on touch WebViews. */
+.rename-member-btn {
+  opacity: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .group:hover .rename-member-btn,
+  .rename-member-btn:focus-visible {
+    opacity: 1;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .rename-member-btn {
+    opacity: 0.6;
+  }
 }
 </style>

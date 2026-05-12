@@ -79,4 +79,20 @@ describe("getDisplayName — local alias priority", () => {
     expect(store.getDisplayName("PTrim")).not.toBe("Trimmed");
     expect(store.getDisplayName("PTrim")).not.toBe("   ");
   });
+
+  it("clear via raw form clears alias set via hex form (H1 regression)", async () => {
+    // Bug class: dual-key (hex+raw) cache layout left stale entries when the
+    // user set via group panel (hex) and cleared via DM panel (raw) or vice
+    // versa. Aliases must canonicalize to raw form regardless of input shape.
+    const raw = "PCrossForm";
+    const hex = hexEncode(raw);
+    await store.setContactAlias(hex, "Cousin");
+    expect(store.getDisplayName(hex)).toBe("Cousin");
+    expect(store.getDisplayName(raw)).toBe("Cousin");
+    await store.setContactAlias(raw, null);
+    expect(store.getDisplayName(hex)).not.toBe("Cousin");
+    expect(store.getDisplayName(raw)).not.toBe("Cousin");
+    expect(store.hasLocalAlias(hex)).toBe(false);
+    expect(store.hasLocalAlias(raw)).toBe(false);
+  });
 });
