@@ -419,9 +419,11 @@ export async function getDecryptedBlobForMessage(
   // and skips the whole download/decrypt loop.
   if (fileInfo.url?.startsWith("blob:")) {
     try {
-      const res = await fetch(fileInfo.url);
+      const res = await fetch(fileInfo.url, signal ? { signal } : undefined);
       if (res.ok) return await res.blob();
-    } catch {
+    } catch (e) {
+      // Caller cancellation is terminal — don't fall through to a server fetch.
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
       // Blob URL was revoked between snapshot and forward — fall through to
       // server-side download below if there's anything to download.
     }

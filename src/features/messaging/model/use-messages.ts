@@ -1019,6 +1019,14 @@ export function useMessages() {
       fileInfo: FileInfo;
       sourceMessageId: string;
       roomId: string;
+      /** Original sender's address on the source event. Needed to derive the
+       *  per-event decryption key for E2E rooms — `forwardMeta.senderId` is
+       *  only set when the user opted into «Show sender attribution». */
+      sourceSenderId: string;
+      /** Original event timestamp. Some Matrix key-rotation policies are
+       *  timestamp-sensitive, so passing the source event time (not
+       *  Date.now()) keeps decrypt correct for older messages. */
+      sourceTimestamp: number;
     },
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
@@ -1126,6 +1134,8 @@ export function useMessages() {
       fileInfo: FileInfo;
       sourceMessageId: string;
       roomId: string;
+      sourceSenderId: string;
+      sourceTimestamp: number;
     },
   ): Promise<boolean> => {
     let blob: Blob | null;
@@ -1133,8 +1143,12 @@ export function useMessages() {
       blob = await getDecryptedBlobForMessage({
         fileInfo: source.fileInfo,
         roomId: source.roomId,
-        senderId: forwardMeta?.senderId ?? "",
-        timestamp: Date.now(),
+        // Pass the *source* sender + timestamp so downloadAndDecrypt builds
+        // the same event shape pcrypto used when the original was sent.
+        // Using Date.now() here was wrong — it would mismatch any timestamp-
+        // sensitive key resolution.
+        senderId: source.sourceSenderId,
+        timestamp: source.sourceTimestamp,
       });
     } catch (e) {
       console.error("[sendForward] Failed to fetch source blob:", e);
@@ -1163,11 +1177,18 @@ export function useMessages() {
           forwardedFrom: forwardMeta,
         });
       case MessageType.videoCircle:
-        await sendVideoCircle(file, {
-          duration: source.fileInfo.duration,
-          forwardedFrom: forwardMeta,
-        });
-        return true;
+        // sendVideoCircle returns void and swallows its own errors; wrap so
+        // a failed video-circle forward surfaces as `false` to the caller.
+        try {
+          await sendVideoCircle(file, {
+            duration: source.fileInfo.duration,
+            forwardedFrom: forwardMeta,
+          });
+          return true;
+        } catch (e) {
+          console.error("[sendForward] sendVideoCircle threw:", e);
+          return false;
+        }
       case MessageType.video:
       case MessageType.file:
         return await sendFile(file, { forwardedFrom: forwardMeta });
@@ -1350,11 +1371,28 @@ export function useMessages() {
         // re-uploads the original blob via sendImage/sendFile/sendAudio so
         // the recipient receives a real attachment, not a text body.
         if (src.type !== MessageType.text && src.fileInfo) {
+          // forwardMediaMessage dispatches through sendImage/sendFile, which
+          // read chatStore.activeRoomId. The current UI guarantees
+          // targetRoomId === activeRoomId (ForwardPicker switches the active
+          // room before invoking forwardMessages). Surface that invariant
+          // here so a future caller that forwards into a non-active room
+          // gets a clear error instead of silently posting into the wrong
+          // chat.
+          if (targetRoomId !== chatStore.activeRoomId) {
+            throw new Error(
+              "Bulk media forward requires targetRoomId === activeRoomId " +
+                "(sendImage/sendFile read activeRoomId). Switch the active " +
+                "room before calling forwardMessages, or thread a room " +
+                "override through the per-type send functions.",
+            );
+          }
           const ok = await forwardMediaMessage(src.content, fwdMeta, {
             type: src.type,
             fileInfo: src.fileInfo,
             sourceMessageId: src.id,
             roomId: src.roomId,
+            sourceSenderId: src.senderId,
+            sourceTimestamp: src.timestamp,
           });
           if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
           return;

@@ -320,6 +320,12 @@ const handleSend = async () => {
             fileInfo: fwd.fileInfo!,
             sourceMessageId: fwd.id,
             roomId: fwd.roomId,
+            // Pass through the source event's sender + timestamp so the
+            // decrypt path uses the right event-shape. Falls back to
+            // Date.now() / forwardMeta when ForwardingMessage is synthetic
+            // (e.g. channel-post forward — but those go through text path).
+            sourceSenderId: fwd.senderId,
+            sourceTimestamp: fwd.sourceTimestamp ?? Date.now(),
           });
           if (inserted === false) {
             // sendForward returns false when the source blob is unavailable

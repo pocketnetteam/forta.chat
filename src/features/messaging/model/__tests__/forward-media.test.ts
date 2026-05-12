@@ -171,6 +171,8 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
         },
         sourceMessageId: "$src:server",
         roomId: "!source:server",
+        sourceSenderId: "alice",
+        sourceTimestamp: 100,
       },
     );
 
@@ -200,6 +202,8 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
         },
         sourceMessageId: "$pdf:server",
         roomId: "!source:server",
+        sourceSenderId: "bob",
+        sourceTimestamp: 200,
       },
     );
 
@@ -222,6 +226,8 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
         fileInfo: { name: "p.jpg", type: "image/jpeg", size: 1, url: "mxc://o" },
         sourceMessageId: "$src",
         roomId: "!src",
+        sourceSenderId: "alice",
+        sourceTimestamp: 300,
       },
     );
 
@@ -255,6 +261,8 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
         fileInfo: { name: "p.jpg", type: "image/jpeg", size: 1, url: "mxc://o" },
         sourceMessageId: "$src",
         roomId: "!src",
+        sourceSenderId: "alice",
+        sourceTimestamp: 400,
       },
     );
 
