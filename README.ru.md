@@ -138,6 +138,27 @@ npm run cap:run     # запустить на подключённом устр�
 
 Capacitor-конфиг: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
 
+### iOS (Capacitor)
+
+Требуется macOS 14+, Xcode 16+, CocoaPods и аккаунт Apple Developer. Сборка под iOS не работает на Windows и Linux.
+
+```bash
+npm run cap:build:ios   # vite build + cap sync ios
+npm run cap:open:ios    # открыть ios/App/App.xcworkspace в Xcode
+npm run cap:run:ios     # запустить в симуляторе / на устройстве
+```
+
+Push, звонки и Universal Links требуют реального устройства — на симуляторе доступна только проверка текстового чата.
+
+Полный план iOS-порта: [docs/plans/ios/README.md](docs/plans/ios/README.md).
+
+#### Известные отличия iOS
+
+- **Tor:** не поставляется на iOS. Переключатель скрыт в настройках, JS-заглушки оставляют приложение работать через прямой HTTPS.
+- **Авто-обновление:** скрыто — политика App Store запрещает установку бинарников внутри приложения. Обновления через TestFlight / App Store.
+- **Локаль:** iOS использует системную локаль (`Bundle.main.preferredLocalizations`); смена языка внутри приложения вступает в силу после перезапуска.
+- **WebRTC:** используется встроенный WebRTC из WKWebView; нативный WebRTC-прокси — только для Android.
+
 ## Архитектура
 
 Проект организован по **Feature-Sliced Design**:
