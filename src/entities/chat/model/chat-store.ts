@@ -527,34 +527,136 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // User display name cache: address → display name
   const userDisplayNames = ref<Record<string, string>>({});
 
+  /** User-set local alias cache: address → alias (Telegram-style "rename contact").
+   *  Mirrors Dexie users.localAlias. Populated by loadLocalAliases() on login
+   *  and updated optimistically by setContactAlias(). Cross-device sync is
+   *  driven by the m.bastyon.contact_aliases global account_data event. */
+  const localAliases = ref<Record<string, string>>({});
+
   /** Look up a user's display name; falls back to truncated address.
    *  Accepts both raw Bastyon addresses and hex-encoded IDs (from room.members).
-   *  Also checks the user store (restored from localStorage on startup) to avoid
-   *  showing raw addresses while Matrix sync is still in progress. */
+   *  Resolution order:
+   *    1. Local alias (user-set "rename contact" — Session 51) — top priority.
+   *    2. Matrix displayName cache (populated by /sync).
+   *    3. User store (synchronously restored from localStorage on boot —
+   *       available before Matrix sync, prevents raw-address flash).
+   *    4. Truncated address fallback. */
   const getDisplayName = (address: string): string => {
     if (!address) return "?";
-    // Direct lookup (raw address)
-    const cached = userDisplayNames.value[address];
-    if (cached) return cached;
     // Try hex-decoded lookup (room.members stores hex IDs, cache uses raw addresses)
     let resolvedAddr = address;
     if (/^[a-f0-9]+$/i.test(address)) {
       try {
         const decoded = hexDecode(address);
         if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) {
-          const decodedCached = userDisplayNames.value[decoded];
-          if (decodedCached) return decodedCached;
           resolvedAddr = decoded;
         }
       } catch { /* not a valid hex string */ }
     }
-    // Check user store (synchronously restored from localStorage — available before Matrix sync)
+    // 1) Local alias — top priority, overrides everything (including Matrix name)
+    const alias = localAliases.value[address]
+      ?? (resolvedAddr !== address ? localAliases.value[resolvedAddr] : undefined);
+    if (alias) return alias;
+    // 2) Matrix displayName cache — direct (raw) lookup, then decoded
+    const cached = userDisplayNames.value[address];
+    if (cached) return cached;
+    if (resolvedAddr !== address) {
+      const decodedCached = userDisplayNames.value[resolvedAddr];
+      if (decodedCached) return decodedCached;
+    }
+    // 3) Check user store (synchronously restored from localStorage — available before Matrix sync)
     const uStore = useUserStore();
     const userProfile = uStore.users[resolvedAddr];
     if (userProfile?.name) return userProfile.name;
     // Fallback: truncated address
     if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
     return address;
+  };
+
+  /** Resolve a hex-encoded address back to the raw Bastyon form (or echo
+   *  the input if it is already raw). */
+  const resolveRawAddress = (address: string): string => {
+    if (!address) return address;
+    if (/^[a-f0-9]+$/i.test(address)) {
+      try {
+        const decoded = hexDecode(address);
+        if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) return decoded;
+      } catch { /* not valid hex */ }
+    }
+    return address;
+  };
+
+  /** Get the local alias for an address (or null if none).
+   *  Accepts both raw and hex-encoded address forms. */
+  const getLocalAlias = (address: string): string | null => {
+    if (!address) return null;
+    const raw = resolveRawAddress(address);
+    return localAliases.value[address] ?? localAliases.value[raw] ?? null;
+  };
+
+  /** True iff a local alias is set for the address (raw or hex form). */
+  const hasLocalAlias = (address: string): boolean => getLocalAlias(address) !== null;
+
+  /** Load the alias cache from Dexie. Called on login + chat-db init. */
+  const loadLocalAliases = async () => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return;
+    try {
+      const all = await kit.users.getAllAliases();
+      const next: Record<string, string> = {};
+      for (const [addr, { alias }] of Object.entries(all)) next[addr] = alias;
+      localAliases.value = next;
+    } catch (e) {
+      console.warn("[chat-store] loadLocalAliases failed:", e);
+    }
+  };
+
+  /** Set or clear a user's local alias.
+   *  Passing alias = null (or empty/whitespace) clears the alias.
+   *  Performs an optimistic UI update first, then persists to Dexie, then
+   *  best-effort syncs to Matrix account_data for cross-device propagation.
+   *  The alias is NEVER sent as Matrix room displayname \u2014 peers do not see it. */
+  const setContactAlias = async (address: string, alias: string | null): Promise<void> => {
+    if (!address) return;
+    const trimmed = alias?.trim() ? alias.trim() : null;
+    const now = Date.now();
+    const raw = resolveRawAddress(address);
+
+    // Optimistic UI \u2014 key by both raw and hex form so any callsite sees it
+    const next = { ...localAliases.value };
+    if (trimmed) {
+      next[address] = trimmed;
+      if (raw !== address) next[raw] = trimmed;
+    } else {
+      delete next[address];
+      if (raw !== address) delete next[raw];
+    }
+    localAliases.value = next;
+
+    // Dexie (single source of truth \u2014 keyed by raw address)
+    const kit = chatDbKitRef.value;
+    if (kit) {
+      try {
+        await kit.users.setAlias(raw, trimmed, now);
+      } catch (e) {
+        console.warn("[chat-store] setContactAlias: Dexie write failed:", e);
+      }
+    }
+
+    // Matrix account_data (best-effort \u2014 peers do NOT see this; it only
+    // syncs to the same user's other devices via /sync).
+    try {
+      const matrix = getMatrixClientService();
+      const current = (matrix.getAccountData("m.bastyon.contact_aliases") ?? {}) as {
+        aliases?: Record<string, { name: string; updatedAt: number }>;
+      };
+      const aliases = { ...(current.aliases ?? {}) };
+      if (trimmed) aliases[raw] = { name: trimmed, updatedAt: now };
+      else delete aliases[raw];
+      await matrix.setAccountData("m.bastyon.contact_aliases", { aliases });
+    } catch (e) {
+      console.warn("[chat-store] setContactAlias: account_data sync failed:", e);
+    }
   };
 
   // Selection/forward state (Batch 4)
@@ -6366,6 +6468,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     deletingMessage.value = null;
     deletingMessages.value = [];
     userDisplayNames.value = {};
+    localAliases.value = {};
     selectionMode.value = false;
     selectedMessageIds.value = new Set();
     forwardingMessage.value = null;
@@ -6426,6 +6529,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     saveForwardDraft,
     restoreForwardDraft,
     getDisplayName,
+    getLocalAlias,
+    hasLocalAlias,
+    localAliases,
+    loadLocalAliases,
+    setContactAlias,
     getRoomMemberCount,
     getRoomPowerLevels,
     getMemberPowerLevelById,
