@@ -11,7 +11,7 @@ import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import { detectUrl, fetchPreview } from "./use-link-preview";
-import { invalidateDownloadCache } from "./use-file-download";
+import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
@@ -322,7 +322,10 @@ export function useMessages() {
    *  it, even when subsequent enqueue fails), false when the call was
    *  silently dropped before any visible side effect (caller can then
    *  preserve the share/forward intent or restore the input). */
-  const sendFile = async (file: File): Promise<boolean> => {
+  const sendFile = async (
+    file: File,
+    options: { forwardedFrom?: { senderId: string; senderName?: string } } = {},
+  ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
 
@@ -360,6 +363,7 @@ export function useMessages() {
         size: file.size,
         url: localBlobUrl,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -382,6 +386,7 @@ export function useMessages() {
         mimeType: mime,
         msgtype: "m.file",
         attachmentId,
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
@@ -392,7 +397,11 @@ export function useMessages() {
    *  See sendFile for the boolean return contract. */
   const sendImage = async (
     file: File,
-    options: { caption?: string; captionAbove?: boolean } = {},
+    options: {
+      caption?: string;
+      captionAbove?: boolean;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
@@ -426,6 +435,7 @@ export function useMessages() {
         caption: options.caption,
         captionAbove: options.captionAbove,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -456,6 +466,7 @@ export function useMessages() {
           ...(options.caption ? { caption: options.caption } : {}),
           ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
         },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
@@ -466,7 +477,11 @@ export function useMessages() {
    *  See sendFile for the boolean return contract. */
   const sendAudio = async (
     file: File,
-    options: { duration?: number; waveform?: number[] } = {},
+    options: {
+      duration?: number;
+      waveform?: number[];
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
@@ -497,6 +512,7 @@ export function useMessages() {
         duration: options.duration,
         waveform: options.waveform,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -527,6 +543,7 @@ export function useMessages() {
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
           waveform: intWaveform,
         },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
@@ -534,7 +551,13 @@ export function useMessages() {
   };
 
   /** Send a video circle (video note) message — circular video like Telegram */
-  const sendVideoCircle = async (file: File, options: { duration?: number } = {}) => {
+  const sendVideoCircle = async (
+    file: File,
+    options: {
+      duration?: number;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
+  ) => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return;
 
@@ -562,6 +585,7 @@ export function useMessages() {
             duration: options.duration,
             videoNote: true,
           },
+          forwardedFrom: options.forwardedFrom,
           localBlobUrl,
           uploadProgress: 0,
         });
@@ -630,6 +654,14 @@ export function useMessages() {
                 videoNote: true,
                 ...(secrets ? { secrets } : {}),
               },
+              ...(options.forwardedFrom
+                ? {
+                    forwarded_from: {
+                      sender_id: options.forwardedFrom.senderId,
+                      sender_name: options.forwardedFrom.senderName,
+                    },
+                  }
+                : {}),
             };
 
             const serverEventId = await withTimeout(
@@ -968,15 +1000,44 @@ export function useMessages() {
     return true;
   };
 
-  /** Send a forwarded text message with optimistic UI. Returns true if insert succeeded.
-   *  Pass forwardMeta to include sender attribution; omit to send without attribution. */
+  /** Send a forwarded message with optimistic UI. Returns true if insert succeeded.
+   *  Pass forwardMeta to include sender attribution; omit to send without attribution.
+   *
+   *  Two branches:
+   *   - text (default): content is the body, hits the legacy send_message path.
+   *   - media: when `source.type !== text` and `source.fileInfo` is present,
+   *            re-downloads the original blob and dispatches through
+   *            sendImage/sendFile/sendAudio/sendVideoCircle. This is the
+   *            internal-forward path for photos/videos/voice/files — without
+   *            it the recipient would see «Image» / «Photo» as a text body
+   *            with no attachment (issues #311, #702). */
   const sendForward = async (
     content: string,
     forwardMeta?: { senderId: string; senderName?: string },
+    source?: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+      /** Original sender's address on the source event. Needed to derive the
+       *  per-event decryption key for E2E rooms — `forwardMeta.senderId` is
+       *  only set when the user opted into «Show sender attribution». */
+      sourceSenderId: string;
+      /** Original event timestamp. Some Matrix key-rotation policies are
+       *  timestamp-sensitive, so passing the source event time (not
+       *  Date.now()) keeps decrypt correct for older messages. */
+      sourceTimestamp: number;
+    },
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !content.trim()) return false;
+    if (!roomId) return false;
 
+    // Media branch — re-upload the original bytes through the per-type pipeline.
+    if (source && source.type !== MessageType.text && source.fileInfo) {
+      return await forwardMediaMessage(content, forwardMeta, source);
+    }
+
+    if (!content.trim()) return false;
     const trimmed = content.trim();
 
     // ── Dexie path: optimistic insert FIRST ──
@@ -1056,6 +1117,87 @@ export function useMessages() {
     } catch (e) {
       console.error("[sendForward] Legacy path failed:", e);
       return false;
+    }
+  };
+
+  /** Re-upload a media message into the active room as part of a forward.
+   *  Downloads the original blob (or reuses a local blob URL when the source
+   *  was sent from this device and is still cached), wraps it in a File, and
+   *  dispatches through the per-type send pipeline so the recipient gets a
+   *  real m.image / m.file / m.audio event with the attachment — not a text
+   *  body «Image» without payload (the pre-fix bug behind #311, #702). */
+  const forwardMediaMessage = async (
+    caption: string,
+    forwardMeta: { senderId: string; senderName?: string } | undefined,
+    source: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+      sourceSenderId: string;
+      sourceTimestamp: number;
+    },
+  ): Promise<boolean> => {
+    let blob: Blob | null;
+    try {
+      blob = await getDecryptedBlobForMessage({
+        fileInfo: source.fileInfo,
+        roomId: source.roomId,
+        // Pass the *source* sender + timestamp so downloadAndDecrypt builds
+        // the same event shape pcrypto used when the original was sent.
+        // Using Date.now() here was wrong — it would mismatch any timestamp-
+        // sensitive key resolution.
+        senderId: source.sourceSenderId,
+        timestamp: source.sourceTimestamp,
+      });
+    } catch (e) {
+      console.error("[sendForward] Failed to fetch source blob:", e);
+      return false;
+    }
+    if (!blob) {
+      console.error("[sendForward] forwardMedia: source blob unavailable");
+      return false;
+    }
+
+    const fileName = source.fileInfo.name || "forwarded";
+    const fileType = source.fileInfo.type || blob.type || "application/octet-stream";
+    const file = new File([blob], fileName, { type: fileType });
+    const trimmedCaption = caption.trim();
+
+    switch (source.type) {
+      case MessageType.image:
+        return await sendImage(file, {
+          caption: trimmedCaption || undefined,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.audio:
+        return await sendAudio(file, {
+          duration: source.fileInfo.duration,
+          waveform: source.fileInfo.waveform,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.videoCircle:
+        // sendVideoCircle returns void and swallows its own errors; wrap so
+        // a failed video-circle forward surfaces as `false` to the caller.
+        try {
+          await sendVideoCircle(file, {
+            duration: source.fileInfo.duration,
+            forwardedFrom: forwardMeta,
+          });
+          return true;
+        } catch (e) {
+          console.error("[sendForward] sendVideoCircle threw:", e);
+          return false;
+        }
+      case MessageType.video:
+      case MessageType.file:
+        return await sendFile(file, { forwardedFrom: forwardMeta });
+      default:
+        console.warn(
+          "[sendForward] forwardMedia: unsupported source type, falling back to text:",
+          source.type,
+        );
+        return false;
     }
   };
 
@@ -1189,12 +1331,31 @@ export function useMessages() {
 
     // Collect source messages across all rooms (selection may span rooms in theory,
     // though the current UI path feeds us only the active room's selection).
+    // We need type + fileInfo + roomId so media forwards can re-upload through
+    // the per-type pipeline instead of collapsing into a text body «Image»
+    // without attachment (the pre-fix bug behind #311, #702).
     const idSet = new Set(sourceMessageIds);
-    const collected: Array<{ id: string; content: string; senderId: string; timestamp: number }> = [];
+    const collected: Array<{
+      id: string;
+      content: string;
+      senderId: string;
+      timestamp: number;
+      type: MessageType;
+      fileInfo?: FileInfo;
+      roomId: string;
+    }> = [];
     for (const roomMessages of Object.values(chatStore.messages)) {
       for (const m of roomMessages) {
         if (idSet.has(m.id)) {
-          collected.push({ id: m.id, content: m.content, senderId: m.senderId, timestamp: m.timestamp });
+          collected.push({
+            id: m.id,
+            content: m.content,
+            senderId: m.senderId,
+            timestamp: m.timestamp,
+            type: m.type,
+            fileInfo: m.fileInfo,
+            roomId: m.roomId,
+          });
         }
       }
     }
@@ -1205,6 +1366,37 @@ export function useMessages() {
       collected.map(async (src) => {
         const senderName = chatStore.getDisplayName(src.senderId);
         const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
+
+        // Media branch — reuse the singular forwardMediaMessage path. It
+        // re-uploads the original blob via sendImage/sendFile/sendAudio so
+        // the recipient receives a real attachment, not a text body.
+        if (src.type !== MessageType.text && src.fileInfo) {
+          // forwardMediaMessage dispatches through sendImage/sendFile, which
+          // read chatStore.activeRoomId. The current UI guarantees
+          // targetRoomId === activeRoomId (ForwardPicker switches the active
+          // room before invoking forwardMessages). Surface that invariant
+          // here so a future caller that forwards into a non-active room
+          // gets a clear error instead of silently posting into the wrong
+          // chat.
+          if (targetRoomId !== chatStore.activeRoomId) {
+            throw new Error(
+              "Bulk media forward requires targetRoomId === activeRoomId " +
+                "(sendImage/sendFile read activeRoomId). Switch the active " +
+                "room before calling forwardMessages, or thread a room " +
+                "override through the per-type send functions.",
+            );
+          }
+          const ok = await forwardMediaMessage(src.content, fwdMeta, {
+            type: src.type,
+            fileInfo: src.fileInfo,
+            sourceMessageId: src.id,
+            roomId: src.roomId,
+            sourceSenderId: src.senderId,
+            sourceTimestamp: src.timestamp,
+          });
+          if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
+          return;
+        }
 
         if (isChatDbReady()) {
           try {

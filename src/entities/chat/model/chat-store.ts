@@ -591,6 +591,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       fileInfo: message.fileInfo,
       forwardedFrom: message.forwardedFrom,
       withSenderInfo: true,
+      sourceTimestamp: message.timestamp,
     };
   };
 

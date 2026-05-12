@@ -324,6 +324,7 @@ export const en = {
   "forward.cancelConfirm.cancel": "Cancel forwarding",
   "forward.resultSuccess": "Forwarded: {count}",
   "forward.resultSummary": "Forwarded {succeeded} of {total}",
+  "forward.mediaFailed": "Couldn't forward media — original unavailable or not decrypted",
   "forward.bulkTitle": "Forward {count} messages",
   "forward.bulkFrom": "From: {names}",
   "forward.bulkCancelConfirm.title": "{count} messages",

@@ -7,6 +7,7 @@ import { getDraft, saveDraft, clearDraft } from "@/shared/lib/drafts";
 import { useMessages } from "../model/use-messages";
 import { useLinkPreview } from "../model/use-link-preview";
 import { useI18n } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { useMediaUpload } from "../model/use-media-upload";
 import { usePasteDrop } from "../model/use-paste-drop";
 import EmojiPicker from "./EmojiPicker.vue";
@@ -325,8 +326,35 @@ const handleSend = async () => {
         const forwardMeta = fwd.withSenderInfo
           ? { senderId: fwd.senderId, senderName: fwd.senderName }
           : undefined;
-        const forwardContent = rawText || fwd.content || forwardPreviewText.value;
-        inserted = await sendForward(forwardContent, forwardMeta);
+        const isMedia = fwd.type !== MessageType.text && !!fwd.fileInfo;
+        if (isMedia) {
+          // Media forward — re-upload the original blob so the recipient
+          // receives a real m.image/m.file/m.audio event instead of a text
+          // body «Image» without attachment (the pre-fix bug behind #311,
+          // #702). The caption (if user typed any) lands as the body.
+          inserted = await sendForward(rawText, forwardMeta, {
+            type: fwd.type,
+            fileInfo: fwd.fileInfo!,
+            sourceMessageId: fwd.id,
+            roomId: fwd.roomId,
+            // Pass through the source event's sender + timestamp so the
+            // decrypt path uses the right event-shape. Falls back to
+            // Date.now() / forwardMeta when ForwardingMessage is synthetic
+            // (e.g. channel-post forward — but those go through text path).
+            sourceSenderId: fwd.senderId,
+            sourceTimestamp: fwd.sourceTimestamp ?? Date.now(),
+          });
+          if (inserted === false) {
+            // sendForward returns false when the source blob is unavailable
+            // (revoked local URL, missing decryption keys, network/region
+            // block on the mxc download). Tell the user explicitly — the
+            // forward sheet just closed and they'd otherwise think it worked.
+            toast(t("forward.mediaFailed"), "error", 5000);
+          }
+        } else {
+          const forwardContent = rawText || fwd.content || forwardPreviewText.value;
+          inserted = await sendForward(forwardContent, forwardMeta);
+        }
         if (inserted !== false) chatStore.cancelForward();
       }
     } else if (chatStore.replyingTo) {

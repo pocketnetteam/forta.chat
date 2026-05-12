@@ -326,6 +326,7 @@ export const ru: Record<TranslationKey, string> = {
   "forward.cancelConfirm.cancel": "Отменить пересылку",
   "forward.resultSuccess": "Переслано: {count}",
   "forward.resultSummary": "Переслано {succeeded} из {total}",
+  "forward.mediaFailed": "Не удалось переслать медиа — оригинал недоступен или не расшифрован",
   "forward.bulkTitle": "Переслать {count} сообщений",
   "forward.bulkFrom": "От: {names}",
   "forward.bulkCancelConfirm.title": "{count} сообщений",

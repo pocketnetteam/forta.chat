@@ -76,6 +76,11 @@ export interface ForwardingMessage {
   withSenderInfo: boolean;
   /** True when message originates from Android Share Sheet (not internal forward) */
   isExternalShare?: boolean;
+  /** Original event timestamp — only meaningful for internal forwards of
+   *  real messages (initForward). Used by the media re-upload path to
+   *  derive the right decryption context. Omitted for synthetic
+   *  ForwardingMessages (external share, channel post share). */
+  sourceTimestamp?: number;
 }
 
 /** Open Graph metadata for URL link previews */
