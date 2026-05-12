@@ -322,7 +322,10 @@ export function useMessages() {
    *  it, even when subsequent enqueue fails), false when the call was
    *  silently dropped before any visible side effect (caller can then
    *  preserve the share/forward intent or restore the input). */
-  const sendFile = async (file: File): Promise<boolean> => {
+  const sendFile = async (
+    file: File,
+    options: { forwardedFrom?: { senderId: string; senderName?: string } } = {},
+  ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
 
@@ -360,6 +363,7 @@ export function useMessages() {
         size: file.size,
         url: localBlobUrl,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -382,6 +386,7 @@ export function useMessages() {
         mimeType: mime,
         msgtype: "m.file",
         attachmentId,
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
@@ -392,7 +397,11 @@ export function useMessages() {
    *  See sendFile for the boolean return contract. */
   const sendImage = async (
     file: File,
-    options: { caption?: string; captionAbove?: boolean } = {},
+    options: {
+      caption?: string;
+      captionAbove?: boolean;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
@@ -426,6 +435,7 @@ export function useMessages() {
         caption: options.caption,
         captionAbove: options.captionAbove,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -456,6 +466,7 @@ export function useMessages() {
           ...(options.caption ? { caption: options.caption } : {}),
           ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
         },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
@@ -466,7 +477,11 @@ export function useMessages() {
    *  See sendFile for the boolean return contract. */
   const sendAudio = async (
     file: File,
-    options: { duration?: number; waveform?: number[] } = {},
+    options: {
+      duration?: number;
+      waveform?: number[];
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
@@ -497,6 +512,7 @@ export function useMessages() {
         duration: options.duration,
         waveform: options.waveform,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -527,6 +543,7 @@ export function useMessages() {
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
           waveform: intWaveform,
         },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
@@ -534,7 +551,13 @@ export function useMessages() {
   };
 
   /** Send a video circle (video note) message — circular video like Telegram */
-  const sendVideoCircle = async (file: File, options: { duration?: number } = {}) => {
+  const sendVideoCircle = async (
+    file: File,
+    options: {
+      duration?: number;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
+  ) => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return;
 
@@ -562,6 +585,7 @@ export function useMessages() {
             duration: options.duration,
             videoNote: true,
           },
+          forwardedFrom: options.forwardedFrom,
           localBlobUrl,
           uploadProgress: 0,
         });
@@ -630,6 +654,14 @@ export function useMessages() {
                 videoNote: true,
                 ...(secrets ? { secrets } : {}),
               },
+              ...(options.forwardedFrom
+                ? {
+                    forwarded_from: {
+                      sender_id: options.forwardedFrom.senderId,
+                      sender_name: options.forwardedFrom.senderName,
+                    },
+                  }
+                : {}),
             };
 
             const serverEventId = await withTimeout(

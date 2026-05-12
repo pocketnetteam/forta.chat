@@ -495,6 +495,11 @@ export class SyncEngine {
       /** Optional top-level event fields merged after msgtype — e.g.
        *  caption / captionAbove / bastyon-specific flags. */
       eventExtras?: Record<string, unknown>;
+      /** Forward attribution for the receiving side. When present the
+       *  outbound Matrix event gets a `forwarded_from` field so recipients
+       *  render «Forwarded from <name>» on top of the media bubble. Mirrors
+       *  syncSendMessage. */
+      forwardedFrom?: { senderId: string; senderName?: string };
     };
     const matrixService = getMatrixClientService();
 
@@ -585,6 +590,12 @@ export class SyncEngine {
         };
       } else if (secrets) {
         content.secrets = secrets;
+      }
+      if (payload.forwardedFrom) {
+        content.forwarded_from = {
+          sender_id: payload.forwardedFrom.senderId,
+          sender_name: payload.forwardedFrom.senderName,
+        };
       }
 
       const serverEventId = await withTimeout(
