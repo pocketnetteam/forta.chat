@@ -55,7 +55,14 @@
                 <data android:scheme="forta" />
             </intent-filter>
 
-            <!-- Share Target: receive content from other apps -->
+            <!-- Share Target: receive content from other apps.
+                 Specific MIME filters are kept so the IntentResolver ranks
+                 us higher for the common types (it picks the most-specific
+                 match regardless of declaration order in this manifest).
+                 The `*/*` fallback exists to keep Forta visible in the
+                 share sheet for exotic payloads we don't enumerate —
+                 image/heic from WhatsApp/iOS exports, vendor archives,
+                 application/x-… types, etc. (Session 48 / #713 #706). -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -75,6 +82,11 @@
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
             </intent-filter>
 
         </activity>

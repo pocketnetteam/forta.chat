@@ -639,6 +639,7 @@ export const ru: Record<TranslationKey, string> = {
   "share.linkCopied": "Ссылка скопирована",
   "share.copyFailed": "Не удалось скопировать ссылку",
   "share.nativeShare": "Поделиться через...",
+  "share.sendFailed": "Не удалось отправить файл",
 
   // ── Share group link ──
   "shareGroup.inviteLink": "Ссылка-приглашение",
