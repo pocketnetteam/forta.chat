@@ -3,6 +3,7 @@ import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { getMatrixClientService } from "@/entities/matrix";
 import { useUserStore } from "@/entities/user/model";
+import { hexDecode } from "@/shared/lib/matrix/functions";
 import { rankChatRoomsBySearchRelevance } from "./rank-chat-rooms";
 
 export interface MessageSearchResult {
@@ -21,6 +22,8 @@ export function useSearch() {
     if (!q) return [];
     const qLower = q.toLowerCase();
     const matrix = getMatrixClientService();
+    // Read once so Vue tracks the ref — re-rank when an alias is set/cleared.
+    const aliases = chatStore.localAliases;
     return rankChatRoomsBySearchRelevance(chatStore.sortedRooms, {
       queryLower: qLower,
       getMatrixRoom: (roomId) => {
@@ -33,9 +36,20 @@ export function useSearch() {
         };
       },
       getMemberNameLower: (address: string) => {
-        const u = userStore.getUser(address);
-        const raw = (u?.name && String(u.name).trim()) || address;
-        return raw.toLowerCase();
+        // `address` here is a hex-encoded member ID (room.members format).
+        // Aliases are keyed by raw Bastyon address — normalize before lookup.
+        // Concatenate alias + profile name so search finds the chat by either.
+        let raw = address;
+        if (/^[a-f0-9]+$/i.test(address)) {
+          try {
+            const decoded = hexDecode(address);
+            if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) raw = decoded;
+          } catch { /* not hex */ }
+        }
+        const alias = aliases[raw];
+        const u = userStore.getUser(raw);
+        const profile = (u?.name && String(u.name).trim()) || raw;
+        return (alias ? alias + " " + profile : profile).toLowerCase();
       },
     });
   });
