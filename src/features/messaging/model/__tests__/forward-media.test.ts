@@ -146,11 +146,9 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
 
     // URL.createObjectURL / revokeObjectURL no-op for the same reason.
     if (typeof URL.createObjectURL !== "function") {
-      // @ts-expect-error — stub if happy-dom omits it
       URL.createObjectURL = vi.fn(() => "blob:stub");
     }
     if (typeof URL.revokeObjectURL !== "function") {
-      // @ts-expect-error — stub if happy-dom omits it
       URL.revokeObjectURL = vi.fn();
     }
   });
