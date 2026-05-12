@@ -25,7 +25,6 @@ import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
 import { readShareUriAsBlob } from "@/shared/lib/share-target";
-import { useToast } from "@/shared/lib/use-toast";
 
 const PEER_KEYS_GRACE_MS = 2000;
 
