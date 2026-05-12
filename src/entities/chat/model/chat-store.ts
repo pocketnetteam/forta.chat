@@ -653,20 +653,39 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     }
 
-    // Matrix account_data (best-effort \u2014 peers do NOT see this; it only
-    // syncs to the same user's other devices via /sync).
-    try {
-      const matrix = getMatrixClientService();
-      const current = (matrix.getAccountData("m.bastyon.contact_aliases") ?? {}) as {
-        aliases?: Record<string, { name: string; updatedAt: number }>;
-      };
-      const aliases = { ...(current.aliases ?? {}) };
-      if (trimmed) aliases[raw] = { name: trimmed, updatedAt: now };
-      else delete aliases[raw];
-      await matrix.setAccountData("m.bastyon.contact_aliases", { aliases });
-    } catch (e) {
-      console.warn("[chat-store] setContactAlias: account_data sync failed:", e);
-    }
+    // Matrix account_data (best-effort, fire-and-forget \u2014 peers do NOT see
+    // this; it only syncs to the same user's other devices via /sync).
+    //
+    // We deliberately DO NOT await the network call here. The local write is
+    // the user-facing success criterion; the server-side replication is
+    // background. Awaiting would:
+    //   - Delay the dialog close on slow networks.
+    //   - Risk a stray rejection bubbling into a region-block toast if the
+    //     homeserver is blocked / rate-limited (a transient failure here is
+    //     not a download failure and should not pester the user).
+    // A 5s timeout race guards against the SDK hanging the promise forever.
+    void (async () => {
+      try {
+        const matrix = getMatrixClientService();
+        const current = (matrix.getAccountData("m.bastyon.contact_aliases") ?? {}) as {
+          aliases?: Record<string, { name: string; updatedAt: number }>;
+        };
+        const aliases = { ...(current.aliases ?? {}) };
+        if (trimmed) aliases[raw] = { name: trimmed, updatedAt: now };
+        else delete aliases[raw];
+        await Promise.race([
+          matrix.setAccountData("m.bastyon.contact_aliases", { aliases }),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error("account_data sync timeout")), 5_000),
+          ),
+        ]);
+      } catch (e) {
+        // Swallow \u2014 the local write succeeded, other devices will catch up
+        // on their next /sync (or via a future setContactAlias call that
+        // takes hold during a more cooperative network window).
+        console.warn("[chat-store] setContactAlias: account_data sync failed (best-effort):", e);
+      }
+    })().catch(() => { /* belt-and-braces \u2014 the IIFE already swallows */ });
   };
 
   // Selection/forward state (Batch 4)
