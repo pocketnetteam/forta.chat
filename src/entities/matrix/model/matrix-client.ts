@@ -57,6 +57,7 @@ export class MatrixClientService {
   private onIncomingCall: IncomingCallCallback | null = null;
   private onRoom: ((room: unknown) => void) | null = null;
   private onRoomAccountData: RoomAccountDataCallback | null = null;
+  private onAccountData: ((event: unknown) => void) | null = null;
   private onEncryptionKeyArrived: ((roomId: string) => void) | null = null;
 
   constructor(domain?: string) {
@@ -79,6 +80,7 @@ export class MatrixClientService {
     onIncomingCall?: IncomingCallCallback;
     onRoom?: (room: unknown) => void;
     onRoomAccountData?: RoomAccountDataCallback;
+    onAccountData?: (event: unknown) => void;
     onEncryptionKeyArrived?: (roomId: string) => void;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
@@ -91,6 +93,7 @@ export class MatrixClientService {
     if (handlers.onIncomingCall) this.onIncomingCall = handlers.onIncomingCall;
     if (handlers.onRoom) this.onRoom = handlers.onRoom;
     if (handlers.onRoomAccountData) this.onRoomAccountData = handlers.onRoomAccountData;
+    if (handlers.onAccountData) this.onAccountData = handlers.onAccountData;
     if (handlers.onEncryptionKeyArrived) this.onEncryptionKeyArrived = handlers.onEncryptionKeyArrived;
   }
 
@@ -288,7 +291,7 @@ export class MatrixClientService {
             types: ["m.receipt", "m.typing"],
           },
           account_data: {
-            types: ["m.fully_read", "m.tag", "m.bastyon.clear_history"],
+            types: ["m.fully_read", "m.tag", "m.bastyon.clear_history", "m.bastyon.contact_aliases"],
           },
         },
         presence: {
@@ -459,6 +462,13 @@ export class MatrixClientService {
     this.client.on("Room.accountData" as string, (event: unknown, room: unknown) => {
       if (!this.chatsReady) return;
       this.onRoomAccountData?.(event, room);
+    });
+
+    // Global per-user account_data changes (e.g. contact aliases from other devices).
+    // Fires whenever a /sync delivers a new global account_data event.
+    this.client.on("accountData" as string, (event: unknown) => {
+      if (!this.chatsReady) return;
+      this.onAccountData?.(event);
     });
 
     // Listen for encryption state events — triggers decryption retry for room
@@ -832,6 +842,21 @@ export class MatrixClientService {
     if (!room) return null;
     const event = room.getAccountData(eventType);
     return event?.getContent() ?? null;
+  }
+
+  /** Set per-user GLOBAL account data (syncs across the user's devices via /sync) */
+  async setAccountData(eventType: string, content: Record<string, unknown>): Promise<void> {
+    if (!this.client) throw new Error("Client not initialized");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (this.client as any).setAccountData(eventType, content);
+  }
+
+  /** Get per-user GLOBAL account data (cached locally by the SDK) */
+  getAccountData(eventType: string): Record<string, unknown> | null {
+    if (!this.client) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const event = (this.client as any).getAccountData?.(eventType);
+    return event?.getContent?.() ?? null;
   }
 
   /** Kick a user from a room (requires admin power level) */
