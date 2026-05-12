@@ -125,6 +125,34 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
     mocks.createLocalSpy.mockResolvedValue({ clientId: "client-xyz", localId: 42 });
     mocks.enqueueSpy.mockResolvedValue(1);
     mocks.attachmentsAddSpy.mockResolvedValue(7);
+
+    // happy-dom's Image doesn't fire load/error for blob: URLs, so
+    // getImageDimensions hangs forever. Stub it with an Image-shaped mock
+    // that fires onload synchronously the moment .src is assigned.
+    class StubImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 320;
+      naturalHeight = 240;
+      private _src = "";
+      get src(): string { return this._src; }
+      set src(v: string) {
+        this._src = v;
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    // @ts-expect-error — override global Image for the test
+    globalThis.Image = StubImage;
+
+    // URL.createObjectURL / revokeObjectURL no-op for the same reason.
+    if (typeof URL.createObjectURL !== "function") {
+      // @ts-expect-error — stub if happy-dom omits it
+      URL.createObjectURL = vi.fn(() => "blob:stub");
+    }
+    if (typeof URL.revokeObjectURL !== "function") {
+      // @ts-expect-error — stub if happy-dom omits it
+      URL.revokeObjectURL = vi.fn();
+    }
   });
 
   it("forwarding an image dispatches send_file enqueue with msgtype m.image (not send_message text)", async () => {

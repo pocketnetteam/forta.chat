@@ -11,7 +11,7 @@ import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import { detectUrl, fetchPreview } from "./use-link-preview";
-import { invalidateDownloadCache } from "./use-file-download";
+import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
@@ -1000,15 +1000,36 @@ export function useMessages() {
     return true;
   };
 
-  /** Send a forwarded text message with optimistic UI. Returns true if insert succeeded.
-   *  Pass forwardMeta to include sender attribution; omit to send without attribution. */
+  /** Send a forwarded message with optimistic UI. Returns true if insert succeeded.
+   *  Pass forwardMeta to include sender attribution; omit to send without attribution.
+   *
+   *  Two branches:
+   *   - text (default): content is the body, hits the legacy send_message path.
+   *   - media: when `source.type !== text` and `source.fileInfo` is present,
+   *            re-downloads the original blob and dispatches through
+   *            sendImage/sendFile/sendAudio/sendVideoCircle. This is the
+   *            internal-forward path for photos/videos/voice/files — without
+   *            it the recipient would see «Image» / «Photo» as a text body
+   *            with no attachment (issues #311, #702). */
   const sendForward = async (
     content: string,
     forwardMeta?: { senderId: string; senderName?: string },
+    source?: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+    },
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !content.trim()) return false;
+    if (!roomId) return false;
 
+    // Media branch — re-upload the original bytes through the per-type pipeline.
+    if (source && source.type !== MessageType.text && source.fileInfo) {
+      return await forwardMediaMessage(content, forwardMeta, source);
+    }
+
+    if (!content.trim()) return false;
     const trimmed = content.trim();
 
     // ── Dexie path: optimistic insert FIRST ──
@@ -1088,6 +1109,74 @@ export function useMessages() {
     } catch (e) {
       console.error("[sendForward] Legacy path failed:", e);
       return false;
+    }
+  };
+
+  /** Re-upload a media message into the active room as part of a forward.
+   *  Downloads the original blob (or reuses a local blob URL when the source
+   *  was sent from this device and is still cached), wraps it in a File, and
+   *  dispatches through the per-type send pipeline so the recipient gets a
+   *  real m.image / m.file / m.audio event with the attachment — not a text
+   *  body «Image» without payload (the pre-fix bug behind #311, #702). */
+  const forwardMediaMessage = async (
+    caption: string,
+    forwardMeta: { senderId: string; senderName?: string } | undefined,
+    source: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+    },
+  ): Promise<boolean> => {
+    let blob: Blob | null;
+    try {
+      blob = await getDecryptedBlobForMessage({
+        fileInfo: source.fileInfo,
+        roomId: source.roomId,
+        senderId: forwardMeta?.senderId ?? "",
+        timestamp: Date.now(),
+      });
+    } catch (e) {
+      console.error("[sendForward] Failed to fetch source blob:", e);
+      return false;
+    }
+    if (!blob) {
+      console.error("[sendForward] forwardMedia: source blob unavailable");
+      return false;
+    }
+
+    const fileName = source.fileInfo.name || "forwarded";
+    const fileType = source.fileInfo.type || blob.type || "application/octet-stream";
+    const file = new File([blob], fileName, { type: fileType });
+    const trimmedCaption = caption.trim();
+
+    switch (source.type) {
+      case MessageType.image:
+        return await sendImage(file, {
+          caption: trimmedCaption || undefined,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.audio:
+        return await sendAudio(file, {
+          duration: source.fileInfo.duration,
+          waveform: source.fileInfo.waveform,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.videoCircle:
+        await sendVideoCircle(file, {
+          duration: source.fileInfo.duration,
+          forwardedFrom: forwardMeta,
+        });
+        return true;
+      case MessageType.video:
+      case MessageType.file:
+        return await sendFile(file, { forwardedFrom: forwardMeta });
+      default:
+        console.warn(
+          "[sendForward] forwardMedia: unsupported source type, falling back to text:",
+          source.type,
+        );
+        return false;
     }
   };
 
