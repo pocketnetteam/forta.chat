@@ -7,7 +7,7 @@ import { AccountList, AddAccountModal } from "@/features/account-switcher";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative, isAndroid } from "@/shared/lib/platform";
+import { isNative, isAndroid, isIOS } from "@/shared/lib/platform";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import {
@@ -34,7 +34,10 @@ const { openSettingsContent } = useSidebarTab();
 const walletStore = useWalletStore();
 
 const isElectron = !!(window as any).electronAPI?.isElectron;
-const showTor = isElectron || isNative;
+// Tor is not shipped on iOS — hide the toggle entirely so users don't
+// see a dead control. See docs/plans/ios/2026-05-12-ios-simple-tasks.md
+// Task 4.
+const showTor = (isElectron || isNative) && !isIOS;
 const showDisableWarning = ref(false);
 
 

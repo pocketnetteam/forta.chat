@@ -1,6 +1,6 @@
 import { ref, readonly } from 'vue';
 import { registerPlugin } from '@capacitor/core';
-import { isNative } from '@/shared/lib/platform';
+import { isNative, isIOS } from '@/shared/lib/platform';
 
 interface TorNativePlugin {
   startDaemon(options?: {
@@ -64,6 +64,16 @@ class TorService {
   }
 
   async init(mode: 'always' | 'auto' | 'never' = 'always'): Promise<void> {
+    // Tor is not shipped on iOS — see docs/plans/ios/2026-05-12-ios-overall-plan.md
+    // and 2026-05-12-ios-simple-tasks.md Task 4. JS callers see a stable API
+    // surface but every native call is a no-op; downstream code falls back to
+    // direct HTTPS via the homeserver (matrixBaseUrl below returns '').
+    if (isIOS) {
+      this._ready.value = true;
+      this._state.value = 'NEVER';
+      this._proxyPort.value = 0;
+      return;
+    }
     if (!isNative) {
       this._ready.value = true;
       return;
@@ -87,6 +97,12 @@ class TorService {
    * Sets initFailed=true if Tor cannot start within time limits.
    */
   initBackground(): void {
+    if (isIOS) {
+      this._ready.value = true;
+      this._state.value = 'NEVER';
+      this._proxyPort.value = 0;
+      return;
+    }
     if (!isNative) {
       this._ready.value = true;
       return;
@@ -158,6 +174,7 @@ class TorService {
   }
 
   async stop(): Promise<void> {
+    if (isIOS) return;
     if (!isNative) return;
     await TorNative.stopDaemon();
     this._ready.value = false;
@@ -169,11 +186,13 @@ class TorService {
     bridgeType?: string;
     bridges?: string[];
   }): Promise<void> {
+    if (isIOS) return;
     if (!isNative) return;
     await TorNative.configure(options);
   }
 
-  async verify(): Promise<{ isTor: boolean; ip: string }> {
+  async verify(): Promise<{ isTor: boolean; ip: string; error?: string }> {
+    if (isIOS) return { isTor: false, ip: '', error: 'tor_disabled_on_ios' };
     if (!isNative || !this._ready.value) {
       return { isTor: false, ip: '' };
     }
@@ -187,6 +206,7 @@ class TorService {
   }
 
   async clearCache(): Promise<void> {
+    if (isIOS) return;
     if (!isNative) return;
     await TorNative.clearTorCache();
   }

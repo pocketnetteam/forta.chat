@@ -14,8 +14,10 @@ export const useTorStore = defineStore(NAMESPACE, () => {
   const status = ref<TorStatus>("stopped");
   const info = ref("");
 
-  // Verification state
-  const verifyResult = ref<{ isTor: boolean; ip: string } | null>(null);
+  // Verification state. `error` is set by TorService.verify() when the
+  // platform doesn't ship Tor (iOS) so callers can distinguish "verifier
+  // failed" from "no Tor here".
+  const verifyResult = ref<{ isTor: boolean; ip: string; error?: string } | null>(null);
   const isVerifying = ref(false);
 
   // --- Computed ---
