@@ -395,6 +395,48 @@ async function downloadAndDecrypt(
   throw wrapTransientError(lastError, fileInfo.url);
 }
 
+/** Resolve a decrypted Blob for a media message without touching the per-event
+ *  cache or rendering pipeline. Used by the forward path: when the user picks
+ *  «Forward» on an image/video/file message, we need the decrypted bytes so
+ *  we can wrap them in a `File` and re-upload through `sendImage`/`sendFile`
+ *  (preserving forward attribution). The download composable's public
+ *  `download()` is unsuitable because it returns an `objectUrl` and mutates
+ *  per-message UI state — forward is a one-shot byte access with no UI
+ *  side effects.
+ *
+ *  Returns null when there is no source bytes available (no fileInfo at all,
+ *  or a local blob URL whose object has already been revoked). Throws on
+ *  network/crypto failures so the caller can surface a clear toast. */
+export async function getDecryptedBlobForMessage(
+  message: Pick<Message, "fileInfo" | "roomId" | "senderId" | "timestamp">,
+  signal?: AbortSignal,
+): Promise<Blob | null> {
+  const fileInfo = message.fileInfo;
+  if (!fileInfo) return null;
+
+  // Local blob URL fast path: the original message was sent from this device
+  // and its optimistic blob is still alive. Fetching `blob:` is synchronous-ish
+  // and skips the whole download/decrypt loop.
+  if (fileInfo.url?.startsWith("blob:")) {
+    try {
+      const res = await fetch(fileInfo.url);
+      if (res.ok) return await res.blob();
+    } catch {
+      // Blob URL was revoked between snapshot and forward — fall through to
+      // server-side download below if there's anything to download.
+    }
+  }
+
+  // Server-side mxc URL — reuse the full retry + decrypt pipeline.
+  return await downloadAndDecrypt(
+    fileInfo,
+    message.roomId,
+    message.senderId,
+    message.timestamp,
+    signal,
+  );
+}
+
 /** Convert Blob to base64 data string (without the data:...;base64, prefix) */
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
