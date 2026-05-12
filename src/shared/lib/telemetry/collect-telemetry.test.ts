@@ -13,9 +13,13 @@ vi.mock('@capgo/capacitor-webview-version-checker', () => ({
 }));
 
 let mockIsAndroid = false;
+let mockIsIOS = false;
 vi.mock('@/shared/lib/platform', () => ({
   get isAndroid() {
     return mockIsAndroid;
+  },
+  get isIOS() {
+    return mockIsIOS;
   },
 }));
 
@@ -38,6 +42,7 @@ describe('collectTelemetry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsAndroid = false;
+    mockIsIOS = false;
     mockGetInfo.mockResolvedValue(makeDeviceInfo());
 
     // Provide screen globals for happy-dom
@@ -90,8 +95,9 @@ describe('collectTelemetry', () => {
     expect(snap.webViewState).toBe('outdated');
   });
 
-  it('on non-Android, webView fields are null and checker is not called', async () => {
+  it('on non-Android, non-iOS, webView fields are null and checker is not called', async () => {
     mockIsAndroid = false;
+    mockIsIOS = false;
 
     vi.resetModules();
     const { collectTelemetry } = await import('./collect-telemetry');
@@ -101,6 +107,39 @@ describe('collectTelemetry', () => {
     expect(snap.webViewVersion).toBeNull();
     expect(snap.webViewMajor).toBeNull();
     expect(snap.webViewState).toBeNull();
+  });
+
+  it('on iOS, reports a WKWebView label derived from the device OS version', async () => {
+    mockIsAndroid = false;
+    mockIsIOS = true;
+    mockGetInfo.mockResolvedValue(
+      makeDeviceInfo({ platform: 'ios', osVersion: '17.4', androidSDKVersion: undefined }),
+    );
+
+    vi.resetModules();
+    const { collectTelemetry } = await import('./collect-telemetry');
+    const snap = await collectTelemetry();
+
+    expect(mockCheck).not.toHaveBeenCalled();
+    expect(snap.webViewVersion).toBe('17.4');
+    expect(snap.webViewMajor).toBe(17);
+    expect(snap.webViewState).toBe('WKWebView (iOS 17.4)');
+  });
+
+  it('on iOS with unknown osVersion, degrades gracefully to a labelled placeholder', async () => {
+    mockIsAndroid = false;
+    mockIsIOS = true;
+    mockGetInfo.mockResolvedValue(
+      makeDeviceInfo({ platform: 'ios', osVersion: '', androidSDKVersion: undefined }),
+    );
+
+    vi.resetModules();
+    const { collectTelemetry } = await import('./collect-telemetry');
+    const snap = await collectTelemetry();
+
+    expect(snap.webViewVersion).toBeNull();
+    expect(snap.webViewMajor).toBeNull();
+    expect(snap.webViewState).toBe('WKWebView (iOS unknown)');
   });
 
   it('does not throw when WebViewVersionChecker.check() throws', async () => {

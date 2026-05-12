@@ -1,10 +1,15 @@
 import { Device } from '@capacitor/device';
-import { isAndroid } from '@/shared/lib/platform';
+import { isAndroid, isIOS } from '@/shared/lib/platform';
 import type { TelemetrySnapshot } from './telemetry.types';
 
 /**
- * Collect device/WebView telemetry for Android bug correlation.
+ * Collect device/WebView telemetry for bug correlation.
  * Non-throwing — all native calls are wrapped in try/catch.
+ *
+ * On Android we query @capgo/capacitor-webview-version-checker for the
+ * exact WebView build (varies per OEM/firmware). On iOS WebKit is pinned
+ * to the OS version, so we synthesize a WKWebView label from the iOS
+ * version reported by @capacitor/device.
  */
 export async function collectTelemetry(): Promise<TelemetrySnapshot> {
   const info = await Device.getInfo();
@@ -25,6 +30,12 @@ export async function collectTelemetry(): Promise<TelemetrySnapshot> {
     } catch {
       // Plugin unavailable or failed — leave fields null
     }
+  } else if (isIOS) {
+    const osVersion = info.osVersion ?? '';
+    webViewVersion = osVersion || null;
+    const major = parseInt(osVersion.split('.')[0] ?? '', 10);
+    webViewMajor = Number.isFinite(major) ? major : null;
+    webViewState = `WKWebView (iOS ${osVersion || 'unknown'})`;
   }
 
   const snapshot: TelemetrySnapshot = {
