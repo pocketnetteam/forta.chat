@@ -20,6 +20,32 @@ android/capacitor-filesystem/build/
 *.keystore
 google-services.json
 
+# iOS secrets and build output
+# Policy: see docs/plans/ios/SECRETS-MANIFEST.md
+# .p8 — APNs auth keys + App Store Connect API keys (SECRET, never commit)
+*.p8
+# Firebase iOS config — public-by-shipped-in-bundle but kept out of repo
+# for parity with android/app/google-services.json. Onboarding instructions
+# live in docs/plans/ios/STEP-1-CHECKLIST.md Section E.
+GoogleService-Info.plist
+# Apple signing artefacts
+*.mobileprovision
+*.cer
+*.certSigningRequest
+*.p12
+# Xcode build output (these paths exist after Step 2 `cap add ios`)
+ios/App/build/
+ios/App/Pods/
+ios/App/DerivedData/
+ios/.xcode.env.local
+xcuserdata/
+*.xcuserstate
+
+# Local staging area for in-flight artefacts (e.g. GoogleService-Info.plist
+# while waiting for the ios/ folder to be created in Step 2). Never put
+# secrets here — see docs/plans/ios/SECRETS-MANIFEST.md "What goes in tmp/".
+tmp/
+
 # Vite
 *.local
 
