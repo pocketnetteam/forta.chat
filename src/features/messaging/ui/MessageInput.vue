@@ -24,6 +24,7 @@ import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
 import { readShareUriAsBlob } from "@/shared/lib/share-target";
+import { useToast } from "@/shared/lib/use-toast";
 
 const PEER_KEYS_GRACE_MS = 2000;
 
@@ -38,6 +39,7 @@ const emit = defineEmits<{ donate: [] }>();
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
 const { t } = useI18n();
+const { toast } = useToast();
 const { sendMessage, sendFile, sendImage, sendAudio, sendVideoCircle, sendReply, sendForward, forwardMessages, editMessage, setTyping, sendPoll, sendGif } = useMessages();
 const mediaUpload = useMediaUpload();
 const pasteDrop = usePasteDrop({
@@ -207,6 +209,13 @@ const peerKeysOk = computed(() => {
   });
 });
 
+// External share = user picked Forta from Android Share Sheet and chose this
+// room. Bypass peerKeysOk gate (Session 48 / #717 #710 #706): SyncEngine
+// retries the send with exponential backoff while peer keys propagate, and on
+// terminal failure the bubble lands as "failed" with a visible retry — both
+// are strictly better than the previous silent Send-tap-does-nothing UX.
+const isExternalShareActive = computed(() => chatStore.forwardingMessage?.isExternalShare === true);
+
 const isEditing = computed(() => !!chatStore.editingMessage);
 
 const cancelEdit = () => {
@@ -243,7 +252,11 @@ const autoResize = autoGrow;
 const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
 
 const handleSend = async () => {
-  if ((!text.value.trim() && !showForwardPreview.value && !showBulkForwardPreview.value) || !peerKeysOk.value) return;
+  if (!text.value.trim() && !showForwardPreview.value && !showBulkForwardPreview.value) return;
+  // External share bypasses peerKeysOk — the user already picked the target,
+  // SyncEngine queues the op. Without this branch the Send tap was a silent
+  // no-op for fresh DMs where peer keys haven't propagated yet (Session 48).
+  if (!isExternalShareActive.value && !peerKeysOk.value) return;
   const rawText = mention.resolveText();
   const savedText = text.value;
 
@@ -299,7 +312,12 @@ const handleSend = async () => {
             inserted = await sendFile(file);
           }
         } catch (e) {
+          // Without a visible toast the user just sees the Send tap "do
+          // nothing" — same UX surface as the silent peerKeysOk gate this
+          // session also unsticks. Surface every failure so the user can
+          // retry (Session 48 / #710 #706).
           console.error("[MessageInput] Failed to send external share file:", e);
+          toast(t("share.sendFailed"), "error");
           inserted = false;
         }
         if (inserted !== false) chatStore.cancelForward();
@@ -464,6 +482,7 @@ const sendButtonDisabled = computed(() => isSendButtonDisabled({
   showForwardPreview: showForwardPreview.value,
   showBulkForwardPreview: showBulkForwardPreview.value,
   peerKeysOk: peerKeysOk.value,
+  isExternalShare: isExternalShareActive.value,
 }));
 
 const bulkForwardCount = computed(() => chatStore.forwardingMessages.length);
