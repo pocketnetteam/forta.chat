@@ -1310,12 +1310,31 @@ export function useMessages() {
 
     // Collect source messages across all rooms (selection may span rooms in theory,
     // though the current UI path feeds us only the active room's selection).
+    // We need type + fileInfo + roomId so media forwards can re-upload through
+    // the per-type pipeline instead of collapsing into a text body «Image»
+    // without attachment (the pre-fix bug behind #311, #702).
     const idSet = new Set(sourceMessageIds);
-    const collected: Array<{ id: string; content: string; senderId: string; timestamp: number }> = [];
+    const collected: Array<{
+      id: string;
+      content: string;
+      senderId: string;
+      timestamp: number;
+      type: MessageType;
+      fileInfo?: FileInfo;
+      roomId: string;
+    }> = [];
     for (const roomMessages of Object.values(chatStore.messages)) {
       for (const m of roomMessages) {
         if (idSet.has(m.id)) {
-          collected.push({ id: m.id, content: m.content, senderId: m.senderId, timestamp: m.timestamp });
+          collected.push({
+            id: m.id,
+            content: m.content,
+            senderId: m.senderId,
+            timestamp: m.timestamp,
+            type: m.type,
+            fileInfo: m.fileInfo,
+            roomId: m.roomId,
+          });
         }
       }
     }
@@ -1326,6 +1345,20 @@ export function useMessages() {
       collected.map(async (src) => {
         const senderName = chatStore.getDisplayName(src.senderId);
         const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
+
+        // Media branch — reuse the singular forwardMediaMessage path. It
+        // re-uploads the original blob via sendImage/sendFile/sendAudio so
+        // the recipient receives a real attachment, not a text body.
+        if (src.type !== MessageType.text && src.fileInfo) {
+          const ok = await forwardMediaMessage(src.content, fwdMeta, {
+            type: src.type,
+            fileInfo: src.fileInfo,
+            sourceMessageId: src.id,
+            roomId: src.roomId,
+          });
+          if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
+          return;
+        }
 
         if (isChatDbReady()) {
           try {
