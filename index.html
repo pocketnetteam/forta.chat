@@ -9,6 +9,13 @@
     <title>Forta Chat</title>
     <meta name="description" content="Forta Chat — Decentralized Messenger" />
     <link rel="icon" type="image/png" href="/forta-icon.png" />
+    <!--
+      viewport-fit=cover is required for env(safe-area-inset-*) to resolve
+      to non-zero values inside WKWebView on iOS. Without it the page would
+      render inside the safe area instead of edge-to-edge and the notch /
+      home-indicator math elsewhere in the app would collapse to 0.
+      See docs/plans/ios/2026-05-12-ios-keyboard-safe-area.md Task 4.
+    -->
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover"

@@ -15,7 +15,11 @@ const config: CapacitorConfig = {
     },
   },
   ios: {
+    // 'never' prevents WKWebView from auto-padding the top by the status
+    // bar height; our CSS does that via env(safe-area-inset-top).
     contentInset: 'never',
+    // Disable WKWebView's bounce/overscroll so it doesn't compete with our
+    // custom virtual scroller in chat history. Matches Android edge-to-edge.
     scrollEnabled: false,
     backgroundColor: '#000000',
   },
