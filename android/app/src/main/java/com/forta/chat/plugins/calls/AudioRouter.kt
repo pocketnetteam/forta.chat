@@ -39,6 +39,16 @@ class AudioRouter private constructor(private val context: Context) {
         private const val TAG = "AudioRouter"
         private const val LIFECYCLE_TAG = "AudioLifecycle"
 
+        /**
+         * Maximum lifetime of a single audio-routing session before the
+         * watchdog forces a reset. Picked at 5 minutes because a real call
+         * cycle is rarely longer than a few minutes for our user base; if
+         * we have not seen a stop()/forceStop() by then, the JS finalize
+         * path almost certainly never ran (process killed by OEM, Doze,
+         * or battery-saver between hangup and stopAudioRouting).
+         */
+        private const val AUDIO_MAX_LIFETIME_MS = 5L * 60_000L
+
         @Volatile
         private var INSTANCE: AudioRouter? = null
 
@@ -70,6 +80,24 @@ class AudioRouter private constructor(private val context: Context) {
                 INSTANCE = null
             }
         }
+
+        /**
+         * Pure predicate used by the orphan-watchdog (Session 54).
+         *
+         * Returns true when the watchdog should brute-force restore
+         * MODE_NORMAL: the router still thinks audio routing is active,
+         * but the call infrastructure (WebRTC manager + foreground
+         * service) is gone — meaning the JS-side stopAudioRouting never
+         * reached us (OEM killed the process).
+         *
+         * Exposed at companion-object scope so it can be unit-tested
+         * without spinning up a real AudioManager / Looper.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun shouldForceStopForWatchdog(
+            callAlive: Boolean,
+            isRouterActive: Boolean,
+        ): Boolean = isRouterActive && !callAlive
     }
 
     enum class Device(val label: String) {
@@ -107,6 +135,15 @@ class AudioRouter private constructor(private val context: Context) {
     private var isActive = false
     private var callType = "voice"
     private var bluetoothDeviceName: String? = null
+
+    // Session 54: cancellable Runnables. The 500ms re-apply runnable used to
+    // be an anonymous lambda we could never cancel — on ultra-fast hangups
+    // (stop() within 500ms of start()) it would fire after stop() and put
+    // the device back into MODE_IN_COMMUNICATION. The orphan watchdog needs
+    // the same cancel guarantee: stop()/forceStop() must remove it so a
+    // healthy hangup does not later trigger a redundant forceStop.
+    private var reapplyRunnable: Runnable? = null
+    private var stopWatchdog: Runnable? = null
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
@@ -159,12 +196,47 @@ class AudioRouter private constructor(private val context: Context) {
 
         // OEM fix: Some Chinese ROMs (MIUI, RealmeUI, XOS) reset audio mode
         // asynchronously after init. Re-apply after a short delay to catch resets.
-        mainHandler.postDelayed({
+        // Stored as a field so stop() / forceStop() can cancel it on fast hangups.
+        reapplyRunnable?.let { mainHandler.removeCallbacks(it) }
+        val reapply = Runnable {
             if (isActive && audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
                 Log.w(LIFECYCLE_TAG, "Audio mode was reset by system — re-applying MODE_IN_COMMUNICATION")
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             }
-        }, 500)
+        }
+        reapplyRunnable = reapply
+        mainHandler.postDelayed(reapply, 500)
+
+        // Session 54: orphan-call watchdog. If the JS finalize never runs
+        // (process killed by OEM Doze / battery-saver between hangup and
+        // stopAudioRouting), AudioRouter stays in MODE_IN_COMMUNICATION
+        // forever and the phone's media volume is broken until reboot.
+        // Every AUDIO_MAX_LIFETIME_MS we check whether the call foreground
+        // service is still running; if not, we forceStop() ourselves.
+        // (WebRTCPlugin.manager is plugin-lifetime, not call-lifetime, so
+        // including it in the predicate would never trip — the call
+        // foreground service is the actual call-liveness signal.)
+        stopWatchdog?.let { mainHandler.removeCallbacks(it) }
+        val watchdog = object : Runnable {
+            override fun run() {
+                val callAlive = CallForegroundService.isRunning
+                if (shouldForceStopForWatchdog(callAlive = callAlive, isRouterActive = isActive)) {
+                    Log.w(
+                        LIFECYCLE_TAG,
+                        "Audio watchdog: no active call after ${AUDIO_MAX_LIFETIME_MS}ms — forceStop",
+                    )
+                    forceStop()
+                } else if (isActive) {
+                    // Call still alive (or router was already stopped) —
+                    // rearm for another window. Only rearm while we still
+                    // believe routing is active; if isActive is false we
+                    // are already torn down and rescheduling would be a leak.
+                    mainHandler.postDelayed(this, AUDIO_MAX_LIFETIME_MS)
+                }
+            }
+        }
+        stopWatchdog = watchdog
+        mainHandler.postDelayed(watchdog, AUDIO_MAX_LIFETIME_MS)
 
         audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
 
@@ -195,6 +267,16 @@ class AudioRouter private constructor(private val context: Context) {
         }
 
         isActive = false
+
+        // Session 54: cancel the orphan watchdog and the OEM re-apply
+        // runnable before tearing down. Without these removeCallbacks,
+        // a healthy hangup followed by an immediate new call would see
+        // the previous call's watchdog still scheduled, and a 500ms
+        // re-apply could fire after the new start() had set the mode.
+        stopWatchdog?.let { mainHandler.removeCallbacks(it) }
+        stopWatchdog = null
+        reapplyRunnable?.let { mainHandler.removeCallbacks(it) }
+        reapplyRunnable = null
 
         // Session 23: previously a single call chain. If
         // unregisterAudioDeviceCallback or BT SCO teardown threw, the
@@ -282,6 +364,15 @@ class AudioRouter private constructor(private val context: Context) {
     fun forceStop() = synchronized(lifecycleLock) {
         Log.w(LIFECYCLE_TAG, "forceStop() — bypassing guards, brute reset")
         isActive = false
+
+        // Session 54: same cancellation as stop() — the watchdog itself
+        // may have triggered this forceStop, but a no-op removeCallbacks
+        // on the currently-executing Runnable is safe and prevents the
+        // (cancelled) reapply runnable from outliving us.
+        stopWatchdog?.let { mainHandler.removeCallbacks(it) }
+        stopWatchdog = null
+        reapplyRunnable?.let { mainHandler.removeCallbacks(it) }
+        reapplyRunnable = null
 
         try { audioManager.unregisterAudioDeviceCallback(deviceCallback) } catch (_: Exception) {}
 
