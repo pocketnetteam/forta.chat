@@ -1,6 +1,7 @@
 import { onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
-import { App as CapApp, type PluginListenerHandle } from "@capacitor/app";
+import { App as CapApp } from "@capacitor/app";
+import type { PluginListenerHandle } from "@capacitor/core";
 import { useCallStore } from "@/entities/call";
 
 const RESUME_THRESHOLD_MS = 60_000;
