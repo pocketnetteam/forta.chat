@@ -36,6 +36,36 @@ export function messageTypeFromMime(mime: string): MessageType {
   return MessageType.file;
 }
 
+/** Map MIME → file extension (used when body has no extension). */
+const MIME_EXT: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
+  "video/3gpp": "3gp",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/mp4": "m4a",
+  "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/webm": "webm",
+  "audio/aac": "aac",
+};
+
+/** Append extension from mime if filename doesn't already have one. */
+function ensureExt(name: string, mime: string): string {
+  if (/\.[a-zA-Z0-9]{2,5}$/.test(name)) return name;
+  const cleanMime = mime.replace(/^encrypted\//, "");
+  const ext = MIME_EXT[cleanMime] ?? "bin";
+  return `${name}.${ext}`;
+}
+
 /** Parse file metadata from raw event content.
  *  m.file events: body is JSON string with {name, type, size, url, secrets}
  *                 matrix-client.ts already parses it into content.pbody
@@ -62,7 +92,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
 
   if (msgtype === "m.image" && info) {
     return {
-      name: (content.body as string) ?? "image",
+      name: ensureExt((content.body as string) ?? "image", info.mimetype ?? "image/jpeg"),
       type: info.mimetype ?? "image/jpeg",
       size: info.size ?? 0,
       url: info.url ?? (content.url as string) ?? "",
@@ -86,7 +116,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       : undefined;
 
     return {
-      name: (content.body as string) ?? "Audio",
+      name: ensureExt((content.body as string) ?? "Audio", info.mimetype ?? "audio/mpeg"),
       type: info.mimetype ?? "audio/mpeg",
       size: info.size ?? 0,
       url: info.url ?? (content.url as string) ?? "",
@@ -105,7 +135,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   if (msgtype === "m.video") {
     const url = info?.url ?? (content.url as string) ?? "";
     return {
-      name: (content.body as string) ?? "Video",
+      name: ensureExt((content.body as string) ?? "Video", info?.mimetype ?? "video/mp4"),
       type: info?.mimetype ?? "video/mp4",
       size: info?.size ?? 0,
       url,
