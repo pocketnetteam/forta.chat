@@ -32,8 +32,8 @@ import {
 import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
+import { useResumeRedirect } from "@/shared/lib/composables/use-resume-redirect";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
-import { useResumeRedirect } from "./composables/use-resume-redirect";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
 import { PROXY_NODES } from "@/shared/config/constants";
