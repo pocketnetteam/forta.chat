@@ -77,8 +77,27 @@ class CallForegroundService : Service() {
             context.startService(intent)
         }
 
-        // D-10: Re-request audio focus from CallActivity.onResume
+        // D-10: Re-request audio focus from CallActivity.onResume.
+        // Session 54: @Volatile so the isRunning getter can be read safely
+        // from non-main threads if a future caller does so. Today all
+        // readers are on the main thread (watchdog + CallActivity.onResume),
+        // but the cost of @Volatile is a single memory barrier so the
+        // safety win is free.
+        @Volatile
         private var instance: CallForegroundService? = null
+
+        /**
+         * Session 54: exposed read-only liveness flag. Other call surfaces
+         * (AudioRouter orphan watchdog, CallActivity.onResume) need to know
+         * whether the foreground service is actually running before
+         * restoring MODE_IN_COMMUNICATION — assuming the service is up just
+         * because we have a saved Activity reference is what produced the
+         * orphan VoIP-mode bug (#708 / #462). Kept as a property getter so
+         * the underlying `instance` reference can stay private.
+         */
+        @JvmStatic
+        val isRunning: Boolean
+            get() = instance != null
 
         fun reRequestAudioFocus(context: Context) {
             instance?.requestAudioFocus()

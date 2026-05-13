@@ -295,8 +295,14 @@ class CallActivity : Activity(), SensorEventListener {
             }
         }
 
-        // D-10: Restore audio context when returning to active call
-        val hasActiveCall = WebRTCPlugin.manager != null
+        // D-10 / Session 54: Restore audio context only if the call is
+        // really still alive. Previously we keyed off WebRTCPlugin.manager
+        // alone, which can outlive the call lifecycle (e.g. when the
+        // foreground service was killed by the OEM but the JS-side manager
+        // reference was never cleared). In that case onResume was happily
+        // re-applying MODE_IN_COMMUNICATION on a corpse call, leaving the
+        // device's volume controls stuck on VoIP-only until reboot (#708).
+        val hasActiveCall = WebRTCPlugin.manager != null && CallForegroundService.isRunning
         if (hasActiveCall) {
             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             am.mode = AudioManager.MODE_IN_COMMUNICATION
