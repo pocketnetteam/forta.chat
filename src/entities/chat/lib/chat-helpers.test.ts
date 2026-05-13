@@ -329,6 +329,76 @@ describe("parseFileInfo", () => {
   });
 });
 
+// ─── parseFileInfo — filename normalization (Session 53) ──────────
+
+describe("parseFileInfo — filename normalization by mime", () => {
+  it("adds .jpg when m.image body has no extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 100, h: 100 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.jpg");
+  });
+
+  it("keeps existing extension when present", () => {
+    const fi = parseFileInfo(
+      {
+        body: "screenshot.png",
+        info: { mimetype: "image/png", size: 100, url: "mxc://x", w: 100, h: 100 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("screenshot.png");
+  });
+
+  it("adds .mp4 for m.video without extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Video",
+        info: { mimetype: "video/mp4", size: 100, url: "mxc://x" },
+      },
+      "m.video",
+    );
+    expect(fi?.name).toBe("Video.mp4");
+  });
+
+  it("adds .mp3 for m.audio without extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Audio",
+        info: { mimetype: "audio/mpeg", size: 100, url: "mxc://x" },
+      },
+      "m.audio",
+    );
+    expect(fi?.name).toBe("Audio.mp3");
+  });
+
+  it("falls back to .bin for unknown mime", () => {
+    const fi = parseFileInfo(
+      {
+        body: "blob",
+        info: { mimetype: "application/x-foo", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("blob.bin");
+  });
+
+  it("strips encrypted/ prefix from mime when picking extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "encrypted/image/png", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.png");
+  });
+});
+
 // ─── looksLikeProperName ──────────────────────────────────────────
 
 describe("looksLikeProperName", () => {
