@@ -58,10 +58,14 @@ const MIME_EXT: Record<string, string> = {
   "audio/aac": "aac",
 };
 
-/** Append extension from mime if filename doesn't already have one. */
+/** Append extension from mime if filename doesn't already have one.
+ *  - alpha-first regex avoids treating "track.2024" or "v1.0" as already-
+ *    extensioned (saves "holiday.2024" as "holiday.2024.jpg" instead of
+ *    losing the .jpg)
+ *  - strips MIME parameters ("image/jpeg; charset=binary" → "image/jpeg") */
 function ensureExt(name: string, mime: string): string {
-  if (/\.[a-zA-Z0-9]{2,5}$/.test(name)) return name;
-  const cleanMime = mime.replace(/^encrypted\//, "");
+  if (/\.[a-zA-Z][a-zA-Z0-9]{1,4}$/.test(name)) return name;
+  const cleanMime = mime.split(";")[0].trim().toLowerCase().replace(/^encrypted\//, "");
   const ext = MIME_EXT[cleanMime] ?? "bin";
   return `${name}.${ext}`;
 }
@@ -92,7 +96,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
 
   if (msgtype === "m.image" && info) {
     return {
-      name: ensureExt((content.body as string) ?? "image", info.mimetype ?? "image/jpeg"),
+      name: ensureExt((content.body as string) || "image", info.mimetype ?? "image/jpeg"),
       type: info.mimetype ?? "image/jpeg",
       size: info.size ?? 0,
       url: info.url ?? (content.url as string) ?? "",
@@ -116,7 +120,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       : undefined;
 
     return {
-      name: ensureExt((content.body as string) ?? "Audio", info.mimetype ?? "audio/mpeg"),
+      name: ensureExt((content.body as string) || "Audio", info.mimetype ?? "audio/mpeg"),
       type: info.mimetype ?? "audio/mpeg",
       size: info.size ?? 0,
       url: info.url ?? (content.url as string) ?? "",
@@ -135,7 +139,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   if (msgtype === "m.video") {
     const url = info?.url ?? (content.url as string) ?? "";
     return {
-      name: ensureExt((content.body as string) ?? "Video", info?.mimetype ?? "video/mp4"),
+      name: ensureExt((content.body as string) || "Video", info?.mimetype ?? "video/mp4"),
       type: info?.mimetype ?? "video/mp4",
       size: info?.size ?? 0,
       url,

@@ -141,6 +141,19 @@ const onTouchend = (e: TouchEvent) => {
   // Reset pinch tracker once one finger lifts so the next two-finger touch
   // starts fresh instead of inheriting the previous distance.
   if (e.touches.length < 2) pinchLastDistance = 0;
+  // 2→1 finger transition: pinch just ended but one finger is still down.
+  // Re-seed both the swipe anchor and the pan anchor so the remaining
+  // finger doesn't drag from stale pre-pinch coordinates.
+  if (e.touches.length === 1) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchDeltaX = 0;
+    if (scale.value > 1) {
+      panStartX = translateX.value;
+      panStartY = translateY.value;
+    }
+    return;
+  }
   // Snap back to 1x if a tiny over-pinch left a barely-visible scale change.
   if (scale.value < MIN_SCALE + 0.05 && scale.value !== MIN_SCALE) {
     resetTransform();

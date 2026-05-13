@@ -397,6 +397,43 @@ describe("parseFileInfo — filename normalization by mime", () => {
     );
     expect(fi?.name).toBe("Image.png");
   });
+
+  it("treats numeric trailing segment as non-extension (holiday.2024)", () => {
+    // Without alpha-first guard "holiday.2024" looks like it already has an
+    // extension and saves without .jpg. Tighter regex restores .jpg.
+    const fi = parseFileInfo(
+      {
+        body: "holiday.2024",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("holiday.2024.jpg");
+  });
+
+  it("strips MIME parameters before mapping to extension", () => {
+    // "image/jpeg; charset=binary" must still resolve to .jpg, not .bin.
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "image/jpeg; charset=binary", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.jpg");
+  });
+
+  it("uses default name stem when body is empty string", () => {
+    // "" ?? "image" returned "" — file then saved as ".jpg" with no stem.
+    const fi = parseFileInfo(
+      {
+        body: "",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("image.jpg");
+  });
 });
 
 // ─── looksLikeProperName ──────────────────────────────────────────

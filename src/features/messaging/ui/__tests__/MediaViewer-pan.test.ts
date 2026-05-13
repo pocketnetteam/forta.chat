@@ -69,4 +69,30 @@ describe("MediaViewer — pan when zoomed (Session 53)", () => {
     // apply transform directly without the 200ms ease.
     expect(imgTag).not.toMatch(/transition-transform/);
   });
+
+  it("pan formula reads panStartX and divides by scale (finger-pixel parity)", () => {
+    // Guards against two regressions at once:
+    //  1. Forgetting the panStartX anchor: translateX = dx/scale instead of
+    //     panStartX + dx/scale, which makes the image snap back to (0,0) at
+    //     each touchmove.
+    //  2. Forgetting "/ scale": at 4× zoom the photo would race away from
+    //     the finger.
+    const body = extractTouchmove(getSource());
+    expect(body).toMatch(/translateX\.value\s*=\s*panStartX\s*\+/);
+    expect(body).toMatch(/translateY\.value\s*=\s*panStartY\s*\+/);
+    expect(body).toMatch(/\/\s*scale\.value/);
+  });
+
+  it("re-seeds pan anchor on 2→1 finger transition in onTouchend", () => {
+    // After pinch-zoom releases one finger, onTouchstart does NOT fire for
+    // the remaining finger. Without re-seeding, the next touchmove drags
+    // from stale pre-pinch coordinates and the image jumps.
+    const source = getSource();
+    const endStart = source.indexOf("const onTouchend");
+    expect(endStart).toBeGreaterThan(-1);
+    const endBody = source.slice(endStart, source.indexOf("};", endStart));
+    expect(endBody).toMatch(/touches\.length\s*===\s*1/);
+    expect(endBody).toMatch(/touchStartX\s*=\s*e\.touches\[0\]\.clientX/);
+    expect(endBody).toMatch(/panStartX\s*=\s*translateX\.value/);
+  });
 });
