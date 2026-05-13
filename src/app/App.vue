@@ -33,6 +33,7 @@ import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
+import { useResumeRedirect } from "./composables/use-resume-redirect";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
 import { PROXY_NODES } from "@/shared/config/constants";
@@ -52,6 +53,9 @@ const authStore = useAuthStore();
 authStore.setSyncStatusCallback(handleSdkSync);
 const chatStore = useChatStore();
 const router = useRouter();
+
+// On resume after >60s background, return to chat list (unless in a call or already there).
+useResumeRedirect();
 
 const retryError = ref("");
 
