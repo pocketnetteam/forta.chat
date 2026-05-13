@@ -77,13 +77,15 @@ const goPrev = () => {
   }
 };
 
-// Swipe navigation + pinch-to-zoom. Two-finger gestures take priority; one-
-// finger swipes only run when not zoomed so a horizontal pan inside a zoomed
-// image doesn't accidentally jump to the previous/next photo.
+// Swipe navigation + pinch-to-zoom + pan-when-zoomed. Two-finger gestures
+// take priority; one-finger drag is interpreted as pan while zoomed and as
+// swipe (prev/next/dismiss) at 1x.
 let touchStartX = 0;
 let touchStartY = 0;
 let touchDeltaX = 0;
 let pinchLastDistance = 0;
+let panStartX = 0;
+let panStartY = 0;
 
 const onTouchstart = (e: TouchEvent) => {
   if (e.touches.length === 2) {
@@ -94,10 +96,15 @@ const onTouchstart = (e: TouchEvent) => {
     touchDeltaX = 0;
     return;
   }
-  if (scale.value > 1) return; // Don't swipe when zoomed
   touchStartX = e.touches[0].clientX;
   touchStartY = e.touches[0].clientY;
   touchDeltaX = 0;
+  if (scale.value > 1) {
+    // Anchor pan to the current translate so subsequent deltas are relative
+    // to where the finger first touched, not to (0,0) every frame.
+    panStartX = translateX.value;
+    panStartY = translateY.value;
+  }
 };
 
 const onTouchmove = (e: TouchEvent) => {
@@ -110,7 +117,16 @@ const onTouchmove = (e: TouchEvent) => {
     pinchLastDistance = d;
     return;
   }
-  if (scale.value > 1) return;
+  if (scale.value > 1) {
+    // Divide by scale so 1 finger-pixel of drag corresponds to 1 screen-pixel
+    // of movement, regardless of zoom level — without this the photo races
+    // away from the finger at 4x zoom.
+    const dx = e.touches[0].clientX - touchStartX;
+    const dy = e.touches[0].clientY - touchStartY;
+    translateX.value = panStartX + dx / scale.value;
+    translateY.value = panStartY + dy / scale.value;
+    return;
+  }
   touchDeltaX = e.touches[0].clientX - touchStartX;
   const deltaY = e.touches[0].clientY - touchStartY;
 
@@ -125,6 +141,19 @@ const onTouchend = (e: TouchEvent) => {
   // Reset pinch tracker once one finger lifts so the next two-finger touch
   // starts fresh instead of inheriting the previous distance.
   if (e.touches.length < 2) pinchLastDistance = 0;
+  // 2→1 finger transition: pinch just ended but one finger is still down.
+  // Re-seed both the swipe anchor and the pan anchor so the remaining
+  // finger doesn't drag from stale pre-pinch coordinates.
+  if (e.touches.length === 1) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchDeltaX = 0;
+    if (scale.value > 1) {
+      panStartX = translateX.value;
+      panStartY = translateY.value;
+    }
+    return;
+  }
   // Snap back to 1x if a tiny over-pinch left a barely-visible scale change.
   if (scale.value < MIN_SCALE + 0.05 && scale.value !== MIN_SCALE) {
     resetTransform();
@@ -215,7 +244,7 @@ const handleSaveCurrent = async () => {
             v-if="currentUrl && currentMessage.type === 'image'"
             :src="currentUrl"
             :alt="currentMessage.fileInfo?.name"
-            class="max-h-full max-w-full object-contain transition-transform duration-200"
+            class="max-h-full max-w-full object-contain"
             :style="{ transform: `scale(${scale}) translate(${translateX}px, ${translateY}px)` }"
             draggable="false"
           />

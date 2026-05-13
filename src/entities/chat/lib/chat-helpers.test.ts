@@ -329,6 +329,113 @@ describe("parseFileInfo", () => {
   });
 });
 
+// ─── parseFileInfo — filename normalization (Session 53) ──────────
+
+describe("parseFileInfo — filename normalization by mime", () => {
+  it("adds .jpg when m.image body has no extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 100, h: 100 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.jpg");
+  });
+
+  it("keeps existing extension when present", () => {
+    const fi = parseFileInfo(
+      {
+        body: "screenshot.png",
+        info: { mimetype: "image/png", size: 100, url: "mxc://x", w: 100, h: 100 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("screenshot.png");
+  });
+
+  it("adds .mp4 for m.video without extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Video",
+        info: { mimetype: "video/mp4", size: 100, url: "mxc://x" },
+      },
+      "m.video",
+    );
+    expect(fi?.name).toBe("Video.mp4");
+  });
+
+  it("adds .mp3 for m.audio without extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Audio",
+        info: { mimetype: "audio/mpeg", size: 100, url: "mxc://x" },
+      },
+      "m.audio",
+    );
+    expect(fi?.name).toBe("Audio.mp3");
+  });
+
+  it("falls back to .bin for unknown mime", () => {
+    const fi = parseFileInfo(
+      {
+        body: "blob",
+        info: { mimetype: "application/x-foo", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("blob.bin");
+  });
+
+  it("strips encrypted/ prefix from mime when picking extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "encrypted/image/png", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.png");
+  });
+
+  it("treats numeric trailing segment as non-extension (holiday.2024)", () => {
+    // Without alpha-first guard "holiday.2024" looks like it already has an
+    // extension and saves without .jpg. Tighter regex restores .jpg.
+    const fi = parseFileInfo(
+      {
+        body: "holiday.2024",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("holiday.2024.jpg");
+  });
+
+  it("strips MIME parameters before mapping to extension", () => {
+    // "image/jpeg; charset=binary" must still resolve to .jpg, not .bin.
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "image/jpeg; charset=binary", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.jpg");
+  });
+
+  it("uses default name stem when body is empty string", () => {
+    // "" ?? "image" returned "" — file then saved as ".jpg" with no stem.
+    const fi = parseFileInfo(
+      {
+        body: "",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("image.jpg");
+  });
+});
+
 // ─── looksLikeProperName ──────────────────────────────────────────
 
 describe("looksLikeProperName", () => {
