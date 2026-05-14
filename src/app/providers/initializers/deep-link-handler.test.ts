@@ -143,4 +143,50 @@ describe("deep-link-handler", () => {
     onDeepLinkOpen("not a url");
     expect(onMalformed).not.toHaveBeenCalled();
   });
+
+  describe("forta://share (iOS Share Extension callback)", () => {
+    it("silently drops forta://share — no handler fires", () => {
+      const onInvite = vi.fn();
+      const onJoin = vi.fn();
+      const onMalformed = vi.fn();
+      registerDeepLinkHandlers({ onInvite, onJoin, onMalformed });
+
+      onDeepLinkOpen("forta://share");
+      onDeepLinkOpen("forta://share/");
+      onDeepLinkOpen("forta://share?from=ext");
+
+      expect(onInvite).not.toHaveBeenCalled();
+      expect(onJoin).not.toHaveBeenCalled();
+      // Critical: the Share Extension wakes the app via this URL after
+      // writing the payload to the App Group; users must NOT see an
+      // "invalid invite link" toast for it.
+      expect(onMalformed).not.toHaveBeenCalled();
+    });
+
+    it("does not occupy the cold-start buffer with forta://share", () => {
+      // 16 share-extension URLs arriving before handlers register must
+      // not crowd out a real invite URL that arrives after them.
+      for (let i = 0; i < 32; i++) onDeepLinkOpen("forta://share");
+      onDeepLinkOpen(`forta://invite?ref=${VALID_ADDR}`);
+
+      const onInvite = vi.fn();
+      const onJoin = vi.fn();
+      registerDeepLinkHandlers({ onInvite, onJoin });
+
+      expect(onInvite).toHaveBeenCalledTimes(1);
+      expect(onInvite).toHaveBeenCalledWith({ address: VALID_ADDR });
+    });
+
+    it("does not treat forta:// URLs with other hosts as system signals", () => {
+      const onInvite = vi.fn();
+      const onJoin = vi.fn();
+      const onMalformed = vi.fn();
+      registerDeepLinkHandlers({ onInvite, onJoin, onMalformed });
+
+      // `forta://invite` (no params) is still a malformed user-facing
+      // invite — the system-signal short-circuit must not eat it.
+      onDeepLinkOpen("forta://invite");
+      expect(onMalformed).toHaveBeenCalledTimes(1);
+    });
+  });
 });

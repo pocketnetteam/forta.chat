@@ -31,6 +31,23 @@ function looksLikeFortaUrl(raw: string): boolean {
   }
 }
 
+/** Internal-use forta:// URLs that aren't user-visible deep links. Today
+ *  the only one is `forta://share`, posted by the iOS Share Extension to
+ *  bring the host app to the foreground after writing the share payload to
+ *  the App Group. The Capgo share-target plugin reads the payload natively
+ *  on `appUrlOpen` — JS only needs to know not to toast "invalid link".
+ *  Match on host, ignoring trailing slash / query: `forta://share`,
+ *  `forta://share/`, `forta://share?foo=1` all qualify. */
+function isInternalSystemUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "forta:") return false;
+    return url.hostname === "share";
+  } catch {
+    return false;
+  }
+}
+
 export interface DeepLinkHandlers {
   onInvite: (target: InviteTarget) => void;
   onJoin: (target: JoinTarget) => void;
@@ -50,6 +67,12 @@ let handlers: DeepLinkHandlers | null = null;
 let listenerRegistered = false;
 
 function dispatch(url: string, active: DeepLinkHandlers): void {
+  // forta://share and friends are system signals from the iOS Share
+  // Extension — the share payload is delivered out-of-band via the
+  // CapacitorShareTarget plugin reading the App Group UserDefaults. We
+  // must not toast "invalid invite link" for them.
+  if (isInternalSystemUrl(url)) return;
+
   const target = parseDeepLink(url);
   try {
     if (target) {
@@ -75,6 +98,12 @@ function drainBuffer(active: DeepLinkHandlers): void {
 
 /** Called by the Capacitor listener (or tests) every time a new URL opens the app. */
 export function onDeepLinkOpen(url: string): void {
+  // Internal system URLs (forta://share) carry no payload of their own —
+  // the side effect (waking the host app so the Capgo share-target plugin
+  // can flush its UserDefaults) is what matters. Drop them before they
+  // can occupy a slot in the cold-start buffer.
+  if (isInternalSystemUrl(url)) return;
+
   if (!handlers) {
     if (pendingUrls.length >= MAX_PENDING_URLS) {
       console.warn("[deep-link-handler] buffer full, dropping URL");
