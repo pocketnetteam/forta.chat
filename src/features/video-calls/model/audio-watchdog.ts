@@ -90,16 +90,17 @@ export async function setupAudioWatchdog(): Promise<void> {
           console.warn(
             "[audio-watchdog] AVAudioSession interruption began → hanging up active call",
           );
-          // Use the call-service's hangup path via the bridge so the
-          // teardown ordering (stopAudioRouting → reportCallEnded →
-          // peer disconnect) matches the user-driven hangup case. We
-          // dynamic-import call-service to keep the audio-watchdog
-          // free of the heavy WebRTC graph at load time.
-          void import("@/features/video-calls/model/call-service").then(
-            ({ callService }) => callService.hangup(),
-          ).catch((e) => {
-            console.warn("[audio-watchdog] call-service import failed:", e);
-          });
+          // Use the call-service's hangup path so the teardown ordering
+          // (stopAudioRouting → reportCallEnded → peer disconnect)
+          // matches the user-driven hangup case. Dynamic-import to keep
+          // the audio-watchdog free of the heavy WebRTC graph at load
+          // time. `useCallService()` is a factory — call it inside the
+          // .then to grab the live service instance, then invoke hangup.
+          void import("@/features/video-calls/model/call-service")
+            .then(({ useCallService }) => useCallService().hangup())
+            .catch((e) => {
+              console.warn("[audio-watchdog] call-service import failed:", e);
+            });
         } catch (e) {
           console.warn("[audio-watchdog] interruption handler failed:", e);
         }

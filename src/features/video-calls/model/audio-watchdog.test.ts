@@ -56,13 +56,14 @@ vi.mock("@/shared/lib/native-calls/native-call-bridge.ios", () => ({
 }));
 
 // `vi.hoisted` so the spy survives `vi.resetModules()` — without this,
-// every reload() builds a fresh `callService.hangup` and our local
-// mockCallServiceHangup reference becomes stale on the second run.
+// every reload() builds a fresh useCallService() factory closure and
+// our local mockCallServiceHangup reference becomes stale on the
+// second run.
 const { mockCallServiceHangup } = vi.hoisted(() => ({
   mockCallServiceHangup: vi.fn(),
 }));
 vi.mock("@/features/video-calls/model/call-service", () => ({
-  callService: { hangup: mockCallServiceHangup },
+  useCallService: () => ({ hangup: mockCallServiceHangup }),
 }));
 
 const mockCallStore: Record<string, unknown> = {
