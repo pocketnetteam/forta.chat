@@ -106,10 +106,11 @@ export const IncomingCallKit = registerPlugin<IncomingCallKitPlugin>('IncomingCa
 
 /**
  * Custom Swift plugin (Step 6 Task 4). Owns AVAudioSession so background
- * mid-call audio survives. The interface mirrors what the bridge needs;
- * Task 4 will provide the Swift backing.
+ * mid-call audio survives + (Task 6) surfaces system interruption events
+ * so the JS watchdog can end our call cleanly when iOS hands the audio
+ * session to a real cellular phone call / Siri / system alarm.
  */
-interface IOSCallAudioPlugin {
+export interface IOSCallAudioPlugin {
   requestRecordPermission(): Promise<{ granted: boolean }>;
   probeAvailability(): Promise<AudioProbeResult>;
   start(opts: { callType: string }): Promise<void>;
@@ -121,6 +122,23 @@ interface IOSCallAudioPlugin {
     isBtScoOn: boolean;
   }>;
   setOutput(opts: { device: string }): Promise<void>;
+  /**
+   * AVAudioSession.interruptionNotification (.began). Fires when iOS takes
+   * the audio session away from us — typically a real cellular phone call,
+   * Siri activation, or a system alarm.
+   */
+  addListener(
+    event: 'audioInterruptionBegan',
+    cb: () => void,
+  ): Promise<PluginListenerHandle>;
+  /**
+   * AVAudioSession.interruptionNotification (.ended). The `shouldResume`
+   * flag mirrors the AVAudioSessionInterruptionOptions.shouldResume bit.
+   */
+  addListener(
+    event: 'audioInterruptionEnded',
+    cb: (data: { shouldResume?: boolean }) => void,
+  ): Promise<PluginListenerHandle>;
 }
 
 export const IOSCallAudio = registerPlugin<IOSCallAudioPlugin>('IOSCallAudio');

@@ -42,6 +42,59 @@ import AVFoundation
 @objc(IOSCallAudioPlugin)
 public class IOSCallAudioPlugin: CAPPlugin {
 
+    // MARK: - Lifecycle
+
+    /// Subscribe to AVAudioSession interruption events. iOS posts these
+    /// when the OS takes the audio session away from us — most commonly
+    /// when a real cellular phone call comes in mid-VoIP-call. We
+    /// surface them to JS via `audioInterruptionBegan` /
+    /// `audioInterruptionEnded` so the JS watchdog (audio-watchdog.ts)
+    /// can hang up our call and let CallKit + the system phone UI take
+    /// over cleanly.
+    ///
+    /// Other triggers iOS routes through this notification:
+    ///   - Siri activated mid-call (rare but real)
+    ///   - Music app force-takeover (with `.notifyOthersOnDeactivation`
+    ///     options, normally we cooperate; this is the catch-all)
+    ///   - System alarm / timer firing in the foreground
+    public override func load() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard
+            let info = notification.userInfo,
+            let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let type = AVAudioSession.InterruptionType(rawValue: typeValue)
+        else { return }
+
+        switch type {
+        case .began:
+            notifyListeners("audioInterruptionBegan", data: [:])
+        case .ended:
+            // The .ended payload includes the interruption options,
+            // most importantly `.shouldResume`. Forward it so JS can
+            // decide whether to attempt a re-activate or stay silent.
+            var data: [String: Any] = [:]
+            if let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                data["shouldResume"] = options.contains(.shouldResume)
+            }
+            notifyListeners("audioInterruptionEnded", data: data)
+        @unknown default:
+            break
+        }
+    }
+
     // MARK: - Permissions
 
     /// Wraps `AVAudioSession.requestRecordPermission` so the JS layer
