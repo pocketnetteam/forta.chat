@@ -309,6 +309,114 @@ describe('cold-start accept replay (iOS)', () => {
   });
 });
 
+describe('getInviteThrottleSnapshot — Android-only telemetry', () => {
+  // The throttle snapshot is FCM-data-message latency telemetry baked
+  // into FortaFirebaseMessagingService on Android. iOS uses PushKit,
+  // which is real-time and not subject to FCM throttling, so the metric
+  // does not apply. Short-circuiting before the native round-trip avoids
+  // logging "method not registered" on every bug-report submission and
+  // saves a guaranteed-empty IPC hop.
+
+  async function loadBridgeAndReadSnapshot(platform: PlatformFlags): Promise<{
+    snapshot: { records: unknown[] };
+    nativeSpy: Mock;
+  }> {
+    const inviteSpy: Mock = vi.fn().mockResolvedValue({
+      records: [
+        {
+          receivedAtMs: 1,
+          sentAtMs: 0,
+          deliveryLatencyMs: 1,
+          expired: false,
+          callId: 'native-result',
+        },
+      ],
+    });
+    vi.resetModules();
+    vi.doMock('@capacitor/core', () => ({
+      registerPlugin: (name: string) => {
+        if (name === 'IncomingCallKit') {
+          return {
+            showIncomingCall: vi.fn(),
+            endCall: vi.fn().mockResolvedValue({ calls: [] }),
+            getActiveCalls: vi.fn().mockResolvedValue({ calls: [] }),
+            endAllCalls: vi.fn().mockResolvedValue({ calls: [] }),
+            requestPermissions: vi.fn(),
+            addListener: vi.fn().mockResolvedValue({ remove: vi.fn() }),
+          };
+        }
+        if (name === 'IOSCallAudio') {
+          return new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) });
+        }
+        if (name === 'NativeCall') {
+          return {
+            reportIncomingCall: vi.fn(),
+            requestAudioPermission: vi.fn().mockResolvedValue({ granted: true }),
+            addListener: vi.fn().mockResolvedValue({ remove: vi.fn() }),
+            getPendingAnswer: vi.fn().mockResolvedValue({ callId: null, roomId: null }),
+            getPendingReject: vi.fn().mockResolvedValue({ callId: null, roomId: null }),
+            getInviteThrottleSnapshot: inviteSpy,
+            getAudioStatus: vi
+              .fn()
+              .mockResolvedValue({ mode: 'MODE_NORMAL', isSpeakerOn: false, isBtScoOn: false }),
+          };
+        }
+        return new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) });
+      },
+    }));
+    vi.doMock('@/shared/lib/platform', () => platform);
+    vi.doMock('@/shared/lib/native-webrtc/native-webrtc-bridge', () => ({
+      NativeWebRTC: { addListener: vi.fn() },
+    }));
+    vi.doMock('@capacitor/camera', () => ({
+      Camera: { requestPermissions: vi.fn() },
+    }));
+
+    const { nativeCallBridge } = await import('./native-call-bridge');
+    const snapshot = await nativeCallBridge.getInviteThrottleSnapshot();
+    return { snapshot, nativeSpy: inviteSpy };
+  }
+
+  it('on Android: forwards through the native plugin and returns its records', async () => {
+    const { snapshot, nativeSpy } = await loadBridgeAndReadSnapshot({
+      isNative: true,
+      isAndroid: true,
+      isIOS: false,
+      isElectron: false,
+      isWeb: false,
+      currentPlatform: 'android',
+    });
+    expect(nativeSpy).toHaveBeenCalledOnce();
+    expect(snapshot.records).toHaveLength(1);
+  });
+
+  it('on iOS: short-circuits to empty records WITHOUT touching the native plugin', async () => {
+    const { snapshot, nativeSpy } = await loadBridgeAndReadSnapshot({
+      isNative: true,
+      isAndroid: false,
+      isIOS: true,
+      isElectron: false,
+      isWeb: false,
+      currentPlatform: 'ios',
+    });
+    expect(snapshot).toEqual({ records: [] });
+    expect(nativeSpy).not.toHaveBeenCalled();
+  });
+
+  it('on web: short-circuits to empty records WITHOUT touching the native plugin', async () => {
+    const { snapshot, nativeSpy } = await loadBridgeAndReadSnapshot({
+      isNative: false,
+      isAndroid: false,
+      isIOS: false,
+      isElectron: false,
+      isWeb: true,
+      currentPlatform: 'web',
+    });
+    expect(snapshot).toEqual({ records: [] });
+    expect(nativeSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('reportIncomingCall and friends pass through the per-platform NativeCall handle', () => {
   it('on iOS: reportIncomingCall fires through IncomingCallKit, NOT NativeCall', async () => {
     const showIncomingCallSpy: Mock = vi.fn().mockResolvedValue({ call: {} });

@@ -588,9 +588,18 @@ class NativeCallBridge {
    * the bug-reporter envelope. Returns an empty list on non-native
    * platforms or when the native plugin is older than this build (the
    * Capacitor bridge surfaces a "method not registered" error there).
+   *
+   * iOS short-circuits to the empty list. The metric is FCM-throttle
+   * telemetry from the Android FortaFirebaseMessagingService — iOS
+   * uses PushKit, which is real-time and not subject to the FCM
+   * data-message throttle. Sygnal also routes `m.call.invite` over
+   * APNs VoIP class on iOS (Step 6 Task 3 / fortaios.voip pusher),
+   * which has its own latency profile but no throttle bucket. Skipping
+   * the native call avoids a guaranteed-empty round-trip on every
+   * bug-report submission.
    */
   async getInviteThrottleSnapshot(): Promise<InviteThrottleSnapshot> {
-    if (!isNative) return { records: [] };
+    if (!isAndroid) return { records: [] };
     try {
       const res = await NativeCall.getInviteThrottleSnapshot();
       const records = Array.isArray(res?.records) ? res.records : [];
