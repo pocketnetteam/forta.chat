@@ -166,7 +166,15 @@ const handleSaveMedia = async (message: import("@/entities/chat").Message) => {
   const cacheKey = message._key || message.id;
   const url = getFileState(cacheKey).objectUrl ?? (await downloadFile(message));
   if (!url) return;
-  await saveFile(url, message.fileInfo.name, message.fileInfo.type);
+  const mime = message.fileInfo.type || "";
+  const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+  try {
+    await saveFile(url, message.fileInfo.name, mime);
+    toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
+  } catch (e) {
+    console.error("[MessageList] save failed:", e);
+    toast(t("media.saveFailed"), "error");
+  }
 };
 
 const handlePollVote = (messageId: string, optionId: string) => {

@@ -3,7 +3,7 @@ import { useAuthStore } from "@/entities/auth";
 import type { FileInfo, Message } from "@/entities/chat";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
-import { isNative, isElectron } from "@/shared/lib/platform";
+import { isNative, isElectron, isAndroid } from "@/shared/lib/platform";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
@@ -514,8 +514,28 @@ function guessMime(fileName: string): string {
   return MIME_BY_EXT[ext] ?? "application/octet-stream";
 }
 
-/** Write file to device cache and open with system viewer (Android/iOS). */
-async function saveFileNative(objectUrl: string, fileName: string, mimeType?: string) {
+/** Save media to the Android gallery / Downloads folder via the native
+ *  SaveMediaPlugin (MediaStore.insert). Session 58 replaces the prior
+ *  FileOpener + Share fallback path that silently degraded to a Share
+ *  dialog on Android 14+ scoped storage. */
+async function saveFileAndroid(objectUrl: string, fileName: string, mimeType: string) {
+  const { registerPlugin } = await import("@capacitor/core");
+  const SaveMedia = registerPlugin<{
+    save(opts: { base64: string; fileName: string; mimeType: string }): Promise<{ uri: string; path: string }>;
+  }>("SaveMedia");
+
+  const response = await fetch(objectUrl);
+  const blob = await response.blob();
+  const base64 = await blobToBase64(blob);
+
+  await SaveMedia.save({ base64, fileName, mimeType });
+}
+
+/** iOS save path — write to Documents and hand off to the system viewer
+ *  / Share Sheet. iOS UX expects a Share Sheet, so the legacy pipeline
+ *  remains intentional here. Android takes a different path via
+ *  `saveFileAndroid`. */
+async function saveFileIOS(objectUrl: string, fileName: string, mimeType?: string) {
   const { Filesystem, Directory } = await import("@capacitor/filesystem");
   const { FileOpener } = await import("@capacitor-community/file-opener");
 
@@ -539,13 +559,22 @@ async function saveFileNative(objectUrl: string, fileName: string, mimeType?: st
     });
   } catch (openError) {
     console.warn("[saveFile] native open failed, trying share:", openError);
-    // Fallback: offer system share sheet
     const { Share } = await import("@capacitor/share");
     await Share.share({
       title: fileName,
       url: result.uri,
       dialogTitle: fileName,
     });
+  }
+}
+
+/** Route to the platform-specific native save path. */
+async function saveFileNative(objectUrl: string, fileName: string, mimeType?: string) {
+  const resolvedMime = mimeType || guessMime(fileName);
+  if (isAndroid) {
+    await saveFileAndroid(objectUrl, fileName, resolvedMime);
+  } else {
+    await saveFileIOS(objectUrl, fileName, resolvedMime);
   }
 }
 
