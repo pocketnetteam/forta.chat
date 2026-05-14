@@ -79,13 +79,22 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   const pbody = content.pbody as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const info = content.info as any;
+  // Canonical Matrix encrypted attachments (Element, Cinny, FluffyChat, …)
+  // carry `mxc://` url under `content.file.url` alongside { iv, key, hashes }.
+  // Bastyon's own pipeline duplicates the url into pbody/info/content.url,
+  // but messages forwarded from other clients omit those copies — without a
+  // fallback the download path throws "No file URL" (Session 57, bugs #740,
+  // #739, #719, #567).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const encryptedFile = content.file as any;
+  const encryptedUrl: string | undefined = typeof encryptedFile?.url === "string" ? encryptedFile.url : undefined;
 
   if (msgtype === "m.file" && pbody) {
     return {
       name: pbody.name ?? "file",
       type: (pbody.type ?? "").replace("encrypted/", ""),
       size: pbody.size ?? 0,
-      url: pbody.url ?? "",
+      url: pbody.url ?? encryptedUrl ?? "",
       secrets: pbody.secrets ? {
         block: pbody.secrets.block,
         keys: pbody.secrets.keys,
@@ -99,7 +108,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       name: ensureExt((content.body as string) || "image", info.mimetype ?? "image/jpeg"),
       type: info.mimetype ?? "image/jpeg",
       size: info.size ?? 0,
-      url: info.url ?? (content.url as string) ?? "",
+      url: info.url ?? encryptedUrl ?? (content.url as string) ?? "",
       w: info.w,
       h: info.h,
       caption: info.caption ?? undefined,
@@ -123,7 +132,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       name: ensureExt((content.body as string) || "Audio", info.mimetype ?? "audio/mpeg"),
       type: info.mimetype ?? "audio/mpeg",
       size: info.size ?? 0,
-      url: info.url ?? (content.url as string) ?? "",
+      url: info.url ?? encryptedUrl ?? (content.url as string) ?? "",
       duration: typeof info.duration === "number" && info.duration > 0
         ? Math.round(info.duration / 1000)
         : undefined,
@@ -137,7 +146,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   }
 
   if (msgtype === "m.video") {
-    const url = info?.url ?? (content.url as string) ?? "";
+    const url = info?.url ?? encryptedUrl ?? (content.url as string) ?? "";
     return {
       name: ensureExt((content.body as string) || "Video", info?.mimetype ?? "video/mp4"),
       type: info?.mimetype ?? "video/mp4",
@@ -174,6 +183,23 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
         };
       }
     } catch { /* not JSON, ignore */ }
+  }
+
+  // Canonical Matrix encrypted m.file from non-Bastyon clients: no pbody,
+  // body is a plain filename string. Construct FileInfo directly from
+  // content.file.url + info{mimetype,size}.
+  if (msgtype === "m.file" && encryptedUrl) {
+    const mime = (info?.mimetype as string | undefined) ?? "application/octet-stream";
+    return {
+      name: ensureExt((content.body as string) || "file", mime),
+      type: mime.replace("encrypted/", ""),
+      size: info?.size ?? 0,
+      url: encryptedUrl,
+      // Secrets follow Matrix EncryptedFile shape: { url, key, iv, hashes, v }.
+      // We do not surface them here because the bastyon-chat crypto pipeline
+      // reads its own pbody.secrets shape; canonical-Matrix decryption is
+      // handled by matrix-js-sdk before parseFileInfo runs.
+    };
   }
 
   return undefined;
