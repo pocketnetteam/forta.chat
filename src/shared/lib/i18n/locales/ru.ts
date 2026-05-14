@@ -738,6 +738,10 @@ export const ru: Record<TranslationKey, string> = {
   "push.unknownSender": "Неизвестный",
   "push.file": "📎 Файл",
 
+  // ── Relative date labels (sidebar / chat list) ──
+  "date.today": "Сегодня",
+  "date.yesterday": "Вчера",
+
   // ── Notification channels ──
   "channel.messages": "Сообщения",
   "channel.messagesDesc": "Уведомления о сообщениях",

@@ -736,6 +736,10 @@ export const en = {
   "push.unknownSender": "Unknown",
   "push.file": "📎 File",
 
+  // ── Relative date labels (sidebar / chat list) ──
+  "date.today": "Today",
+  "date.yesterday": "Yesterday",
+
   // ── Notification channels ──
   "channel.messages": "Messages",
   "channel.messagesDesc": "Chat message notifications",
