@@ -1,8 +1,59 @@
 import { PushNotifications } from '@capacitor/push-notifications';
 import { LocalNotifications } from '@capacitor/local-notifications';
-import { isNative } from '@/shared/lib/platform';
+import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
 import { tRaw } from '@/shared/lib/i18n';
+
+/**
+ * Sygnal `app_id` per platform. Both pushers can coexist on the same Matrix
+ * account when a user is signed in on multiple devices; cleanup of stale
+ * pushkeys is scoped to the device's own `app_id` so iOS does not delete
+ * Android's pusher and vice versa.
+ */
+export const PUSHER_APP_ID_IOS = 'fortaios';
+export const PUSHER_APP_ID_ANDROID = 'fortaandroid';
+const SYGNAL_PUSH_URL = 'https://matrix.pocketnet.app/_matrix/push/v1/notify';
+
+export interface PusherPayload {
+  pushkey: string;
+  kind: 'http';
+  app_id: string;
+  app_display_name: string;
+  device_display_name: string;
+  lang: string;
+  data: { url: string };
+}
+
+/**
+ * Build the per-platform pusher payload. Pure function — exported for unit
+ * tests. iOS flows through Firebase iOS SDK → APNs (Apple delivers via Sygnal
+ * with `app_id: fortaios`). Android flows through FCM directly.
+ */
+export function buildPusherPayload(token: string, opts: { isIOS: boolean }): PusherPayload {
+  return {
+    pushkey: token,
+    kind: 'http',
+    app_id: opts.isIOS ? PUSHER_APP_ID_IOS : PUSHER_APP_ID_ANDROID,
+    app_display_name: 'Forta Chat',
+    device_display_name: opts.isIOS ? 'iOS' : 'Android',
+    lang: 'en',
+    data: { url: SYGNAL_PUSH_URL },
+  };
+}
+
+/**
+ * Decide whether a pusher entry from `getPushers()` is stale and should be
+ * removed. Stale = same `app_id` as our current platform's pusher but a
+ * different `pushkey`. We never touch entries from other platforms — those
+ * belong to other devices on this Matrix account.
+ */
+export function isStalePusherEntry(
+  p: { app_id?: string; pushkey?: string },
+  currentAppId: string,
+  currentToken: string,
+): boolean {
+  return p.app_id === currentAppId && p.pushkey !== currentToken;
+}
 
 class PushService {
   private fcmToken: string | null = null;
@@ -69,24 +120,15 @@ class PushService {
   }
 
   private async registerPusher(matrixClient: any, token: string): Promise<void> {
+    const payload = buildPusherPayload(token, { isIOS });
     try {
-      await matrixClient.setPusher({
-        pushkey: token,
-        kind: 'http',
-        app_id: 'fortaandroid',
-        app_display_name: 'Forta Chat',
-        device_display_name: 'Android',
-        lang: 'en',
-        data: {
-          url: 'https://matrix.pocketnet.app/_matrix/push/v1/notify',
-        },
-      });
+      await matrixClient.setPusher(payload);
       // pusher registered
 
       try {
         const { pushers } = await matrixClient.getPushers();
         for (const p of pushers) {
-          if (p.app_id === 'fortaandroid' && p.pushkey !== token) {
+          if (isStalePusherEntry(p, payload.app_id, token)) {
             // remove stale pusher
             await matrixClient.setPusher({ ...p, kind: null });
           }

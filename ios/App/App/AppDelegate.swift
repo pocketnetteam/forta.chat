@@ -1,13 +1,17 @@
 import UIKit
 import Capacitor
+import FirebaseCore
+import FirebaseMessaging
+import UserNotifications
 
 @UIApplicationMain
-class AppDelegate: UIResponder, UIApplicationDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate {
 
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        FirebaseApp.configure()
+        Messaging.messaging().delegate = self
         return true
     }
 
@@ -46,4 +50,43 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
+    // MARK: - Push notification token plumbing
+    //
+    // Forward APNs token to Firebase Cloud Messaging so it can issue an FCM
+    // token. We deliberately do NOT post `.capacitorDidRegisterForRemoteNotifications`
+    // here: that would surface the raw APNs hex to JS twice (first APNs, then
+    // FCM via MessagingDelegate). Forta's Sygnal pusher expects the FCM token,
+    // matching the Android FortaFirebaseMessagingService path. Capacitor's
+    // PushNotifications plugin still resolves the JS `register()` promise via
+    // its own request flow; we surface the registration event only when FCM
+    // returns the final token below.
+
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Messaging.messaging().apnsToken = deviceToken
+    }
+
+    func application(_ application: UIApplication,
+                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(
+            name: .capacitorDidFailToRegisterForRemoteNotifications,
+            object: error
+        )
+    }
+
+    // MARK: - MessagingDelegate
+    //
+    // FCM token ready (initial issue or rotation). Capacitor's PushNotifications
+    // plugin treats `notification.object as? String` as a pre-formatted token
+    // and emits the JS `'registration'` event with `{ value: <token> }`,
+    // matching the Android FCM token semantics 1:1.
+
+    func messaging(_ messaging: Messaging,
+                   didReceiveRegistrationToken fcmToken: String?) {
+        guard let token = fcmToken else { return }
+        NotificationCenter.default.post(
+            name: .capacitorDidRegisterForRemoteNotifications,
+            object: token
+        )
+    }
 }
