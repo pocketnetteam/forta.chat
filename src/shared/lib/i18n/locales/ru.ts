@@ -862,4 +862,5 @@ export const ru: Record<TranslationKey, string> = {
   "errors.mediaUnavailable": "Медиа недоступно. Попробуйте позже.",
   "errors.networkBlocked": "Сервер недоступен. Попробуйте включить Tor или VPN.",
   "errors.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
+  "errors.missingUrl": "Файл повреждён или не пришёл с источника. Попросите отправителя прислать ещё раз.",
 };

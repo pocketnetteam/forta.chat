@@ -860,6 +860,7 @@ export const en = {
   "errors.mediaUnavailable": "Media unavailable. Please try again later.",
   "errors.networkBlocked": "Server unreachable. Try enabling Tor or a VPN.",
   "errors.cryptoNotReady": "Encryption keys are still loading. Please wait.",
+  "errors.missingUrl": "File is corrupted or never arrived. Ask the sender to resend.",
 } as const;
 
 export type TranslationKey = keyof typeof en;

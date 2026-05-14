@@ -11,6 +11,7 @@ import {
   CryptoNotReadyError,
   isNetworkBlocked,
   MediaUnavailableError,
+  MissingUrlError,
   NetworkBlockedError,
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
@@ -127,7 +128,8 @@ function shouldAutoReport(messageKey: string, err: unknown): boolean {
   if (
     err instanceof CryptoNotReadyError ||
     err instanceof NetworkBlockedError ||
-    err instanceof MediaUnavailableError
+    err instanceof MediaUnavailableError ||
+    err instanceof MissingUrlError
   ) {
     return false;
   }
@@ -180,10 +182,16 @@ export function _resetToastDedupForTests(): void {
  *  Deduped per (cacheKey, errorKey) within TOAST_DEDUP_WINDOW_MS so that
  *  repeated re-attempts during the same network glitch do not spam the user. */
 function surfaceTypedErrorToast(err: unknown, cacheKey: string): void {
-  let key: "errors.networkBlocked" | "errors.cryptoNotReady" | "errors.mediaUnavailable" | null = null;
+  let key:
+    | "errors.networkBlocked"
+    | "errors.cryptoNotReady"
+    | "errors.mediaUnavailable"
+    | "errors.missingUrl"
+    | null = null;
   if (err instanceof NetworkBlockedError) key = "errors.networkBlocked";
   else if (err instanceof CryptoNotReadyError) key = "errors.cryptoNotReady";
   else if (err instanceof MediaUnavailableError) key = "errors.mediaUnavailable";
+  else if (err instanceof MissingUrlError) key = "errors.missingUrl";
   if (!key) return;
 
   pruneToastDedup();
@@ -325,7 +333,7 @@ async function downloadAndDecrypt(
   timestamp: number,
   signal?: AbortSignal,
 ): Promise<Blob> {
-  if (!fileInfo.url) throw new Error("No file URL");
+  if (!fileInfo.url) throw new MissingUrlError();
   if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
 
   let lastError: unknown;
@@ -409,8 +417,8 @@ async function downloadAndDecrypt(
       // the toast tells them what's going on.
       if (e instanceof CryptoNotReadyError) throw e;
       // Don't retry on permanent errors (missing URL, 4xx client errors)
+      if (e instanceof MissingUrlError) throw e;
       if (e instanceof Error) {
-        if (e.message === "No file URL") throw e;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const status = (e as any).status as number | undefined;
         if (status !== undefined && NON_RETRIABLE_STATUSES.has(status)) throw e;
