@@ -1,10 +1,19 @@
 /**
  * Tests for date/time formatting utilities.
  */
-import { describe, it, expect } from "vitest";
-import { formatDate, formatDuration } from "./format";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { formatDate, formatDuration, formatRelativeTime } from "./format";
+
+const LOCALE_KEY = "forta-chat:locale";
 
 describe("formatDate", () => {
+  beforeEach(() => {
+    localStorage.removeItem(LOCALE_KEY);
+  });
+  afterEach(() => {
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
   it("returns 'Today' for today's date", () => {
     expect(formatDate(new Date())).toBe("Today");
   });
@@ -22,6 +31,40 @@ describe("formatDate", () => {
     expect(result).not.toBe("Today");
     expect(result).not.toBe("Yesterday");
     expect(result.length).toBeGreaterThan(0);
+  });
+
+  it("returns 'Сегодня' in russian locale for today", () => {
+    localStorage.setItem(LOCALE_KEY, JSON.stringify("ru"));
+    expect(formatDate(new Date())).toBe("Сегодня");
+  });
+
+  it("returns 'Вчера' in russian locale for yesterday", () => {
+    localStorage.setItem(LOCALE_KEY, JSON.stringify("ru"));
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    expect(formatDate(yesterday)).toBe("Вчера");
+  });
+});
+
+describe("formatRelativeTime", () => {
+  beforeEach(() => {
+    localStorage.removeItem(LOCALE_KEY);
+  });
+  afterEach(() => {
+    localStorage.removeItem(LOCALE_KEY);
+  });
+
+  it("returns 'Yesterday' in english for yesterday", () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    expect(formatRelativeTime(yesterday)).toBe("Yesterday");
+  });
+
+  it("returns 'Вчера' in russian locale for yesterday", () => {
+    localStorage.setItem(LOCALE_KEY, JSON.stringify("ru"));
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    expect(formatRelativeTime(yesterday)).toBe("Вчера");
   });
 });
 
