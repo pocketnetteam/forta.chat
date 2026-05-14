@@ -183,6 +183,132 @@ describe('nativeCallBridge.wire() — platform gate', () => {
   });
 });
 
+describe('cold-start accept replay (iOS)', () => {
+  // The cold-start-from-push flow on iOS:
+  //   1. PushKit wakes the app; IOSVoIPPushPlugin asks
+  //      @capgo/capacitor-incoming-call-kit to ring.
+  //   2. User taps Accept on the lock screen BEFORE the WKWebView
+  //      bridge is alive. The plugin marks the call's state as
+  //      'accepted' inside its native cache.
+  //   3. App finishes booting → nativeCallBridge.wire() runs.
+  //   4. wire() calls NativeCall.getPendingAnswer() (which on iOS is
+  //      our adapter routing to getActiveCalls → first state==accepted).
+  //   5. waitForMatrixCallAndAnswer polls callStore.matrixCall until
+  //      the SDK delivers the m.call.invite, then calls answerCall().
+  // This test verifies steps 4-5 wire up correctly through the iOS path.
+
+  it('seeds pendingAnswer from getActiveCalls() (state=accepted) and triggers callService.answerCall once matrixCall arrives', async () => {
+    vi.useFakeTimers();
+
+    const showIncomingCallSpy: Mock = vi.fn().mockResolvedValue({ call: {} });
+    const getActiveCallsForBridgeSpy: Mock = vi.fn().mockResolvedValue({
+      calls: [
+        {
+          callId: 'cold-start-call-99',
+          state: 'accepted',
+          extra: { roomId: '!cold-start-room:matrix.org' },
+        },
+      ],
+    });
+    const ickAddListener: Mock = vi.fn().mockResolvedValue({ remove: vi.fn() });
+    const answerSpy: Mock = vi.fn();
+
+    const matrixCallRef: { current: { callId?: string; roomId?: string } | null } = {
+      current: null,
+    };
+
+    vi.resetModules();
+    vi.doMock('@capacitor/core', () => ({
+      registerPlugin: (name: string) => {
+        if (name === 'IncomingCallKit') {
+          return {
+            showIncomingCall: showIncomingCallSpy,
+            endCall: vi.fn().mockResolvedValue({ calls: [] }),
+            getActiveCalls: getActiveCallsForBridgeSpy,
+            endAllCalls: vi.fn().mockResolvedValue({ calls: [] }),
+            requestPermissions: vi.fn(),
+            addListener: ickAddListener,
+          };
+        }
+        if (name === 'IOSCallAudio') {
+          return new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) });
+        }
+        if (name === 'NativeCall') {
+          return {
+            requestAudioPermission: vi.fn().mockResolvedValue({ granted: true }),
+            addListener: vi.fn().mockResolvedValue({ remove: vi.fn() }),
+            getPendingAnswer: vi.fn(),
+            getPendingReject: vi.fn(),
+          };
+        }
+        return new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) });
+      },
+    }));
+    vi.doMock('@/shared/lib/platform', () => ({
+      isNative: true,
+      isAndroid: false,
+      isIOS: true,
+      isElectron: false,
+      isWeb: false,
+      currentPlatform: 'ios',
+    }));
+    vi.doMock('@/shared/lib/native-webrtc/native-webrtc-bridge', () => ({
+      NativeWebRTC: { addListener: vi.fn() },
+    }));
+    vi.doMock('@capacitor/camera', () => ({
+      Camera: { requestPermissions: vi.fn() },
+    }));
+    // The recovery loop dynamically imports useCallStore — supply a
+    // controllable matrixCall ref so we can release the poll.
+    vi.doMock('@/entities/call', () => ({
+      useCallStore: () => ({
+        get matrixCall() {
+          return matrixCallRef.current;
+        },
+      }),
+    }));
+    // SDK probe used by the recovery pass — return false so the bridge
+    // stays in poll mode (we'll just satisfy the match on roomId path).
+    vi.doMock('@/entities/matrix', () => ({
+      getMatrixClientService: () => ({
+        client: { callEventHandler: { calls: new Map() } },
+      }),
+    }));
+
+    const { nativeCallBridge } = await import('./native-call-bridge');
+
+    // Wire kicks off getPendingAnswer → adapter → getActiveCalls.
+    // After the await chain settles, the bridge schedules its first
+    // poll tick at +300ms. Until then, callService.answerCall is silent.
+    await nativeCallBridge.wire({
+      answerCall: answerSpy,
+      rejectCall: vi.fn(),
+      hangup: vi.fn(),
+    });
+
+    expect(getActiveCallsForBridgeSpy).toHaveBeenCalled();
+    expect(answerSpy).not.toHaveBeenCalled();
+
+    // Now make the SDK "deliver" the invite by populating the store.
+    matrixCallRef.current = {
+      callId: 'cold-start-call-99',
+      roomId: '!cold-start-room:matrix.org',
+    };
+
+    // Advance through the first poll tick (300ms) plus the dynamic
+    // import microtask queue. waitForMatrixCallAndAnswer matches by
+    // callId and fires answerCall.
+    await vi.advanceTimersByTimeAsync(350);
+    // Flush import + then() chains.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(answerSpy).toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+});
+
 describe('reportIncomingCall and friends pass through the per-platform NativeCall handle', () => {
   it('on iOS: reportIncomingCall fires through IncomingCallKit, NOT NativeCall', async () => {
     const showIncomingCallSpy: Mock = vi.fn().mockResolvedValue({ call: {} });
