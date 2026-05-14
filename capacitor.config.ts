@@ -37,11 +37,13 @@ const config: CapacitorConfig = {
     CapacitorShareTarget: {
       appGroupId: 'group.com.forta.chat',
     },
-    IncomingCallKit: {
-      callKitName: 'Forta Chat',
-      ringtone: 'ringtone.caf',
-      enableAndroid: false,
-    },
+    // @capgo/capacitor-incoming-call-kit v8.x has no `pluginsConfig` block
+    // of its own — every option (handleType, channelId, accentColor, ringtone
+    // URI, video flag, timeoutMs, …) is passed per-call via showIncomingCall().
+    // The iOS CallKit caller-app label comes from CFBundleDisplayName
+    // ("Forta Chat", set in ios/App/App/Info.plist). We keep the per-platform
+    // wiring inside src/shared/lib/native-calls/native-call-bridge.ts —
+    // see Step 6 plan task 2.
   },
 };
 

@@ -44,6 +44,7 @@
     "@capacitor/push-notifications": "^8.0.2",
     "@capacitor/share": "^8.0.1",
     "@capacitor/status-bar": "^8.0.1",
+    "@capgo/capacitor-incoming-call-kit": "^8.2.1",
     "@capgo/capacitor-share-target": "^8.0.25",
     "@capgo/capacitor-webview-version-checker": "^8.2.1",
     "@noble/secp256k1": "^2.3.0",
