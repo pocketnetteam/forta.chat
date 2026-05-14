@@ -55,6 +55,22 @@ export function isStalePusherEntry(
   return p.app_id === currentAppId && p.pushkey !== currentToken;
 }
 
+/**
+ * Whether the JS-side `tryDecryptAndReplace` flow should run.
+ *
+ * Android: yes. The native PushDataPlugin shows a placeholder notification
+ * on receive, and JS later replaces its title/body once Matrix sync delivers
+ * and decrypts the event.
+ *
+ * iOS: no. The Notification Service Extension (Step 7) renders the final
+ * notification at delivery time, and iOS forbids editing notifications that
+ * are already on screen. Running the JS replacement path would do work for
+ * no observable effect.
+ */
+export function shouldRunJsPushDecryption(opts: { isIOS: boolean }): boolean {
+  return !opts.isIOS;
+}
+
 class PushService {
   private fcmToken: string | null = null;
   private matrixClient: any = null;
@@ -144,8 +160,15 @@ class PushService {
   /**
    * Wait for the event to arrive via sync and be decrypted by the SDK,
    * then replace the native notification with the decrypted content.
+   *
+   * iOS no-op: the Notification Service Extension (Step 7) produces the
+   * final user-facing notification at delivery time, and iOS does not
+   * allow editing already-shown notifications. Skipping the decrypt+replace
+   * dance avoids a redundant Matrix fetch and removes the only Android-only
+   * code path from the iOS push pipeline.
    */
   private async tryDecryptAndReplace(data: PushPayload): Promise<void> {
+    if (!shouldRunJsPushDecryption({ isIOS })) return;
     const { room_id: roomId, event_id: eventId } = data;
     if (!roomId || !this.matrixClient) return;
 

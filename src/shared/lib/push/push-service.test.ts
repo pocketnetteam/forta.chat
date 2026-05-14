@@ -4,6 +4,7 @@ import {
   PUSHER_APP_ID_IOS,
   buildPusherPayload,
   isStalePusherEntry,
+  shouldRunJsPushDecryption,
 } from './push-service';
 
 describe('buildPusherPayload', () => {
@@ -84,5 +85,19 @@ describe('isStalePusherEntry', () => {
       'new-token',
     );
     expect(stale).toBe(false);
+  });
+});
+
+describe('shouldRunJsPushDecryption', () => {
+  it('runs the JS decrypt+replace flow on Android', () => {
+    expect(shouldRunJsPushDecryption({ isIOS: false })).toBe(true);
+  });
+
+  it('skips the JS decrypt+replace flow on iOS', () => {
+    // Step 7's Notification Service Extension renders the final
+    // notification at delivery time, and iOS does not allow editing a
+    // notification once it is shown — so any JS replacement work would be
+    // wasted. Keep this regression test until the contract changes.
+    expect(shouldRunJsPushDecryption({ isIOS: true })).toBe(false);
   });
 });
