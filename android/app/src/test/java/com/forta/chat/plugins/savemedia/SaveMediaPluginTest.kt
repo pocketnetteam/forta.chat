@@ -67,4 +67,40 @@ class SaveMediaPluginTest {
             SaveMediaPlugin.relativePathForMime("application/x-binary"),
         )
     }
+
+    // ─── sanitizeFileName: defence-in-depth against malicious senders ───
+    // The JS side (`src/shared/lib/file-name-sanitizer.ts`) is the primary
+    // gate, but the plugin's `fileName` parameter ultimately comes from a
+    // sender-controlled Matrix event. Sanitising on the native side too
+    // keeps the plugin safe if a future caller forgets to clean the input.
+
+    @Test
+    fun `sanitize strips forward slashes`() {
+        assertEquals("foo_bar.jpg", SaveMediaPlugin.sanitizeFileName("foo/bar.jpg"))
+    }
+
+    @Test
+    fun `sanitize strips backslashes`() {
+        assertEquals("foo_bar.jpg", SaveMediaPlugin.sanitizeFileName("foo\\bar.jpg"))
+    }
+
+    @Test
+    fun `sanitize blocks parent-directory traversal`() {
+        assertEquals("etc_passwd", SaveMediaPlugin.sanitizeFileName("../../etc/passwd"))
+    }
+
+    @Test
+    fun `sanitize falls back to file when input is empty or all stripped`() {
+        assertEquals("file", SaveMediaPlugin.sanitizeFileName(""))
+        assertEquals("file", SaveMediaPlugin.sanitizeFileName("///"))
+        assertEquals("file", SaveMediaPlugin.sanitizeFileName("..."))
+    }
+
+    @Test
+    fun `sanitize preserves normal filenames`() {
+        assertEquals(
+            "IMG_20240315_104530.jpg",
+            SaveMediaPlugin.sanitizeFileName("IMG_20240315_104530.jpg"),
+        )
+    }
 }

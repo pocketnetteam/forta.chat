@@ -6,6 +6,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -29,6 +31,9 @@ import java.io.FileOutputStream
 class SaveMediaPlugin : Plugin() {
 
     companion object {
+        private const val MAX_NAME_LENGTH = 200
+        private const val FALLBACK_NAME = "file"
+
         /**
          * Resolve the MediaStore RELATIVE_PATH for a given MIME family.
          *
@@ -41,11 +46,65 @@ class SaveMediaPlugin : Plugin() {
          * JUnit unit tests without Robolectric. The values match Android's
          * documented constants: `Pictures`, `Movies`, `Music`, `Download`.
          */
+        @VisibleForTesting
         fun relativePathForMime(mime: String): String = when {
             mime.startsWith("image/") -> "Pictures/Forta Chat"
             mime.startsWith("video/") -> "Movies/Forta Chat"
             mime.startsWith("audio/") -> "Music/Forta Chat"
             else -> "Download/Forta Chat"
+        }
+
+        /**
+         * Defence-in-depth sanitizer for sender-supplied file names.
+         *
+         * The primary gate is the JS side (`file-name-sanitizer.ts`), but
+         * `fileName` ultimately originates from a Matrix event field that
+         * any sender controls. Without sanitization on legacy API 28-,
+         * `File(targetDir, "../../foo.pdf")` resolves outside the
+         * intended `Pictures/Forta Chat/` directory.
+         *
+         * Matches the JS-side rules so behavior is consistent across
+         * platforms. See `file-name-sanitizer.test.ts` for the spec.
+         */
+        @VisibleForTesting
+        fun sanitizeFileName(input: String): String {
+            // Strip control chars (incl. NUL), replace path separators
+            // and Windows-reserved chars with '_' so adjacent tokens
+            // don't fuse together (foo/bar.jpg → foo_bar.jpg, not foobar.jpg).
+            var out = input
+                .replace(Regex("[\\x00-\\x1F\\x7F]"), "")
+                .replace(Regex("[/\\\\]"), "_")
+                .replace(Regex("[<>:\"|?*]"), "_")
+
+            // Strip parent-directory tokens. Repeat until stable — a
+            // single pass over "...." would leave ".." behind.
+            var previous: String
+            do {
+                previous = out
+                out = out.replace("..", "")
+            } while (out != previous)
+
+            // Collapse runs of '_' left by separator substitution
+            // (../../etc/passwd → _____etc_passwd → _etc_passwd), then
+            // trim leading/trailing whitespace, dots, and underscores.
+            out = out.replace(Regex("_+"), "_")
+                .replace(Regex("^[\\s._]+|[\\s._]+$"), "")
+
+            if (out.isEmpty()) return FALLBACK_NAME
+
+            if (out.length <= MAX_NAME_LENGTH) return out
+
+            // Length cap, preserving extension when present. Cap the
+            // extension itself at 16 chars to avoid pathological inputs
+            // eating the whole budget.
+            val dot = out.lastIndexOf('.')
+            if (dot > 0 && out.length - dot <= 16) {
+                val ext = out.substring(dot)
+                val stem = out.substring(0, dot)
+                val room = MAX_NAME_LENGTH - ext.length
+                return stem.substring(0, room) + ext
+            }
+            return out.substring(0, MAX_NAME_LENGTH)
         }
     }
 
@@ -53,9 +112,14 @@ class SaveMediaPlugin : Plugin() {
     fun save(call: PluginCall) {
         val base64 = call.getString("base64")
             ?: return call.reject("base64 required")
-        val fileName = call.getString("fileName")
+        val rawFileName = call.getString("fileName")
             ?: return call.reject("fileName required")
         val mimeType = call.getString("mimeType") ?: "application/octet-stream"
+
+        // Sanitize defensively even though the JS side already cleans —
+        // a future caller may forget, and the legacy storage path treats
+        // path traversal as a real exploit vector.
+        val fileName = sanitizeFileName(rawFileName)
 
         try {
             val bytes = Base64.decode(base64, Base64.DEFAULT)
@@ -74,7 +138,9 @@ class SaveMediaPlugin : Plugin() {
         }
     }
 
-    /** API 29+ scoped storage path — no runtime permission required. */
+    /** API 29+ scoped storage path — no runtime permission required.
+     *  Uses `RELATIVE_PATH` and `IS_PENDING` columns, both Q+. */
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun writeViaMediaStore(fileName: String, mimeType: String, bytes: ByteArray): SavedPath {
         val resolver = context.contentResolver
         val relativePath = relativePathForMime(mimeType)
@@ -148,6 +214,9 @@ class SaveMediaPlugin : Plugin() {
         )
     }
 
+    /** `VOLUME_EXTERNAL_PRIMARY` and `MediaStore.Downloads` are Q+. Only
+     *  called from `writeViaMediaStore`, which is already gated to Q+. */
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun collectionForMime(mime: String): Uri = when {
         mime.startsWith("image/") ->
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)

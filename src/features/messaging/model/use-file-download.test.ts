@@ -204,6 +204,31 @@ describe("useFileDownload", () => {
         await expect(
           saveFile("blob:http://localhost/abc", "photo.jpg", "image/jpeg"),
         ).rejects.toThrow(/MediaStore insert failed/);
+
+        // Regression for forta-bugs#734: on Android, a failed save MUST
+        // bubble to the caller — never silently degrade to a Share dialog
+        // the way the prior FileOpener+Share fallback did.
+        expect(mockFileOpenerOpen).not.toHaveBeenCalled();
+        expect(mockShare).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("sanitizes path-traversal attempts in fileName before sending to native (security)", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile(
+          "blob:http://localhost/abc",
+          "../../etc/passwd.jpg",
+          "image/jpeg",
+        );
+
+        const args = mockSaveMediaSave.mock.calls[0][0];
+        expect(args.fileName).not.toContain("..");
+        expect(args.fileName).not.toContain("/");
+        expect(args.fileName).toBe("etc_passwd.jpg");
       });
       scope.stop();
     });
