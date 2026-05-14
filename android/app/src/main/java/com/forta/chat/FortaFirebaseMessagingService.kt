@@ -12,6 +12,7 @@ import android.telecom.TelecomManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.forta.chat.plugins.calls.CallConnectionService
+import com.forta.chat.plugins.calls.CancelledCallStore
 import com.forta.chat.plugins.calls.IncomingCallActivity
 import com.forta.chat.plugins.calls.InviteThrottleGuard
 import com.forta.chat.plugins.calls.InviteThrottleTracker
@@ -127,6 +128,16 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             if (endedCallId != null && lastRingingCallId == endedCallId) {
                 lastRingingCallId = null
             }
+            // Session 62: persist the cancellation so any in-flight
+            // invite retry for the same call_id that lands after this
+            // hangup/reject/select_answer is silently dropped instead
+            // of re-launching the ringer. `lastRingingCallId` lives in
+            // process memory only and the FCM service is routinely
+            // torn down between pushes, which is precisely when the
+            // late retry arrives.
+            if (endedCallId != null) {
+                CancelledCallStore(this).markCancelled(endedCallId)
+            }
             forwardToJs(data)
             return
         }
@@ -142,6 +153,19 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             val callId = data["call_id"] ?: data["event_id"] ?: ""
             if (callId.isNotEmpty() && callId == lastRingingCallId) {
                 Log.d(TAG, "Duplicate invite retry for $callId — suppressing")
+                forwardToJs(data)
+                return
+            }
+
+            // Session 62: persistent dedup for caller-cancelled calls.
+            // If we've already seen hangup/reject/select_answer for
+            // this callId within the TTL window, drop the retry
+            // silently — the call is dead and re-ringing would just
+            // re-open the IncomingCallActivity for nothing. JS still
+            // gets the forward for telemetry. Survives FCM service
+            // process death because the store is SharedPreferences.
+            if (callId.isNotEmpty() && CancelledCallStore(this).isCancelled(callId)) {
+                Log.d(TAG, "Suppressing invite for cancelled callId=$callId")
                 forwardToJs(data)
                 return
             }
