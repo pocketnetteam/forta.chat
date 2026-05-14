@@ -419,13 +419,32 @@ class PushService {
       this.handlePushFromNative(data as PushPayload);
     });
 
-    // Listen for notification tap (from native intent)
+    // Listen for notification tap (Android source: PushDataPlugin emits
+    // pushOpenRoom directly; on iOS the native PushData plugin no longer
+    // emits this — see iOS handler below).
     PushData.addListener('pushOpenRoom', (data) => {
       // push tap → open room
       window.dispatchEvent(new CustomEvent('push:openRoom', {
         detail: { roomId: data.roomId, eventId: data.eventId },
       }));
     });
+
+    // iOS-specific tap source. UNUserNotificationCenter.delegate is owned
+    // by Capacitor's runtime; foreground/background taps surface as the
+    // standard PushNotifications.pushNotificationActionPerformed event.
+    // Cold-start taps are still buffered into PushData.getPendingIntent()
+    // by the native IOSPushIntent plugin.
+    if (isIOS) {
+      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+        const data = (action.notification.data ?? {}) as Record<string, unknown>;
+        const roomId = typeof data.room_id === 'string' ? data.room_id : undefined;
+        if (!roomId) return;
+        const eventId = typeof data.event_id === 'string' ? data.event_id : undefined;
+        window.dispatchEvent(new CustomEvent('push:openRoom', {
+          detail: { roomId, eventId },
+        }));
+      });
+    }
 
     // Tap on local notification (shown by JS after decryption)
     LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
