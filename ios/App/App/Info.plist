@@ -38,6 +38,19 @@
 		<string>remote-notification</string>
 		<string>voip</string>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.forta.chat.share</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>forta</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>armv7</string>
