@@ -351,6 +351,9 @@ export const ru: Record<TranslationKey, string> = {
   "media.captionBelow": "Подпись снизу",
   "media.captionAbove": "Подпись сверху",
   "media.save": "Сохранить",
+  "media.savedToGallery": "Сохранено в галерею",
+  "media.savedToDownloads": "Сохранено в Загрузки",
+  "media.saveFailed": "Не удалось сохранить файл",
 
   // ── Drop overlay ──
   "drop.title": "Перетащите файлы сюда",

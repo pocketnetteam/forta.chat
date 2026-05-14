@@ -4,10 +4,12 @@ import { effectScope } from "vue";
 // --- Platform mock: default = web ---
 let mockIsNative = false;
 let mockIsElectron = false;
+let mockIsAndroid = false;
 
 vi.mock("@/shared/lib/platform", () => ({
   get isNative() { return mockIsNative; },
   get isElectron() { return mockIsElectron; },
+  get isAndroid() { return mockIsAndroid; },
 }));
 
 // --- Auth store mock ---
@@ -41,6 +43,18 @@ vi.mock("@capacitor-community/file-opener", () => ({
 const mockShare: Mock = vi.fn(() => Promise.resolve());
 vi.mock("@capacitor/share", () => ({
   Share: { get share() { return mockShare; } },
+}));
+
+// --- Capacitor core / SaveMedia plugin mock ---
+// `registerPlugin("SaveMedia")` returns this object. The plugin's `save`
+// method must accept { base64, fileName, mimeType } and resolve — Android
+// MediaStore semantics live on the native side and are covered by
+// SaveMediaPluginTest.kt, so here we only assert the JS-side wiring.
+const mockSaveMediaSave: Mock = vi.fn(() =>
+  Promise.resolve({ uri: "content://media/external/file/42", path: "Pictures/Forta Chat/photo.jpg" }),
+);
+vi.mock("@capacitor/core", () => ({
+  registerPlugin: vi.fn(() => ({ save: mockSaveMediaSave })),
 }));
 
 // --- Matrix crypto mock ---
@@ -98,6 +112,7 @@ describe("useFileDownload", () => {
   beforeEach(() => {
     mockIsNative = false;
     mockIsElectron = false;
+    mockIsAndroid = false;
     vi.clearAllMocks();
     revokeAllFileUrls();
     // Reset window.electronAPI
@@ -125,9 +140,122 @@ describe("useFileDownload", () => {
     });
   });
 
-  describe("saveFile — native platform (Android/iOS)", () => {
+  // ─────────────────────────────────────────────────────────────────────
+  // saveFile — Android (Session 58 SaveMediaPlugin path)
+  // Replaces the prior FileOpener + Share fallback. On Android 14+
+  // scoped storage that path silently degraded to a Share dialog when
+  // FileOpener could not get a content:// for the cache file
+  // (forta-bugs#734). SaveMedia.save writes via MediaStore so the file
+  // lands in Pictures/Forta Chat or Download/Forta Chat — viewable in
+  // the Gallery / Files app, no Share dialog.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("saveFile — Android (SaveMediaPlugin)", () => {
     beforeEach(() => {
       mockIsNative = true;
+      mockIsAndroid = true;
+    });
+
+    it("calls SaveMedia.save with base64 + fileName + mimeType", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "photo.jpg", "image/jpeg");
+
+        expect(mockSaveMediaSave).toHaveBeenCalledTimes(1);
+        const args = mockSaveMediaSave.mock.calls[0][0];
+        expect(args).toEqual(
+          expect.objectContaining({
+            base64: expect.any(String),
+            fileName: "photo.jpg",
+            mimeType: "image/jpeg",
+          }),
+        );
+        expect(args.base64.length).toBeGreaterThan(0);
+      });
+      scope.stop();
+    });
+
+    it("falls back to guessed MIME when caller does not provide one", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "document.xlsx");
+
+        expect(mockSaveMediaSave).toHaveBeenCalledWith(
+          expect.objectContaining({
+            fileName: "document.xlsx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+        );
+      });
+      scope.stop();
+    });
+
+    it("propagates errors so the caller can surface a toast", async () => {
+      mockSaveMediaSave.mockRejectedValueOnce(new Error("MediaStore insert failed"));
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await expect(
+          saveFile("blob:http://localhost/abc", "photo.jpg", "image/jpeg"),
+        ).rejects.toThrow(/MediaStore insert failed/);
+
+        // Regression for forta-bugs#734: on Android, a failed save MUST
+        // bubble to the caller — never silently degrade to a Share dialog
+        // the way the prior FileOpener+Share fallback did.
+        expect(mockFileOpenerOpen).not.toHaveBeenCalled();
+        expect(mockShare).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("sanitizes path-traversal attempts in fileName before sending to native (security)", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile(
+          "blob:http://localhost/abc",
+          "../../etc/passwd.jpg",
+          "image/jpeg",
+        );
+
+        const args = mockSaveMediaSave.mock.calls[0][0];
+        expect(args.fileName).not.toContain("..");
+        expect(args.fileName).not.toContain("/");
+        expect(args.fileName).toBe("etc_passwd.jpg");
+      });
+      scope.stop();
+    });
+
+    it("does NOT call the legacy FileOpener or Share fallback (regression — forta-bugs#734)", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "doc.pdf", "application/pdf");
+
+        expect(mockFileOpenerOpen).not.toHaveBeenCalled();
+        expect(mockShare).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // saveFile — iOS (legacy FileOpener + Share fallback)
+  // iOS UX expects a Share Sheet for documents, so the legacy pipeline
+  // remains intentional. Session 58 only changes Android behavior.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("saveFile — iOS (legacy FileOpener pipeline)", () => {
+    beforeEach(() => {
+      mockIsNative = true;
+      mockIsAndroid = false;
     });
 
     it("writes file to cache and opens with FileOpener", async () => {
@@ -198,6 +326,18 @@ describe("useFileDownload", () => {
             contentType: "application/octet-stream",
           }),
         );
+      });
+      scope.stop();
+    });
+
+    it("does NOT call SaveMediaPlugin on iOS", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "report.pdf", "application/pdf");
+
+        expect(mockSaveMediaSave).not.toHaveBeenCalled();
       });
       scope.stop();
     });

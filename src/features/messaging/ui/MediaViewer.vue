@@ -6,6 +6,7 @@ import { useFileDownload } from "../model/use-file-download";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import { touchDistance, nextScale, MIN_SCALE } from "../model/pinch-zoom";
+import { useToast } from "@/shared/lib/use-toast";
 
 interface Props {
   show: boolean;
@@ -16,6 +17,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{ close: [] }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 const chatStore = useChatStore();
 const { getState, download, saveFile } = useFileDownload();
 
@@ -196,7 +198,15 @@ const handleSaveCurrent = async () => {
   const msg = currentMessage.value;
   const url = currentUrl.value;
   if (!msg || !msg.fileInfo || !url) return;
-  await saveFile(url, msg.fileInfo.name, msg.fileInfo.type);
+  const mime = msg.fileInfo.type || "";
+  const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+  try {
+    await saveFile(url, msg.fileInfo.name, mime);
+    toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
+  } catch (e) {
+    console.error("[MediaViewer] save failed:", e);
+    toast(t("media.saveFailed"), "error");
+  }
 };
 </script>
 
