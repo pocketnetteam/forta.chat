@@ -2,6 +2,7 @@ import { PushNotifications } from '@capacitor/push-notifications';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
+import { IOSVoIPPush } from './ios-voip-push';
 import { tRaw } from '@/shared/lib/i18n';
 
 /**
@@ -9,8 +10,17 @@ import { tRaw } from '@/shared/lib/i18n';
  * account when a user is signed in on multiple devices; cleanup of stale
  * pushkeys is scoped to the device's own `app_id` so iOS does not delete
  * Android's pusher and vice versa.
+ *
+ * iOS uses TWO pushers in parallel:
+ *   - `fortaios`     → regular APNs (FCM token) for non-call notifications.
+ *   - `fortaios.voip` → APNs VoIP class (PushKit token) for `m.call.invite`
+ *                      events only. Apple guidelines forbid using PushKit
+ *                      for anything else, so Sygnal is configured to route
+ *                      only `msg_type == m.call.invite[.video]` to this
+ *                      pusher (see SYGNAL-CONFIG-REQUEST.md).
  */
 export const PUSHER_APP_ID_IOS = 'fortaios';
+export const PUSHER_APP_ID_IOS_VOIP = 'fortaios.voip';
 export const PUSHER_APP_ID_ANDROID = 'fortaandroid';
 const SYGNAL_PUSH_URL = 'https://matrix.pocketnet.app/_matrix/push/v1/notify';
 
@@ -36,6 +46,29 @@ export function buildPusherPayload(token: string, opts: { isIOS: boolean }): Pus
     app_id: opts.isIOS ? PUSHER_APP_ID_IOS : PUSHER_APP_ID_ANDROID,
     app_display_name: 'Forta Chat',
     device_display_name: opts.isIOS ? 'iOS' : 'Android',
+    lang: 'en',
+    data: { url: SYGNAL_PUSH_URL },
+  };
+}
+
+/**
+ * Build the iOS VoIP pusher payload (PushKit). The pushkey is the VoIP
+ * push token from `PKPushRegistry`, which is DIFFERENT from the regular
+ * APNs/FCM token used by {@link buildPusherPayload}. Sygnal routes only
+ * `m.call.invite[.video]` events to this pusher and uses APNs VoIP class
+ * instead of normal-priority APNs so the OS wakes the app even from cold.
+ *
+ * Pure function — exported for unit tests. The returned `device_display_name`
+ * is intentionally distinct from the regular `'iOS'` pusher so the user
+ * can tell them apart in `getPushers()` listings.
+ */
+export function buildVoipPusherPayload(voipToken: string): PusherPayload {
+  return {
+    pushkey: voipToken,
+    kind: 'http',
+    app_id: PUSHER_APP_ID_IOS_VOIP,
+    app_display_name: 'Forta Chat',
+    device_display_name: 'iOS (VoIP)',
     lang: 'en',
     data: { url: SYGNAL_PUSH_URL },
   };
@@ -154,6 +187,35 @@ class PushService {
       }
     } catch (e) {
       console.error('[PushService] Failed to register pusher:', e);
+    }
+  }
+
+  /**
+   * Register the iOS VoIP (PushKit) pusher for `m.call.invite` events.
+   *
+   * Idempotent: safe to call on every `voipTokenReceived` event including
+   * rotations. Cleans up stale `fortaios.voip` pushers from previous
+   * tokens on this device — without this, every reinstall + new token
+   * would leave a dead pusher on the homeserver and Sygnal would keep
+   * trying to deliver to gone-app tokens forever.
+   */
+  private async registerVoipPusher(matrixClient: any, voipToken: string): Promise<void> {
+    if (!matrixClient) return;
+    const payload = buildVoipPusherPayload(voipToken);
+    try {
+      await matrixClient.setPusher(payload);
+      try {
+        const { pushers } = await matrixClient.getPushers();
+        for (const p of pushers) {
+          if (isStalePusherEntry(p, payload.app_id, voipToken)) {
+            await matrixClient.setPusher({ ...p, kind: null });
+          }
+        }
+      } catch (pe) {
+        console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
+      }
+    } catch (e) {
+      console.error('[PushService] Failed to register VoIP pusher:', e);
     }
   }
 
@@ -506,6 +568,33 @@ class PushService {
     });
 
     await PushNotifications.register();
+
+    // 5. iOS-only: register a SECOND pusher for VoIP (PushKit). The
+    // Swift IOSVoIPPushPlugin starts the PKPushRegistry in load(), so
+    // by the time we get here iOS may already have handed us a token —
+    // grab it eagerly. Subsequent rotations come through the
+    // voipTokenReceived listener.
+    if (isIOS) {
+      try {
+        await IOSVoIPPush.addListener('voipTokenReceived', async ({ token }) => {
+          await this.registerVoipPusher(matrixClient, token);
+        });
+        await IOSVoIPPush.addListener('voipTokenInvalidated', async () => {
+          // Best-effort cleanup of the stale VoIP pusher. We don't have
+          // the old token in scope, but the Matrix homeserver lists ALL
+          // pushers under our user — any fortaios.voip with a key not
+          // matching a current token gets dropped on the next
+          // registerVoipPusher() pass.
+          console.log('[PushService] VoIP token invalidated by iOS');
+        });
+        const { token } = await IOSVoIPPush.getToken();
+        if (token) {
+          await this.registerVoipPusher(matrixClient, token);
+        }
+      } catch (e) {
+        console.warn('[PushService] IOSVoIPPush wiring failed:', e);
+      }
+    }
   }
 }
 

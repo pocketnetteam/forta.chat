@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   PUSHER_APP_ID_ANDROID,
   PUSHER_APP_ID_IOS,
+  PUSHER_APP_ID_IOS_VOIP,
   buildPusherPayload,
+  buildVoipPusherPayload,
   isStalePusherEntry,
   shouldRunJsPushDecryption,
 } from './push-service';
@@ -99,5 +101,69 @@ describe('shouldRunJsPushDecryption', () => {
     // notification once it is shown — so any JS replacement work would be
     // wasted. Keep this regression test until the contract changes.
     expect(shouldRunJsPushDecryption({ isIOS: true })).toBe(false);
+  });
+});
+
+describe('buildVoipPusherPayload (iOS PushKit)', () => {
+  it('uses the dedicated fortaios.voip app_id (separate from the regular fortaios pusher)', () => {
+    const payload = buildVoipPusherPayload('voip-token-xyz');
+    expect(payload.app_id).toBe(PUSHER_APP_ID_IOS_VOIP);
+    expect(payload.app_id).toBe('fortaios.voip');
+    // Critical: the VoIP pusher MUST NOT collide with the regular
+    // fortaios pusher's app_id, otherwise Sygnal would route
+    // m.room.message events through PushKit (Apple-forbidden) or
+    // m.call.invite events through normal APNs (no CallKit ringer).
+    expect(payload.app_id).not.toBe(PUSHER_APP_ID_IOS);
+  });
+
+  it('uses the VoIP token verbatim as pushkey (PKPushCredentials.token, NOT the regular APNs/FCM token)', () => {
+    expect(buildVoipPusherPayload('pkt-abc').pushkey).toBe('pkt-abc');
+  });
+
+  it('marks the device as "iOS (VoIP)" so getPushers() shows it as separate from the regular iOS pusher', () => {
+    const payload = buildVoipPusherPayload('t');
+    expect(payload.device_display_name).toBe('iOS (VoIP)');
+  });
+
+  it('reuses the same Sygnal http URL and lang as the regular pusher', () => {
+    const voip = buildVoipPusherPayload('t1');
+    const regular = buildPusherPayload('t2', { isIOS: true });
+    expect(voip.kind).toBe('http');
+    expect(voip.lang).toBe('en');
+    expect(voip.data.url).toBe(regular.data.url);
+    expect(voip.app_display_name).toBe('Forta Chat');
+  });
+});
+
+describe('isStalePusherEntry — VoIP pusher cleanup', () => {
+  it('flags a stale fortaios.voip pusher when the VoIP token rotated', () => {
+    const stale = isStalePusherEntry(
+      { app_id: 'fortaios.voip', pushkey: 'old-voip-token' },
+      'fortaios.voip',
+      'new-voip-token',
+    );
+    expect(stale).toBe(true);
+  });
+
+  it('does NOT flag the regular fortaios pusher when cleaning the VoIP one', () => {
+    // We're cleaning fortaios.voip with a new VoIP token. The regular
+    // fortaios pusher (different app_id, different token) must stay.
+    const stale = isStalePusherEntry(
+      { app_id: 'fortaios', pushkey: 'fcm-token' },
+      'fortaios.voip',
+      'voip-token',
+    );
+    expect(stale).toBe(false);
+  });
+
+  it('does NOT flag the VoIP pusher when cleaning the regular fortaios one', () => {
+    // Symmetric guard: don't accidentally drop the VoIP pusher when
+    // re-registering the regular FCM-backed iOS pusher.
+    const stale = isStalePusherEntry(
+      { app_id: 'fortaios.voip', pushkey: 'voip-token' },
+      'fortaios',
+      'new-fcm-token',
+    );
+    expect(stale).toBe(false);
   });
 });
