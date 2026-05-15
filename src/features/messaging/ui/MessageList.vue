@@ -26,6 +26,7 @@ import { useUnreadBanner } from "../model/use-unread-banner";
 import { useReadTracker } from "../model/use-read-tracker";
 import { decideFabAction, shouldAutoDismissBanner } from "../model/fab-decision";
 import UnreadBanner from "./UnreadBanner.vue";
+import { computeChatListStyle } from "./chat-list-style";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -1199,11 +1200,15 @@ const setSearchQuery = (q: string) => {
   searchQuery.value = q;
 };
 
+// Reserve room at the bottom of the chat scrolу for the docked EmojiPicker
+// (input mode). See `chat-list-style.ts` for rationale.
+const listStyle = computed(() => computeChatListStyle(themeStore.chatWallpaper));
+
 defineExpose({ scrollToMessage, setSearchQuery });
 </script>
 
 <template>
-  <div ref="listRef" class="relative min-h-0 flex-1" :style="themeStore.chatWallpaper ? { background: themeStore.chatWallpaper } : {}">
+  <div ref="listRef" class="relative min-h-0 flex-1" :style="listStyle">
     <!-- Floating date header (single, non-stacking) -->
     <div
       v-if="currentDateLabel && !loading"
