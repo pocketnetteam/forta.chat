@@ -29,6 +29,12 @@ vi.mock("@/shared/lib/connectivity", () => ({
   useConnectivity: vi.fn(() => ({ isOnline: { value: true } })),
 }));
 
+// Mock heic2any — happy path returns a JPEG blob; per-test overrides via
+// vi.mocked(heic2anyDefault).mockRejectedValueOnce(...) when needed.
+vi.mock("heic2any", () => ({
+  default: vi.fn(async () => new Blob(["jpegBytes"], { type: "image/jpeg" })),
+}));
+
 // Mock MatrixClientService with all needed methods
 const mockRedactEvent = vi.fn();
 const mockSendReaction = vi.fn(() => "$reaction_event_1");
@@ -531,11 +537,6 @@ describe("useMessages", () => {
 });
 
 // ─── convertHeicToJpeg ────────────────────────────────────────────
-// Mock heic2any at top level — vi.mock is hoisted, so importing it before
-// the describe block lets us use vi.mocked() for per-test overrides.
-vi.mock("heic2any", () => ({
-  default: vi.fn(async () => new Blob(["jpegBytes"], { type: "image/jpeg" })),
-}));
 
 describe("convertHeicToJpeg", () => {
   it("returns input file unchanged for non-HEIC MIME", async () => {

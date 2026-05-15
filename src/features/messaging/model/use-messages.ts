@@ -82,7 +82,7 @@ function resolveMime(file: File): string {
 /** Convert HEIC/HEIF File to JPEG so Android WebView (Chromium) can render it.
  *  iPhone cameras default to HEIC; Chromium does not support HEIC in <img>,
  *  resulting in a broken image on the receiver side. heic2any is loaded
- *  dynamically (~250KB gzipped) only on the first HEIC encounter.
+ *  dynamically (~340 KB gzipped chunk) only on the first HEIC encounter.
  *  Returns the original file when the input is not HEIC/HEIF, or when
  *  conversion fails (fail-open: better to send the original than nothing). */
 export async function convertHeicToJpeg(file: File): Promise<File> {
@@ -357,25 +357,24 @@ export function useMessages() {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
 
-    // Android WebView cannot render HEIC; convert image-typed input before
-    // size check so the (typically smaller) JPEG payload is what we measure.
-    if (file.type.startsWith("image/") || /\.(heic|heif)$/i.test(file.name)) {
-      file = await convertHeicToJpeg(file);
-    }
-
     if (file.size > MAX_UPLOAD_SIZE) {
       console.warn(`[use-messages] File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
       return false;
     }
 
+    // Android WebView cannot render HEIC; convertHeicToJpeg short-circuits
+    // for non-HEIC inputs, so calling it unconditionally is safe and keeps
+    // the two send paths symmetric.
+    const processedFile = await convertHeicToJpeg(file);
+
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return false;
 
     // Determine message type from MIME (with fallback for HEIC/extension-only files)
-    const mime = normalizeMime(resolveMime(file));
+    const mime = normalizeMime(resolveMime(processedFile));
     const msgType = messageTypeFromMime(mime);
 
-    const localBlobUrl = URL.createObjectURL(file);
+    const localBlobUrl = URL.createObjectURL(processedFile);
 
     if (!isChatDbReady()) {
       // Without Dexie we have no crash-safe queue — dropping the send is
@@ -389,12 +388,12 @@ export function useMessages() {
     const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
-      content: file.name,
+      content: processedFile.name,
       type: msgType,
       fileInfo: {
-        name: file.name,
+        name: processedFile.name,
         type: mime,
-        size: file.size,
+        size: processedFile.size,
         url: localBlobUrl,
       },
       forwardedFrom: options.forwardedFrom,
@@ -405,10 +404,10 @@ export function useMessages() {
     // Persist blob so SyncEngine.syncSendFile can resume after a crash.
     const attachmentId = await dbKit.db.attachments.add({
       messageLocalId: localMsg.localId!,
-      fileName: file.name,
+      fileName: processedFile.name,
       mimeType: mime,
-      size: file.size,
-      localBlob: file,
+      size: processedFile.size,
+      localBlob: processedFile,
       status: "local",
     });
 
@@ -416,7 +415,7 @@ export function useMessages() {
       "send_file",
       roomId,
       {
-        fileName: file.name,
+        fileName: processedFile.name,
         mimeType: mime,
         msgtype: "m.file",
         attachmentId,
@@ -440,17 +439,22 @@ export function useMessages() {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
 
+    if (file.size > MAX_UPLOAD_SIZE) {
+      console.warn(`[use-messages] Image too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      return false;
+    }
+
     // HEIC must be converted before getImageDimensions — Chromium <img> cannot
     // decode HEIC at all, so reading naturalWidth/Height on the original blob
     // would produce zeros and corrupt the m.image event payload.
-    file = await convertHeicToJpeg(file);
+    const processedFile = await convertHeicToJpeg(file);
 
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return false;
 
-    const dimensions = await getImageDimensions(file);
-    const imageMime = resolveMime(file);
-    const localBlobUrl = URL.createObjectURL(file);
+    const dimensions = await getImageDimensions(processedFile);
+    const imageMime = resolveMime(processedFile);
+    const localBlobUrl = URL.createObjectURL(processedFile);
 
     if (!isChatDbReady()) {
       console.error("[use-messages] sendImage: chat DB not ready");
@@ -462,12 +466,12 @@ export function useMessages() {
     const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
-      content: options.caption || file.name,
+      content: options.caption || processedFile.name,
       type: MessageType.image,
       fileInfo: {
-        name: file.name,
+        name: processedFile.name,
         type: imageMime,
-        size: file.size,
+        size: processedFile.size,
         url: localBlobUrl,
         w: dimensions.w,
         h: dimensions.h,
@@ -481,10 +485,10 @@ export function useMessages() {
 
     const attachmentId = await dbKit.db.attachments.add({
       messageLocalId: localMsg.localId!,
-      fileName: file.name,
+      fileName: processedFile.name,
       mimeType: imageMime,
-      size: file.size,
-      localBlob: file,
+      size: processedFile.size,
+      localBlob: processedFile,
       status: "local",
     });
 
@@ -492,7 +496,7 @@ export function useMessages() {
       "send_file",
       roomId,
       {
-        fileName: file.name,
+        fileName: processedFile.name,
         mimeType: imageMime,
         msgtype: "m.image",
         attachmentId,
@@ -501,7 +505,7 @@ export function useMessages() {
           w: dimensions.w,
           h: dimensions.h,
           mimetype: imageMime,
-          size: file.size,
+          size: processedFile.size,
           ...(options.caption ? { caption: options.caption } : {}),
           ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
         },
