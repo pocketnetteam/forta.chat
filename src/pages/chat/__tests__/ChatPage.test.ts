@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { computed, ref } from "vue";
+import type { SidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 
 // ── Force mobile viewport before Vue mounts ──────────────────────
 beforeEach(() => {
@@ -83,13 +84,14 @@ vi.mock("@/shared/lib/i18n", () => ({
 const closeSettingsContentSpy = vi.fn();
 const setTabSpy = vi.fn();
 const settingsSubViewRef = ref<string | null>(null);
+const activeTabRef = ref<SidebarTab>("chats");
 
 vi.mock("@/widgets/sidebar/model/use-sidebar-tab", () => ({
   useSidebarTab: () => ({
     settingsSubView: settingsSubViewRef,
     closeSettingsContent: closeSettingsContentSpy,
     setTab: setTabSpy,
-    activeTab: ref("chats"),
+    activeTab: activeTabRef,
     openSettingsContent: vi.fn(),
   }),
 }));
@@ -97,6 +99,8 @@ vi.mock("@/widgets/sidebar/model/use-sidebar-tab", () => ({
 vi.mock("@/shared/lib/composables/use-android-back-handler", () => ({
   useAndroidBackHandler: vi.fn(),
 }));
+
+import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
 vi.mock("@/features/messaging/model/use-audio-playback", () => ({
   useAudioPlayback: () => ({
@@ -150,10 +154,12 @@ beforeEach(() => {
   fakeRoomsInitialized.value = false;
   fakeActiveChannelAddress.value = null;
   settingsSubViewRef.value = null;
+  activeTabRef.value = "chats";
   setActiveRoomSpy.mockClear();
   closeSettingsContentSpy.mockClear();
   setTabSpy.mockClear();
   clearActiveChannelSpy.mockClear();
+  vi.mocked(useAndroidBackHandler).mockClear();
 });
 
 afterEach(() => {
@@ -390,6 +396,123 @@ describe("ChatPage — reactive showSidebar", () => {
     expect(isVisible(sidebar.element as HTMLElement)).toBe(false);
     const cw = wrapper.find('[data-testid="chat-window"]');
     expect(isVisible(cw.element as HTMLElement)).toBe(true);
+
+    wrapper.unmount();
+  });
+});
+
+// ── Regression: Back from Settings/Contacts must return to Chats ──
+//
+// Telegram-like UX (issue #729, continuation of #276): the very first
+// tap of Android Back when the user is on Settings or Contacts tab
+// (without an open subview) should switch the sidebar to "chats" instead
+// of minimizing the app. Only the second tap minimizes.
+//
+// The handler is registered with priority 55 — below the existing
+// settings-subview handler (70) so a tap inside settings still closes
+// the subview first, and above the fallback minimize.
+describe("ChatPage Android back handler — chat-tab-to-chats", () => {
+  const getTabToChatsHandler = (): (() => boolean) => {
+    const mocked = vi.mocked(useAndroidBackHandler);
+    const call = mocked.mock.calls.find((c) => c[0] === "chat-tab-to-chats");
+    if (!call) throw new Error("handler 'chat-tab-to-chats' was not registered");
+    return call[2] as () => boolean;
+  };
+
+  it("registers handler with id 'chat-tab-to-chats' and priority 55", async () => {
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const mocked = vi.mocked(useAndroidBackHandler);
+    const call = mocked.mock.calls.find((c) => c[0] === "chat-tab-to-chats");
+
+    expect(call).toBeDefined();
+    expect(call![1]).toBe(55);
+    expect(typeof call![2]).toBe("function");
+
+    wrapper.unmount();
+  });
+
+  it("returns true and calls setTab('chats') when activeTab='settings' and no subview", async () => {
+    activeTabRef.value = "settings";
+    settingsSubViewRef.value = null;
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const handler = getTabToChatsHandler();
+    const consumed = handler();
+
+    expect(consumed).toBe(true);
+    expect(setTabSpy).toHaveBeenCalledWith("chats");
+
+    wrapper.unmount();
+  });
+
+  it("returns true and calls setTab('chats') when activeTab='contacts'", async () => {
+    activeTabRef.value = "contacts";
+    settingsSubViewRef.value = null;
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const handler = getTabToChatsHandler();
+    const consumed = handler();
+
+    expect(consumed).toBe(true);
+    expect(setTabSpy).toHaveBeenCalledWith("chats");
+
+    wrapper.unmount();
+  });
+
+  it("returns false (passes through) when activeTab='chats' — fallback minimize", async () => {
+    activeTabRef.value = "chats";
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const handler = getTabToChatsHandler();
+    const consumed = handler();
+
+    expect(consumed).toBe(false);
+    expect(setTabSpy).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("returns false when settingsSubView is set — defer to higher-priority handler", async () => {
+    activeTabRef.value = "settings";
+    settingsSubViewRef.value = "appearance";
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const handler = getTabToChatsHandler();
+    const consumed = handler();
+
+    expect(consumed).toBe(false);
+    expect(setTabSpy).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("returns false on desktop (isMobile=false)", async () => {
+    // Desktop layout always shows the sidebar — Back has no meaning here.
+    Object.defineProperty(window, "innerWidth", {
+      value: 1200,
+      configurable: true,
+      writable: true,
+    });
+    activeTabRef.value = "settings";
+
+    const wrapper = mount(ChatPage, mountOpts);
+    await flushPromises();
+
+    const handler = getTabToChatsHandler();
+    const consumed = handler();
+
+    expect(consumed).toBe(false);
+    expect(setTabSpy).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
