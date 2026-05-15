@@ -17,10 +17,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // silently breaking `toHaveBeenCalled*` even though the underlying call did
 // happen.
 const ioMocks = vi.hoisted(() => ({
-  getLaunchUrlMock: vi.fn<[], Promise<{ url: string } | undefined>>(),
+  getLaunchUrlMock: vi.fn<() => Promise<{ url: string } | undefined>>(),
   addListenerMock: vi.fn<
-    [string, (event: { url: string }) => void],
-    Promise<{ remove: () => void }>
+    (
+      eventName: string,
+      cb: (event: { url: string }) => void,
+    ) => Promise<{ remove: () => void }>
   >(),
   capturedAppUrlOpenListener: null as ((event: { url: string }) => void) | null,
 }));
