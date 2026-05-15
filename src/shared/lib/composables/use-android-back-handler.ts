@@ -17,6 +17,7 @@ const handlers: { id: string; priority: number; handler: BackHandler }[] = [];
  *    80 — side panels (info panel, search)
  *    70 — sub-views (settings content, group creation)
  *    60 — chat view (back to sidebar on mobile)
+ *    55 — tab fallback (Settings/Contacts → Chats on mobile)
  *    50 — router-level pages (settings, profile)
  *    --   (fallback) App.minimizeApp()
  */
