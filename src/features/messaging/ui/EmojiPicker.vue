@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onScopeDispose } from "vue";
 import { useThemeStore } from "@/entities/theme";
 import { EMOJI_CATEGORIES, searchEmojis } from "@/shared/lib/emoji-data";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
@@ -70,6 +70,49 @@ const panelStyle = computed(() =>
     vh: typeof window !== "undefined" ? window.innerHeight : 600,
   }),
 );
+
+// Publish the picker's height as a CSS var so MessageList can pad its bottom
+// and keep the latest messages visible above the docked picker (Telegram-like).
+// Only relevant in input mode — reaction mode is a floating popover near the
+// tapped message and doesn't obscure the bottom of the chat scrolу.
+const panelRef = ref<HTMLElement | null>(null);
+let panelObserver: ResizeObserver | null = null;
+
+const publishPickerHeight = (h: number) => {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(
+    "--emoji-picker-height",
+    `${Math.max(0, Math.round(h))}px`,
+  );
+};
+
+watch(
+  [() => props.show, panelRef, () => props.mode],
+  ([show, el, mode]) => {
+    if (panelObserver) {
+      panelObserver.disconnect();
+      panelObserver = null;
+    }
+    if (!show || !el || mode !== "input") {
+      publishPickerHeight(0);
+      return;
+    }
+    publishPickerHeight(el.getBoundingClientRect().height);
+    if (typeof ResizeObserver === "undefined") return;
+    panelObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) publishPickerHeight(entry.contentRect.height);
+    });
+    panelObserver.observe(el);
+  },
+  { immediate: true, flush: "post" },
+);
+
+onScopeDispose(() => {
+  panelObserver?.disconnect();
+  panelObserver = null;
+  publishPickerHeight(0);
+});
 
 const filteredEmojis = computed(() => {
   if (!search.value) return null;
@@ -149,6 +192,7 @@ useAndroidBackHandler(`emoji-picker-${props.mode}`, 90, () => {
     <transition name="emoji-popup">
       <div v-if="props.show" class="fixed inset-0 z-50" @click.self="emit('close')">
         <div
+          ref="panelRef"
           class="emoji-panel flex flex-col overflow-hidden border border-neutral-grad-0 bg-background-total-theme shadow-2xl"
           :class="isMobile ? 'fixed' : 'absolute rounded-2xl'"
           :style="panelStyle"
