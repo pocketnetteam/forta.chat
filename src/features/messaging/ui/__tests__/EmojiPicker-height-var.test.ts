@@ -136,4 +136,40 @@ describe("EmojiPicker — publishes --emoji-picker-height", () => {
 
     wrapper.unmount();
   });
+
+  // Two EmojiPicker instances coexist in the chat tree — one bound to the
+  // input panel ("input" mode), one anchored to the long-pressed message
+  // ("reaction" mode). Reaction-mode lifecycle must NOT stomp the height
+  // published by the input panel, otherwise the chat list collapses while
+  // the docked picker is still visible.
+  it("reaction-mode lifecycle never overwrites the height published by an open input picker", async () => {
+    const input = mount(EmojiPicker, {
+      props: { show: true, mode: "input", x: 0, y: 0 },
+      attachTo: document.body,
+    });
+    await nextTick();
+    await nextTick();
+    expect(getVar()).toBe(`${FAKE_PICKER_HEIGHT}px`);
+
+    // User long-presses a message — reaction picker mounts on top.
+    const reaction = mount(EmojiPicker, {
+      props: { show: true, mode: "reaction", x: 100, y: 200 },
+      attachTo: document.body,
+    });
+    await nextTick();
+    await nextTick();
+    expect(getVar()).toBe(`${FAKE_PICKER_HEIGHT}px`);
+
+    // Reaction picker closes — input picker is still docked.
+    await reaction.setProps({ show: false });
+    await nextTick();
+    await nextTick();
+    expect(getVar()).toBe(`${FAKE_PICKER_HEIGHT}px`);
+
+    reaction.unmount();
+    await nextTick();
+    expect(getVar()).toBe(`${FAKE_PICKER_HEIGHT}px`);
+
+    input.unmount();
+  });
 });

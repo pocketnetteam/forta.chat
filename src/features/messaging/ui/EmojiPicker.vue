@@ -73,8 +73,11 @@ const panelStyle = computed(() =>
 
 // Publish the picker's height as a CSS var so MessageList can pad its bottom
 // and keep the latest messages visible above the docked picker (Telegram-like).
-// Only relevant in input mode — reaction mode is a floating popover near the
-// tapped message and doesn't obscure the bottom of the chat scrolу.
+// Only the input-mode instance owns this var. Reaction-mode is a floating
+// popover anchored to a long-pressed message and must NOT touch the var —
+// otherwise the two pickers stomp each other when both are momentarily live.
+// Scope is documentElement on purpose: ChatWindow is the only consumer in
+// this app, and a global var avoids threading a provide/inject down the tree.
 const panelRef = ref<HTMLElement | null>(null);
 let panelObserver: ResizeObserver | null = null;
 
@@ -89,11 +92,15 @@ const publishPickerHeight = (h: number) => {
 watch(
   [() => props.show, panelRef, () => props.mode],
   ([show, el, mode]) => {
+    // Reaction-mode is hands-off: never read, never write — let the input
+    // instance (if any) keep ownership of the var.
+    if (mode !== "input") return;
+
     if (panelObserver) {
       panelObserver.disconnect();
       panelObserver = null;
     }
-    if (!show || !el || mode !== "input") {
+    if (!show || !el) {
       publishPickerHeight(0);
       return;
     }
@@ -111,7 +118,8 @@ watch(
 onScopeDispose(() => {
   panelObserver?.disconnect();
   panelObserver = null;
-  publishPickerHeight(0);
+  // Only the owning instance resets — same gate as the watcher above.
+  if (props.mode === "input") publishPickerHeight(0);
 });
 
 const filteredEmojis = computed(() => {
