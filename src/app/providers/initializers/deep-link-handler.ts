@@ -1,21 +1,32 @@
 /**
  * Native deep-link delivery for Forta Chat.
  *
- * Android App Links / custom scheme URLs arrive through Capacitor's
- * `App.appUrlOpen` event. On a cold start the event fires *before* Vue, the
- * router, or Matrix are ready — so we buffer URLs until `registerDeepLinkHandlers`
- * is called from the app bootstrap path.
+ * Android App Links / iOS Universal Links / custom scheme URLs arrive through
+ * Capacitor's `App.appUrlOpen` event. On a cold start the event fires *before*
+ * Vue, the router, or Matrix are ready — so we buffer URLs until
+ * `registerDeepLinkHandlers` is called from the app bootstrap path.
+ *
+ * iOS cold-start has an additional wrinkle: `application(_:open:url:options:)`
+ * is delivered by UIKit synchronously during app launch, often *before* our JS
+ * has even imported `@capacitor/app`. Capacitor's listener mechanism drops
+ * events that have no live JS subscriber at the time they fire — so a cold-
+ * start Universal Link can be lost. We plug that hole by also calling
+ * `App.getLaunchUrl()` right before we attach the live listener. To avoid
+ * double-dispatch in the case where Capacitor *does* later replay the same
+ * URL through `appUrlOpen`, we keep a single-shot dedup slot covering the
+ * first few seconds after the cold-start URL is observed.
  *
  * Usage:
  *   - Call `setupDeepLinkHandler()` synchronously in `main.ts`, before any
- *     await. This just wires up the Capacitor listener.
+ *     await. This wires up the Capacitor listener (and on iOS, also drains the
+ *     cold-start launch URL).
  *   - Call `registerDeepLinkHandlers({ onInvite, onJoin })` once the router
  *     (and, if needed, auth/Matrix) can act on a deep link. Any URLs that
  *     arrived while we were still booting are delivered immediately.
  */
 
 import { parseDeepLink, type InviteTarget, type JoinTarget } from "@/shared/lib/parse-invite-url";
-import { isNative } from "@/shared/lib/platform";
+import { isIOS, isNative } from "@/shared/lib/platform";
 
 /** A URL "looks like ours" if it targets a forta host or uses the custom
  *  scheme — i.e. something the user clearly expected to open the app, but
@@ -62,9 +73,18 @@ export interface DeepLinkHandlers {
  *  (usually 0–1 URLs) and bounds the blast radius. */
 const MAX_PENDING_URLS = 16;
 
+/** Window in which a cold-start URL observed via `App.getLaunchUrl()` will
+ *  shadow a subsequent identical `appUrlOpen` replay. Long enough to cover
+ *  Capacitor's listener-attach race during boot, short enough that a genuine
+ *  user-initiated retap of the same link a few seconds later still routes. */
+const IOS_COLD_START_DEDUP_MS = 5_000;
+
 let pendingUrls: string[] = [];
 let handlers: DeepLinkHandlers | null = null;
 let listenerRegistered = false;
+/** Single-shot dedup slot. Set when the cold-start launch URL is observed via
+ *  `App.getLaunchUrl()`; cleared on consumption or after the window elapses. */
+let recentColdStartUrl: { url: string; at: number } | null = null;
 
 function dispatch(url: string, active: DeepLinkHandlers): void {
   // forta://share and friends are system signals from the iOS Share
@@ -96,13 +116,33 @@ function drainBuffer(active: DeepLinkHandlers): void {
   }
 }
 
-/** Called by the Capacitor listener (or tests) every time a new URL opens the app. */
-export function onDeepLinkOpen(url: string): void {
+/** Returns true if the URL matches the currently-armed cold-start dedup slot
+ *  (consuming it). Falls through if the slot is empty, expired, or holds a
+ *  different URL. */
+function consumeIfColdStartReplay(url: string): boolean {
+  if (!recentColdStartUrl) return false;
+  if (Date.now() - recentColdStartUrl.at > IOS_COLD_START_DEDUP_MS) {
+    recentColdStartUrl = null;
+    return false;
+  }
+  if (recentColdStartUrl.url === url) {
+    recentColdStartUrl = null;
+    return true;
+  }
+  return false;
+}
+
+function ingest(url: string, source: "listener" | "cold-start"): void {
   // Internal system URLs (forta://share) carry no payload of their own —
   // the side effect (waking the host app so the Capgo share-target plugin
   // can flush its UserDefaults) is what matters. Drop them before they
-  // can occupy a slot in the cold-start buffer.
+  // can occupy a slot in the cold-start buffer or arm the dedup slot.
   if (isInternalSystemUrl(url)) return;
+
+  // iOS only: if this URL arrived via the live listener and we already saw
+  // an identical URL through getLaunchUrl(), drop the replay.
+  if (source === "listener" && consumeIfColdStartReplay(url)) return;
+  if (source === "cold-start") recentColdStartUrl = { url, at: Date.now() };
 
   if (!handlers) {
     if (pendingUrls.length >= MAX_PENDING_URLS) {
@@ -115,8 +155,23 @@ export function onDeepLinkOpen(url: string): void {
   dispatch(url, handlers);
 }
 
+/** Called by the Capacitor `appUrlOpen` listener (or tests) every time a new
+ *  URL opens the app. */
+export function onDeepLinkOpen(url: string): void {
+  ingest(url, "listener");
+}
+
+/** Test-only: simulate the cold-start launch URL path that
+ *  `setupDeepLinkHandler` takes on iOS via `App.getLaunchUrl()`. Routes
+ *  through the same dedup-arming codepath as the production caller. */
+export function onColdStartLaunchUrlForTesting(url: string): void {
+  ingest(url, "cold-start");
+}
+
 /** Wire up the Capacitor listener. Safe to call once per app lifetime;
- *  subsequent calls are no-ops. */
+ *  subsequent calls are no-ops. On iOS we additionally drain the cold-start
+ *  launch URL via `App.getLaunchUrl()` to recover Universal Links that fired
+ *  before our JS listener was alive. */
 export function setupDeepLinkHandler(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
@@ -125,9 +180,19 @@ export function setupDeepLinkHandler(): void {
 
   // Lazy-import so the web bundle doesn't carry the native plugin's runtime.
   import("@capacitor/app")
-    .then(({ App }) => {
+    .then(async ({ App }) => {
+      // iOS-only cold-start recovery. Android's intent-filter pipeline replays
+      // through `appUrlOpen` reliably in Capacitor 8, so this stays gated.
+      if (isIOS) {
+        try {
+          const launch = await App.getLaunchUrl();
+          if (launch?.url) ingest(launch.url, "cold-start");
+        } catch (e) {
+          console.warn("[deep-link-handler] App.getLaunchUrl failed:", e);
+        }
+      }
       App.addListener("appUrlOpen", (event: { url: string }) => {
-        onDeepLinkOpen(event.url);
+        ingest(event.url, "listener");
       });
     })
     .catch((e) => {
@@ -151,4 +216,5 @@ export function resetDeepLinkHandlerForTesting(): void {
   pendingUrls = [];
   handlers = null;
   listenerRegistered = false;
+  recentColdStartUrl = null;
 }
