@@ -24,6 +24,8 @@
 		F0BA000100080000000000A2 /* IOSVoIPPushPlugin.m in Sources */ = {isa = PBXBuildFile; fileRef = F0BA000100080000000000A1 /* IOSVoIPPushPlugin.m */; };
 		F0BA000100090000000000A2 /* IOSCallAudioPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0BA000100090000000000A1 /* IOSCallAudioPlugin.swift */; };
 		F0BA0001000A0000000000A2 /* IOSCallAudioPlugin.m in Sources */ = {isa = PBXBuildFile; fileRef = F0BA0001000A0000000000A1 /* IOSCallAudioPlugin.m */; };
+		F0BA0001000B0000000000A2 /* IOSTorFilePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0BA0001000B0000000000A1 /* IOSTorFilePlugin.swift */; };
+		F0BA0001000C0000000000A2 /* IOSTorFilePlugin.m in Sources */ = {isa = PBXBuildFile; fileRef = F0BA0001000C0000000000A1 /* IOSTorFilePlugin.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -46,6 +48,8 @@
 		F0BA000100080000000000A1 /* IOSVoIPPushPlugin.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = IOSVoIPPushPlugin.m; sourceTree = "<group>"; };
 		F0BA000100090000000000A1 /* IOSCallAudioPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSCallAudioPlugin.swift; sourceTree = "<group>"; };
 		F0BA0001000A0000000000A1 /* IOSCallAudioPlugin.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = IOSCallAudioPlugin.m; sourceTree = "<group>"; };
+		F0BA0001000B0000000000A1 /* IOSTorFilePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSTorFilePlugin.swift; sourceTree = "<group>"; };
+		F0BA0001000C0000000000A1 /* IOSTorFilePlugin.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = IOSTorFilePlugin.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -95,6 +99,8 @@
 				F0BA000100080000000000A1 /* IOSVoIPPushPlugin.m */,
 				F0BA000100090000000000A1 /* IOSCallAudioPlugin.swift */,
 				F0BA0001000A0000000000A1 /* IOSCallAudioPlugin.m */,
+				F0BA0001000B0000000000A1 /* IOSTorFilePlugin.swift */,
+				F0BA0001000C0000000000A1 /* IOSTorFilePlugin.m */,
 				F0BA000100040000000000A0 /* Shared */,
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
@@ -202,6 +208,8 @@
 				F0BA000100080000000000A2 /* IOSVoIPPushPlugin.m in Sources */,
 				F0BA000100090000000000A2 /* IOSCallAudioPlugin.swift in Sources */,
 				F0BA0001000A0000000000A2 /* IOSCallAudioPlugin.m in Sources */,
+				F0BA0001000B0000000000A2 /* IOSTorFilePlugin.swift in Sources */,
+				F0BA0001000C0000000000A2 /* IOSTorFilePlugin.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
