@@ -29,6 +29,12 @@ vi.mock("@/shared/lib/connectivity", () => ({
   useConnectivity: vi.fn(() => ({ isOnline: { value: true } })),
 }));
 
+// Mock heic2any — happy path returns a JPEG blob; per-test overrides via
+// vi.mocked(heic2anyDefault).mockRejectedValueOnce(...) when needed.
+vi.mock("heic2any", () => ({
+  default: vi.fn(async () => new Blob(["jpegBytes"], { type: "image/jpeg" })),
+}));
+
 // Mock MatrixClientService with all needed methods
 const mockRedactEvent = vi.fn();
 const mockSendReaction = vi.fn(() => "$reaction_event_1");
@@ -527,5 +533,41 @@ describe("useMessages", () => {
       messaging.setTyping(true);
       expect(mockSetTyping).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ─── convertHeicToJpeg ────────────────────────────────────────────
+
+describe("convertHeicToJpeg", () => {
+  it("returns input file unchanged for non-HEIC MIME", async () => {
+    const { convertHeicToJpeg } = await import("./use-messages");
+    const file = new File(["abc"], "photo.jpg", { type: "image/jpeg" });
+    const out = await convertHeicToJpeg(file);
+    expect(out).toBe(file);
+  });
+
+  it("renames .heic file extension to .jpg", async () => {
+    const { convertHeicToJpeg } = await import("./use-messages");
+    const file = new File(["heicData"], "IMG_1234.heic", { type: "image/heic" });
+    const out = await convertHeicToJpeg(file);
+    expect(out.name).toBe("IMG_1234.jpg");
+    expect(out.type).toBe("image/jpeg");
+  });
+
+  it("renames .heif extension to .jpg, MIME image/jpeg", async () => {
+    const { convertHeicToJpeg } = await import("./use-messages");
+    const file = new File(["heifData"], "photo.HEIF", { type: "image/heif" });
+    const out = await convertHeicToJpeg(file);
+    expect(out.name).toBe("photo.jpg");
+    expect(out.type).toBe("image/jpeg");
+  });
+
+  it("falls back to original file if heic2any throws", async () => {
+    const heic2anyMod = await import("heic2any");
+    vi.mocked(heic2anyMod.default).mockRejectedValueOnce(new Error("unsupported"));
+    const { convertHeicToJpeg } = await import("./use-messages");
+    const file = new File(["heicData"], "broken.heic", { type: "image/heic" });
+    const out = await convertHeicToJpeg(file);
+    expect(out).toBe(file); // fail-open
   });
 });
