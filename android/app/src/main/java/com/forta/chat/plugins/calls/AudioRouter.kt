@@ -98,6 +98,42 @@ class AudioRouter private constructor(private val context: Context) {
             callAlive: Boolean,
             isRouterActive: Boolean,
         ): Boolean = isRouterActive && !callAlive
+
+        /**
+         * Pure predicate for the WEE-16 extended OEM mode-reapply window.
+         *
+         * Returns true when the periodic watchdog should re-apply
+         * MODE_IN_COMMUNICATION:
+         *   - The router still thinks routing is active.
+         *   - The OS reports a mode other than MODE_IN_COMMUNICATION,
+         *     which means something (typically an aggressive OEM ROM)
+         *     reset it after `start()` already applied the correct mode.
+         *
+         * Exposed at companion-object scope so it can be covered by a
+         * JVM-only JUnit test without Robolectric / mockk.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun shouldReapplyMode(
+            currentMode: Int,
+            isActive: Boolean,
+        ): Boolean = isActive && currentMode != AudioManager.MODE_IN_COMMUNICATION
+
+        /**
+         * WEE-16: schedule of re-apply ticks (in ms after `start()`).
+         *
+         * The original single 500 ms re-apply caught fast OEM resets
+         * (MIUI/RealmeUI/XOS) but missed slower resets observed on
+         * Huawei P70 / Xiaomi 12X — those reset MODE_IN_COMMUNICATION
+         * 1–5 s after acceptCall, leaving the user with one-way or
+         * fully silent audio. The schedule below covers that window
+         * without burning CPU on long-running calls (re-apply stops
+         * after the last tick because OEM resets are start-of-call
+         * behaviour — once the call survives the first ~8 s, audio
+         * mode stays stable for the rest of the session).
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun modeReapplyScheduleMs(): List<Long> =
+            listOf(500L, 1_500L, 3_500L, 7_500L)
     }
 
     enum class Device(val label: String) {
@@ -132,7 +168,17 @@ class AudioRouter private constructor(private val context: Context) {
     @Volatile private var coreListener: Listener? = null
     @Volatile private var uiListener: Listener? = null
     private var activeDevice: Device = Device.EARPIECE
-    private var isActive = false
+    // WEE-16: @Volatile so the periodic re-apply runnables observe a
+    // stop()/forceStop()-side write across threads. start()/stop()/
+    // forceStop() are invoked from arbitrary Capacitor plugin threads
+    // while the runnables run on the main handler. Without this barrier
+    // a runnable could see isActive=true after stop() set it to false
+    // and re-apply MODE_IN_COMMUNICATION on top of stop()'s MODE_NORMAL
+    // restore — exactly the regression the OEM-reset window is trying
+    // to prevent. The lifecycleLock around start/stop/forceStop gives
+    // mutual exclusion among themselves but does not synchronize with
+    // the lock-free runnables.
+    @Volatile private var isActive = false
     private var callType = "voice"
     private var bluetoothDeviceName: String? = null
 
@@ -142,7 +188,13 @@ class AudioRouter private constructor(private val context: Context) {
     // the device back into MODE_IN_COMMUNICATION. The orphan watchdog needs
     // the same cancel guarantee: stop()/forceStop() must remove it so a
     // healthy hangup does not later trigger a redundant forceStop.
-    private var reapplyRunnable: Runnable? = null
+    //
+    // WEE-16: a single 500ms re-apply only catches fast OEM resets (MIUI /
+    // RealmeUI / XOS). Slower resets observed on Huawei P70 / Xiaomi 12X
+    // (1–5 s after start) slipped through and left peers hearing silence.
+    // We now schedule the whole [modeReapplyScheduleMs] list and track
+    // every runnable here so stop()/forceStop() can cancel each one.
+    private val reapplyRunnables = mutableListOf<Runnable>()
     private var stopWatchdog: Runnable? = null
 
     private val deviceCallback = object : AudioDeviceCallback() {
@@ -194,18 +246,36 @@ class AudioRouter private constructor(private val context: Context) {
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         Log.d(LIFECYCLE_TAG, "start($callType): set mode=MODE_IN_COMMUNICATION, initial active=$activeDevice")
 
-        // OEM fix: Some Chinese ROMs (MIUI, RealmeUI, XOS) reset audio mode
-        // asynchronously after init. Re-apply after a short delay to catch resets.
-        // Stored as a field so stop() / forceStop() can cancel it on fast hangups.
-        reapplyRunnable?.let { mainHandler.removeCallbacks(it) }
-        val reapply = Runnable {
-            if (isActive && audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
-                Log.w(LIFECYCLE_TAG, "Audio mode was reset by system — re-applying MODE_IN_COMMUNICATION")
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        // OEM fix: Some Chinese ROMs (MIUI, RealmeUI, XOS, HyperOS, EMUI,
+        // HarmonyOS) reset audio mode asynchronously after init. WEE-16:
+        // a single 500ms re-apply caught fast OEMs but missed slower resets
+        // on Huawei P70 / Xiaomi 12X (1–5s after start), leaving the peer
+        // with one-way or fully silent audio. We schedule the whole
+        // [modeReapplyScheduleMs] list; each runnable is stored so stop()
+        // / forceStop() can cancel any that haven't fired yet on hangup.
+        cancelReapplyRunnables()
+        for (delayMs in modeReapplyScheduleMs()) {
+            val reapply = Runnable {
+                // Wrap the WHOLE body — `audioManager.mode` getter is
+                // documented to throw SecurityException on the exact
+                // OEM ROMs we're trying to recover (MIUI privacy shield,
+                // Huawei AudioRecord guard). Letting that escape into
+                // the main handler crashes the process.
+                try {
+                    if (shouldReapplyMode(audioManager.mode, isActive)) {
+                        Log.w(
+                            LIFECYCLE_TAG,
+                            "Audio mode reset detected at +${delayMs}ms — re-applying MODE_IN_COMMUNICATION",
+                        )
+                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    }
+                } catch (e: Exception) {
+                    Log.w(LIFECYCLE_TAG, "Re-apply tick at +${delayMs}ms threw", e)
+                }
             }
+            reapplyRunnables.add(reapply)
+            mainHandler.postDelayed(reapply, delayMs)
         }
-        reapplyRunnable = reapply
-        mainHandler.postDelayed(reapply, 500)
 
         // Session 54: orphan-call watchdog. If the JS finalize never runs
         // (process killed by OEM Doze / battery-saver between hangup and
@@ -269,14 +339,14 @@ class AudioRouter private constructor(private val context: Context) {
         isActive = false
 
         // Session 54: cancel the orphan watchdog and the OEM re-apply
-        // runnable before tearing down. Without these removeCallbacks,
+        // runnables before tearing down. Without these removeCallbacks,
         // a healthy hangup followed by an immediate new call would see
-        // the previous call's watchdog still scheduled, and a 500ms
-        // re-apply could fire after the new start() had set the mode.
+        // the previous call's watchdog still scheduled, and any pending
+        // re-apply tick could fire after the new start() had set the mode.
+        // WEE-16: the single runnable is now a list (modeReapplyScheduleMs).
         stopWatchdog?.let { mainHandler.removeCallbacks(it) }
         stopWatchdog = null
-        reapplyRunnable?.let { mainHandler.removeCallbacks(it) }
-        reapplyRunnable = null
+        cancelReapplyRunnables()
 
         // Session 23: previously a single call chain. If
         // unregisterAudioDeviceCallback or BT SCO teardown threw, the
@@ -320,6 +390,18 @@ class AudioRouter private constructor(private val context: Context) {
 
             Log.d(LIFECYCLE_TAG, "stop(): set mode=MODE_NORMAL, cleared comm device")
         }
+    }
+
+    /**
+     * WEE-16: remove every pending OEM-mode re-apply runnable from the
+     * main handler and clear the tracking list. Idempotent — calling
+     * twice (start() → start() before stop()) is a no-op on the second
+     * call because the list is empty.
+     */
+    private fun cancelReapplyRunnables() {
+        if (reapplyRunnables.isEmpty()) return
+        for (r in reapplyRunnables) mainHandler.removeCallbacks(r)
+        reapplyRunnables.clear()
     }
 
     /**
@@ -368,11 +450,11 @@ class AudioRouter private constructor(private val context: Context) {
         // Session 54: same cancellation as stop() — the watchdog itself
         // may have triggered this forceStop, but a no-op removeCallbacks
         // on the currently-executing Runnable is safe and prevents the
-        // (cancelled) reapply runnable from outliving us.
+        // (cancelled) reapply runnables from outliving us. WEE-16: the
+        // single runnable is now a list (modeReapplyScheduleMs).
         stopWatchdog?.let { mainHandler.removeCallbacks(it) }
         stopWatchdog = null
-        reapplyRunnable?.let { mainHandler.removeCallbacks(it) }
-        reapplyRunnable = null
+        cancelReapplyRunnables()
 
         try { audioManager.unregisterAudioDeviceCallback(deviceCallback) } catch (_: Exception) {}
 
