@@ -12,6 +12,7 @@ import android.telecom.TelecomManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.forta.chat.plugins.calls.CallConnectionService
+import com.forta.chat.plugins.calls.CallNotificationConfig
 import com.forta.chat.plugins.calls.CancelledCallStore
 import com.forta.chat.plugins.calls.IncomingCallActivity
 import com.forta.chat.plugins.calls.InviteThrottleGuard
@@ -47,19 +48,45 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 }
             )
         }
-        if (nm.getNotificationChannel(CHANNEL_CALLS) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_CALLS, getString(R.string.channel_calls), NotificationManager.IMPORTANCE_MAX).apply {
-                    description = getString(R.string.channel_calls_desc)
-                    enableVibration(true)
+
+        // WEE-18 / forta-bugs#768: NotificationChannel settings are
+        // immutable after first creation. v1.x created the "calls"
+        // channel without an explicit ringtone, and on Xiaomi MIUI the
+        // channel was preserved silent across upgrades, so every
+        // incoming push arrived without a ring. Migrate to a fresh id
+        // and remove the legacy ones so the new ringtone/lockscreen/DND
+        // settings take effect for everyone.
+        for (legacyId in CallNotificationConfig.LEGACY_INCOMING_CALL_CHANNEL_IDS) {
+            if (nm.getNotificationChannel(legacyId) != null) {
+                try {
+                    nm.deleteNotificationChannel(legacyId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to delete legacy channel $legacyId", e)
+                }
+            }
+        }
+        if (nm.getNotificationChannel(CallNotificationConfig.INCOMING_CALL_CHANNEL_ID) == null) {
+            val spec = CallNotificationConfig.incomingCallChannelSpec(
+                name = getString(R.string.channel_incoming_calls),
+                description = getString(R.string.channel_incoming_calls_desc),
+            )
+            val channel = NotificationChannel(spec.id, spec.name, spec.importance).apply {
+                description = spec.description
+                enableVibration(spec.withVibration)
+                lockscreenVisibility = spec.lockscreenVisibility
+                setBypassDnd(spec.bypassDnd)
+                setShowBadge(true)
+                if (spec.withRingtone) {
                     setSound(
                         RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
                         android.media.AudioAttributes.Builder()
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
                             .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                            .build()
+                            .build(),
                     )
                 }
-            )
+            }
+            nm.createNotificationChannel(channel)
         }
     }
 
@@ -301,10 +328,11 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         // This is the only ringer path that survives Android 10+ killed-app
         // background-startActivity restrictions (no exception thrown — the
         // launch is silently dropped). Posting the notification with
-        // setFullScreenIntent + CHANNEL_CALLS (IMPORTANCE_MAX, ringtone)
+        // setFullScreenIntent + the migrated incoming-call channel
+        // (IMPORTANCE_MAX, explicit ringtone, lockscreen-public, bypass-DND)
         // wakes the screen and rings reliably from the locked screen on
         // every device the system grants USE_FULL_SCREEN_INTENT to.
-        showSimpleCallNotification(roomId, callerName)
+        showSimpleCallNotification(roomId, callerName, callId)
 
         // Best-effort additional path: when the process is in foreground or
         // recently stopped, startActivity succeeds and the user gets the
@@ -343,28 +371,96 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         }
     }
 
-    private fun showSimpleCallNotification(roomId: String, callerName: String) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            putExtra(EXTRA_PUSH_ROOM_ID, roomId)
-            putExtra("push_call", true)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    private fun showSimpleCallNotification(roomId: String, callerName: String, callId: String) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        // WEE-18 / forta-bugs#768: on Android 14+ (API 34) USE_FULL_SCREEN_INTENT
+        // is a special permission users grant via Settings. Without it the
+        // FSI silently degrades to a heads-up. Log so we can correlate
+        // user reports against missing permission rather than channel
+        // settings. The notification still posts — action buttons remain
+        // tappable from the heads-up, and the foreground startActivity
+        // attempt that follows in showCallNotification is the fallback
+        // ringer path for the killed-process case.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            !nm.canUseFullScreenIntent()
+        ) {
+            Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted; incoming-call notification will appear heads-up only")
         }
-        val pendingIntent = PendingIntent.getActivity(
-            this, "call_$roomId".hashCode(), intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
+        // WEE-18 / forta-bugs#308, #268: route both the content tap and
+        // the full-screen-intent through IncomingCallActivity directly.
+        // The previous design opened MainActivity with `push_call=true`,
+        // which lifted the WebView but left no ringer surface — users
+        // tapped the notification, saw the chat list, and had to guess
+        // that a call had been ringing.
+        val ringerIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("roomId", roomId)
+            putExtra("hasVideo", false)
+        }
+        val ringerPendingIntent = PendingIntent.getActivity(
+            this, "call_$roomId".hashCode(), ringerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(this, CHANNEL_CALLS)
+
+        // Accept / decline action buttons. Tapping them in the shade
+        // launches IncomingCallActivity with an action= extra, which
+        // dispatches the answer/reject flow and dismisses the ringer
+        // notification (#751). Using distinct request codes so the
+        // PendingIntent flags can update independently per-callId.
+        val acceptIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("roomId", roomId)
+            putExtra("hasVideo", false)
+            putExtra("action", "accept")
+        }
+        val acceptPendingIntent = PendingIntent.getActivity(
+            this, "call_accept_$roomId".hashCode(), acceptIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val declineIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("roomId", roomId)
+            putExtra("hasVideo", false)
+            putExtra("action", "decline")
+        }
+        val declinePendingIntent = PendingIntent.getActivity(
+            this, "call_decline_$roomId".hashCode(), declineIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(this, CallNotificationConfig.INCOMING_CALL_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(callerName)
             .setContentText(getString(R.string.push_incoming_call))
             .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(ringerPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setFullScreenIntent(pendingIntent, true)
+            .setFullScreenIntent(ringerPendingIntent, true)
             .setOngoing(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(
+                R.drawable.ic_call_accept,
+                getString(R.string.call_accept),
+                acceptPendingIntent,
+            )
+            .addAction(
+                R.drawable.ic_call_end,
+                getString(R.string.call_decline),
+                declinePendingIntent,
+            )
             .build()
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(NOTIF_TAG, "call_$roomId".hashCode(), notification)
     }
 
@@ -387,7 +483,6 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         private const val TAG = "FortaPush"
         const val PREFS_NAME = "forta_push"
         const val CHANNEL_MESSAGES = "messages"
-        const val CHANNEL_CALLS = "calls"
         const val NOTIF_TAG = "forta_push"
         const val EXTRA_PUSH_ROOM_ID = "push_room_id"
         const val EXTRA_PUSH_EVENT_ID = "push_event_id"

@@ -158,6 +158,28 @@ class IncomingCallActivity : Activity() {
         handler.postDelayed(countdownRunnable, 1000)
     }
 
+    /**
+     * Re-dispatch action extras when the system delivers a new Intent to
+     * an already-resident instance.
+     *
+     * The notification's Accept / Decline action buttons (added in the
+     * FCM service for WEE-18) launch this Activity with
+     * launchMode="singleTop", so when the ringer is already visible the
+     * tap arrives via onNewIntent rather than a fresh onCreate. Without
+     * this override the action= extra would be silently ignored and the
+     * shade button would behave like a no-op (#751 backslide path).
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+
+        val action = intent.getStringExtra("action")
+        if (action == "accept" || action == "decline") {
+            Log.d(TAG, "onNewIntent: dispatching action=$action on resident instance")
+            if (action == "accept") accept() else decline()
+        }
+    }
+
     private fun accept() {
         Log.d(TAG, "Accept pressed")
         cleanup()
