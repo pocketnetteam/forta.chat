@@ -3,6 +3,8 @@ import { isNative } from "@/shared/lib/platform";
 import { getRealGetUserMedia } from "@/shared/lib/native-webrtc";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
+import { classifyMicError, sendDiag, SendError } from "./send-errors";
+import { reportSendError } from "./send-error-bus";
 
 export type RecorderState = "idle" | "recording" | "locked" | "preview";
 
@@ -37,6 +39,7 @@ export function useVoiceRecorder() {
 
   const startRecording = async () => {
     try {
+      sendDiag("voice:start");
       const t0 = Date.now();
       const gum = (isNative && getRealGetUserMedia()) || navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
       audioStream = await gum({
@@ -47,15 +50,20 @@ export function useVoiceRecorder() {
         },
       });
 
-      // Validate we got real audio tracks (not dummy from WebRTC proxy)
+      // Validate we got real audio tracks (not dummy from WebRTC proxy).
+      // An empty track list is observable both when RECORD_AUDIO is silently
+      // revoked on Android and when the WebRTC bridge returns a dummy stream
+      // mid-call. Either way the user gets nothing — surface it as micDenied
+      // so the banner appears instead of a silent state reset.
       const audioTracks = audioStream.getAudioTracks();
       if (audioTracks.length === 0 || !audioTracks[0].enabled) {
         console.error("[VoiceRecorder] No usable audio tracks — count:", audioTracks.length, "enabled:", audioTracks[0]?.enabled);
         audioStream.getTracks().forEach(t => t.stop());
         cleanup();
+        reportSendError(new SendError("micDenied", "No usable audio tracks available", { kind: "audio" }));
         return;
       }
-      console.log("[VoiceRecorder] Started with", audioTracks.length, "audio track(s)");
+      sendDiag("voice:tracks-ok", { count: audioTracks.length });
 
       audioChunks = [];
 
@@ -105,7 +113,19 @@ export function useVoiceRecorder() {
       }, 50);
     } catch (e) {
       console.error("Failed to start recording:", e);
-      useBugReport().open({ context: tRaw("bugReport.ctx.voiceRecord"), error: e });
+      const classified = classifyMicError(e);
+      sendDiag("voice:start-failed", { kind: classified.kind });
+      // micDenied is the user-actionable case (Settings → Permissions →
+      // Microphone). Show a typed banner instead of the bug-report modal so
+      // the user knows what to do. Everything else still routes to the bug
+      // report so we get the stack on the unhappy paths we don't yet know
+      // about.
+      if (classified.kind === "micDenied") {
+        reportSendError(classified);
+      } else {
+        reportSendError(classified);
+        useBugReport().open({ context: tRaw("bugReport.ctx.voiceRecord"), error: e });
+      }
       cleanup();
     }
   };

@@ -14,6 +14,7 @@ import EmojiPicker from "./EmojiPicker.vue";
 import AttachmentPanel from "./AttachmentPanel.vue";
 import MediaPreview from "./MediaPreview.vue";
 import PollCreator from "./PollCreator.vue";
+import SendErrorBanner from "./SendErrorBanner.vue";
 import { useVoiceRecorder } from "../model/use-voice-recorder";
 import { useVideoCircleRecorder } from "../model/use-video-circle-recorder";
 import { useMentionAutocomplete } from "../model/use-mention-autocomplete";
@@ -890,6 +891,10 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
 <template>
   <div ref="inputRootRef" class="relative border-t border-neutral-grad-0 bg-background-total-theme">
+    <!-- Send error banner (WEE-20): permission/upload/queue failures from
+         sendFile/sendImage/sendAudio + voice recorder are routed here via
+         the send-error bus so they stop disappearing silently. -->
+    <SendErrorBanner />
     <!-- Editing bar -->
     <div class="input-bar-grid" :class="{ 'input-bar-grid--open': isEditing }">
       <div class="input-bar-grid-inner">

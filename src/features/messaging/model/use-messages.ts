@@ -18,6 +18,8 @@ import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
+import { SendError, sendDiag } from "./send-errors";
+import { reportSendError } from "./send-error-bus";
 
 /** Per-phase media pipeline timeouts. Splitting the old single 5-minute cap
  *  lets us surface phase-specific failures (e.g. crypto hang vs upload stall)
@@ -354,11 +356,16 @@ export function useMessages() {
     file: File,
     options: { forwardedFrom?: { senderId: string; senderName?: string } } = {},
   ): Promise<boolean> => {
+    sendDiag("file:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return false;
+    if (!roomId || !file) {
+      sendDiag("file:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
 
     if (file.size > MAX_UPLOAD_SIZE) {
       console.warn(`[use-messages] File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      reportSendError(new SendError("fileTooLarge", `File too large: ${file.name}`, { fileName: file.name, kind: "file" }, false));
       return false;
     }
 
@@ -368,7 +375,11 @@ export function useMessages() {
     const processedFile = await convertHeicToJpeg(file);
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return false;
+    if (!matrixService.isReady()) {
+      sendDiag("file:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
+      return false;
+    }
 
     // Determine message type from MIME (with fallback for HEIC/extension-only files)
     const mime = normalizeMime(resolveMime(processedFile));
@@ -380,6 +391,7 @@ export function useMessages() {
       // Without Dexie we have no crash-safe queue — dropping the send is
       // safer than leaking a never-completing toast on a dead pipeline.
       console.error("[use-messages] sendFile: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "file" }));
       URL.revokeObjectURL(localBlobUrl);
       return false;
     }
@@ -423,6 +435,7 @@ export function useMessages() {
       },
       localMsg.clientId,
     );
+    sendDiag("file:enqueued", { clientId: localMsg.clientId });
     return true;
   };
 
@@ -436,11 +449,16 @@ export function useMessages() {
       forwardedFrom?: { senderId: string; senderName?: string };
     } = {},
   ): Promise<boolean> => {
+    sendDiag("image:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return false;
+    if (!roomId || !file) {
+      sendDiag("image:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
 
     if (file.size > MAX_UPLOAD_SIZE) {
       console.warn(`[use-messages] Image too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      reportSendError(new SendError("fileTooLarge", `Image too large: ${file.name}`, { fileName: file.name, kind: "image" }, false));
       return false;
     }
 
@@ -450,7 +468,11 @@ export function useMessages() {
     const processedFile = await convertHeicToJpeg(file);
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return false;
+    if (!matrixService.isReady()) {
+      sendDiag("image:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "image" }));
+      return false;
+    }
 
     const dimensions = await getImageDimensions(processedFile);
     const imageMime = resolveMime(processedFile);
@@ -458,6 +480,7 @@ export function useMessages() {
 
     if (!isChatDbReady()) {
       console.error("[use-messages] sendImage: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "image" }));
       URL.revokeObjectURL(localBlobUrl);
       return false;
     }
@@ -513,6 +536,7 @@ export function useMessages() {
       },
       localMsg.clientId,
     );
+    sendDiag("image:enqueued", { clientId: localMsg.clientId });
     return true;
   };
 
@@ -526,17 +550,26 @@ export function useMessages() {
       forwardedFrom?: { senderId: string; senderName?: string };
     } = {},
   ): Promise<boolean> => {
+    sendDiag("audio:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return false;
+    if (!roomId || !file) {
+      sendDiag("audio:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return false;
+    if (!matrixService.isReady()) {
+      sendDiag("audio:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "audio" }));
+      return false;
+    }
 
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
 
     if (!isChatDbReady()) {
       console.error("[use-messages] sendAudio: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "audio" }));
       URL.revokeObjectURL(localBlobUrl);
       return false;
     }
@@ -590,6 +623,7 @@ export function useMessages() {
       },
       localMsg.clientId,
     );
+    sendDiag("audio:enqueued", { clientId: localMsg.clientId });
     return true;
   };
 
