@@ -868,6 +868,20 @@ export const en = {
   "errors.networkBlocked": "Server unreachable. Try enabling Tor or a VPN.",
   "errors.cryptoNotReady": "Encryption keys are still loading. Please wait.",
   "errors.missingUrl": "File is corrupted or never arrived. Ask the sender to resend.",
+
+  // ── Send errors (WEE-20) ──
+  "errors.send.permissionDenied": "No access to files. Grant access in app settings.",
+  "errors.send.micDenied": "No access to the microphone. Grant access in app settings.",
+  "errors.send.pickerCancelled": "No file selected.",
+  "errors.send.fileTooLarge": "File too large (max 100 MB).",
+  "errors.send.dbNotReady": "Local database is not ready yet. Wait and try again.",
+  "errors.send.matrixNotReady": "Connection is not ready yet. Wait and try again.",
+  "errors.send.cryptoNotReady": "Encryption keys are still loading. Please wait.",
+  "errors.send.uploadFailed": "Failed to send. Check the connection and try again.",
+  "errors.send.queueStuck": "Send queue is stuck. Restart the app.",
+  "errors.send.unknown": "Failed to send. Please try again.",
+  "errors.send.dismiss": "Dismiss",
+  "errors.send.retry": "Retry",
 } as const;
 
 export type TranslationKey = keyof typeof en;

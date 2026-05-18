@@ -870,4 +870,18 @@ export const ru: Record<TranslationKey, string> = {
   "errors.networkBlocked": "Сервер недоступен. Попробуйте включить Tor или VPN.",
   "errors.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
   "errors.missingUrl": "Файл повреждён или не пришёл с источника. Попросите отправителя прислать ещё раз.",
+
+  // ── Ошибки отправки сообщений (WEE-20) ──
+  "errors.send.permissionDenied": "Нет доступа к файлам. Разрешите доступ в настройках приложения.",
+  "errors.send.micDenied": "Нет доступа к микрофону. Разрешите доступ в настройках приложения.",
+  "errors.send.pickerCancelled": "Файл не выбран.",
+  "errors.send.fileTooLarge": "Файл слишком большой (максимум 100 МБ).",
+  "errors.send.dbNotReady": "Локальная база ещё не готова. Подождите и попробуйте снова.",
+  "errors.send.matrixNotReady": "Соединение ещё не установлено. Подождите и попробуйте снова.",
+  "errors.send.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
+  "errors.send.uploadFailed": "Не удалось отправить. Проверьте соединение и попробуйте снова.",
+  "errors.send.queueStuck": "Очередь отправки зависла. Перезапустите приложение.",
+  "errors.send.unknown": "Не удалось отправить. Попробуйте снова.",
+  "errors.send.dismiss": "Закрыть",
+  "errors.send.retry": "Повторить",
 };

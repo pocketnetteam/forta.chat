@@ -165,6 +165,47 @@ export class SyncEngine {
     this.onChange = cb;
   }
 
+  /**
+   * Snapshot of the outbound queue used by the UI banner to detect stuck sends.
+   *
+   * `oldestPendingAgeMs` is `null` when the queue has no due ops. When it is
+   * large the UI can warn the user that something is wedged — e.g. crypto
+   * never resolved or media server is unreachable — instead of leaving them
+   * staring at "sending…" forever.
+   *
+   * Why exposed as a polled snapshot and not a Dexie live-query:
+   *  - The caller (status banner) is allowed to be eventually consistent;
+   *    polling once every few seconds is cheaper than a hot live-query that
+   *    fires on every progress write.
+   *  - Keeps the SyncEngine's public surface minimal — Dexie tables are
+   *    internal state.
+   */
+  async getQueueHealth(): Promise<{
+    pendingCount: number;
+    failedCount: number;
+    syncingCount: number;
+    oldestPendingAgeMs: number | null;
+  }> {
+    const [pending, failed, syncing] = await Promise.all([
+      this.db.pendingOps.where("status").equals("pending").toArray(),
+      this.db.pendingOps.where("status").equals("failed").count(),
+      this.db.pendingOps.where("status").equals("syncing").count(),
+    ]);
+    const now = Date.now();
+    let oldest: number | null = null;
+    for (const op of pending) {
+      const created = op.createdAt ?? op.lastAttemptAt ?? now;
+      const age = now - created;
+      if (oldest === null || age > oldest) oldest = age;
+    }
+    return {
+      pendingCount: pending.length,
+      failedCount: failed,
+      syncingCount: syncing,
+      oldestPendingAgeMs: oldest,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Queue processing
   // ---------------------------------------------------------------------------
