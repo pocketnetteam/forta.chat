@@ -62,6 +62,18 @@ vi.mock("@/shared/lib/matrix/functions", () => ({
   hexEncode: vi.fn((s: string) => s),
 }));
 
+// --- Matrix client service mock ---
+// `getMatrixClientService().mxcToHttp(mxc)` resolves an mxc:// URI to an HTTP
+// download URL. Tests can override the implementation per case via
+// `mockMxcToHttp.mockImplementation(...)` to simulate baseUrl changes between
+// retry attempts (the fresh-resolve regression for WEE-17).
+const mockMxcToHttp: Mock = vi.fn((mxc: string) =>
+  mxc.startsWith("mxc://") ? `https://homeserver.example/_matrix/media/r0/download/${mxc.slice(6)}` : null,
+);
+vi.mock("@/entities/matrix", () => ({
+  getMatrixClientService: vi.fn(() => ({ mxcToHttp: mockMxcToHttp })),
+}));
+
 // --- Bug report & i18n mocks (called on download errors) ---
 vi.mock("@/features/bug-report", () => ({
   useBugReport: vi.fn(() => ({ open: vi.fn() })),
@@ -122,6 +134,11 @@ describe("useFileDownload", () => {
     setMockPcrypto(null);
     // Reset toast dedup so repeated-failure tests start from a clean slate.
     _resetToastDedupForTests();
+    // Restore the default mxc → http resolver so per-test overrides do not
+    // leak into subsequent cases.
+    mockMxcToHttp.mockImplementation((mxc: string) =>
+      mxc.startsWith("mxc://") ? `https://homeserver.example/_matrix/media/r0/download/${mxc.slice(6)}` : null,
+    );
   });
 
   describe("saveFile — web platform", () => {
@@ -454,6 +471,18 @@ describe("useFileDownload", () => {
       expect(withQuery).toMatch(/^https:\/\/example\.com\/file\.pdf\?token=abc&cb=/);
     });
 
+    it("does NOT mangle blob:/data: URLs with cache-bust (those schemes do not accept query strings)", () => {
+      // Regression safety net for WEE-17 review: appending `?cb=` to a blob:
+      // URL breaks the URL grammar and the next fetch would fail spuriously.
+      // blob: / data: have no HTTP cache layer to bust anyway.
+      expect(appendCacheBust("blob:http://localhost/abc-123", 1)).toBe(
+        "blob:http://localhost/abc-123",
+      );
+      expect(appendCacheBust("data:image/png;base64,iVBORw0KGgo=", 2)).toBe(
+        "data:image/png;base64,iVBORw0KGgo=",
+      );
+    });
+
     it("retry attempts produce distinct cache-bust values", () => {
       const a = appendCacheBust("https://example.com/file.pdf", 1);
       const b = appendCacheBust("https://example.com/file.pdf", 2);
@@ -739,6 +768,223 @@ describe("useFileDownload", () => {
       });
       scope.stop();
     }, 30_000);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // WEE-17: mxc:// → http resolve before fetch
+    //
+    // Matrix encrypted attachments arrive with `fileInfo.url = "mxc://..."`
+    // (parseFileInfo preserves the canonical Matrix URI). `fetch("mxc://...")`
+    // throws `TypeError: Failed to fetch` immediately in Capacitor's WebView
+    // shim, and cache-bust alone cannot rescue it — every retry attempt would
+    // fetch the same un-resolvable scheme.
+    //
+    // Closes forta-bugs#776 #763 #648 #513 #475 #441 #373 — the largest media
+    // failure cluster on the bug board.
+    // ─────────────────────────────────────────────────────────────────────
+    it("resolves mxc:// URLs to http via matrixService.mxcToHttp before fetch (WEE-17)", async () => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_mxc",
+          _key: "client_mxc",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "photo.jpg",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "image",
+          fileInfo: {
+            name: "photo.jpg",
+            type: "image/jpeg",
+            size: 1024,
+            url: "mxc://matrix.bastyon.com/abc123",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // The Matrix client must have been consulted to translate mxc → http.
+        expect(mockMxcToHttp).toHaveBeenCalledWith("mxc://matrix.bastyon.com/abc123");
+        // fetch must NOT have been called with the raw mxc:// URI (that would
+        // throw TypeError: Failed to fetch on every retry).
+        const [firstUrl] = (global.fetch as Mock).mock.calls[0];
+        expect(firstUrl).not.toMatch(/^mxc:\/\//);
+        expect(firstUrl).toBe("https://homeserver.example/_matrix/media/r0/download/matrix.bastyon.com/abc123");
+      });
+      scope.stop();
+    });
+
+    it("does NOT call mxcToHttp for http/https URLs (already resolved)", async () => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_http",
+          _key: "client_http",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "https://example.com/file.pdf",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        expect(mockMxcToHttp).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("re-resolves mxc:// on every retry attempt — picks up homeserver baseUrl changes (WEE-17 H2)", async () => {
+      // First attempt fails with Failed-to-fetch (region block / stale CDN);
+      // before the second attempt, the Matrix client has reconfigured its
+      // baseUrl (e.g. failover from one media server to another). A fresh
+      // resolve must happen so the second fetch goes to the new homeserver
+      // instead of replaying the same stale URL.
+      (global.fetch as Mock)
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+        });
+
+      // Different homeserver URLs on each resolve.
+      mockMxcToHttp
+        .mockReturnValueOnce("https://old.example/_matrix/media/r0/download/server/file")
+        .mockReturnValueOnce("https://new.example/_matrix/media/r0/download/server/file");
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_refresh",
+          _key: "client_refresh",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "mxc://server/file",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // mxcToHttp must have been consulted twice — once per attempt — so a
+        // baseUrl change between retries is picked up.
+        expect(mockMxcToHttp).toHaveBeenCalledTimes(2);
+        const calls = (global.fetch as Mock).mock.calls;
+        expect(calls[0][0]).toMatch(/^https:\/\/old\.example\//);
+        // Second attempt uses the new baseUrl (with cache-bust appended).
+        expect(calls[1][0]).toMatch(/^https:\/\/new\.example\/.+\?cb=/);
+      });
+      scope.stop();
+    }, 15_000);
+
+    it("treats mxcToHttp throwing the same as returning null (cold-start Matrix client)", async () => {
+      mockMxcToHttp.mockImplementation(() => {
+        throw new Error("Client not initialized");
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt_throw",
+          _key: "client_throw",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "mxc://server/file",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // Throw collapses to the same MediaUnavailableError fast-fail path —
+        // a throwing Matrix client should not cause an unhandled rejection.
+        expect((global.fetch as Mock).mock.calls.length).toBe(0);
+        expect(getState("client_throw").errorKind).toBe("network");
+      });
+      scope.stop();
+    });
+
+    it("throws MediaUnavailableError when mxcToHttp returns null (no Matrix client)", async () => {
+      mockMxcToHttp.mockReturnValue(null);
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt_unresolved",
+          _key: "client_unresolved",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "mxc://server/file",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // Resolve failure is terminal — do NOT burn the retry budget on
+        // something that cannot be retried.
+        expect((global.fetch as Mock).mock.calls.length).toBe(0);
+        expect(getState("client_unresolved").errorKind).toBe("network");
+        // User sees the typed "media unavailable" toast, not a generic error.
+        expect(mockToast).toHaveBeenCalledWith(
+          "errors.mediaUnavailable",
+          "error",
+          expect.any(Number),
+        );
+      });
+      scope.stop();
+    });
 
     it("does not retry on 404 (fast-fail)", async () => {
       (global.fetch as Mock).mockResolvedValue({

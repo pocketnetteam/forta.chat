@@ -1,6 +1,7 @@
 import { ref, onScopeDispose, type Ref } from "vue";
 import { useAuthStore } from "@/entities/auth";
 import type { FileInfo, Message } from "@/entities/chat";
+import { getMatrixClientService } from "@/entities/matrix";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { isNative, isElectron, isAndroid } from "@/shared/lib/platform";
@@ -252,11 +253,44 @@ let cacheBustCounter = 0;
  *  we've already seen a confirmed miss, and polluting the canonical URL
  *  hurts CDN hit rates. Retries (`attempt >= 1`) get a unique `cb=` so
  *  Service Workers, browser HTTP cache, and intermediate proxies all
- *  re-resolve instead of replaying the prior failure. */
+ *  re-resolve instead of replaying the prior failure.
+ *
+ *  `blob:` and `data:` URIs are left untouched: query strings are not part of
+ *  their grammar, so appending `?cb=...` would mangle the URL and break the
+ *  fetch. Those schemes also bypass HTTP caches by construction — there is
+ *  nothing to bust. */
 export function appendCacheBust(url: string, attempt: number): string {
   if (attempt <= 0) return url;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return url;
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}cb=${Date.now()}_${++cacheBustCounter}`;
+}
+
+/** Resolve a Matrix `mxc://` URI to an HTTP download URL via the active
+ *  Matrix client. Non-mxc inputs (`https://`, `blob:`, `data:`) pass through
+ *  unchanged — those are already directly fetchable.
+ *
+ *  Returns `null` only when the input is `mxc://` and the Matrix client
+ *  cannot resolve it (no client / no baseUrl). Callers treat null as a
+ *  terminal media-unavailable failure: nothing the retry loop can do.
+ *
+ *  Called fresh on every retry attempt so transient client state changes
+ *  (homeserver baseUrl rotation, access-token refresh) take effect between
+ *  attempts. Historically the download path passed `fileInfo.url` straight
+ *  to `fetch`, and for encrypted attachments from non-Bastyon clients
+ *  (Element / Cinny / forwarded messages) that URL is `mxc://...`, which
+ *  Capacitor's WebView shim rejects with `TypeError: Failed to fetch`. That
+ *  one missing translation accounts for the largest media-failure cluster
+ *  on the bug board (forta-bugs #776 #763 #648 #513 #475 #441 #373). */
+export function resolveMediaUrl(url: string): string | null {
+  if (!url.startsWith("mxc://")) return url;
+  try {
+    return getMatrixClientService().mxcToHttp(url);
+  } catch {
+    // Matrix service not yet initialised (cold start race) — treat as a
+    // resolve miss; the outer error path surfaces MediaUnavailableError.
+    return null;
+  }
 }
 
 /** True for failures that look like a network/server issue we should label
@@ -347,9 +381,20 @@ async function downloadAndDecrypt(
 
     try {
       // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls).
+      // Resolve mxc:// → http on every attempt so a fresh homeserver baseUrl /
+      // access-token rotation takes effect between retries. Without this,
+      // encrypted attachments from non-Bastyon clients (forta-bugs #776 #763
+      // #648 #513 #475 #441 #373) carry raw mxc:// URIs that fetch() rejects
+      // with TypeError: Failed to fetch on every attempt.
       // On retry attempts, append a cache-bust so Service Workers / CDN edges
       // don't replay the prior failure response (issues #648, #641, #637).
-      const fetchUrl = appendCacheBust(fileInfo.url, attempt);
+      const resolvedUrl = resolveMediaUrl(fileInfo.url);
+      if (resolvedUrl === null) {
+        // Cannot translate mxc:// — Matrix client missing or unknown baseUrl.
+        // This is terminal: the retry budget will hit the same null every time.
+        throw new MediaUnavailableError(fileInfo.url);
+      }
+      const fetchUrl = appendCacheBust(resolvedUrl, attempt);
       const response = await fetchWithTimeout(fetchUrl, signal);
       if (!response.ok) {
         const err = new Error(`Download failed: ${response.status}`);
@@ -419,6 +464,9 @@ async function downloadAndDecrypt(
       if (e instanceof CryptoNotReadyError) throw e;
       // Don't retry on permanent errors (missing URL, 4xx client errors)
       if (e instanceof MissingUrlError) throw e;
+      // mxc:// could not be resolved to an http URL (no Matrix client, no
+      // baseUrl). Every retry will hit the same null — fast-fail.
+      if (e instanceof MediaUnavailableError) throw e;
       if (e instanceof Error) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const status = (e as any).status as number | undefined;
