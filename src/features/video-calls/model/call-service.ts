@@ -847,10 +847,12 @@ export function useCallService() {
       // setCommunicationDevice, BT hot-swap, OEM delayed re-apply.
       // Must come AFTER placeCall so the call exists; graceful degradation
       // on failure (no reason to drop the call if routing fails).
+      // WEE-16: the bridge now retries with a backoff and never rejects
+      // — failures are logged inside the bridge with full attempt count.
+      // We do not await it: starting audio routing is non-blocking for
+      // the dial-tone UX.
       if (isNative) {
-        nativeCallBridge.startAudioRouting({ callType: type }).catch((e) => {
-          console.warn("[call-service] startAudioRouting failed:", e);
-        });
+        void nativeCallBridge.startAudioRouting({ callType: type });
       }
     } catch (e) {
       console.error("[call-service] Failed to place call:", e);
@@ -1196,11 +1198,11 @@ export function useCallService() {
 
       // Activate native VoIP audio routing after answering. Graceful
       // degradation on failure — never drop the call for a routing hiccup.
+      // WEE-16: the bridge now retries with a backoff and never rejects;
+      // failures are logged inside the bridge.
       if (isNative) {
         const callType = isVideo ? "video" : "voice";
-        nativeCallBridge.startAudioRouting({ callType }).catch((e) => {
-          console.warn("[call-service] startAudioRouting failed:", e);
-        });
+        void nativeCallBridge.startAudioRouting({ callType });
       }
     } catch (e) {
       console.error("[call-service] Failed to answer call:", e);
