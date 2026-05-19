@@ -471,6 +471,48 @@ describe("useFileDownload", () => {
       expect(withQuery).toMatch(/^https:\/\/example\.com\/file\.pdf\?token=abc&cb=/);
     });
 
+    it("fast-fails blob:/data: URLs with MissingUrlError instead of attempting fetch (WEE-28 defense)", async () => {
+      // If an optimistic local blob URL leaks into fileInfo.url because
+      // confirmMediaSent never ran, fetch(blob:...) throws a Security Error
+      // that the outer wrapTransientError miscategorises as a network
+      // failure — the retry loop then burns ~10s of spinner UI for nothing.
+      // Surface MissingUrlError immediately so the UI shows a meaningful
+      // "no usable file URL" state and the user can act on it.
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_blob",
+          _key: "client_blob",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "stuck.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "stuck.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "blob:http://localhost:5173/ffc1e2c2-8585-46ea-9244-be66a1e04db8",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(message);
+
+        // Must not have made any network attempt against the dead blob URL.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // download() returns null/undefined on error; the typed error landed
+        // in the per-message download state for the UI to surface.
+        expect(result).toBeFalsy();
+      });
+      scope.stop();
+    });
+
     it("does NOT mangle blob:/data: URLs with cache-bust (those schemes do not accept query strings)", () => {
       // Regression safety net for WEE-17 review: appending `?cb=` to a blob:
       // URL breaks the URL grammar and the next fetch would fail spuriously.

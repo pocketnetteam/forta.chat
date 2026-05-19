@@ -369,6 +369,19 @@ async function downloadAndDecrypt(
   signal?: AbortSignal,
 ): Promise<Blob> {
   if (!fileInfo.url) throw new MissingUrlError();
+  // Local-only schemes (blob:, data:) never reach the homeserver — they
+  // are an optimistic placeholder set by createLocal that should have
+  // been overwritten by confirmMediaSent once the upload completes. If
+  // we still see one here, the upload was aborted, crashed mid-flight,
+  // or the row predates the WEE-28 send-shape fix. fetch(blob:) on a
+  // document that no longer owns that blob throws a Security Error,
+  // which `wrapTransientError` then miscategorises as a network failure
+  // and the retry loop pointlessly burns 10s of spinner UI. Fast-fail
+  // with MissingUrlError so the UI surfaces "no usable file URL" and
+  // the user gets a meaningful state instead of an endless retry.
+  if (fileInfo.url.startsWith("blob:") || fileInfo.url.startsWith("data:")) {
+    throw new MissingUrlError();
+  }
   if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
 
   let lastError: unknown;
