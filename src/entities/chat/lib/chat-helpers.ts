@@ -90,15 +90,27 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   const encryptedUrl: string | undefined = typeof encryptedFile?.url === "string" ? encryptedFile.url : undefined;
 
   if (msgtype === "m.file" && pbody) {
+    // SyncEngine.processFileSend (sync-engine.ts) ships m.file events with
+    // body = JSON({ name, type, size }) and the mxc URL + secrets pinned to
+    // top-level content.url / content.secrets. matrix-client unconditionally
+    // JSON.parses body into pbody, so pbody loses url/secrets — without
+    // these fallbacks every forwarded/uploaded PDF throws MissingUrlError
+    // (WEE-28). Legacy bastyon-chat puts url+secrets inside body, so
+    // pbody.* keeps priority for back-compat.
+    const topUrl = typeof content.url === "string" ? content.url : undefined;
+    const topSecrets = content.secrets as
+      | { block?: number; keys?: string; v?: number; version?: number }
+      | undefined;
+    const secrets = pbody.secrets ?? topSecrets;
     return {
       name: pbody.name ?? "file",
       type: (pbody.type ?? "").replace("encrypted/", ""),
       size: pbody.size ?? 0,
-      url: pbody.url ?? encryptedUrl ?? "",
-      secrets: pbody.secrets ? {
-        block: pbody.secrets.block,
-        keys: pbody.secrets.keys,
-        v: pbody.secrets.v ?? pbody.secrets.version ?? 1,
+      url: pbody.url ?? encryptedUrl ?? topUrl ?? "",
+      secrets: secrets ? {
+        block: secrets.block,
+        keys: secrets.keys,
+        v: secrets.v ?? secrets.version ?? 1,
       } : undefined,
     };
   }

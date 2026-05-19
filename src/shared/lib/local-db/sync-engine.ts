@@ -612,15 +612,24 @@ export class SyncEngine {
       // existing viewers keep rendering. Callers that need richer metadata
       // (m.image with dimensions, m.audio with duration) pass eventInfo /
       // eventExtras which merge on top.
+      // m.file with no explicit body: embed url + secrets inside the JSON
+      // body so any client (old bastyon-chat parsers, recipients running
+      // matrix-client.ts that JSON.parses body into pbody) can recover the
+      // mxc URL even when they ignore top-level content.url. Without this
+      // forwarded/uploaded PDFs throw MissingUrlError on the sender after
+      // /sync re-parses the event (WEE-28).
+      const defaultFileBody: Record<string, unknown> = {
+        name: payload.fileName,
+        type: payload.mimeType,
+        size: attachment.size,
+      };
+      if (payload.msgtype === "m.file") {
+        defaultFileBody.url = url;
+        if (secrets) defaultFileBody.secrets = secrets;
+      }
       const content: Record<string, unknown> = {
         msgtype: payload.msgtype,
-        body:
-          payload.body ??
-          JSON.stringify({
-            name: payload.fileName,
-            type: payload.mimeType,
-            size: attachment.size,
-          }),
+        body: payload.body ?? JSON.stringify(defaultFileBody),
         url,
         ...(payload.eventExtras ?? {}),
       };
