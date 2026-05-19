@@ -159,22 +159,34 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
   closeContextMenu();
 };
 
+// In-flight guard for the context-menu save path: a long-press → Save while
+// the previous Save is still streaming would otherwise create a duplicate
+// MediaStore entry (forta-bugs#758, WEE-25). Keyed by cacheKey so different
+// messages remain independently savable while one is in progress.
+const savingInFlight = new Set<string>();
+
 const handleSaveMedia = async (message: import("@/entities/chat").Message) => {
   if (!message.fileInfo) return;
   // Match the cache key used by MessageBubble + MediaViewer: stable clientId
   // when available so an in-flight upload's blob URL is reused instead of
   // re-decrypting the just-rendered file.
   const cacheKey = message._key || message.id;
-  const url = getFileState(cacheKey).objectUrl ?? (await downloadFile(message));
-  if (!url) return;
-  const mime = message.fileInfo.type || "";
-  const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+  if (savingInFlight.has(cacheKey)) return;
+  savingInFlight.add(cacheKey);
   try {
-    await saveFile(url, message.fileInfo.name, mime);
-    toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
-  } catch (e) {
-    console.error("[MessageList] save failed:", e);
-    toast(t("media.saveFailed"), "error");
+    const url = getFileState(cacheKey).objectUrl ?? (await downloadFile(message));
+    if (!url) return;
+    const mime = message.fileInfo.type || "";
+    const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+    try {
+      await saveFile(url, message.fileInfo.name, mime);
+      toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
+    } catch (e) {
+      console.error("[MessageList] save failed:", e);
+      toast(t("media.saveFailed"), "error");
+    }
+  } finally {
+    savingInFlight.delete(cacheKey);
   }
 };
 

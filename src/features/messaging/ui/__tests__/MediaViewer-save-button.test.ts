@@ -34,7 +34,10 @@ describe("MediaViewer — save-to-gallery button", () => {
     const start = source.indexOf('data-testid="media-save"');
     expect(start).toBeGreaterThan(-1);
     const fragment = source.slice(start, start + 500);
-    expect(fragment).toMatch(/:disabled="!currentUrl"/);
+    // The button must guard against `!currentUrl`. After WEE-25 it also
+    // disables while a save is in flight (`|| saving`) — the assertion is
+    // loosened to match either form so the guarded variant stays valid.
+    expect(fragment).toMatch(/:disabled="!currentUrl(\s*\|\|\s*\w+)?"/);
   });
 
   it("wires the save button click to a handler that calls saveFile", () => {
