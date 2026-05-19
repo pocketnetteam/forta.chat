@@ -46,7 +46,13 @@ describe("registration poll", () => {
     const fnStart = source.indexOf("async function onRegistrationConfirmed");
     expect(fnStart).toBeGreaterThan(-1);
     const fnSection = source.slice(fnStart, fnStart + 1200);
-    const loadIdx = fnSection.indexOf("loadUsersInfo([address.value!], { update: true })");
+    // Address may be passed either as `address.value!` directly or as a
+    // snapshot variable (`confirmedAddress`) — both are valid; the only
+    // ordering invariant is that loadUsersInfo runs before initializeAndFetchUserData.
+    const loadMatch = fnSection.match(
+      /loadUsersInfo\(\s*\[\s*(?:address\.value!|confirmedAddress)\s*\]\s*,\s*\{\s*update:\s*true\s*\}\s*\)/,
+    );
+    const loadIdx = loadMatch?.index ?? -1;
     const initIdx = fnSection.indexOf("initializeAndFetchUserData");
     expect(loadIdx).toBeGreaterThan(-1);
     expect(initIdx).toBeGreaterThan(loadIdx);

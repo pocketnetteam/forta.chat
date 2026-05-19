@@ -44,6 +44,10 @@ import {
   loadMnemonic,
   clearMnemonic,
   syncProfileToMatrix,
+  readSelfProfile,
+  writeSelfProfile,
+  clearSelfProfile,
+  mergeSelfProfileWithRemote,
 } from "../lib";
 import { createKeyPair } from "./key-pair";
 
@@ -260,10 +264,36 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   const { execute: editUserData, isLoading: isEditingUserData } =
     useAsyncOperation(async (userData: UserData) => {
+      // Snapshot the active address before the RPC so a logout that happens
+      // during the broadcast cannot misroute the cache write into another
+      // account.
+      const editAddress = address.value!;
+      const merged = mergeObjects(userInfo.value!, userData);
       const result = await appInitializer.editUserData({
-        address: address.value!,
-        userData: mergeObjects(userInfo.value!, userData)
+        address: editAddress,
+        userData: merged
       });
+
+      if (result?.success === true && address.value === editAddress) {
+        // Persist the just-saved profile so it survives Pocketnet RPC
+        // returning the *pre-edit* name on the next boot — root cause of
+        // WEE-26 / forta-bugs#596, #580.
+        const prev = readSelfProfile(editAddress);
+        writeSelfProfile({
+          address: editAddress,
+          name: merged.name ?? "",
+          about: merged.about ?? "",
+          image: merged.image ?? "",
+          site: merged.site ?? "",
+          language: merged.language ?? "",
+          localEditedAt: Date.now(),
+          syncedAt: prev?.syncedAt ?? 0,
+        });
+        // Reflect the new values in in-memory userInfo immediately so the
+        // form (and any other consumer) shows the saved name without
+        // waiting for a fresh fetchUserInfo to settle.
+        setUserInfo(merged);
+      }
 
       // Best-effort Matrix profile sync — ensures peers see the user's chosen
       // nickname + avatar instead of a truncated wallet address. Pocketnet
@@ -777,8 +807,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
+    // Snapshot the active address so a logout + re-login that races with the
+    // RPC cannot cause us to write the first account's profile into the
+    // second account's cache slot.
+    const requestAddress = address.value;
+    const requestPrivateKey = privateKey.value;
+
     await appInitializer.initializeAndFetchUserData(
-      address.value,
+      requestAddress,
       (userData: UserData) => {
         // Defensive: app-initializer guards against undefined userData, but
         // this callback is reached from three flows (login, onConfirmed,
@@ -787,20 +823,45 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // login()'s catch and surface as "Invalid private key or mnemonic"
         // on the register page after a successful registration.
         if (!userData) return;
-        setUserInfo(userData);
-        PocketnetInstanceConfigurator.setUserAddress(address.value!);
+
+        // Bail if the active account changed mid-flight — the response
+        // belongs to a logged-out session and must not touch the new one.
+        if (address.value !== requestAddress) return;
+
+        // Merge cached self-profile (last user save) into the remote snapshot
+        // so a stale Pocketnet `getuserprofile` response cannot revert the
+        // user's name within the propagation window — WEE-26 / forta-bugs#596,
+        // #580. When no cache exists or the local edit is older than the grace
+        // window, remote wins unchanged.
+        const cached = readSelfProfile(requestAddress);
+        const merged = mergeSelfProfileWithRemote(cached, userData);
+
+        setUserInfo(merged);
+        PocketnetInstanceConfigurator.setUserAddress(requestAddress);
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-          createKeyPair(privateKey.value!)
+          createKeyPair(requestPrivateKey)
         );
+
+        writeSelfProfile({
+          address: requestAddress,
+          name: merged.name ?? "",
+          about: merged.about ?? "",
+          image: merged.image ?? "",
+          site: merged.site ?? "",
+          language: merged.language ?? "",
+          localEditedAt: cached?.localEditedAt ?? 0,
+          syncedAt: Date.now(),
+        });
+
         // Sync own profile to userStore so Avatar components show correct name/initial
-        if (userData && userData.name) {
-          useUserStore().setUser(address.value!, {
-            address: address.value!,
-            name: userData.name ?? "",
-            about: userData.about ?? "",
-            image: userData.image ?? "",
-            site: userData.site ?? "",
-            language: userData.language ?? "",
+        if (merged.name) {
+          useUserStore().setUser(requestAddress, {
+            address: requestAddress,
+            name: merged.name ?? "",
+            about: merged.about ?? "",
+            image: merged.image ?? "",
+            site: merged.site ?? "",
+            language: merged.language ?? "",
           });
         }
       }
@@ -1036,6 +1097,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     clearAllDrafts();
     clearQueue();
     clearAccountLocalStorage(logoutAddress ?? undefined);
+    // Drop self-profile snapshot (WEE-26). Routed through the cache helper
+    // so the key prefix stays a single source of truth.
+    if (logoutAddress) clearSelfProfile(logoutAddress);
 
     // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
     await deleteChatDb().catch(() => {});
@@ -1359,24 +1423,44 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
 
       try {
-        await appInitializer.loadUsersInfo([address.value!], { update: true });
+        // Snapshot — see fetchUserInfo. Prevents a logout race from writing
+        // this account's confirmed profile into a different account's slot.
+        const confirmedAddress = address.value!;
+        await appInitializer.loadUsersInfo([confirmedAddress], { update: true });
         await appInitializer.initializeAndFetchUserData(
-          address.value!,
+          confirmedAddress,
           (data: UserData) => {
             // Defensive guard — see fetchUserInfo for rationale. Without
             // this, a timing quirk in psdk.userInfo.get() (cache miss right
             // after blockchain confirmation) would crash the callback and
             // abort the post-registration flow.
             if (!data) return;
-            setUserInfo(data);
+            if (address.value !== confirmedAddress) return;
+            // Same merge logic as fetchUserInfo — preserves any cached
+            // self-profile (e.g. from pendingRegProfile or a prior session)
+            // when Pocketnet returns an empty/stale row right after the
+            // confirmation tx propagates (WEE-26).
+            const cached = readSelfProfile(confirmedAddress);
+            const merged = mergeSelfProfileWithRemote(cached, data);
+            setUserInfo(merged);
+            writeSelfProfile({
+              address: confirmedAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
+              localEditedAt: cached?.localEditedAt ?? 0,
+              syncedAt: Date.now(),
+            });
             // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
-            useUserStore().setUser(address.value!, {
-              address: address.value!,
-              name: data.name ?? "",
-              about: data.about ?? "",
-              image: data.image ?? "",
-              site: data.site ?? "",
-              language: data.language ?? "",
+            useUserStore().setUser(confirmedAddress, {
+              address: confirmedAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
             });
           }
         );
