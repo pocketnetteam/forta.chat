@@ -6,6 +6,7 @@ import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-f
 import { useFileDownload } from "../model/use-file-download";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import MessageContent from "./MessageContent.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
@@ -176,6 +177,12 @@ const handleBubbleClick = () => {
   }
 };
 const { getState, download, saveFile, formatSize } = useFileDownload();
+// Toast cached at setup time so the async `handleFileDownload` doesn't re-enter
+// the composable after an `await`. useToast() is module-state today and safe
+// to re-enter, but keeping the call site at setup matches MediaViewer /
+// MessageList / UserEditForm and avoids the "composable after await" Vue
+// pitfall if useToast ever starts using inject() / getCurrentInstance.
+const { toast: showToast } = useToast();
 
 const time = computed(() => formatTime(new Date(props.message.timestamp)));
 
@@ -235,10 +242,29 @@ const handleMediaClick = () => {
   }
 };
 
+// In-flight guard for the file/audio bubble save button: prevents 5 rapid
+// taps from creating 5 duplicate downloads (forta-bugs#758, WEE-25).
+const isSavingFile = ref(false);
+
 const handleFileDownload = async () => {
+  if (isSavingFile.value) return;
   if (!props.message.fileInfo) return;
-  const url = fileState.value.objectUrl ?? await download(props.message);
-  if (url) await saveFile(url, props.message.fileInfo.name, props.message.fileInfo.type);
+  isSavingFile.value = true;
+  try {
+    const url = fileState.value.objectUrl ?? await download(props.message);
+    if (!url) return;
+    const mime = props.message.fileInfo.type || "";
+    const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+    try {
+      await saveFile(url, props.message.fileInfo.name, mime);
+      showToast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
+    } catch (e) {
+      console.error("[MessageBubble] save failed:", e);
+      showToast(t("media.saveFailed"), "error");
+    }
+  } finally {
+    isSavingFile.value = false;
+  }
 };
 
 const retryDownload = () => {
@@ -729,7 +755,11 @@ const replyPreviewSender = computed(() => {
             <div class="truncate text-[11px] opacity-70">{{ replyPreviewText }}</div>
           </div>
         </div>
-        <button class="flex w-full items-center gap-3 text-left" @click="handleFileDownload">
+        <button
+          class="flex w-full items-center gap-3 text-left disabled:opacity-60"
+          :disabled="isSavingFile"
+          @click="handleFileDownload"
+        >
           <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" :class="props.isOwn ? 'bg-white/20' : 'bg-color-bg-ac/10'">
             <svg v-if="fileState.loading" class="contain-strict h-5 w-5 animate-spin" :class="props.isOwn ? 'text-white' : 'text-color-bg-ac'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4 31.4" /></svg>
             <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" :class="props.isOwn ? 'text-white' : 'text-color-bg-ac'">

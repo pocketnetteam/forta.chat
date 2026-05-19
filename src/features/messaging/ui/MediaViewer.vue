@@ -32,6 +32,11 @@ const currentIndex = ref(0);
 const scale = ref(1);
 const translateX = ref(0);
 const translateY = ref(0);
+// In-flight guard: while a save is running, ignore further taps on the same
+// button. Without this, a fast multi-tap on Android (where the toast is
+// delayed by base64 + native MediaStore.insert) creates one duplicate per
+// extra tap — forta-bugs#758, WEE-25.
+const saving = ref(false);
 
 const mediaMessages = computed(() => chatStore.activeMediaMessages);
 
@@ -195,17 +200,21 @@ watch(currentMessage, async (msg) => {
 });
 
 const handleSaveCurrent = async () => {
+  if (saving.value) return;
   const msg = currentMessage.value;
   const url = currentUrl.value;
   if (!msg || !msg.fileInfo || !url) return;
   const mime = msg.fileInfo.type || "";
   const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+  saving.value = true;
   try {
     await saveFile(url, msg.fileInfo.name, mime);
     toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
   } catch (e) {
     console.error("[MediaViewer] save failed:", e);
     toast(t("media.saveFailed"), "error");
+  } finally {
+    saving.value = false;
   }
 };
 </script>
@@ -235,7 +244,7 @@ const handleSaveCurrent = async () => {
           <button
             data-testid="media-save"
             class="text-white/80 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-            :disabled="!currentUrl"
+            :disabled="!currentUrl || saving"
             :title="t('media.save')"
             :aria-label="t('media.save')"
             @click="handleSaveCurrent"

@@ -5,11 +5,13 @@ import { useLocaleStore } from "@/entities/locale";
 import type { Locale } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
+import { useToast } from "@/shared/lib/use-toast";
 
 const authStore = useAuthStore();
 const userStore = useUserStore();
 const localeStore = useLocaleStore();
 const { t } = useI18n();
+const { toast } = useToast();
 
 // Start empty — we sync from userInfo via watch below. Initializing from
 // authStore.userInfo at mount captures a snapshot that never updates when
@@ -128,6 +130,9 @@ const handleSave = async () => {
       (result as { success: boolean }).success === false
     ) {
       saveError.value = t("profile.saveFailed");
+      // The inline error text is easy to miss on long forms (forta-bugs#281,
+      // WEE-25) — surface a toast as well so the user gets immediate feedback.
+      toast(t("profile.saveFailed"), "error");
       return;
     }
 
@@ -144,10 +149,17 @@ const handleSave = async () => {
     }
     saveSuccess.value = true;
     setTimeout(() => (saveSuccess.value = false), 2000);
+    // Toast in addition to the inline button state: profile save can run
+    // for several seconds (long-running RPC, forta-bugs#281), and the user
+    // may have scrolled away or switched apps — toast lands feedback even
+    // when the button is off-screen.
+    toast(t("profile.saved"), "success");
   } catch (err) {
     console.error("[UserEditForm] handleSave failed:", err);
-    saveError.value =
+    const message =
       err instanceof Error ? err.message : t("profile.saveFailed");
+    saveError.value = message;
+    toast(t("profile.saveFailed"), "error");
   }
 };
 
