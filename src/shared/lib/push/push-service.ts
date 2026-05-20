@@ -344,13 +344,20 @@ class PushService {
     this.matrixClient = matrixClient;
     // init push service
 
-    // 1. Request notification permission (Android 13+ shows OS dialog)
-    const currentStatus = await PushNotifications.checkPermissions();
-    if (currentStatus.receive !== 'granted') {
-      const permission = await PushNotifications.requestPermissions();
-      if (permission.receive !== 'granted') {
-        console.warn('[PushService] Push permission not granted');
+    // 1. Request notification permission (Android 13+ shows OS dialog).
+    // WEE-31: on devices without GMS the Capacitor PushNotifications
+    // permission probe goes through a stub that may still throw — wrap
+    // so a missing permission API can't kill the boot path.
+    try {
+      const currentStatus = await PushNotifications.checkPermissions();
+      if (currentStatus.receive !== 'granted') {
+        const permission = await PushNotifications.requestPermissions();
+        if (permission.receive !== 'granted') {
+          console.warn('[PushService] Push permission not granted');
+        }
       }
+    } catch (e) {
+      console.warn('[PushService] Push permission probe failed (no GMS?):', e);
     }
 
     // 2. Create notification channels
@@ -406,7 +413,30 @@ class PushService {
       console.warn('[PushService] Failed to check pending intent:', e);
     }
 
-    // 4. Register for FCM
+    // 4. WEE-31: Check Google Play Services availability before
+    // attempting FCM registration. On devices without GMS (Huawei HMS-
+    // only, Aurora OS, GrapheneOS w/o microG, MIUI with GMS disabled)
+    // `PushNotifications.register()` calls into
+    // `FirebaseMessaging.getInstance().token` which throws — and the
+    // unhandled rejection used to crash the app on cold start.
+    try {
+      const gms = await PushData.isGoogleServicesAvailable();
+      if (!gms.available) {
+        console.warn(
+          `[PushService] Google Play Services unavailable (status=${gms.status}); skipping FCM registration. ` +
+            'Native FCM-driven notifications will be disabled on this device.',
+        );
+        return;
+      }
+    } catch (e) {
+      // Older native builds (or a future Capacitor regression) may not
+      // expose isGoogleServicesAvailable. Don't block FCM init — fall
+      // through to the wrapped register() call, which now also has its
+      // own catch.
+      console.warn('[PushService] GMS probe unavailable, proceeding with register():', e);
+    }
+
+    // 5. Register for FCM
     await PushNotifications.removeAllListeners();
 
     PushNotifications.addListener('registration', async ({ value: token }) => {
@@ -421,7 +451,16 @@ class PushService {
       console.error('[PushService] Registration error:', error);
     });
 
-    await PushNotifications.register();
+    try {
+      await PushNotifications.register();
+    } catch (e) {
+      // Defence-in-depth: even when GMS is reported as available, the
+      // FCM token round-trip can still fail with IOException on a
+      // throttled network, an expired play-services-base mismatch, or
+      // a sandboxed work-profile container. Log and continue — JS
+      // boot must not abort on this.
+      console.error('[PushService] PushNotifications.register() threw:', e);
+    }
   }
 }
 
