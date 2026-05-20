@@ -103,6 +103,39 @@ class CallPlugin : Plugin() {
         })
     }
 
+    /**
+     * WEE-31: idempotent ringer-surface ensurer.
+     *
+     * Background: `handleIncomingCall` on Capacitor relies on the FCM push
+     * handler (FortaFirebaseMessagingService) to have launched
+     * IncomingCallActivity already. But when the app is in the foreground,
+     * Matrix /sync delivers `m.call.invite` *before* FCM does, so the push
+     * handler never fires and no ringer surface is shown — the user hears
+     * nothing and the caller is stuck on "connecting" until their timeout.
+     *
+     * This plugin method checks whether either the full-screen activity or
+     * the Telecom CallConnection is already up. If neither is, it goes
+     * through the normal `reportIncomingCall` path (Telecom add → fallback
+     * direct activity launch) so the user actually sees the call.
+     *
+     * Safe to call unconditionally from JS — it's a no-op when a ringer is
+     * already present.
+     */
+    @PluginMethod
+    fun ensureIncomingCallVisible(call: PluginCall) {
+        val alreadyVisible = IncomingCallActivity.currentInstance != null ||
+            CallConnectionService.currentConnection != null
+        if (alreadyVisible) {
+            Log.d(TAG, "ensureIncomingCallVisible: ringer already up, skip")
+            call.resolve()
+            return
+        }
+        Log.d(TAG, "ensureIncomingCallVisible: no ringer present, launching")
+        // Delegate to the existing reportIncomingCall path so we share the
+        // Telecom-add + activity-launch fallback chain.
+        reportIncomingCall(call)
+    }
+
     @PluginMethod
     fun reportIncomingCall(call: PluginCall) {
         val callId = call.getString("callId") ?: ""

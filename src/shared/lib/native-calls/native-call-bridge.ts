@@ -49,6 +49,20 @@ interface NativeCallNativePlugin {
     hasVideo: boolean;
   }): Promise<void>;
   /**
+   * WEE-31: idempotent ringer-surface ensurer. Launches the native
+   * IncomingCallActivity ONLY IF neither the activity nor the Telecom
+   * CallConnection is already showing. Use this from `handleIncomingCall`
+   * on the isNative path so that, when Matrix /sync delivers the invite
+   * before FCM does (typical when the app is in the foreground), the user
+   * still sees a ringer instead of nothing.
+   */
+  ensureIncomingCallVisible(options: {
+    callId: string;
+    callerName: string;
+    roomId: string;
+    hasVideo: boolean;
+  }): Promise<void>;
+  /**
    * Check if user tapped Answer before JS was ready.
    * Returns the push-side call_id AND the room_id, because the push
    * payload's call_id is often the event_id (not Matrix's content.
@@ -510,6 +524,41 @@ class NativeCallBridge {
   }): Promise<void> {
     if (!isNative) return;
     await NativeCall.reportIncomingCall(options);
+  }
+
+  /**
+   * WEE-31: launch the native ringer surface only if one isn't already
+   * showing. Use this from `handleIncomingCall` on isNative so that
+   * sync-first deliveries (app in foreground → Matrix /sync wins the
+   * race against FCM) still get a ringer. Older native builds that
+   * don't ship `ensureIncomingCallVisible` are handled by falling
+   * back to {@link reportIncomingCall}.
+   */
+  async ensureIncomingCallVisible(options: {
+    callId: string;
+    callerName: string;
+    roomId: string;
+    hasVideo: boolean;
+  }): Promise<void> {
+    if (!isNative) return;
+    try {
+      const plugin = NativeCall as Partial<NativeCallNativePlugin>;
+      if (typeof plugin.ensureIncomingCallVisible === 'function') {
+        await plugin.ensureIncomingCallVisible(options);
+        return;
+      }
+    } catch (e) {
+      console.warn('[NativeCallBridge] ensureIncomingCallVisible failed, falling back:', e);
+    }
+    // Older native build — best-effort fall back to reportIncomingCall.
+    // It's not perfectly idempotent (it can stack a second Telecom call
+    // if one is already up), but anything is better than a silent
+    // ringer on the foreground sync path.
+    try {
+      await NativeCall.reportIncomingCall(options);
+    } catch (e) {
+      console.warn('[NativeCallBridge] fallback reportIncomingCall failed:', e);
+    }
   }
 
   async reportOutgoingCall(options: {
