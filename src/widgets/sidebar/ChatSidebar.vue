@@ -30,8 +30,11 @@ useAndroidBackHandler("chat-selection", 92, () => {
   return false;
 });
 
-onMounted(() => {
+onMounted(async () => {
   chatStore.loadCachedRooms();
+  // Show persisted channel list immediately, then refresh from RPC in
+  // the background — same pattern chatStore already uses for rooms (WEE-24).
+  await channelStore.hydrateFromDexie();
   channelStore.fetchChannels(true);
 });
 

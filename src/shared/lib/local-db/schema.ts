@@ -213,6 +213,40 @@ export interface SearchCacheRow {
   expiresAt: number;               // Unix ms — entry is considered stale past this
 }
 
+// ---------------------------------------------------------------------------
+// Channels (Bastyon broadcast subscriptions)
+// ---------------------------------------------------------------------------
+
+export interface ChannelLastContent {
+  txid: string;
+  type: "video" | "share" | "article";
+  caption: string;
+  message: string;
+  time: number;
+  height: number;
+  scoreSum: number;
+  scoreCnt: number;
+  comments: number;
+  images?: string[];
+  url?: string;
+  tags?: string[];
+  settings?: { v?: string };
+}
+
+/** Persisted Bastyon channel subscription. Source of truth for cold-start render
+ *  before the Pocketnet RPC `getsubscribeschannels` response arrives. */
+export interface LocalChannel {
+  address: string;                 // PK: channel author Bastyon address
+  name: string;
+  avatar: string;
+  lastContent: ChannelLastContent | null;
+  /** Preserves the order returned by Pocketnet RPC across cold-starts.
+   *  Lower = higher in the list. Backfilled per fetch page. */
+  syncOrder: number;
+  /** Timestamp of the latest RPC refresh that touched this entry. */
+  updatedAt: number;
+}
+
 /** Queued decryption retry job */
 export interface DecryptionJob {
   id?: number;                   // Auto PK
@@ -241,6 +275,7 @@ export class ChatDatabase extends Dexie {
   decryptionQueue!: Table<DecryptionJob>;
   listenedMessages!: Table<ListenedMessage>;
   searchCache!: Table<SearchCacheRow>;
+  channels!: Table<LocalChannel>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -609,6 +644,24 @@ export class ChatDatabase extends Dexie {
       decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
       listenedMessages: "messageId",
       searchCache: "query, expiresAt",
+    });
+
+    // Version 14: add channels table. Bastyon broadcast subscriptions used to
+    // live only in transient Pinia state, so a slow Pocketnet RPC response on
+    // cold-start showed an empty sidebar — users reported it as data loss
+    // (forta-bugs#736, #553, #762, #471, WEE-24). PK: channel address;
+    // syncOrder index preserves RPC list order across restarts.
+    this.version(14).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
     });
   }
 }
