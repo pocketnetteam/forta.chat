@@ -25,19 +25,6 @@ interface PushDataPlugin extends Plugin {
   /** Replace native notification content (keeps native PendingIntent for tap handling) */
   replaceNotificationContent(options: { roomId: string; eventId?: string; title: string; body: string }): Promise<void>;
   getPendingIntent(): Promise<{ roomId?: string; eventId?: string }>;
-  /**
-   * WEE-31: Probe whether Google Play Services is installed and usable
-   * on the current device. Call this before attempting
-   * `PushNotifications.register()` — FCM token retrieval throws on
-   * devices without GMS (Huawei HMS-only, Aurora OS, GrapheneOS without
-   * microG, MIUI with GMS disabled), and the unhandled rejection used
-   * to crash the app on cold start.
-   *
-   * `status` is the raw `ConnectionResult` code from
-   * `GoogleApiAvailability` (0 = SUCCESS, 1 = SERVICE_MISSING,
-   * 3 = SERVICE_DISABLED, 9 = SERVICE_INVALID, etc.).
-   */
-  isGoogleServicesAvailable(): Promise<{ available: boolean; status: number }>;
   addListener(event: 'pushReceived', handler: (data: PushPayload) => void): Promise<PluginListenerHandle>;
   addListener(event: 'pushOpenRoom', handler: (data: { roomId: string; eventId?: string }) => void): Promise<PluginListenerHandle>;
 }

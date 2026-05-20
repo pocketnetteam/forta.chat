@@ -79,27 +79,6 @@ class PushDataPlugin : Plugin() {
         notifyListeners("pushOpenRoom", data)
     }
 
-    /**
-     * WEE-31: Probe Google Play Services availability before JS attempts
-     * `PushNotifications.register()` — that Capacitor call goes straight
-     * to `FirebaseMessaging.getInstance().token` which throws on devices
-     * without GMS (Huawei HMS-only, Aurora OS, GrapheneOS w/o microG,
-     * MIUI with GMS disabled). The unhandled rejection used to bubble
-     * out of the JS push-init flow and crash the app on cold start.
-     *
-     * @return `{ available: Boolean, status: Int }` so JS can branch on
-     * a single boolean and surface the specific status code in logs.
-     */
-    @PluginMethod
-    fun isGoogleServicesAvailable(call: PluginCall) {
-        val status = GooglePlayServicesHelper.statusCode(context)
-        val result = JSObject().apply {
-            put("available", status == 0) // ConnectionResult.SUCCESS = 0
-            put("status", status)
-        }
-        call.resolve(result)
-    }
-
     /** Called by JS to retrieve buffered push intent from cold-start */
     @PluginMethod
     fun getPendingIntent(call: PluginCall) {

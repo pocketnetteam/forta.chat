@@ -68,11 +68,6 @@ dependencies {
     // Firebase Cloud Messaging — for native push handling when app is killed
     implementation 'com.google.firebase:firebase-messaging:25.0.1'
 
-    // WEE-31: explicit play-services-base so GoogleApiAvailability is on
-    // the compile classpath. Firebase pulls it transitively at runtime,
-    // but Kotlin compile needs the symbol declared directly.
-    implementation 'com.google.android.gms:play-services-base:18.5.0'
-
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
