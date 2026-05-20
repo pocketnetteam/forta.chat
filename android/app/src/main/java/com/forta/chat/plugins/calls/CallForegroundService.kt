@@ -58,7 +58,18 @@ class CallForegroundService : Service() {
                 putExtra(EXTRA_CALLER_NAME, callerName)
                 putExtra(EXTRA_CALL_TYPE, callType)
             }
-            context.startForegroundService(intent)
+            try {
+                context.startForegroundService(intent)
+            } catch (e: Throwable) {
+                // WEE-31: Android 12+ ForegroundServiceStartNotAllowedException
+                // when the call accept path is invoked from a context the OS
+                // doesn't consider eligible to start an FGS (e.g. an OEM
+                // killed the app between the FCM push and the user tap).
+                // Logging-only — caller's accept flow will surface the audio
+                // error through AudioRouter and the user can retry. Without
+                // this, the throw would crash the callee process.
+                Log.e(TAG, "[callee-crash-guard] startForegroundService rejected", e)
+            }
         }
 
         fun updateStatus(context: Context, status: String, duration: String = "") {
@@ -201,20 +212,53 @@ class CallForegroundService : Service() {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL,
                 )
+                return
             } catch (e: SecurityException) {
                 // RECORD_AUDIO permission revoked between accept and FGS
                 // start — fall back to the call-only type so the notification
                 // still appears and the user can hang up. AudioRouter will
                 // surface the missing-mic error through the JS bridge.
                 Log.e(TAG, "FGS_TYPE_MICROPHONE rejected, falling back to phoneCall-only", e)
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL,
-                )
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL,
+                    )
+                    return
+                } catch (e2: Throwable) {
+                    // WEE-31: even phoneCall-only can be rejected on some
+                    // OEM builds (HarmonyOS) or when the OS thinks the
+                    // service was started from a disallowed background
+                    // context. Fall through to the untyped path below.
+                    Log.e(TAG, "[callee-crash-guard] phoneCall-only startForeground rejected", e2)
+                }
+            } catch (e: Throwable) {
+                // WEE-31 (H2): Android 12+ ForegroundServiceStartNotAllowedException
+                // when startForegroundService → startForeground timing slips
+                // past the 5s background-start window (FCM-triggered path
+                // is most exposed). InvalidForegroundServiceTypeException on
+                // a few Xiaomi / HarmonyOS builds. Either of these used to
+                // process-kill the callee "наглухо".
+                Log.e(TAG, "[callee-crash-guard] typed startForeground threw, retrying untyped", e)
             }
-        } else {
+        }
+        // Untyped fallback path (pre-Android-14, or post-Android-14 after
+        // a typed startForeground failure). Still wrapped so an exotic
+        // OEM that disallows even this can't kill the process.
+        try {
             startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Throwable) {
+            Log.e(TAG, "[callee-crash-guard] untyped startForeground also failed; service will run without FGS", e)
+            // Best-effort: post the notification through the manager so the
+            // user still sees the ongoing call surface (no FGS lifetime
+            // guarantees but the call thread is alive). stopSelf if even
+            // that fails — never let the service-start path crash the
+            // process.
+            runCatching {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.notify(NOTIFICATION_ID, notification)
+            }
         }
     }
 

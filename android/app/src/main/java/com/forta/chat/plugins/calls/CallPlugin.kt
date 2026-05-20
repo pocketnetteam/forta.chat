@@ -126,14 +126,31 @@ class CallPlugin : Plugin() {
 
             telecomManager.addNewIncomingCall(handle, extras)
             call.resolve()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to report incoming call", e)
-            val intent = Intent(context, IncomingCallActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                putExtra("callId", callId)
-                putExtra("callerName", callerName)
+        } catch (e: Throwable) {
+            // WEE-31 (H1): addNewIncomingCall throws SecurityException on
+            // mobile-only devices where the PhoneAccount registration was
+            // rejected, and IllegalArgumentException on Telecom-restricted
+            // tablets. Both used to bubble out of this @PluginMethod and
+            // process-kill the callee. Fall back to a direct activity
+            // launch — same UX, no Telecom integration. roomId / hasVideo
+            // must be forwarded so accept() can resolve the Matrix room.
+            Log.e(TAG, "[callee-crash-guard] Failed to report incoming call via Telecom, falling back", e)
+            try {
+                val intent = Intent(context, IncomingCallActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    putExtra("callId", callId)
+                    putExtra("callerName", callerName)
+                    putExtra("roomId", roomId)
+                    putExtra("hasVideo", hasVideo)
+                }
+                context.startActivity(intent)
+            } catch (e2: Throwable) {
+                // Android 12+ background-start restriction may also block
+                // the direct startActivity. The FCM service still posted a
+                // ringer notification — the user can tap the heads-up to
+                // get the same UI through a foreground PendingIntent path.
+                Log.e(TAG, "[callee-crash-guard] Direct IncomingCallActivity launch also blocked", e2)
             }
-            context.startActivity(intent)
             call.resolve()
         }
     }
