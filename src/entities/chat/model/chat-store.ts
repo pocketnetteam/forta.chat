@@ -3400,6 +3400,43 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       rooms.value.push(room);
     }
     roomsMap.set(room.id, existing ?? room);
+
+    // Optimistic Dexie write: rooms produced by `createGroup` (and other
+    // explicit "I just created/joined this" code paths) used to live only in
+    // the in-memory Pinia state until the next Matrix /sync arrived and
+    // `fullRoomRefresh` mirrored everything to Dexie. If the user closed the
+    // app in that window, the newly created group was lost on cold-start —
+    // see WEE-24 / forta-bugs#553. `bulkSyncRooms` handles both new-insert
+    // (full defaults) and merge-with-existing semantics, so it is safe to
+    // call unconditionally here. Fire-and-forget — UI already updated.
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.rooms
+        .bulkSyncRooms([
+          {
+            id: room.id,
+            name: room.name,
+            avatar: room.avatar,
+            isGroup: room.isGroup,
+            members: room.members,
+            membership: room.membership ?? "join",
+            topic: room.topic,
+            syncedAt: Date.now(),
+            updatedAt: room.updatedAt,
+            lastMessageTimestamp: room.lastMessage?.timestamp,
+            serverUnreadCount: room.unreadCount,
+            unreadCount: room.unreadCount,
+            hasMoreHistory: true,
+            lastReadInboundTs: 0,
+            lastReadOutboundTs: 0,
+            isDeleted: false,
+            deletedAt: null,
+            deleteReason: null,
+          },
+        ])
+        .catch((e: unknown) => {
+          console.warn("[chat-store] addRoom: optimistic Dexie write failed:", e);
+        });
+    }
   };
 
   /** Helper: optimistically remove a room from runtime UI state */
