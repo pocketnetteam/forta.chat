@@ -304,7 +304,7 @@ useAndroidBackHandler(`emoji-picker-${props.mode}`, 90, () => {
                 :key="section.key"
                 :ref="(el) => setSectionRef(el, i)"
               >
-                <div class="sticky top-0 z-10 bg-background-total-theme/90 px-1 py-1 text-[11px] font-medium uppercase tracking-wider text-text-on-main-bg-color/60 backdrop-blur-sm">
+                <div class="sticky top-0 z-10 bg-background-total-theme px-1 py-1 text-[11px] font-medium uppercase tracking-wider text-text-on-main-bg-color/60">
                   {{ section.name }}
                 </div>
                 <div class="grid grid-cols-8 gap-0.5 pb-2">
