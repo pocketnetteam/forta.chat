@@ -1039,15 +1039,21 @@ export function useCallService() {
 
     // Normal incoming flow — not pre-accepted.
     //
-    // On native: the FCM push handler already showed IncomingCallActivity
-    // — that's the ONLY ringer the user should see. Do NOT set the Vue
-    // activeCall state to `incoming` here because the Vue UI binds to
-    // activeCall and would render a SECOND, web-based ringer on top of
-    // the native one. We also skip reportIncomingCall, which would just
-    // ask Telecom to open yet another incoming call surface. The user's
-    // accept/decline from the native ringer will route through
-    // CallConnection's callbacks and drive rejectCall() / answerCall()
-    // from the existing bridge listeners.
+    // On native: the FCM push handler is the *primary* ringer surface,
+    // but the race below has bitten users hard (WEE-31 follow-up):
+    //   - Push handler can only fire when the FCM message arrives first.
+    //   - When the app is in the foreground, Matrix /sync wins the race
+    //     against FCM and `handleIncomingCall` fires *before* the push
+    //     handler. The push handler then no-ops (already-known callId).
+    //   - Net result: no ringer surface is shown, the user hears nothing,
+    //     the caller is stuck on "connecting" until their own SDK timeout.
+    //
+    // Solution: ask the native bridge to ensure the ringer surface is
+    // visible. `ensureIncomingCallVisible` is idempotent — it's a no-op
+    // when IncomingCallActivity or the Telecom CallConnection is already
+    // up (push-first path), and launches the activity when neither is
+    // (sync-first path). Vue activeCall stays cleared either way so we
+    // don't get a duplicate Vue ringer on top of the native one.
     //
     // On web: render the Vue incoming ringer and play our ringtone.
     if (isNative) {
@@ -1057,6 +1063,12 @@ export function useCallService() {
       // the resolved name into. The native ringer was launched by the
       // FCM handler with whatever name was in the push payload — fixing
       // that path needs a Kotlin-side updateCallerInfo bridge.
+      void nativeCallBridge.ensureIncomingCallVisible({
+        callId: matrixCall.callId,
+        callerName: peerName,
+        roomId: matrixCall.roomId ?? "",
+        hasVideo: callInfo.type === "video",
+      });
     } else {
       callStore.setActiveCall(callInfo);
       // Web ringer is showing the Vue UI — schedule the late patch so
@@ -1226,16 +1238,42 @@ export function useCallService() {
 
   function rejectCall() {
     const call = callStore.matrixCall as MatrixCall | null;
-    if (!call) return;
+    console.log("[call-service] rejectCall: invoked, hasCall=" + Boolean(call));
+    if (!call) {
+      // No MatrixCall but the modal might still be up — make sure the
+      // Vue ringer disappears anyway so the user isn't stuck on the
+      // decline button. This guards the "ghost incoming" state where
+      // activeCall got set without matrixCall (e.g. an SDK race).
+      stopAllSounds();
+      clearIncomingTimeout();
+      callStore.clearCall();
+      return;
+    }
 
     clearIncomingTimeout();
     clearConnectingWatchdog();
     stopAllSounds();
 
+    // WEE-31 follow-up: previously a throw inside call.reject() — most
+    // commonly on web when the SDK call is in Fledgling state and rejects
+    // a reject() — was only logged. The modal stayed mounted because
+    // clearCall() was unreachable, leaving the user stuck on the decline
+    // button with no visible effect. Wrap the SDK call so the local
+    // teardown ALWAYS runs even when the protocol-level reject fails.
     try {
       call.reject();
+      console.log("[call-service] rejectCall: SDK call.reject resolved");
     } catch (e) {
-      console.warn("[call-service] reject error:", e);
+      console.warn("[call-service] rejectCall: SDK reject error (continuing teardown):", e);
+      // Fallback: try hangup() — on some SDK paths reject() requires the
+      // call to be in 'Ringing' state, but hangup() works from any state
+      // and produces the same observable outcome for the caller (they
+      // see m.call.hangup and stop ringing).
+      try {
+        call.hangup(CallErrorCode.UserHangup, false);
+      } catch (e2) {
+        console.warn("[call-service] rejectCall: fallback hangup also threw:", e2);
+      }
     }
 
     // Centralized native cleanup — release audio routing, dismiss UI,
@@ -1262,6 +1300,7 @@ export function useCallService() {
       });
     }
     callStore.clearCall();
+    console.log("[call-service] rejectCall: complete, callStore cleared");
   }
 
   function hangup() {
