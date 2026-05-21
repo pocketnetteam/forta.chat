@@ -86,7 +86,8 @@ export function initMediaCache(db: ChatDatabase): MediaCacheRepository {
     currentDb = null;
   }
   const limitMb = getStoredCacheLimitMb();
-  currentCache = new MediaCacheRepository(db, pickStorage(db), {
+  const storage = pickStorage(db);
+  currentCache = new MediaCacheRepository(db, storage, {
     maxBytes: limitMb * 1024 * 1024,
   });
   currentDb = db;

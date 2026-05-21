@@ -735,13 +735,17 @@ export function useFileDownload() {
     state.errorKind = null;
 
     // Fast path: persistent media cache hit (Telegram/WhatsApp-style).
-    // Only `mxc://` URLs are eligible — `blob:` / `data:` are already local
-    // and routed through the seedLocalUrl path or fetched cheaply.
+    // Cacheable when the source is a remote URL we can stably key by —
+    // any `mxc://` or `http(s)://`. Local schemes (`blob:` / `data:`) are
+    // already local bytes the seedLocalUrl path or direct fetch handles
+    // for free, so caching them gains nothing and pollutes the index.
     // Cache lookup failures are swallowed: a missing cache layer just falls
     // through to the network path with no user-visible difference.
     const mxc = message.fileInfo.url;
+    const isCacheableUrl = !!mxc &&
+      (mxc.startsWith("mxc://") || mxc.startsWith("http://") || mxc.startsWith("https://"));
     const mediaCache = getMediaCache();
-    if (mediaCache && mxc && mxc.startsWith("mxc://")) {
+    if (mediaCache && isCacheableUrl) {
       try {
         const cachedBlob = await mediaCache.get(mxc);
         if (cachedBlob) {
@@ -778,11 +782,11 @@ export function useFileDownload() {
       cache.set(cacheKey, url);
 
       // Persist decrypted bytes so the next chat-open hits the disk cache
-      // instead of re-downloading + re-decrypting. mxc URIs only — local
-      // schemes have nothing meaningful to persist. Errors here are
-      // non-fatal: the user already has their blob URL.
-      if (mediaCache && mxc && mxc.startsWith("mxc://")) {
-        mediaCache.put(mxc, typedBlob).catch((err) => {
+      // instead of re-downloading + re-decrypting. Local schemes have
+      // nothing meaningful to persist. Errors here are non-fatal: the
+      // user already has their blob URL.
+      if (mediaCache && isCacheableUrl) {
+        mediaCache.put(mxc!, typedBlob).catch((err) => {
           console.warn("[use-file-download] media cache write failed:", err);
         });
       }
