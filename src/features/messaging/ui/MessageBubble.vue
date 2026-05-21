@@ -8,6 +8,7 @@ import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
+import { formatVideoDuration, extractVideoFrameThumbnail } from "../model/video-thumbnail";
 import MessageContent from "./MessageContent.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
@@ -196,6 +197,93 @@ const fileState = computed(() => getState(fileCacheKey.value));
 
 const inlineVideoRef = ref<HTMLVideoElement | null>(null);
 useVideoStatePreservation(inlineVideoRef, fileCacheKey, { dontResumePlay: true });
+
+// Telegram-style video bubble (WEE-32): show a generated first-frame poster
+// + center play button + bottom-right duration badge instead of a bare
+// `<video controls>`. Native controls only appear once the user taps play.
+const isVideoPlaying = ref(false);
+const videoPosterUrl = ref<string | null>(null);
+const videoMetaDuration = ref<number | null>(null);
+const lastPosterSource = ref<string | null>(null);
+// Tracks whether this component instance is still alive: the virtual scroller
+// recycles bubbles aggressively, so an in-flight `extractVideoFrameThumbnail`
+// can resolve after the bubble's scope is gone. Writing to a dead ref would
+// leak the generated blob URL until the page reloads.
+let isBubbleAlive = true;
+
+const videoDurationSeconds = computed(() => {
+  const fromMeta = props.message.fileInfo?.duration;
+  if (typeof fromMeta === "number" && fromMeta > 0) return fromMeta;
+  return videoMetaDuration.value ?? undefined;
+});
+const videoDurationText = computed(() => formatVideoDuration(videoDurationSeconds.value));
+
+const revokePoster = () => {
+  if (videoPosterUrl.value) {
+    try { URL.revokeObjectURL(videoPosterUrl.value); } catch { /* ignore */ }
+    videoPosterUrl.value = null;
+  }
+};
+
+watch(
+  () => fileState.value.objectUrl,
+  async (url, prevUrl) => {
+    if (url === prevUrl) return;
+    if (props.message.type !== MessageType.video) return;
+    revokePoster();
+    lastPosterSource.value = url ?? null;
+    if (!url) return;
+    const source = url;
+    const thumb = await extractVideoFrameThumbnail(source);
+    // Bail if the bubble was recycled or unmounted before extraction finished
+    // — the poster would belong to a different (or no) video.
+    if (!thumb) return;
+    if (!isBubbleAlive || lastPosterSource.value !== source) {
+      try { URL.revokeObjectURL(thumb); } catch { /* ignore */ }
+      return;
+    }
+    videoPosterUrl.value = thumb;
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.message.id,
+  () => {
+    isVideoPlaying.value = false;
+    videoMetaDuration.value = null;
+    // Recycled bubble: drop the stale poster + source guard so the next
+    // objectUrl write triggers a fresh extraction (the `url === prevUrl`
+    // short-circuit can otherwise pin us to the previous message's poster).
+    revokePoster();
+    lastPosterSource.value = null;
+  },
+);
+
+onBeforeUnmount(() => {
+  isBubbleAlive = false;
+  revokePoster();
+});
+
+const onInlineVideoLoadedMetadata = () => {
+  const el = inlineVideoRef.value;
+  if (el && Number.isFinite(el.duration) && el.duration > 0) {
+    videoMetaDuration.value = el.duration;
+  }
+};
+
+const playInlineVideo = () => {
+  const el = inlineVideoRef.value;
+  if (!el) return;
+  // `isVideoPlaying` is wired to the @play / @pause / @ended events on the
+  // <video> element, so the overlay hides only once playback is actually
+  // running. Flipping it here would briefly show native controls on a paused
+  // element if play() rejects (autoplay/focus interrupt on Android WebView).
+  const result = el.play();
+  if (result && typeof (result as Promise<void>).catch === "function") {
+    (result as Promise<void>).catch(() => { /* @pause handler resets state */ });
+  }
+};
 
 /** Telegram-style sender colors (same palette as Avatar) */
 const SENDER_COLORS = ["#E17076", "#FAA774", "#A695E7", "#7BC862", "#6EC9CB", "#65AADD", "#EE7AAE"];
@@ -607,14 +695,47 @@ const replyPreviewSender = computed(() => {
             <div class="truncate text-[11px] opacity-70">{{ replyPreviewText }}</div>
           </div>
         </div>
-        <div class="relative">
-          <video v-if="fileState.objectUrl" ref="inlineVideoRef" :src="fileState.objectUrl" controls playsinline class="block max-h-[360px] max-w-full" preload="metadata" />
-          <div v-else-if="fileState.loading" class="flex h-48 w-64 items-center justify-center bg-neutral-grad-0">
+        <div class="relative aspect-video w-full overflow-hidden bg-black/90">
+          <video
+            v-if="fileState.objectUrl"
+            ref="inlineVideoRef"
+            :src="fileState.objectUrl"
+            :poster="videoPosterUrl ?? undefined"
+            :controls="isVideoPlaying"
+            :controlslist="isVideoPlaying ? 'nodownload' : undefined"
+            playsinline
+            preload="metadata"
+            class="block h-full w-full object-cover"
+            @loadedmetadata="onInlineVideoLoadedMetadata"
+            @play="isVideoPlaying = true"
+            @pause="isVideoPlaying = false"
+            @ended="isVideoPlaying = false"
+          />
+          <div v-else-if="fileState.loading" class="flex h-full w-full items-center justify-center bg-neutral-grad-0">
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
           </div>
-          <button v-else class="flex h-48 w-64 items-center justify-center bg-neutral-grad-0 transition-colors hover:bg-neutral-grad-2" @click="handleVideoAudioLoad">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" class="text-color-bg-ac"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+          <button v-else type="button" class="flex h-full w-full items-center justify-center bg-neutral-grad-0 transition-colors hover:bg-neutral-grad-2" @click="handleVideoAudioLoad">
+            <span class="flex h-14 w-14 items-center justify-center rounded-full bg-color-bg-ac/90 text-white shadow-lg">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4" /></svg>
+            </span>
           </button>
+          <button
+            v-if="fileState.objectUrl && !isVideoPlaying && !isUploading && !isSending && !isFailed"
+            type="button"
+            class="absolute inset-0 flex items-center justify-center bg-black/15 transition-colors hover:bg-black/25"
+            aria-label="Play video"
+            @click.stop="playInlineVideo"
+          >
+            <span class="flex h-14 w-14 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm shadow-lg ring-1 ring-white/15">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><polygon points="6 4 20 12 6 20 6 4" /></svg>
+            </span>
+          </button>
+          <div
+            v-if="videoDurationText && !isVideoPlaying"
+            class="pointer-events-none absolute bottom-2 right-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[11px] font-medium leading-none text-white"
+          >
+            {{ videoDurationText }}
+          </div>
           <!-- Upload progress overlay for video -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <button class="relative flex h-14 w-14 items-center justify-center" @click.stop="emit('cancelUpload', message)">
