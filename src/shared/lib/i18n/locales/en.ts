@@ -287,6 +287,7 @@ export const en = {
   "messageList.cancel": "Cancel",
 
   // ── Attachment panel ──
+  "attachment.panelLabel": "Attachments",
   "attachment.photoOrVideo": "Photo or Video",
   "attachment.file": "File",
   "attachment.poll": "Poll",
