@@ -20,6 +20,7 @@ export type {
   ChannelLastContent,
   MediaCacheIndexEntry,
   MediaCacheBlobRow,
+  MediaCacheCategory,
 } from "./schema";
 export { DecryptionWorker } from "./decryption-worker";
 export { ListenedRepository } from "./listened-repository";

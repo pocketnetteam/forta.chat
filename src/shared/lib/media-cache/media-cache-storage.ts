@@ -196,5 +196,20 @@ export class FilesystemMediaCacheStorage implements MediaCacheStorage {
     } catch {
       // Directory may not exist yet — that's fine.
     }
+    // Also sweep the StoragePreview temp directory. `StoragePreview` writes
+    // blobs there before handing them to FileOpener, and eagerly deletes
+    // each one on its own unmount. If anything went wrong (FileOpener
+    // crash, app force-killed mid-view) a stale file could remain — and
+    // on logout we cannot let plaintext documents survive across users.
+    try {
+      const { Filesystem, Directory } = await this.fs();
+      await Filesystem.rmdir({
+        path: "media-cache-preview",
+        directory: Directory.Cache,
+        recursive: true,
+      });
+    } catch {
+      // Same rationale — never created or already swept.
+    }
   }
 }

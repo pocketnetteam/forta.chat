@@ -18,7 +18,34 @@ import {
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
-import { getMediaCache } from "@/shared/lib/media-cache";
+import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
+import { MessageType } from "@/entities/chat";
+
+/** Classify a message into the Settings → Storage tab buckets.
+ *  - `media` = photos + videos + video circles
+ *  - `voice` = audio messages (Forta only ships voice notes via audio)
+ *  - `file`  = catch-all for documents, archives, anything else
+ *  We rely on MessageType primarily; mime is a secondary signal for the
+ *  rare case where senders mis-set the type (e.g. an old client uploading
+ *  audio as a generic file). */
+function classifyForCache(messageType: MessageType, mime: string | undefined): MediaCacheCategory {
+  switch (messageType) {
+    case MessageType.image:
+    case MessageType.video:
+    case MessageType.videoCircle:
+      return "media";
+    case MessageType.audio:
+      return "voice";
+    case MessageType.file: {
+      const top = (mime ?? "").split("/")[0]?.toLowerCase() ?? "";
+      if (top === "image" || top === "video") return "media";
+      if (top === "audio") return "voice";
+      return "file";
+    }
+    default:
+      return "file";
+  }
+}
 
 /** Coarse classification of a download/decrypt failure for UI branching.
  *  - `crypto` — AES-SIV / membership / decryption failure; the user should
@@ -786,7 +813,11 @@ export function useFileDownload() {
       // nothing meaningful to persist. Errors here are non-fatal: the
       // user already has their blob URL.
       if (mediaCache && isCacheableUrl) {
-        mediaCache.put(mxc!, typedBlob).catch((err) => {
+        mediaCache.put(mxc!, typedBlob, {
+          roomId: message.roomId,
+          category: classifyForCache(message.type, mimeType),
+          fileName: message.fileInfo.name,
+        }).catch((err) => {
           console.warn("[use-file-download] media cache write failed:", err);
         });
       }

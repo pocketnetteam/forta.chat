@@ -17,13 +17,26 @@
  * media leaking out of cache.
  */
 
-import type { ChatDatabase, MediaCacheIndexEntry } from "@/shared/lib/local-db/schema";
+import type { ChatDatabase, MediaCacheIndexEntry, MediaCacheCategory } from "@/shared/lib/local-db/schema";
 import type { MediaCacheStorage } from "./media-cache-storage";
 
 export interface MediaCacheOptions {
   /** Soft cap on total cached bytes. LRU eviction runs after every `put()`
    *  to bring total back under this number. */
   maxBytes: number;
+}
+
+/** Per-write metadata that powers the Settings → Storage breakdown UI.
+ *  Required so the Telegram-style per-chat / per-category lists have
+ *  the data they need without re-classifying each blob at render time. */
+export interface MediaCachePutMeta {
+  /** Matrix room ID the message came from — drives the "Чаты" tab. */
+  roomId: string;
+  /** Top-level grouping for the Storage tabs (media / file / voice). */
+  category: MediaCacheCategory;
+  /** Original filename, used in the Files / Voice list rows. Optional
+   *  because images/videos rarely have a user-facing name. */
+  fileName?: string;
 }
 
 /** Aggregate sizes grouped by top-level MIME category. Used by the
@@ -34,6 +47,27 @@ export interface MediaCacheBreakdown {
   audio: number;
   other: number;
   total: number;
+}
+
+/** Per-room aggregate row for the "Чаты" tab. */
+export interface MediaCacheRoomUsage {
+  roomId: string;
+  totalBytes: number;
+  /** Per-category byte counts inside this room so the row can show a
+   *  small stacked bar (media / file / voice) without a second query. */
+  byCategory: Record<MediaCacheCategory, number>;
+  /** Number of cached entries — useful for "5 files" subtitle. */
+  count: number;
+}
+
+/** Single-pass snapshot powering the Settings → Storage screen. All
+ *  derived views share one `toArray()` instead of 4-5 redundant scans
+ *  per refresh tick — important when the index grows to thousands of
+ *  rows on low-end Android. */
+export interface MediaCacheSnapshot {
+  breakdown: MediaCacheBreakdown;
+  byRoom: MediaCacheRoomUsage[];
+  byCategory: Record<MediaCacheCategory, MediaCacheIndexEntry[]>;
 }
 
 const DEFAULT_MAX_BYTES = 500 * 1024 * 1024; // 500 MB — Telegram default
@@ -103,19 +137,19 @@ export class MediaCacheRepository {
    *
    *  Concurrent calls for the same `mxc` coalesce: the second caller
    *  awaits the first's promise instead of writing again. */
-  async put(mxc: string, blob: Blob): Promise<void> {
+  async put(mxc: string, blob: Blob, meta: MediaCachePutMeta): Promise<void> {
     if (this.disposed) return;
     const existingFlight = this.inflight.get(mxc);
     if (existingFlight) return existingFlight;
 
-    const work = this.doPut(mxc, blob).finally(() => {
+    const work = this.doPut(mxc, blob, meta).finally(() => {
       this.inflight.delete(mxc);
     });
     this.inflight.set(mxc, work);
     return work;
   }
 
-  private async doPut(mxc: string, blob: Blob): Promise<void> {
+  private async doPut(mxc: string, blob: Blob, meta: MediaCachePutMeta): Promise<void> {
     await this.storage.write(mxc, blob);
     // The cache might have been disposed (logout) while the storage write
     // was in flight. Skip the index update AND roll back the storage write,
@@ -133,6 +167,9 @@ export class MediaCacheRepository {
       mime: blob.type || "application/octet-stream",
       accessedAt: now,
       createdAt: existing?.createdAt ?? now,
+      roomId: meta.roomId,
+      category: meta.category,
+      fileName: meta.fileName,
     });
 
     try {
@@ -204,6 +241,129 @@ export class MediaCacheRepository {
       out.total += e.size;
     }
     return out;
+  }
+
+  /** Aggregate cached bytes per room, sorted by total descending.
+   *  Powers the Settings → Storage "Чаты" tab. One full-table scan
+   *  is enough — the index is bounded by maxBytes / avg-blob-size. */
+  async breakdownByRoom(): Promise<MediaCacheRoomUsage[]> {
+    const entries = await this.db.mediaCacheIndex.toArray().catch(() => []);
+    const byRoom = new Map<string, MediaCacheRoomUsage>();
+
+    for (const e of entries) {
+      // v15 rows wiped in the v16 migration, but defensively coerce
+      // anything legacy that slipped through to a sentinel bucket so
+      // the UI can at least surface it instead of crashing on undefined.
+      const roomId = e.roomId ?? "unknown";
+      const category: MediaCacheCategory = e.category ?? "file";
+
+      const usage = byRoom.get(roomId) ?? {
+        roomId,
+        totalBytes: 0,
+        byCategory: { media: 0, file: 0, voice: 0 },
+        count: 0,
+      };
+      usage.totalBytes += e.size;
+      usage.byCategory[category] += e.size;
+      usage.count += 1;
+      byRoom.set(roomId, usage);
+    }
+
+    return Array.from(byRoom.values()).sort((a, b) => b.totalBytes - a.totalBytes);
+  }
+
+  /** All entries in a given category, sorted by `createdAt` descending
+   *  so the most recent appears first in the per-tab list. */
+  async listByCategory(category: MediaCacheCategory): Promise<MediaCacheIndexEntry[]> {
+    const entries = await this.db.mediaCacheIndex
+      .where("category")
+      .equals(category)
+      .toArray()
+      .catch(() => []);
+    return entries.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** All entries belonging to one room. Used by the per-chat detail
+   *  view (drill-down from the Чаты tab). */
+  async listByRoom(roomId: string): Promise<MediaCacheIndexEntry[]> {
+    const entries = await this.db.mediaCacheIndex
+      .where("roomId")
+      .equals(roomId)
+      .toArray()
+      .catch(() => []);
+    return entries.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** Drop every cached blob belonging to `roomId` — used when the user
+   *  taps "Clear chat cache" on a single chat in the Чаты tab. Returns
+   *  the number of entries removed for UI feedback.
+   *
+   *  Uses Dexie `bulkDelete` for the index (one IDB write per N rows
+   *  instead of N writes) and parallelises storage deletes via
+   *  `Promise.allSettled` — at 1k entries this drops wall time from
+   *  ~seconds to a single round-trip + IO concurrency. */
+  async deleteByRoom(roomId: string): Promise<number> {
+    const entries = await this.db.mediaCacheIndex
+      .where("roomId")
+      .equals(roomId)
+      .toArray()
+      .catch(() => []);
+    if (entries.length === 0) return 0;
+    const keys = entries.map((e) => e.mxc);
+    try { await this.db.mediaCacheIndex.bulkDelete(keys); } catch { /* ignore */ }
+    await Promise.allSettled(keys.map((mxc) => this.storage.delete(mxc)));
+    return entries.length;
+  }
+
+  /** Build the full Settings → Storage snapshot in a single Dexie scan.
+   *  Callers that need breakdown + per-room + per-category lists should
+   *  prefer this over chaining separate queries — it cuts IDB round-trips
+   *  and main-thread JS work proportionally. */
+  async snapshot(): Promise<MediaCacheSnapshot> {
+    const entries = await this.db.mediaCacheIndex.toArray().catch(() => []);
+
+    const breakdown: MediaCacheBreakdown = {
+      image: 0, video: 0, audio: 0, other: 0, total: 0,
+    };
+    const byRoom = new Map<string, MediaCacheRoomUsage>();
+    const byCategory: Record<MediaCacheCategory, MediaCacheIndexEntry[]> = {
+      media: [], file: [], voice: [],
+    };
+
+    for (const e of entries) {
+      // MIME bucket for the top bars
+      const top = e.mime.split("/")[0]?.toLowerCase() ?? "";
+      if (top === "image") breakdown.image += e.size;
+      else if (top === "video") breakdown.video += e.size;
+      else if (top === "audio") breakdown.audio += e.size;
+      else breakdown.other += e.size;
+      breakdown.total += e.size;
+
+      // Per-room aggregation
+      const roomId = e.roomId ?? "unknown";
+      const category: MediaCacheCategory = e.category ?? "file";
+      const usage = byRoom.get(roomId) ?? {
+        roomId,
+        totalBytes: 0,
+        byCategory: { media: 0, file: 0, voice: 0 },
+        count: 0,
+      };
+      usage.totalBytes += e.size;
+      usage.byCategory[category] += e.size;
+      usage.count += 1;
+      byRoom.set(roomId, usage);
+
+      // Per-category list (collected first, sorted below)
+      byCategory[category].push(e);
+    }
+
+    // Sort: rooms by total desc, category lists by createdAt desc.
+    const rooms = Array.from(byRoom.values()).sort((a, b) => b.totalBytes - a.totalBytes);
+    for (const list of Object.values(byCategory)) {
+      list.sort((a, b) => b.createdAt - a.createdAt);
+    }
+
+    return { breakdown, byRoom: rooms, byCategory };
   }
 
   /** Current size budget in bytes. */

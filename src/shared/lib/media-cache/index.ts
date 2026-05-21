@@ -16,7 +16,14 @@ import type { ChatDatabase } from "@/shared/lib/local-db/schema";
 import { isNative } from "@/shared/lib/platform";
 
 export { MediaCacheRepository } from "./media-cache-repository";
-export type { MediaCacheBreakdown, MediaCacheOptions } from "./media-cache-repository";
+export type {
+  MediaCacheBreakdown,
+  MediaCacheOptions,
+  MediaCachePutMeta,
+  MediaCacheRoomUsage,
+  MediaCacheSnapshot,
+} from "./media-cache-repository";
+export type { MediaCacheCategory, MediaCacheIndexEntry } from "@/shared/lib/local-db/schema";
 export {
   DexieMediaCacheStorage,
   FilesystemMediaCacheStorage,

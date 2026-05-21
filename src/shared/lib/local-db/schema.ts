@@ -247,17 +247,30 @@ export interface LocalChannel {
   updatedAt: number;
 }
 
+/** Top-level grouping the Settings → Storage UI shows as tabs:
+ *  Media (photos + videos), Files (PDFs/archives/docs), Voice (voice
+ *  notes / audio). The category is computed from MessageType + mime at
+ *  put-time and stored on the index row so the breakdown queries can
+ *  group cheaply without re-classifying. */
+export type MediaCacheCategory = "media" | "file" | "voice";
+
 /** Persistent media cache index — Telegram/WhatsApp-style disk cache for
  *  decrypted media blobs. The bytes themselves live in `mediaCacheBlobs`
  *  (web) or Capacitor Filesystem (native) — this table only holds metadata
  *  + LRU bookkeeping. PK is the original `mxc://server/id` URI so cache
- *  lookups from `useFileDownload` are O(1) by primary key. */
+ *  lookups from `useFileDownload` are O(1) by primary key.
+ *
+ *  Added in v16: roomId / category / fileName so Settings → Storage can
+ *  render a per-chat breakdown and per-category lists like Telegram does. */
 export interface MediaCacheIndexEntry {
-  mxc: string;                     // PK: mxc://server/mediaId
+  mxc: string;                     // PK: mxc:// or https:// URL
   size: number;                    // Bytes of the cached blob
-  mime: string;                    // Content-Type (e.g. image/jpeg, video/mp4)
+  mime: string;                    // Content-Type (e.g. image/jpeg)
   accessedAt: number;              // epoch-ms of last get() — LRU watermark
-  createdAt: number;               // epoch-ms of first put — for diagnostics
+  createdAt: number;               // epoch-ms of first put — sort key
+  roomId: string;                  // Matrix room ID this blob came from
+  category: MediaCacheCategory;    // Top-level grouping for the Storage UI
+  fileName?: string;               // Original filename (files/voice only)
 }
 
 /** Web-fallback storage row: the decrypted blob bytes themselves.
@@ -703,11 +716,42 @@ export class ChatDatabase extends Dexie {
       listenedMessages: "messageId",
       searchCache: "query, expiresAt",
       channels: "address, syncOrder, updatedAt",
-      // PK: mxc URI (string).
-      // Indexes: accessedAt — ordered scan for LRU eviction sweep.
       mediaCacheIndex: "mxc, accessedAt",
-      // PK: mxc URI. No secondary indexes — we only ever fetch by PK.
       mediaCacheBlobs: "mxc",
+    });
+
+    // Version 16: enrich media cache index with roomId + category + fileName
+    // so Settings → Storage can show Telegram-style per-chat breakdown and
+    // per-category lists (WEE-33 follow-up). Old v15 rows lack these fields
+    // and there is no way to back-fill them (the source Matrix events have
+    // already been forgotten by the time the cache populated), so the
+    // migration wipes the cache. Users lose at most a few hundred MB of
+    // re-downloadable blobs; we gain a clean dataset for the new UI.
+    this.version(16).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      // New indexes:
+      //   roomId   — per-chat breakdown query (where(roomId).equals(x))
+      //   category — per-tab list (where(category).equals("media"))
+      mediaCacheIndex: "mxc, accessedAt, roomId, category",
+      mediaCacheBlobs: "mxc",
+    }).upgrade(async (tx) => {
+      // Wipe v15 rows + blobs — they don't carry the new metadata.
+      // Filesystem-backed entries on native (Capacitor `Directory.Cache`)
+      // are NOT touched here; the next `MediaCacheRepository.clearAll`
+      // (or `enforceLimit` once new puts come in) will surface them as
+      // orphans and self-heal via the storage MISS path.
+      try { await tx.table("mediaCacheIndex").clear(); } catch { /* ignore */ }
+      try { await tx.table("mediaCacheBlobs").clear(); } catch { /* ignore */ }
+      console.log("[ChatDB] Media cache v16 migration: wiped v15 index (no roomId)");
     });
   }
 }

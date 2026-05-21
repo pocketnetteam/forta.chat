@@ -901,6 +901,34 @@ export const en = {
   "storage.clearing": "Clearing…",
   "storage.confirmTitle": "Clear media cache?",
   "storage.confirmBody": "All cached photos, videos and files will be removed from this device. Originals stay on the server.",
+  // Tabs + per-entry actions
+  "storage.tabs.chats": "Chats",
+  "storage.tabs.media": "Media",
+  "storage.tabs.files": "Files",
+  "storage.tabs.voice": "Voice",
+  "storage.empty": "Nothing cached yet",
+  "storage.unknownChat": "Unknown chat",
+  "storage.unnamed": "Untitled",
+  "storage.voiceNote": "Voice message",
+  "storage.itemCount": "{n} items",
+  "storage.deleteFromChat": "Clear chat cache",
+  "storage.deleteEntry": "Remove from cache",
+  "storage.confirmRoomTitle": "Clear cache for {name}?",
+  "storage.confirmRoomBody": "All cached media from this chat will be removed from this device. Originals stay on the server.",
+  // Friendly labels — replace generic upload names (image.png / audio.webm / …)
+  "storage.kind.photo": "Photo",
+  "storage.kind.video": "Video",
+  "storage.kind.media": "Media",
+  "storage.kind.voice": "Voice message",
+  "storage.kind.audio": "Audio",
+  "storage.kind.file": "File",
+  // Chat detail screen
+  "storage.chatShareOfTotal": "This chat takes {pct}% of the media cache.",
+  "storage.totalForChat": "Total cached",
+  "storage.openInChat": "Open in chat",
+  "storage.openFile": "Open file",
+  "storage.previewLoading": "Loading…",
+  "storage.previewUnavailable": "Preview unavailable",
 } as const;
 
 export type TranslationKey = keyof typeof en;
