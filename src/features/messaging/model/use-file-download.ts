@@ -18,6 +18,34 @@ import {
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
+import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
+import { MessageType } from "@/entities/chat";
+
+/** Classify a message into the Settings → Storage tab buckets.
+ *  - `media` = photos + videos + video circles
+ *  - `voice` = audio messages (Forta only ships voice notes via audio)
+ *  - `file`  = catch-all for documents, archives, anything else
+ *  We rely on MessageType primarily; mime is a secondary signal for the
+ *  rare case where senders mis-set the type (e.g. an old client uploading
+ *  audio as a generic file). */
+function classifyForCache(messageType: MessageType, mime: string | undefined): MediaCacheCategory {
+  switch (messageType) {
+    case MessageType.image:
+    case MessageType.video:
+    case MessageType.videoCircle:
+      return "media";
+    case MessageType.audio:
+      return "voice";
+    case MessageType.file: {
+      const top = (mime ?? "").split("/")[0]?.toLowerCase() ?? "";
+      if (top === "image" || top === "video") return "media";
+      if (top === "audio") return "voice";
+      return "file";
+    }
+    default:
+      return "file";
+  }
+}
 
 /** Coarse classification of a download/decrypt failure for UI branching.
  *  - `crypto` — AES-SIV / membership / decryption failure; the user should
@@ -697,13 +725,19 @@ export function useFileDownload() {
 
     // forceRefetch — drop the prior cache entry and revoke the old blob URL
     // before re-running the pipeline. Without revoking, the previous
-    // objectUrl would leak (no one else holds a reference to it).
+    // objectUrl would leak (no one else holds a reference to it). Also
+    // invalidate the persistent media cache so the retry actually re-fetches
+    // from the network instead of returning the same stale bytes.
     if (opts.forceRefetch) {
       const previousUrl = cache.get(cacheKey);
       if (previousUrl) {
         try { URL.revokeObjectURL(previousUrl); } catch { /* ignore */ }
       }
       cache.delete(cacheKey);
+      const mxc = message.fileInfo.url;
+      if (mxc) {
+        getMediaCache()?.delete(mxc).catch(() => { /* non-fatal */ });
+      }
       const existingState = states.value[cacheKey];
       if (existingState) {
         existingState.objectUrl = null;
@@ -727,6 +761,37 @@ export function useFileDownload() {
     state.error = null;
     state.errorKind = null;
 
+    // Fast path: persistent media cache hit (Telegram/WhatsApp-style).
+    // Cacheable when the source is a remote URL we can stably key by —
+    // any `mxc://` or `http(s)://`. Local schemes (`blob:` / `data:`) are
+    // already local bytes the seedLocalUrl path or direct fetch handles
+    // for free, so caching them gains nothing and pollutes the index.
+    // Cache lookup failures are swallowed: a missing cache layer just falls
+    // through to the network path with no user-visible difference.
+    const mxc = message.fileInfo.url;
+    const isCacheableUrl = !!mxc &&
+      (mxc.startsWith("mxc://") || mxc.startsWith("http://") || mxc.startsWith("https://"));
+    const mediaCache = getMediaCache();
+    if (mediaCache && isCacheableUrl) {
+      try {
+        const cachedBlob = await mediaCache.get(mxc);
+        if (cachedBlob) {
+          const mimeType = message.fileInfo.type || cachedBlob.type || "application/octet-stream";
+          const typedBlob = cachedBlob.type === mimeType
+            ? cachedBlob
+            : new Blob([cachedBlob], { type: mimeType });
+          const url = URL.createObjectURL(typedBlob);
+          state.objectUrl = url;
+          state.blob = typedBlob;
+          state.loading = false;
+          cache.set(cacheKey, url);
+          return url;
+        }
+      } catch (cacheErr) {
+        console.warn("[use-file-download] media cache read failed:", cacheErr);
+      }
+    }
+
     try {
       const blob = await downloadAndDecrypt(
         message.fileInfo,
@@ -742,6 +807,20 @@ export function useFileDownload() {
       state.objectUrl = url;
       state.blob = typedBlob;
       cache.set(cacheKey, url);
+
+      // Persist decrypted bytes so the next chat-open hits the disk cache
+      // instead of re-downloading + re-decrypting. Local schemes have
+      // nothing meaningful to persist. Errors here are non-fatal: the
+      // user already has their blob URL.
+      if (mediaCache && isCacheableUrl) {
+        mediaCache.put(mxc!, typedBlob, {
+          roomId: message.roomId,
+          category: classifyForCache(message.type, mimeType),
+          fileName: message.fileInfo.name,
+        }).catch((err) => {
+          console.warn("[use-file-download] media cache write failed:", err);
+        });
+      }
 
       return url;
     } catch (e) {

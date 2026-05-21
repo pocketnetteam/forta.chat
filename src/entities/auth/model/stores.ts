@@ -16,6 +16,7 @@ import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto"
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
+import { initMediaCache, clearMediaCache, closeMediaCache } from "@/shared/lib/media-cache";
 import { clearAllDrafts } from "@/shared/lib/drafts";
 import { clearQueue } from "@/shared/lib/offline-queue";
 import { deleteLegacyCache } from "@/shared/lib/cache/chat-cache";
@@ -448,6 +449,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         },
       );
       chatStore.setChatDbKit(chatDbKit);
+
+      // WEE-33: spin up the persistent media cache so subsequent chat opens
+      // hit the disk cache instead of re-downloading every photo/video.
+      // Singleton; safe to call repeatedly across re-inits.
+      initMediaCache(chatDbKit.db);
 
       // Contact aliases (Session 51): hydrate cache from Dexie immediately so
       // chat list / headers do not flash raw addresses before /sync. The live
@@ -1102,6 +1108,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (logoutAddress) clearSelfProfile(logoutAddress);
 
     // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
+    // Clear the persistent media cache FIRST so we wipe Capacitor Filesystem
+    // entries before Dexie (which holds the index + web-fallback blobs) is
+    // torn down. Otherwise the Filesystem entries leak to disk under the
+    // new user's session.
+    await clearMediaCache();
     await deleteChatDb().catch(() => {});
 
     // ── 6. Delete legacy IndexedDB cache ──
@@ -1707,6 +1718,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       // Close Dexie without deleting
       closeChatDb();
+      // Drop the cache singleton too — `initMediaCache` will re-attach
+      // to the new user's Dexie after `initChatDb` runs in `initMatrix`.
+      closeMediaCache();
 
       // 3. SWAP active account
       sessionManager.setActive(targetAddress);
