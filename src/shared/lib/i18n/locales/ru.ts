@@ -289,6 +289,7 @@ export const ru: Record<TranslationKey, string> = {
   "messageList.cancel": "Отмена",
 
   // ── Attachment panel ──
+  "attachment.panelLabel": "Вложения",
   "attachment.photoOrVideo": "Фото или видео",
   "attachment.file": "Файл",
   "attachment.poll": "Опрос",
