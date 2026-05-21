@@ -276,6 +276,38 @@ const handleLogout = () => {
           </svg>
         </button>
 
+        <!-- Storage (WEE-33) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('storage')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+            <path d="M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.storage") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
         <!-- Dark Mode -->
         <div
           class="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"

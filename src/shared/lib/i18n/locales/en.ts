@@ -85,6 +85,7 @@ export const en = {
   "settings.title": "Settings",
   "settings.myProfile": "My Profile",
   "settings.appearance": "Appearance",
+  "settings.storage": "Storage",
   "settings.darkMode": "Dark Mode",
   "settings.torProxy": "Tor Proxy",
   "settings.torFailed": "Tor failed to start. Try toggling off and on again.",
@@ -882,6 +883,24 @@ export const en = {
   "errors.send.unknown": "Failed to send. Please try again.",
   "errors.send.dismiss": "Dismiss",
   "errors.send.retry": "Retry",
+
+  // ── Storage / media cache (WEE-33) ──
+  "storage.title": "Media cache",
+  "storage.description": "Photos, videos and files load instantly from the cache instead of being re-downloaded every time you open a chat.",
+  "storage.used": "Cache size",
+  "storage.photos": "Photos",
+  "storage.videos": "Videos",
+  "storage.audio": "Audio",
+  "storage.other": "Files",
+  "storage.limitTitle": "Cache limit",
+  "storage.limitDescription": "Older items are removed automatically when the cache exceeds this size.",
+  "storage.currentLimit": "Current limit",
+  "storage.clearTitle": "Clear cache",
+  "storage.clearDescription": "Removes all locally cached media. Files will be re-downloaded on demand.",
+  "storage.clearAll": "Clear cache",
+  "storage.clearing": "Clearing…",
+  "storage.confirmTitle": "Clear media cache?",
+  "storage.confirmBody": "All cached photos, videos and files will be removed from this device. Originals stay on the server.",
 } as const;
 
 export type TranslationKey = keyof typeof en;

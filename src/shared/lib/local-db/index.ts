@@ -18,6 +18,8 @@ export type {
   SearchCacheRow,
   LocalChannel,
   ChannelLastContent,
+  MediaCacheIndexEntry,
+  MediaCacheBlobRow,
 } from "./schema";
 export { DecryptionWorker } from "./decryption-worker";
 export { ListenedRepository } from "./listened-repository";

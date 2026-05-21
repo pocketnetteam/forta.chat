@@ -247,6 +247,27 @@ export interface LocalChannel {
   updatedAt: number;
 }
 
+/** Persistent media cache index — Telegram/WhatsApp-style disk cache for
+ *  decrypted media blobs. The bytes themselves live in `mediaCacheBlobs`
+ *  (web) or Capacitor Filesystem (native) — this table only holds metadata
+ *  + LRU bookkeeping. PK is the original `mxc://server/id` URI so cache
+ *  lookups from `useFileDownload` are O(1) by primary key. */
+export interface MediaCacheIndexEntry {
+  mxc: string;                     // PK: mxc://server/mediaId
+  size: number;                    // Bytes of the cached blob
+  mime: string;                    // Content-Type (e.g. image/jpeg, video/mp4)
+  accessedAt: number;              // epoch-ms of last get() — LRU watermark
+  createdAt: number;               // epoch-ms of first put — for diagnostics
+}
+
+/** Web-fallback storage row: the decrypted blob bytes themselves.
+ *  PK matches `MediaCacheIndexEntry.mxc`. On native (Capacitor) the blob
+ *  lives on disk and this table is unused. */
+export interface MediaCacheBlobRow {
+  mxc: string;                     // PK: mxc://server/mediaId
+  blob: Blob;                      // Decrypted plaintext bytes
+}
+
 /** Queued decryption retry job */
 export interface DecryptionJob {
   id?: number;                   // Auto PK
@@ -276,6 +297,8 @@ export class ChatDatabase extends Dexie {
   listenedMessages!: Table<ListenedMessage>;
   searchCache!: Table<SearchCacheRow>;
   channels!: Table<LocalChannel>;
+  mediaCacheIndex!: Table<MediaCacheIndexEntry>;
+  mediaCacheBlobs!: Table<MediaCacheBlobRow>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -662,6 +685,29 @@ export class ChatDatabase extends Dexie {
       listenedMessages: "messageId",
       searchCache: "query, expiresAt",
       channels: "address, syncOrder, updatedAt",
+    });
+
+    // Version 15: add persistent media cache (Telegram/WhatsApp-style).
+    // Decrypted media blobs persist across chat re-opens / app restarts so
+    // photos and videos no longer re-download on every visit (WEE-33).
+    //   - mediaCacheIndex: metadata + LRU bookkeeping, queried by accessedAt
+    //   - mediaCacheBlobs: web-fallback blob bytes (native uses Filesystem)
+    this.version(15).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      // PK: mxc URI (string).
+      // Indexes: accessedAt — ordered scan for LRU eviction sweep.
+      mediaCacheIndex: "mxc, accessedAt",
+      // PK: mxc URI. No secondary indexes — we only ever fetch by PK.
+      mediaCacheBlobs: "mxc",
     });
   }
 }
