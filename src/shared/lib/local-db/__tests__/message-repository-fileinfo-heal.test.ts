@@ -270,6 +270,53 @@ describe("MessageRepository.upsertFromServer — fileInfo self-heal (WEE-40)", (
   });
 });
 
+describe("MessageRepository.updateFileInfo — clears localBlobUrl (WEE-40)", () => {
+  let db: TestDb;
+  let repo: MessageRepository;
+
+  beforeEach(async () => {
+    db = new TestDb(`heal-update-${Date.now()}-${Math.random()}`);
+    await db.open();
+    repo = new MessageRepository(db as unknown as ChatDatabase);
+  });
+
+  afterEach(async () => {
+    await db.delete();
+  });
+
+  it("nulls localBlobUrl so the mapper does not re-mask the healed url on next render", async () => {
+    // Without clearing localBlobUrl, mappers.ts:33 (`url: local.localBlobUrl ||
+    // local.fileInfo.url`) would resurface the dead blob: URL on every reload,
+    // defeating the heal. The clear ensures the heal persists across renders.
+    await db.messages.add(
+      makeLocalMsg({
+        clientId: "cli_clear",
+        eventId: "$clear_evt",
+        status: "synced",
+        localBlobUrl: "blob:http://localhost:5173/zombie",
+        fileInfo: {
+          name: "photo.jpg",
+          type: "image/jpeg",
+          size: 2048,
+          url: "blob:http://localhost:5173/zombie",
+        },
+      }),
+    );
+
+    await repo.updateFileInfo("$clear_evt", {
+      name: "photo.jpg",
+      type: "image/jpeg",
+      size: 2048,
+      url: "mxc://server/healed",
+      secrets: { block: 1, keys: "healedkey", v: 1 },
+    });
+
+    const after = await repo.getByClientId("cli_clear");
+    expect(after?.fileInfo?.url).toBe("mxc://server/healed");
+    expect(after?.localBlobUrl).toBeUndefined();
+  });
+});
+
 describe("MessageRepository.bulkInsert — fileInfo self-heal (WEE-40)", () => {
   let db: TestDb;
   let repo: MessageRepository;

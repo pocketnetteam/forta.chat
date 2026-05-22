@@ -20,6 +20,7 @@ import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
 import { MessageType, MessageStatus } from "@/entities/chat";
+import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 
 /** Classify a message into the Settings → Storage tab buckets.
  *  - `media` = photos + videos + video circles
@@ -238,6 +239,76 @@ function surfaceTypedErrorToast(err: unknown, cacheKey: string): void {
     // (worker contexts, headless tests without scope) it may throw.
     // Don't let a failed toast mask the original download error.
     console.warn("[use-file-download] toast surface failed:", toastErr);
+  }
+}
+
+/** Refetch a Matrix event by id and extract a fresh FileInfo with the
+ *  server URL + secrets. Used to recover from rows where an optimistic
+ *  `blob:` URL survived a reload because confirmMediaSent never ran —
+ *  e.g. the /sync echo won the race against the queue's catch path
+ *  (WEE-40). Returns the healed FileInfo, or null when the event is
+ *  unavailable or doesn't carry a usable url.
+ *
+ *  Side effect: persists the healed FileInfo to Dexie so future renders
+ *  of the same message skip this fetch entirely. Persistence failures
+ *  are non-fatal — the caller will still get the healed FileInfo for
+ *  the current download attempt. */
+export async function tryHealStaleBlobFileInfo(
+  eventId: string,
+  roomId: string,
+  fileInfo: FileInfo,
+): Promise<FileInfo | null> {
+  try {
+    const matrix = getMatrixClientService();
+    const event = await matrix.fetchRoomEvent(roomId, eventId);
+    if (!event) return null;
+    const content = event.content as Record<string, unknown> | undefined;
+    if (!content) return null;
+    const rawUrl = typeof content.url === "string" ? content.url : undefined;
+    if (!rawUrl || rawUrl.startsWith("blob:") || rawUrl.startsWith("data:")) {
+      // Event itself carries no real server URL — sender lost it too.
+      return null;
+    }
+
+    // Secrets may live under three shapes depending on the sending client:
+    //  - `content.info.secrets`   — modern m.image / m.video / m.audio with explicit info
+    //  - `content.secrets`        — older m.file shape that emits top-level secrets
+    //  - `content.pbody.secrets`  — legacy Bastyon shape; downloadAndDecrypt
+    //                                already reads from this path (use-file-download.ts:471)
+    // Cover all three so a heal on a legacy-format encrypted attachment
+    // doesn't silently lose its keys and surface a crypto failure on next
+    // decrypt attempt.
+    let secrets: FileInfo["secrets"] | undefined;
+    const info = content.info as Record<string, unknown> | undefined;
+    const pbody = content.pbody as Record<string, unknown> | undefined;
+    if (info && info.secrets && typeof info.secrets === "object") {
+      secrets = info.secrets as FileInfo["secrets"];
+    } else if (content.secrets && typeof content.secrets === "object") {
+      secrets = content.secrets as FileInfo["secrets"];
+    } else if (pbody && pbody.secrets && typeof pbody.secrets === "object") {
+      secrets = pbody.secrets as FileInfo["secrets"];
+    }
+
+    const healed: FileInfo = {
+      ...fileInfo,
+      url: rawUrl,
+      ...(secrets ? { secrets } : {}),
+    };
+
+    if (isChatDbReady()) {
+      try {
+        await getChatDb().messages.updateFileInfo(eventId, healed);
+      } catch (persistErr) {
+        // Heal still works for this attempt — only future renders pay
+        // the refetch cost again. Don't bubble.
+        console.warn("[use-file-download] heal: persist failed:", persistErr);
+      }
+    }
+
+    return healed;
+  } catch (e) {
+    console.warn("[use-file-download] heal: fetchRoomEvent failed:", e);
+    return null;
   }
 }
 
@@ -785,6 +856,34 @@ export function useFileDownload() {
     state.error = null;
     state.errorKind = null;
 
+    // Lazy heal: a row whose fileInfo.url is still blob:/data: after the
+    // page reload almost always means confirmMediaSent never ran on the
+    // sender side (race with /sync echo, queue catch-path dropped the op,
+    // etc.). The event itself does have a real mxc URL on the server —
+    // refetch it and patch the row before falling through to
+    // downloadAndDecrypt, which would otherwise fast-fail with
+    // MissingUrlError and show a misleading "файл повреждён" toast on a
+    // message the peer actually received (WEE-40).
+    let effectiveFileInfo = message.fileInfo;
+    const looksOptimisticAndStale =
+      effectiveFileInfo.url !== undefined &&
+      (effectiveFileInfo.url.startsWith("blob:") || effectiveFileInfo.url.startsWith("data:")) &&
+      message.status !== MessageStatus.sending &&
+      // `id` flips from clientId to eventId in localToMessage on
+      // confirmSent; `_key` always holds clientId. They differ exactly
+      // when a server eventId is known — the only case where heal can
+      // hope to succeed.
+      message._key !== undefined &&
+      message.id !== message._key;
+    if (looksOptimisticAndStale) {
+      const healed = await tryHealStaleBlobFileInfo(
+        message.id,
+        message.roomId,
+        effectiveFileInfo,
+      );
+      if (healed) effectiveFileInfo = healed;
+    }
+
     // Fast path: persistent media cache hit (Telegram/WhatsApp-style).
     // Cacheable when the source is a remote URL we can stably key by —
     // any `mxc://` or `http(s)://`. Local schemes (`blob:` / `data:`) are
@@ -792,7 +891,7 @@ export function useFileDownload() {
     // for free, so caching them gains nothing and pollutes the index.
     // Cache lookup failures are swallowed: a missing cache layer just falls
     // through to the network path with no user-visible difference.
-    const mxc = message.fileInfo.url;
+    const mxc = effectiveFileInfo.url;
     const isCacheableUrl = !!mxc &&
       (mxc.startsWith("mxc://") || mxc.startsWith("http://") || mxc.startsWith("https://"));
     const mediaCache = getMediaCache();
@@ -800,7 +899,7 @@ export function useFileDownload() {
       try {
         const cachedBlob = await mediaCache.get(mxc);
         if (cachedBlob) {
-          const mimeType = message.fileInfo.type || cachedBlob.type || "application/octet-stream";
+          const mimeType = effectiveFileInfo.type || cachedBlob.type || "application/octet-stream";
           const typedBlob = cachedBlob.type === mimeType
             ? cachedBlob
             : new Blob([cachedBlob], { type: mimeType });
@@ -818,13 +917,13 @@ export function useFileDownload() {
 
     try {
       const blob = await downloadAndDecrypt(
-        message.fileInfo,
+        effectiveFileInfo,
         message.roomId,
         message.senderId,
         message.timestamp,
         signal,
       );
-      const mimeType = message.fileInfo.type || "application/octet-stream";
+      const mimeType = effectiveFileInfo.type || "application/octet-stream";
       const typedBlob = new Blob([blob], { type: mimeType });
       const url = URL.createObjectURL(typedBlob);
 
@@ -840,7 +939,7 @@ export function useFileDownload() {
         mediaCache.put(mxc!, typedBlob, {
           roomId: message.roomId,
           category: classifyForCache(message.type, mimeType),
-          fileName: message.fileInfo.name,
+          fileName: effectiveFileInfo.name,
         }).catch((err) => {
           console.warn("[use-file-download] media cache write failed:", err);
         });

@@ -412,6 +412,23 @@ export class MessageRepository {
       .modify({ reactions });
   }
 
+  /** Overwrite the fileInfo of a message identified by eventId. Used by
+   *  the download-side lazy heal path (`use-file-download.ts`) when an
+   *  optimistic `blob:` URL has lingered in Dexie because confirmMediaSent
+   *  never ran — we refetch the event from Matrix and patch the row in
+   *  place so the next render uses a real mxc URL (WEE-40).
+   *
+   *  Also clears `localBlobUrl` so that `mappers.ts`'s
+   *  `local.localBlobUrl || local.fileInfo.url` fallback does not re-mask
+   *  the healed url with the dead blob: on the next render. Skipping this
+   *  would defeat the heal — the dead blob would resurface every reload. */
+  async updateFileInfo(eventId: string, fileInfo: LocalMessage["fileInfo"]): Promise<void> {
+    await this.db.messages
+      .where("eventId")
+      .equals(eventId)
+      .modify({ fileInfo, localBlobUrl: undefined });
+  }
+
   /** Update poll info on a message */
   async updatePollInfo(
     eventId: string,
