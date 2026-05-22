@@ -261,6 +261,9 @@ export const en = {
   "message.retry": "Retry",
   "message.failedToLoadImage": "Failed to load image",
   "message.tapToRetry": "Tap to retry",
+  "message.videoUnsupportedFormat": "Video format not supported",
+  "message.videoLoadFailed": "Failed to load video",
+  "message.videoDownload": "Download",
 
   // ── Message context menu ──
   "contextMenu.reply": "Reply",

@@ -9,6 +9,11 @@ import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import { formatVideoDuration, extractVideoFrameThumbnail } from "../model/video-thumbnail";
+import {
+  videoPlaybackErrorFromMediaError,
+  VIDEO_LOAD_TIMEOUT_MS,
+  type VideoPlaybackError,
+} from "../model/video-error";
 import MessageContent from "./MessageContent.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
@@ -257,15 +262,24 @@ watch(
     // short-circuit can otherwise pin us to the previous message's poster).
     revokePoster();
     lastPosterSource.value = null;
+    // Drop the previous video's playback error so the next message doesn't
+    // inherit a stale codec-unsupported overlay (WEE-21).
+    videoPlaybackError.value = null;
+    clearVideoLoadTimer();
   },
 );
 
 onBeforeUnmount(() => {
   isBubbleAlive = false;
   revokePoster();
+  clearVideoLoadTimer();
 });
 
 const onInlineVideoLoadedMetadata = () => {
+  // First successful frame of metadata = decoder is alive. Disarm the
+  // 10s timeout so a slow `canplay` on a long video doesn't trip it.
+  clearVideoLoadTimer();
+  videoPlaybackError.value = null;
   const el = inlineVideoRef.value;
   if (el && Number.isFinite(el.duration) && el.duration > 0) {
     videoMetaDuration.value = el.duration;
@@ -284,6 +298,101 @@ const playInlineVideo = () => {
     (result as Promise<void>).catch(() => { /* @pause handler resets state */ });
   }
 };
+
+// ── Video playback state machine (WEE-21) ──
+// Pre-fix, a failed decrypt/decode/codec-mismatch surfaced as an eternal
+// spinner or the bare Android WebView "green icon" placeholder. The state
+// below routes those failures into a typed UX with a retry / download
+// fallback. See `model/video-error.ts` for the MediaError → typed mapping.
+const videoPlaybackError = ref<VideoPlaybackError | null>(null);
+let videoLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearVideoLoadTimer = () => {
+  if (videoLoadTimer !== null) {
+    clearTimeout(videoLoadTimer);
+    videoLoadTimer = null;
+  }
+};
+
+const armVideoLoadTimer = () => {
+  clearVideoLoadTimer();
+  videoLoadTimer = setTimeout(() => {
+    videoLoadTimer = null;
+    // Only surface a timeout if the element never reached a playable state.
+    // `loadedmetadata` is the earliest signal that decoding works at all;
+    // once that fires we clear the timer eagerly so the deadline is moot.
+    // The `videoPlaybackError === null` guard prevents the timer from
+    // clobbering a more specific error (decode / codec-unsupported) that
+    // arrived via `@error` between arming and the deadline — Android WebView
+    // can fire synchronous errors on `el.load()` during retry, so without
+    // this check the typed copy would silently revert to "timeout" 10s later.
+    if (
+      !isVideoPlaying.value &&
+      videoMetaDuration.value === null &&
+      videoPlaybackError.value === null
+    ) {
+      videoPlaybackError.value = "timeout";
+    }
+  }, VIDEO_LOAD_TIMEOUT_MS);
+};
+
+const onInlineVideoError = (event: Event) => {
+  clearVideoLoadTimer();
+  const target = event.target as HTMLVideoElement | null;
+  videoPlaybackError.value = videoPlaybackErrorFromMediaError(target?.error?.code);
+};
+
+const onInlineVideoCanPlay = () => {
+  clearVideoLoadTimer();
+  videoPlaybackError.value = null;
+};
+
+const videoErrorMessage = computed(() => {
+  switch (videoPlaybackError.value) {
+    case "codec-unsupported":
+      return t("message.videoUnsupportedFormat");
+    case "decode":
+    case "timeout":
+    case "generic":
+      return t("message.videoLoadFailed");
+    default:
+      return "";
+  }
+});
+
+// Codec-unsupported can't be retried — the WebView genuinely lacks the
+// decoder, so re-fetching the same bytes won't help. All other errors
+// (decode/timeout/generic) are potentially transient, so a retry is the
+// right affordance alongside the download fallback.
+const videoCanRetry = computed(() => videoPlaybackError.value !== "codec-unsupported");
+
+const retryVideoPlayback = () => {
+  videoPlaybackError.value = null;
+  const el = inlineVideoRef.value;
+  if (el) {
+    try { el.load(); } catch { /* WebView edge case — ignore */ }
+  }
+  if (fileState.value.objectUrl) {
+    armVideoLoadTimer();
+  } else {
+    download(props.message);
+  }
+};
+
+// Arm the load-deadline as soon as a fresh blob URL is wired into <video>.
+// Disarming happens on `loadedmetadata` / `canplay` (success) or in
+// `onInlineVideoError` (failure) — no leak even if the bubble unmounts
+// mid-load, because `onBeforeUnmount` also calls `clearVideoLoadTimer`.
+watch(
+  () => fileState.value.objectUrl,
+  (url, prevUrl) => {
+    if (url === prevUrl) return;
+    if (props.message.type !== MessageType.video) return;
+    clearVideoLoadTimer();
+    videoPlaybackError.value = null;
+    if (url) armVideoLoadTimer();
+  },
+);
 
 /** Telegram-style sender colors (same palette as Avatar) */
 const SENDER_COLORS = ["#E17076", "#FAA774", "#A695E7", "#7BC862", "#6EC9CB", "#65AADD", "#EE7AAE"];
@@ -707,6 +816,8 @@ const replyPreviewSender = computed(() => {
             preload="metadata"
             class="block h-full w-full object-cover"
             @loadedmetadata="onInlineVideoLoadedMetadata"
+            @canplay="onInlineVideoCanPlay"
+            @error="onInlineVideoError"
             @play="isVideoPlaying = true"
             @pause="isVideoPlaying = false"
             @ended="isVideoPlaying = false"
@@ -720,7 +831,7 @@ const replyPreviewSender = computed(() => {
             </span>
           </button>
           <button
-            v-if="fileState.objectUrl && !isVideoPlaying && !isUploading && !isSending && !isFailed"
+            v-if="fileState.objectUrl && !isVideoPlaying && !isUploading && !isSending && !isFailed && !videoPlaybackError"
             type="button"
             class="absolute inset-0 flex items-center justify-center bg-black/15 transition-colors hover:bg-black/25"
             aria-label="Play video"
@@ -731,10 +842,45 @@ const replyPreviewSender = computed(() => {
             </span>
           </button>
           <div
-            v-if="videoDurationText && !isVideoPlaying"
+            v-if="videoDurationText && !isVideoPlaying && !videoPlaybackError"
             class="pointer-events-none absolute bottom-2 right-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[11px] font-medium leading-none text-white"
           >
             {{ videoDurationText }}
+          </div>
+          <!--
+            Typed playback-error overlay (WEE-21). Sits above the duration
+            badge / play-button overlay so a failed decode shows specific
+            UX instead of an eternal spinner. Codec-unsupported renders
+            only the download button; transient errors add a retry.
+          -->
+          <div
+            v-if="videoPlaybackError && !isUploading && !isSending"
+            class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 px-4 text-center text-white"
+          >
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span class="text-xs font-medium">{{ videoErrorMessage }}</span>
+            <div class="flex gap-2">
+              <button
+                v-if="videoCanRetry"
+                type="button"
+                class="rounded-md bg-white/15 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/25"
+                @click.stop="retryVideoPlayback"
+              >
+                {{ t('message.retry') }}
+              </button>
+              <button
+                type="button"
+                class="rounded-md bg-color-bg-ac px-3 py-1.5 text-xs font-medium text-text-on-bg-ac-color transition-opacity hover:opacity-90 disabled:opacity-60"
+                :disabled="isSavingFile"
+                @click.stop="handleFileDownload"
+              >
+                {{ t('message.videoDownload') }}
+              </button>
+            </div>
           </div>
           <!-- Upload progress overlay for video -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
@@ -753,7 +899,7 @@ const replyPreviewSender = computed(() => {
           <div v-else-if="isSending" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-3 border-white border-t-transparent" />
           </div>
-          <div v-if="isFailed && hasFileInfo" class="absolute inset-0 flex items-center justify-center bg-black/40">
+          <div v-if="isFailed && hasFileInfo && !videoPlaybackError" class="absolute inset-0 flex items-center justify-center bg-black/40">
             <button class="flex flex-col items-center gap-1 text-white" @click.stop="emit('retryMedia', message)">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
