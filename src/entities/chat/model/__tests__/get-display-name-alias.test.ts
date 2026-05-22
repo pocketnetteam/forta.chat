@@ -96,3 +96,63 @@ describe("getDisplayName — local alias priority", () => {
     expect(store.hasLocalAlias(raw)).toBe(false);
   });
 });
+
+/**
+ * WEE-39 follow-up regression: `getCanonicalDisplayName` MUST skip the
+ * local-alias step. It is the chokepoint for any name that will leave the
+ * device (outbound @mention safeName, forward attribution, etc.). If it
+ * accidentally returned the alias, recipients would see a stranger string
+ * because they do not share the sender's private address book.
+ */
+describe("getCanonicalDisplayName — alias must not leak to wire", () => {
+  let store: ReturnType<typeof useChatStore>;
+  let userStore: ReturnType<typeof import("@/entities/user/model").useUserStore>;
+
+  beforeEach(async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    setActivePinia(createTestingPinia({ stubActions: false }));
+    store = useChatStore();
+    const { useUserStore } = await import("@/entities/user/model");
+    userStore = useUserStore();
+  });
+
+  function seedCanonical(address: string, name: string): void {
+    userStore.setUser(address, {
+      address,
+      name,
+      about: "",
+      image: "",
+      site: "",
+      language: "",
+    });
+  }
+
+  it("ignores localAlias and falls back to canonical chain", async () => {
+    await store.setContactAlias("PAlias", "qqq");
+    // Sanity: getDisplayName returns the alias (private UX).
+    expect(store.getDisplayName("PAlias")).toBe("qqq");
+    // Canonical lookup must skip the alias and fall back to truncation
+    // (no user-store profile seeded for this address).
+    expect(store.getCanonicalDisplayName("PAlias")).not.toBe("qqq");
+  });
+
+  it("returns user-store profile name when one is cached (no alias leak)", async () => {
+    await store.setContactAlias("PCached", "qqq");
+    seedCanonical("PCached", "dqwewr");
+    expect(store.getDisplayName("PCached")).toBe("qqq");
+    expect(store.getCanonicalDisplayName("PCached")).toBe("dqwewr");
+  });
+
+  it("resolves hex-encoded address through canonical chain", async () => {
+    const raw = "PHexCanonical";
+    const hex = hexEncode(raw);
+    await store.setContactAlias(raw, "MyLocal");
+    seedCanonical(raw, "Real Name");
+    expect(store.getDisplayName(hex)).toBe("MyLocal");
+    expect(store.getCanonicalDisplayName(hex)).toBe("Real Name");
+  });
+
+  it("returns '?' for empty input", () => {
+    expect(store.getCanonicalDisplayName("")).toBe("?");
+  });
+});

@@ -6,15 +6,20 @@ import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 
 /**
  * Tracked mention inserted via autocomplete.
- * The textarea shows `@SafeName` (display), but on send
- * we expand it to `@hexId:SafeName` (raw mention format).
+ * The textarea shows `@DisplaySafeName` (display, may include the user's
+ * private local alias for readability), but on send we expand it to
+ * `@hexId:CanonicalSafeName` (raw mention format using the canonical name
+ * peers know — see WEE-39 follow-up: prior code embedded the local alias in
+ * the wire payload, so recipients saw a stranger string instead of the
+ * sender they recognize).
  */
 interface MentionToken {
-  start: number;   // index of '@' in display text
-  end: number;     // index after display name (before trailing space)
+  start: number;        // index of '@' in display text
+  end: number;          // index after display name (before trailing space)
   hexId: string;
+  /** Sanitised canonical name (no local alias). Used in the wire payload. */
   safeName: string;
-  display: string; // "@SafeName" as it appears in the textarea
+  display: string;      // "@DisplaySafeName" as it appears in the textarea
 }
 
 /**
@@ -180,14 +185,32 @@ export function useMentionAutocomplete(
     if (len > 0 && selectedIndex.value >= len) selectedIndex.value = len - 1;
   }, { immediate: true });
 
-  /** Insert a mention at the trigger position (display-only in textarea). */
+  /** Insert a mention at the trigger position (display-only in textarea).
+   *
+   *  Two names are computed:
+   *  - `displaySafe` (textarea / pill) uses the user-facing display name —
+   *    if they renamed the contact locally ("qqq"), the input shows `@qqq`
+   *    so the sender keeps a familiar reference.
+   *  - `safeName` (wire payload) uses the CANONICAL display name — what
+   *    peers actually know the user as ("dqwewr"). The local alias must
+   *    never travel through `@hexId:safeName` because recipients do not
+   *    share the sender's address book and would parse it as a stranger
+   *    string. (WEE-39 follow-up.)
+   */
   const insertMention = (hexId: string) => {
     const el = textareaRef.value;
     if (!el) return;
 
-    const rawName = chatStore.getDisplayName(hexId);
-    const safeName = rawName.replace(/\s+/g, "_").replace(/[^\p{L}\p{N}_]/gu, "").slice(0, 50) || hexId.slice(0, 8);
-    const displayMention = `@${safeName}`;
+    const sanitise = (raw: string): string =>
+      raw.replace(/\s+/g, "_").replace(/[^\p{L}\p{N}_]/gu, "").slice(0, 50) || hexId.slice(0, 8);
+
+    const canonicalName = chatStore.getCanonicalDisplayName(hexId);
+    const safeName = sanitise(canonicalName);
+
+    const displayName = chatStore.getDisplayName(hexId);
+    const displaySafe = sanitise(displayName);
+
+    const displayMention = `@${displaySafe}`;
     const insertion = displayMention + " "; // trailing space
 
     const before = text.value.slice(0, triggerIndex.value);

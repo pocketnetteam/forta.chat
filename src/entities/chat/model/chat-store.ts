@@ -579,6 +579,38 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return address;
   };
 
+  /** Same resolution chain as `getDisplayName` but SKIPS the local-alias
+   *  step. Use this whenever the resulting name will leave the device —
+   *  outbound `@hexId:safeName` mention payloads, forward attributions,
+   *  anything peers will see. The alias is a private "Telegram-style rename"
+   *  and must never appear in a wire format (WEE-39 follow-up: peers were
+   *  receiving the local alias inside the mention safeName, causing the
+   *  mention to render as a stranger string on their side). */
+  const getCanonicalDisplayName = (address: string): string => {
+    if (!address) return "?";
+    let resolvedAddr = address;
+    if (/^[a-f0-9]+$/i.test(address)) {
+      try {
+        const decoded = hexDecode(address);
+        if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) {
+          resolvedAddr = decoded;
+        }
+      } catch { /* not a valid hex string */ }
+    }
+    // (skip local alias on purpose — see jsdoc above)
+    const cached = userDisplayNames.value[address];
+    if (cached) return cached;
+    if (resolvedAddr !== address) {
+      const decodedCached = userDisplayNames.value[resolvedAddr];
+      if (decodedCached) return decodedCached;
+    }
+    const uStore = useUserStore();
+    const userProfile = uStore.users[resolvedAddr];
+    if (userProfile?.name) return userProfile.name;
+    if (address.length > 16) return address.slice(0, 8) + "…" + address.slice(-4);
+    return address;
+  };
+
   /** Resolve a hex-encoded address back to the raw Bastyon form (or echo
    *  the input if it is already raw). */
   const resolveRawAddress = (address: string): string => {
@@ -6659,6 +6691,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     saveForwardDraft,
     restoreForwardDraft,
     getDisplayName,
+    getCanonicalDisplayName,
     getLocalAlias,
     hasLocalAlias,
     localAliases,
