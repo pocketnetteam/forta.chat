@@ -92,11 +92,23 @@ export function applyLocalAlias(
 /**
  * Strip hex addresses from mentions for plain-text preview.
  * "@50486457...5:Daniel_Satchkov" → "@Daniel_Satchkov"
+ *
+ * When `getAlias` is provided and returns a non-empty value for the
+ * mention's hex userId, that alias is used instead of the wire safeName.
+ * This is what surfaces a renamed contact ("@qqq") in chat-list previews,
+ * reply blurbs, forward attributions, etc. — keeping the read experience
+ * symmetric with the in-bubble renderer (WEE-39 follow-up).
  */
-export function stripMentionAddresses(text: string): string {
+export function stripMentionAddresses(
+  text: string,
+  getAlias?: (userId: string) => string | null | undefined,
+): string {
   if (!text) return "";
   // Use a fresh regex (since MENTION_RE is global and has state)
-  return text.replace(/@\w{34,68}:([\p{L}\p{N}_]{1,50})/gu, (_match, name) => `@${name}`);
+  return text.replace(/@(\w{34,68}):([\p{L}\p{N}_]{1,50})/gu, (_match, userId, name) => {
+    const alias = getAlias?.(userId);
+    return alias ? `@${alias}` : `@${name}`;
+  });
 }
 
 /**

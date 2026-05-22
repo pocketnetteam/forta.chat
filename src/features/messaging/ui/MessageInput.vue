@@ -475,7 +475,7 @@ const replyInputPreviewText = computed(() => {
   if (reply.type === MessageType.videoCircle) return "Video message";
   if (reply.type === MessageType.audio) return "Voice message";
   if (reply.type === MessageType.file) return reply.content || "File";
-  const t = stripBastyonLinks(stripMentionAddresses(reply.content));
+  const t = stripBastyonLinks(stripMentionAddresses(reply.content, (id) => chatStore.getLocalAlias(id)));
   return (t.length > 100 ? t.slice(0, 100) + "\u2026" : t) || "...";
 });
 
@@ -534,7 +534,7 @@ const bulkForwardPreviewText = computed(() => {
   // First message's body, clipped — gives visual continuity with singular bar.
   const first = chatStore.forwardingMessages[0];
   if (!first) return "";
-  const txt = stripBastyonLinks(stripMentionAddresses(first.content));
+  const txt = stripBastyonLinks(stripMentionAddresses(first.content, (id) => chatStore.getLocalAlias(id)));
   return (txt.length > 100 ? txt.slice(0, 100) + "\u2026" : txt) || "...";
 });
 
@@ -546,7 +546,7 @@ const forwardPreviewText = computed(() => {
   if (fwd.type === MessageType.videoCircle) return "Video message";
   if (fwd.type === MessageType.audio) return "Voice message";
   if (fwd.type === MessageType.file) return fwd.content || "File";
-  const txt = stripBastyonLinks(stripMentionAddresses(fwd.content));
+  const txt = stripBastyonLinks(stripMentionAddresses(fwd.content, (id) => chatStore.getLocalAlias(id)));
   return (txt.length > 100 ? txt.slice(0, 100) + "\u2026" : txt) || "...";
 });
 

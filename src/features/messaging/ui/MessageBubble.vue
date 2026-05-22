@@ -398,7 +398,7 @@ const replyPreviewText = computed(() => {
   if (reply.type === MessageType.videoCircle) return "Video message";
   if (reply.type === MessageType.audio) return "Voice message";
   if (reply.type === MessageType.file) return reply.content || "File";
-  const text = stripBastyonLinks(stripMentionAddresses(reply.content));
+  const text = stripBastyonLinks(stripMentionAddresses(reply.content, (id) => chatStore.getLocalAlias(id)));
   return (text.length > 100 ? text.slice(0, 100) + "\u2026" : text) || "...";
 });
 

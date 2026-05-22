@@ -233,7 +233,7 @@ function getPreview(room: ChatRoom): DisplayResult {
     // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)
     const content = room.lastMessage.content;
     const cleaned = (content && !content.startsWith("[encrypted"))
-      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content)))
+      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content, (id) => chatStore.getLocalAlias(id))))
       : content;
     return getMessagePreviewForUI(
       cleaned,
@@ -260,7 +260,7 @@ function getPreview(room: ChatRoom): DisplayResult {
       return { state: "ready", text: formatPreview(last, room) };
     }
     // Strip bastyon links and matrix IDs from fallback preview (same as formatPreview does)
-    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content)));
+    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content, (id) => chatStore.getLocalAlias(id))));
     return getMessagePreviewForUI(
       cleaned,
       last.decryptionStatus,

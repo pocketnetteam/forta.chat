@@ -150,6 +150,38 @@ describe("stripMentionAddresses", () => {
     const result = stripMentionAddresses(`@${hex1}:Alice and @${hex2}:Борис`);
     expect(result).toBe("@Alice and @Борис");
   });
+
+  // WEE-39 follow-up: previews must show the viewer's local alias when set.
+  it("substitutes alias when getAlias returns a value", () => {
+    const hex = "a".repeat(68);
+    const result = stripMentionAddresses(
+      `say hi to @${hex}:dqwewr`,
+      (id) => (id === hex ? "qqq" : null),
+    );
+    expect(result).toBe("say hi to @qqq");
+  });
+
+  it("falls back to wire name when getAlias returns null/undefined", () => {
+    const hex = "a".repeat(68);
+    expect(stripMentionAddresses(`@${hex}:Alice`, () => null)).toBe("@Alice");
+    expect(stripMentionAddresses(`@${hex}:Alice`, () => undefined)).toBe("@Alice");
+  });
+
+  it("falls back to wire name when alias is empty string", () => {
+    const hex = "a".repeat(68);
+    expect(stripMentionAddresses(`@${hex}:Alice`, () => "")).toBe("@Alice");
+  });
+
+  it("applies alias selectively per mention", () => {
+    const hex1 = "a".repeat(68);
+    const hex2 = "b".repeat(68);
+    const aliases: Record<string, string> = { [hex1]: "qqq" };
+    const result = stripMentionAddresses(
+      `@${hex1}:Alice and @${hex2}:Bob`,
+      (id) => aliases[id] ?? null,
+    );
+    expect(result).toBe("@qqq and @Bob");
+  });
 });
 
 // ─── stripBastyonLinks ────────────────────────────────────────────
