@@ -14,6 +14,7 @@ import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
 import Toggle from "@/shared/ui/toggle/Toggle.vue";
 import ChatInfoGallery from "./ChatInfoGallery.vue";
 import RenameContactDialog from "./RenameContactDialog.vue";
+import { shouldShowPeerRenamePencil } from "../lib/should-show-rename-pencil";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { openBastyonProfile } from "@/shared/lib/open-profile-url";
 import { copyToClipboard, shareLink } from "@/shared/lib/share-link";
@@ -509,6 +510,10 @@ const copyAddress = async () => {
 const renameTarget = ref<string | null>(null);
 const myAddress = computed(() => authStore.address ?? "");
 
+const showPeerRenamePencil = computed(() =>
+  shouldShowPeerRenamePencil(room.value?.isGroup ?? false, peerAddress.value, myAddress.value),
+);
+
 const openRenameDialog = (address: string) => {
   if (!address) return;
   // Never let the user "rename themselves" via this flow — that lives in
@@ -613,8 +618,23 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 />
               </div>
               <div class="text-center">
-                <h2 v-if="isUnresolvedName(roomDisplayName)" class="mx-auto h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
-                <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
+                <div class="flex items-center justify-center gap-2">
+                  <h2 v-if="isUnresolvedName(roomDisplayName)" class="h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
+                  <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
+                  <button
+                    v-if="showPeerRenamePencil && peerAddress"
+                    data-test="rename-peer-btn"
+                    class="shrink-0 rounded p-1 text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-2/40 hover:text-text-color"
+                    :title="chatStore.hasLocalAlias(peerAddress) ? t('contact.editAlias') : t('contact.addAlias')"
+                    :aria-label="chatStore.hasLocalAlias(peerAddress) ? t('contact.editAlias') : t('contact.addAlias')"
+                    @click="openRenameDialog(peerAddress)"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                    </svg>
+                  </button>
+                </div>
                 <p class="text-sm text-text-on-main-bg-color">
                   {{ room.isGroup ? t("info.members", { count: chatStore.getRoomMemberCount(room.id) }) : t("info.directMessage") }}
                 </p>
