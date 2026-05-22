@@ -86,7 +86,7 @@ export function useFormatPreview() {
       default:
         preview = content || "";
     }
-    preview = stripMentionAddresses(preview);
+    preview = stripMentionAddresses(preview, (userId) => chatStore.getLocalAlias(userId));
     preview = stripBastyonLinks(preview);
     preview = cleanMatrixIds(preview);
 

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, type Ref, ref } from "vue";
-import { parseMessage } from "@/shared/lib/message-format";
+import { parseMessage, applyLocalAlias } from "@/shared/lib/message-format";
 import type { Segment } from "@/shared/lib/message-format";
 import { PostCard } from "@/features/post-player";
 import { splitByQuery, type TextPart } from "@/shared/lib/utils/highlight";
 import type { LinkPreview } from "@/entities/chat";
+import { useChatStore } from "@/entities/chat";
 import LinkPreviewCard from "./LinkPreviewCard.vue";
 
 interface Props {
@@ -17,8 +18,17 @@ const props = withDefaults(defineProps<Props>(), { isOwn: false });
 const emit = defineEmits<{ mentionClick: [userId: string] }>();
 
 const searchQuery = inject<Ref<string>>("searchQuery", ref(""));
+const chatStore = useChatStore();
 
-const segments = computed<Segment[]>(() => parseMessage(props.text));
+// Map each mention to the viewer's local alias (if any) so a renamed
+// contact reads `@qqq` here even when the sender shipped `@dqwewr`. The
+// userId carried by the segment is untouched, so click-through still
+// opens the correct profile. (WEE-39 follow-up.)
+const segments = computed<Segment[]>(() =>
+  parseMessage(props.text).map((s) =>
+    applyLocalAlias(s, (userId) => chatStore.getLocalAlias(userId)),
+  ),
+);
 const activeQuery = computed(() => searchQuery.value?.trim() ?? "");
 
 /** Inline segments (text, link, mention) vs block segments (bastyonLink) */

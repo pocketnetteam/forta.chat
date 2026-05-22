@@ -8,8 +8,10 @@ import {
   stripBastyonLinks,
   isSafeUrl,
   truncateMessage,
+  applyLocalAlias,
   MAX_MESSAGE_LENGTH,
 } from "./message-format";
+import type { Segment } from "./message-format";
 
 describe("parseMessage", () => {
   it("returns single text segment for plain text", () => {
@@ -148,6 +150,38 @@ describe("stripMentionAddresses", () => {
     const result = stripMentionAddresses(`@${hex1}:Alice and @${hex2}:Борис`);
     expect(result).toBe("@Alice and @Борис");
   });
+
+  // WEE-39 follow-up: previews must show the viewer's local alias when set.
+  it("substitutes alias when getAlias returns a value", () => {
+    const hex = "a".repeat(68);
+    const result = stripMentionAddresses(
+      `say hi to @${hex}:dqwewr`,
+      (id) => (id === hex ? "qqq" : null),
+    );
+    expect(result).toBe("say hi to @qqq");
+  });
+
+  it("falls back to wire name when getAlias returns null/undefined", () => {
+    const hex = "a".repeat(68);
+    expect(stripMentionAddresses(`@${hex}:Alice`, () => null)).toBe("@Alice");
+    expect(stripMentionAddresses(`@${hex}:Alice`, () => undefined)).toBe("@Alice");
+  });
+
+  it("falls back to wire name when alias is empty string", () => {
+    const hex = "a".repeat(68);
+    expect(stripMentionAddresses(`@${hex}:Alice`, () => "")).toBe("@Alice");
+  });
+
+  it("applies alias selectively per mention", () => {
+    const hex1 = "a".repeat(68);
+    const hex2 = "b".repeat(68);
+    const aliases: Record<string, string> = { [hex1]: "qqq" };
+    const result = stripMentionAddresses(
+      `@${hex1}:Alice and @${hex2}:Bob`,
+      (id) => aliases[id] ?? null,
+    );
+    expect(result).toBe("@qqq and @Bob");
+  });
 });
 
 // ─── stripBastyonLinks ────────────────────────────────────────────
@@ -281,5 +315,43 @@ describe("truncateMessage", () => {
 
   it("MAX_MESSAGE_LENGTH equals 65536", () => {
     expect(MAX_MESSAGE_LENGTH).toBe(65536);
+  });
+});
+
+describe("applyLocalAlias (WEE-39 follow-up)", () => {
+  const mentionSeg: Segment = { type: "mention", content: "@Alice", userId: "deadbeef" };
+  const textSeg: Segment = { type: "text", content: "hi" };
+
+  it("replaces mention content with @alias when getAlias returns a value", () => {
+    const result = applyLocalAlias(mentionSeg, () => "qqq");
+    expect(result).toEqual({ type: "mention", content: "@qqq", userId: "deadbeef" });
+  });
+
+  it("preserves userId — clicking the mention still resolves the correct profile", () => {
+    const result = applyLocalAlias(mentionSeg, () => "qqq");
+    if (result.type !== "mention") throw new Error("expected mention segment");
+    expect(result.userId).toBe("deadbeef");
+  });
+
+  it("returns the segment unchanged when getAlias returns null/undefined", () => {
+    expect(applyLocalAlias(mentionSeg, () => null)).toBe(mentionSeg);
+    expect(applyLocalAlias(mentionSeg, () => undefined)).toBe(mentionSeg);
+  });
+
+  it("treats empty-string alias as no alias", () => {
+    expect(applyLocalAlias(mentionSeg, () => "")).toBe(mentionSeg);
+  });
+
+  it("passes through non-mention segments untouched", () => {
+    expect(applyLocalAlias(textSeg, () => "qqq")).toBe(textSeg);
+  });
+
+  it("invokes getAlias with the segment's userId, not its display name", () => {
+    let receivedId = "";
+    applyLocalAlias(mentionSeg, (id) => {
+      receivedId = id;
+      return null;
+    });
+    expect(receivedId).toBe("deadbeef");
   });
 });

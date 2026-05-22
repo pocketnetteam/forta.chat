@@ -727,7 +727,7 @@ export const en = {
   "common.loading": "Loading...",
   "common.unknownUser": "User",
   "common.encryptedChat": "Chat",
-  "message.notDecrypted": "Message not decrypted",
+  "message.notDecrypted": "Couldn't decrypt — ask the sender to resend or update the app",
 
   // ── Sync status ──
   "sync.offline": "Waiting for network...",
