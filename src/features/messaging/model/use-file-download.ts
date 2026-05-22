@@ -19,7 +19,7 @@ import {
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
-import { MessageType } from "@/entities/chat";
+import { MessageType, MessageStatus } from "@/entities/chat";
 
 /** Classify a message into the Settings → Storage tab buckets.
  *  - `media` = photos + videos + video circles
@@ -752,6 +752,30 @@ export function useFileDownload() {
       const state = getState(cacheKey);
       state.objectUrl = cache.get(cacheKey)!;
       return state.objectUrl;
+    }
+
+    // Optimistic-upload fast path: the message is still going through the
+    // outbound queue (status=sending), `localBlobUrl` is alive, and
+    // `mappers.ts` has surfaced it as fileInfo.url. Running the full
+    // server-fetch pipeline here would fast-fail in downloadAndDecrypt's
+    // blob:/data: guard (defence against WEE-28 dead blob remnants), which
+    // pops a misleading "Файл повреждён или не пришёл с источника" toast
+    // and a momentary red retry overlay while the sender's own upload is
+    // still in flight. Bypass the pipeline: use the blob URL as-is, do not
+    // pollute the long-lived `cache` (the blob is revoked ~5s after
+    // confirmMediaSent), and let the watch-on-id re-trigger download once
+    // the row flips to status=sent with a real mxc URL.
+    const fileUrl = message.fileInfo.url;
+    if (
+      fileUrl?.startsWith("blob:") &&
+      message.status === MessageStatus.sending
+    ) {
+      const state = getState(cacheKey);
+      state.objectUrl = fileUrl;
+      state.loading = false;
+      state.error = null;
+      state.errorKind = null;
+      return fileUrl;
     }
 
     const state = getState(cacheKey);

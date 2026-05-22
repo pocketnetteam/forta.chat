@@ -513,6 +513,94 @@ describe("useFileDownload", () => {
       scope.stop();
     });
 
+    it("short-circuits and reuses the live blob URL while the upload is still in flight (no toast, no overlay)", async () => {
+      // Optimistic outbound media: the row is status="sending", localBlobUrl
+      // is alive, mappers.ts surfaces it as fileInfo.url. The previous
+      // behaviour fell through to the WEE-28 fast-fail and produced a
+      // misleading "Файл повреждён или не пришёл с источника" toast plus a
+      // momentary retry overlay until confirmMediaSent flipped the row.
+      // After the fix, download() must return the blob URL as-is, with no
+      // fetch, no toast, no error state.
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      mockToast.mockClear();
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const blobUrl = "blob:http://localhost:5173/optimistic-photo";
+        const message = {
+          id: "client_inflight",
+          _key: "client_inflight",
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "photo.jpg",
+          timestamp: Date.now(),
+          // MessageStatus.sending is the canonical "upload in flight" signal.
+          status: "sending",
+          type: "image",
+          uploadProgress: 42,
+          fileInfo: {
+            name: "photo.jpg",
+            type: "image/jpeg",
+            size: 2048,
+            url: blobUrl,
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(message);
+
+        expect(result).toBe(blobUrl);
+        // Network must not be touched — the blob is local.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // No error toast must fire while the upload is still in flight.
+        expect(mockToast).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("still fast-fails blob: URLs for non-sending status (WEE-28 dead-blob defense intact)", async () => {
+      // Guard parity: a row that survived a crashed upload comes back from
+      // Dexie with status="failed" (or "sent" if echo confirmed it) and a
+      // dead blob: URL. The short-circuit must NOT swallow that case —
+      // downloadAndDecrypt still has to throw MissingUrlError so the user
+      // sees an actionable "no usable file URL" state instead of a stuck
+      // <img> with a 404 from the browser.
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_dead_blob",
+          _key: "client_dead_blob",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "stuck.pdf",
+          timestamp: Date.now(),
+          status: "failed",
+          type: "file",
+          fileInfo: {
+            name: "stuck.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "blob:http://localhost:5173/dead-blob",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(message);
+
+        // No fetch — the WEE-28 guard short-circuits before the network.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // Returns null/undefined (download() reports errors via state, not throw).
+        expect(result).toBeFalsy();
+      });
+      scope.stop();
+    });
+
     it("does NOT mangle blob:/data: URLs with cache-bust (those schemes do not accept query strings)", () => {
       // Regression safety net for WEE-17 review: appending `?cb=` to a blob:
       // URL breaks the URL grammar and the next fetch would fail spuriously.
