@@ -726,7 +726,7 @@ export const ru: Record<TranslationKey, string> = {
   "common.loading": "Загрузка...",
   "common.unknownUser": "Пользователь",
   "common.encryptedChat": "Чат",
-  "message.notDecrypted": "Сообщение не расшифровано",
+  "message.notDecrypted": "Не удалось расшифровать — попросите переслать сообщение или обновить приложение",
 
   // ── Sync status ──
   "sync.offline": "Ожидание сети...",

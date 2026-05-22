@@ -21,6 +21,7 @@ import {
   readFile,
 } from "@/shared/lib/matrix/functions";
 import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix/chat-storage";
+import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const m = 12;
@@ -725,6 +726,18 @@ export class Pcrypto {
       async encryptEvent(text: string): Promise<Record<string, unknown>> {
         const tetatet = pcrypto.getIsTetatetChat?.(chat) ?? false;
 
+        // Boolean signals only — `text` itself must never appear in this
+        // payload. `hasMention` is a presence flag derived from a regex,
+        // not the captured mention text.
+        cryptoDebug("encrypt", {
+          roomId,
+          tetatet,
+          textLen: text.length,
+          hasMention: looksLikeMention(text),
+          memberCount: Object.keys(usersinfo).length,
+          version,
+        });
+
         // Group chats use common key + AES-CBC
         if (!tetatet) {
           return room.encryptEventGroup(text);
@@ -769,6 +782,16 @@ export class Pcrypto {
       async decryptEvent(event: Record<string, unknown>): Promise<{ body: string; msgtype: string }> {
         const content = event.content as Record<string, unknown>;
         if (!pcrypto.user?.userinfo) throw new Error("userinfo");
+
+        cryptoDebug("decrypt:route", {
+          roomId,
+          eventId: event.event_id,
+          hasHash: Boolean(content.hash),
+          hasBlock: Boolean(content.block),
+          hasVersion: Boolean(content.version),
+          msgtype: content.msgtype,
+          senderMatrix: event.sender,
+        });
 
         // Group messages have a 'hash' field → use group decryption (AES-CBC)
         if (content.hash) {
@@ -916,6 +939,16 @@ export class Pcrypto {
           commonKeyEvt = getCommonKey(sender, hash);
         }
         if (!commonKeyEvt) {
+          cryptoDebug("decrypt:group:no-common-key", {
+            roomId,
+            eventId: event.event_id,
+            // hashLen rather than hash itself: the MD5 of member IDs is not
+            // secret, but in combination with roomId+sender it pinpoints the
+            // server-side state event that holds the encrypted group key.
+            hashLen: hash.length,
+            sender,
+            memberCount: Object.keys(usersinfo).length,
+          });
           throw new Error("No common key event found for hash=" + hash);
         }
         // Decrypt the common key (AES-SIV per-user encrypted key)
