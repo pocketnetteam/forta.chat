@@ -14,6 +14,7 @@ import {
   VIDEO_LOAD_TIMEOUT_MS,
   type VideoPlaybackError,
 } from "../model/video-error";
+import { computeVideoAspectStyle, resolveVideoDimensions } from "../model/video-layout";
 import MessageContent from "./MessageContent.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
@@ -209,7 +210,24 @@ useVideoStatePreservation(inlineVideoRef, fileCacheKey, { dontResumePlay: true }
 const isVideoPlaying = ref(false);
 const videoPosterUrl = ref<string | null>(null);
 const videoMetaDuration = ref<number | null>(null);
+const videoNaturalDim = ref<{ w: number; h: number } | null>(null);
 const lastPosterSource = ref<string | null>(null);
+
+// Fix forta-bugs#804 (WEE-36): bubble previously used a fixed `aspect-video`
+// (16:9) container, so vertical clips were squashed into a horizontal frame.
+// We now lock the container's aspect-ratio to the original media size
+// (upload metadata when available, otherwise the natural size reported by the
+// <video> element after `loadedmetadata`).
+const videoAspectStyle = computed(() =>
+  computeVideoAspectStyle(
+    resolveVideoDimensions(
+      props.message.fileInfo
+        ? { w: props.message.fileInfo.w ?? 0, h: props.message.fileInfo.h ?? 0 }
+        : null,
+      videoNaturalDim.value,
+    ),
+  ),
+);
 // Tracks whether this component instance is still alive: the virtual scroller
 // recycles bubbles aggressively, so an in-flight `extractVideoFrameThumbnail`
 // can resolve after the bubble's scope is gone. Writing to a dead ref would
@@ -257,6 +275,7 @@ watch(
   () => {
     isVideoPlaying.value = false;
     videoMetaDuration.value = null;
+    videoNaturalDim.value = null;
     // Recycled bubble: drop the stale poster + source guard so the next
     // objectUrl write triggers a fresh extraction (the `url === prevUrl`
     // short-circuit can otherwise pin us to the previous message's poster).
@@ -281,8 +300,16 @@ const onInlineVideoLoadedMetadata = () => {
   clearVideoLoadTimer();
   videoPlaybackError.value = null;
   const el = inlineVideoRef.value;
-  if (el && Number.isFinite(el.duration) && el.duration > 0) {
+  if (!el) return;
+  if (Number.isFinite(el.duration) && el.duration > 0) {
     videoMetaDuration.value = el.duration;
+  }
+  // Surface the natural pixel size so the bubble can lock the right
+  // aspect-ratio even when upload metadata (`fileInfo.w/h`) is missing.
+  const w = el.videoWidth;
+  const h = el.videoHeight;
+  if (w > 0 && h > 0) {
+    videoNaturalDim.value = { w, h };
   }
 };
 
@@ -804,7 +831,11 @@ const replyPreviewSender = computed(() => {
             <div class="truncate text-[11px] opacity-70">{{ replyPreviewText }}</div>
           </div>
         </div>
-        <div class="relative aspect-video w-full overflow-hidden bg-black/90">
+        <div
+          class="video-bubble-frame relative w-full overflow-hidden bg-black/90"
+          :style="videoAspectStyle"
+          data-testid="video-bubble-frame"
+        >
           <video
             v-if="fileState.objectUrl"
             ref="inlineVideoRef"
@@ -814,7 +845,7 @@ const replyPreviewSender = computed(() => {
             :controlslist="isVideoPlaying ? 'nodownload' : undefined"
             playsinline
             preload="metadata"
-            class="block h-full w-full object-cover"
+            class="block h-full w-full object-contain"
             @loadedmetadata="onInlineVideoLoadedMetadata"
             @canplay="onInlineVideoCanPlay"
             @error="onInlineVideoError"
