@@ -3,6 +3,7 @@ import { useCallStore, CallStatus } from "@/entities/call";
 import { UserAvatar } from "@/entities/user";
 import { formatDuration } from "@/shared/lib/format";
 import { useCallService } from "../model/call-service";
+import { isFrontFacingStream } from "../model/camera-facing";
 import CallControls from "./CallControls.vue";
 import VideoTile from "./VideoTile.vue";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
@@ -175,6 +176,14 @@ const peerName = computed(() => callStore.activeCall?.peerName ?? "");
 const peerAddress = computed(() => callStore.activeCall?.peerAddress ?? "");
 const myAddress = computed(() => "");
 
+// Mirror the local self-view ONLY when the active camera is user-facing
+// (forta-bugs#749 / WEE-36). Reading `callStore.localStream` here keeps the
+// flag reactive when the user flips between front/back cameras via
+// `setVideoDevice`, which swaps the video track and calls `triggerRef`.
+const localCameraMirror = computed(() =>
+  isFrontFacingStream(callStore.localStream),
+);
+
 function makeTile(
   id: string,
   stream: MediaStream | null,
@@ -215,7 +224,7 @@ const allTiles = computed<TileData[]>(() => {
       callStore.videoMuted,
       callStore.audioMuted,
       false,
-      true,
+      localCameraMirror.value,
       true,
     ),
   );
@@ -638,7 +647,7 @@ const isAnyScreenSharing = computed(
               >
                 <VideoTile
                   :stream="callStore.screenSharing && callStore.localScreenStream ? callStore.localScreenStream : callStore.localStream"
-                  :mirror="!callStore.screenSharing"
+                  :mirror="!callStore.screenSharing && localCameraMirror"
                   :video-off="callStore.videoMuted && !callStore.screenSharing"
                   object-fit="cover"
                   muted
