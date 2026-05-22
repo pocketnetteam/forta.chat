@@ -263,6 +263,9 @@ export const ru: Record<TranslationKey, string> = {
   "message.retry": "Повторить",
   "message.failedToLoadImage": "Не удалось загрузить",
   "message.tapToRetry": "Нажмите для повтора",
+  "message.videoUnsupportedFormat": "Формат видео не поддерживается",
+  "message.videoLoadFailed": "Не удалось воспроизвести видео",
+  "message.videoDownload": "Скачать",
 
   // ── Message context menu ──
   "contextMenu.reply": "Ответить",
