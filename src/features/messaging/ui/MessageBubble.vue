@@ -4,6 +4,7 @@ import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { useFileDownload } from "../model/use-file-download";
+import { isMessageFailedForRetry } from "../model/message-failed-state";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
@@ -433,7 +434,11 @@ const isUploading = computed(() =>
   props.message.status === MessageStatus.sending &&
   props.message.uploadProgress !== undefined
 );
-const isFailed = computed(() => props.message.status === MessageStatus.failed);
+// Treat failed-status only as actual retry-worthy when the server never
+// accepted the event. See `isMessageFailedForRetry` for the rationale — this
+// guard suppresses the WEE-40 false-failed indicator on messages that the
+// peer actually received.
+const isFailed = computed(() => isMessageFailedForRetry(props.message));
 
 const fileIcon = computed(() => {
   const type = props.message.fileInfo?.type ?? "";
@@ -1232,7 +1237,7 @@ const replyPreviewSender = computed(() => {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
           </svg>
-          {{ t('message.retrySend', 'Tap to retry') }}
+          {{ t('message.tapToRetry') }}
         </div>
 
         <!-- Reactions row -->
