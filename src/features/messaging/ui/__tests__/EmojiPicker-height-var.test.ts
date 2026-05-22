@@ -19,10 +19,11 @@ vi.mock("@/shared/lib/composables/use-android-back-handler", () => ({
   useAndroidBackHandler: vi.fn(),
 }));
 
-// Force mobile so the input-mode branch (which docks the picker and publishes
-// height) is exercised.
+// Shared ref so individual tests can flip the platform (mobile/desktop) and
+// exercise the platform-aware publish guard.
+const mockIsMobile = ref(true);
 vi.mock("@/shared/lib/composables/use-media-query", () => ({
-  useMobile: () => ref(true),
+  useMobile: () => mockIsMobile,
 }));
 
 // Local ResizeObserver mock — happy-dom doesn't deliver observe callbacks.
@@ -72,6 +73,7 @@ describe("EmojiPicker — publishes --emoji-picker-height", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     document.documentElement.style.setProperty(CSS_VAR, "0px");
     setRectHeight(FAKE_PICKER_HEIGHT);
+    mockIsMobile.value = true;
   });
 
   afterEach(() => {
@@ -171,5 +173,97 @@ describe("EmojiPicker — publishes --emoji-picker-height", () => {
     expect(getVar()).toBe(`${FAKE_PICKER_HEIGHT}px`);
 
     input.unmount();
+  });
+});
+
+// WEE-41: on desktop the picker is a floating popup anchored to the emoji
+// button; it does NOT overlay the bottom of the viewport. Publishing
+// `--emoji-picker-height` would force MessageList to reserve padding-bottom
+// for nothing, leaving a large empty gap below the chat. Session 59's
+// push-up mechanism must stay scoped to mobile bottom-sheets only.
+describe("EmojiPicker — desktop floating popup must NOT publish picker height", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    document.documentElement.style.setProperty(CSS_VAR, "0px");
+    setRectHeight(FAKE_PICKER_HEIGHT);
+    mockIsMobile.value = false;
+  });
+
+  afterEach(() => {
+    document.documentElement.style.setProperty(CSS_VAR, "0px");
+    Element.prototype.getBoundingClientRect = originalRect;
+    vi.unstubAllGlobals();
+    mockIsMobile.value = true;
+  });
+
+  it("does NOT publish --emoji-picker-height when opened on desktop in input mode", async () => {
+    const wrapper = mount(EmojiPicker, {
+      props: { show: true, mode: "input", x: 0, y: 0 },
+      attachTo: document.body,
+    });
+    await nextTick();
+    await nextTick();
+
+    const v = getVar();
+    expect(v === "" || v === "0px").toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("leaves the var at 0px on unmount on desktop (no spurious writes)", async () => {
+    const wrapper = mount(EmojiPicker, {
+      props: { show: true, mode: "input", x: 0, y: 0 },
+      attachTo: document.body,
+    });
+    await nextTick();
+    await nextTick();
+
+    wrapper.unmount();
+    await nextTick();
+    const v = getVar();
+    expect(v === "" || v === "0px").toBe(true);
+  });
+
+  // Race scenario: picker opens on mobile (var = 320px), viewport flips to
+  // desktop *and then* component unmounts in the same teardown sequence. The
+  // dispose hook must reset the var unconditionally for input-mode so
+  // MessageList never holds onto a stale padding-bottom after teardown.
+  it("clears --emoji-picker-height on unmount even if isMobile flipped to false mid-teardown", async () => {
+    mockIsMobile.value = true;
+    const wrapper = mount(EmojiPicker, {
+      props: { show: true, mode: "input", x: 0, y: 0 },
+      attachTo: document.body,
+    });
+    await nextTick();
+    await nextTick();
+    expect(getVar()).toBe(`${FAKE_PICKER_HEIGHT}px`);
+
+    // Resize to desktop just before unmount — simulate the var still being
+    // non-zero (e.g. watcher hasn't fired yet).
+    mockIsMobile.value = false;
+    document.documentElement.style.setProperty(CSS_VAR, "240px");
+
+    wrapper.unmount();
+    await nextTick();
+    expect(getVar()).toBe("0px");
+  });
+
+  // Belt-and-braces: a stale non-zero var left over by an earlier mobile
+  // instance (e.g. on a resize from mobile→desktop) must be cleared once the
+  // desktop picker mounts, otherwise MessageList keeps the bottom gap.
+  it("clears any stale non-zero --emoji-picker-height when mounting on desktop", async () => {
+    document.documentElement.style.setProperty(CSS_VAR, "240px");
+
+    const wrapper = mount(EmojiPicker, {
+      props: { show: true, mode: "input", x: 0, y: 0 },
+      attachTo: document.body,
+    });
+    await nextTick();
+    await nextTick();
+
+    const v = getVar();
+    expect(v === "" || v === "0px").toBe(true);
+
+    wrapper.unmount();
   });
 });

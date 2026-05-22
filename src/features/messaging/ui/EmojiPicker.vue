@@ -90,8 +90,8 @@ const publishPickerHeight = (h: number) => {
 };
 
 watch(
-  [() => props.show, panelRef, () => props.mode],
-  ([show, el, mode]) => {
+  [() => props.show, panelRef, () => props.mode, () => isMobile.value],
+  ([show, el, mode, mobile]) => {
     // Reaction-mode is hands-off: never read, never write — let the input
     // instance (if any) keep ownership of the var.
     if (mode !== "input") return;
@@ -99,6 +99,15 @@ watch(
     if (panelObserver) {
       panelObserver.disconnect();
       panelObserver = null;
+    }
+    // WEE-41: desktop picker is a floating popup anchored to the emoji
+    // button, not a bottom-sheet — pushing MessageList up would leave a
+    // huge empty gap. Session 59's push-up is mobile-only. Reset the var
+    // here too, so a mobile→desktop resize while the picker is open
+    // releases any padding-bottom previously reserved by MessageList.
+    if (!mobile) {
+      publishPickerHeight(0);
+      return;
     }
     if (!show || !el) {
       publishPickerHeight(0);
@@ -118,7 +127,11 @@ watch(
 onScopeDispose(() => {
   panelObserver?.disconnect();
   panelObserver = null;
-  // Only the owning instance resets — same gate as the watcher above.
+  // Reaction-mode picker never publishes the var, so stays hands-off.
+  // For input-mode we always reset to 0 here regardless of platform — on
+  // desktop the var is already 0 (no-op), on mobile this guarantees the
+  // var is cleared even if isMobile flipped mid-teardown (e.g. an unmount
+  // that races a viewport resize) so MessageList never keeps a stale gap.
   if (props.mode === "input") publishPickerHeight(0);
 });
 
