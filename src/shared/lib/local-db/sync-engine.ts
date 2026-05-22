@@ -326,6 +326,21 @@ export class SyncEngine {
         this.onChange?.(op.roomId);
       } catch (e) {
         if (this.disposed) return;
+
+        // Race guard: Matrix may have accepted the event server-side even
+        // though the SDK threw (read timeout, CORS race, etc.). When the
+        // server-side `/sync` echo arrives via EventWriter → upsertFromServer
+        // the local message picks up its eventId and flips to "synced"
+        // before this catch runs. In that case the queued op is already
+        // satisfied — drop it without flagging the message as failed,
+        // otherwise the user sees a red retry indicator on a message the
+        // peer actually received (WEE-40).
+        if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
+          await this.db.pendingOps.delete(op.id!);
+          this.onChange?.(op.roomId);
+          return;
+        }
+
         const retries = op.retries + 1;
         if (retries >= op.maxRetries) {
           await this.db.pendingOps.update(op.id!, {
@@ -867,14 +882,31 @@ export class SyncEngine {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  /** Mark the message associated with a failed operation */
+  /** Mark the message associated with a failed operation.
+   *  No-op when the message has already been confirmed (eventId present or
+   *  status already "synced") — the matrix-js-sdk error happened after the
+   *  server actually accepted the event and the /sync echo restored state.
+   *  Without this guard the watchdog/retry-exhaustion path would flip a
+   *  successfully delivered message back to "failed" and surface a false
+   *  retry indicator (WEE-40). */
   private async markMessageFailed(op: PendingOperation): Promise<void> {
-    if (op.clientId) {
-      await this.messageRepo.updateStatus(
-        { clientId: op.clientId },
-        "failed",
-      );
-    }
+    if (!op.clientId) return;
+    if (await this.isMessageAlreadyConfirmed(op.clientId)) return;
+    await this.messageRepo.updateStatus(
+      { clientId: op.clientId },
+      "failed",
+    );
+  }
+
+  /** Returns true when the local message row for `clientId` already has a
+   *  server eventId or has been flipped to "synced" — typically by an
+   *  upsertFromServer echo that won the race against the queue's failure
+   *  handler. Used to suppress false-failed transitions in markMessageFailed
+   *  and processTick. */
+  private async isMessageAlreadyConfirmed(clientId: string): Promise<boolean> {
+    const msg = await this.messageRepo.getByClientId(clientId);
+    if (!msg) return false;
+    return Boolean(msg.eventId) || msg.status === "synced";
   }
 
   /** Enqueue a new operation. Returns the operation ID. */
