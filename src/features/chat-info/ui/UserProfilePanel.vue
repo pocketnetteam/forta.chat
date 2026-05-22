@@ -46,6 +46,12 @@ watch(
 );
 
 const displayName = computed(() => {
+  // Local alias (Telegram-style "rename contact") wins — when the viewer
+  // opens a renamed contact's profile from a mention or any other entry
+  // point, they should see the familiar nickname, not the canonical
+  // Bastyon profile name. (WEE-39 follow-up.)
+  const alias = chatStore.getLocalAlias(props.address);
+  if (alias) return alias;
   if (userData.value?.name) return userData.value.name;
   // Fall back to address if no name loaded
   return props.address;

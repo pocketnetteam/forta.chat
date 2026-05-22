@@ -8,8 +8,10 @@ import {
   stripBastyonLinks,
   isSafeUrl,
   truncateMessage,
+  applyLocalAlias,
   MAX_MESSAGE_LENGTH,
 } from "./message-format";
+import type { Segment } from "./message-format";
 
 describe("parseMessage", () => {
   it("returns single text segment for plain text", () => {
@@ -281,5 +283,43 @@ describe("truncateMessage", () => {
 
   it("MAX_MESSAGE_LENGTH equals 65536", () => {
     expect(MAX_MESSAGE_LENGTH).toBe(65536);
+  });
+});
+
+describe("applyLocalAlias (WEE-39 follow-up)", () => {
+  const mentionSeg: Segment = { type: "mention", content: "@Alice", userId: "deadbeef" };
+  const textSeg: Segment = { type: "text", content: "hi" };
+
+  it("replaces mention content with @alias when getAlias returns a value", () => {
+    const result = applyLocalAlias(mentionSeg, () => "qqq");
+    expect(result).toEqual({ type: "mention", content: "@qqq", userId: "deadbeef" });
+  });
+
+  it("preserves userId — clicking the mention still resolves the correct profile", () => {
+    const result = applyLocalAlias(mentionSeg, () => "qqq");
+    if (result.type !== "mention") throw new Error("expected mention segment");
+    expect(result.userId).toBe("deadbeef");
+  });
+
+  it("returns the segment unchanged when getAlias returns null/undefined", () => {
+    expect(applyLocalAlias(mentionSeg, () => null)).toBe(mentionSeg);
+    expect(applyLocalAlias(mentionSeg, () => undefined)).toBe(mentionSeg);
+  });
+
+  it("treats empty-string alias as no alias", () => {
+    expect(applyLocalAlias(mentionSeg, () => "")).toBe(mentionSeg);
+  });
+
+  it("passes through non-mention segments untouched", () => {
+    expect(applyLocalAlias(textSeg, () => "qqq")).toBe(textSeg);
+  });
+
+  it("invokes getAlias with the segment's userId, not its display name", () => {
+    let receivedId = "";
+    applyLocalAlias(mentionSeg, (id) => {
+      receivedId = id;
+      return null;
+    });
+    expect(receivedId).toBe("deadbeef");
   });
 });

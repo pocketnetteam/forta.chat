@@ -68,6 +68,28 @@ const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
 const MENTION_RE = /@(\w{34,68}):([\p{L}\p{N}_]{1,50})/gu;
 
 /**
+ * Replace a mention segment's display text with the viewer's local alias
+ * when one is set for the mentioned user. Pure function — no Vue / store
+ * dependency, the caller wires the alias lookup.
+ *
+ * Used by the renderer so that mentions for contacts the viewer renamed
+ * locally ("qqq") show the alias instead of the wire `safeName` shipped
+ * by the sender (WEE-39 follow-up). The `userId` is intentionally kept
+ * untouched so clicking the mention still navigates to the correct profile.
+ *
+ * Non-mention segments are returned as-is.
+ */
+export function applyLocalAlias(
+  seg: Segment,
+  getAlias: (userId: string) => string | null | undefined,
+): Segment {
+  if (seg.type !== "mention") return seg;
+  const alias = getAlias(seg.userId);
+  if (!alias) return seg;
+  return { ...seg, content: `@${alias}` };
+}
+
+/**
  * Strip hex addresses from mentions for plain-text preview.
  * "@50486457...5:Daniel_Satchkov" → "@Daniel_Satchkov"
  */
