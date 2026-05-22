@@ -4,6 +4,49 @@ import { MessageType } from "@/entities/chat/model/types";
 import type { ReplyTo } from "@/entities/chat/model/types";
 import { sortLocalMessagesTimelineAsc } from "./timeline-sort";
 
+/** A LocalMessage URL is "optimistic-only" when it cannot survive a page
+ *  reload — blob:/data: URLs are bound to the document lifetime and
+ *  become invalid the moment the user refreshes. Empty/undefined also
+ *  qualifies: there's nothing to preserve. */
+function isOptimisticOnlyFileUrl(url: string | undefined | null): boolean {
+  if (!url) return true;
+  return url.startsWith("blob:") || url.startsWith("data:");
+}
+
+/** A server-issued media URL — survives reload, can be re-resolved across
+ *  sessions. mxc:// is the canonical Matrix shape; http(s):// is the
+ *  already-resolved form returned by mxcUrlToHttp for clients that want
+ *  to skip the resolve step. Note: localhost http URLs are technically
+ *  matched here too, but they never reach this code path — sync-engine
+ *  resolves against the homeserver's baseUrl, and only the blob-guard in
+ *  downloadAndDecrypt would block a localhost URL upstream. */
+function isServerFileUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  return (
+    url.startsWith("mxc://") ||
+    url.startsWith("http://") ||
+    url.startsWith("https://")
+  );
+}
+
+/** Decide whether an incoming /sync echo should replace the locally-stored
+ *  fileInfo. Replacement only happens when:
+ *   1. the incoming event actually carries fileInfo with a server URL, and
+ *   2. the local copy is missing fileInfo entirely OR still has the
+ *      optimistic blob:/data: URL written by createLocal — i.e. the
+ *      upload pipeline never wrote a real URL back, typically because
+ *      the /sync echo won the race against confirmMediaSent.
+ *  Returns the fileInfo to use, or `undefined` to leave the existing
+ *  copy untouched. */
+function healFileInfoFromEcho(
+  existing: LocalMessage["fileInfo"],
+  incoming: LocalMessage["fileInfo"],
+): LocalMessage["fileInfo"] | undefined {
+  if (!incoming || !isServerFileUrl(incoming.url)) return undefined;
+  if (!isOptimisticOnlyFileUrl(existing?.url)) return undefined;
+  return incoming;
+}
+
 export class MessageRepository {
   constructor(private db: ChatDatabase) {}
 
@@ -161,6 +204,19 @@ export class MessageRepository {
     if (msg.clientId) {
       const existing = await this.getByClientId(msg.clientId);
       if (existing) {
+        // Self-heal local fileInfo when the optimistic insert wrote a
+        // blob:/data: URL (createLocal in use-messages.ts puts the local
+        // preview blob URL into fileInfo.url) and the server echo carries
+        // a real mxc:// or http(s):// URL. Without this, a race where the
+        // /sync echo arrives before confirmMediaSent — or where the
+        // send-engine's catch path drops the op early because the row is
+        // already "synced" (WEE-40 guard) — leaves a dead blob: URL in
+        // fileInfo.url forever. After reload the bubble fast-fails through
+        // downloadAndDecrypt's blob-guard and surfaces a misleading
+        // "Файл повреждён или не пришёл с источника" toast on a message
+        // that actually reached the peer.
+        const healedFileInfo = healFileInfoFromEcho(existing.fileInfo, msg.fileInfo);
+
         // If upload is still in-flight (has localBlobUrl) and hasn't failed,
         // only store eventId — let confirmMediaSent handle the final status transition.
         // If the message is already "failed", the upload pipeline is dead and we should
@@ -171,6 +227,7 @@ export class MessageRepository {
             serverTs: msg.serverTs ?? msg.timestamp,
             // Merge local-only fields that the server echo may lack
             linkPreview: existing.linkPreview ?? msg.linkPreview,
+            ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
           });
         } else {
           await this.db.messages.update(existing.localId!, {
@@ -181,6 +238,7 @@ export class MessageRepository {
             // fall back to server (parsed from url_preview in event content)
             linkPreview: existing.linkPreview ?? msg.linkPreview,
             localBlobUrl: existing.localBlobUrl ?? msg.localBlobUrl,
+            ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
           });
         }
         return "updated";
@@ -238,10 +296,16 @@ export class MessageRepository {
         if (e.status === "pending" || e.status === "syncing") {
           const incoming = messages.find((m) => m.clientId === e.clientId);
           if (incoming?.eventId && e.localId) {
+            // Self-heal: same rationale as upsertFromServer — adopt the
+            // server-side fileInfo when the optimistic local copy still
+            // has a blob:/data: URL, so reload doesn't surface a dead
+            // blob (WEE-40).
+            const healedFileInfo = healFileInfoFromEcho(e.fileInfo, incoming.fileInfo);
             await this.db.messages.update(e.localId, {
               eventId: incoming.eventId,
               status: "synced" as LocalMessageStatus,
               serverTs: incoming.serverTs ?? incoming.timestamp,
+              ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
             });
           }
         }
