@@ -520,6 +520,8 @@ export const ru: Record<TranslationKey, string> = {
   "call.camera": "Камера",
   "call.speaker": "Динамик",
   "call.devices": "Устройства",
+  "call.deviceLabel.earpiece": "Разговорный (в ухо)",
+  "call.deviceLabel.speakerphone": "Громкая связь",
   "call.peerCameraOff": "Камера выключена",
   "call.you": "Вы",
   "call.screen": "экран",
