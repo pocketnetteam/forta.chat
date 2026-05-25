@@ -764,6 +764,8 @@ export const ru: Record<TranslationKey, string> = {
   "boot.syncingMessages": "Синхронизация сообщений…",
   "boot.loading": "Загрузка Forta Chat…",
   "boot.failed": "Не удалось запустить Forta Chat",
+  "boot.matrixUnreachable": "Не удалось подключиться к серверу чата",
+  "boot.matrixUnreachableHint": "Проверьте соединение и повторите попытку. Если проблема не исчезает, сервер может быть временно недоступен.",
   "boot.retry": "Повторить",
   "boot.clearing": "Очистка…",
   "boot.clearCache": "Очистить кеш и повторить",

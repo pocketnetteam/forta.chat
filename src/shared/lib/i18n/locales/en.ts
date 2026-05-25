@@ -762,6 +762,8 @@ export const en = {
   "boot.syncingMessages": "Syncing messages…",
   "boot.loading": "Loading Forta Chat…",
   "boot.failed": "Failed to start Forta Chat",
+  "boot.matrixUnreachable": "Couldn't reach the chat server",
+  "boot.matrixUnreachableHint": "Check your connection and try again. If the problem persists, the server may be temporarily unavailable.",
   "boot.retry": "Retry",
   "boot.clearing": "Clearing…",
   "boot.clearCache": "Clear cache & retry",

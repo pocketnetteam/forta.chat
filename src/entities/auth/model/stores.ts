@@ -50,6 +50,7 @@ import {
   clearSelfProfile,
   mergeSelfProfileWithRemote,
 } from "../lib";
+import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { createKeyPair } from "./key-pair";
 
 const NAMESPACE = "auth";
@@ -618,9 +619,32 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       matrixError.value = "Connecting to Matrix server...";
       bootStatus.setStep("matrix");
-      await withTimeout(matrixService.init(), 45_000, "Matrix server connection");
 
-      if (matrixService.isReady()) {
+      // WEE-46: Xiaomi MIUI / Android 14+ aggressively kills the long-poll
+      // before the SDK flips ready, leaving us in a silent "Matrix not ready"
+      // state on cold start. Retry-with-backoff turns a single brittle attempt
+      // into 3 attempts (1s/2s backoff, 45s per attempt) so transient transport
+      // failures don't surface as a fatal boot error.
+      const connectResult = await connectMatrixWithRetry(matrixService, {
+        attemptTimeoutMs: 45_000,
+        maxAttempts: 3,
+        baseDelayMs: 1_000,
+        maxDelayMs: 30_000,
+        onAttempt: (attempt, max) => {
+          matrixError.value =
+            attempt === 1
+              ? "Connecting to Matrix server..."
+              : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
+        },
+        onAttemptFail: (attempt, err) => {
+          console.warn(
+            `[auth] Matrix connect attempt ${attempt} failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        },
+      });
+
+      if (connectResult.ready) {
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
@@ -793,10 +817,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // here would run with 0 rooms (sync hasn't finished) and poison the
         // IndexedDB cache with an empty array.
       } else {
-        console.error("[auth] Matrix client NOT ready, error:", matrixService.error);
-        matrixError.value = matrixService.error || "Matrix init failed";
-        if (bootStatus.state.value === 'booting') {
-          bootStatus.setError(matrixError.value);
+        const lastErr = connectResult.lastError;
+        const reason =
+          lastErr instanceof Error
+            ? lastErr.message
+            : lastErr
+              ? String(lastErr)
+              : matrixService.error || "Matrix init failed";
+        console.error(
+          `[auth] Matrix client NOT ready after ${connectResult.attempts} attempt(s):`,
+          reason,
+        );
+        matrixError.value = reason;
+        if (bootStatus.state.value === "booting") {
+          bootStatus.setError(reason, "matrix-unreachable");
         }
       }
     } catch (e) {

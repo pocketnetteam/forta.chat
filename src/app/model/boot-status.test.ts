@@ -16,6 +16,7 @@ describe("bootStatus", () => {
     expect(bootStatus.state.value).toBe("booting");
     expect(bootStatus.currentStep.value).toBe("scripts");
     expect(bootStatus.error.value).toBeNull();
+    expect(bootStatus.errorKind.value).toBeNull();
   });
 
   it("advances steps", () => {
@@ -33,11 +34,19 @@ describe("bootStatus", () => {
     expect(bootStatus.currentStep.value).toBe("ready");
   });
 
-  it("transitions to error", () => {
+  it("transitions to error with default generic kind", () => {
     bootStatus.setStep("matrix");
     bootStatus.setError("Connection refused");
     expect(bootStatus.state.value).toBe("error");
     expect(bootStatus.error.value).toBe("Connection refused");
+    expect(bootStatus.errorKind.value).toBe("generic");
+  });
+
+  it("preserves typed error kind", () => {
+    bootStatus.setStep("matrix");
+    bootStatus.setError("homeserver 503", "matrix-unreachable");
+    expect(bootStatus.errorKind.value).toBe("matrix-unreachable");
+    expect(bootStatus.error.value).toBe("homeserver 503");
   });
 
   it("ignores setStep after ready", () => {
@@ -52,12 +61,20 @@ describe("bootStatus", () => {
     expect(bootStatus.state.value).toBe("error");
   });
 
-  it("reset returns to initial state", () => {
+  it("ignores subsequent setError calls (does not overwrite kind or message)", () => {
+    bootStatus.setError("matrix offline", "matrix-unreachable");
+    bootStatus.setError("something else", "generic");
+    expect(bootStatus.error.value).toBe("matrix offline");
+    expect(bootStatus.errorKind.value).toBe("matrix-unreachable");
+  });
+
+  it("reset clears error kind and message", () => {
     bootStatus.setStep("matrix");
-    bootStatus.setError("fail");
+    bootStatus.setError("fail", "matrix-unreachable");
     bootStatus.reset();
     expect(bootStatus.state.value).toBe("booting");
     expect(bootStatus.currentStep.value).toBe("scripts");
     expect(bootStatus.error.value).toBeNull();
+    expect(bootStatus.errorKind.value).toBeNull();
   });
 });
