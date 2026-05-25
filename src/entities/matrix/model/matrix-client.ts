@@ -499,6 +499,12 @@ export class MatrixClientService {
 
   /** Full init: create client + init db */
   async init(): Promise<void> {
+    // Reset transient failure state from any previous attempt. Without this,
+    // `isReady()` would stay `false` on a successful retry because it ANDs
+    // `ready` with `!error`, and a stale error from attempt N would mask a
+    // healthy attempt N+1 — see WEE-46 retry path.
+    this.error = false;
+    this.ready = false;
     try {
       this.client = await this.getClient();
       if (this.client) {
