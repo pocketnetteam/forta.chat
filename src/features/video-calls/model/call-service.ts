@@ -712,6 +712,25 @@ function getClient(): any {
 let toggleCameraLock = false;
 
 // ---------------------------------------------------------------------------
+// Answer-call re-entry lock (WEE-45 / forta-bugs#724)
+// ---------------------------------------------------------------------------
+
+// Synchronous re-entry guard for answerCall. The status-based guard inside
+// answerCall reads `activeCall.status` and bails if it's already
+// connecting/connected, but the first await (`ensureCallPermissions`) opens
+// a ~100-400ms window during which the status is still 'incoming' even
+// though answer is in flight. Without this sync flag, a double-tap on the
+// accept button (forta-bugs#724) passes the guard twice and invokes
+// `call.answer()` twice — the SDK then throws on the second invocation
+// (state machine wedge) or doubles the SDP exchange, leaving the caller
+// stuck on "connecting" forever.
+//
+// Module-scope is fine because there's at most one active answer attempt
+// per process (call store enforces single-call), and resetting it in
+// `finally` guarantees we never leak the lock across calls.
+let answerInProgress = false;
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -1102,6 +1121,16 @@ export function useCallService() {
     }
     console.log("[call-service] answerCall: begin, callId=" + call.callId);
 
+    // Sync re-entry guard (WEE-45 / forta-bugs#724) — catches double-taps
+    // on the accept button before `await ensureCallPermissions` opens the
+    // status-based guard's race window. The status guard below still
+    // matters for cross-codepath races (e.g. native accept event vs Vue
+    // tap), but only this flag is observable BEFORE the first await.
+    if (answerInProgress) {
+      console.warn("[call-service] answerCall: already in progress (sync guard), bailing");
+      return;
+    }
+
     // Guard against duplicate invocations. We intentionally allow
     // multiple answerCall() call sites (user tap in UI, native accept
     // event, pre-accepted push path, wait-for-matrix poll) because any
@@ -1109,9 +1138,16 @@ export function useCallService() {
     // through this check so only the first one actually answers.
     const currentStatus = callStore.activeCall?.status;
     if (currentStatus === CallStatus.connecting || currentStatus === CallStatus.connected) {
-      console.log("[call-service] answerCall: already " + currentStatus + ", guard bails");
+      console.warn("[call-service] answerCall: already " + currentStatus + ", guard bails");
       return;
     }
+
+    answerInProgress = true;
+    // Safety net per code-review: if any future edit inserts a throwing
+    // synchronous call between here and the manual releases below, the
+    // outer try/finally guarantees the lock is cleared on the way out so
+    // a single bad edit can't permanently jam future incoming calls.
+    try {
 
     clearIncomingTimeout();
     stopAllSounds();
@@ -1160,10 +1196,21 @@ export function useCallService() {
       if (isNative) {
         void finalizeCall("permission-denied", call.callId);
       }
+      // Release the re-entry lock — the user may legitimately retry the
+      // same call after granting the previously-denied permission, and
+      // a future incoming call must not be silently blocked.
+      answerInProgress = false;
       return;
     }
 
     callStore.updateStatus(CallStatus.connecting);
+
+    // WEE-45: release the re-entry lock now that status === 'connecting'.
+    // The pre-existing status-based guard at the top of answerCall covers
+    // every subsequent re-entry path; holding the lock past this point
+    // would permanently jam future answers if `await call.answer(...)`
+    // below wedges (matches the watchdog test scenario for stuck SDKs).
+    answerInProgress = false;
 
     // Hint stored device IDs (lightweight, sync) — real fix is post-connect
     const client = getClient();
@@ -1233,6 +1280,14 @@ export function useCallService() {
       if (isNative) {
         void finalizeCall("error", call.callId);
       }
+    }
+    } finally {
+      // Belt-and-suspenders: the manual releases above (permission-denied
+      // and right after `updateStatus('connecting')`) already cleared the
+      // flag for the common paths, but this guarantees no exit route can
+      // leave the lock stuck — including any hypothetical sync throw
+      // between `answerInProgress = true` and the try below.
+      answerInProgress = false;
     }
   }
 

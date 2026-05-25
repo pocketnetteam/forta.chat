@@ -120,8 +120,24 @@ class CallForegroundService : Service() {
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var savedVoiceCallVolume: Int = -1
-    private var callerName = ""
+    // WEE-45: NotificationCompat.CallStyle.forOngoingCall throws
+    // IllegalArgumentException when the Person it wraps has an empty
+    // name. On a second call right after the first one stopped, the
+    // OS sometimes delivers ACTION_UPDATE to a freshly-recreated service
+    // instance BEFORE ACTION_START runs (lifecycle race observed on
+    // Samsung One UI / Z Flip 4), at which point `callerName` is still
+    // the empty default. Initialising to a non-empty fallback keeps the
+    // notification builder safe even if updateNotification is ever
+    // invoked before the real caller name is known. The fallback is the
+    // app's display label so the notification still reads sensibly.
+    private var callerName = "Forta Chat"
     private var callType = ""
+    // Tracks whether ACTION_START actually populated callerName/callType
+    // for this service instance. Lets ACTION_UPDATE detect the
+    // out-of-order delivery path and ignore the update instead of
+    // rendering a placeholder Person — the next legitimate START will
+    // build the notification correctly with the real caller name.
+    private var hasStarted: Boolean = false
 
     private val binder = LocalBinder()
 
@@ -141,14 +157,31 @@ class CallForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
+                // Coalesce blank/missing values to non-empty defaults — the
+                // Android NotificationCompat.CallStyle person-name guard is
+                // strict and rejects empty strings (not just nulls).
+                val incomingName = intent.getStringExtra(EXTRA_CALLER_NAME)
+                callerName = if (incomingName.isNullOrBlank()) "Unknown" else incomingName
                 callType = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "voice"
+                hasStarted = true
                 startForegroundWithNotification(getString(R.string.call_connecting))
                 acquireWakeLock()
                 requestAudioFocus()
                 Log.d(TAG, "Service started for call with $callerName")
             }
             ACTION_UPDATE -> {
+                // WEE-45: ignore ACTION_UPDATE that arrives before ACTION_START
+                // populated this instance. On Samsung One UI the OS occasionally
+                // delivers a stale UPDATE intent to a freshly-recreated service
+                // process (second call right after the first stopped); without
+                // this guard, buildNotification would call
+                // CallStyle.forOngoingCall with the fallback caller name and
+                // dump a misleading notification, or — pre-WEE-45 — crash with
+                // `person must have a non-empty a name` when callerName was "".
+                if (!hasStarted) {
+                    Log.w(TAG, "ACTION_UPDATE before ACTION_START — ignoring stale update")
+                    return START_NOT_STICKY
+                }
                 val status = intent.getStringExtra(EXTRA_STATUS) ?: ""
                 val duration = intent.getStringExtra(EXTRA_DURATION) ?: ""
                 val text = if (duration.isNotEmpty()) "$status - $duration" else status
@@ -160,6 +193,7 @@ class CallForegroundService : Service() {
                 stopSelf()
             }
             ACTION_STOP -> {
+                hasStarted = false
                 releaseWakeLock()
                 abandonAudioFocus()
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -287,8 +321,14 @@ class CallForegroundService : Service() {
 
         val typeLabel = if (callType == "video") getString(R.string.call_video_call) else getString(R.string.call_voice_call)
 
+        // WEE-45: NotificationCompat.CallStyle throws on empty Person names.
+        // The instance fallback above should keep callerName non-empty, but
+        // a final guard here ensures any future code path that mutates
+        // callerName cannot crash the foreground service. The fallback is
+        // a sensible app label — never user-controlled, never blank.
+        val safeCallerName = if (callerName.isBlank()) "Forta Chat" else callerName
         val caller = androidx.core.app.Person.Builder()
-            .setName(callerName)
+            .setName(safeCallerName)
             .setImportant(true)
             .build()
 
@@ -306,7 +346,7 @@ class CallForegroundService : Service() {
             )
             builder.setContentText(status)
         } else {
-            builder.setContentTitle(if (callType == "video") getString(R.string.call_video_call_with, callerName) else getString(R.string.call_voice_call_with, callerName))
+            builder.setContentTitle(if (callType == "video") getString(R.string.call_video_call_with, safeCallerName) else getString(R.string.call_voice_call_with, safeCallerName))
             builder.setContentText(status)
             builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,

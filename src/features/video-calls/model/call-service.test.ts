@@ -416,6 +416,84 @@ describe('call-service permission flow', () => {
       expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
       expect(mockAnswer).not.toHaveBeenCalled();
     });
+
+    // WEE-45 / forta-bugs#724 — accept-button double-tap regression.
+    // The pre-existing status-based guard (`if currentStatus === connecting
+    // || connected return`) only protects AFTER `updateStatus('connecting')`
+    // has run. Between the entry check and `await ensureCallPermissions`
+    // resolving, status stays `incoming` for several hundred ms — long
+    // enough for an impatient user (or a flaky Android touchscreen) to
+    // double-tap. Without the sync re-entry lock, both invocations pass
+    // the guard and both eventually call `matrixCall.answer()`, wedging
+    // the SDK state machine. This test asserts the sync lock holds even
+    // when both calls are dispatched before the permission promise settles.
+    it('does not invoke SDK answer twice when accept button is double-tapped (forta-bugs#724)', async () => {
+      seedIncomingCall('voice');
+      // Hold the permission preflight pending so the second invocation
+      // races the first while status is still `incoming`. This mirrors
+      // the real-device timing where the OS permission dialog (or the
+      // probeAudioAvailability roundtrip) opens a ~200ms window.
+      let releasePermissions: () => void = () => {};
+      mockEnsureCallPermissions.mockImplementationOnce(
+        () => new Promise<void>((resolve) => { releasePermissions = resolve; }),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+
+      const firstAnswer = service.answerCall();
+      const secondAnswer = service.answerCall();
+      releasePermissions();
+      await Promise.all([firstAnswer, secondAnswer]);
+
+      expect(mockAnswer).toHaveBeenCalledTimes(1);
+    });
+
+    // Recoverability check: once a previous answerCall has completed (success
+    // or error), the lock must reset so a *fresh* incoming call can still
+    // be answered. The lock is released as soon as status flips to
+    // `connecting` so a stuck `call.answer()` cannot permanently jam future
+    // answers (existing watchdog at H3 covers stuck-connecting recovery).
+    it('releases the re-entry lock after a previous answer completes', async () => {
+      seedIncomingCall('voice');
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+
+      await service.answerCall();
+      expect(mockAnswer).toHaveBeenCalledTimes(1);
+
+      // Simulate a second incoming call after the first one resolved.
+      // Status returns to `incoming` (fresh call) and matrixCall is
+      // replaced. The second answer must go through, not be silently
+      // dropped by a sticky lock.
+      mockAnswer.mockClear();
+      seedIncomingCall('voice');
+      await service.answerCall();
+      expect(mockAnswer).toHaveBeenCalledTimes(1);
+    });
+
+    // Recoverability check #2: when permission is denied on the first
+    // answer, the user might grant permission in Settings and try again
+    // on a fresh incoming call. The lock must NOT remain stuck just
+    // because the permission preflight rejected.
+    it('releases the re-entry lock after a permission-denied answer', async () => {
+      seedIncomingCall('voice');
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('microphone'),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+
+      await service.answerCall();
+      expect(mockAnswer).not.toHaveBeenCalled();
+
+      // Permission granted on retry, fresh incoming call comes in.
+      seedIncomingCall('voice');
+      await service.answerCall();
+      expect(mockAnswer).toHaveBeenCalledTimes(1);
+    });
   });
 
   // -------------------------------------------------------------------------

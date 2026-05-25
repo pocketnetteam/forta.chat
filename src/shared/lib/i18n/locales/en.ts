@@ -518,6 +518,8 @@ export const en = {
   "call.camera": "Camera",
   "call.speaker": "Speaker",
   "call.devices": "Devices",
+  "call.deviceLabel.earpiece": "Earpiece",
+  "call.deviceLabel.speakerphone": "Speakerphone",
   "call.peerCameraOff": "Camera is off",
   "call.you": "You",
   "call.screen": "screen",
