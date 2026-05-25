@@ -700,8 +700,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // Uses chatDbKit.rooms (RoomRepository) which is already initialized above.
             // The monotonic guard inside optimisticUpdateFromPush prevents stale
             // push data from overwriting newer /sync data.
-            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId) =>
-              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId),
+            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId, eventId) =>
+              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId, undefined, eventId),
             );
 
             pushService.setRoomInfoGetter((roomId) => {

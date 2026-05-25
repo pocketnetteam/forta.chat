@@ -3364,6 +3364,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // without waiting for the eventWriter.clearUnread → Dexie delta cycle.
       // Single writer route — diff-guards no-op when count already 0.
       _setUnreadCount(roomId, 0, "setActiveRoom");
+
+      // WEE-44 / forta-bugs#764: dismiss the native Android notification (if
+      // any) the moment the user opens the room. The launcher badge follows
+      // the count of active notifications in our messages channel, so this
+      // is what actually unsticks the icon counter. Doing it here (rather
+      // than waiting for commitReadWatermark) covers the push-tap path:
+      // setActiveRoom fires on push tap, but the read watermark only
+      // advances later when IntersectionObserver sees the messages — by
+      // which time the user has often already closed/minimised, leaving
+      // the notification (and badge) stuck.
+      if (isNative) {
+        console.info('[chat-store] setActiveRoom → cancelNotification', roomId);
+        import('@/shared/lib/push/push-data-plugin')
+          .then(({ PushData }) => PushData.cancelNotification({ roomId }))
+          .catch((e) => console.warn('[chat-store] cancelNotification failed:', e));
+      }
     }
     perfMark("setActiveRoom-end");
     perfMeasure("setActiveRoom", "setActiveRoom-start", "setActiveRoom-end");

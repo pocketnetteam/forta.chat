@@ -14,7 +14,7 @@ class PushService {
   private getAllSenderNames: (() => Record<string, string>) | null = null;
   /** Callback to optimistically update room preview in Dexie when push arrives.
    *  Wired from auth store after ChatDbKit is initialized. */
-  private optimisticRoomUpdate: ((roomId: string, preview: string, timestamp: number, senderId?: string) => Promise<boolean>) | null = null;
+  private optimisticRoomUpdate: ((roomId: string, preview: string, timestamp: number, senderId?: string, eventId?: string) => Promise<boolean>) | null = null;
 
   setCallHandler(handler: typeof this.onCallPush) {
     this.onCallPush = handler;
@@ -375,7 +375,10 @@ class PushService {
       });
       const ts = Date.now(); // Server timestamp not available in push — use local time.
                              // EventWriter's updateLastMessage will overwrite with real ts.
-      this.optimisticRoomUpdate(roomId, preview, ts, data.sender).catch(() => {});
+      // Pass event_id so updateLastMessage can recognize "same event"
+      // and replace this optimistic placeholder when /sync delivers the
+      // real (decrypted) body — see room-repository.ts updateLastMessage.
+      this.optimisticRoomUpdate(roomId, preview, ts, data.sender, data.event_id).catch(() => {});
     }
 
     // Try to decrypt and show rich notification
