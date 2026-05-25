@@ -724,8 +724,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // Uses chatDbKit.rooms (RoomRepository) which is already initialized above.
             // The monotonic guard inside optimisticUpdateFromPush prevents stale
             // push data from overwriting newer /sync data.
-            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId) =>
-              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId),
+            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId, eventId) =>
+              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId, undefined, eventId),
             );
 
             pushService.setRoomInfoGetter((roomId) => {
@@ -764,6 +764,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             console.log('[auth] Initializing push service...');
             await pushService.init(matrixService.client);
+
+            // WEE-44 / forta-bugs#561, #817: mute state is now authoritative
+            // on the Matrix server (push rules). Refresh the local mute set
+            // from the server right after push init so the user sees the
+            // same mute state across devices and across APK reinstalls —
+            // localStorage is treated as a cache, not the source of truth.
+            try {
+              await chatStore.syncMutedRoomsFromMatrix();
+            } catch (err) {
+              console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
+            }
 
             // Wire call handler after push init (needs nativeCallBridge)
             try {
