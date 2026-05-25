@@ -203,4 +203,45 @@ class PushDataPlugin : Plugin() {
         nm.cancel(FortaFirebaseMessagingService.NOTIF_TAG, roomId.hashCode())
         call.resolve()
     }
+
+    /**
+     * Cancel all message notifications in the messages channel. Called by JS
+     * on app resume after the user has demonstrably seen the unread state
+     * (e.g. opened the chat list). The badge on the launcher icon is the
+     * count of active notifications in the messages channel, so cancelling
+     * here is sufficient to clear the stuck-badge case from forta-bugs#764
+     * without adding ShortcutBadger or a per-launcher badge SDK.
+     *
+     * Call notifications (separate channel) are intentionally untouched —
+     * dismissing an in-progress ringer here would be a regression.
+     */
+    @PluginMethod
+    fun cancelAllMessageNotifications(call: PluginCall) {
+        val nm = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE)
+            as android.app.NotificationManager
+        // Cancel by tag: only the messages tag, leave call notifications alone.
+        val active = nm.activeNotifications ?: emptyArray()
+        for (sb in active) {
+            if (sb.tag == FortaFirebaseMessagingService.NOTIF_TAG &&
+                sb.notification?.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES) {
+                nm.cancel(sb.tag, sb.id)
+            }
+        }
+        call.resolve()
+    }
+
+    /**
+     * Return device manufacturer + model so JS can surface vendor-specific
+     * energy-saver hints (Samsung One UI, HONOR/Huawei EMUI, Xiaomi MIUI,
+     * OPPO/OnePlus ColorOS — see forta-bugs#732 and #766). Avoids adding the
+     * @capacitor/device package for one Build field.
+     */
+    @PluginMethod
+    fun getDeviceManufacturer(call: PluginCall) {
+        val result = JSObject()
+        result.put("manufacturer", android.os.Build.MANUFACTURER ?: "")
+        result.put("model", android.os.Build.MODEL ?: "")
+        result.put("sdk", android.os.Build.VERSION.SDK_INT)
+        call.resolve(result)
+    }
 }

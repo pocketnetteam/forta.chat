@@ -741,6 +741,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             console.log('[auth] Initializing push service...');
             await pushService.init(matrixService.client);
 
+            // WEE-44 / forta-bugs#561, #817: mute state is now authoritative
+            // on the Matrix server (push rules). Refresh the local mute set
+            // from the server right after push init so the user sees the
+            // same mute state across devices and across APK reinstalls —
+            // localStorage is treated as a cache, not the source of truth.
+            try {
+              await chatStore.syncMutedRoomsFromMatrix();
+            } catch (err) {
+              console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
+            }
+
             // Wire call handler after push init (needs nativeCallBridge)
             try {
               const { nativeCallBridge } = await import('@/shared/lib/native-calls');

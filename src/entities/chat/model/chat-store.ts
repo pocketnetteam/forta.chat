@@ -968,12 +968,98 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     persistRoomSets();
   };
 
-  const toggleMuteRoom = (roomId: string) => {
+  /** Canonical mute setter. Local state is updated optimistically (instant UI),
+   *  then the change is propagated to the Matrix homeserver as a push rule.
+   *
+   *  WEE-44 / forta-bugs#561, #817: previously mute was localStorage-only.
+   *  That left two bugs:
+   *    - #561: the homeserver kept pushing for "muted" rooms because it
+   *      never learned about the mute → users got notifications they had
+   *      already silenced.
+   *    - #817: localStorage is per-WebView; some Android launchers /
+   *      OEMs blow it away on app updates, which silently re-enabled all
+   *      notifications. Pushing rules to the server makes them survive
+   *      reinstalls and roam across devices.
+   */
+  const setRoomMute = async (roomId: string, muted: boolean): Promise<void> => {
+    // 1. Optimistic local state — UI updates immediately
     const s = new Set(mutedRoomIds.value);
-    if (s.has(roomId)) s.delete(roomId);
-    else s.add(roomId);
+    if (muted) s.add(roomId);
+    else s.delete(roomId);
     mutedRoomIds.value = s;
     persistRoomSets();
+
+    // 2. Server sync — fire-and-forget for UI snappiness. On failure we
+    //    keep the optimistic local state (better UX than yanking the
+    //    toggle back), but emit a warning so support can correlate
+    //    "muted in UI but still receiving" reports.
+    try {
+      const matrixService = getMatrixClientService();
+      const client = matrixService.client as unknown as {
+        setRoomMutePushRule?: (
+          scope: 'global' | 'device',
+          roomId: string,
+          mute: boolean,
+        ) => Promise<void> | undefined;
+      } | null;
+      if (client?.setRoomMutePushRule) {
+        await client.setRoomMutePushRule('global', roomId, muted);
+      }
+    } catch (e) {
+      console.warn('[chat-store] Failed to push mute rule to server:', { roomId, muted, e });
+    }
+  };
+
+  const toggleMuteRoom = (roomId: string): void => {
+    // Synchronous facade kept for existing callers (ContactList etc.).
+    // Server sync is intentionally fire-and-forget under the hood.
+    const willBeMuted = !mutedRoomIds.value.has(roomId);
+    setRoomMute(roomId, willBeMuted).catch(() => { /* already warned inside */ });
+  };
+
+  /** Pull authoritative mute state from Matrix push rules and merge with
+   *  the local set. Called after Matrix becomes ready.
+   *
+   *  Merge policy: we UNION the server set with the local set rather than
+   *  replacing. The race we are protecting against: between `pushService.init`
+   *  and the `getPushRules` round-trip the user may have tapped Mute on a
+   *  room — `setRoomMute` already wrote that optimistically into
+   *  `mutedRoomIds`, and the in-flight `setRoomMutePushRule` POST has not
+   *  necessarily landed before we read the rules back. A plain "server wins"
+   *  policy would clobber that optimistic write, silently un-muting a room
+   *  the user just muted. We bias toward "muted" because the failure mode is
+   *  safer: at worst the user has to tap Unmute again on the next boot if
+   *  their just-issued unmute didn't land on the server yet, but we never
+   *  silently push notifications into a room they had silenced. */
+  const syncMutedRoomsFromMatrix = async (): Promise<void> => {
+    try {
+      const matrixService = getMatrixClientService();
+      const client = matrixService.client as unknown as {
+        getPushRules?: () => Promise<{
+          global?: { room?: Array<{ rule_id: string; enabled: boolean; actions: unknown[] }> };
+        }>;
+      } | null;
+      if (!client?.getPushRules) return;
+      const rules = await client.getPushRules();
+      const roomRules = rules?.global?.room ?? [];
+      const serverMuted = new Set<string>();
+      for (const r of roomRules) {
+        if (!r?.enabled) continue;
+        // Convention used by setRoomMutePushRule: actions = ["dont_notify"]
+        // means muted. Be defensive about the action shape.
+        const isMute = Array.isArray(r.actions) && r.actions.some(
+          (a) => a === 'dont_notify' || (typeof a === 'object' && a !== null && (a as { value?: boolean }).value === false),
+        );
+        if (isMute && typeof r.rule_id === 'string') serverMuted.add(r.rule_id);
+      }
+      // Union, not replace — see merge-policy note above.
+      const merged = new Set<string>(mutedRoomIds.value);
+      for (const id of serverMuted) merged.add(id);
+      mutedRoomIds.value = merged;
+      persistRoomSets();
+    } catch (e) {
+      console.warn('[chat-store] Failed to sync mute rules from Matrix:', e);
+    }
   };
 
   /** Single writer for unreadCount across ALL update paths.
@@ -3072,6 +3158,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // 1. LOCAL COMMIT — instant, UI reacts via liveQuery
     if (chatDbKitRef.value) {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
+    }
+
+    // WEE-44 / forta-bugs#764: dismiss the native Android notification (if
+    // any) for this room the moment the user reads it. The launcher badge is
+    // the count of active notifications in our messages channel, so cancelling
+    // here is what actually reverts the icon counter — without this, opening
+    // a chat just hid the unread dot in the sidebar while the system-tray
+    // notification (and badge) lingered. Fire-and-forget: failure to clear
+    // the notification must not roll back the local read commit.
+    if (isNative) {
+      import('@/shared/lib/push/push-data-plugin')
+        .then(({ PushData }) => PushData.cancelNotification({ roomId }))
+        .catch(() => { /* non-fatal */ });
     }
 
     const lastReceiptTs = lastReadReceiptSentTs.get(roomId) ?? 0;
@@ -6777,6 +6876,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     sortedRooms,
     unbanMember,
     toggleMuteRoom,
+    setRoomMute,
+    syncMutedRoomsFromMatrix,
     togglePinRoom,
     toggleSelection,
     totalUnread,

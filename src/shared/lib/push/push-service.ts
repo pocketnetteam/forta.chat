@@ -68,34 +68,80 @@ class PushService {
     }
   }
 
-  private async registerPusher(matrixClient: any, token: string): Promise<void> {
-    try {
-      await matrixClient.setPusher({
-        pushkey: token,
-        kind: 'http',
-        app_id: 'fortaandroid',
-        app_display_name: 'Forta Chat',
-        device_display_name: 'Android',
-        lang: 'en',
-        data: {
-          url: 'https://matrix.pocketnet.app/_matrix/push/v1/notify',
-        },
-      });
-      // pusher registered
+  /** Retry budget for setPusher. With 3 attempts and exponential backoff
+   *  (1s, 2s, 4s) we cover transient network blips and short Matrix homeserver
+   *  hiccups without blocking the boot path for more than ~7 seconds. */
+  private static readonly PUSHER_REGISTER_RETRIES = 3;
 
+  /** Sleep helper kept inline to avoid a util import for one call site. */
+  private static sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  private async registerPusher(matrixClient: any, token: string): Promise<void> {
+    // WEE-44 (H1, forta-bugs#766/#572/#356/#344/#556): the original code did
+    // `await setPusher(...)` once and swallowed the error. A single transient
+    // failure (network blip, 5xx from /_matrix/push, slow Matrix sync) left
+    // the device with a valid FCM token that the homeserver had never been
+    // told about — so no push ever arrived for that session.
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= PushService.PUSHER_REGISTER_RETRIES; attempt++) {
       try {
-        const { pushers } = await matrixClient.getPushers();
-        for (const p of pushers) {
-          if (p.app_id === 'fortaandroid' && p.pushkey !== token) {
-            // remove stale pusher
-            await matrixClient.setPusher({ ...p, kind: null });
-          }
+        await matrixClient.setPusher({
+          pushkey: token,
+          kind: 'http',
+          app_id: 'fortaandroid',
+          app_display_name: 'Forta Chat',
+          device_display_name: 'Android',
+          lang: 'en',
+          data: {
+            url: 'https://matrix.pocketnet.app/_matrix/push/v1/notify',
+          },
+        });
+        if (attempt > 1) {
+          console.info(`[PushService] Pusher registered on attempt ${attempt}`);
         }
-      } catch (pe) {
-        console.warn('[PushService] Could not clean stale pushers:', pe);
+        // Pusher is live — best-effort stale cleanup is a separate concern;
+        // its failure must not invalidate the successful registration above.
+        try {
+          const { pushers } = await matrixClient.getPushers();
+          for (const p of pushers) {
+            if (p.app_id === 'fortaandroid' && p.pushkey !== token) {
+              await matrixClient.setPusher({ ...p, kind: null });
+            }
+          }
+        } catch (pe) {
+          console.warn('[PushService] Could not clean stale pushers:', pe);
+        }
+        return;
+      } catch (e) {
+        lastError = e;
+        if (attempt < PushService.PUSHER_REGISTER_RETRIES) {
+          const delay = 1000 * 2 ** (attempt - 1); // 1s, 2s
+          console.warn(
+            `[PushService] setPusher attempt ${attempt}/${PushService.PUSHER_REGISTER_RETRIES} failed, retrying in ${delay}ms:`,
+            e,
+          );
+          await PushService.sleep(delay);
+        }
       }
-    } catch (e) {
-      console.error('[PushService] Failed to register pusher:', e);
+    }
+    // Dead-letter: all retries exhausted. Stash the token + timestamp so a
+    // later boot can re-attempt registration even if the user does not
+    // explicitly re-trigger PushNotifications.register().
+    console.error(
+      '[PushService] Pusher registration failed permanently after',
+      PushService.PUSHER_REGISTER_RETRIES,
+      'attempts:',
+      lastError,
+    );
+    try {
+      localStorage.setItem(
+        'push_pusher_dead_letter',
+        JSON.stringify({ token, at: Date.now(), error: String(lastError) }),
+      );
+    } catch {
+      /* localStorage may be unavailable in degraded WebViews — non-fatal */
     }
   }
 
@@ -413,6 +459,15 @@ class PushService {
       // FCM token received
       this.fcmToken = token;
       await this.registerPusher(matrixClient, token);
+      // WEE-44: if a previous boot left a dead-letter for the same token,
+      // a successful registration just now means we can safely clear it.
+      try {
+        const raw = localStorage.getItem('push_pusher_dead_letter');
+        if (raw) {
+          const dl = JSON.parse(raw) as { token?: string };
+          if (dl?.token === token) localStorage.removeItem('push_pusher_dead_letter');
+        }
+      } catch { /* non-fatal */ }
       await this.syncRoomNamesToNative();
       await this.syncSenderNamesToNative();
     });
