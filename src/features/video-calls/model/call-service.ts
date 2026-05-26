@@ -1149,6 +1149,47 @@ export function useCallService() {
     // a single bad edit can't permanently jam future incoming calls.
     try {
 
+    // WEE-47 (#836): on the native non-pre-accepted incoming flow,
+    // handleIncomingCall intentionally leaves callStore.activeCall null
+    // so the Vue ringer (IncomingCallModal) does not double up over the
+    // native IncomingCallActivity. When the user finally accepts from
+    // the native ringer, NativeCallBridge fires callAnswered → answerCall
+    // runs here with matrixCall set but activeCall still null. Every
+    // store mutation below (`updateStatus(connecting)`, `setActiveCall`
+    // in onState→connected, type upgrade in syncRemoteVideoMuted) is a
+    // no-op when activeCall is null, so:
+    //   - CallWindow.show stays false (callStore.activeCall?.status is
+    //     never in ringing/connecting/connected),
+    //   - the callee hears audio (native WebRTC pipeline) but sees a
+    //     bare chat without mute/speaker/hangup controls.
+    // Populate activeCall synchronously from matrixCall here — cached
+    // profile if available, raw address otherwise — and schedule the
+    // async profile refresh exactly like handleIncomingCall would have.
+    if (!callStore.activeCall) {
+      const opponentId =
+        (call.getOpponentMember?.() as { userId?: string } | undefined)?.userId ?? "";
+      const peerAddress = opponentId ? matrixIdToAddress(opponentId) : "";
+      const cached = peerAddress ? useUserStore().getUser(peerAddress) : null;
+      const peerName = cached?.name || peerAddress;
+      const seedInfo: CallInfo = {
+        callId: call.callId,
+        roomId: call.roomId ?? "",
+        peerId: opponentId,
+        peerAddress,
+        peerName,
+        type: call.type === "video" ? "video" : "voice",
+        direction: "incoming",
+        status: CallStatus.incoming,
+        startedAt: null,
+        endedAt: null,
+      };
+      callStore.setActiveCall(seedInfo);
+      callStore.videoMuted = seedInfo.type !== "video";
+      if (peerAddress && peerName === peerAddress) {
+        refreshPeerNameAsync(call.callId, peerAddress);
+      }
+    }
+
     clearIncomingTimeout();
     stopAllSounds();
 
