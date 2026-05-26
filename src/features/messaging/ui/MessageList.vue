@@ -131,9 +131,24 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
     case "reply":
       chatStore.replyingTo = { id: message.id, senderId: message.senderId, content: message.content.slice(0, 150), type: message.type };
       break;
-    case "copy":
-      navigator.clipboard.writeText(message.content).then(() => toast(t("chat.copiedToClipboard")));
+    case "copy": {
+      // Honour an active text selection inside this bubble so users can copy a
+      // phone number / fragment instead of the whole message body. We scope to
+      // the bubble's DOM subtree so a selection elsewhere on the page doesn't
+      // hijack the copy. (WEE-42, forta-bugs#801/#579.)
+      const sel = window.getSelection();
+      const selectedText = sel?.toString().trim() ?? "";
+      const isSelectionInBubble =
+        sel != null
+        && sel.rangeCount > 0
+        && selectedText.length > 0
+        && (sel.anchorNode as Element | null)
+            ?.parentElement
+            ?.closest(`[data-message-id="${message.id}"]`) != null;
+      const payload = isSelectionInBubble ? selectedText : message.content;
+      navigator.clipboard.writeText(payload).then(() => toast(t("chat.copiedToClipboard")));
       break;
+    }
     case "edit":
       chatStore.editingMessage = { id: message.id, content: message.content };
       break;

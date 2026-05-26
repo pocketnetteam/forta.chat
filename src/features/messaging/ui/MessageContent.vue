@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, type Ref, ref } from "vue";
+import { Capacitor } from "@capacitor/core";
 import { parseMessage, applyLocalAlias } from "@/shared/lib/message-format";
 import type { Segment } from "@/shared/lib/message-format";
 import { PostCard } from "@/features/post-player";
@@ -33,6 +34,32 @@ const activeQuery = computed(() => searchQuery.value?.trim() ?? "");
 
 /** Inline segments (text, link, mention) vs block segments (bastyonLink) */
 const hasBlockSegments = computed(() => segments.value.some(s => s.type === "bastyonLink"));
+
+// Capacitor Android WebView treats `<a target="_blank">` as a no-op (there is
+// no concept of a new tab), so a plain anchor leaves the user stuck. Intercept
+// the click and route through @capacitor/browser on native, fall back to
+// window.open everywhere else. (WEE-42, forta-bugs#815/#351.)
+function openExternalLink(href: string): void {
+  window.open(href, "_blank", "noopener,noreferrer");
+}
+
+async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!Capacitor.isNativePlatform()) {
+    openExternalLink(href);
+    return;
+  }
+  try {
+    const { Browser } = await import("@capacitor/browser");
+    await Browser.open({ url: href });
+  } catch (err) {
+    // Plugin missing or rejected — at least give the user *something*. On
+    // Capacitor Android `window.open` may still no-op, but it does no harm.
+    console.error("[MessageContent] Browser.open failed, falling back:", err);
+    openExternalLink(href);
+  }
+}
 </script>
 
 <template>
@@ -51,10 +78,9 @@ const hasBlockSegments = computed(() => segments.value.some(s => s.type === "bas
       <a
         v-else-if="seg.type === 'link'"
         :href="seg.href"
-        target="_blank"
         rel="noopener noreferrer"
         class="text-color-txt-ac underline hover:no-underline"
-        @click.stop
+        @click="handleLinkClick($event, seg.href)"
       >{{ seg.content }}</a>
       <span
         v-else-if="seg.type === 'mention'"
@@ -87,10 +113,9 @@ const hasBlockSegments = computed(() => segments.value.some(s => s.type === "bas
         <a
           v-else-if="seg.type === 'link'"
           :href="seg.href"
-          target="_blank"
           rel="noopener noreferrer"
           class="text-color-txt-ac underline hover:no-underline"
-          @click.stop
+          @click="handleLinkClick($event, seg.href)"
         >{{ seg.content }}</a>
         <span
           v-else-if="seg.type === 'mention'"
