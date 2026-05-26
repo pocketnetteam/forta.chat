@@ -897,6 +897,135 @@ describe('call-service permission flow', () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // WEE-47 (#836): callee UI parity — control panel must render after accept
+  // on the native non-pre-accepted incoming flow.
+  //
+  // On Android, when Matrix /sync delivers `m.call.invite` before the user
+  // taps Accept on the native IncomingCallActivity, handleIncomingCall enters
+  // its `if (isNative)` branch which keeps callStore.activeCall null on
+  // purpose (so the Vue IncomingCallModal does not double-ring over the
+  // native one). When NativeCallBridge later fires callAnswered → answerCall,
+  // the function used to run with matrixCall set and activeCall still null —
+  // every subsequent store mutation (updateStatus, type upgrade) was a no-op,
+  // so CallWindow.show stayed false and the callee saw no mute/speaker/hangup
+  // controls (forta-bugs#836). The fix populates activeCall synchronously
+  // from matrixCall at the top of answerCall so the rest of the flow has a
+  // real CallInfo to mutate.
+  // -------------------------------------------------------------------------
+  describe('answerCall populates activeCall on native non-pre-accepted flow (WEE-47 / #836)', () => {
+    function seedMatrixCallOnly(type: 'voice' | 'video' = 'voice') {
+      mockCallStore.matrixCall = {
+        callId: 'native-ringer-call-id',
+        roomId: '!room:matrix.org',
+        type,
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      };
+      mockCallStore.activeCall = null;
+    }
+
+    it('seeds callStore.activeCall from matrixCall before updateStatus(connecting)', async () => {
+      seedMatrixCallOnly('voice');
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      // The seed must run before any updateStatus, otherwise the
+      // connecting transition is lost on an empty activeCall.
+      const seedSetCall = mockSetActiveCall.mock.calls.find(
+        ([info]) =>
+          (info as { callId?: string; status?: string }).callId === 'native-ringer-call-id'
+          && (info as { status?: string }).status === 'incoming',
+      );
+      expect(seedSetCall).toBeTruthy();
+      // The seeded CallInfo must carry the SDK call's type + roomId so the
+      // CallWindow.show gate (`status in {ringing, connecting, connected}`)
+      // and the type-aware UI (voice vs video layout) work post-accept.
+      expect(seedSetCall?.[0]).toMatchObject({
+        callId: 'native-ringer-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        direction: 'incoming',
+      });
+
+      // Sanity: SDK answer must still be invoked exactly once on this flow.
+      expect(mockAnswer).toHaveBeenCalledTimes(1);
+    });
+
+    it('seeds activeCall.type = "video" for a video incoming call', async () => {
+      seedMatrixCallOnly('video');
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      const seedSetCall = mockSetActiveCall.mock.calls.find(
+        ([info]) =>
+          (info as { callId?: string }).callId === 'native-ringer-call-id'
+          && (info as { status?: string }).status === 'incoming',
+      );
+      expect(seedSetCall?.[0]).toMatchObject({ type: 'video' });
+      // videoMuted defaults to false for video so the local camera turns on.
+      expect(mockCallStore.videoMuted).toBe(false);
+    });
+
+    it('does NOT re-seed activeCall when it was already populated (pre-accepted / Vue ringer flow)', async () => {
+      // Pre-accepted path or web Vue ringer path: handleIncomingCall already
+      // wrote activeCall. The lazy-seed guard must be a strict `if (null)`
+      // so we don't overwrite the existing CallInfo (which may carry the
+      // refreshed peerName, startedAt sentinel, etc.).
+      mockCallStore.matrixCall = {
+        callId: 'pre-accepted-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      };
+      mockCallStore.activeCall = {
+        callId: 'pre-accepted-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        direction: 'incoming',
+        peerName: 'Already Resolved',
+        status: 'incoming',
+      };
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.answerCall();
+
+      // No seed setActiveCall with status='incoming' should fire — the
+      // existing activeCall must be left untouched by the lazy-seed branch.
+      // (Other setActiveCall calls — e.g. peer-name patch — are allowed but
+      // must NOT carry status='incoming', which is the seed signature.)
+      const seedSetCall = mockSetActiveCall.mock.calls.find(
+        ([info]) =>
+          (info as { callId?: string }).callId === 'pre-accepted-id'
+          && (info as { status?: string }).status === 'incoming'
+          && (info as { peerName?: string }).peerName !== 'Already Resolved',
+      );
+      expect(seedSetCall).toBeFalsy();
+    });
+  });
+
   describe('onAudioError listener', () => {
     it('registers onAudioError listener on module load for native', async () => {
       // Module-level code runs once at first import. Since vi.clearAllMocks()
