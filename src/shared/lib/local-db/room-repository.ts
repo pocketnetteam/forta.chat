@@ -247,7 +247,11 @@ export class RoomRepository {
 
   /** Update the last message preview for a room.
    *  Monotonic: skips the update if the existing preview is already newer,
-   *  preventing stale server data from overwriting fresher local-first writes. */
+   *  preventing stale server data from overwriting fresher local-first writes.
+   *
+   *  `force` bypasses the monotonic guard — required by redaction rollback,
+   *  which intentionally points the preview back to an older message after
+   *  the current `lastMessage` has been soft-deleted (WEE-43). */
   async updateLastMessage(
     roomId: string,
     preview: string,
@@ -257,6 +261,7 @@ export class RoomRepository {
     eventId?: string,
     callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number },
     systemMeta?: { template: string; senderAddr: string; targetAddr?: string; extra?: Record<string, string> },
+    force = false,
   ): Promise<void> {
     // Monotonic guard — never roll back to an older preview.
     //
@@ -272,6 +277,7 @@ export class RoomRepository {
       eventId !== undefined &&
       (existing?.lastMessageEventId === undefined || existing?.lastMessageEventId === eventId);
     if (
+      !force &&
       !isReplacingOwnPlaceholder &&
       existing?.lastMessageTimestamp &&
       timestamp < existing.lastMessageTimestamp
@@ -302,6 +308,25 @@ export class RoomRepository {
     if (updated === 0 && existing) {
       await this.db.rooms.update(roomId, changes);
     }
+  }
+
+  /** Clear all lastMessage* metadata for a room (WEE-43).
+   *  Used when every message in the room has been redacted/soft-deleted —
+   *  the sidebar should fall back to the "no messages yet" hint instead of
+   *  preserving a stale eventId/preview that points at a deleted message. */
+  async clearLastMessage(roomId: string): Promise<void> {
+    await this.db.rooms.where("id").equals(roomId).modify((room) => {
+      delete room.lastMessagePreview;
+      delete room.lastMessageTimestamp;
+      delete room.lastMessageSenderId;
+      delete room.lastMessageType;
+      delete room.lastMessageEventId;
+      delete room.lastMessageLocalStatus;
+      delete room.lastMessageDecryptionStatus;
+      delete room.lastMessageCallInfo;
+      delete room.lastMessageSystemMeta;
+      room.lastMessageReaction = null;
+    });
   }
 
   /** Update reaction on the last message (does NOT touch updatedAt) */

@@ -505,33 +505,47 @@ export class EventWriter {
   // Redactions (deletions)
   // ---------------------------------------------------------------------------
 
-  /** Mark a message as soft-deleted and update room preview if needed */
+  /** Mark a message as soft-deleted and update room preview if needed.
+   *
+   *  WEE-43: redaction rollback was silently no-op'd by `updateLastMessage`'s
+   *  monotonic guard whenever the previous non-redacted message had an older
+   *  timestamp than the now-deleted lastMessage. We now (a) only touch the
+   *  preview when the redacted event WAS the lastMessage, (b) force-bypass the
+   *  monotonic guard on rollback, and (c) clear every lastMessage* field when
+   *  no non-redacted message remains so the sidebar shows the "no messages"
+   *  hint rather than a stale "deleted" placeholder. */
   async writeRedaction(redaction: ParsedRedaction): Promise<void> {
-    await this.messageRepo.softDelete(redaction.redactedEventId);
+    // Wrap soft-delete + preview rollback in a single transaction so a
+    // concurrent inbound message can't overwrite lastMessage* between our
+    // `getRoom` read and the `clearLastMessage`/`updateLastMessage` write,
+    // which would otherwise either revive a deleted preview or wipe a freshly
+    // arrived one.
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      await this.messageRepo.softDelete(redaction.redactedEventId);
 
-    // Mark replyTo.deleted on messages referencing the redacted one in Dexie
-    await this.messageRepo.markReplyDeleted(redaction.redactedEventId);
+      // Mark replyTo.deleted on messages referencing the redacted one in Dexie
+      await this.messageRepo.markReplyDeleted(redaction.redactedEventId);
 
-    // Always update room preview after deletion
-    const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
-    const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
-    if (prevMsg) {
-      await this.updateRoomPreviewFromLocal(prevMsg);
-    } else {
-      // All messages in room are deleted — write an empty preview so the UI
-      // can localise the "deleted" label itself via formatPreview (avoids
-      // bypassing i18n by hard-coding English here).
       const room = await this.roomRepo.getRoom(redaction.roomId);
-      if (room) {
-        await this.roomRepo.updateLastMessage(
-          redaction.roomId,
-          "",
-          room.updatedAt,
-          room.lastMessageSenderId ?? "",
-          room.lastMessageType,
-        );
+      const wasLastMessage = room?.lastMessageEventId === redaction.redactedEventId;
+
+      // Only roll the preview back when the redacted event was actually the
+      // lastMessage of the room — otherwise the preview is already pointing at
+      // a newer message and must stay untouched.
+      if (wasLastMessage) {
+        const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
+        const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
+        if (prevMsg) {
+          await this.updateRoomPreviewFromLocal(prevMsg, /* force */ true);
+        } else {
+          // Every message in the room is redacted/cleared — wipe lastMessage*
+          // metadata entirely. buildLastMessage() returns undefined for rooms
+          // without preview state, which surfaces the localised "no messages"
+          // hint in formatPreview instead of a false-positive "deleted" placeholder.
+          await this.roomRepo.clearLastMessage(redaction.roomId);
+        }
       }
-    }
+    });
 
     this.onChange?.(redaction.roomId);
   }
@@ -722,8 +736,13 @@ export class EventWriter {
   }
 
   /** Update room preview from an existing LocalMessage (used after deletion).
-   *  Same fault-tolerance as updateRoomPreview — never stores empty preview. */
-  private async updateRoomPreviewFromLocal(msg: LocalMessage): Promise<void> {
+   *  Same fault-tolerance as updateRoomPreview — never stores empty preview.
+   *
+   *  `force` bypasses the monotonic guard in `updateLastMessage`. Callers that
+   *  intentionally roll the preview back to an older message (e.g. redaction
+   *  rollback in `writeRedaction`) must pass `force: true` — otherwise the
+   *  guard silently swallows the rollback and a stale preview stays put. */
+  private async updateRoomPreviewFromLocal(msg: LocalMessage, force = false): Promise<void> {
     let preview: string;
     try {
       preview = this.getPreviewText(
@@ -751,6 +770,7 @@ export class EventWriter {
       msg.eventId ?? undefined,
       msg.callInfo,
       msg.systemMeta,
+      force,
     );
   }
 

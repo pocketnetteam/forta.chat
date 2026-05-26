@@ -140,12 +140,16 @@ describe("useFormatPreview", () => {
       expect(formatPreview(msg, room)).toBe("🚫 This message was deleted");
     });
 
-    it("renders 'deleted' for empty text with no fileInfo (legacy pattern)", () => {
+    it("does NOT render 'deleted' for empty text with no fileInfo when msg.deleted is false (WEE-43)", () => {
+      // Regression: the legacy heuristic `(!content && type === text && !fileInfo) → deleted`
+      // produced false positives (#395) — any text message with an empty preview was
+      // mislabeled as deleted. Only explicit signals (msg.deleted, literal "🚫 Message deleted")
+      // should drive the deletion label now.
       const { formatPreview } = useFormatPreview();
       const room = makeRoom({ isGroup: false });
       const msg = makeMsg({ content: "", type: MessageType.text });
 
-      expect(formatPreview(msg, room)).toBe("🚫 This message was deleted");
+      expect(formatPreview(msg, room)).toBe("");
     });
   });
 });

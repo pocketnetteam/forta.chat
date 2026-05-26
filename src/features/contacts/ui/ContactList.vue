@@ -220,14 +220,11 @@ function getPreview(room: ChatRoom): DisplayResult {
   // Primary: use room.lastMessage from Dexie LiveRoom
   if (room.lastMessage) {
     const c = room.lastMessage.content;
-    // Explicit deletion markers only. `"[message]"` is a generic "preview
-    // unavailable" sentinel (see format-preview.ts), not a deletion marker —
-    // treating it as deleted here used to mislabel call/media events.
-    if (
-      room.lastMessage.deleted ||
-      (!c && room.lastMessage.type === MessageType.text) ||
-      c === "🚫 Message deleted"
-    ) {
+    // WEE-43: explicit deletion signals only — `msg.deleted` (mapper sets it
+    // from softDeleted) or the legacy literal "🚫 Message deleted" body.
+    // The previous "empty text → deleted" inference produced false positives
+    // for any room whose preview was transiently blank (push-driven, cold-start).
+    if (room.lastMessage.deleted || c === "🚫 Message deleted") {
       return { state: "ready", text: `🚫 ${t("message.deleted")}` };
     }
     // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)
@@ -246,8 +243,8 @@ function getPreview(room: ChatRoom): DisplayResult {
   const msgs = chatStore.messages[room.id];
   if (msgs?.length) {
     const last = msgs[msgs.length - 1];
-    // Deleted message
-    if (last.deleted || (!last.content && last.type === MessageType.text)) {
+    // WEE-43: explicit deletion signal only — see comment in the primary branch.
+    if (last.deleted) {
       return { state: "ready", text: `🚫 ${t("message.deleted")}` };
     }
     // For group chats: if sender name isn't resolved yet, show skeleton instead of raw ID
