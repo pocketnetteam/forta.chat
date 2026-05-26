@@ -4,12 +4,19 @@ import type { Message } from "../model/types";
 import { MessageType } from "../model/types";
 
 /** Resolve the effective preview body — prefer decrypted-cache value over
- *  raw "[encrypted]" / "m.bad.encrypted" / "** Unable to decrypt" placeholders. */
+ *  raw "[encrypted]" / "m.bad.encrypted" / "** Unable to decrypt" placeholders.
+ *
+ *  WEE-43: an empty `rawPreview` is normalised to `undefined` so callers like
+ *  `buildLastMessage` short-circuit to "no preview", letting `formatPreview`
+ *  surface the localised "no messages" hint instead of building a Message with
+ *  an empty content body. Older builds wrote `lastMessagePreview: ""` for
+ *  fully-redacted rooms — this keeps that legacy data from rendering blank
+ *  until the next message or redaction overwrites it. */
 export function resolveLastMessagePreview(
   rawPreview: string | undefined,
   decryptedPreview?: string,
 ): string | undefined {
-  if (rawPreview == null) return undefined;
+  if (rawPreview == null || rawPreview === "") return undefined;
   const isEncryptedPlaceholder = rawPreview === "[encrypted]"
     || rawPreview === "m.bad.encrypted"
     || rawPreview.startsWith("** Unable to decrypt");
