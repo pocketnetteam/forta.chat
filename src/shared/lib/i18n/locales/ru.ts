@@ -512,6 +512,7 @@ export const ru: Record<TranslationKey, string> = {
   "call.outgoing": "Исходящий звонок",
   "call.incomingCall": "Входящий звонок",
   "call.missed": "Пропущен",
+  "call.callBack": "Перезвонить",
   "call.voiceCallSystem": "Голосовой звонок",
   "call.videoCallSystem": "Видеозвонок",
   "call.missedVoiceCall": "Пропущенный голосовой звонок",

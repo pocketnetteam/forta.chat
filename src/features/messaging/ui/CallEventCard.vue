@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { Message } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
+import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallStore } from "@/entities/call";
 
 const props = defineProps<{
   message: Message;
@@ -9,6 +11,8 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
+const callService = useCallService();
+const callStore = useCallStore();
 
 const missed = computed(() => props.message.callInfo?.missed ?? false);
 const isVideo = computed(() => props.message.callInfo?.callType === "video");
@@ -36,12 +40,32 @@ const statusLabel = computed(() => {
 });
 
 const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
+
+// WEE-49 / forta-bugs#754: tapping a call-event card initiates a callback
+// to the same peer using the same call type. Disabled while another call
+// is already active so the user does not accidentally fire startCall while
+// the existing call is still tearing down.
+const isClickable = computed(() => !callStore.isInCall);
+
+const handleCallback = () => {
+  if (!isClickable.value) return;
+  const callType = props.message.callInfo?.callType ?? "voice";
+  void callService.startCall(props.message.roomId, callType);
+};
 </script>
 
 <template>
-  <div
-    class="flex items-center gap-3 rounded-bubble px-3 py-2"
-    :class="[tailClass, isOwn ? 'bg-chat-bubble-own' : 'bg-chat-bubble-other']"
+  <button
+    type="button"
+    :disabled="!isClickable"
+    class="call-card flex items-center gap-3 rounded-bubble px-3 py-2 text-left transition-opacity"
+    :class="[
+      tailClass,
+      isOwn ? 'bg-chat-bubble-own' : 'bg-chat-bubble-other',
+      isClickable ? 'cursor-pointer hover:opacity-90 active:opacity-80' : 'cursor-default opacity-100',
+    ]"
+    :aria-label="`${callTypeLabel} — ${statusLabel} — ${t('call.callBack')}`"
+    @click="handleCallback"
   >
     <!-- Phone / video icon in circle -->
     <div
@@ -92,5 +116,16 @@ const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
         </span>
       </div>
     </div>
-  </div>
+  </button>
 </template>
+
+<style scoped>
+.call-card {
+  /* Reset native button styling */
+  border: 0;
+  font: inherit;
+}
+.call-card:disabled {
+  cursor: default;
+}
+</style>

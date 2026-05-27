@@ -205,6 +205,24 @@ class CallForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        // WEE-49: when the OS tears the service down without going through
+        // ACTION_STOP (process killed by OEM Doze, swipe-app-out, low-mem
+        // SIGKILL, system-initiated `stopWithReason`), the previous teardown
+        // only released the wake-lock + abandoned audio focus. AudioRouter
+        // stayed in MODE_IN_COMMUNICATION, holding the voice-call audio
+        // mode globally and blocking cellular network until reboot
+        // (#839 post-WEE-45 residual, #771 phantom call). Brute-force reset
+        // the router and pull the notification surface explicitly so the
+        // OS recognises the call as fully ended.
+        runCatching {
+            AudioRouter.getSharedInstance(applicationContext).forceStop()
+        }.onFailure { Log.w(TAG, "AudioRouter.forceStop in onDestroy threw", it) }
+
+        runCatching {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }.onFailure { Log.w(TAG, "stopForeground in onDestroy threw", it) }
+
+        hasStarted = false
         releaseWakeLock()
         abandonAudioFocus()
         instance = null
