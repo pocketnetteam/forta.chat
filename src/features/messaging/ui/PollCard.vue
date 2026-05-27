@@ -15,9 +15,31 @@ const emit = defineEmits<{
 
 const poll = computed(() => props.message.pollInfo!);
 
+/** Dedup voters per option (one vote per user) and enforce last-vote-wins
+ *  across options so a single voter never counts twice in the tally.
+ *  This is defence-in-depth on top of the EventWriter dedup — protects
+ *  against stale Dexie rows written before the dedup fix landed. */
+const dedupedVotes = computed<Record<string, string[]>>(() => {
+  const optionEntries = Object.entries(poll.value.votes ?? {});
+  const seen = new Set<string>();
+  const result: Record<string, string[]> = {};
+  // Iterate options in stable order; first occurrence of a voter wins so the
+  // visual tally stays consistent even if backend somehow stored duplicates.
+  for (const [optionId, voters] of optionEntries) {
+    const unique: string[] = [];
+    for (const voter of voters ?? []) {
+      if (seen.has(voter)) continue;
+      seen.add(voter);
+      unique.push(voter);
+    }
+    result[optionId] = unique;
+  }
+  return result;
+});
+
 const totalVotes = computed(() => {
   let total = 0;
-  for (const voters of Object.values(poll.value.votes)) {
+  for (const voters of Object.values(dedupedVotes.value)) {
     total += voters.length;
   }
   return total;
@@ -26,7 +48,7 @@ const totalVotes = computed(() => {
 const hasVoted = computed(() => !!poll.value.myVote);
 
 const getVoteCount = (optionId: string): number => {
-  return (poll.value.votes[optionId] ?? []).length;
+  return (dedupedVotes.value[optionId] ?? []).length;
 };
 
 const getPercentage = (optionId: string): number => {

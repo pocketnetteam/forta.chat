@@ -776,6 +776,36 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
             }
 
+            // WEE-52 / forta-bugs#167: re-sync mute state when the app comes
+            // back to foreground. On Android, the OS can purge localStorage
+            // (per-WebView eviction under memory pressure, OEM cleanups) while
+            // the app is backgrounded. Without this listener the cache desync
+            // surfaces as "I muted the group but notifications came back after
+            // I closed the app for a while". Re-pulling push rules on resume
+            // restores the user's intent without requiring a re-login.
+            //
+            // The handle is stashed in `_appStateHandle` (declared at module
+            // top alongside other per-account cleanup refs) so logout can
+            // detach it — otherwise a re-login would stack a second listener
+            // on top of the first.
+            if (isNative) {
+              try {
+                if (_appStateHandle) {
+                  await _appStateHandle.remove().catch(() => { /* ignore */ });
+                  _appStateHandle = null;
+                }
+                const { App } = await import('@capacitor/app');
+                _appStateHandle = await App.addListener('appStateChange', ({ isActive }) => {
+                  if (!isActive) return;
+                  chatStore.syncMutedRoomsFromMatrix().catch((err) => {
+                    console.warn('[auth] resume sync mute failed:', err);
+                  });
+                });
+              } catch (err) {
+                console.warn('[auth] Failed to wire app-resume mute sync:', err);
+              }
+            }
+
             // Wire call handler after push init (needs nativeCallBridge)
             try {
               const { nativeCallBridge } = await import('@/shared/lib/native-calls');
@@ -1143,6 +1173,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
+    if (_appStateHandle) {
+      await _appStateHandle.remove().catch(() => { /* ignore */ });
+      _appStateHandle = null;
+    }
 
     // ── 4. Clear localStorage account data ──
     clearAllDrafts();

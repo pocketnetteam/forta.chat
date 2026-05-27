@@ -83,6 +83,13 @@ export interface ParsedReceipt {
 
 type OnChangeCallback = (roomId: string) => void;
 
+/** Buffered poll responses + end waiting for their poll.start to land. */
+interface PendingPollEntry {
+  votes: Map<string, { optionId: string; isMine: boolean }>;
+  ended?: { endedBy: string };
+  stashedAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // EventWriter — writes incoming Matrix events to local DB
 // ---------------------------------------------------------------------------
@@ -236,6 +243,14 @@ export class EventWriter {
       if (item.parsed.eventId && this.pendingEdits.has(item.parsed.eventId)) {
         await this.applyPendingEdit(item.parsed.eventId, item.roomId);
       }
+      // Apply stashed poll votes/end for newly inserted poll.start messages
+      if (
+        item.parsed.eventId
+        && item.parsed.type === MessageType.poll
+        && this.pendingPollVotes.has(item.parsed.eventId)
+      ) {
+        await this.applyPendingPollUpdates(item.parsed.eventId);
+      }
     }
 
     // Notify once per unique room (outside the transaction)
@@ -283,6 +298,10 @@ export class EventWriter {
       if (parsed.eventId) {
         await this.applyPendingEdit(parsed.eventId, parsed.roomId);
       }
+      // Apply any stashed poll votes/end that arrived before this poll.start
+      if (parsed.eventId && parsed.type === MessageType.poll) {
+        await this.applyPendingPollUpdates(parsed.eventId);
+      }
       this.onChange?.(parsed.roomId);
 
       // Async link preview for incoming messages — skip if sender dismissed preview.
@@ -320,6 +339,10 @@ export class EventWriter {
     for (const m of messages) {
       if (m.eventId && this.pendingEdits.has(m.eventId)) {
         await this.applyPendingEdit(m.eventId, m.roomId);
+      }
+      // Apply any stashed poll votes/end for poll.start messages
+      if (m.eventId && m.type === MessageType.poll && this.pendingPollVotes.has(m.eventId)) {
+        await this.applyPendingPollUpdates(m.eventId);
       }
     }
   }
@@ -396,43 +419,167 @@ export class EventWriter {
   // Poll votes
   // ---------------------------------------------------------------------------
 
-  /** Persist a poll vote to the local DB */
+  /** Poll votes/ends whose poll.start hasn't landed in Dexie yet.
+   *  Keyed by pollEventId. Vote uses last-wins per voter (MSC3381). */
+  private pendingPollVotes = new Map<string, PendingPollEntry>();
+  private static readonly PENDING_POLL_TTL_MS = 5 * 60_000;
+  private static readonly PENDING_POLL_MAX_SIZE = 200;
+
+  /** Persist a poll vote to the local DB.
+   *  When the corresponding poll.start hasn't arrived yet (race during initial
+   *  timeline pagination), stash the vote and replay it once the poll message
+   *  lands. Without this guard, early-arriving responses would silently drop.
+   *
+   *  The read+update is wrapped in a `rw` transaction so a concurrent vote on
+   *  the same poll (e.g. a fresh inbound response interleaving with a replay
+   *  batch) can't last-write-wins one of the votes away. */
   async writePollVote(
     pollEventId: string,
     voterAddress: string,
     optionId: string,
     isMine: boolean,
   ): Promise<void> {
-    const msg = await this.messageRepo.getByEventId(pollEventId);
-    if (!msg?.pollInfo) return;
+    const out = { roomId: null as string | null, stashed: false };
 
-    const pollInfo = { ...msg.pollInfo, votes: { ...msg.pollInfo.votes } };
+    await this.db.transaction("rw", [this.db.messages], async () => {
+      const msg = await this.messageRepo.getByEventId(pollEventId);
+      if (!msg?.pollInfo) {
+        out.stashed = true;
+        return;
+      }
+      const pollInfo = this.applyVoteToPollInfo(msg.pollInfo, voterAddress, optionId, isMine);
+      await this.messageRepo.updatePollInfo(pollEventId, pollInfo);
+      out.roomId = msg.roomId;
+    });
 
-    // Remove previous vote by this voter
-    for (const key of Object.keys(pollInfo.votes)) {
-      pollInfo.votes[key] = pollInfo.votes[key].filter(v => v !== voterAddress);
+    if (out.stashed) {
+      this.stashPollVote(pollEventId, voterAddress, optionId, isMine);
+      return;
     }
-
-    // Add new vote
-    if (!pollInfo.votes[optionId]) pollInfo.votes[optionId] = [];
-    pollInfo.votes[optionId] = [...pollInfo.votes[optionId], voterAddress];
-
-    if (isMine) {
-      pollInfo.myVote = optionId;
-    }
-
-    await this.messageRepo.updatePollInfo(pollEventId, pollInfo);
-    this.onChange?.(msg.roomId);
+    if (out.roomId) this.onChange?.(out.roomId);
   }
 
-  /** Persist poll end to the local DB */
+  /** Persist poll end to the local DB.
+   *  Same race window as writePollVote — stash if poll.start hasn't landed.
+   *  Read+update wrapped in a transaction for the same reason. */
   async writePollEnd(pollEventId: string, endedByAddress: string): Promise<void> {
-    const msg = await this.messageRepo.getByEventId(pollEventId);
-    if (!msg?.pollInfo) return;
+    const out = { roomId: null as string | null, stashed: false };
 
-    const pollInfo = { ...msg.pollInfo, ended: true, endedBy: endedByAddress };
-    await this.messageRepo.updatePollInfo(pollEventId, pollInfo);
-    this.onChange?.(msg.roomId);
+    await this.db.transaction("rw", [this.db.messages], async () => {
+      const msg = await this.messageRepo.getByEventId(pollEventId);
+      if (!msg?.pollInfo) {
+        out.stashed = true;
+        return;
+      }
+      const pollInfo = { ...msg.pollInfo, ended: true, endedBy: endedByAddress };
+      await this.messageRepo.updatePollInfo(pollEventId, pollInfo);
+      out.roomId = msg.roomId;
+    });
+
+    if (out.stashed) {
+      this.stashPollEnd(pollEventId, endedByAddress);
+      return;
+    }
+    if (out.roomId) this.onChange?.(out.roomId);
+  }
+
+  /** Apply any stashed poll votes/end for a poll message that just landed.
+   *  Called after writeMessage / writeMessages / flushBatch inserts a poll.start.
+   *  Wrapped in the same `rw` transaction so it can't race with a fresh inbound
+   *  vote for the same poll. */
+  async applyPendingPollUpdates(pollEventId: string): Promise<void> {
+    const pending = this.pendingPollVotes.get(pollEventId);
+    if (!pending) return;
+    this.pendingPollVotes.delete(pollEventId);
+
+    const out = { roomId: null as string | null };
+
+    await this.db.transaction("rw", [this.db.messages], async () => {
+      const msg = await this.messageRepo.getByEventId(pollEventId);
+      if (!msg?.pollInfo) {
+        // Poll was redacted or never landed in this window — drop stashed
+        // updates rather than re-stashing (could loop forever).
+        console.warn("[EventWriter] applyPendingPollUpdates: poll vanished, dropping stashed updates", pollEventId);
+        return;
+      }
+
+      let pollInfo = { ...msg.pollInfo, votes: { ...msg.pollInfo.votes } };
+      for (const [voter, { optionId, isMine }] of pending.votes) {
+        pollInfo = this.applyVoteToPollInfo(pollInfo, voter, optionId, isMine);
+      }
+      if (pending.ended) {
+        pollInfo = { ...pollInfo, ended: true, endedBy: pending.ended.endedBy };
+      }
+
+      await this.messageRepo.updatePollInfo(pollEventId, pollInfo);
+      out.roomId = msg.roomId;
+    });
+
+    if (out.roomId) this.onChange?.(out.roomId);
+  }
+
+  private applyVoteToPollInfo(
+    base: NonNullable<LocalMessage["pollInfo"]>,
+    voterAddress: string,
+    optionId: string,
+    isMine: boolean,
+  ): NonNullable<LocalMessage["pollInfo"]> {
+    const votes: Record<string, string[]> = { ...base.votes };
+    for (const key of Object.keys(votes)) {
+      votes[key] = votes[key].filter(v => v !== voterAddress);
+    }
+    if (!votes[optionId]) votes[optionId] = [];
+    votes[optionId] = [...votes[optionId], voterAddress];
+
+    return {
+      ...base,
+      votes,
+      ...(isMine ? { myVote: optionId } : {}),
+    };
+  }
+
+  private stashPollVote(
+    pollEventId: string,
+    voterAddress: string,
+    optionId: string,
+    isMine: boolean,
+  ): void {
+    const entry: PendingPollEntry = this.pendingPollVotes.get(pollEventId) ?? {
+      votes: new Map(),
+      stashedAt: Date.now(),
+    };
+    entry.votes.set(voterAddress, { optionId, isMine });
+    entry.stashedAt = Date.now();
+    this.pendingPollVotes.set(pollEventId, entry);
+    this.evictStalePendingPolls();
+  }
+
+  private stashPollEnd(pollEventId: string, endedByAddress: string): void {
+    const entry: PendingPollEntry = this.pendingPollVotes.get(pollEventId) ?? {
+      votes: new Map(),
+      stashedAt: Date.now(),
+    };
+    entry.ended = { endedBy: endedByAddress };
+    entry.stashedAt = Date.now();
+    this.pendingPollVotes.set(pollEventId, entry);
+    this.evictStalePendingPolls();
+  }
+
+  private evictStalePendingPolls(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.pendingPollVotes) {
+      if (now - entry.stashedAt > EventWriter.PENDING_POLL_TTL_MS) {
+        this.pendingPollVotes.delete(key);
+      }
+    }
+    if (this.pendingPollVotes.size > EventWriter.PENDING_POLL_MAX_SIZE) {
+      const sorted = [...this.pendingPollVotes.entries()]
+        .sort((a, b) => a[1].stashedAt - b[1].stashedAt);
+      const toRemove = sorted.slice(0, sorted.length - EventWriter.PENDING_POLL_MAX_SIZE);
+      for (const [key] of toRemove) {
+        this.pendingPollVotes.delete(key);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
