@@ -731,6 +731,23 @@ let toggleCameraLock = false;
 let answerInProgress = false;
 
 // ---------------------------------------------------------------------------
+// Outgoing-call re-entry lock (WEE-49 / forta-bugs#460)
+// ---------------------------------------------------------------------------
+//
+// The status-based `callStore.isInCall` guard inside startCall bails when
+// an active call already exists, but the first `await` (ensureCallPermissions)
+// opens a window of several hundred milliseconds during which callStore is
+// still empty. A double-tap on the call button — or a JS event re-emit
+// from the call message timeline — passes the guard twice and creates two
+// MatrixCall objects, which the SDK then surfaces as two outgoing dialogs
+// (forta-bugs#460). The synchronous flag closes that window; resetting it
+// in `finally` keeps it from leaking across calls.
+//
+// Module-scope is safe: the store already enforces a single active call per
+// process, so there's at most one startCall in flight at any time.
+let outgoingCallInProgress = false;
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -742,7 +759,36 @@ export function useCallService() {
       console.warn("[call-service] Already in a call");
       return;
     }
+    // WEE-49 / forta-bugs#460: synchronous re-entry guard for outgoing calls.
+    // The `isInCall` check above only catches the case where a previous
+    // call already wrote `setActiveCall`; a fast double-tap (or a JS-event
+    // re-emit from the call-message timeline) can pass it twice before the
+    // first invocation reaches that write. Set the flag immediately and
+    // clear it in `finally` so a failed dial does not block a retry — and
+    // also clear it as soon as `setActiveCall` ran inside the inner flow,
+    // so a slow placeVoiceCall does not keep the lock past the actual
+    // double-tap window (`isInCall` protects re-entry after that point).
+    if (outgoingCallInProgress) {
+      console.warn("[call-service] startCall ignored — outgoing call already in progress");
+      return;
+    }
+    outgoingCallInProgress = true;
 
+    try {
+      await startCallInner(roomId, type);
+    } finally {
+      outgoingCallInProgress = false;
+    }
+  }
+
+  // Called from `startCallInner` once the call has been registered on the
+  // store; after this point `isInCall` takes over the dedup duty so we can
+  // release the synchronous lock early. Safe to call multiple times.
+  function releaseOutgoingLock(): void {
+    outgoingCallInProgress = false;
+  }
+
+  async function startCallInner(roomId: string, type: CallType) {
     const otherTabActive = await checkOtherTabHasCall();
     if (otherTabActive) {
       console.warn("[call-service] Another tab already has an active call");
@@ -823,6 +869,12 @@ export function useCallService() {
     callStore.setActiveCall(callInfo);
     callStore.setMatrixCall(call);
     callStore.videoMuted = type === "voice";
+    // WEE-49: hand off the dedup duty to `callStore.isInCall` now that the
+    // call is registered. The outer `finally` is a safety net but holding
+    // the sync lock through placeVoiceCall (which may take >1s on a slow
+    // network) would block legitimate dial retries after a hangup if any
+    // dialing path failed to complete cleanly.
+    releaseOutgoingLock();
     wireCallEvents(call, "outgoing");
 
     // Late-arriving profile patch — only schedule when resolvePeerInfo's

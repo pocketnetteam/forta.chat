@@ -513,6 +513,7 @@ export const en = {
   "call.outgoing": "Outgoing call",
   "call.incomingCall": "Incoming call",
   "call.missed": "Missed",
+  "call.callBack": "Call back",
   "call.voiceCallSystem": "Voice call",
   "call.videoCallSystem": "Video call",
   "call.missedVoiceCall": "Missed voice call",

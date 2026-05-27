@@ -327,6 +327,56 @@ describe('call-service permission flow', () => {
 
       expect(mockStartAudioRouting).not.toHaveBeenCalled();
     });
+
+    // WEE-49 / forta-bugs#460: a fast double-tap on the dial button (or a
+    // JS-event re-emit from CallEventCard's call-back handler) used to slip
+    // past the `isInCall` check while the first invocation was still awaiting
+    // ensureCallPermissions — producing two outgoing call dialogs.
+    it('ignores re-entrant startCall while the first is in flight (forta-bugs#460)', async () => {
+      // Suspend the first permission check so we can fire a second startCall
+      // while the first one is parked between entry and setActiveCall. The
+      // dedup guard must short-circuit the second call without invoking
+      // ensureCallPermissions a second time.
+      let resolveFirst: (() => void) | undefined;
+      mockEnsureCallPermissions.mockImplementationOnce(
+        () => new Promise<void>((res) => { resolveFirst = () => res(); }),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      const first = service.startCall('!room:matrix.org', 'voice');
+
+      // Yield to the microtask queue so the first call actually awaits
+      // ensureCallPermissions before we fire the second one.
+      await Promise.resolve();
+
+      const second = service.startCall('!room:matrix.org', 'voice');
+      await second;
+      // Only the first startCall reached ensureCallPermissions.
+      expect(mockEnsureCallPermissions).toHaveBeenCalledTimes(1);
+      // And no extra place*Call landed on the SDK for the duplicate.
+      expect(mockPlaceVoiceCall).not.toHaveBeenCalled();
+
+      // Unblock the first invocation so the test cleanup does not leak it.
+      resolveFirst?.();
+      await first;
+    });
+
+    it('clears the dedup lock after a failed dial (subsequent startCall works)', async () => {
+      mockEnsureCallPermissions.mockRejectedValueOnce(
+        new MockPermissionDeniedError('microphone'),
+      );
+
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      // Second startCall must reach ensureCallPermissions again — the dedup
+      // guard set in `finally` must be reset even on the denied-permission
+      // path or the user would be locked out of dialing until reload.
+      await service.startCall('!room:matrix.org', 'voice');
+      expect(mockEnsureCallPermissions).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('answerCall', () => {
