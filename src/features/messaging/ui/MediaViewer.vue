@@ -1,3 +1,10 @@
+<script lang="ts">
+// Per-instance counter so simultaneous MediaViewers (e.g. MessageList +
+// ChatInfoGallery) don't share a back-handler slot. Lives outside
+// `<script setup>` so it stays module-scoped across mounts.
+let mediaViewerInstanceCounter = 0;
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import type { Message } from "@/entities/chat";
@@ -21,9 +28,23 @@ const { toast } = useToast();
 const chatStore = useChatStore();
 const { getState, download, saveFile } = useFileDownload();
 
-// Android back: close media viewer (highest overlay priority)
-useAndroidBackHandler("media-viewer", 100, () => {
+// Per-instance id so two MediaViewers mounted at once (e.g. MessageList +
+// ChatInfoGallery on the same chat screen) don't share a handler slot and
+// silently overwrite each other — when the slot collapsed, the back-press
+// fell through to the router and kicked the user out of the chat instead of
+// closing the viewer (forta-bugs#805).
+const backHandlerId = `media-viewer-${++mediaViewerInstanceCounter}`;
+
+// Android back: first exit native <video> fullscreen if active, then close
+// the viewer. Without the fullscreen check, tapping back while a video is
+// playing fullscreen (WebView native control) closed the viewer + chat in
+// one go on some Android versions.
+useAndroidBackHandler(backHandlerId, 100, () => {
   if (!props.show) return false;
+  if (typeof document !== "undefined" && document.fullscreenElement) {
+    document.exitFullscreen?.().catch(() => {});
+    return true;
+  }
   emit("close");
   return true;
 });

@@ -4,6 +4,7 @@ import { getMediaCache, type MediaCacheIndexEntry } from "@/shared/lib/media-cac
 import { displayName } from "../lib/storage-display";
 import { isNative } from "@/shared/lib/platform";
 import { ZoomableImage } from "@/shared/ui/zoomable-image";
+import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
 interface Props {
   entry: MediaCacheIndexEntry;
@@ -14,6 +15,15 @@ const emit = defineEmits<{
   close: [];
   deleted: [];
 }>();
+
+// Android back: close the fullscreen storage preview overlay first instead
+// of letting the event propagate to the router (which would pop the
+// Settings page and feel like "back exits the chat" to the user — see
+// forta-bugs#805 for the chat-side equivalent).
+useAndroidBackHandler("storage-preview", 100, () => {
+  emit("close");
+  return true;
+});
 
 const { t } = useI18n();
 const blobUrl = ref<string | null>(null);

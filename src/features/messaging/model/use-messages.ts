@@ -1,5 +1,5 @@
 import { onScopeDispose } from "vue";
-import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime } from "@/entities/chat";
+import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime, MSC3245_VIDEO_NOTE_KEY } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
@@ -729,6 +729,7 @@ export function useMessages() {
                 h: 480,
                 duration: options.duration ? Math.round(options.duration * 1000) : undefined,
                 videoNote: true,
+                [MSC3245_VIDEO_NOTE_KEY]: true,
                 ...(secrets ? { secrets } : {}),
               },
               ...(options.forwardedFrom
@@ -846,6 +847,7 @@ export function useMessages() {
           h: 480,
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
           videoNote: true,
+          [MSC3245_VIDEO_NOTE_KEY]: true,
           ...(secrets ? { secrets } : {}),
         },
       };
@@ -2148,6 +2150,7 @@ export function useMessages() {
             mimetype: fi.type, size: Math.round(fi.size), w: 480, h: 480,
             duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
             videoNote: true,
+            [MSC3245_VIDEO_NOTE_KEY]: true,
             ...(secrets ? { secrets } : {}),
           },
         };

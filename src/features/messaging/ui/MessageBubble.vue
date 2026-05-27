@@ -463,6 +463,19 @@ watch(() => props.message.id, () => {
   if (props.message.type === MessageType.image && props.message.fileInfo) {
     download(props.message);
   }
+  imageDecodeFailed.value = false;
+});
+
+// `imageDecodeFailed` is for images the WebView refuses to decode (typically
+// HEIC/HEIF from senders on other clients that didn't transcode). Without
+// this guard the browser kept the broken-image glyph at the natural <img>
+// intrinsic size, blowing past the bubble's max-h and producing the
+// "huge blurry preview" reported in forta-bugs#757 and #743.
+const imageDecodeFailed = ref(false);
+const isLikelyHeic = computed(() => {
+  const t = (props.message.fileInfo?.type ?? "").toLowerCase();
+  const n = (props.message.fileInfo?.name ?? "").toLowerCase();
+  return /heic|heif/.test(t) || /\.(heic|heif)$/.test(n);
 });
 
 const handleMediaClick = () => {
@@ -704,7 +717,20 @@ const replyPreviewSender = computed(() => {
             <span>{{ t('message.failedToLoadImage') }}</span>
             <span class="text-[10px] opacity-60">{{ t('message.tapToRetry') }}</span>
           </div>
-          <img v-else-if="fileState.objectUrl" :src="fileState.objectUrl" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" />
+          <div
+            v-else-if="fileState.objectUrl && imageDecodeFailed"
+            class="flex flex-col items-center justify-center gap-1 bg-neutral-grad-0 px-3 py-4 text-center text-xs text-text-on-main-bg-color/70"
+            :style="imagePlaceholderStyle"
+          >
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <polyline points="21 15 16 10 5 21" />
+            </svg>
+            <span class="truncate max-w-full font-medium">{{ message.fileInfo?.name }}</span>
+            <span v-if="isLikelyHeic" class="text-[10px] opacity-70">{{ t('message.heicNotSupported') }}</span>
+          </div>
+          <img v-else-if="fileState.objectUrl" :src="fileState.objectUrl" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" @error="imageDecodeFailed = true" />
           <!-- Upload progress overlay -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <button class="relative flex h-14 w-14 items-center justify-center" @click.stop="emit('cancelUpload', message)">

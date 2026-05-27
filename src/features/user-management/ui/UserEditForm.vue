@@ -165,23 +165,34 @@ const handleSave = async () => {
 
 // Avatar upload
 const fileInput = ref<HTMLInputElement>();
+const avatarRetrying = ref(false);
 const handleAvatarClick = () => fileInput.value?.click();
 const handleAvatarChange = async (e: Event) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
   avatarError.value = "";
+  avatarRetrying.value = false;
   try {
     const base64 = await fileToBase64(file);
     avatarUrl.value = base64; // local preview
     avatarUploading.value = true;
-    const url = await uploadImage(base64);
+    const url = await uploadImage(base64, {
+      // Surface retries as a non-fatal hint so the user understands the
+      // spinner isn't stuck — flaky cell connections often need 2 attempts
+      // (forta-bugs#803).
+      onRetry: () => { avatarRetrying.value = true; },
+    });
     avatarUrl.value = url;
     userDirty.value = true;
   } catch (err) {
-    avatarError.value = err instanceof Error ? err.message : t("profile.avatarError");
+    const fallback = t("profile.avatarError");
+    const msg = err instanceof Error && err.message ? err.message : fallback;
+    avatarError.value = msg;
+    toast(fallback, "error");
     avatarUrl.value = authStore.userInfo?.image ?? "";
   } finally {
     avatarUploading.value = false;
+    avatarRetrying.value = false;
     // Reset file input so re-selecting same file triggers change
     if (fileInput.value) fileInput.value.value = "";
   }
@@ -220,6 +231,7 @@ watch(
           <Spinner v-else size="sm" class="text-white" />
         </div>
       </div>
+      <p v-if="avatarRetrying && avatarUploading" class="mt-1 text-xs text-text-on-main-bg-color">{{ t('profile.avatarRetrying') }}</p>
       <p v-if="avatarError" class="mt-1 text-xs text-color-bad">{{ avatarError }}</p>
       <input
         ref="fileInput"
