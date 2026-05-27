@@ -202,7 +202,12 @@ const walletStore = useWalletStore();
               >{{ formatPkoin(walletStore.balance) }}</span>
             </button>
 
-            <!-- New Group -->
+            <!-- New Group — WEE-52 / forta-bugs#526, #851 (web), #167 cluster.
+                 Previously a pencil glyph that users repeatedly reported as
+                 unclear ("how do I create a group?"). Switched to a
+                 "users + plus" icon (Lucide user-plus) that reads as
+                 "add people / new group" at a glance. Tooltip and aria-label
+                 already declared the action; the glyph now matches. -->
             <button
               class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
               :title="t('nav.newGroup')"
@@ -210,16 +215,19 @@ const walletStore = useWalletStore();
               @click="emit('newGroup')"
             >
               <svg
-                width="18"
-                height="18"
+                width="20"
+                height="20"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
                 stroke-linecap="round"
+                stroke-linejoin="round"
               >
-                <path d="M12 20h9" />
-                <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
+                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="8.5" cy="7" r="4" />
+                <line x1="20" y1="8" x2="20" y2="14" />
+                <line x1="23" y1="11" x2="17" y2="11" />
               </svg>
             </button>
           </div>

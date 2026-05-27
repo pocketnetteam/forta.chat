@@ -393,6 +393,7 @@ export const en = {
   "info.add": "Add",
   "info.searchToAdd": "Search users to add...",
   "info.noUsersFound": "No users found",
+  "info.addMemberFailed": "Failed to add member. You may lack permission or the user is blocked.",
   "info.admin": "admin",
   "info.adminLabel": "Admin",
   "info.leaveGroup": "Leave group",

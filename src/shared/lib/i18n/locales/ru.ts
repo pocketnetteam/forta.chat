@@ -395,6 +395,7 @@ export const ru: Record<TranslationKey, string> = {
   "info.add": "Добавить",
   "info.searchToAdd": "Поиск пользователей...",
   "info.noUsersFound": "Пользователи не найдены",
+  "info.addMemberFailed": "Не удалось добавить участника. Возможно, нет прав или пользователь заблокирован.",
   "info.admin": "админ",
   "info.adminLabel": "Админ",
   "info.leaveGroup": "Покинуть группу",

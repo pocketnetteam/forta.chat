@@ -286,6 +286,11 @@ const handleAddMember = async (address: string) => {
   if (ok) {
     showAddMember.value = false;
     addSearchQuery.value = "";
+  } else {
+    // Surface failure to user — server-side rejection (insufficient power
+    // level, banned target, network) was silently swallowed before, which
+    // made the button appear broken to non-admin members.
+    showToast(t("info.addMemberFailed"), "error");
   }
 };
 
@@ -858,9 +863,14 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 <span class="text-xs font-medium uppercase text-text-on-main-bg-color">
                   {{ t("chatInfo.members") }} ({{ chatStore.getRoomMemberCount(room.id) }})
                 </span>
-                <!-- Add member button (admin only) -->
+                <!-- Add member button — always visible for groups.
+                     Server-side power-level check is the ultimate gate;
+                     hiding the button client-side hid the action from
+                     legacy bastyon-chat admins whose power_levels.users
+                     map was keyed under a different Matrix domain
+                     (isAdmin computed evaluated to false). Errors from
+                     the server are surfaced via toast in handleAddMember. -->
                 <button
-                  v-if="isAdmin"
                   class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-color-bg-ac transition-colors hover:bg-neutral-grad-0"
                   @click="showAddMember = !showAddMember"
                 >
