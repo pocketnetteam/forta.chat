@@ -244,6 +244,7 @@ export const ru: Record<TranslationKey, string> = {
   "profile.saved": "Сохранено",
   "profile.saving": "Сохранение...",
   "profile.avatarUploading": "Загрузка...",
+  "profile.avatarRetrying": "Связь нестабильна — повторяем...",
   "profile.avatarError": "Не удалось загрузить аватар",
   "profile.saveFailed": "Не удалось сохранить профиль. Проверьте подключение и попробуйте снова.",
 
@@ -263,6 +264,7 @@ export const ru: Record<TranslationKey, string> = {
   "message.retry": "Повторить",
   "message.failedToLoadImage": "Не удалось загрузить",
   "message.tapToRetry": "Нажмите для повтора",
+  "message.heicNotSupported": "HEIC — откройте в галерее",
   "message.videoUnsupportedFormat": "Формат видео не поддерживается",
   "message.videoLoadFailed": "Не удалось воспроизвести видео",
   "message.videoDownload": "Скачать",

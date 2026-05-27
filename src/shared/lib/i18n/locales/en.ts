@@ -242,6 +242,7 @@ export const en = {
   "profile.saved": "Saved",
   "profile.saving": "Saving...",
   "profile.avatarUploading": "Uploading...",
+  "profile.avatarRetrying": "Connection unstable — retrying...",
   "profile.avatarError": "Failed to upload avatar",
   "profile.saveFailed": "Failed to save profile. Check your connection and try again.",
 
@@ -261,6 +262,7 @@ export const en = {
   "message.retry": "Retry",
   "message.failedToLoadImage": "Failed to load image",
   "message.tapToRetry": "Tap to retry",
+  "message.heicNotSupported": "HEIC image — open in gallery to view",
   "message.videoUnsupportedFormat": "Video format not supported",
   "message.videoLoadFailed": "Failed to load video",
   "message.videoDownload": "Download",

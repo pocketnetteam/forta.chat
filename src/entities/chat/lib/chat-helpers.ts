@@ -27,6 +27,21 @@ export function normalizeMime(mime: string | undefined): string {
   return mime && mime.includes("/") ? mime : "application/octet-stream";
 }
 
+/**
+ * Matrix MSC3245 video-note metadata flag.
+ * Standard interoperable marker so other clients (Element, etc.) preserve
+ * the circular video-note rendering instead of falling back to a square video.
+ * We also keep the legacy `videoNote: true` shortcut for backwards compatibility
+ * with messages written by older builds of this app.
+ */
+export const MSC3245_VIDEO_NOTE_KEY = "org.matrix.msc3245.video_note";
+
+/** True when an m.video info bag is marked as a video-note (circle). */
+export function isVideoNoteInfo(info: Record<string, unknown> | undefined | null): boolean {
+  if (!info) return false;
+  return info.videoNote === true || info[MSC3245_VIDEO_NOTE_KEY] === true;
+}
+
 /** Determine MessageType from MIME type string */
 export function messageTypeFromMime(mime: string): MessageType {
   const m = normalizeMime(mime);
@@ -167,7 +182,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       w: info?.w,
       h: info?.h,
       duration: info?.duration ? Math.round(info.duration / 1000) : undefined,
-      videoNote: info?.videoNote === true ? true : undefined,
+      videoNote: isVideoNoteInfo(info) ? true : undefined,
       thumbnailUrl: info?.thumbnailUrl ?? undefined,
       secrets: info?.secrets ? {
         block: info.secrets.block,
