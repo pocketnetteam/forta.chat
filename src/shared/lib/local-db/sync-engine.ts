@@ -57,6 +57,84 @@ function computeBackoff(retries: number): number {
   return base + Math.random() * Math.min(base * 0.5, 5_000);
 }
 
+/** Short, in-attempt backoff for the upload sub-step (forta-bugs#831 /
+ *  #725 / #423 / WEE-50). Network blips on flaky Android cell links lose
+ *  the first POST to the media repo even when the rest of the pipeline is
+ *  fine; without an in-line retry the whole op fails and the user waits
+ *  out the engine-level 1-30s backoff. Three quick attempts cover the
+ *  vast majority of single-packet drops within ~6 s before falling back
+ *  to the queue-level retry logic. Delays kept in ms. */
+const UPLOAD_RETRY_DELAYS_MS = [500, 1500, 4000] as const;
+
+/** Errors that the upload retry loop must NOT swallow. Aborts are user
+ *  intent (cancelMediaUpload), and deterministic server-side failures are
+ *  retry-immune — retrying just delays the failure UX. */
+function isUploadFatal(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof Error) {
+    // Matrix media repo returns 413 (payload too large) and 4xx auth/quota
+    // failures that are not retryable. We don't have typed errors at this
+    // layer, so substring-match the bare message — same approach the
+    // download path takes. Matches only digit groups that look like an
+    // HTTP-status mention (preceded by "status" or by start-of-message /
+    // whitespace + non-digit) so a filename like `meeting_403.mp3` doesn't
+    // poison the heuristic.
+    if (/(?:status\s*|^|\s)(?:413|415|401|403)\b|too large|payload too large/i.test(err.message)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** AbortSignal-aware sleep. Resolves after `ms` or rejects immediately on
+ *  abort — the latter is important so `cancelMediaUpload` can interrupt the
+ *  backoff between attempts instead of forcing the user to wait out the
+ *  4-second tail. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Upload cancelled", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Wrap `matrixService.uploadContent` with short in-attempt retries.
+ *  See `UPLOAD_RETRY_DELAYS_MS` for the rationale. Returns the mxc:// URL
+ *  emitted by the final successful attempt. Throws the LAST error if every
+ *  attempt fails so the engine-level retry loop can take over with its
+ *  longer backoff.
+ *
+ *  Total: 1 initial attempt + UPLOAD_RETRY_DELAYS_MS.length retries. */
+async function uploadWithRetry(
+  upload: () => Promise<string>,
+  signal: AbortSignal,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= UPLOAD_RETRY_DELAYS_MS.length; attempt++) {
+    if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+    if (attempt > 0) {
+      await sleep(UPLOAD_RETRY_DELAYS_MS[attempt - 1], signal);
+    }
+    try {
+      return await upload();
+    } catch (e) {
+      lastErr = e;
+      if (isUploadFatal(e)) throw e;
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * SyncEngine processes pending operations (outbound queue).
  *
@@ -607,8 +685,20 @@ export class SyncEngine {
         // fire-and-forget; progress is advisory and must not stall upload
         void this.messageRepo.updateUploadProgress(op.clientId, percent);
       });
+      // The retry loop sits *inside* the timeout so the deadline covers the
+      // whole upload phase (including in-attempt retries) rather than being
+      // reset between attempts — protects against a runaway 4×4-min loop on
+      // a flaky link.
       const url = await withTimeout(
-        matrixService.uploadContent(fileToUpload, onProgress, controller.signal),
+        uploadWithRetry(
+          () =>
+            matrixService.uploadContent(
+              fileToUpload,
+              onProgress,
+              controller.signal,
+            ),
+          controller.signal,
+        ),
         MEDIA_UPLOAD_TIMEOUT_MS,
         "Media upload",
       );

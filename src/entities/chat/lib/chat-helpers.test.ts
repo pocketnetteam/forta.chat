@@ -11,7 +11,7 @@
  *   A bug here breaks: encrypted file decryption, image/video rendering.
  */
 import { describe, it, expect } from "vitest";
-import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds } from "./chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, isVoiceAudioContent, MSC3245_VOICE_KEY } from "./chat-helpers";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MessageType } from "../model/types";
 
@@ -293,6 +293,68 @@ describe("parseFileInfo", () => {
     expect(info).toBeDefined();
     expect(info!.duration).toBeUndefined();
     expect(info!.waveform).toBeUndefined();
+  });
+
+  // ─── m.audio voice vs file (WEE-50 / forta-bugs#841) ───────────
+  // The voice player UI must only render for actual voice recordings.
+  // Generic audio attachments (MP3 from gallery, podcasts, …) must be
+  // surfaced as files with a save-to-disk affordance.
+
+  it("flags m.audio with MSC3245 voice marker as a voice recording", () => {
+    const content = {
+      body: "voice.ogg",
+      [MSC3245_VOICE_KEY]: {},
+      info: { mimetype: "audio/ogg", size: 4000, url: "https://url", duration: 5000 },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(true);
+  });
+
+  it("flags m.audio with waveform as a voice recording (legacy fallback)", () => {
+    const content = {
+      body: "voice.ogg",
+      info: { mimetype: "audio/ogg", size: 4000, url: "https://url", duration: 5000, waveform: [100, 200, 300] },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(true);
+  });
+
+  it("does NOT flag plain m.audio MP3 (gallery attachment) as a voice recording", () => {
+    const content = {
+      body: "song.mp3",
+      info: { mimetype: "audio/mpeg", size: 3000, url: "https://url" },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(false);
+  });
+
+  // m.file is never a voice recording — Forta ships gallery picks as m.file
+  // regardless of MIME, so the receiver-side decoder must NOT treat audio
+  // MIME under m.file as a voice message (forta-bugs#841 / WEE-50).
+  it("never flags m.file as voice (pbody path)", () => {
+    const content = {
+      pbody: { name: "song.mp3", type: "audio/mpeg", size: 3000, url: "https://url" },
+    };
+    const info = parseFileInfo(content, "m.file");
+    expect(info!.isVoice).toBe(false);
+  });
+
+  it("never flags m.file as voice (JSON-body path)", () => {
+    const content = {
+      body: JSON.stringify({ name: "track.m4a", type: "audio/mp4", size: 5000, url: "https://url" }),
+    };
+    const info = parseFileInfo(content, "m.file");
+    expect(info!.isVoice).toBe(false);
+  });
+
+  it("never flags m.file as voice (canonical Matrix encrypted-file path)", () => {
+    const content = {
+      body: "podcast.mp3",
+      file: { url: "mxc://server/abc", mimetype: "audio/mpeg" },
+      info: { mimetype: "audio/mpeg", size: 200 },
+    };
+    const info = parseFileInfo(content, "m.file");
+    expect(info!.isVoice).toBe(false);
   });
 
   // ─── m.video ────────────────────────────────────────────────────
@@ -708,5 +770,39 @@ describe("matrixIdToAddress — non-printable character validation", () => {
     const addr = "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu";
     const hex = hexEncode(addr).toLowerCase();
     expect(matrixIdToAddress(`@${hex}:server`)).toBe(addr);
+  });
+});
+
+// ─── isVoiceAudioContent — voice recording vs audio file (WEE-50) ───
+//
+// The audio-rendering branch in MessageBubble.vue decides between
+// VoiceMessage and the generic file bubble using this helper. Misclassifying
+// an MP3 picked from the gallery as a voice message (forta-bugs#841) hides
+// the save-to-disk button and presents a player UI with no waveform — so
+// this test set has to lock down both directions of the boundary.
+
+describe("isVoiceAudioContent", () => {
+  it("returns true when the MSC3245 voice marker is on the content", () => {
+    expect(isVoiceAudioContent({ [MSC3245_VOICE_KEY]: {} }, null)).toBe(true);
+  });
+
+  it("returns true when the MSC3245 voice marker is on info", () => {
+    expect(isVoiceAudioContent(null, { [MSC3245_VOICE_KEY]: {} })).toBe(true);
+  });
+
+  it("returns true when info has a non-empty waveform (legacy fallback)", () => {
+    expect(isVoiceAudioContent({}, { waveform: [1, 2, 3] })).toBe(true);
+  });
+
+  it("returns false when neither marker nor waveform present", () => {
+    expect(isVoiceAudioContent({}, { mimetype: "audio/mpeg" })).toBe(false);
+  });
+
+  it("returns false for an empty waveform array (heuristic safety)", () => {
+    expect(isVoiceAudioContent({}, { waveform: [] })).toBe(false);
+  });
+
+  it("returns false when both inputs are null", () => {
+    expect(isVoiceAudioContent(null, null)).toBe(false);
   });
 });

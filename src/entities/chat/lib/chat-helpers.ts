@@ -36,10 +36,45 @@ export function normalizeMime(mime: string | undefined): string {
  */
 export const MSC3245_VIDEO_NOTE_KEY = "org.matrix.msc3245.video_note";
 
+/**
+ * Matrix MSC3245 voice-message marker.
+ * Voice recordings carry this top-level key; regular audio files (mp3
+ * picked from gallery, podcast attachments, etc.) do not. Without it the
+ * UI treats *all* `m.audio` events as voice messages — leaving the user
+ * with a player bubble and no save-to-disk affordance for an MP3 file
+ * (forta-bugs#841 / WEE-50). We also accept the alternative `info.waveform`
+ * marker so legacy bastyon-chat voice notes (which predate MSC3245) keep
+ * rendering as voice bubbles.
+ */
+export const MSC3245_VOICE_KEY = "org.matrix.msc3245.voice";
+
 /** True when an m.video info bag is marked as a video-note (circle). */
 export function isVideoNoteInfo(info: Record<string, unknown> | undefined | null): boolean {
   if (!info) return false;
   return info.videoNote === true || info[MSC3245_VIDEO_NOTE_KEY] === true;
+}
+
+/** True when an `m.audio` event is a voice-message recording.
+ *
+ *  Heuristic, in priority order:
+ *    1. MSC3245 voice marker on the event content (`org.matrix.msc3245.voice`)
+ *       — the canonical Matrix-wide signal used by Element / Cinny / etc.
+ *    2. Same marker mirrored under `content.info` — some clients put it there.
+ *    3. Presence of `info.waveform` — legacy bastyon-chat voice notes
+ *       (pre-MSC3245) only carry the waveform array. Treating waveform as a
+ *       sufficient signal keeps backwards-compat without misclassifying gallery
+ *       MP3s (which never include a waveform).
+ *
+ *  Returns false for everything else — that is the file-bubble path. */
+export function isVoiceAudioContent(
+  content: Record<string, unknown> | undefined | null,
+  info: Record<string, unknown> | undefined | null,
+): boolean {
+  if (!content && !info) return false;
+  if (content && MSC3245_VOICE_KEY in content) return true;
+  if (info && MSC3245_VOICE_KEY in info) return true;
+  if (info && Array.isArray(info.waveform) && info.waveform.length > 0) return true;
+  return false;
 }
 
 /** Determine MessageType from MIME type string */
@@ -104,6 +139,11 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   const encryptedFile = content.file as any;
   const encryptedUrl: string | undefined = typeof encryptedFile?.url === "string" ? encryptedFile.url : undefined;
 
+  // m.file events never carry a voice recording — voice always rides on
+  // m.audio. Setting `isVoice: false` here lets the UI default-to-voice
+  // safety net (`isVoice ?? true`) keep working for legacy stored rows
+  // without misclassifying audio attachments shipped as m.file.
+  const fileIsVoice = false;
   if (msgtype === "m.file" && pbody) {
     // SyncEngine.processFileSend (sync-engine.ts) ships m.file events with
     // body = JSON({ name, type, size }) and the mxc URL + secrets pinned to
@@ -122,6 +162,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       type: (pbody.type ?? "").replace("encrypted/", ""),
       size: pbody.size ?? 0,
       url: pbody.url ?? encryptedUrl ?? topUrl ?? "",
+      isVoice: fileIsVoice,
       secrets: secrets ? {
         block: secrets.block,
         keys: secrets.keys,
@@ -164,6 +205,10 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
         ? Math.round(info.duration / 1000)
         : undefined,
       waveform: normalizedWaveform,
+      // Detect MSC3245 voice marker so generic mp3/aac attachments (no marker,
+      // no waveform) render as files instead of being forced into the voice
+      // player UI (forta-bugs#841 / WEE-50).
+      isVoice: isVoiceAudioContent(content, info),
       secrets: info.secrets ? {
         block: info.secrets.block,
         keys: info.secrets.keys,
@@ -202,6 +247,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
           type: (parsed.type ?? "").replace("encrypted/", ""),
           size: parsed.size ?? 0,
           url: parsed.url,
+          isVoice: fileIsVoice,
           secrets: parsed.secrets ? {
             block: parsed.secrets.block,
             keys: parsed.secrets.keys,
@@ -222,6 +268,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       type: mime.replace("encrypted/", ""),
       size: info?.size ?? 0,
       url: encryptedUrl,
+      isVoice: fileIsVoice,
       // Secrets follow Matrix EncryptedFile shape: { url, key, iv, hashes, v }.
       // We do not surface them here because the bastyon-chat crypto pipeline
       // reads its own pbody.secrets shape; canonical-Matrix decryption is

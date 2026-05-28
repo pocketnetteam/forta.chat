@@ -2,7 +2,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo } from "../lib/chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioContent } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
@@ -214,8 +214,14 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
         previewBody = "[photo]";
         previewType = MessageType.image;
       } else if (msgtype === "m.audio") {
-        previewBody = "[voice message]";
-        previewType = MessageType.audio;
+        // Voice recording vs generic audio file (mp3 from gallery, podcast, …):
+        // only the former should preview as "[voice message]". Without the
+        // distinction MP3 attachments preview with the voice-bubble label even
+        // though the bubble below renders them as files (forta-bugs#841 / WEE-50).
+        const info = content.info as Record<string, unknown> | undefined;
+        const isVoice = isVoiceAudioContent(content, info);
+        previewBody = isVoice ? "[voice message]" : (content?.body as string) || "[audio]";
+        previewType = isVoice ? MessageType.audio : MessageType.file;
       } else if (msgtype === "m.video") {
         const info = content.info as Record<string, unknown> | undefined;
         if (isVideoNoteInfo(info)) {
@@ -4708,9 +4714,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       fileInfo = parseFileInfo(content, mtype);
       if (fileInfo) {
         if (mtype === "m.image") msgType = MessageType.image;
-        else if (mtype === "m.audio") msgType = MessageType.audio;
+        // m.audio carries either a voice recording (MSC3245 marker / waveform)
+        // or a regular audio file picked from gallery. The latter must render
+        // as a file-bubble with save-to-disk, not as the voice player UI
+        // (forta-bugs#841 / WEE-50).
+        else if (mtype === "m.audio") msgType = fileInfo.isVoice ? MessageType.audio : MessageType.file;
         else if (mtype === "m.video") msgType = fileInfo.videoNote ? MessageType.videoCircle : MessageType.video;
-        else msgType = messageTypeFromMime(fileInfo.type);
+        // m.file: route audio MIME (mp3, m4a, …) to MessageType.file so the
+        // receiver renders a file-bubble with save-to-disk instead of the
+        // voice player UI. Forta ships gallery picks as m.file regardless
+        // of MIME, so without this override the receiver re-introduces the
+        // forta-bugs#841 misclassification.
+        else msgType = fileInfo.type.startsWith("audio/")
+          ? MessageType.file
+          : messageTypeFromMime(fileInfo.type);
         body = fileInfo.name;
       } else {
         if (mtype === "m.image") msgType = MessageType.image;
@@ -6122,9 +6139,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         fileInfo = parseFileInfo(content, mtype);
         if (fileInfo) {
           if (mtype === "m.image") msgType = MessageType.image;
-          else if (mtype === "m.audio") msgType = MessageType.audio;
+          // See decryption-path branch above for the voice vs. audio-file split.
+          else if (mtype === "m.audio") msgType = fileInfo.isVoice ? MessageType.audio : MessageType.file;
           else if (mtype === "m.video") msgType = MessageType.video;
-          else msgType = messageTypeFromMime(fileInfo.type);
+          else msgType = fileInfo.type.startsWith("audio/")
+            ? MessageType.file
+            : messageTypeFromMime(fileInfo.type);
           body = fileInfo.name;
         } else {
           if (mtype === "m.image") msgType = MessageType.image;

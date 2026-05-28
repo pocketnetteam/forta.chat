@@ -39,6 +39,19 @@ const mockMatrix = {
     async () => undefined,
   ),
   uploadContentMxc: vi.fn<(blob: Blob) => Promise<string>>(async () => "mxc://server/file"),
+  // syncSendFile streams uploads through uploadContent (progress + AbortSignal
+  // path). The false-failed scenario covered below is about the *send-event*
+  // step failing after a successful upload, so we resolve the upload happily
+  // and let `sendEncryptedText` carry the simulated failure. Without this
+  // mock, the WEE-50 in-attempt upload retry would wait through its budget
+  // before the catch branch ever runs and the test would race its timeout.
+  uploadContent: vi.fn<
+    (
+      blob: Blob,
+      progress?: (p: { loaded: number; total: number }) => void,
+      signal?: AbortSignal,
+    ) => Promise<string>
+  >(async () => "https://server/_matrix/media/r0/download/server/file"),
 };
 
 vi.mock("@/entities/matrix", () => ({
