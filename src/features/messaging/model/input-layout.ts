@@ -19,13 +19,15 @@ export interface InputLayoutInput {
 export interface InputLayoutResult {
   /** Show PKOIN / attach / wallet etc. shortcut row next to the textarea. */
   showSecondaryActions: boolean;
-  /** Show the dedicated PKOIN button. Mobile always hides it (donate is one
-   *  tap deeper inside the AttachmentPanel) so the textarea claims the row. */
+  /** Show the dedicated PKOIN button. Hidden on mobile only while the user
+   *  is typing — same rule the other secondary buttons follow — so the
+   *  textarea claims the full row mid-message and donate stays one tap away
+   *  when the input is idle. */
   showDonateShortcut: boolean;
 }
 
 export const deriveInputLayout = (input: InputLayoutInput): InputLayoutResult => {
   const showSecondaryActions = !input.isMobile || input.text.trim().length === 0;
-  const showDonateShortcut = input.showDonate && !input.isMobile;
+  const showDonateShortcut = input.showDonate && showSecondaryActions;
   return { showSecondaryActions, showDonateShortcut };
 };

@@ -253,11 +253,11 @@ const autoGrowSync = () => {
 const autoResize = autoGrow;
 
 // WEE-48 / forta-bugs#593, #515: on mobile portrait the input row hosts Emoji +
-// Textarea + PKOIN + Attach + Send/Record. That leaves the textarea at ~45-50%
-// of the row, below the readable threshold for any non-trivial message. Hide the
-// dedicated PKOIN shortcut on mobile — donate stays one extra tap away inside the
-// AttachmentPanel (`@select-donate`), so no feature regresses. Desktop keeps the
-// shortcut because horizontal room is not the bottleneck there.
+// Textarea + PKOIN + Attach + Send/Record, which leaves the textarea at ~45-50%
+// while the user is mid-message. PKOIN now follows the same rule as the other
+// secondary buttons — visible when the input is idle, hidden as soon as the
+// user starts typing so the textarea reclaims the row. Donate stays reachable
+// through AttachmentPanel either way.
 const inputLayout = computed(() => deriveInputLayout({
   isMobile: isMobile.value,
   text: text.value,
