@@ -51,6 +51,11 @@ export interface FileInfo {
   videoNote?: boolean;
   /** Thumbnail URL for video circles */
   thumbnailUrl?: string;
+  /** True when the m.audio event is a voice-message recording (MSC3245)
+   *  or carries a waveform (legacy bastyon-chat marker). When false, the
+   *  audio is a generic file that should render as a file-bubble with a
+   *  save-to-disk affordance instead of the voice-bubble player. */
+  isVoice?: boolean;
 }
 
 export interface ReplyTo {

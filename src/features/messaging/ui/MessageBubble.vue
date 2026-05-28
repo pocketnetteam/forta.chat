@@ -194,7 +194,17 @@ const { toast: showToast } = useToast();
 
 const time = computed(() => formatTime(new Date(props.message.timestamp)));
 
-const isFile = computed(() => props.message.type === MessageType.file);
+// Voice recordings render as the voice player; everything else with audio
+// MIME falls through to the file-bubble below (forta-bugs#841 / WEE-50).
+// Default to `true` for backwards compatibility with messages stored before
+// the `isVoice` flag was introduced — they were always treated as voice.
+const isVoiceAudio = computed(() =>
+  props.message.type === MessageType.audio && (props.message.fileInfo?.isVoice ?? true),
+);
+const isFile = computed(() =>
+  props.message.type === MessageType.file ||
+  (props.message.type === MessageType.audio && !isVoiceAudio.value),
+);
 const hasFileInfo = computed(() => !!props.message.fileInfo);
 // Must use the same cache key as download() — _key (stable clientId) when available,
 // otherwise id. Without this, getState and download write to different state entries
@@ -999,9 +1009,10 @@ const replyPreviewSender = computed(() => {
         </div>
       </div>
 
-      <!-- Audio message -->
+      <!-- Audio message (voice recording only — generic audio files fall
+           through to the file branch below) -->
       <div
-        v-else-if="message.type === MessageType.audio && hasFileInfo"
+        v-else-if="isVoiceAudio && hasFileInfo"
         class="min-w-[240px] rounded-bubble px-3 py-2"
         :class="[tailClass, props.isOwn ? 'bg-chat-bubble-own text-text-on-bg-ac-color' : 'bg-chat-bubble-other text-text-color']"
       >
@@ -1027,7 +1038,24 @@ const replyPreviewSender = computed(() => {
             <div class="truncate text-[11px] opacity-70">{{ replyPreviewText }}</div>
           </div>
         </div>
-        <VoiceMessage :message="message" :is-own="props.isOwn" />
+        <!-- Replace the silent voice player with a typed decrypt-error block
+             when the download/decrypt failed (forta-bugs#456 / WEE-50).
+             Without the v-if guard the player would render an empty bar
+             underneath the error UI. -->
+        <VoiceMessage
+          v-if="!(fileState.error && fileState.errorKind === 'crypto')"
+          :message="message"
+          :is-own="props.isOwn"
+        />
+        <div v-if="fileState.error && fileState.errorKind === 'crypto'" class="mt-1 flex flex-col gap-0.5">
+          <p class="text-xs font-medium text-color-bad">{{ t('chat.decryptError.title') }}</p>
+          <p class="text-[11px] opacity-70">{{ isOwn ? t('chat.decryptError.askSelf') : t('chat.decryptError.askResend') }}</p>
+          <div class="mt-0.5 flex items-center gap-3">
+            <button type="button" class="text-xs font-medium text-color-bg-ac" @click.stop="retryDownload">{{ t('chat.decryptError.retry') }}</button>
+            <button type="button" class="text-[11px] opacity-60 underline" @click.stop="reportDownloadProblem">{{ t('chat.decryptError.reportProblem') }}</button>
+          </div>
+        </div>
+        <p v-else-if="fileState.error" class="mt-1 text-xs text-color-bad">{{ fileState.error }}</p>
         <!-- Upload progress with cancel for audio -->
         <div v-if="isUploading" class="mt-1 flex items-center gap-2">
           <button class="relative flex h-8 w-8 shrink-0 items-center justify-center" @click.stop="emit('cancelUpload', message)">

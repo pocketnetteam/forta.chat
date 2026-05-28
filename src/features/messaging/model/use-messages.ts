@@ -381,9 +381,15 @@ export function useMessages() {
       return false;
     }
 
-    // Determine message type from MIME (with fallback for HEIC/extension-only files)
+    // Determine message type from MIME (with fallback for HEIC/extension-only files).
+    // Audio MIME deliberately routes to MessageType.file: voice recordings have
+    // their own send path (sendAudio) and audio attachments coming from the
+    // gallery / file picker are *files*, not voice notes. Without this guard
+    // an MP3 picked from the gallery preview-rendered as a voice bubble with
+    // no save-to-disk affordance (forta-bugs#841 / WEE-50).
     const mime = normalizeMime(resolveMime(processedFile));
-    const msgType = messageTypeFromMime(mime);
+    const inferredType = messageTypeFromMime(mime);
+    const msgType = inferredType === MessageType.audio ? MessageType.file : inferredType;
 
     const localBlobUrl = URL.createObjectURL(processedFile);
 
@@ -587,6 +593,10 @@ export function useMessages() {
         url: localBlobUrl,
         duration: options.duration,
         waveform: options.waveform,
+        // Voice recordings created via VoiceRecorder are always voice messages;
+        // recipients without an MSC3245 marker (older app versions) keep the
+        // waveform-presence heuristic as a fallback.
+        isVoice: true,
       },
       forwardedFrom: options.forwardedFrom,
       localBlobUrl,
@@ -619,6 +629,11 @@ export function useMessages() {
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
           waveform: intWaveform,
         },
+        // MSC3245 voice marker — canonical Matrix signal that this m.audio
+        // event is a voice recording, not a regular audio file. Lets Element /
+        // Cinny / future Forta builds tell the two apart without inspecting
+        // the waveform (forta-bugs#841 / WEE-50).
+        eventExtras: { "org.matrix.msc3245.voice": {} },
         ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
