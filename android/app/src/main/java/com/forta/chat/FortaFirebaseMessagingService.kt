@@ -251,12 +251,19 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             return
         }
 
-        // Build notification text — fallback chain for best possible title
-        val title = senderName
-            ?: (sender?.let { getCachedSenderName(it) })
-            ?: roomName
-            ?: getCachedRoomName(roomId)
-            ?: getString(R.string.push_new_message)
+        // Build notification text — fallback chain for best possible title.
+        // WEE-11 (forta-bugs#660, #686): push gateway sometimes emits
+        // sender_display_name == raw Matrix ID ("@PXXX:matrix.bastyon.com")
+        // when the sender has no homeserver-side displayname. Without an
+        // isMatrixId guard, that opaque ID became the visible notification
+        // title — see chooseNotificationTitle().
+        val title = chooseNotificationTitle(
+            senderDisplayName = senderName,
+            cachedSenderName = sender?.let { getCachedSenderName(it) },
+            roomName = roomName,
+            cachedRoomName = getCachedRoomName(roomId),
+            fallback = getString(R.string.push_new_message),
+        )
         val body = previewByMsgtype(contentMsgtype)
 
         // Show notification (JS may replace it later with decrypted content)
@@ -514,6 +521,68 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
          * S3 (FCM throttle) when triaging user reports.
          */
         val inviteTracker: InviteThrottleTracker = InviteThrottleTracker(maxRecords = 5)
+
+        /**
+         * Heuristic: does [value] look like a raw Matrix user ID such as
+         * `@PXXX...:matrix.bastyon.com`? Matrix IDs always start with `@`
+         * and contain a `:`-separated homeserver part. Display names that
+         * happen to start with `@` but have no `:` (e.g. someone literally
+         * named "@bob") are NOT filtered out — that would be a false
+         * positive.
+         *
+         * The "starts-with-@ AND contains-`:`" pair also rejects degenerate
+         * strings like `@:`, `@a:`, `@:srv`: none of those are valid Matrix
+         * IDs nor sensible display names; falling through to the room name
+         * is strictly better than displaying them. A stricter regex would
+         * actually be WEAKER here — it would let those degenerate strings
+         * become the title.
+         *
+         * WEE-11 / forta-bugs#660.
+         */
+        internal fun isMatrixId(value: String?): Boolean {
+            if (value == null) return false
+            return value.startsWith("@") && value.contains(":")
+        }
+
+        /**
+         * Pick the best notification title from the layered fallback chain.
+         *
+         * Push payload may carry [senderDisplayName] for the message author
+         * and [roomName] for the conversation, plus cached versions from
+         * previous deliveries. Each layer is rejected if it is null, blank,
+         * or looks like a raw Matrix ID (see [isMatrixId]).
+         *
+         * Order of preference:
+         *   1. fresh sender display name from the push,
+         *   2. cached sender display name (previous deliveries),
+         *   3. fresh room name from the push,
+         *   4. cached room name,
+         *   5. localized fallback ("New message").
+         *
+         * Pure function — extracted as a companion-object @JvmStatic so it
+         * can be unit-tested without Android framework dependencies. See
+         * `NotificationTitleFallbackTest`.
+         *
+         * WEE-11 / forta-bugs#660, #686.
+         */
+        internal fun chooseNotificationTitle(
+            senderDisplayName: String?,
+            cachedSenderName: String?,
+            roomName: String?,
+            cachedRoomName: String?,
+            fallback: String,
+        ): String {
+            fun usable(value: String?, rejectMatrixId: Boolean): String? {
+                if (value.isNullOrBlank()) return null
+                if (rejectMatrixId && isMatrixId(value)) return null
+                return value
+            }
+            return usable(senderDisplayName, rejectMatrixId = true)
+                ?: usable(cachedSenderName, rejectMatrixId = true)
+                ?: usable(roomName, rejectMatrixId = false)
+                ?: usable(cachedRoomName, rejectMatrixId = false)
+                ?: fallback
+        }
 
         fun cacheRoomName(context: Context, roomId: String, name: String) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
