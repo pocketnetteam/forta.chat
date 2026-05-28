@@ -25,6 +25,8 @@ import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
+import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
+import { tRaw } from "@/shared/lib/i18n";
 
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
@@ -5675,9 +5677,38 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /**
+   * WEE-48 / forta-bugs#437, #439, #440, #445, #498: web/electron notifier.
+   * Native (Capacitor) ships its own FCM push pipeline via WEE-11, so we
+   * skip this branch there. On web, fire a short beep + tab-title bump +
+   * optional Notification API banner only for new inbound messages in
+   * non-active, non-muted rooms — and only when the tab itself is hidden.
+   * The notifier internally gates on visibility + permission, but we still
+   * filter here to avoid the WebAudio + Notification ctor cost in the common
+   * "active room" case.
+   *
+   * System messages (member changes, room renames, pin events, …) are NOT
+   * surfaced — they ride through `dexieWriteMessage` too but the user
+   * doesn't think of them as "new messages" worth a beep.
+   */
+  const notifyInboundMessageIfBackground = (msg: Message, roomId: string): void => {
+    if (isNative) return;
+    if (msg.type === MessageType.system) return;
+    if (roomId === activeRoomId.value) return;
+    if (mutedRoomIds.value.has(roomId)) return;
+    const myAddr = useAuthStore().address ?? "";
+    if (msg.senderId && myAddr && msg.senderId === myAddr) return;
+    const room = getRoomById(roomId);
+    const title = room?.name || getDisplayName(msg.senderId) || undefined;
+    const fallbackBody = tRaw("notifications.newMessage");
+    const body = msg.content && msg.content !== "[encrypted]" ? msg.content : fallbackBody;
+    notifyNewMessage({ roomId, body, title, fallbackTitle: tRaw("titleBar.appName") });
+  };
+
   /** Dual-write: persist a parsed message to Dexie alongside the in-memory store */
   const dexieWriteMessage = (msg: Message, roomId: string, raw: Record<string, unknown>) => {
     if (!chatDbKitRef.value) return;
+    notifyInboundMessageIfBackground(msg, roomId);
     const isEncrypted = msg.content === "[encrypted]";
     const parsed: ParsedMessage = {
       eventId: raw.event_id as string,

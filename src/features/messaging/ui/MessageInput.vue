@@ -23,6 +23,8 @@ import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { shouldSendOnEnter } from "../model/enter-key-behavior";
 import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
+import { insertEmojiAtCursor } from "../model/emoji-insertion";
+import { deriveInputLayout } from "../model/input-layout";
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
 import { readShareUriAsBlob } from "@/shared/lib/share-target";
@@ -250,7 +252,19 @@ const autoGrowSync = () => {
 // Keep old name as alias so existing callsites work
 const autoResize = autoGrow;
 
-const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
+// WEE-48 / forta-bugs#593, #515: on mobile portrait the input row hosts Emoji +
+// Textarea + PKOIN + Attach + Send/Record, which leaves the textarea at ~45-50%
+// while the user is mid-message. PKOIN now follows the same rule as the other
+// secondary buttons — visible when the input is idle, hidden as soon as the
+// user starts typing so the textarea reclaims the row. Donate stays reachable
+// through AttachmentPanel either way.
+const inputLayout = computed(() => deriveInputLayout({
+  isMobile: isMobile.value,
+  text: text.value,
+  showDonate: !!props.showDonate,
+}));
+const showSecondaryActions = computed(() => inputLayout.value.showSecondaryActions);
+const showDonateShortcut = computed(() => inputLayout.value.showDonateShortcut);
 
 const handleSend = async () => {
   if (!text.value.trim() && !showForwardPreview.value && !showBulkForwardPreview.value) return;
@@ -852,14 +866,30 @@ defineExpose({
   },
 });
 
+// WEE-48 / forta-bugs#483, #489: emoji insert preserves cursor position AND
+// fires the same input-side-effects that a real keystroke would. Previously
+// `text.value = ...` skipped mention-autocomplete reset, the typing throttle,
+// and the synthetic input event downstream consumers listen for — the input
+// felt "stuck" until the user tapped outside the chat to re-arm the textarea.
+// Math lives in `emoji-insertion.ts` so the cursor preservation contract is
+// unit-tested without mounting the SFC.
 const insertEmoji = (emoji: string) => {
   const el = textareaRef.value;
+  const start = el?.selectionStart ?? text.value.length;
+  const end = el?.selectionEnd ?? text.value.length;
+  const result = insertEmojiAtCursor({ text: text.value, selectionStart: start, selectionEnd: end, emoji });
+  if (!result.changed) return;
+  text.value = result.text;
   if (el) {
-    const start = el.selectionStart ?? text.value.length;
-    const end = el.selectionEnd ?? text.value.length;
-    text.value = text.value.slice(0, start) + emoji + text.value.slice(end);
-    nextTick(() => { el.selectionStart = el.selectionEnd = start + emoji.length; el.focus({ preventScroll: true }); autoResize(); });
-  } else { text.value += emoji; }
+    nextTick(() => {
+      el.selectionStart = el.selectionEnd = result.cursor;
+      el.focus({ preventScroll: true });
+      autoResize();
+      // Re-run the @input pipeline: mention autocomplete, typing throttle,
+      // and any v-model holdouts after a programmatic mutation.
+      mention.onCursorChange();
+    });
+  }
   themeStore.addRecentEmoji(emoji);
 };
 
@@ -1121,9 +1151,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
           @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()"
         />
 
-        <!-- PKOIN button -->
+        <!-- PKOIN button (desktop only — see showDonateShortcut) -->
         <transition name="btn-morph">
-          <button v-if="props.showDonate && showSecondaryActions"
+          <button v-if="showDonateShortcut && showSecondaryActions"
             class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-color-txt-ac/60 transition-colors hover:text-color-txt-ac"
             :disabled="sending" :title="t('wallet.sendPkoin')" @click="emit('donate')">
             <svg width="20" height="20" viewBox="0 0 18 18" fill="currentColor">

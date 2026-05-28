@@ -232,6 +232,9 @@ export const ru: Record<TranslationKey, string> = {
   "titleBar.maximize": "Развернуть",
   "titleBar.close": "Закрыть",
 
+  // ── Web notifications (WEE-48) ──
+  "notifications.newMessage": "Новое сообщение",
+
   // ── User edit form ──
   "profile.name": "Имя",
   "profile.displayName": "Ваше отображаемое имя",
