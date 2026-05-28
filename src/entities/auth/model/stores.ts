@@ -649,6 +649,25 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         matrixReady.value = true;
         matrixError.value = null;
 
+        // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
+        // soon as Matrix is connected, BEFORE we wait for PREPARED. The
+        // PREPARED-time sync below catches future updates, but it can lag
+        // first-message FCM pushes on cold start — leaving the Kotlin
+        // fallback chain with no cached display name and forcing it onto
+        // the (sometimes-Matrix-ID) `sender_display_name` from the push
+        // payload. Pre-warming from whatever names the getter already has
+        // (room members loaded from Dexie, prior session) closes that gap.
+        // Note: when homeserver indexing > 500ms the slow timeline-wait
+        // path in push-service.ts still kicks in — that's by design.
+        if (isNative) {
+          import('@/shared/lib/push').then(({ pushService }) => {
+            pushService.syncSenderNamesToNative();
+            pushService.syncRoomNamesToNative();
+          }).catch((e) => {
+            console.warn('[auth] push prewarm failed:', e);
+          });
+        }
+
         // Replay any contact_aliases already in the SDK's account_data cache
         // (Session 51). The live "accountData" listener catches future
         // changes; this covers the cold-start window before that fires.

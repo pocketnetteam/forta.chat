@@ -73,6 +73,15 @@ class PushService {
    *  hiccups without blocking the boot path for more than ~7 seconds. */
   private static readonly PUSHER_REGISTER_RETRIES = 3;
 
+  /** WEE-11 / forta-bugs#686: short pause before the FAST PATH fetch so the
+   *  homeserver has time to index the event the FCM push referred to.
+   *  Cold-start pushes often arrive ahead of indexing; without the grace the
+   *  targeted fetch 404s, we fall through to the 15s timeline-wait, and the
+   *  user keeps staring at the raw Matrix ID. 500ms is well below the push
+   *  UX budget (total path stays under 1.5s) and well above measured
+   *  homeserver indexing latency. */
+  private static readonly TARGETED_FETCH_GRACE_MS = 500;
+
   /** Sleep helper kept inline to avoid a util import for one call site. */
   private static sleep(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
@@ -161,9 +170,16 @@ class PushService {
         return;
       }
 
-      // 2. FAST PATH: targeted fetch
+      // 2. FAST PATH: targeted fetch with a short grace delay.
+      // WEE-11 / forta-bugs#686: homeserver event indexing can lag the FCM
+      // delivery by ~200-500ms — fetching the event_id immediately returns
+      // 404 and we fall through to the 15s timeline-wait path, leaving the
+      // raw-Matrix-ID title on screen. A small grace gives the homeserver
+      // time to index the event before we ask for it.
       if (eventId) {
-        const fetched = await this.tryTargetedFetch(roomId, eventId);
+        const fetched = await this.tryTargetedFetch(roomId, eventId, {
+          graceMs: PushService.TARGETED_FETCH_GRACE_MS,
+        });
         if (fetched) {
           await this.replaceNotification(roomId, eventId, fetched);
           return;
@@ -179,12 +195,25 @@ class PushService {
     }
   }
 
-  /** Extract message from a directly-fetched event */
+  /**
+   * Extract message from a directly-fetched event.
+   *
+   * `opts.graceMs` (WEE-11 / forta-bugs#686): wait this long before issuing
+   * the fetch so the homeserver has time to index the event the push
+   * referred to. Without the grace, cold-start pushes routinely 404 on the
+   * first hit and we fall through to the slow timeline-wait path, leaving
+   * the raw Matrix ID visible as the notification title for 15s.
+   */
   private async tryTargetedFetch(
     roomId: string,
     eventId: string,
+    opts: { graceMs?: number } = {},
   ): Promise<{ senderName: string; body: string } | null> {
     try {
+      const graceMs = opts.graceMs ?? 0;
+      if (graceMs > 0) {
+        await PushService.sleep(graceMs);
+      }
       const { getMatrixClientService } = await import("@/entities/matrix/model/matrix-client");
       const matrixService = getMatrixClientService();
       const raw = await matrixService.fetchRoomEvent(roomId, eventId);
