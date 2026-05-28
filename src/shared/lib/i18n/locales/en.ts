@@ -230,6 +230,9 @@ export const en = {
   "titleBar.maximize": "Maximize",
   "titleBar.close": "Close",
 
+  // ── Web notifications (WEE-48) ──
+  "notifications.newMessage": "New message",
+
   // ── User edit form ──
   "profile.name": "Name",
   "profile.displayName": "Your display name",

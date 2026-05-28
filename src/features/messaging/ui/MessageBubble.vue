@@ -105,13 +105,21 @@ const handleRightClick = (e: MouseEvent) => {
   emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
 };
 
-// Use direction "both" always — callbacks read live props to handle virtual scroller recycling
+// Use direction "both" always — callbacks read live props to handle virtual scroller recycling.
+// WEE-48 / forta-bugs#797: emit reply on swipes that aren't already claimed by
+// the reveal-actions affordance. Previously ONLY swipe-left triggered reply, but
+// peer bubbles benefit from a natural swipe-right (Telegram/WhatsApp habit) —
+// haptic fired and then nothing happened, which was the dominant complaint in
+// the cluster. Own bubbles keep right-swipe for delete/forward reveal (see the
+// `isOwn && swipeDirection === 'right'` block in the template), so we only emit
+// quote on right-swipe when the bubble is a peer's.
+const triggerReply = () => emit("reply", props.message);
 const { offsetX: swipeOffsetX, isSwiping, swipeDirection, onTouchstart, onTouchmove, onTouchend } = useSwipeGesture({
   direction: "both",
   threshold: 60,
   maxOffset: 100,
-  onTriggerLeft: () => { emit("reply", props.message); },
-  onTriggerRight: () => { /* reveal actions — handled via swipeDirection ref */ },
+  onTriggerLeft: triggerReply,
+  onTriggerRight: () => { if (!props.isOwn) triggerReply(); },
   haptic: true,
 });
 
