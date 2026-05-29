@@ -527,6 +527,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           // Skip event processing before initial sync completes — events will be
           // picked up by fullRoomRefresh reconciliation. Processing them early causes
           // Dexie writes → liveQuery notifications against an incomplete room list.
+          // WEE-55: the degraded watchdog also flips roomsInitialized=true after a
+          // stalled first /sync, so events may be processed before the first full
+          // refresh. That is intentional — degraded mode favours showing live
+          // events over an infinite preloader, and the eventual PREPARED full
+          // refresh reconciles any rooms missed in the meantime.
           if (roomId && chatStore.roomsInitialized) {
             chatStore.handleTimelineEvent(event, roomId);
           }
