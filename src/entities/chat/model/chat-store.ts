@@ -465,8 +465,51 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const namesReady = ref(false);
   /** Current Matrix sync state — updated from onSync callback via refreshRooms */
   const syncState = ref<"PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING" | null>(null);
-  /** True during initial sync or when connection is lost */
-  const isSyncing = computed(() => !roomsInitialized.value || syncState.value === "ERROR" || syncState.value === "RECONNECTING");
+
+  // WEE-55: explicit initial-sync lifecycle. A hung post-update Matrix /sync
+  // (invalid sync_token, slow 3G, server stall) used to leave roomsInitialized
+  // false forever → infinite preloader / empty chat list / endless in-room
+  // message skeleton. "degraded" is the escape hatch: stop waiting and fall
+  // back to whatever the Dexie cache holds (or the empty-state hint).
+  const initialSyncStatus = ref<"loading" | "ready" | "degraded">("loading");
+  /** Watchdog deadline before we give up on the first sync and degrade. */
+  const INITIAL_SYNC_TIMEOUT_MS = 8000;
+  let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearInitialSyncTimer = () => {
+    if (initialSyncTimer) {
+      clearTimeout(initialSyncTimer);
+      initialSyncTimer = null;
+    }
+  };
+
+  /**
+   * Start the watchdog that escapes the "loading" state if the first Matrix
+   * sync never completes. Idempotent per login; cleared on `cleanup()` and on
+   * the first successful sync-driven refresh. Local-first: degrading unblocks
+   * the UI to render whatever Dexie already holds instead of spinning forever.
+   */
+  const startInitialSyncWatch = () => {
+    if (initialSyncStatus.value === "ready") return;
+    clearInitialSyncTimer();
+    initialSyncTimer = setTimeout(() => {
+      initialSyncTimer = null;
+      if (initialSyncStatus.value !== "loading") return;
+      initialSyncStatus.value = "degraded";
+      // Release every skeleton/preloader that keys off roomsInitialized so the
+      // cached room list (or the empty-state hint) becomes visible. A later
+      // PREPARED sync still runs a full refresh and upgrades back to "ready".
+      roomsInitialized.value = true;
+    }, INITIAL_SYNC_TIMEOUT_MS);
+  };
+
+  /** True during initial sync or when connection is lost. Degraded mode is
+   *  intentionally NOT syncing — we have stopped blocking the UI. */
+  const isSyncing = computed(() =>
+    initialSyncStatus.value === "loading"
+    || syncState.value === "ERROR"
+    || syncState.value === "RECONNECTING",
+  );
 
   // Cache for decrypted room previews — persists across refreshRooms() rebuilds
   const decryptedPreviewCache = new Map<string, string>();
@@ -1819,6 +1862,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const setHelpers = (kit: MatrixKit, crypto: Pcrypto) => {
     matrixKitRef.value = kit;
     pcryptoRef.value = crypto;
+    // WEE-55: begin the initial-sync watchdog as soon as the Matrix client is
+    // wired up, so a stalled first /sync degrades instead of hanging the UI.
+    startInitialSyncWatch();
   };
 
 
@@ -2800,9 +2846,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       incrementalRoomRefresh(kit, myUserId, changed);
     }
 
-    // Mark rooms as initialized (first sync-based refresh complete)
-    if (!roomsInitialized.value) {
-      roomsInitialized.value = true;
+    // Mark rooms as initialized (first sync-based refresh complete).
+    // WEE-55: gate the one-time post-sync side effects on initialSyncStatus
+    // rather than roomsInitialized, because the degraded watchdog may have
+    // already flipped roomsInitialized=true before the first real sync landed.
+    const firstSyncComplete = initialSyncStatus.value !== "ready";
+    if (!roomsInitialized.value) roomsInitialized.value = true;
+    if (firstSyncComplete) {
+      initialSyncStatus.value = "ready";
+      clearInitialSyncTimer();
       // Start background preloading after rooms are built
       // Delay lets the UI render the room list and decrypt previews first
       setTimeout(() => preloadVisibleRooms(), 500);
@@ -6791,6 +6843,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomsInitialized.value = false;
     namesReady.value = false;
     syncState.value = null;
+    // WEE-55: reset the initial-sync lifecycle for the next login/account.
+    initialSyncStatus.value = "loading";
+    clearInitialSyncTimer();
     editingMessage.value = null;
     deletingMessage.value = null;
     deletingMessages.value = [];
@@ -6920,6 +6975,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     removeMessage,
     removeRoom,
     roomsInitialized,
+    initialSyncStatus,
+    startInitialSyncWatch,
     namesReady,
     syncState,
     isSyncing,
