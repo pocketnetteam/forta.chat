@@ -134,6 +134,32 @@ class AudioRouter private constructor(private val context: Context) {
         @androidx.annotation.VisibleForTesting
         internal fun modeReapplyScheduleMs(): List<Long> =
             listOf(500L, 1_500L, 3_500L, 7_500L)
+
+        /**
+         * WEE-54 / forta-bugs#860 — Samsung A15 (Android 15) bidirectional
+         * silence guard.
+         *
+         * When [setDeviceModern] cannot find the requested device in
+         * `availableCommunicationDevices`, the old behaviour was to call
+         * `clearCommunicationDevice()`. For a *removable* device (Bluetooth /
+         * wired headset) that genuinely went away that is correct — fall back
+         * to the system default. But the built-in earpiece and speaker ALWAYS
+         * physically exist; their absence from the freshly-enumerated comm-
+         * device list is a transient timing artifact on Android 15, where the
+         * list can be momentarily empty right after `mode` flips to
+         * MODE_IN_COMMUNICATION. Clearing the communication device in that
+         * window tears down the only routing the call has and leaves both
+         * parties in total silence (#860 on Samsung SM-G991B / A15).
+         *
+         * So: only clear for removable devices; for built-in earpiece/speaker
+         * keep whatever routing the system already chose (default is the
+         * earpiece in communication mode) and let the OEM mode-reapply window
+         * settle the enumeration. Pure predicate so it is covered by a JVM
+         * unit test without a real AudioManager.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun shouldClearWhenTargetMissing(device: Device): Boolean =
+            device == Device.BLUETOOTH || device == Device.WIRED_HEADSET
     }
 
     enum class Device(val label: String) {
@@ -607,9 +633,20 @@ class AudioRouter private constructor(private val context: Context) {
         if (target != null) {
             val success = audioManager.setCommunicationDevice(target)
             Log.d(LIFECYCLE_TAG, "setCommunicationDevice(${deviceTypeToString(target.type)}): $success")
-        } else {
-            Log.w(LIFECYCLE_TAG, "Target device $device not found in available communication devices")
+        } else if (shouldClearWhenTargetMissing(device)) {
+            // Removable device (BT / wired) genuinely gone — fall back to the
+            // system default by clearing the explicit communication device.
+            Log.w(LIFECYCLE_TAG, "Removable target $device gone — clearing communication device")
             audioManager.clearCommunicationDevice()
+        } else {
+            // WEE-54 / forta-bugs#860: built-in earpiece/speaker missing from
+            // the enumeration is a transient Android 15 timing artifact — do
+            // NOT clear, or we strand the call in total silence. Keep the
+            // system's current routing; the OEM mode-reapply window settles it.
+            Log.w(
+                LIFECYCLE_TAG,
+                "Built-in target $device not yet enumerated (Android 15 race) — keeping current routing",
+            )
         }
     }
 

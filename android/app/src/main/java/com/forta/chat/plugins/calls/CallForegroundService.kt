@@ -204,6 +204,44 @@ class CallForegroundService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // WEE-54 / forta-bugs#839 (reopen): when the user swipes the app out of
+        // Recents during or right after a call, Android delivers onTaskRemoved
+        // but does NOT always call onDestroy promptly — the OS can keep the
+        // service record around (especially on OEM ROMs), so AudioRouter stays
+        // in MODE_IN_COMMUNICATION and the cellular network is blocked until
+        // reboot. WEE-49 only hardened onDestroy(); this swipe-out path slipped
+        // through, which is why #839 reopened on 1.10.31. Mirror the onDestroy
+        // brute-force cleanup here and stopSelf() so teardown is deterministic.
+        runCatching {
+            AudioRouter.getSharedInstance(applicationContext).forceStop()
+        }.onFailure { Log.w(TAG, "AudioRouter.forceStop in onTaskRemoved threw", it) }
+
+        runCatching {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }.onFailure { Log.w(TAG, "stopForeground in onTaskRemoved threw", it) }
+
+        hasStarted = false
+        releaseWakeLock()
+        abandonAudioFocus()
+        // Clear liveness NOW, not in the (possibly deferred) onDestroy. The
+        // audio mode has already been torn down above, but `isRunning` is what
+        // the AudioRouter orphan watchdog and CallActivity.onResume consult
+        // before restoring MODE_IN_COMMUNICATION. If we left `instance`
+        // non-null until the OS finally runs onDestroy, a surface waking in
+        // that window would see a "running" call and re-apply comm mode —
+        // re-stranding the audio and re-creating the orphan VoIP-mode bug
+        // (#708 / #462) that this whole cellular-unblock fix targets. Nulling
+        // here keeps liveness consistent with the teardown that just ran;
+        // onDestroy setting it null again is an idempotent no-op.
+        instance = null
+
+        super.onTaskRemoved(rootIntent)
+        // stopSelf so the OS finalises the service (and runs onDestroy) instead
+        // of leaving a zombie service record holding the audio mode.
+        stopSelf()
+    }
+
     override fun onDestroy() {
         // WEE-49: when the OS tears the service down without going through
         // ACTION_STOP (process killed by OEM Doze, swipe-app-out, low-mem

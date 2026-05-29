@@ -421,8 +421,31 @@ class IncomingCallActivity : Activity() {
         }
     }
 
+    /**
+     * WEE-54 / forta-bugs#862: bump STREAM_RING when an OEM (MIUI / HyperOS)
+     * has left it muted while the phone is in normal ringer mode, otherwise
+     * the system ringtone plays inaudibly and only the vibration is felt.
+     * Silent / vibrate ringer modes are respected (no-op) — see
+     * [CallNotificationConfig.ringVolumeToForce]. Best-effort: any failure
+     * (locked stream on hardened ROMs) is swallowed; vibration still fires.
+     */
+    private fun ensureRingerAudible() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+            val target = CallNotificationConfig.ringVolumeToForce(
+                ringerMode = am.ringerMode,
+                currentVolume = am.getStreamVolume(android.media.AudioManager.STREAM_RING),
+                maxVolume = am.getStreamMaxVolume(android.media.AudioManager.STREAM_RING),
+            ) ?: return
+            am.setStreamVolume(android.media.AudioManager.STREAM_RING, target, 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureRingerAudible failed", e)
+        }
+    }
+
     private fun startRingtone() {
         try {
+            ensureRingerAudible()
             val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ringtone = RingtoneManager.getRingtone(applicationContext, ringtoneUri)
             ringtone?.audioAttributes = AudioAttributes.Builder()

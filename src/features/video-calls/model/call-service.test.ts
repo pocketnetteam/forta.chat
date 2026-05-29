@@ -64,6 +64,7 @@ vi.mock('@/shared/lib/native-calls', () => ({
     wire: vi.fn().mockResolvedValue(undefined),
     startAudioRouting: mockStartAudioRouting,
     stopAudioRouting: mockStopAudioRouting,
+    ensureIncomingCallVisible: vi.fn().mockResolvedValue(undefined),
   },
   consumePendingAnswerCallId: vi.fn().mockResolvedValue(false),
   consumePendingRejectCallId: vi.fn().mockResolvedValue(false),
@@ -376,6 +377,105 @@ describe('call-service permission flow', () => {
       // path or the user would be locked out of dialing until reload.
       await service.startCall('!room:matrix.org', 'voice');
       expect(mockEnsureCallPermissions).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // WEE-54 / forta-bugs#866 — phantom ringback tone.
+  //
+  // The local ringback ("гудки") used to play synchronously inside
+  // startCallInner *before* placeVoiceCall() ran, so it sounded during local
+  // getUserMedia + offer creation, and even when the invite never reached the
+  // homeserver. Users perceived this as ringback "when the peer device was
+  // off". The fix gates the ringback on the SDK's InviteSent state (invite
+  // actually delivered to the server) inside wireCallEvents.
+  // -------------------------------------------------------------------------
+  describe('outgoing ringback gating (#866 / WEE-54)', () => {
+    function captureOnState() {
+      const stateCall = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'State');
+      return stateCall?.[1] as
+        | ((newState: string, oldState: string) => void)
+        | undefined;
+    }
+
+    it('does NOT play the ringback synchronously when the call is dialed', async () => {
+      const { playDialtone } = await import('./call-sounds');
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      // The dial tone must not fire just because placeVoiceCall resolved —
+      // only the SDK InviteSent transition is allowed to start it.
+      expect(vi.mocked(playDialtone)).not.toHaveBeenCalled();
+    });
+
+    it('plays the ringback once the SDK reports InviteSent (invite delivered)', async () => {
+      const { playDialtone } = await import('./call-sounds');
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      const onState = captureOnState();
+      expect(onState).toBeTruthy();
+
+      // SDK transitions CreateOffer → InviteSent once the invite is sent.
+      onState?.('invite_sent', 'create_offer');
+      expect(vi.mocked(playDialtone)).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT play the ringback during pre-invite states (local media / offer setup)', async () => {
+      const { playDialtone } = await import('./call-sounds');
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      const onState = captureOnState();
+      // None of the pre-invite states should trigger the dial tone — this is
+      // exactly the window where the phantom ringback used to play.
+      onState?.('wait_local_media', 'fledgling');
+      onState?.('create_offer', 'wait_local_media');
+      expect(vi.mocked(playDialtone)).not.toHaveBeenCalled();
+    });
+
+    it('starts the ringback at most once even if InviteSent is observed twice', async () => {
+      const { playDialtone } = await import('./call-sounds');
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      await service.startCall('!room:matrix.org', 'voice');
+
+      const onState = captureOnState();
+      onState?.('invite_sent', 'create_offer');
+      onState?.('invite_sent', 'invite_sent');
+      expect(vi.mocked(playDialtone)).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT play the ringback for an incoming call on InviteSent', async () => {
+      // Defensive: the gate is keyed on direction === "outgoing". An incoming
+      // call must never emit the outgoing dial tone.
+      const { playDialtone } = await import('./call-sounds');
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+
+      mockCallStore.matrixCall = {
+        callId: 'incoming-call-id',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        localUsermediaStream: null,
+        localScreensharingStream: null,
+        remoteUsermediaStream: null,
+        remoteScreensharingStream: null,
+        remoteUsermediaFeed: null,
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      };
+      await service.handleIncomingCall(mockCallStore.matrixCall as never);
+
+      const onState = captureOnState();
+      onState?.('invite_sent', 'create_offer');
+      expect(vi.mocked(playDialtone)).not.toHaveBeenCalled();
     });
   });
 

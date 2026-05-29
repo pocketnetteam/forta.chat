@@ -314,9 +314,38 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
 
   const callStore = useCallStore();
 
+  // WEE-54 / forta-bugs#866 — phantom ringback guard.
+  //
+  // Closure-local (reset per call because wireCallEvents runs once per
+  // MatrixCall) one-shot flag so the local ringback tone ("гудки") starts
+  // exactly once, and only after the SDK has actually emitted the invite
+  // to the homeserver (CallState.InviteSent). See the InviteSent branch
+  // below for the full rationale.
+  let ringbackStarted = false;
+
   const onState = ((newState: SDKCallState, _oldState: SDKCallState) => {
     const status = mapSDKState(newState, direction);
     callStore.updateStatus(status);
+
+    // WEE-54 / forta-bugs#866: start the outgoing ringback only once the
+    // invite has actually been sent to the homeserver (InviteSent), not
+    // the instant the user taps dial. Previously playDialtone() ran
+    // synchronously in startCallInner *before* placeVoiceCall(), so the
+    // ringback played during local getUserMedia + offer creation + the
+    // DTLS handshake — and even when the invite never left the device
+    // (e.g. a failed placeCall), which users perceived as "гудки when the
+    // peer was offline" (#866). Matrix 1:1 call signaling has no peer-ack
+    // receipt, so InviteSent (invite delivered to the server) is the
+    // earliest honest "we are now dialing the peer" signal we can gate on.
+    // stopAllSounds() in the connected/ended/error/hangup paths stops it.
+    if (
+      direction === "outgoing" &&
+      newState === SDKCallState.InviteSent &&
+      !ringbackStarted
+    ) {
+      ringbackStarted = true;
+      playDialtone();
+    }
 
     // Any transition out of "connecting" cancels the watchdog — either
     // we connected successfully or the SDK itself decided to end/fail.
@@ -886,7 +915,12 @@ export function useCallService() {
       refreshPeerNameAsync(call.callId, peerAddress);
     }
 
-    playDialtone();
+    // WEE-54 / forta-bugs#866: the local ringback tone is NOT started here.
+    // It used to play synchronously at this point — before placeVoiceCall()
+    // even ran — so "гудки" sounded during local media setup and even when
+    // the invite never reached the server. It is now gated on the SDK's
+    // InviteSent state inside wireCallEvents() so it only plays once we are
+    // actually dialing the peer.
 
     // Register outgoing call with Android ConnectionService + launch native UI
     if (isNative) {

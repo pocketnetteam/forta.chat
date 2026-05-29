@@ -75,6 +75,46 @@ class AudioRouterModeReapplyTest {
         )
     }
 
+    // -------------------------------------------------------------------------
+    // WEE-54 / forta-bugs#860 — Samsung A15 bidirectional-silence guard.
+    //
+    // setDeviceModern() must only clear the communication device when a
+    // *removable* device (BT / wired) is genuinely gone. Built-in earpiece /
+    // speaker missing from the freshly-enumerated list is a transient Android
+    // 15 timing artifact; clearing routing there leaves both parties silent.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun builtInEarpieceMissing_doesNotClearRouting() {
+        assertFalse(
+            "built-in earpiece absence is a transient A15 enumeration race — " +
+                "clearing would strand the call in silence (#860)",
+            AudioRouter.shouldClearWhenTargetMissing(AudioRouter.Device.EARPIECE),
+        )
+    }
+
+    @Test
+    fun builtInSpeakerMissing_doesNotClearRouting() {
+        assertFalse(
+            AudioRouter.shouldClearWhenTargetMissing(AudioRouter.Device.SPEAKER),
+        )
+    }
+
+    @Test
+    fun removableBluetoothMissing_clearsRouting() {
+        assertTrue(
+            "a Bluetooth device that left must fall back to the system default",
+            AudioRouter.shouldClearWhenTargetMissing(AudioRouter.Device.BLUETOOTH),
+        )
+    }
+
+    @Test
+    fun removableWiredHeadsetMissing_clearsRouting() {
+        assertTrue(
+            AudioRouter.shouldClearWhenTargetMissing(AudioRouter.Device.WIRED_HEADSET),
+        )
+    }
+
     @Test
     fun reapplySchedule_coversExpectedOemResetWindows() {
         // The schedule must include the original 500 ms catch (fast OEMs) and
