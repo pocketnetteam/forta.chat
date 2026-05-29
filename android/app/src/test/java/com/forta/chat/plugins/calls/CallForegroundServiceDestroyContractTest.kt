@@ -82,6 +82,68 @@ class CallForegroundServiceDestroyContractTest {
         )
     }
 
+    // -------------------------------------------------------------------------
+    // WEE-54 / forta-bugs#839 (reopen) — swipe-out cellular block.
+    //
+    // onDestroy() hardening (WEE-49) only fired when the OS actually destroyed
+    // the service. On swipe-app-out the OS delivers onTaskRemoved but can defer
+    // onDestroy, leaving AudioRouter in MODE_IN_COMMUNICATION and cellular
+    // blocked. onTaskRemoved must run the same brute-force audio cleanup.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun onTaskRemoved_forceStopsAudioRouter_toUnblockCellularOnSwipeOut() {
+        val block = extractFunctionBody("onTaskRemoved")
+        assertTrue(
+            "onTaskRemoved() must call AudioRouter.forceStop() so a swipe-out " +
+                "during a call cannot leave MODE_IN_COMMUNICATION set and block " +
+                "cellular (WEE-54 / forta-bugs#839 reopen):\n$block",
+            block.contains("AudioRouter.getSharedInstance(") &&
+                block.contains(".forceStop()"),
+        )
+    }
+
+    @Test
+    fun onTaskRemoved_stopsForegroundAndStopsSelf_soNoZombieServiceHoldsAudioMode() {
+        val block = extractFunctionBody("onTaskRemoved")
+        assertTrue(
+            "onTaskRemoved() must stopForeground(STOP_FOREGROUND_REMOVE):\n$block",
+            block.contains("stopForeground(STOP_FOREGROUND_REMOVE)"),
+        )
+        assertTrue(
+            "onTaskRemoved() must stopSelf() so the OS finalises the service " +
+                "instead of leaving a zombie record holding the audio mode:\n$block",
+            block.contains("stopSelf()"),
+        )
+    }
+
+    @Test
+    fun onTaskRemoved_clearsInstance_soStaleIsRunningCannotResurrectVoipMode() {
+        val block = extractFunctionBody("onTaskRemoved")
+        // isRunning == (instance != null) is what the AudioRouter orphan
+        // watchdog / CallActivity.onResume consult before restoring
+        // MODE_IN_COMMUNICATION. onTaskRemoved tears audio down but the OS can
+        // defer onDestroy — if instance stays non-null in that window a waking
+        // surface re-applies comm mode and re-strands audio (#708 / #462).
+        assertTrue(
+            "onTaskRemoved() must set instance = null so isRunning matches the " +
+                "audio teardown that already ran (WEE-54):\n$block",
+            block.contains("instance = null"),
+        )
+    }
+
+    @Test
+    fun onTaskRemoved_wrapsBruteResetInRunCatching_soOneFailureDoesNotSwallowTheNext() {
+        val block = extractFunctionBody("onTaskRemoved")
+        val runCatchingHits = Regex("runCatching\\s*\\{")
+            .findAll(block).count()
+        assertTrue(
+            "onTaskRemoved() must wrap at least two brute-force steps in " +
+                "runCatching (found $runCatchingHits):\n$block",
+            runCatchingHits >= 2,
+        )
+    }
+
     /**
      * Extract the body of a top-level `override fun <name>(...)` block from the
      * Kotlin source. Brace-counts so nested blocks (if/try/runCatching) do not

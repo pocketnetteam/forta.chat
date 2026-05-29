@@ -2,6 +2,7 @@ package com.forta.chat.plugins.calls
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -83,5 +84,95 @@ class CallNotificationConfigTest {
     fun `spec id matches the active channel id constant`() {
         val spec = CallNotificationConfig.incomingCallChannelSpec("Calls", "desc")
         assertEquals(CallNotificationConfig.INCOMING_CALL_CHANNEL_ID, spec.id)
+    }
+
+    // -------------------------------------------------------------------------
+    // WEE-54 / forta-bugs#862 — STREAM_RING volume bump for OEM-muted ringers.
+    //
+    // MIUI / HyperOS leave the ring stream muted while the phone is in normal
+    // ringer mode, so the system ringtone is silent and the user only feels
+    // vibration. ringVolumeToForce decides when to bump the volume, respecting
+    // silent / vibrate ringer modes (an explicit user choice).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `RINGER_MODE_NORMAL mirrors the AudioManager constant value`() {
+        // AudioManager.RINGER_MODE_NORMAL == 2. If the platform ever changed
+        // this, our call sites that pass am.ringerMode would silently break.
+        assertEquals(2, CallNotificationConfig.RINGER_MODE_NORMAL)
+    }
+
+    @Test
+    fun `bumps muted ring stream to half in normal ringer mode (regression for #862)`() {
+        // Xiaomi: normal mode but stream muted → ringtone silent. Bump to half.
+        assertEquals(
+            Integer.valueOf(7),
+            CallNotificationConfig.ringVolumeToForce(
+                ringerMode = CallNotificationConfig.RINGER_MODE_NORMAL,
+                currentVolume = 0,
+                maxVolume = 15,
+            ),
+        )
+    }
+
+    @Test
+    fun `bumps a near-silent ring stream up to half`() {
+        assertEquals(
+            Integer.valueOf(7),
+            CallNotificationConfig.ringVolumeToForce(
+                ringerMode = CallNotificationConfig.RINGER_MODE_NORMAL,
+                currentVolume = 2,
+                maxVolume = 15,
+            ),
+        )
+    }
+
+    @Test
+    fun `leaves an already-audible ring stream untouched`() {
+        assertNull(
+            "volume already at/above half — no adjustment needed",
+            CallNotificationConfig.ringVolumeToForce(
+                ringerMode = CallNotificationConfig.RINGER_MODE_NORMAL,
+                currentVolume = 10,
+                maxVolume = 15,
+            ),
+        )
+    }
+
+    @Test
+    fun `respects vibrate ringer mode and does not force audio`() {
+        // RINGER_MODE_VIBRATE == 1 — user explicitly chose vibrate-only.
+        assertNull(
+            CallNotificationConfig.ringVolumeToForce(
+                ringerMode = 1,
+                currentVolume = 0,
+                maxVolume = 15,
+            ),
+        )
+    }
+
+    @Test
+    fun `respects silent ringer mode and does not force audio`() {
+        // RINGER_MODE_SILENT == 0 — user explicitly silenced the phone.
+        assertNull(
+            CallNotificationConfig.ringVolumeToForce(
+                ringerMode = 0,
+                currentVolume = 0,
+                maxVolume = 15,
+            ),
+        )
+    }
+
+    @Test
+    fun `returns null when the device reports a zero-range ring stream`() {
+        // Defensive: a maxVolume of 0 must not produce a divide-by-zero or a
+        // bogus target of 0 — leave the stream untouched.
+        assertNull(
+            CallNotificationConfig.ringVolumeToForce(
+                ringerMode = CallNotificationConfig.RINGER_MODE_NORMAL,
+                currentVolume = 0,
+                maxVolume = 0,
+            ),
+        )
     }
 }

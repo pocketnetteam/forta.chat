@@ -53,6 +53,40 @@ object CallNotificationConfig {
      */
     val LEGACY_INCOMING_CALL_CHANNEL_IDS: List<String> = listOf("calls")
 
+    /**
+     * Mirror of [android.media.AudioManager.RINGER_MODE_NORMAL] (= 2),
+     * duplicated as a plain constant so [ringVolumeToForce] stays a pure
+     * JVM-unit-testable predicate without the Android framework on the
+     * test classpath (same approach as [AudioRouter]'s companion predicates).
+     */
+    const val RINGER_MODE_NORMAL = 2
+
+    /**
+     * Compute the STREAM_RING volume to force before playing the incoming-call
+     * ringtone, or `null` when no adjustment should be made.
+     *
+     * WEE-54 / forta-bugs#862: on MIUI / HyperOS (Xiaomi) the STREAM_RING
+     * volume is frequently left muted or near-zero by the OEM even though the
+     * phone is in the normal ringer mode, so [android.media.RingtoneManager]
+     * plays inaudibly and the user only feels the vibration ("тихая вибрация
+     * без рингтона"). When the ringer mode is NORMAL but the ring stream sits
+     * below half its range, bump it to half so the ringtone is actually heard.
+     *
+     * Silent and vibrate ringer modes are respected (return `null`): forcing
+     * audio there would override an explicit user choice. The vibration that
+     * accompanies the ringer remains the fallback signal in those modes.
+     *
+     * @return the volume to apply via `setStreamVolume`, or `null` to leave
+     *   the current volume untouched.
+     */
+    fun ringVolumeToForce(ringerMode: Int, currentVolume: Int, maxVolume: Int): Int? {
+        if (ringerMode != RINGER_MODE_NORMAL) return null
+        if (maxVolume <= 0) return null
+        val target = maxVolume / 2
+        if (currentVolume >= target) return null
+        return target
+    }
+
     fun incomingCallChannelSpec(name: String, description: String): IncomingCallChannelSpec =
         IncomingCallChannelSpec(
             id = INCOMING_CALL_CHANNEL_ID,
