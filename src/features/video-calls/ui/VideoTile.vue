@@ -30,6 +30,11 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   pin: [tileId: string];
+  // Natural aspect ratio (width / height) of the bound stream, emitted once
+  // metadata is known and again on track resize. Lets a parent size its
+  // container to the source so a `cover` thumbnail no longer crops the frame
+  // (forta-bugs#433 / WEE-53 — self-preview PiP).
+  aspectchange: [ratio: number];
 }>();
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -47,6 +52,13 @@ watch(
     // before the wrapper can reshape. Without this the desktop side kept
     // the previous voice-only aspect after the phone enabled its camera
     // mid-call and the user saw a stretched/dot remote tile (WEE-45).
+    //
+    // We deliberately do NOT re-emit `aspectchange` here. A parent sizing a
+    // container from the ratio (the self-view PiP, WEE-53) keeps the prior
+    // aspect until the new stream's `loadedmetadata` fires a fresh value —
+    // typically within a frame or two. Emitting a reset would force a size
+    // blip to the fallback on every swap, including front↔back camera flips
+    // where the ratio is usually identical; persisting is the calmer choice.
     videoAspect.value = null;
   },
   { flush: "post" },
@@ -76,6 +88,7 @@ function captureAspect() {
   const h = v.videoHeight;
   if (w > 0 && h > 0) {
     videoAspect.value = w / h;
+    emit("aspectchange", w / h);
   }
 }
 

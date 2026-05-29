@@ -23,7 +23,11 @@ import {
 } from "@/shared/lib/native-calls";
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall } from "./finalize-call";
-import { isLegacyWebView, MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC } from "./webview-compatibility";
+import {
+  isLegacyWebView,
+  shouldWarnLegacyWebView,
+  MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC,
+} from "./webview-compatibility";
 import {
   isIncomingCallSeen,
   markIncomingCallSeen,
@@ -39,7 +43,19 @@ import {
 let legacyWebViewToastShown = false;
 
 function maybeWarnLegacyWebView(): void {
-  if (legacyWebViewToastShown) return;
+  // Self-gating so call sites (call start, answer, mid-call restart skip)
+  // can fire-and-forget without each duplicating the native/legacy/one-shot
+  // policy. Native negotiates ICE through bundled libwebrtc, so the UA Chrome
+  // version is meaningless there — never warn on native.
+  if (
+    !shouldWarnLegacyWebView({
+      isNative,
+      isLegacy: isLegacyWebView(),
+      alreadyWarned: legacyWebViewToastShown,
+    })
+  ) {
+    return;
+  }
   legacyWebViewToastShown = true;
   try {
     // The shared toast surface only models info/success/error severities.
@@ -826,6 +842,13 @@ export function useCallService() {
 
     callStore.cancelScheduledClear();
 
+    // forta-bugs#497 / WEE-53: warn up-front when an outdated WebView is about
+    // to drive a call. Previously this only surfaced if a mid-call network
+    // change triggered the restartIce skip — but most legacy-device failures
+    // happen before any handover, so the user never saw the hint. One-shot
+    // guard + native exclusion live inside maybeWarnLegacyWebView.
+    maybeWarnLegacyWebView();
+
     // Preflight: mic (+ camera for video). Throws PermissionDeniedError
     // if the OS denied access, or if getUserMedia returns a stream with
     // empty tracks. If we skip this and let the SDK's getUserMedia fail
@@ -1229,6 +1252,12 @@ export function useCallService() {
     }
 
     answerInProgress = true;
+
+    // forta-bugs#497 / WEE-53: same proactive legacy-WebView hint on the
+    // answer path — an outdated callee should be told why the call may drop
+    // before it connects, not only if a later network change skips restartIce.
+    maybeWarnLegacyWebView();
+
     // Safety net per code-review: if any future edit inserts a throwing
     // synchronous call between here and the manual releases below, the
     // outer try/finally guarantees the lock is cleared on the way out so

@@ -88,3 +88,29 @@ export function isLegacyWebView(
   if (info.engine !== "chromium") return false;
   return info.major < threshold;
 }
+
+export interface LegacyWarnContext {
+  /** Capacitor native runtime — UA Chrome version is irrelevant there. */
+  isNative: boolean;
+  /** Result of {@link isLegacyWebView} for the current UA. */
+  isLegacy: boolean;
+  /** Whether the one-shot warning has already fired this process. */
+  alreadyWarned: boolean;
+}
+
+/**
+ * Pure policy for the legacy-WebView user warning (forta-bugs#497 / WEE-53).
+ *
+ * The warning must surface once per process when an outdated WebView drives a
+ * call on the web/Electron path — proactively when the user starts or answers
+ * a call, not only when a mid-call network change happens to trigger the
+ * restartIce skip. Native is excluded because it negotiates ICE through the
+ * bundled libwebrtc, so the WebView Chrome version says nothing about call
+ * health there.
+ *
+ * Extracted as a pure predicate so the gating matrix is unit-testable without
+ * the toast/i18n composables.
+ */
+export function shouldWarnLegacyWebView(ctx: LegacyWarnContext): boolean {
+  return !ctx.isNative && ctx.isLegacy && !ctx.alreadyWarned;
+}
