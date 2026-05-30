@@ -247,7 +247,11 @@ export class RoomRepository {
 
   /** Update the last message preview for a room.
    *  Monotonic: skips the update if the existing preview is already newer,
-   *  preventing stale server data from overwriting fresher local-first writes. */
+   *  preventing stale server data from overwriting fresher local-first writes.
+   *
+   *  `force` bypasses the monotonic guard — required by redaction rollback,
+   *  which intentionally points the preview back to an older message after
+   *  the current `lastMessage` has been soft-deleted (WEE-43). */
   async updateLastMessage(
     roomId: string,
     preview: string,
@@ -257,10 +261,27 @@ export class RoomRepository {
     eventId?: string,
     callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number },
     systemMeta?: { template: string; senderAddr: string; targetAddr?: string; extra?: Record<string, string> },
+    force = false,
   ): Promise<void> {
-    // Monotonic guard — never roll back to an older preview
+    // Monotonic guard — never roll back to an older preview.
+    //
+    // WEE-44 escape hatch: when the existing row is an OPTIMISTIC push preview
+    // (no lastMessageEventId, or eventId matches the one we're now writing),
+    // we MUST allow the overwrite even if the existing `lastMessageTimestamp`
+    // looks "newer". The push handler stamps `Date.now()` which routinely
+    // beats `origin_server_ts` by 100–800 ms due to network latency, so a
+    // strict `timestamp < existing.lastMessageTimestamp` check would leave
+    // the room previewed as "New message" forever.
     const existing = await this.db.rooms.get(roomId);
-    if (existing?.lastMessageTimestamp && timestamp < existing.lastMessageTimestamp) {
+    const isReplacingOwnPlaceholder =
+      eventId !== undefined &&
+      (existing?.lastMessageEventId === undefined || existing?.lastMessageEventId === eventId);
+    if (
+      !force &&
+      !isReplacingOwnPlaceholder &&
+      existing?.lastMessageTimestamp &&
+      timestamp < existing.lastMessageTimestamp
+    ) {
       return;
     }
     // Clear-history guard — never show preview for messages before the clear marker
@@ -287,6 +308,25 @@ export class RoomRepository {
     if (updated === 0 && existing) {
       await this.db.rooms.update(roomId, changes);
     }
+  }
+
+  /** Clear all lastMessage* metadata for a room (WEE-43).
+   *  Used when every message in the room has been redacted/soft-deleted —
+   *  the sidebar should fall back to the "no messages yet" hint instead of
+   *  preserving a stale eventId/preview that points at a deleted message. */
+  async clearLastMessage(roomId: string): Promise<void> {
+    await this.db.rooms.where("id").equals(roomId).modify((room) => {
+      delete room.lastMessagePreview;
+      delete room.lastMessageTimestamp;
+      delete room.lastMessageSenderId;
+      delete room.lastMessageType;
+      delete room.lastMessageEventId;
+      delete room.lastMessageLocalStatus;
+      delete room.lastMessageDecryptionStatus;
+      delete room.lastMessageCallInfo;
+      delete room.lastMessageSystemMeta;
+      room.lastMessageReaction = null;
+    });
   }
 
   /** Update reaction on the last message (does NOT touch updatedAt) */
@@ -438,6 +478,7 @@ export class RoomRepository {
     timestamp: number,
     senderId?: string,
     messageType?: MessageType,
+    eventId?: string,
   ): Promise<boolean> {
     const existing = await this.db.rooms.get(roomId);
     if (!existing) return false; // room not in Dexie yet — let /sync handle it
@@ -467,6 +508,14 @@ export class RoomRepository {
 
     if (senderId) changes.lastMessageSenderId = senderId;
     if (messageType) changes.lastMessageType = messageType;
+    // WEE-44 / forta-bugs#785 follow-up: stamp the pushed event_id so that
+    // when /sync later delivers the real event, updateLastMessage() can
+    // recognize "same event — replace my optimistic placeholder" and bypass
+    // the strict monotonic timestamp guard. Without this, the push's
+    // Date.now() routinely beats the event's `origin_server_ts` by ~100–800ms
+    // (network latency) and the "New message" placeholder is never replaced
+    // by the decrypted body.
+    if (eventId) changes.lastMessageEventId = eventId;
 
     await this.db.rooms.update(roomId, changes);
     return true;

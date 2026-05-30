@@ -52,6 +52,12 @@ describe("resolveLastMessagePreview", () => {
   it("returns undefined when raw is undefined", () => {
     expect(resolveLastMessagePreview(undefined)).toBeUndefined();
   });
+
+  it("normalises empty string to undefined so legacy redaction-empty rooms render as 'no messages' (WEE-43)", () => {
+    // Pre-fix builds wrote `lastMessagePreview: ""` on full-room redaction.
+    // Treating that as no-preview avoids the blank sidebar row.
+    expect(resolveLastMessagePreview("")).toBeUndefined();
+  });
 });
 
 describe("buildLastMessage", () => {

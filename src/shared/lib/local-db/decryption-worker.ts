@@ -1,6 +1,7 @@
 import type { ChatDatabase, DecryptionJob } from "./schema";
 import type { RoomRepository } from "./room-repository";
 import { MessageType } from "@/entities/chat/model/types";
+import { cryptoDebug } from "@/shared/lib/utils/crypto-debug";
 
 type GetRoomCrypto = (roomId: string) => Promise<{ decryptEvent(raw: unknown): Promise<{ body: string }> } | undefined>;
 
@@ -175,6 +176,14 @@ export class DecryptionWorker {
     } catch (e) {
       const attempts = job.attempts + 1;
       const isDead = attempts >= MAX_ATTEMPTS;
+
+      cryptoDebug("retry:fail", {
+        eventId: job.eventId,
+        roomId: job.roomId,
+        attempts,
+        isDead,
+        error: e instanceof Error ? e.message : String(e),
+      });
 
       let delay: number;
       if (attempts <= FAST_BACKOFF_MS.length) {

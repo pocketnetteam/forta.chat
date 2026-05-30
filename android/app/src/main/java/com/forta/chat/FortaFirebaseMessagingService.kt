@@ -12,6 +12,8 @@ import android.telecom.TelecomManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.forta.chat.plugins.calls.CallConnectionService
+import com.forta.chat.plugins.calls.CallNotificationConfig
+import com.forta.chat.plugins.calls.CancelledCallStore
 import com.forta.chat.plugins.calls.IncomingCallActivity
 import com.forta.chat.plugins.calls.InviteThrottleGuard
 import com.forta.chat.plugins.calls.InviteThrottleTracker
@@ -46,19 +48,45 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 }
             )
         }
-        if (nm.getNotificationChannel(CHANNEL_CALLS) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_CALLS, getString(R.string.channel_calls), NotificationManager.IMPORTANCE_MAX).apply {
-                    description = getString(R.string.channel_calls_desc)
-                    enableVibration(true)
+
+        // WEE-18 / forta-bugs#768: NotificationChannel settings are
+        // immutable after first creation. v1.x created the "calls"
+        // channel without an explicit ringtone, and on Xiaomi MIUI the
+        // channel was preserved silent across upgrades, so every
+        // incoming push arrived without a ring. Migrate to a fresh id
+        // and remove the legacy ones so the new ringtone/lockscreen/DND
+        // settings take effect for everyone.
+        for (legacyId in CallNotificationConfig.LEGACY_INCOMING_CALL_CHANNEL_IDS) {
+            if (nm.getNotificationChannel(legacyId) != null) {
+                try {
+                    nm.deleteNotificationChannel(legacyId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to delete legacy channel $legacyId", e)
+                }
+            }
+        }
+        if (nm.getNotificationChannel(CallNotificationConfig.INCOMING_CALL_CHANNEL_ID) == null) {
+            val spec = CallNotificationConfig.incomingCallChannelSpec(
+                name = getString(R.string.channel_incoming_calls),
+                description = getString(R.string.channel_incoming_calls_desc),
+            )
+            val channel = NotificationChannel(spec.id, spec.name, spec.importance).apply {
+                description = spec.description
+                enableVibration(spec.withVibration)
+                lockscreenVisibility = spec.lockscreenVisibility
+                setBypassDnd(spec.bypassDnd)
+                setShowBadge(true)
+                if (spec.withRingtone) {
                     setSound(
                         RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
                         android.media.AudioAttributes.Builder()
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
                             .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                            .build()
+                            .build(),
                     )
                 }
-            )
+            }
+            nm.createNotificationChannel(channel)
         }
     }
 
@@ -127,6 +155,16 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             if (endedCallId != null && lastRingingCallId == endedCallId) {
                 lastRingingCallId = null
             }
+            // Session 62: persist the cancellation so any in-flight
+            // invite retry for the same call_id that lands after this
+            // hangup/reject/select_answer is silently dropped instead
+            // of re-launching the ringer. `lastRingingCallId` lives in
+            // process memory only and the FCM service is routinely
+            // torn down between pushes, which is precisely when the
+            // late retry arrives.
+            if (endedCallId != null) {
+                CancelledCallStore(this).markCancelled(endedCallId)
+            }
             forwardToJs(data)
             return
         }
@@ -142,6 +180,19 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             val callId = data["call_id"] ?: data["event_id"] ?: ""
             if (callId.isNotEmpty() && callId == lastRingingCallId) {
                 Log.d(TAG, "Duplicate invite retry for $callId — suppressing")
+                forwardToJs(data)
+                return
+            }
+
+            // Session 62: persistent dedup for caller-cancelled calls.
+            // If we've already seen hangup/reject/select_answer for
+            // this callId within the TTL window, drop the retry
+            // silently — the call is dead and re-ringing would just
+            // re-open the IncomingCallActivity for nothing. JS still
+            // gets the forward for telemetry. Survives FCM service
+            // process death because the store is SharedPreferences.
+            if (callId.isNotEmpty() && CancelledCallStore(this).isCancelled(callId)) {
+                Log.d(TAG, "Suppressing invite for cancelled callId=$callId")
                 forwardToJs(data)
                 return
             }
@@ -200,12 +251,19 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             return
         }
 
-        // Build notification text — fallback chain for best possible title
-        val title = senderName
-            ?: (sender?.let { getCachedSenderName(it) })
-            ?: roomName
-            ?: getCachedRoomName(roomId)
-            ?: getString(R.string.push_new_message)
+        // Build notification text — fallback chain for best possible title.
+        // WEE-11 (forta-bugs#660, #686): push gateway sometimes emits
+        // sender_display_name == raw Matrix ID ("@PXXX:matrix.bastyon.com")
+        // when the sender has no homeserver-side displayname. Without an
+        // isMatrixId guard, that opaque ID became the visible notification
+        // title — see chooseNotificationTitle().
+        val title = chooseNotificationTitle(
+            senderDisplayName = senderName,
+            cachedSenderName = sender?.let { getCachedSenderName(it) },
+            roomName = roomName,
+            cachedRoomName = getCachedRoomName(roomId),
+            fallback = getString(R.string.push_new_message),
+        )
         val body = previewByMsgtype(contentMsgtype)
 
         // Show notification (JS may replace it later with decrypted content)
@@ -277,10 +335,11 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         // This is the only ringer path that survives Android 10+ killed-app
         // background-startActivity restrictions (no exception thrown — the
         // launch is silently dropped). Posting the notification with
-        // setFullScreenIntent + CHANNEL_CALLS (IMPORTANCE_MAX, ringtone)
+        // setFullScreenIntent + the migrated incoming-call channel
+        // (IMPORTANCE_MAX, explicit ringtone, lockscreen-public, bypass-DND)
         // wakes the screen and rings reliably from the locked screen on
         // every device the system grants USE_FULL_SCREEN_INTENT to.
-        showSimpleCallNotification(roomId, callerName)
+        showSimpleCallNotification(roomId, callerName, callId)
 
         // Best-effort additional path: when the process is in foreground or
         // recently stopped, startActivity succeeds and the user gets the
@@ -319,28 +378,96 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         }
     }
 
-    private fun showSimpleCallNotification(roomId: String, callerName: String) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            putExtra(EXTRA_PUSH_ROOM_ID, roomId)
-            putExtra("push_call", true)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    private fun showSimpleCallNotification(roomId: String, callerName: String, callId: String) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        // WEE-18 / forta-bugs#768: on Android 14+ (API 34) USE_FULL_SCREEN_INTENT
+        // is a special permission users grant via Settings. Without it the
+        // FSI silently degrades to a heads-up. Log so we can correlate
+        // user reports against missing permission rather than channel
+        // settings. The notification still posts — action buttons remain
+        // tappable from the heads-up, and the foreground startActivity
+        // attempt that follows in showCallNotification is the fallback
+        // ringer path for the killed-process case.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            !nm.canUseFullScreenIntent()
+        ) {
+            Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted; incoming-call notification will appear heads-up only")
         }
-        val pendingIntent = PendingIntent.getActivity(
-            this, "call_$roomId".hashCode(), intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
+        // WEE-18 / forta-bugs#308, #268: route both the content tap and
+        // the full-screen-intent through IncomingCallActivity directly.
+        // The previous design opened MainActivity with `push_call=true`,
+        // which lifted the WebView but left no ringer surface — users
+        // tapped the notification, saw the chat list, and had to guess
+        // that a call had been ringing.
+        val ringerIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("roomId", roomId)
+            putExtra("hasVideo", false)
+        }
+        val ringerPendingIntent = PendingIntent.getActivity(
+            this, "call_$roomId".hashCode(), ringerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(this, CHANNEL_CALLS)
+
+        // Accept / decline action buttons. Tapping them in the shade
+        // launches IncomingCallActivity with an action= extra, which
+        // dispatches the answer/reject flow and dismisses the ringer
+        // notification (#751). Using distinct request codes so the
+        // PendingIntent flags can update independently per-callId.
+        val acceptIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("roomId", roomId)
+            putExtra("hasVideo", false)
+            putExtra("action", "accept")
+        }
+        val acceptPendingIntent = PendingIntent.getActivity(
+            this, "call_accept_$roomId".hashCode(), acceptIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val declineIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("callId", callId)
+            putExtra("callerName", callerName)
+            putExtra("roomId", roomId)
+            putExtra("hasVideo", false)
+            putExtra("action", "decline")
+        }
+        val declinePendingIntent = PendingIntent.getActivity(
+            this, "call_decline_$roomId".hashCode(), declineIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(this, CallNotificationConfig.INCOMING_CALL_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(callerName)
             .setContentText(getString(R.string.push_incoming_call))
             .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(ringerPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setFullScreenIntent(pendingIntent, true)
+            .setFullScreenIntent(ringerPendingIntent, true)
             .setOngoing(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(
+                R.drawable.ic_call_accept,
+                getString(R.string.call_accept),
+                acceptPendingIntent,
+            )
+            .addAction(
+                R.drawable.ic_call_end,
+                getString(R.string.call_decline),
+                declinePendingIntent,
+            )
             .build()
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(NOTIF_TAG, "call_$roomId".hashCode(), notification)
     }
 
@@ -363,7 +490,6 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         private const val TAG = "FortaPush"
         const val PREFS_NAME = "forta_push"
         const val CHANNEL_MESSAGES = "messages"
-        const val CHANNEL_CALLS = "calls"
         const val NOTIF_TAG = "forta_push"
         const val EXTRA_PUSH_ROOM_ID = "push_room_id"
         const val EXTRA_PUSH_EVENT_ID = "push_event_id"
@@ -395,6 +521,68 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
          * S3 (FCM throttle) when triaging user reports.
          */
         val inviteTracker: InviteThrottleTracker = InviteThrottleTracker(maxRecords = 5)
+
+        /**
+         * Heuristic: does [value] look like a raw Matrix user ID such as
+         * `@PXXX...:matrix.bastyon.com`? Matrix IDs always start with `@`
+         * and contain a `:`-separated homeserver part. Display names that
+         * happen to start with `@` but have no `:` (e.g. someone literally
+         * named "@bob") are NOT filtered out — that would be a false
+         * positive.
+         *
+         * The "starts-with-@ AND contains-`:`" pair also rejects degenerate
+         * strings like `@:`, `@a:`, `@:srv`: none of those are valid Matrix
+         * IDs nor sensible display names; falling through to the room name
+         * is strictly better than displaying them. A stricter regex would
+         * actually be WEAKER here — it would let those degenerate strings
+         * become the title.
+         *
+         * WEE-11 / forta-bugs#660.
+         */
+        internal fun isMatrixId(value: String?): Boolean {
+            if (value == null) return false
+            return value.startsWith("@") && value.contains(":")
+        }
+
+        /**
+         * Pick the best notification title from the layered fallback chain.
+         *
+         * Push payload may carry [senderDisplayName] for the message author
+         * and [roomName] for the conversation, plus cached versions from
+         * previous deliveries. Each layer is rejected if it is null, blank,
+         * or looks like a raw Matrix ID (see [isMatrixId]).
+         *
+         * Order of preference:
+         *   1. fresh sender display name from the push,
+         *   2. cached sender display name (previous deliveries),
+         *   3. fresh room name from the push,
+         *   4. cached room name,
+         *   5. localized fallback ("New message").
+         *
+         * Pure function — extracted as a companion-object @JvmStatic so it
+         * can be unit-tested without Android framework dependencies. See
+         * `NotificationTitleFallbackTest`.
+         *
+         * WEE-11 / forta-bugs#660, #686.
+         */
+        internal fun chooseNotificationTitle(
+            senderDisplayName: String?,
+            cachedSenderName: String?,
+            roomName: String?,
+            cachedRoomName: String?,
+            fallback: String,
+        ): String {
+            fun usable(value: String?, rejectMatrixId: Boolean): String? {
+                if (value.isNullOrBlank()) return null
+                if (rejectMatrixId && isMatrixId(value)) return null
+                return value
+            }
+            return usable(senderDisplayName, rejectMatrixId = true)
+                ?: usable(cachedSenderName, rejectMatrixId = true)
+                ?: usable(roomName, rejectMatrixId = false)
+                ?: usable(cachedRoomName, rejectMatrixId = false)
+                ?: fallback
+        }
 
         fun cacheRoomName(context: Context, roomId: String, name: String) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

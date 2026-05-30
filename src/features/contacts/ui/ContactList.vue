@@ -23,6 +23,7 @@ import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { getDraft } from "@/shared/lib/drafts";
 import { useSelectionStore } from "@/features/selection";
+import RenameContactDialog from "@/features/chat-info/ui/RenameContactDialog.vue";
 import { hapticImpact } from "@/shared/lib/haptics";
 
 interface Props {
@@ -127,10 +128,17 @@ function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHe
     ...(room.invitedMembers ?? []),
   ].filter(m => m !== myHexId);
 
+  // Read localAliases reactively (Session 51) — Pinia ref access here makes
+  // the calling computed re-evaluate when an alias is set/cleared.
+  const aliases = chatStore.localAliases;
+
   const names: string[] = [];
   for (const hexId of otherMembers) {
     const addr = cachedHexDecode(hexId);
     if (/^[A-Za-z0-9]+$/.test(addr)) {
+      // Priority 0: User-set local alias — overrides everything below.
+      const alias = aliases[addr];
+      if (alias) { names.push(alias); continue; }
       // Priority 1: Pocketnet profile (richest data)
       const user = allUsers[addr];
       if (user?.name && !isUnresolvedName(user.name) && user.name !== addr) {
@@ -147,13 +155,17 @@ function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHe
   // Fallback: try avatar address
   if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
     const avatarAddr = room.avatar.slice("__pocketnet__:".length);
-    const user = allUsers[avatarAddr];
-    if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
-      names.push(user.name);
-    } else {
-      const matrixName = chatStore.getDisplayName(avatarAddr);
-      if (matrixName && matrixName !== avatarAddr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-        names.push(matrixName);
+    const alias = aliases[avatarAddr];
+    if (alias) { names.push(alias); }
+    else {
+      const user = allUsers[avatarAddr];
+      if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
+        names.push(user.name);
+      } else {
+        const matrixName = chatStore.getDisplayName(avatarAddr);
+        if (matrixName && matrixName !== avatarAddr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
+          names.push(matrixName);
+        }
       }
     }
   }
@@ -208,20 +220,17 @@ function getPreview(room: ChatRoom): DisplayResult {
   // Primary: use room.lastMessage from Dexie LiveRoom
   if (room.lastMessage) {
     const c = room.lastMessage.content;
-    // Explicit deletion markers only. `"[message]"` is a generic "preview
-    // unavailable" sentinel (see format-preview.ts), not a deletion marker —
-    // treating it as deleted here used to mislabel call/media events.
-    if (
-      room.lastMessage.deleted ||
-      (!c && room.lastMessage.type === MessageType.text) ||
-      c === "🚫 Message deleted"
-    ) {
+    // WEE-43: explicit deletion signals only — `msg.deleted` (mapper sets it
+    // from softDeleted) or the legacy literal "🚫 Message deleted" body.
+    // The previous "empty text → deleted" inference produced false positives
+    // for any room whose preview was transiently blank (push-driven, cold-start).
+    if (room.lastMessage.deleted || c === "🚫 Message deleted") {
       return { state: "ready", text: `🚫 ${t("message.deleted")}` };
     }
     // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)
     const content = room.lastMessage.content;
     const cleaned = (content && !content.startsWith("[encrypted"))
-      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content)))
+      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content, (id) => chatStore.getLocalAlias(id))))
       : content;
     return getMessagePreviewForUI(
       cleaned,
@@ -234,8 +243,8 @@ function getPreview(room: ChatRoom): DisplayResult {
   const msgs = chatStore.messages[room.id];
   if (msgs?.length) {
     const last = msgs[msgs.length - 1];
-    // Deleted message
-    if (last.deleted || (!last.content && last.type === MessageType.text)) {
+    // WEE-43: explicit deletion signal only — see comment in the primary branch.
+    if (last.deleted) {
       return { state: "ready", text: `🚫 ${t("message.deleted")}` };
     }
     // For group chats: if sender name isn't resolved yet, show skeleton instead of raw ID
@@ -248,7 +257,7 @@ function getPreview(room: ChatRoom): DisplayResult {
       return { state: "ready", text: formatPreview(last, room) };
     }
     // Strip bastyon links and matrix IDs from fallback preview (same as formatPreview does)
-    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content)));
+    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content, (id) => chatStore.getLocalAlias(id))));
     return getMessagePreviewForUI(
       cleaned,
       last.decryptionStatus,
@@ -656,7 +665,22 @@ const ICONS = {
   mute:   svg('<path d="M18 16.5a9 9 0 0 0 .38-10.17"/><path d="M13.73 7.73a4 4 0 0 1 .52 4.52"/><path d="m2 2 20 20"/><path d="M9.34 9.34 3 16h4v4l4.65-4.65"/><path d="M15 2 9.34 7.66"/>'),
   unmute: svg('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>'),
   read:   svg('<polyline points="20 6 9 17 4 12"/>'),
+  rename: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   delete: svg('<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>'),
+};
+
+/** Resolve the DM peer (raw Bastyon address) for a 1:1 chat. Returns null
+ *  for group rooms or rooms with no resolvable peer. Used by the context-menu
+ *  rename action — group room names are admin-controlled and not aliasable. */
+const getDmPeerAddress = (roomId: string): string | null => {
+  const room = chatStore.rooms.find(r => r.id === roomId);
+  if (!room || room.isGroup) return null;
+  const me = authStore.address ? hexEncode(authStore.address) : "";
+  const candidates = [...room.members, ...(room.invitedMembers ?? [])];
+  const other = candidates.find(m => m !== me);
+  if (!other) return null;
+  const decoded = hexDecode(other);
+  return /^[A-Za-z0-9]+$/.test(decoded) ? decoded : null;
 };
 
 const ctxMenuItems = computed<ContextMenuItem[]>(() => {
@@ -664,12 +688,22 @@ const ctxMenuItems = computed<ContextMenuItem[]>(() => {
   if (!roomId) return [];
   const isPinned = chatStore.pinnedRoomIds.has(roomId);
   const isMuted = chatStore.mutedRoomIds.has(roomId);
-  return [
+  const peer = getDmPeerAddress(roomId);
+  const items: ContextMenuItem[] = [
     { label: isPinned ? t("contactList.unpin") : t("contactList.pin"), icon: isPinned ? ICONS.unpin : ICONS.pin, action: "pin" },
     { label: isMuted ? t("contactList.unmute") : t("contactList.mute"), icon: isMuted ? ICONS.unmute : ICONS.mute, action: "mute" },
     { label: t("contactList.markAsRead"), icon: ICONS.read, action: "read" },
-    { label: t("contactList.delete"), icon: ICONS.delete, action: "delete", danger: true },
   ];
+  // Rename contact (Session 51) — DM rooms only. Group names are admin-controlled.
+  if (peer) {
+    items.push({
+      label: chatStore.hasLocalAlias(peer) ? t("contact.editAlias") : t("contact.addAlias"),
+      icon: ICONS.rename,
+      action: "rename",
+    });
+  }
+  items.push({ label: t("contactList.delete"), icon: ICONS.delete, action: "delete", danger: true });
+  return items;
 });
 
 const openCtxMenu = (e: PointerEvent, room: ChatRoom) => {
@@ -678,6 +712,22 @@ const openCtxMenu = (e: PointerEvent, room: ChatRoom) => {
 
 const deleteConfirm = ref<{ show: boolean; roomId: string | null }>({ show: false, roomId: null });
 
+// Rename contact dialog state (Session 51) — opened from the long-press menu.
+const renameTarget = ref<string | null>(null);
+const openRenameFromCtx = (roomId: string) => {
+  const peer = getDmPeerAddress(roomId);
+  if (peer) renameTarget.value = peer;
+};
+const handleAliasSave = async (alias: string) => {
+  if (renameTarget.value) await chatStore.setContactAlias(renameTarget.value, alias);
+  renameTarget.value = null;
+};
+const handleAliasRemove = async () => {
+  if (renameTarget.value) await chatStore.setContactAlias(renameTarget.value, null);
+  renameTarget.value = null;
+};
+const closeRenameDialog = () => { renameTarget.value = null; };
+
 const handleCtxAction = (action: string) => {
   const roomId = ctxMenu.value.roomId;
   if (!roomId) return;
@@ -685,6 +735,7 @@ const handleCtxAction = (action: string) => {
     case "pin": chatStore.togglePinRoom(roomId); break;
     case "mute": chatStore.toggleMuteRoom(roomId); break;
     case "read": chatStore.markRoomAsRead(roomId); break;
+    case "rename": openRenameFromCtx(roomId); break;
     case "delete":
       deleteConfirm.value = { show: true, roomId };
       break;
@@ -973,6 +1024,16 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
       :items="ctxMenuItems"
       @close="ctxMenu.show = false"
       @select="handleCtxAction"
+    />
+
+    <!-- Rename contact dialog (Session 51) — opened from long-press menu. -->
+    <RenameContactDialog
+      v-if="renameTarget"
+      :address="renameTarget"
+      :current-alias="chatStore.getLocalAlias(renameTarget)"
+      @save="handleAliasSave"
+      @remove="handleAliasRemove"
+      @close="closeRenameDialog"
     />
 
     <!-- Delete chat confirmation modal -->

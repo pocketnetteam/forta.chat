@@ -23,21 +23,21 @@ describe("auth store editUserData triggers Matrix profile sync (Session 45)", ()
     const src = getStoresSource();
     const start = src.indexOf("const { execute: editUserData");
     expect(start).toBeGreaterThan(-1);
-    const block = src.slice(start, start + 1500);
+    const block = src.slice(start, start + 3000);
     expect(block).toMatch(/syncProfileToMatrix\(/);
   });
 
   it("guards Matrix sync behind matrixReady so we don't sync before login completes", () => {
     const src = getStoresSource();
     const start = src.indexOf("const { execute: editUserData");
-    const block = src.slice(start, start + 1500);
+    const block = src.slice(start, start + 3000);
     expect(block).toMatch(/matrixReady/);
   });
 
   it("only syncs when blockchain edit succeeded", () => {
     const src = getStoresSource();
     const start = src.indexOf("const { execute: editUserData");
-    const block = src.slice(start, start + 1500);
+    const block = src.slice(start, start + 3000);
     // Either explicit success === true check, or success !== false guard
     expect(block).toMatch(/success\s*===\s*true|success\s*!==\s*false/);
   });
@@ -45,7 +45,7 @@ describe("auth store editUserData triggers Matrix profile sync (Session 45)", ()
   it("fires Matrix sync without blocking the save (no await on syncProfileToMatrix)", () => {
     const src = getStoresSource();
     const start = src.indexOf("const { execute: editUserData");
-    const block = src.slice(start, start + 1500);
+    const block = src.slice(start, start + 3000);
     // Look for a `void syncProfileToMatrix(...)` fire-and-forget pattern.
     // Plain `await syncProfileToMatrix` would re-introduce H3 (UI hang).
     expect(block).toMatch(/void\s+syncProfileToMatrix\s*\(/);

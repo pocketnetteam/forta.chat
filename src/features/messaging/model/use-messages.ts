@@ -1,5 +1,5 @@
 import { onScopeDispose } from "vue";
-import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime } from "@/entities/chat";
+import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime, MSC3245_VIDEO_NOTE_KEY } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
@@ -11,13 +11,15 @@ import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import { detectUrl, fetchPreview } from "./use-link-preview";
-import { invalidateDownloadCache } from "./use-file-download";
+import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
+import { SendError, sendDiag } from "./send-errors";
+import { reportSendError } from "./send-error-bus";
 
 /** Per-phase media pipeline timeouts. Splitting the old single 5-minute cap
  *  lets us surface phase-specific failures (e.g. crypto hang vs upload stall)
@@ -77,6 +79,34 @@ function resolveMime(file: File): string {
   if (file.type) return file.type;
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return MIME_EXT_FALLBACK[ext] ?? "application/octet-stream";
+}
+
+/** Convert HEIC/HEIF File to JPEG so Android WebView (Chromium) can render it.
+ *  iPhone cameras default to HEIC; Chromium does not support HEIC in <img>,
+ *  resulting in a broken image on the receiver side. heic2any is loaded
+ *  dynamically (~340 KB gzipped chunk) only on the first HEIC encounter.
+ *  Returns the original file when the input is not HEIC/HEIF, or when
+ *  conversion fails (fail-open: better to send the original than nothing). */
+export async function convertHeicToJpeg(file: File): Promise<File> {
+  const isHeic =
+    /image\/(heic|heif)/i.test(file.type) ||
+    /\.(heic|heif)$/i.test(file.name);
+  if (!isHeic) return file;
+
+  try {
+    const heic2any = (await import("heic2any")).default;
+    const result = await heic2any({
+      blob: file,
+      toType: "image/jpeg",
+      quality: 0.85,
+    });
+    const jpegBlob = Array.isArray(result) ? result[0] : (result as Blob);
+    const newName = file.name.replace(/\.(heic|heif)$/i, ".jpg");
+    return new File([jpegBlob], newName, { type: "image/jpeg" });
+  } catch (e) {
+    console.warn("[convertHeicToJpeg] conversion failed, sending original:", e);
+    return file; // fail-open
+  }
 }
 
 /** Track which clientIds are already being cancelled (prevent double invocation) */
@@ -322,28 +352,52 @@ export function useMessages() {
    *  it, even when subsequent enqueue fails), false when the call was
    *  silently dropped before any visible side effect (caller can then
    *  preserve the share/forward intent or restore the input). */
-  const sendFile = async (file: File): Promise<boolean> => {
+  const sendFile = async (
+    file: File,
+    options: { forwardedFrom?: { senderId: string; senderName?: string } } = {},
+  ): Promise<boolean> => {
+    sendDiag("file:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return false;
-
-    if (file.size > MAX_UPLOAD_SIZE) {
-      console.warn(`[use-messages] File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+    if (!roomId || !file) {
+      sendDiag("file:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
       return false;
     }
 
+    if (file.size > MAX_UPLOAD_SIZE) {
+      console.warn(`[use-messages] File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      reportSendError(new SendError("fileTooLarge", `File too large: ${file.name}`, { fileName: file.name, kind: "file" }, false));
+      return false;
+    }
+
+    // Android WebView cannot render HEIC; convertHeicToJpeg short-circuits
+    // for non-HEIC inputs, so calling it unconditionally is safe and keeps
+    // the two send paths symmetric.
+    const processedFile = await convertHeicToJpeg(file);
+
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return false;
+    if (!matrixService.isReady()) {
+      sendDiag("file:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
+      return false;
+    }
 
-    // Determine message type from MIME (with fallback for HEIC/extension-only files)
-    const mime = normalizeMime(resolveMime(file));
-    const msgType = messageTypeFromMime(mime);
+    // Determine message type from MIME (with fallback for HEIC/extension-only files).
+    // Audio MIME deliberately routes to MessageType.file: voice recordings have
+    // their own send path (sendAudio) and audio attachments coming from the
+    // gallery / file picker are *files*, not voice notes. Without this guard
+    // an MP3 picked from the gallery preview-rendered as a voice bubble with
+    // no save-to-disk affordance (forta-bugs#841 / WEE-50).
+    const mime = normalizeMime(resolveMime(processedFile));
+    const inferredType = messageTypeFromMime(mime);
+    const msgType = inferredType === MessageType.audio ? MessageType.file : inferredType;
 
-    const localBlobUrl = URL.createObjectURL(file);
+    const localBlobUrl = URL.createObjectURL(processedFile);
 
     if (!isChatDbReady()) {
       // Without Dexie we have no crash-safe queue — dropping the send is
       // safer than leaking a never-completing toast on a dead pipeline.
       console.error("[use-messages] sendFile: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "file" }));
       URL.revokeObjectURL(localBlobUrl);
       return false;
     }
@@ -352,14 +406,15 @@ export function useMessages() {
     const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
-      content: file.name,
+      content: processedFile.name,
       type: msgType,
       fileInfo: {
-        name: file.name,
+        name: processedFile.name,
         type: mime,
-        size: file.size,
+        size: processedFile.size,
         url: localBlobUrl,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -367,10 +422,10 @@ export function useMessages() {
     // Persist blob so SyncEngine.syncSendFile can resume after a crash.
     const attachmentId = await dbKit.db.attachments.add({
       messageLocalId: localMsg.localId!,
-      fileName: file.name,
+      fileName: processedFile.name,
       mimeType: mime,
-      size: file.size,
-      localBlob: file,
+      size: processedFile.size,
+      localBlob: processedFile,
       status: "local",
     });
 
@@ -378,13 +433,15 @@ export function useMessages() {
       "send_file",
       roomId,
       {
-        fileName: file.name,
+        fileName: processedFile.name,
         mimeType: mime,
         msgtype: "m.file",
         attachmentId,
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
+    sendDiag("file:enqueued", { clientId: localMsg.clientId });
     return true;
   };
 
@@ -392,20 +449,44 @@ export function useMessages() {
    *  See sendFile for the boolean return contract. */
   const sendImage = async (
     file: File,
-    options: { caption?: string; captionAbove?: boolean } = {},
+    options: {
+      caption?: string;
+      captionAbove?: boolean;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
   ): Promise<boolean> => {
+    sendDiag("image:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return false;
+    if (!roomId || !file) {
+      sendDiag("image:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
+
+    if (file.size > MAX_UPLOAD_SIZE) {
+      console.warn(`[use-messages] Image too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      reportSendError(new SendError("fileTooLarge", `Image too large: ${file.name}`, { fileName: file.name, kind: "image" }, false));
+      return false;
+    }
+
+    // HEIC must be converted before getImageDimensions — Chromium <img> cannot
+    // decode HEIC at all, so reading naturalWidth/Height on the original blob
+    // would produce zeros and corrupt the m.image event payload.
+    const processedFile = await convertHeicToJpeg(file);
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return false;
+    if (!matrixService.isReady()) {
+      sendDiag("image:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "image" }));
+      return false;
+    }
 
-    const dimensions = await getImageDimensions(file);
-    const imageMime = resolveMime(file);
-    const localBlobUrl = URL.createObjectURL(file);
+    const dimensions = await getImageDimensions(processedFile);
+    const imageMime = resolveMime(processedFile);
+    const localBlobUrl = URL.createObjectURL(processedFile);
 
     if (!isChatDbReady()) {
       console.error("[use-messages] sendImage: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "image" }));
       URL.revokeObjectURL(localBlobUrl);
       return false;
     }
@@ -414,28 +495,29 @@ export function useMessages() {
     const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
-      content: options.caption || file.name,
+      content: options.caption || processedFile.name,
       type: MessageType.image,
       fileInfo: {
-        name: file.name,
+        name: processedFile.name,
         type: imageMime,
-        size: file.size,
+        size: processedFile.size,
         url: localBlobUrl,
         w: dimensions.w,
         h: dimensions.h,
         caption: options.caption,
         captionAbove: options.captionAbove,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
 
     const attachmentId = await dbKit.db.attachments.add({
       messageLocalId: localMsg.localId!,
-      fileName: file.name,
+      fileName: processedFile.name,
       mimeType: imageMime,
-      size: file.size,
-      localBlob: file,
+      size: processedFile.size,
+      localBlob: processedFile,
       status: "local",
     });
 
@@ -443,7 +525,7 @@ export function useMessages() {
       "send_file",
       roomId,
       {
-        fileName: file.name,
+        fileName: processedFile.name,
         mimeType: imageMime,
         msgtype: "m.image",
         attachmentId,
@@ -452,13 +534,15 @@ export function useMessages() {
           w: dimensions.w,
           h: dimensions.h,
           mimetype: imageMime,
-          size: file.size,
+          size: processedFile.size,
           ...(options.caption ? { caption: options.caption } : {}),
           ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
         },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
+    sendDiag("image:enqueued", { clientId: localMsg.clientId });
     return true;
   };
 
@@ -466,19 +550,32 @@ export function useMessages() {
    *  See sendFile for the boolean return contract. */
   const sendAudio = async (
     file: File,
-    options: { duration?: number; waveform?: number[] } = {},
+    options: {
+      duration?: number;
+      waveform?: number[];
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
   ): Promise<boolean> => {
+    sendDiag("audio:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return false;
+    if (!roomId || !file) {
+      sendDiag("audio:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return false;
+    if (!matrixService.isReady()) {
+      sendDiag("audio:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "audio" }));
+      return false;
+    }
 
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
 
     if (!isChatDbReady()) {
       console.error("[use-messages] sendAudio: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "audio" }));
       URL.revokeObjectURL(localBlobUrl);
       return false;
     }
@@ -496,7 +593,12 @@ export function useMessages() {
         url: localBlobUrl,
         duration: options.duration,
         waveform: options.waveform,
+        // Voice recordings created via VoiceRecorder are always voice messages;
+        // recipients without an MSC3245 marker (older app versions) keep the
+        // waveform-presence heuristic as a fallback.
+        isVoice: true,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -527,14 +629,27 @@ export function useMessages() {
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
           waveform: intWaveform,
         },
+        // MSC3245 voice marker — canonical Matrix signal that this m.audio
+        // event is a voice recording, not a regular audio file. Lets Element /
+        // Cinny / future Forta builds tell the two apart without inspecting
+        // the waveform (forta-bugs#841 / WEE-50).
+        eventExtras: { "org.matrix.msc3245.voice": {} },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
+    sendDiag("audio:enqueued", { clientId: localMsg.clientId });
     return true;
   };
 
   /** Send a video circle (video note) message — circular video like Telegram */
-  const sendVideoCircle = async (file: File, options: { duration?: number } = {}) => {
+  const sendVideoCircle = async (
+    file: File,
+    options: {
+      duration?: number;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
+  ) => {
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return;
 
@@ -562,6 +677,7 @@ export function useMessages() {
             duration: options.duration,
             videoNote: true,
           },
+          forwardedFrom: options.forwardedFrom,
           localBlobUrl,
           uploadProgress: 0,
         });
@@ -628,8 +744,17 @@ export function useMessages() {
                 h: 480,
                 duration: options.duration ? Math.round(options.duration * 1000) : undefined,
                 videoNote: true,
+                [MSC3245_VIDEO_NOTE_KEY]: true,
                 ...(secrets ? { secrets } : {}),
               },
+              ...(options.forwardedFrom
+                ? {
+                    forwarded_from: {
+                      sender_id: options.forwardedFrom.senderId,
+                      sender_name: options.forwardedFrom.senderName,
+                    },
+                  }
+                : {}),
             };
 
             const serverEventId = await withTimeout(
@@ -737,6 +862,7 @@ export function useMessages() {
           h: 480,
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
           videoNote: true,
+          [MSC3245_VIDEO_NOTE_KEY]: true,
           ...(secrets ? { secrets } : {}),
         },
       };
@@ -968,15 +1094,44 @@ export function useMessages() {
     return true;
   };
 
-  /** Send a forwarded text message with optimistic UI. Returns true if insert succeeded.
-   *  Pass forwardMeta to include sender attribution; omit to send without attribution. */
+  /** Send a forwarded message with optimistic UI. Returns true if insert succeeded.
+   *  Pass forwardMeta to include sender attribution; omit to send without attribution.
+   *
+   *  Two branches:
+   *   - text (default): content is the body, hits the legacy send_message path.
+   *   - media: when `source.type !== text` and `source.fileInfo` is present,
+   *            re-downloads the original blob and dispatches through
+   *            sendImage/sendFile/sendAudio/sendVideoCircle. This is the
+   *            internal-forward path for photos/videos/voice/files — without
+   *            it the recipient would see «Image» / «Photo» as a text body
+   *            with no attachment (issues #311, #702). */
   const sendForward = async (
     content: string,
     forwardMeta?: { senderId: string; senderName?: string },
+    source?: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+      /** Original sender's address on the source event. Needed to derive the
+       *  per-event decryption key for E2E rooms — `forwardMeta.senderId` is
+       *  only set when the user opted into «Show sender attribution». */
+      sourceSenderId: string;
+      /** Original event timestamp. Some Matrix key-rotation policies are
+       *  timestamp-sensitive, so passing the source event time (not
+       *  Date.now()) keeps decrypt correct for older messages. */
+      sourceTimestamp: number;
+    },
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !content.trim()) return false;
+    if (!roomId) return false;
 
+    // Media branch — re-upload the original bytes through the per-type pipeline.
+    if (source && source.type !== MessageType.text && source.fileInfo) {
+      return await forwardMediaMessage(content, forwardMeta, source);
+    }
+
+    if (!content.trim()) return false;
     const trimmed = content.trim();
 
     // ── Dexie path: optimistic insert FIRST ──
@@ -1056,6 +1211,87 @@ export function useMessages() {
     } catch (e) {
       console.error("[sendForward] Legacy path failed:", e);
       return false;
+    }
+  };
+
+  /** Re-upload a media message into the active room as part of a forward.
+   *  Downloads the original blob (or reuses a local blob URL when the source
+   *  was sent from this device and is still cached), wraps it in a File, and
+   *  dispatches through the per-type send pipeline so the recipient gets a
+   *  real m.image / m.file / m.audio event with the attachment — not a text
+   *  body «Image» without payload (the pre-fix bug behind #311, #702). */
+  const forwardMediaMessage = async (
+    caption: string,
+    forwardMeta: { senderId: string; senderName?: string } | undefined,
+    source: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+      sourceSenderId: string;
+      sourceTimestamp: number;
+    },
+  ): Promise<boolean> => {
+    let blob: Blob | null;
+    try {
+      blob = await getDecryptedBlobForMessage({
+        fileInfo: source.fileInfo,
+        roomId: source.roomId,
+        // Pass the *source* sender + timestamp so downloadAndDecrypt builds
+        // the same event shape pcrypto used when the original was sent.
+        // Using Date.now() here was wrong — it would mismatch any timestamp-
+        // sensitive key resolution.
+        senderId: source.sourceSenderId,
+        timestamp: source.sourceTimestamp,
+      });
+    } catch (e) {
+      console.error("[sendForward] Failed to fetch source blob:", e);
+      return false;
+    }
+    if (!blob) {
+      console.error("[sendForward] forwardMedia: source blob unavailable");
+      return false;
+    }
+
+    const fileName = source.fileInfo.name || "forwarded";
+    const fileType = source.fileInfo.type || blob.type || "application/octet-stream";
+    const file = new File([blob], fileName, { type: fileType });
+    const trimmedCaption = caption.trim();
+
+    switch (source.type) {
+      case MessageType.image:
+        return await sendImage(file, {
+          caption: trimmedCaption || undefined,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.audio:
+        return await sendAudio(file, {
+          duration: source.fileInfo.duration,
+          waveform: source.fileInfo.waveform,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.videoCircle:
+        // sendVideoCircle returns void and swallows its own errors; wrap so
+        // a failed video-circle forward surfaces as `false` to the caller.
+        try {
+          await sendVideoCircle(file, {
+            duration: source.fileInfo.duration,
+            forwardedFrom: forwardMeta,
+          });
+          return true;
+        } catch (e) {
+          console.error("[sendForward] sendVideoCircle threw:", e);
+          return false;
+        }
+      case MessageType.video:
+      case MessageType.file:
+        return await sendFile(file, { forwardedFrom: forwardMeta });
+      default:
+        console.warn(
+          "[sendForward] forwardMedia: unsupported source type, falling back to text:",
+          source.type,
+        );
+        return false;
     }
   };
 
@@ -1189,12 +1425,31 @@ export function useMessages() {
 
     // Collect source messages across all rooms (selection may span rooms in theory,
     // though the current UI path feeds us only the active room's selection).
+    // We need type + fileInfo + roomId so media forwards can re-upload through
+    // the per-type pipeline instead of collapsing into a text body «Image»
+    // without attachment (the pre-fix bug behind #311, #702).
     const idSet = new Set(sourceMessageIds);
-    const collected: Array<{ id: string; content: string; senderId: string; timestamp: number }> = [];
+    const collected: Array<{
+      id: string;
+      content: string;
+      senderId: string;
+      timestamp: number;
+      type: MessageType;
+      fileInfo?: FileInfo;
+      roomId: string;
+    }> = [];
     for (const roomMessages of Object.values(chatStore.messages)) {
       for (const m of roomMessages) {
         if (idSet.has(m.id)) {
-          collected.push({ id: m.id, content: m.content, senderId: m.senderId, timestamp: m.timestamp });
+          collected.push({
+            id: m.id,
+            content: m.content,
+            senderId: m.senderId,
+            timestamp: m.timestamp,
+            type: m.type,
+            fileInfo: m.fileInfo,
+            roomId: m.roomId,
+          });
         }
       }
     }
@@ -1205,6 +1460,37 @@ export function useMessages() {
       collected.map(async (src) => {
         const senderName = chatStore.getDisplayName(src.senderId);
         const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
+
+        // Media branch — reuse the singular forwardMediaMessage path. It
+        // re-uploads the original blob via sendImage/sendFile/sendAudio so
+        // the recipient receives a real attachment, not a text body.
+        if (src.type !== MessageType.text && src.fileInfo) {
+          // forwardMediaMessage dispatches through sendImage/sendFile, which
+          // read chatStore.activeRoomId. The current UI guarantees
+          // targetRoomId === activeRoomId (ForwardPicker switches the active
+          // room before invoking forwardMessages). Surface that invariant
+          // here so a future caller that forwards into a non-active room
+          // gets a clear error instead of silently posting into the wrong
+          // chat.
+          if (targetRoomId !== chatStore.activeRoomId) {
+            throw new Error(
+              "Bulk media forward requires targetRoomId === activeRoomId " +
+                "(sendImage/sendFile read activeRoomId). Switch the active " +
+                "room before calling forwardMessages, or thread a room " +
+                "override through the per-type send functions.",
+            );
+          }
+          const ok = await forwardMediaMessage(src.content, fwdMeta, {
+            type: src.type,
+            fileInfo: src.fileInfo,
+            sourceMessageId: src.id,
+            roomId: src.roomId,
+            sourceSenderId: src.senderId,
+            sourceTimestamp: src.timestamp,
+          });
+          if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
+          return;
+        }
 
         if (isChatDbReady()) {
           try {
@@ -1879,6 +2165,7 @@ export function useMessages() {
             mimetype: fi.type, size: Math.round(fi.size), w: 480, h: 480,
             duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
             videoNote: true,
+            [MSC3245_VIDEO_NOTE_KEY]: true,
             ...(secrets ? { secrets } : {}),
           },
         };

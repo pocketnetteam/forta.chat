@@ -26,6 +26,7 @@ import { useUnreadBanner } from "../model/use-unread-banner";
 import { useReadTracker } from "../model/use-read-tracker";
 import { decideFabAction, shouldAutoDismissBanner } from "../model/fab-decision";
 import UnreadBanner from "./UnreadBanner.vue";
+import { computeChatListStyle } from "./chat-list-style";
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -130,9 +131,24 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
     case "reply":
       chatStore.replyingTo = { id: message.id, senderId: message.senderId, content: message.content.slice(0, 150), type: message.type };
       break;
-    case "copy":
-      navigator.clipboard.writeText(message.content).then(() => toast(t("chat.copiedToClipboard")));
+    case "copy": {
+      // Honour an active text selection inside this bubble so users can copy a
+      // phone number / fragment instead of the whole message body. We scope to
+      // the bubble's DOM subtree so a selection elsewhere on the page doesn't
+      // hijack the copy. (WEE-42, forta-bugs#801/#579.)
+      const sel = window.getSelection();
+      const selectedText = sel?.toString().trim() ?? "";
+      const isSelectionInBubble =
+        sel != null
+        && sel.rangeCount > 0
+        && selectedText.length > 0
+        && (sel.anchorNode as Element | null)
+            ?.parentElement
+            ?.closest(`[data-message-id="${message.id}"]`) != null;
+      const payload = isSelectionInBubble ? selectedText : message.content;
+      navigator.clipboard.writeText(payload).then(() => toast(t("chat.copiedToClipboard")));
       break;
+    }
     case "edit":
       chatStore.editingMessage = { id: message.id, content: message.content };
       break;
@@ -158,15 +174,35 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
   closeContextMenu();
 };
 
+// In-flight guard for the context-menu save path: a long-press → Save while
+// the previous Save is still streaming would otherwise create a duplicate
+// MediaStore entry (forta-bugs#758, WEE-25). Keyed by cacheKey so different
+// messages remain independently savable while one is in progress.
+const savingInFlight = new Set<string>();
+
 const handleSaveMedia = async (message: import("@/entities/chat").Message) => {
   if (!message.fileInfo) return;
   // Match the cache key used by MessageBubble + MediaViewer: stable clientId
   // when available so an in-flight upload's blob URL is reused instead of
   // re-decrypting the just-rendered file.
   const cacheKey = message._key || message.id;
-  const url = getFileState(cacheKey).objectUrl ?? (await downloadFile(message));
-  if (!url) return;
-  await saveFile(url, message.fileInfo.name, message.fileInfo.type);
+  if (savingInFlight.has(cacheKey)) return;
+  savingInFlight.add(cacheKey);
+  try {
+    const url = getFileState(cacheKey).objectUrl ?? (await downloadFile(message));
+    if (!url) return;
+    const mime = message.fileInfo.type || "";
+    const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+    try {
+      await saveFile(url, message.fileInfo.name, mime);
+      toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
+    } catch (e) {
+      console.error("[MessageList] save failed:", e);
+      toast(t("media.saveFailed"), "error");
+    }
+  } finally {
+    savingInFlight.delete(cacheKey);
+  }
 };
 
 const handlePollVote = (messageId: string, optionId: string) => {
@@ -1191,11 +1227,15 @@ const setSearchQuery = (q: string) => {
   searchQuery.value = q;
 };
 
+// Reserve room at the bottom of the chat scrolу for the docked EmojiPicker
+// (input mode). See `chat-list-style.ts` for rationale.
+const listStyle = computed(() => computeChatListStyle(themeStore.chatWallpaper));
+
 defineExpose({ scrollToMessage, setSearchQuery });
 </script>
 
 <template>
-  <div ref="listRef" class="relative min-h-0 flex-1" :style="themeStore.chatWallpaper ? { background: themeStore.chatWallpaper } : {}">
+  <div ref="listRef" class="relative min-h-0 flex-1" :style="listStyle">
     <!-- Floating date header (single, non-stacking) -->
     <div
       v-if="currentDateLabel && !loading"

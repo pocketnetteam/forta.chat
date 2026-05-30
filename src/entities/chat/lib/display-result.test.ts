@@ -134,4 +134,27 @@ describe("getMessagePreviewForUI", () => {
     const result = getMessagePreviewForUI(null, undefined, "Cannot decrypt");
     expect(result).toEqual({ state: "ready", text: "" });
   });
+
+  // WEE-39 regression — decrypted content carrying an @mention must pass
+  // through the preview pipeline byte-identical. A future "strip mentions"
+  // backward-compat patch must not silently drop or rewrite @user tokens
+  // because the contacts list relies on the original sender wording.
+  it("preserves @mention text in decrypted preview (WEE-39)", () => {
+    const text = "Привет @AlexD как дела?";
+    const result = getMessagePreviewForUI(text, "ok", "Cannot decrypt");
+    expect(result).toEqual({ state: "ready", text });
+  });
+
+  // WEE-39 regression — the function MUST return the caller-supplied
+  // `failedText` byte-identical for permanent decrypt fails (decryptionStatus
+  // === "failed"). The current English localisation is exercised here as a
+  // sentinel; production callers pass `t("message.notDecrypted")` from i18n.
+  // If the wording in en.ts/ru.ts changes, update the constant below in lock-step.
+  it("surfaces actionable wording for permanent decrypt fail (WEE-39)", () => {
+    const failedText = "Couldn't decrypt — ask the sender to resend or update the app";
+    const result = getMessagePreviewForUI("[encrypted]", "failed", failedText);
+    expect(result.state).toBe("failed");
+    expect(result.text).toBe(failedText);
+    expect(result.text).not.toBe("Message not decrypted");
+  });
 });

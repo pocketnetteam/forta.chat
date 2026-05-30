@@ -126,34 +126,70 @@ export async function fileToBase64(file: File): Promise<string> {
   });
 }
 
-/** Upload a base64 data URL to Bastyon's image server (up1 endpoint).
- *  Matches the SDK's ImageUploader 'up1' path:
- *  - sends `file` = raw base64 (without data:image prefix)
- *  - sends `api_key`
- *  - response: `{ success: true, data: { ident: "..." } }`
- *  Returns the full image URL. */
-export async function uploadImage(base64DataUrl: string): Promise<string> {
-  // Strip the data URL prefix — server expects raw base64 in 'file' field
-  const rawBase64 = base64DataUrl.includes(",")
-    ? base64DataUrl.split(",")[1]
-    : base64DataUrl;
+/** Retry policy for transient upload failures. The image server occasionally
+ *  drops connections on flaky mobile networks (forta-bugs#803, #747) — a
+ *  one-shot fetch surfaces as "Failed to fetch" and leaves the avatar half-
+ *  applied. Retry only on transport errors and 5xx; 4xx is the user's
+ *  problem (auth, payload size) and shouldn't be retried. */
+const UPLOAD_MAX_ATTEMPTS = 3;
+const UPLOAD_RETRY_DELAYS_MS = [500, 1500];
 
+function isRetriableUploadError(err: unknown, status?: number): boolean {
+  if (typeof status === "number") return status >= 500 && status < 600;
+  if (err instanceof ImageUploadError) return false;
+  if (err instanceof TypeError) return true; // browser "Failed to fetch"
+  if (err instanceof DOMException && err.name === "AbortError") return false;
+  return err instanceof Error;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface UploadImageOptions {
+  /** Called before each retry with the attempt index (1-based) and last error. */
+  onRetry?: (attempt: number, error: unknown) => void;
+}
+
+async function uploadImageOnce(rawBase64: string): Promise<string> {
   const body = new URLSearchParams({
     file: rawBase64,
     api_key: API_KEY,
   });
 
-  const res = await fetch(UPLOAD_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
-  if (!res.ok) {
-    throw new ImageUploadError(`Upload failed: ${res.status}`);
+  let res: Response;
+  try {
+    res = await fetch(UPLOAD_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+  } catch (err) {
+    // Tag the error so the retry loop can distinguish network failure from
+    // a thrown ImageUploadError (which is permanent).
+    if (err instanceof TypeError) throw err;
+    throw new ImageUploadError(err instanceof Error ? err.message : "Network error");
   }
 
-  const json = await res.json();
+  if (!res.ok) {
+    // Carry status on the error so the retry loop can decide 5xx vs 4xx.
+    const e = new ImageUploadError(`Upload failed: ${res.status}`) as ImageUploadError & { status?: number };
+    e.status = res.status;
+    throw e;
+  }
+
+  // Parse failures are a server contract violation, not a transient network
+  // glitch — wrap so the retry loop treats them as permanent. Without this,
+  // a malformed-JSON body would raise SyntaxError and be retried 3× via
+  // the catch-all `err instanceof Error` branch.
+  let json: { success?: boolean; error?: string; data?: { ident?: string } };
+  try {
+    json = await res.json();
+  } catch (err) {
+    throw new ImageUploadError(
+      `Upload response malformed: ${err instanceof Error ? err.message : "unknown"}`,
+    );
+  }
   if (!json.success) {
     throw new ImageUploadError(json.error || "Upload failed");
   }
@@ -165,4 +201,41 @@ export async function uploadImage(base64DataUrl: string): Promise<string> {
   }
 
   throw new ImageUploadError("No image identifier in upload response");
+}
+
+/** Upload a base64 data URL to Bastyon's image server (up1 endpoint).
+ *  Matches the SDK's ImageUploader 'up1' path:
+ *  - sends `file` = raw base64 (without data:image prefix)
+ *  - sends `api_key`
+ *  - response: `{ success: true, data: { ident: "..." } }`
+ *  Returns the full image URL.
+ *
+ *  Retries transient network failures (fetch TypeError / HTTP 5xx) up to
+ *  3 attempts with exponential backoff. 4xx and parse errors fail immediately. */
+export async function uploadImage(
+  base64DataUrl: string,
+  options: UploadImageOptions = {},
+): Promise<string> {
+  // Strip the data URL prefix — server expects raw base64 in 'file' field
+  const rawBase64 = base64DataUrl.includes(",")
+    ? base64DataUrl.split(",")[1]
+    : base64DataUrl;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await uploadImageOnce(rawBase64);
+    } catch (err) {
+      lastError = err;
+      const status = (err as { status?: number } | null)?.status;
+      const retriable = isRetriableUploadError(err, status);
+      if (!retriable || attempt === UPLOAD_MAX_ATTEMPTS) break;
+      options.onRetry?.(attempt, err);
+      await sleep(UPLOAD_RETRY_DELAYS_MS[attempt - 1] ?? 2000);
+    }
+  }
+  if (lastError instanceof ImageUploadError) throw lastError;
+  throw new ImageUploadError(
+    lastError instanceof Error ? lastError.message : "Upload failed",
+  );
 }

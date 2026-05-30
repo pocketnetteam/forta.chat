@@ -120,42 +120,63 @@ class NativeWebRTCManager(private val context: Context) {
     fun initialize() {
         if (isInitialized) return
 
-        eglBase = EglBase.create()
+        // WEE-31 (H3): the libwebrtc native libraries are linked at first
+        // use of EglBase / PeerConnectionFactory. On ancient ARMv7 builds
+        // (Android 7 devices that mis-report their ABI) and on a handful
+        // of HarmonyOS / vendor WebViews that override the linker, the JNI
+        // load throws UnsatisfiedLinkError — which used to bubble out of
+        // here and process-kill the callee "наглухо" the moment the
+        // incoming-call accept handler tried to wire up audio. Wrap the
+        // whole bootstrap in a Throwable catch so the failure surfaces as
+        // a typed UI error through CallActivity instead of a silent crash.
+        try {
+            eglBase = EglBase.create()
 
-        val initOptions = PeerConnectionFactory.InitializationOptions.builder(context)
-            .setEnableInternalTracer(false)
-            .createInitializationOptions()
-        PeerConnectionFactory.initialize(initOptions)
+            val initOptions = PeerConnectionFactory.InitializationOptions.builder(context)
+                .setEnableInternalTracer(false)
+                .createInitializationOptions()
+            PeerConnectionFactory.initialize(initOptions)
 
-        val encoderFactory = DefaultVideoEncoderFactory(
-            eglBase!!.eglBaseContext,
-            true,  // enableIntelVp8Encoder
-            true   // enableH264HighProfile
-        )
-        val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
+            val encoderFactory = DefaultVideoEncoderFactory(
+                eglBase!!.eglBaseContext,
+                true,  // enableIntelVp8Encoder
+                true   // enableH264HighProfile
+            )
+            val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
 
-        // Hardware AEC/NS is broken on Xiaomi/MIUI, Realme, Oppo, Infinix, Tecno,
-        // Huawei, ZTE — enabling it mutes the mic. Fall back to software AEC/NS
-        // (shipped with libwebrtc) on these vendors; keep HW path on Samsung/Pixel/OnePlus.
-        val useHardwareAudioProcessing = !hasBrokenHardwareAudioProcessing()
-        Log.d(
-            TAG,
-            "Audio processing: vendor=${Build.MANUFACTURER} brand=${Build.BRAND} " +
-                "hardwareAEC=$useHardwareAudioProcessing"
-        )
-        val audioDeviceModule = JavaAudioDeviceModule.builder(context)
-            .setUseHardwareAcousticEchoCanceler(useHardwareAudioProcessing)
-            .setUseHardwareNoiseSuppressor(useHardwareAudioProcessing)
-            .createAudioDeviceModule()
+            // Hardware AEC/NS is broken on Xiaomi/MIUI, Realme, Oppo, Infinix, Tecno,
+            // Huawei, ZTE — enabling it mutes the mic. Fall back to software AEC/NS
+            // (shipped with libwebrtc) on these vendors; keep HW path on Samsung/Pixel/OnePlus.
+            val useHardwareAudioProcessing = !hasBrokenHardwareAudioProcessing()
+            Log.d(
+                TAG,
+                "Audio processing: vendor=${Build.MANUFACTURER} brand=${Build.BRAND} " +
+                    "hardwareAEC=$useHardwareAudioProcessing"
+            )
+            val audioDeviceModule = JavaAudioDeviceModule.builder(context)
+                .setUseHardwareAcousticEchoCanceler(useHardwareAudioProcessing)
+                .setUseHardwareNoiseSuppressor(useHardwareAudioProcessing)
+                .createAudioDeviceModule()
 
-        factory = PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(encoderFactory)
-            .setVideoDecoderFactory(decoderFactory)
-            .setAudioDeviceModule(audioDeviceModule)
-            .createPeerConnectionFactory()
+            factory = PeerConnectionFactory.builder()
+                .setVideoEncoderFactory(encoderFactory)
+                .setVideoDecoderFactory(decoderFactory)
+                .setAudioDeviceModule(audioDeviceModule)
+                .createPeerConnectionFactory()
 
-        isInitialized = true
-        Log.d(TAG, "Initialized with HW acceleration")
+            isInitialized = true
+            Log.d(TAG, "Initialized with HW acceleration")
+        } catch (t: Throwable) {
+            // Leave isInitialized=false so a future caller can either
+            // retry or short-circuit with a typed error. Tear down any
+            // partial state — a half-initialised EglBase pins a GL
+            // context and leaks SurfaceTexture handles.
+            Log.e(TAG, "[callee-crash-guard] NativeWebRTC initialize failed", t)
+            runCatching { eglBase?.release() }
+            eglBase = null
+            factory = null
+            isInitialized = false
+        }
     }
 
     fun getEglBase(): EglBase? = eglBase

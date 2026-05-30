@@ -1,3 +1,5 @@
+import { tRaw } from "@/shared/lib/i18n";
+
 export function formatTime(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -7,8 +9,8 @@ export function formatDate(date: Date): string {
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
 
-  if (isSameDay(date, today)) return "Today";
-  if (isSameDay(date, yesterday)) return "Yesterday";
+  if (isSameDay(date, today)) return tRaw("date.today");
+  if (isSameDay(date, yesterday)) return tRaw("date.yesterday");
 
   return date.toLocaleDateString([], {
     day: "numeric",
@@ -40,7 +42,7 @@ export function formatRelativeTime(date: Date): string {
 
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (isSameDay(date, yesterday)) return "Yesterday";
+  if (isSameDay(date, yesterday)) return tRaw("date.yesterday");
 
   // Within same week: day name
   const diffMs = now.getTime() - date.getTime();

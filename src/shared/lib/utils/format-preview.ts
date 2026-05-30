@@ -29,10 +29,11 @@ export function useFormatPreview() {
     // to empty so type-specific branches produce the proper icon+label rather
     // than mislabelling the message as deleted.
     const content = msg.content === "[message]" ? "" : msg.content;
-    // Empty-body text with no attachment is the legacy "deleted text" pattern.
-    if (!content && msg.type === MessageType.text && !msg.fileInfo) {
-      return `🚫 ${t("message.deleted")}`;
-    }
+    // WEE-43: do NOT treat an empty text body as "deleted". Redaction is now
+    // surfaced through msg.deleted (mapper sets it from softDeleted) or the
+    // legacy "🚫 Message deleted" literal above. Inferring deletion from an
+    // empty preview produced false positives whenever updateLastMessage ran
+    // with an empty body (e.g. push-driven preview after a redaction race).
     let preview: string;
     switch (msg.type) {
       case MessageType.image:
@@ -86,7 +87,7 @@ export function useFormatPreview() {
       default:
         preview = content || "";
     }
-    preview = stripMentionAddresses(preview);
+    preview = stripMentionAddresses(preview, (userId) => chatStore.getLocalAlias(userId));
     preview = stripBastyonLinks(preview);
     preview = cleanMatrixIds(preview);
 

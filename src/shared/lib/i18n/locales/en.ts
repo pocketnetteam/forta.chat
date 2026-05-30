@@ -37,6 +37,15 @@ export const en = {
   "contactList.cancel": "Cancel",
   "contactList.draft": "Draft",
 
+  // ── Contact alias (local "rename contact") ──
+  "contact.renameTitle": "Rename contact",
+  "contact.addAlias": "Add name",
+  "contact.editAlias": "Edit name",
+  "contact.removeAlias": "Remove",
+  "contact.aliasPlaceholder": "e.g. Uncle Pete",
+  "contact.aliasHint": "Visible only to you. Syncs across your devices.",
+  "contact.save": "Save",
+
   // ── Contact search ──
   "contactSearch.placeholder": "Search chats or users...",
   "contactSearch.placeholderShort": "Search",
@@ -76,6 +85,7 @@ export const en = {
   "settings.title": "Settings",
   "settings.myProfile": "My Profile",
   "settings.appearance": "Appearance",
+  "settings.storage": "Storage",
   "settings.darkMode": "Dark Mode",
   "settings.torProxy": "Tor Proxy",
   "settings.torFailed": "Tor failed to start. Try toggling off and on again.",
@@ -220,6 +230,9 @@ export const en = {
   "titleBar.maximize": "Maximize",
   "titleBar.close": "Close",
 
+  // ── Web notifications (WEE-48) ──
+  "notifications.newMessage": "New message",
+
   // ── User edit form ──
   "profile.name": "Name",
   "profile.displayName": "Your display name",
@@ -232,6 +245,7 @@ export const en = {
   "profile.saved": "Saved",
   "profile.saving": "Saving...",
   "profile.avatarUploading": "Uploading...",
+  "profile.avatarRetrying": "Connection unstable — retrying...",
   "profile.avatarError": "Failed to upload avatar",
   "profile.saveFailed": "Failed to save profile. Check your connection and try again.",
 
@@ -251,6 +265,10 @@ export const en = {
   "message.retry": "Retry",
   "message.failedToLoadImage": "Failed to load image",
   "message.tapToRetry": "Tap to retry",
+  "message.heicNotSupported": "HEIC image — open in gallery to view",
+  "message.videoUnsupportedFormat": "Video format not supported",
+  "message.videoLoadFailed": "Failed to load video",
+  "message.videoDownload": "Download",
 
   // ── Message context menu ──
   "contextMenu.reply": "Reply",
@@ -278,6 +296,7 @@ export const en = {
   "messageList.cancel": "Cancel",
 
   // ── Attachment panel ──
+  "attachment.panelLabel": "Attachments",
   "attachment.photoOrVideo": "Photo or Video",
   "attachment.file": "File",
   "attachment.poll": "Poll",
@@ -324,6 +343,7 @@ export const en = {
   "forward.cancelConfirm.cancel": "Cancel forwarding",
   "forward.resultSuccess": "Forwarded: {count}",
   "forward.resultSummary": "Forwarded {succeeded} of {total}",
+  "forward.mediaFailed": "Couldn't forward media — original unavailable or not decrypted",
   "forward.bulkTitle": "Forward {count} messages",
   "forward.bulkFrom": "From: {names}",
   "forward.bulkCancelConfirm.title": "{count} messages",
@@ -339,6 +359,9 @@ export const en = {
   "media.captionBelow": "Caption below",
   "media.captionAbove": "Caption above",
   "media.save": "Save",
+  "media.savedToGallery": "Saved to gallery",
+  "media.savedToDownloads": "Saved to Downloads",
+  "media.saveFailed": "Failed to save file",
 
   // ── Drop overlay ──
   "drop.title": "Drop files here to send",
@@ -375,6 +398,7 @@ export const en = {
   "info.add": "Add",
   "info.searchToAdd": "Search users to add...",
   "info.noUsersFound": "No users found",
+  "info.addMemberFailed": "Failed to add member. You may lack permission or the user is blocked.",
   "info.admin": "admin",
   "info.adminLabel": "Admin",
   "info.leaveGroup": "Leave group",
@@ -492,6 +516,7 @@ export const en = {
   "call.outgoing": "Outgoing call",
   "call.incomingCall": "Incoming call",
   "call.missed": "Missed",
+  "call.callBack": "Call back",
   "call.voiceCallSystem": "Voice call",
   "call.videoCallSystem": "Video call",
   "call.missedVoiceCall": "Missed voice call",
@@ -500,6 +525,8 @@ export const en = {
   "call.camera": "Camera",
   "call.speaker": "Speaker",
   "call.devices": "Devices",
+  "call.deviceLabel.earpiece": "Earpiece",
+  "call.deviceLabel.speakerphone": "Speakerphone",
   "call.peerCameraOff": "Camera is off",
   "call.you": "You",
   "call.screen": "screen",
@@ -637,6 +664,7 @@ export const en = {
   "share.linkCopied": "Link copied to clipboard",
   "share.copyFailed": "Failed to copy link",
   "share.nativeShare": "Share via...",
+  "share.sendFailed": "Failed to send file",
 
   // ── Share group link ──
   "shareGroup.inviteLink": "Invite Link",
@@ -708,7 +736,7 @@ export const en = {
   "common.loading": "Loading...",
   "common.unknownUser": "User",
   "common.encryptedChat": "Chat",
-  "message.notDecrypted": "Message not decrypted",
+  "message.notDecrypted": "Couldn't decrypt — ask the sender to resend or update the app",
 
   // ── Sync status ──
   "sync.offline": "Waiting for network...",
@@ -725,6 +753,10 @@ export const en = {
   "push.unknownSender": "Unknown",
   "push.file": "📎 File",
 
+  // ── Relative date labels (sidebar / chat list) ──
+  "date.today": "Today",
+  "date.yesterday": "Yesterday",
+
   // ── Notification channels ──
   "channel.messages": "Messages",
   "channel.messagesDesc": "Chat message notifications",
@@ -739,6 +771,8 @@ export const en = {
   "boot.syncingMessages": "Syncing messages…",
   "boot.loading": "Loading Forta Chat…",
   "boot.failed": "Failed to start Forta Chat",
+  "boot.matrixUnreachable": "Couldn't reach the chat server",
+  "boot.matrixUnreachableHint": "Check your connection and try again. If the problem persists, the server may be temporarily unavailable.",
   "boot.retry": "Retry",
   "boot.clearing": "Clearing…",
   "boot.clearCache": "Clear cache & retry",
@@ -849,6 +883,67 @@ export const en = {
   "errors.mediaUnavailable": "Media unavailable. Please try again later.",
   "errors.networkBlocked": "Server unreachable. Try enabling Tor or a VPN.",
   "errors.cryptoNotReady": "Encryption keys are still loading. Please wait.",
+  "errors.missingUrl": "File is corrupted or never arrived. Ask the sender to resend.",
+
+  // ── Send errors (WEE-20) ──
+  "errors.send.permissionDenied": "No access to files. Grant access in app settings.",
+  "errors.send.micDenied": "No access to the microphone. Grant access in app settings.",
+  "errors.send.pickerCancelled": "No file selected.",
+  "errors.send.fileTooLarge": "File too large (max 100 MB).",
+  "errors.send.dbNotReady": "Local database is not ready yet. Wait and try again.",
+  "errors.send.matrixNotReady": "Connection is not ready yet. Wait and try again.",
+  "errors.send.cryptoNotReady": "Encryption keys are still loading. Please wait.",
+  "errors.send.uploadFailed": "Failed to send. Check the connection and try again.",
+  "errors.send.queueStuck": "Send queue is stuck. Restart the app.",
+  "errors.send.unknown": "Failed to send. Please try again.",
+  "errors.send.dismiss": "Dismiss",
+  "errors.send.retry": "Retry",
+
+  // ── Storage / media cache (WEE-33) ──
+  "storage.title": "Media cache",
+  "storage.description": "Photos, videos and files load instantly from the cache instead of being re-downloaded every time you open a chat.",
+  "storage.used": "Cache size",
+  "storage.photos": "Photos",
+  "storage.videos": "Videos",
+  "storage.audio": "Audio",
+  "storage.other": "Files",
+  "storage.limitTitle": "Cache limit",
+  "storage.limitDescription": "Older items are removed automatically when the cache exceeds this size.",
+  "storage.currentLimit": "Current limit",
+  "storage.clearTitle": "Clear cache",
+  "storage.clearDescription": "Removes all locally cached media. Files will be re-downloaded on demand.",
+  "storage.clearAll": "Clear cache",
+  "storage.clearing": "Clearing…",
+  "storage.confirmTitle": "Clear media cache?",
+  "storage.confirmBody": "All cached photos, videos and files will be removed from this device. Originals stay on the server.",
+  // Tabs + per-entry actions
+  "storage.tabs.chats": "Chats",
+  "storage.tabs.media": "Media",
+  "storage.tabs.files": "Files",
+  "storage.tabs.voice": "Voice",
+  "storage.empty": "Nothing cached yet",
+  "storage.unknownChat": "Unknown chat",
+  "storage.unnamed": "Untitled",
+  "storage.voiceNote": "Voice message",
+  "storage.itemCount": "{n} items",
+  "storage.deleteFromChat": "Clear chat cache",
+  "storage.deleteEntry": "Remove from cache",
+  "storage.confirmRoomTitle": "Clear cache for {name}?",
+  "storage.confirmRoomBody": "All cached media from this chat will be removed from this device. Originals stay on the server.",
+  // Friendly labels — replace generic upload names (image.png / audio.webm / …)
+  "storage.kind.photo": "Photo",
+  "storage.kind.video": "Video",
+  "storage.kind.media": "Media",
+  "storage.kind.voice": "Voice message",
+  "storage.kind.audio": "Audio",
+  "storage.kind.file": "File",
+  // Chat detail screen
+  "storage.chatShareOfTotal": "This chat takes {pct}% of the media cache.",
+  "storage.totalForChat": "Total cached",
+  "storage.openInChat": "Open in chat",
+  "storage.openFile": "Open file",
+  "storage.previewLoading": "Loading…",
+  "storage.previewUnavailable": "Preview unavailable",
 } as const;
 
 export type TranslationKey = keyof typeof en;

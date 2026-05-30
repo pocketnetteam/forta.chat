@@ -225,6 +225,63 @@ describe("useFileDownload — auto bug-report blacklist & dedup", () => {
     expect(bugReportOpen).toHaveBeenCalledTimes(1);
   });
 
+  // ── MissingUrlError (Session 57) ─────────────────────────────────────
+  // Encrypted attachments without a usable mxc url used to throw a generic
+  // `Error("No file URL")` that auto-opened the bug-report modal — overwhelming
+  // signal in bugs #740 #739 #719 #567. Now: typed MissingUrlError → silent
+  // toast, no auto-report, no retry waste.
+
+  it("does NOT auto-open bug-report when fileInfo.url is empty (MissingUrlError)", async () => {
+    const scope = effectScope();
+    await scope.run(async () => {
+      const { download } = useFileDownload();
+      const msg = makeMessage({
+        id: "$evt-no-url",
+        _key: "client-no-url",
+        fileInfo: {
+          name: "report.pdf",
+          type: "application/pdf",
+          size: 12345,
+          url: "", // No url — simulates parse failure on legacy DB row
+          secrets: { keys: "k", block: 1, v: 1 },
+        },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await runWithFakeTimers(() => download(msg as any));
+    });
+    scope.stop();
+
+    expect(bugReportOpen).not.toHaveBeenCalled();
+  });
+
+  it("does NOT issue a network fetch when fileInfo.url is empty", async () => {
+    // The empty-url guard must short-circuit before fetch so callers never
+    // burn a network roundtrip on an obviously-broken message.
+    const fetchSpy = vi.fn() as unknown as Mock;
+    global.fetch = fetchSpy;
+
+    const scope = effectScope();
+    await scope.run(async () => {
+      const { download } = useFileDownload();
+      const msg = makeMessage({
+        id: "$evt-no-url-fetch",
+        _key: "client-no-url-fetch",
+        fileInfo: {
+          name: "x.bin",
+          type: "application/octet-stream",
+          size: 1,
+          url: "",
+          secrets: { keys: "k", block: 1, v: 1 },
+        },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await runWithFakeTimers(() => download(msg as any));
+    });
+    scope.stop();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("emits a SECOND bug-report after the dedup window (5 minutes) elapses", async () => {
     vi.setSystemTime(new Date("2026-04-29T10:00:00Z"));
 

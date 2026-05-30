@@ -51,6 +51,11 @@ export interface FileInfo {
   videoNote?: boolean;
   /** Thumbnail URL for video circles */
   thumbnailUrl?: string;
+  /** True when the m.audio event is a voice-message recording (MSC3245)
+   *  or carries a waveform (legacy bastyon-chat marker). When false, the
+   *  audio is a generic file that should render as a file-bubble with a
+   *  save-to-disk affordance instead of the voice-bubble player. */
+  isVoice?: boolean;
 }
 
 export interface ReplyTo {
@@ -76,6 +81,11 @@ export interface ForwardingMessage {
   withSenderInfo: boolean;
   /** True when message originates from Android Share Sheet (not internal forward) */
   isExternalShare?: boolean;
+  /** Original event timestamp — only meaningful for internal forwards of
+   *  real messages (initForward). Used by the media re-upload path to
+   *  derive the right decryption context. Omitted for synthetic
+   *  ForwardingMessages (external share, channel post share). */
+  sourceTimestamp?: number;
 }
 
 /** Open Graph metadata for URL link previews */

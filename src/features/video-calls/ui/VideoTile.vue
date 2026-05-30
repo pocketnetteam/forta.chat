@@ -30,6 +30,11 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   pin: [tileId: string];
+  // Natural aspect ratio (width / height) of the bound stream, emitted once
+  // metadata is known and again on track resize. Lets a parent size its
+  // container to the source so a `cover` thumbnail no longer crops the frame
+  // (forta-bugs#433 / WEE-53 — self-preview PiP).
+  aspectchange: [ratio: number];
 }>();
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -41,7 +46,21 @@ function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null) {
 
 watch(
   () => props.stream,
-  (stream) => bindStream(videoRef.value, stream),
+  (stream) => {
+    bindStream(videoRef.value, stream);
+    // Reset captured aspect; new stream needs a fresh `loadedmetadata`
+    // before the wrapper can reshape. Without this the desktop side kept
+    // the previous voice-only aspect after the phone enabled its camera
+    // mid-call and the user saw a stretched/dot remote tile (WEE-45).
+    //
+    // We deliberately do NOT re-emit `aspectchange` here. A parent sizing a
+    // container from the ratio (the self-view PiP, WEE-53) keeps the prior
+    // aspect until the new stream's `loadedmetadata` fires a fresh value —
+    // typically within a frame or two. Emitting a reset would force a size
+    // blip to the fallback on every swap, including front↔back camera flips
+    // where the ratio is usually identical; persisting is the calmer choice.
+    videoAspect.value = null;
+  },
   { flush: "post" },
 );
 
@@ -50,6 +69,45 @@ onMounted(() => {
 });
 
 const showAvatar = computed(() => props.videoOff || !props.stream);
+
+// WEE-45 — Google-Meet-style adaptive aspect. When the source is portrait
+// (phone camera held vertically) and the container is landscape (desktop),
+// plain `object-fit: contain` letterboxes the video into a narrow vertical
+// strip in the middle — users described this as "точка" / "тонкая полоска".
+// Capturing the natural aspect from the actual track and applying it to a
+// max-bounded video element produces an inset that hugs the picture
+// regardless of orientation, matching the Meet/Zoom behaviour the user
+// expects. Only kicks in when `objectFit === 'contain'`; the local PiP
+// (cover) still fills its tile.
+const videoAspect = ref<number | null>(null);
+
+function captureAspect() {
+  const v = videoRef.value;
+  if (!v) return;
+  const w = v.videoWidth;
+  const h = v.videoHeight;
+  if (w > 0 && h > 0) {
+    videoAspect.value = w / h;
+    emit("aspectchange", w / h);
+  }
+}
+
+const adaptiveStyle = computed<Record<string, string>>(() => {
+  // Cover mode (local PiP) — keep full-fill behaviour, no aspect override.
+  if (props.objectFit !== "contain") return {};
+  if (videoAspect.value === null) return {};
+  return {
+    aspectRatio: String(videoAspect.value),
+    maxWidth: "100%",
+    maxHeight: "100%",
+    width: "auto",
+    height: "auto",
+  };
+});
+
+const wrapperFlexClass = computed(() =>
+  props.objectFit === "contain" ? "flex items-center justify-center" : "",
+);
 
 function handleClick() {
   if (props.pinnable && props.tileId) {
@@ -61,25 +119,34 @@ function handleClick() {
 <template>
   <div
     class="video-tile relative overflow-hidden rounded-xl"
-    :class="{
-      'cursor-pointer': pinnable,
-      'video-tile--active': active,
-    }"
+    :class="[
+      wrapperFlexClass,
+      {
+        'cursor-pointer': pinnable,
+        'video-tile--active': active,
+      },
+    ]"
     @click="handleClick"
   >
-    <!-- Video element -->
+    <!-- Video element. For `contain` mode the element auto-shrinks to the
+         captured aspect-ratio (Google-Meet-style adaptive) so portrait
+         sources render as tall and landscape sources render as wide,
+         instead of being letterboxed inside a fixed-shape container. -->
     <video
       ref="videoRef"
-      class="h-full w-full"
       :class="{
-        'object-cover': objectFit === 'cover',
+        'h-full w-full object-cover': objectFit === 'cover',
         'object-contain': objectFit === 'contain',
+        'h-full w-full': objectFit === 'contain' && videoAspect === null,
         'scale-x-[-1]': mirror,
         invisible: showAvatar,
       }"
+      :style="adaptiveStyle"
       autoplay
       playsinline
       :muted="muted"
+      @loadedmetadata="captureAspect"
+      @resize="captureAspect"
     />
 
     <!-- Avatar overlay when video is off or no stream -->

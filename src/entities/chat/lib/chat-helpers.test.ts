@@ -11,7 +11,7 @@
  *   A bug here breaks: encrypted file decryption, image/video rendering.
  */
 import { describe, it, expect } from "vitest";
-import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds } from "./chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, isVoiceAudioContent, MSC3245_VOICE_KEY } from "./chat-helpers";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MessageType } from "../model/types";
 
@@ -295,6 +295,68 @@ describe("parseFileInfo", () => {
     expect(info!.waveform).toBeUndefined();
   });
 
+  // ─── m.audio voice vs file (WEE-50 / forta-bugs#841) ───────────
+  // The voice player UI must only render for actual voice recordings.
+  // Generic audio attachments (MP3 from gallery, podcasts, …) must be
+  // surfaced as files with a save-to-disk affordance.
+
+  it("flags m.audio with MSC3245 voice marker as a voice recording", () => {
+    const content = {
+      body: "voice.ogg",
+      [MSC3245_VOICE_KEY]: {},
+      info: { mimetype: "audio/ogg", size: 4000, url: "https://url", duration: 5000 },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(true);
+  });
+
+  it("flags m.audio with waveform as a voice recording (legacy fallback)", () => {
+    const content = {
+      body: "voice.ogg",
+      info: { mimetype: "audio/ogg", size: 4000, url: "https://url", duration: 5000, waveform: [100, 200, 300] },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(true);
+  });
+
+  it("does NOT flag plain m.audio MP3 (gallery attachment) as a voice recording", () => {
+    const content = {
+      body: "song.mp3",
+      info: { mimetype: "audio/mpeg", size: 3000, url: "https://url" },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(false);
+  });
+
+  // m.file is never a voice recording — Forta ships gallery picks as m.file
+  // regardless of MIME, so the receiver-side decoder must NOT treat audio
+  // MIME under m.file as a voice message (forta-bugs#841 / WEE-50).
+  it("never flags m.file as voice (pbody path)", () => {
+    const content = {
+      pbody: { name: "song.mp3", type: "audio/mpeg", size: 3000, url: "https://url" },
+    };
+    const info = parseFileInfo(content, "m.file");
+    expect(info!.isVoice).toBe(false);
+  });
+
+  it("never flags m.file as voice (JSON-body path)", () => {
+    const content = {
+      body: JSON.stringify({ name: "track.m4a", type: "audio/mp4", size: 5000, url: "https://url" }),
+    };
+    const info = parseFileInfo(content, "m.file");
+    expect(info!.isVoice).toBe(false);
+  });
+
+  it("never flags m.file as voice (canonical Matrix encrypted-file path)", () => {
+    const content = {
+      body: "podcast.mp3",
+      file: { url: "mxc://server/abc", mimetype: "audio/mpeg" },
+      info: { mimetype: "audio/mpeg", size: 200 },
+    };
+    const info = parseFileInfo(content, "m.file");
+    expect(info!.isVoice).toBe(false);
+  });
+
   // ─── m.video ────────────────────────────────────────────────────
 
   it("parses m.video with dimensions and duration", () => {
@@ -326,6 +388,209 @@ describe("parseFileInfo", () => {
     const info = parseFileInfo(content, "m.video");
     expect(info).toBeDefined();
     expect(info!.url).toBe("https://matrix.server/video/fallback");
+  });
+});
+
+// ─── parseFileInfo — encrypted attachment via content.file.url (Session 57) ───
+// Canonical Matrix encrypted attachments carry url under `content.file.url`
+// alongside { iv, key }. Some non-Bastyon clients (Element, Cinny, FluffyChat)
+// emit m.image/m.audio/m.video/m.file without copying that url to
+// `content.url` / `content.info.url`. Forta must read content.file.url as a
+// fallback or tap «Download» throws "No file URL" and opens a bug-report.
+
+describe("parseFileInfo — encrypted attachment (content.file.url fallback)", () => {
+  it("reads url from content.file.url when content.url and info.url are missing (m.file)", () => {
+    const content = {
+      msgtype: "m.file",
+      body: "report.pdf",
+      file: {
+        url: "mxc://matrix.bastyon.com/abc123",
+        mimetype: "application/pdf",
+        key: { kty: "oct", k: "..." },
+        iv: "...",
+      },
+      info: { mimetype: "application/pdf", size: 12345 },
+    };
+    const fi = parseFileInfo(content, "m.file");
+    expect(fi).toBeDefined();
+    expect(fi!.url).toBe("mxc://matrix.bastyon.com/abc123");
+  });
+
+  it("reads url from content.file.url for m.image", () => {
+    const content = {
+      body: "photo.jpg",
+      file: { url: "mxc://server/img1", mimetype: "image/jpeg" },
+      info: { mimetype: "image/jpeg", w: 100, h: 200 },
+    };
+    const fi = parseFileInfo(content, "m.image");
+    expect(fi).toBeDefined();
+    expect(fi!.url).toBe("mxc://server/img1");
+  });
+
+  it("reads url from content.file.url for m.audio", () => {
+    const content = {
+      body: "voice.opus",
+      file: { url: "mxc://server/aud1", mimetype: "audio/opus" },
+      info: { mimetype: "audio/opus", duration: 5000 },
+    };
+    const fi = parseFileInfo(content, "m.audio");
+    expect(fi).toBeDefined();
+    expect(fi!.url).toBe("mxc://server/aud1");
+  });
+
+  it("reads url from content.file.url for m.video", () => {
+    const content = {
+      body: "video.mp4",
+      file: { url: "mxc://server/vid1", mimetype: "video/mp4" },
+      info: { mimetype: "video/mp4", w: 1920, h: 1080 },
+    };
+    const fi = parseFileInfo(content, "m.video");
+    expect(fi).toBeDefined();
+    expect(fi!.url).toBe("mxc://server/vid1");
+  });
+
+  it("prefers info.url over content.file.url when both present (m.image)", () => {
+    const content = {
+      body: "x.jpg",
+      file: { url: "mxc://server/from-file" },
+      info: { mimetype: "image/jpeg", url: "mxc://server/from-info", w: 1, h: 1 },
+    };
+    const fi = parseFileInfo(content, "m.image");
+    expect(fi!.url).toBe("mxc://server/from-info");
+  });
+
+  it("prefers pbody.url over content.file.url when both present (m.file)", () => {
+    const content = {
+      pbody: { name: "x.pdf", type: "application/pdf", size: 0, url: "mxc://server/from-pbody" },
+      file: { url: "mxc://server/from-file" },
+    };
+    const fi = parseFileInfo(content, "m.file");
+    expect(fi!.url).toBe("mxc://server/from-pbody");
+  });
+
+  it("m.file without pbody but with content.file.url returns valid FileInfo", () => {
+    // No pbody → first branch skipped; second branch (body-as-JSON) also fails.
+    // Need a third branch that handles raw m.file with content.file.url.
+    const content = {
+      body: "report.pdf",
+      file: {
+        url: "mxc://matrix.bastyon.com/abc123",
+        mimetype: "application/pdf",
+        key: { kty: "oct", k: "..." },
+        iv: "...",
+      },
+      info: { mimetype: "application/pdf", size: 12345 },
+    };
+    const fi = parseFileInfo(content, "m.file");
+    expect(fi).toBeDefined();
+    expect(fi!.url).toBe("mxc://matrix.bastyon.com/abc123");
+  });
+});
+
+// ─── parseFileInfo — filename normalization (Session 53) ──────────
+
+describe("parseFileInfo — filename normalization by mime", () => {
+  it("adds .jpg when m.image body has no extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 100, h: 100 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.jpg");
+  });
+
+  it("keeps existing extension when present", () => {
+    const fi = parseFileInfo(
+      {
+        body: "screenshot.png",
+        info: { mimetype: "image/png", size: 100, url: "mxc://x", w: 100, h: 100 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("screenshot.png");
+  });
+
+  it("adds .mp4 for m.video without extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Video",
+        info: { mimetype: "video/mp4", size: 100, url: "mxc://x" },
+      },
+      "m.video",
+    );
+    expect(fi?.name).toBe("Video.mp4");
+  });
+
+  it("adds .mp3 for m.audio without extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Audio",
+        info: { mimetype: "audio/mpeg", size: 100, url: "mxc://x" },
+      },
+      "m.audio",
+    );
+    expect(fi?.name).toBe("Audio.mp3");
+  });
+
+  it("falls back to .bin for unknown mime", () => {
+    const fi = parseFileInfo(
+      {
+        body: "blob",
+        info: { mimetype: "application/x-foo", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("blob.bin");
+  });
+
+  it("strips encrypted/ prefix from mime when picking extension", () => {
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "encrypted/image/png", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.png");
+  });
+
+  it("treats numeric trailing segment as non-extension (holiday.2024)", () => {
+    // Without alpha-first guard "holiday.2024" looks like it already has an
+    // extension and saves without .jpg. Tighter regex restores .jpg.
+    const fi = parseFileInfo(
+      {
+        body: "holiday.2024",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("holiday.2024.jpg");
+  });
+
+  it("strips MIME parameters before mapping to extension", () => {
+    // "image/jpeg; charset=binary" must still resolve to .jpg, not .bin.
+    const fi = parseFileInfo(
+      {
+        body: "Image",
+        info: { mimetype: "image/jpeg; charset=binary", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("Image.jpg");
+  });
+
+  it("uses default name stem when body is empty string", () => {
+    // "" ?? "image" returned "" — file then saved as ".jpg" with no stem.
+    const fi = parseFileInfo(
+      {
+        body: "",
+        info: { mimetype: "image/jpeg", size: 100, url: "mxc://x", w: 1, h: 1 },
+      },
+      "m.image",
+    );
+    expect(fi?.name).toBe("image.jpg");
   });
 });
 
@@ -505,5 +770,39 @@ describe("matrixIdToAddress — non-printable character validation", () => {
     const addr = "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu";
     const hex = hexEncode(addr).toLowerCase();
     expect(matrixIdToAddress(`@${hex}:server`)).toBe(addr);
+  });
+});
+
+// ─── isVoiceAudioContent — voice recording vs audio file (WEE-50) ───
+//
+// The audio-rendering branch in MessageBubble.vue decides between
+// VoiceMessage and the generic file bubble using this helper. Misclassifying
+// an MP3 picked from the gallery as a voice message (forta-bugs#841) hides
+// the save-to-disk button and presents a player UI with no waveform — so
+// this test set has to lock down both directions of the boundary.
+
+describe("isVoiceAudioContent", () => {
+  it("returns true when the MSC3245 voice marker is on the content", () => {
+    expect(isVoiceAudioContent({ [MSC3245_VOICE_KEY]: {} }, null)).toBe(true);
+  });
+
+  it("returns true when the MSC3245 voice marker is on info", () => {
+    expect(isVoiceAudioContent(null, { [MSC3245_VOICE_KEY]: {} })).toBe(true);
+  });
+
+  it("returns true when info has a non-empty waveform (legacy fallback)", () => {
+    expect(isVoiceAudioContent({}, { waveform: [1, 2, 3] })).toBe(true);
+  });
+
+  it("returns false when neither marker nor waveform present", () => {
+    expect(isVoiceAudioContent({}, { mimetype: "audio/mpeg" })).toBe(false);
+  });
+
+  it("returns false for an empty waveform array (heuristic safety)", () => {
+    expect(isVoiceAudioContent({}, { waveform: [] })).toBe(false);
+  });
+
+  it("returns false when both inputs are null", () => {
+    expect(isVoiceAudioContent(null, null)).toBe(false);
   });
 });

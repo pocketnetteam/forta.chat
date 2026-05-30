@@ -11,6 +11,14 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
+/** Watchdog tick interval. The watchdog is a safety net for cases where the
+ *  connectivity layer fails to deliver a "back online" signal — most commonly
+ *  Android WebView after device sleep+wake, where `window.online` may never
+ *  fire even though `navigator.onLine` has already flipped to true. Once per
+ *  tick we look for stuck pending ops and resume the queue if the underlying
+ *  network is actually available. */
+const WATCHDOG_INTERVAL_MS = 30_000;
+
 /** Per-phase media pipeline timeouts. Splitting one 5-minute cap into
  *  per-phase caps lets retries surface phase-specific failures (e.g. crypto
  *  hang vs. upload stall) instead of a generic "timed out" after 5 min. */
@@ -49,6 +57,84 @@ function computeBackoff(retries: number): number {
   return base + Math.random() * Math.min(base * 0.5, 5_000);
 }
 
+/** Short, in-attempt backoff for the upload sub-step (forta-bugs#831 /
+ *  #725 / #423 / WEE-50). Network blips on flaky Android cell links lose
+ *  the first POST to the media repo even when the rest of the pipeline is
+ *  fine; without an in-line retry the whole op fails and the user waits
+ *  out the engine-level 1-30s backoff. Three quick attempts cover the
+ *  vast majority of single-packet drops within ~6 s before falling back
+ *  to the queue-level retry logic. Delays kept in ms. */
+const UPLOAD_RETRY_DELAYS_MS = [500, 1500, 4000] as const;
+
+/** Errors that the upload retry loop must NOT swallow. Aborts are user
+ *  intent (cancelMediaUpload), and deterministic server-side failures are
+ *  retry-immune — retrying just delays the failure UX. */
+function isUploadFatal(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof Error) {
+    // Matrix media repo returns 413 (payload too large) and 4xx auth/quota
+    // failures that are not retryable. We don't have typed errors at this
+    // layer, so substring-match the bare message — same approach the
+    // download path takes. Matches only digit groups that look like an
+    // HTTP-status mention (preceded by "status" or by start-of-message /
+    // whitespace + non-digit) so a filename like `meeting_403.mp3` doesn't
+    // poison the heuristic.
+    if (/(?:status\s*|^|\s)(?:413|415|401|403)\b|too large|payload too large/i.test(err.message)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** AbortSignal-aware sleep. Resolves after `ms` or rejects immediately on
+ *  abort — the latter is important so `cancelMediaUpload` can interrupt the
+ *  backoff between attempts instead of forcing the user to wait out the
+ *  4-second tail. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Upload cancelled", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Wrap `matrixService.uploadContent` with short in-attempt retries.
+ *  See `UPLOAD_RETRY_DELAYS_MS` for the rationale. Returns the mxc:// URL
+ *  emitted by the final successful attempt. Throws the LAST error if every
+ *  attempt fails so the engine-level retry loop can take over with its
+ *  longer backoff.
+ *
+ *  Total: 1 initial attempt + UPLOAD_RETRY_DELAYS_MS.length retries. */
+async function uploadWithRetry(
+  upload: () => Promise<string>,
+  signal: AbortSignal,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= UPLOAD_RETRY_DELAYS_MS.length; attempt++) {
+    if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+    if (attempt > 0) {
+      await sleep(UPLOAD_RETRY_DELAYS_MS[attempt - 1], signal);
+    }
+    try {
+      return await upload();
+    } catch (e) {
+      lastErr = e;
+      if (isUploadFatal(e)) throw e;
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * SyncEngine processes pending operations (outbound queue).
  *
@@ -67,6 +153,9 @@ export class SyncEngine {
   private scheduled = false;
   private disposed = false;
   private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Watchdog interval handle. Drains stuck queues even when no
+   *  connectivity transition signal arrives (Android WebView sleep+wake). */
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   /** AbortControllers for in-flight media uploads, keyed by clientId.
    *  Populated by syncSendFile at the start of each execution, drained in
    *  its finally block. cancelMediaUpload() signals through this map to
@@ -89,6 +178,7 @@ export class SyncEngine {
   ) {
     this.getRoomCrypto = getRoomCrypto;
     this.onChange = onChange;
+    this.startWatchdog();
   }
 
   /** Update online/offline state. Resumes queue on reconnect and
@@ -153,6 +243,47 @@ export class SyncEngine {
     this.onChange = cb;
   }
 
+  /**
+   * Snapshot of the outbound queue used by the UI banner to detect stuck sends.
+   *
+   * `oldestPendingAgeMs` is `null` when the queue has no due ops. When it is
+   * large the UI can warn the user that something is wedged — e.g. crypto
+   * never resolved or media server is unreachable — instead of leaving them
+   * staring at "sending…" forever.
+   *
+   * Why exposed as a polled snapshot and not a Dexie live-query:
+   *  - The caller (status banner) is allowed to be eventually consistent;
+   *    polling once every few seconds is cheaper than a hot live-query that
+   *    fires on every progress write.
+   *  - Keeps the SyncEngine's public surface minimal — Dexie tables are
+   *    internal state.
+   */
+  async getQueueHealth(): Promise<{
+    pendingCount: number;
+    failedCount: number;
+    syncingCount: number;
+    oldestPendingAgeMs: number | null;
+  }> {
+    const [pending, failed, syncing] = await Promise.all([
+      this.db.pendingOps.where("status").equals("pending").toArray(),
+      this.db.pendingOps.where("status").equals("failed").count(),
+      this.db.pendingOps.where("status").equals("syncing").count(),
+    ]);
+    const now = Date.now();
+    let oldest: number | null = null;
+    for (const op of pending) {
+      const created = op.createdAt ?? op.lastAttemptAt ?? now;
+      const age = now - created;
+      if (oldest === null || age > oldest) oldest = age;
+    }
+    return {
+      pendingCount: pending.length,
+      failedCount: failed,
+      syncingCount: syncing,
+      oldestPendingAgeMs: oldest,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Queue processing
   // ---------------------------------------------------------------------------
@@ -181,7 +312,56 @@ export class SyncEngine {
       clearTimeout(this.scheduledTimer);
       this.scheduledTimer = null;
     }
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     this.scheduled = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Watchdog — last-resort recovery when no connectivity signal arrives
+  // ---------------------------------------------------------------------------
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer || this.disposed) return;
+    this.watchdogTimer = setInterval(() => {
+      if (this.disposed) return;
+      this.watchdogCheck().catch((e) =>
+        console.warn("[SyncEngine] watchdog tick failed:", e),
+      );
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  /**
+   * Per-tick safety check. Three states matter:
+   *  1. No queued work — nothing to do.
+   *  2. Engine thinks it is offline but `navigator.onLine` is true — the
+   *     connectivity transition was missed (Android sleep+wake bug);
+   *     force `setOnline(true)` so retryAllFailed + processQueue run.
+   *  3. Engine is online but scheduler is idle — probably a race where a
+   *     wake-up timer was cleared; kick a fresh tick.
+   */
+  private async watchdogCheck(): Promise<void> {
+    const pending = await this.db.pendingOps
+      .where("status")
+      .anyOf(["pending", "syncing"])
+      .count();
+    if (pending === 0) return;
+
+    if (!this.online) {
+      if (typeof navigator !== "undefined" && navigator.onLine) {
+        console.info(
+          `[SyncEngine] watchdog: ${pending} ops stuck while navigator.onLine=true, forcing setOnline(true)`,
+        );
+        this.setOnline(true);
+      }
+      return;
+    }
+
+    if (!this.scheduled && !this.processing) {
+      this.kickScheduler(0);
+    }
   }
 
   /** Schedule processTick after `delayMs` unless a tick is already pending. */
@@ -224,6 +404,21 @@ export class SyncEngine {
         this.onChange?.(op.roomId);
       } catch (e) {
         if (this.disposed) return;
+
+        // Race guard: Matrix may have accepted the event server-side even
+        // though the SDK threw (read timeout, CORS race, etc.). When the
+        // server-side `/sync` echo arrives via EventWriter → upsertFromServer
+        // the local message picks up its eventId and flips to "synced"
+        // before this catch runs. In that case the queued op is already
+        // satisfied — drop it without flagging the message as failed,
+        // otherwise the user sees a red retry indicator on a message the
+        // peer actually received (WEE-40).
+        if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
+          await this.db.pendingOps.delete(op.id!);
+          this.onChange?.(op.roomId);
+          return;
+        }
+
         const retries = op.retries + 1;
         if (retries >= op.maxRetries) {
           await this.db.pendingOps.update(op.id!, {
@@ -434,6 +629,11 @@ export class SyncEngine {
       /** Optional top-level event fields merged after msgtype — e.g.
        *  caption / captionAbove / bastyon-specific flags. */
       eventExtras?: Record<string, unknown>;
+      /** Forward attribution for the receiving side. When present the
+       *  outbound Matrix event gets a `forwarded_from` field so recipients
+       *  render «Forwarded from <name>» on top of the media bubble. Mirrors
+       *  syncSendMessage. */
+      forwardedFrom?: { senderId: string; senderName?: string };
     };
     const matrixService = getMatrixClientService();
 
@@ -485,8 +685,20 @@ export class SyncEngine {
         // fire-and-forget; progress is advisory and must not stall upload
         void this.messageRepo.updateUploadProgress(op.clientId, percent);
       });
+      // The retry loop sits *inside* the timeout so the deadline covers the
+      // whole upload phase (including in-attempt retries) rather than being
+      // reset between attempts — protects against a runaway 4×4-min loop on
+      // a flaky link.
       const url = await withTimeout(
-        matrixService.uploadContent(fileToUpload, onProgress, controller.signal),
+        uploadWithRetry(
+          () =>
+            matrixService.uploadContent(
+              fileToUpload,
+              onProgress,
+              controller.signal,
+            ),
+          controller.signal,
+        ),
         MEDIA_UPLOAD_TIMEOUT_MS,
         "Media upload",
       );
@@ -505,15 +717,24 @@ export class SyncEngine {
       // existing viewers keep rendering. Callers that need richer metadata
       // (m.image with dimensions, m.audio with duration) pass eventInfo /
       // eventExtras which merge on top.
+      // m.file with no explicit body: embed url + secrets inside the JSON
+      // body so any client (old bastyon-chat parsers, recipients running
+      // matrix-client.ts that JSON.parses body into pbody) can recover the
+      // mxc URL even when they ignore top-level content.url. Without this
+      // forwarded/uploaded PDFs throw MissingUrlError on the sender after
+      // /sync re-parses the event (WEE-28).
+      const defaultFileBody: Record<string, unknown> = {
+        name: payload.fileName,
+        type: payload.mimeType,
+        size: attachment.size,
+      };
+      if (payload.msgtype === "m.file") {
+        defaultFileBody.url = url;
+        if (secrets) defaultFileBody.secrets = secrets;
+      }
       const content: Record<string, unknown> = {
         msgtype: payload.msgtype,
-        body:
-          payload.body ??
-          JSON.stringify({
-            name: payload.fileName,
-            type: payload.mimeType,
-            size: attachment.size,
-          }),
+        body: payload.body ?? JSON.stringify(defaultFileBody),
         url,
         ...(payload.eventExtras ?? {}),
       };
@@ -524,6 +745,12 @@ export class SyncEngine {
         };
       } else if (secrets) {
         content.secrets = secrets;
+      }
+      if (payload.forwardedFrom) {
+        content.forwarded_from = {
+          sender_id: payload.forwardedFrom.senderId,
+          sender_name: payload.forwardedFrom.senderName,
+        };
       }
 
       const serverEventId = await withTimeout(
@@ -745,14 +972,31 @@ export class SyncEngine {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  /** Mark the message associated with a failed operation */
+  /** Mark the message associated with a failed operation.
+   *  No-op when the message has already been confirmed (eventId present or
+   *  status already "synced") — the matrix-js-sdk error happened after the
+   *  server actually accepted the event and the /sync echo restored state.
+   *  Without this guard the watchdog/retry-exhaustion path would flip a
+   *  successfully delivered message back to "failed" and surface a false
+   *  retry indicator (WEE-40). */
   private async markMessageFailed(op: PendingOperation): Promise<void> {
-    if (op.clientId) {
-      await this.messageRepo.updateStatus(
-        { clientId: op.clientId },
-        "failed",
-      );
-    }
+    if (!op.clientId) return;
+    if (await this.isMessageAlreadyConfirmed(op.clientId)) return;
+    await this.messageRepo.updateStatus(
+      { clientId: op.clientId },
+      "failed",
+    );
+  }
+
+  /** Returns true when the local message row for `clientId` already has a
+   *  server eventId or has been flipped to "synced" — typically by an
+   *  upsertFromServer echo that won the race against the queue's failure
+   *  handler. Used to suppress false-failed transitions in markMessageFailed
+   *  and processTick. */
+  private async isMessageAlreadyConfirmed(clientId: string): Promise<boolean> {
+    const msg = await this.messageRepo.getByClientId(clientId);
+    if (!msg) return false;
+    return Boolean(msg.eventId) || msg.status === "synced";
   }
 
   /** Enqueue a new operation. Returns the operation ID. */

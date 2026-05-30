@@ -16,11 +16,13 @@ import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto"
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
+import { initMediaCache, clearMediaCache, closeMediaCache } from "@/shared/lib/media-cache";
 import { clearAllDrafts } from "@/shared/lib/drafts";
 import { clearQueue } from "@/shared/lib/offline-queue";
 import { deleteLegacyCache } from "@/shared/lib/cache/chat-cache";
 import { clearAccountLocalStorage } from "@/shared/lib/clear-account-storage";
 import { isNative } from "@/shared/lib/platform";
+import { onConnectivityChange } from "@/shared/lib/connectivity";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
 import { mergeObjects } from "@/shared/lib/merge-objects";
@@ -43,7 +45,12 @@ import {
   loadMnemonic,
   clearMnemonic,
   syncProfileToMatrix,
+  readSelfProfile,
+  writeSelfProfile,
+  clearSelfProfile,
+  mergeSelfProfileWithRemote,
 } from "../lib";
+import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { createKeyPair } from "./key-pair";
 
 const NAMESPACE = "auth";
@@ -129,8 +136,13 @@ function extractErrorCode(err: unknown): number | null {
 export type RegistrationPhase = 'init' | 'broadcasting' | 'confirming' | 'done' | 'error';
 
 // Store-level references for cleanup on logout
-let _onlineHandler: (() => void) | null = null;
-let _offlineHandler: (() => void) | null = null;
+//
+// _connectivityUnsub: unified subscription to onConnectivityChange (which
+// fans in @capacitor/network on native + window.online/offline on web).
+// Replaces the previous raw window.online/offline listeners — those alone
+// did not fire reliably on Android WebView after device sleep+wake, leaving
+// the SyncEngine stuck offline forever (#705, #496).
+let _connectivityUnsub: (() => void) | null = null;
 let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
 // Per-room debounce timers for peer-keys recheck after member events.
@@ -254,10 +266,36 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   const { execute: editUserData, isLoading: isEditingUserData } =
     useAsyncOperation(async (userData: UserData) => {
+      // Snapshot the active address before the RPC so a logout that happens
+      // during the broadcast cannot misroute the cache write into another
+      // account.
+      const editAddress = address.value!;
+      const merged = mergeObjects(userInfo.value!, userData);
       const result = await appInitializer.editUserData({
-        address: address.value!,
-        userData: mergeObjects(userInfo.value!, userData)
+        address: editAddress,
+        userData: merged
       });
+
+      if (result?.success === true && address.value === editAddress) {
+        // Persist the just-saved profile so it survives Pocketnet RPC
+        // returning the *pre-edit* name on the next boot — root cause of
+        // WEE-26 / forta-bugs#596, #580.
+        const prev = readSelfProfile(editAddress);
+        writeSelfProfile({
+          address: editAddress,
+          name: merged.name ?? "",
+          about: merged.about ?? "",
+          image: merged.image ?? "",
+          site: merged.site ?? "",
+          language: merged.language ?? "",
+          localEditedAt: Date.now(),
+          syncedAt: prev?.syncedAt ?? 0,
+        });
+        // Reflect the new values in in-memory userInfo immediately so the
+        // form (and any other consumer) shows the saved name without
+        // waiting for a fresh fetchUserInfo to settle.
+        setUserInfo(merged);
+      }
 
       // Best-effort Matrix profile sync — ensures peers see the user's chosen
       // nickname + avatar instead of a truncated wallet address. Pocketnet
@@ -413,16 +451,30 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       );
       chatStore.setChatDbKit(chatDbKit);
 
-      // Wire SyncEngine connectivity (store refs for cleanup on logout)
-      if (typeof window !== "undefined") {
-        // Remove previous listeners if any (re-login without full page reload)
-        if (_onlineHandler) window.removeEventListener("online", _onlineHandler);
-        if (_offlineHandler) window.removeEventListener("offline", _offlineHandler);
-        _onlineHandler = () => chatDbKit.syncEngine.setOnline(true);
-        _offlineHandler = () => chatDbKit.syncEngine.setOnline(false);
-        window.addEventListener("online", _onlineHandler);
-        window.addEventListener("offline", _offlineHandler);
+      // WEE-33: spin up the persistent media cache so subsequent chat opens
+      // hit the disk cache instead of re-downloading every photo/video.
+      // Singleton; safe to call repeatedly across re-inits.
+      initMediaCache(chatDbKit.db);
+
+      // Contact aliases (Session 51): hydrate cache from Dexie immediately so
+      // chat list / headers do not flash raw addresses before /sync. The live
+      // account_data listener (onAccountData) takes over from there.
+      chatStore.loadLocalAliases().catch((e) => {
+        console.warn("[auth] loadLocalAliases failed:", e);
+      });
+
+      // Wire SyncEngine connectivity through the unified connectivity layer.
+      // onConnectivityChange fires on @capacitor/network transitions as well
+      // as window.online/offline, so Android WebView wake-ups and WiFi↔cellular
+      // handovers both feed the engine. Drop any prior subscription first
+      // (re-login without a full page reload).
+      if (_connectivityUnsub) {
+        _connectivityUnsub();
+        _connectivityUnsub = null;
       }
+      _connectivityUnsub = onConnectivityChange(({ connected }) => {
+        chatDbKit.syncEngine.setOnline(connected);
+      });
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
       // Wire Pcrypto key-load → decryption retry + peer-keys banner refresh.
@@ -475,6 +527,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           // Skip event processing before initial sync completes — events will be
           // picked up by fullRoomRefresh reconciliation. Processing them early causes
           // Dexie writes → liveQuery notifications against an incomplete room list.
+          // WEE-55: the degraded watchdog also flips roomsInitialized=true after a
+          // stalled first /sync, so events may be processed before the first full
+          // refresh. That is intentional — degraded mode favours showing live
+          // events over an infinite preloader, and the eventual PREPARED full
+          // refresh reconciles any rooms missed in the meantime.
           if (roomId && chatStore.roomsInitialized) {
             chatStore.handleTimelineEvent(event, roomId);
           }
@@ -536,6 +593,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         onRoomAccountData: (event: unknown, room: unknown) => {
           chatStore.handleRoomAccountData(event, room);
         },
+        onAccountData: (event: unknown) => {
+          // Cross-device contact-alias sync (Session 51) — and any other
+          // future global account_data hooks. Errors are swallowed inside.
+          chatStore.handleAccountDataEvent(event).catch((e) => {
+            console.warn("[auth] handleAccountDataEvent failed:", e);
+          });
+        },
         onIncomingCall: (call: unknown) => {
           try {
             const callService = useCallService();
@@ -560,12 +624,71 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       matrixError.value = "Connecting to Matrix server...";
       bootStatus.setStep("matrix");
-      await withTimeout(matrixService.init(), 45_000, "Matrix server connection");
 
-      if (matrixService.isReady()) {
+      // WEE-46: Xiaomi MIUI / Android 14+ aggressively kills the long-poll
+      // before the SDK flips ready, leaving us in a silent "Matrix not ready"
+      // state on cold start. Retry-with-backoff turns a single brittle attempt
+      // into 3 attempts (1s/2s backoff, 45s per attempt) so transient transport
+      // failures don't surface as a fatal boot error.
+      const connectResult = await connectMatrixWithRetry(matrixService, {
+        attemptTimeoutMs: 45_000,
+        maxAttempts: 3,
+        baseDelayMs: 1_000,
+        maxDelayMs: 30_000,
+        onAttempt: (attempt, max) => {
+          matrixError.value =
+            attempt === 1
+              ? "Connecting to Matrix server..."
+              : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
+        },
+        onAttemptFail: (attempt, err) => {
+          console.warn(
+            `[auth] Matrix connect attempt ${attempt} failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        },
+      });
+
+      if (connectResult.ready) {
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+
+        // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
+        // soon as Matrix is connected, BEFORE we wait for PREPARED. The
+        // PREPARED-time sync below catches future updates, but it can lag
+        // first-message FCM pushes on cold start — leaving the Kotlin
+        // fallback chain with no cached display name and forcing it onto
+        // the (sometimes-Matrix-ID) `sender_display_name` from the push
+        // payload. Pre-warming from whatever names the getter already has
+        // (room members loaded from Dexie, prior session) closes that gap.
+        // Note: when homeserver indexing > 500ms the slow timeline-wait
+        // path in push-service.ts still kicks in — that's by design.
+        if (isNative) {
+          import('@/shared/lib/push').then(({ pushService }) => {
+            pushService.syncSenderNamesToNative();
+            pushService.syncRoomNamesToNative();
+          }).catch((e) => {
+            console.warn('[auth] push prewarm failed:', e);
+          });
+        }
+
+        // Replay any contact_aliases already in the SDK's account_data cache
+        // (Session 51). The live "accountData" listener catches future
+        // changes; this covers the cold-start window before that fires.
+        try {
+          const initialAliases = matrixService.getAccountData("m.bastyon.contact_aliases");
+          if (initialAliases) {
+            chatStore.handleAccountDataEvent({
+              getType: () => "m.bastyon.contact_aliases",
+              getContent: () => initialAliases,
+            }).catch((e) => {
+              console.warn("[auth] initial contact_aliases replay failed:", e);
+            });
+          }
+        } catch (e) {
+          console.warn("[auth] contact_aliases cold-start read failed:", e);
+        }
 
         // Cache connection info for background sync
         const client = matrixService.client;
@@ -625,8 +748,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // Uses chatDbKit.rooms (RoomRepository) which is already initialized above.
             // The monotonic guard inside optimisticUpdateFromPush prevents stale
             // push data from overwriting newer /sync data.
-            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId) =>
-              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId),
+            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId, eventId) =>
+              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId, undefined, eventId),
             );
 
             pushService.setRoomInfoGetter((roomId) => {
@@ -665,6 +788,47 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             console.log('[auth] Initializing push service...');
             await pushService.init(matrixService.client);
+
+            // WEE-44 / forta-bugs#561, #817: mute state is now authoritative
+            // on the Matrix server (push rules). Refresh the local mute set
+            // from the server right after push init so the user sees the
+            // same mute state across devices and across APK reinstalls —
+            // localStorage is treated as a cache, not the source of truth.
+            try {
+              await chatStore.syncMutedRoomsFromMatrix();
+            } catch (err) {
+              console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
+            }
+
+            // WEE-52 / forta-bugs#167: re-sync mute state when the app comes
+            // back to foreground. On Android, the OS can purge localStorage
+            // (per-WebView eviction under memory pressure, OEM cleanups) while
+            // the app is backgrounded. Without this listener the cache desync
+            // surfaces as "I muted the group but notifications came back after
+            // I closed the app for a while". Re-pulling push rules on resume
+            // restores the user's intent without requiring a re-login.
+            //
+            // The handle is stashed in `_appStateHandle` (declared at module
+            // top alongside other per-account cleanup refs) so logout can
+            // detach it — otherwise a re-login would stack a second listener
+            // on top of the first.
+            if (isNative) {
+              try {
+                if (_appStateHandle) {
+                  await _appStateHandle.remove().catch(() => { /* ignore */ });
+                  _appStateHandle = null;
+                }
+                const { App } = await import('@capacitor/app');
+                _appStateHandle = await App.addListener('appStateChange', ({ isActive }) => {
+                  if (!isActive) return;
+                  chatStore.syncMutedRoomsFromMatrix().catch((err) => {
+                    console.warn('[auth] resume sync mute failed:', err);
+                  });
+                });
+              } catch (err) {
+                console.warn('[auth] Failed to wire app-resume mute sync:', err);
+              }
+            }
 
             // Wire call handler after push init (needs nativeCallBridge)
             try {
@@ -718,10 +882,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // here would run with 0 rooms (sync hasn't finished) and poison the
         // IndexedDB cache with an empty array.
       } else {
-        console.error("[auth] Matrix client NOT ready, error:", matrixService.error);
-        matrixError.value = matrixService.error || "Matrix init failed";
-        if (bootStatus.state.value === 'booting') {
-          bootStatus.setError(matrixError.value);
+        const lastErr = connectResult.lastError;
+        const reason =
+          lastErr instanceof Error
+            ? lastErr.message
+            : lastErr
+              ? String(lastErr)
+              : matrixService.error || "Matrix init failed";
+        console.error(
+          `[auth] Matrix client NOT ready after ${connectResult.attempts} attempt(s):`,
+          reason,
+        );
+        matrixError.value = reason;
+        if (bootStatus.state.value === "booting") {
+          bootStatus.setError(reason, "matrix-unreachable");
         }
       }
     } catch (e) {
@@ -738,8 +912,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
+    // Snapshot the active address so a logout + re-login that races with the
+    // RPC cannot cause us to write the first account's profile into the
+    // second account's cache slot.
+    const requestAddress = address.value;
+    const requestPrivateKey = privateKey.value;
+
     await appInitializer.initializeAndFetchUserData(
-      address.value,
+      requestAddress,
       (userData: UserData) => {
         // Defensive: app-initializer guards against undefined userData, but
         // this callback is reached from three flows (login, onConfirmed,
@@ -748,20 +928,45 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // login()'s catch and surface as "Invalid private key or mnemonic"
         // on the register page after a successful registration.
         if (!userData) return;
-        setUserInfo(userData);
-        PocketnetInstanceConfigurator.setUserAddress(address.value!);
+
+        // Bail if the active account changed mid-flight — the response
+        // belongs to a logged-out session and must not touch the new one.
+        if (address.value !== requestAddress) return;
+
+        // Merge cached self-profile (last user save) into the remote snapshot
+        // so a stale Pocketnet `getuserprofile` response cannot revert the
+        // user's name within the propagation window — WEE-26 / forta-bugs#596,
+        // #580. When no cache exists or the local edit is older than the grace
+        // window, remote wins unchanged.
+        const cached = readSelfProfile(requestAddress);
+        const merged = mergeSelfProfileWithRemote(cached, userData);
+
+        setUserInfo(merged);
+        PocketnetInstanceConfigurator.setUserAddress(requestAddress);
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-          createKeyPair(privateKey.value!)
+          createKeyPair(requestPrivateKey)
         );
+
+        writeSelfProfile({
+          address: requestAddress,
+          name: merged.name ?? "",
+          about: merged.about ?? "",
+          image: merged.image ?? "",
+          site: merged.site ?? "",
+          language: merged.language ?? "",
+          localEditedAt: cached?.localEditedAt ?? 0,
+          syncedAt: Date.now(),
+        });
+
         // Sync own profile to userStore so Avatar components show correct name/initial
-        if (userData && userData.name) {
-          useUserStore().setUser(address.value!, {
-            address: address.value!,
-            name: userData.name ?? "",
-            about: userData.about ?? "",
-            image: userData.image ?? "",
-            site: userData.site ?? "",
-            language: userData.language ?? "",
+        if (merged.name) {
+          useUserStore().setUser(requestAddress, {
+            address: requestAddress,
+            name: merged.name ?? "",
+            about: merged.about ?? "",
+            image: merged.image ?? "",
+            site: merged.site ?? "",
+            language: merged.language ?? "",
           });
         }
       }
@@ -987,21 +1192,30 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       pcrypto.value = null;
     }
 
-    // ── 3. Clean up window listeners & intervals ──
-    if (typeof window !== "undefined") {
-      if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-      if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-    }
+    // ── 3. Clean up listeners & intervals ──
+    if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
+    if (_appStateHandle) {
+      await _appStateHandle.remove().catch(() => { /* ignore */ });
+      _appStateHandle = null;
+    }
 
     // ── 4. Clear localStorage account data ──
     clearAllDrafts();
     clearQueue();
     clearAccountLocalStorage(logoutAddress ?? undefined);
+    // Drop self-profile snapshot (WEE-26). Routed through the cache helper
+    // so the key prefix stays a single source of truth.
+    if (logoutAddress) clearSelfProfile(logoutAddress);
 
     // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
+    // Clear the persistent media cache FIRST so we wipe Capacitor Filesystem
+    // entries before Dexie (which holds the index + web-fallback blobs) is
+    // torn down. Otherwise the Filesystem entries leak to disk under the
+    // new user's session.
+    await clearMediaCache();
     await deleteChatDb().catch(() => {});
 
     // ── 6. Delete legacy IndexedDB cache ──
@@ -1323,24 +1537,44 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
 
       try {
-        await appInitializer.loadUsersInfo([address.value!], { update: true });
+        // Snapshot — see fetchUserInfo. Prevents a logout race from writing
+        // this account's confirmed profile into a different account's slot.
+        const confirmedAddress = address.value!;
+        await appInitializer.loadUsersInfo([confirmedAddress], { update: true });
         await appInitializer.initializeAndFetchUserData(
-          address.value!,
+          confirmedAddress,
           (data: UserData) => {
             // Defensive guard — see fetchUserInfo for rationale. Without
             // this, a timing quirk in psdk.userInfo.get() (cache miss right
             // after blockchain confirmation) would crash the callback and
             // abort the post-registration flow.
             if (!data) return;
-            setUserInfo(data);
+            if (address.value !== confirmedAddress) return;
+            // Same merge logic as fetchUserInfo — preserves any cached
+            // self-profile (e.g. from pendingRegProfile or a prior session)
+            // when Pocketnet returns an empty/stale row right after the
+            // confirmation tx propagates (WEE-26).
+            const cached = readSelfProfile(confirmedAddress);
+            const merged = mergeSelfProfileWithRemote(cached, data);
+            setUserInfo(merged);
+            writeSelfProfile({
+              address: confirmedAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
+              localEditedAt: cached?.localEditedAt ?? 0,
+              syncedAt: Date.now(),
+            });
             // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
-            useUserStore().setUser(address.value!, {
-              address: address.value!,
-              name: data.name ?? "",
-              about: data.about ?? "",
-              image: data.image ?? "",
-              site: data.site ?? "",
-              language: data.language ?? "",
+            useUserStore().setUser(confirmedAddress, {
+              address: confirmedAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
             });
           }
         );
@@ -1580,16 +1814,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
 
       // Cleanup listeners
-      if (typeof window !== "undefined") {
-        if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-        if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-      }
+      if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
       for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
       _peerKeysRecheckTimers.clear();
 
       // Close Dexie without deleting
       closeChatDb();
+      // Drop the cache singleton too — `initMediaCache` will re-attach
+      // to the new user's Dexie after `initChatDb` runs in `initMatrix`.
+      closeMediaCache();
 
       // 3. SWAP active account
       sessionManager.setActive(targetAddress);

@@ -16,6 +16,12 @@
  *  - `CryptoNotReadyError`  — `authStore.pcrypto.rooms[roomId]` wasn't ready
  *    when we tried to decrypt. Caller should wait briefly and retry; this is
  *    a startup race, not a permanent failure.
+ *  - `MissingUrlError`      — the message event has no usable mxc URL at all
+ *    (neither pbody.url, info.url, content.url, nor content.file.url). This
+ *    is a data-shape problem: corrupted DB row, redacted event, or a
+ *    non-Bastyon client emitting a shape we don't yet parse. Surface a
+ *    friendly toast — never an auto-bug-report, since there's nothing the
+ *    user can debug.
  */
 
 /** Heuristic patterns that indicate the request never reached the server.
@@ -67,6 +73,13 @@ export class CryptoNotReadyError extends Error {
     );
     this.name = "CryptoNotReadyError";
     this.roomId = roomId;
+  }
+}
+
+export class MissingUrlError extends Error {
+  constructor() {
+    super("Message has no usable file URL");
+    this.name = "MissingUrlError";
   }
 }
 

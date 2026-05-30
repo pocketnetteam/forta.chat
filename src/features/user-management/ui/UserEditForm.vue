@@ -5,11 +5,13 @@ import { useLocaleStore } from "@/entities/locale";
 import type { Locale } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
+import { useToast } from "@/shared/lib/use-toast";
 
 const authStore = useAuthStore();
 const userStore = useUserStore();
 const localeStore = useLocaleStore();
 const { t } = useI18n();
+const { toast } = useToast();
 
 // Start empty — we sync from userInfo via watch below. Initializing from
 // authStore.userInfo at mount captures a snapshot that never updates when
@@ -128,6 +130,9 @@ const handleSave = async () => {
       (result as { success: boolean }).success === false
     ) {
       saveError.value = t("profile.saveFailed");
+      // The inline error text is easy to miss on long forms (forta-bugs#281,
+      // WEE-25) — surface a toast as well so the user gets immediate feedback.
+      toast(t("profile.saveFailed"), "error");
       return;
     }
 
@@ -144,32 +149,50 @@ const handleSave = async () => {
     }
     saveSuccess.value = true;
     setTimeout(() => (saveSuccess.value = false), 2000);
+    // Toast in addition to the inline button state: profile save can run
+    // for several seconds (long-running RPC, forta-bugs#281), and the user
+    // may have scrolled away or switched apps — toast lands feedback even
+    // when the button is off-screen.
+    toast(t("profile.saved"), "success");
   } catch (err) {
     console.error("[UserEditForm] handleSave failed:", err);
-    saveError.value =
+    const message =
       err instanceof Error ? err.message : t("profile.saveFailed");
+    saveError.value = message;
+    toast(t("profile.saveFailed"), "error");
   }
 };
 
 // Avatar upload
 const fileInput = ref<HTMLInputElement>();
+const avatarRetrying = ref(false);
 const handleAvatarClick = () => fileInput.value?.click();
 const handleAvatarChange = async (e: Event) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
   avatarError.value = "";
+  avatarRetrying.value = false;
   try {
     const base64 = await fileToBase64(file);
     avatarUrl.value = base64; // local preview
     avatarUploading.value = true;
-    const url = await uploadImage(base64);
+    const url = await uploadImage(base64, {
+      // Surface retries as a non-fatal hint so the user understands the
+      // spinner isn't stuck — flaky cell connections often need 2 attempts
+      // (forta-bugs#803).
+      onRetry: () => { avatarRetrying.value = true; },
+    });
     avatarUrl.value = url;
     userDirty.value = true;
   } catch (err) {
-    avatarError.value = err instanceof Error ? err.message : t("profile.avatarError");
+    const fallback = t("profile.avatarError");
+    const msg = err instanceof Error && err.message ? err.message : fallback;
+    avatarError.value = msg;
+    toast(fallback, "error");
     avatarUrl.value = authStore.userInfo?.image ?? "";
   } finally {
     avatarUploading.value = false;
+    avatarRetrying.value = false;
     // Reset file input so re-selecting same file triggers change
     if (fileInput.value) fileInput.value.value = "";
   }
@@ -208,6 +231,7 @@ watch(
           <Spinner v-else size="sm" class="text-white" />
         </div>
       </div>
+      <p v-if="avatarRetrying && avatarUploading" class="mt-1 text-xs text-text-on-main-bg-color">{{ t('profile.avatarRetrying') }}</p>
       <p v-if="avatarError" class="mt-1 text-xs text-color-bad">{{ avatarError }}</p>
       <input
         ref="fileInput"

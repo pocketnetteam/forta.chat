@@ -16,11 +16,21 @@ const emit = defineEmits<{ selectChannel: [address: string] }>();
 
 const scrollerRef = ref<InstanceType<typeof RecycleScroller>>();
 
-onMounted(() => {
+onMounted(async () => {
+  // Hydrate from Dexie first so the sidebar shows the persisted list
+  // immediately on cold-start — without waiting for the (potentially slow,
+  // Tor-routed) Pocketnet RPC `getsubscribeschannels` response. WEE-24.
+  if (channelStore.channels.length === 0) {
+    await channelStore.hydrateFromDexie();
+  }
+
   if (channelStore.channels.length === 0) {
     channelStore.fetchChannels(true).then(() => nextTick(prefetchVisiblePosts));
   } else {
     nextTick(prefetchVisiblePosts);
+    // Refresh in the background so newly subscribed channels appear and stale
+    // previews update — Dexie data is the first-paint, RPC the second.
+    channelStore.fetchChannels(true);
   }
   attachScrollListener();
 });

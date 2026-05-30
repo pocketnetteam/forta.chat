@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onScopeDispose } from "vue";
 import { useThemeStore } from "@/entities/theme";
 import { EMOJI_CATEGORIES, searchEmojis } from "@/shared/lib/emoji-data";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
@@ -70,6 +70,70 @@ const panelStyle = computed(() =>
     vh: typeof window !== "undefined" ? window.innerHeight : 600,
   }),
 );
+
+// Publish the picker's height as a CSS var so MessageList can pad its bottom
+// and keep the latest messages visible above the docked picker (Telegram-like).
+// Only the input-mode instance owns this var. Reaction-mode is a floating
+// popover anchored to a long-pressed message and must NOT touch the var —
+// otherwise the two pickers stomp each other when both are momentarily live.
+// Scope is documentElement on purpose: ChatWindow is the only consumer in
+// this app, and a global var avoids threading a provide/inject down the tree.
+const panelRef = ref<HTMLElement | null>(null);
+let panelObserver: ResizeObserver | null = null;
+
+const publishPickerHeight = (h: number) => {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(
+    "--emoji-picker-height",
+    `${Math.max(0, Math.round(h))}px`,
+  );
+};
+
+watch(
+  [() => props.show, panelRef, () => props.mode, () => isMobile.value],
+  ([show, el, mode, mobile]) => {
+    // Reaction-mode is hands-off: never read, never write — let the input
+    // instance (if any) keep ownership of the var.
+    if (mode !== "input") return;
+
+    if (panelObserver) {
+      panelObserver.disconnect();
+      panelObserver = null;
+    }
+    // WEE-41: desktop picker is a floating popup anchored to the emoji
+    // button, not a bottom-sheet — pushing MessageList up would leave a
+    // huge empty gap. Session 59's push-up is mobile-only. Reset the var
+    // here too, so a mobile→desktop resize while the picker is open
+    // releases any padding-bottom previously reserved by MessageList.
+    if (!mobile) {
+      publishPickerHeight(0);
+      return;
+    }
+    if (!show || !el) {
+      publishPickerHeight(0);
+      return;
+    }
+    publishPickerHeight(el.getBoundingClientRect().height);
+    if (typeof ResizeObserver === "undefined") return;
+    panelObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) publishPickerHeight(entry.contentRect.height);
+    });
+    panelObserver.observe(el);
+  },
+  { immediate: true, flush: "post" },
+);
+
+onScopeDispose(() => {
+  panelObserver?.disconnect();
+  panelObserver = null;
+  // Reaction-mode picker never publishes the var, so stays hands-off.
+  // For input-mode we always reset to 0 here regardless of platform — on
+  // desktop the var is already 0 (no-op), on mobile this guarantees the
+  // var is cleared even if isMobile flipped mid-teardown (e.g. an unmount
+  // that races a viewport resize) so MessageList never keeps a stale gap.
+  if (props.mode === "input") publishPickerHeight(0);
+});
 
 const filteredEmojis = computed(() => {
   if (!search.value) return null;
@@ -149,6 +213,7 @@ useAndroidBackHandler(`emoji-picker-${props.mode}`, 90, () => {
     <transition name="emoji-popup">
       <div v-if="props.show" class="fixed inset-0 z-50" @click.self="emit('close')">
         <div
+          ref="panelRef"
           class="emoji-panel flex flex-col overflow-hidden border border-neutral-grad-0 bg-background-total-theme shadow-2xl"
           :class="isMobile ? 'fixed' : 'absolute rounded-2xl'"
           :style="panelStyle"
@@ -252,7 +317,7 @@ useAndroidBackHandler(`emoji-picker-${props.mode}`, 90, () => {
                 :key="section.key"
                 :ref="(el) => setSectionRef(el, i)"
               >
-                <div class="sticky top-0 z-10 bg-background-total-theme/90 px-1 py-1 text-[11px] font-medium uppercase tracking-wider text-text-on-main-bg-color/60 backdrop-blur-sm">
+                <div class="sticky top-0 z-10 bg-background-total-theme px-1 py-1 text-[11px] font-medium uppercase tracking-wider text-text-on-main-bg-color/60">
                   {{ section.name }}
                 </div>
                 <div class="grid grid-cols-8 gap-0.5 pb-2">

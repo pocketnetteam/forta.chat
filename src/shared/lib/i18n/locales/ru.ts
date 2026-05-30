@@ -39,6 +39,15 @@ export const ru: Record<TranslationKey, string> = {
   "contactList.cancel": "Отмена",
   "contactList.draft": "Черновик",
 
+  // ── Contact alias (local "rename contact") ──
+  "contact.renameTitle": "Переименовать контакт",
+  "contact.addAlias": "Задать имя",
+  "contact.editAlias": "Изменить имя",
+  "contact.removeAlias": "Сбросить",
+  "contact.aliasPlaceholder": "Например, Дядя Петя",
+  "contact.aliasHint": "Имя видно только вам, синхронизируется между вашими устройствами.",
+  "contact.save": "Сохранить",
+
   // ── Contact search ──
   "contactSearch.placeholder": "Поиск чатов или пользователей...",
   "contactSearch.placeholderShort": "Поиск",
@@ -78,6 +87,7 @@ export const ru: Record<TranslationKey, string> = {
   "settings.title": "Настройки",
   "settings.myProfile": "Мой профиль",
   "settings.appearance": "Оформление",
+  "settings.storage": "Хранилище",
   "settings.darkMode": "Тёмная тема",
   "settings.torProxy": "Tor-прокси",
   "settings.torFailed": "Не удалось запустить Tor. Попробуйте выключить и включить снова.",
@@ -222,6 +232,9 @@ export const ru: Record<TranslationKey, string> = {
   "titleBar.maximize": "Развернуть",
   "titleBar.close": "Закрыть",
 
+  // ── Web notifications (WEE-48) ──
+  "notifications.newMessage": "Новое сообщение",
+
   // ── User edit form ──
   "profile.name": "Имя",
   "profile.displayName": "Ваше отображаемое имя",
@@ -234,6 +247,7 @@ export const ru: Record<TranslationKey, string> = {
   "profile.saved": "Сохранено",
   "profile.saving": "Сохранение...",
   "profile.avatarUploading": "Загрузка...",
+  "profile.avatarRetrying": "Связь нестабильна — повторяем...",
   "profile.avatarError": "Не удалось загрузить аватар",
   "profile.saveFailed": "Не удалось сохранить профиль. Проверьте подключение и попробуйте снова.",
 
@@ -253,6 +267,10 @@ export const ru: Record<TranslationKey, string> = {
   "message.retry": "Повторить",
   "message.failedToLoadImage": "Не удалось загрузить",
   "message.tapToRetry": "Нажмите для повтора",
+  "message.heicNotSupported": "HEIC — откройте в галерее",
+  "message.videoUnsupportedFormat": "Формат видео не поддерживается",
+  "message.videoLoadFailed": "Не удалось воспроизвести видео",
+  "message.videoDownload": "Скачать",
 
   // ── Message context menu ──
   "contextMenu.reply": "Ответить",
@@ -280,6 +298,7 @@ export const ru: Record<TranslationKey, string> = {
   "messageList.cancel": "Отмена",
 
   // ── Attachment panel ──
+  "attachment.panelLabel": "Вложения",
   "attachment.photoOrVideo": "Фото или видео",
   "attachment.file": "Файл",
   "attachment.poll": "Опрос",
@@ -326,6 +345,7 @@ export const ru: Record<TranslationKey, string> = {
   "forward.cancelConfirm.cancel": "Отменить пересылку",
   "forward.resultSuccess": "Переслано: {count}",
   "forward.resultSummary": "Переслано {succeeded} из {total}",
+  "forward.mediaFailed": "Не удалось переслать медиа — оригинал недоступен или не расшифрован",
   "forward.bulkTitle": "Переслать {count} сообщений",
   "forward.bulkFrom": "От: {names}",
   "forward.bulkCancelConfirm.title": "{count} сообщений",
@@ -341,6 +361,9 @@ export const ru: Record<TranslationKey, string> = {
   "media.captionBelow": "Подпись снизу",
   "media.captionAbove": "Подпись сверху",
   "media.save": "Сохранить",
+  "media.savedToGallery": "Сохранено в галерею",
+  "media.savedToDownloads": "Сохранено в Загрузки",
+  "media.saveFailed": "Не удалось сохранить файл",
 
   // ── Drop overlay ──
   "drop.title": "Перетащите файлы сюда",
@@ -377,6 +400,7 @@ export const ru: Record<TranslationKey, string> = {
   "info.add": "Добавить",
   "info.searchToAdd": "Поиск пользователей...",
   "info.noUsersFound": "Пользователи не найдены",
+  "info.addMemberFailed": "Не удалось добавить участника. Возможно, нет прав или пользователь заблокирован.",
   "info.admin": "админ",
   "info.adminLabel": "Админ",
   "info.leaveGroup": "Покинуть группу",
@@ -494,6 +518,7 @@ export const ru: Record<TranslationKey, string> = {
   "call.outgoing": "Исходящий звонок",
   "call.incomingCall": "Входящий звонок",
   "call.missed": "Пропущен",
+  "call.callBack": "Перезвонить",
   "call.voiceCallSystem": "Голосовой звонок",
   "call.videoCallSystem": "Видеозвонок",
   "call.missedVoiceCall": "Пропущенный голосовой звонок",
@@ -502,6 +527,8 @@ export const ru: Record<TranslationKey, string> = {
   "call.camera": "Камера",
   "call.speaker": "Динамик",
   "call.devices": "Устройства",
+  "call.deviceLabel.earpiece": "Разговорный (в ухо)",
+  "call.deviceLabel.speakerphone": "Громкая связь",
   "call.peerCameraOff": "Камера выключена",
   "call.you": "Вы",
   "call.screen": "экран",
@@ -639,6 +666,7 @@ export const ru: Record<TranslationKey, string> = {
   "share.linkCopied": "Ссылка скопирована",
   "share.copyFailed": "Не удалось скопировать ссылку",
   "share.nativeShare": "Поделиться через...",
+  "share.sendFailed": "Не удалось отправить файл",
 
   // ── Share group link ──
   "shareGroup.inviteLink": "Ссылка-приглашение",
@@ -710,7 +738,7 @@ export const ru: Record<TranslationKey, string> = {
   "common.loading": "Загрузка...",
   "common.unknownUser": "Пользователь",
   "common.encryptedChat": "Чат",
-  "message.notDecrypted": "Сообщение не расшифровано",
+  "message.notDecrypted": "Не удалось расшифровать — попросите переслать сообщение или обновить приложение",
 
   // ── Sync status ──
   "sync.offline": "Ожидание сети...",
@@ -727,6 +755,10 @@ export const ru: Record<TranslationKey, string> = {
   "push.unknownSender": "Неизвестный",
   "push.file": "📎 Файл",
 
+  // ── Relative date labels (sidebar / chat list) ──
+  "date.today": "Сегодня",
+  "date.yesterday": "Вчера",
+
   // ── Notification channels ──
   "channel.messages": "Сообщения",
   "channel.messagesDesc": "Уведомления о сообщениях",
@@ -741,6 +773,8 @@ export const ru: Record<TranslationKey, string> = {
   "boot.syncingMessages": "Синхронизация сообщений…",
   "boot.loading": "Загрузка Forta Chat…",
   "boot.failed": "Не удалось запустить Forta Chat",
+  "boot.matrixUnreachable": "Не удалось подключиться к серверу чата",
+  "boot.matrixUnreachableHint": "Проверьте соединение и повторите попытку. Если проблема не исчезает, сервер может быть временно недоступен.",
   "boot.retry": "Повторить",
   "boot.clearing": "Очистка…",
   "boot.clearCache": "Очистить кеш и повторить",
@@ -851,4 +885,65 @@ export const ru: Record<TranslationKey, string> = {
   "errors.mediaUnavailable": "Медиа недоступно. Попробуйте позже.",
   "errors.networkBlocked": "Сервер недоступен. Попробуйте включить Tor или VPN.",
   "errors.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
+  "errors.missingUrl": "Файл повреждён или не пришёл с источника. Попросите отправителя прислать ещё раз.",
+
+  // ── Ошибки отправки сообщений (WEE-20) ──
+  "errors.send.permissionDenied": "Нет доступа к файлам. Разрешите доступ в настройках приложения.",
+  "errors.send.micDenied": "Нет доступа к микрофону. Разрешите доступ в настройках приложения.",
+  "errors.send.pickerCancelled": "Файл не выбран.",
+  "errors.send.fileTooLarge": "Файл слишком большой (максимум 100 МБ).",
+  "errors.send.dbNotReady": "Локальная база ещё не готова. Подождите и попробуйте снова.",
+  "errors.send.matrixNotReady": "Соединение ещё не установлено. Подождите и попробуйте снова.",
+  "errors.send.cryptoNotReady": "Ключи шифрования ещё загружаются. Подождите.",
+  "errors.send.uploadFailed": "Не удалось отправить. Проверьте соединение и попробуйте снова.",
+  "errors.send.queueStuck": "Очередь отправки зависла. Перезапустите приложение.",
+  "errors.send.unknown": "Не удалось отправить. Попробуйте снова.",
+  "errors.send.dismiss": "Закрыть",
+  "errors.send.retry": "Повторить",
+
+  // ── Хранилище / медиа-кэш (WEE-33) ──
+  "storage.title": "Кэш медиа",
+  "storage.description": "Фото, видео и файлы открываются мгновенно из кэша, а не загружаются заново при каждом заходе в чат.",
+  "storage.used": "Размер кэша",
+  "storage.photos": "Фото",
+  "storage.videos": "Видео",
+  "storage.audio": "Аудио",
+  "storage.other": "Файлы",
+  "storage.limitTitle": "Лимит кэша",
+  "storage.limitDescription": "Когда размер кэша превышает лимит, старые файлы удаляются автоматически.",
+  "storage.currentLimit": "Текущий лимит",
+  "storage.clearTitle": "Очистить кэш",
+  "storage.clearDescription": "Удаляет все локально сохранённые медиа. Файлы будут загружаться заново по мере необходимости.",
+  "storage.clearAll": "Очистить кэш",
+  "storage.clearing": "Очищаем…",
+  "storage.confirmTitle": "Очистить кэш медиа?",
+  "storage.confirmBody": "Все сохранённые фото, видео и файлы будут удалены с этого устройства. Оригиналы остаются на сервере.",
+  // Вкладки + действия для отдельных записей
+  "storage.tabs.chats": "Чаты",
+  "storage.tabs.media": "Медиа",
+  "storage.tabs.files": "Файлы",
+  "storage.tabs.voice": "Голосовые",
+  "storage.empty": "Пока ничего не сохранено",
+  "storage.unknownChat": "Неизвестный чат",
+  "storage.unnamed": "Без названия",
+  "storage.voiceNote": "Голосовое сообщение",
+  "storage.itemCount": "{n} файлов",
+  "storage.deleteFromChat": "Очистить кэш чата",
+  "storage.deleteEntry": "Удалить из кэша",
+  "storage.confirmRoomTitle": "Очистить кэш для {name}?",
+  "storage.confirmRoomBody": "Все сохранённые медиа из этого чата будут удалены с устройства. Оригиналы остаются на сервере.",
+  // Понятные подписи вместо image.png / audio.webm
+  "storage.kind.photo": "Фото",
+  "storage.kind.video": "Видео",
+  "storage.kind.media": "Медиа",
+  "storage.kind.voice": "Голосовое сообщение",
+  "storage.kind.audio": "Аудио",
+  "storage.kind.file": "Файл",
+  // Детальная страница чата
+  "storage.chatShareOfTotal": "На этот чат приходится {pct}% кэша медиа.",
+  "storage.totalForChat": "Всего в кэше",
+  "storage.openInChat": "Открыть в чате",
+  "storage.openFile": "Открыть файл",
+  "storage.previewLoading": "Загружаем…",
+  "storage.previewUnavailable": "Предпросмотр недоступен",
 };

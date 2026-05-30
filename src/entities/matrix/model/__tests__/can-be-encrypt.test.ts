@@ -35,7 +35,9 @@ describe("decrypt graceful degradation", () => {
   it("encryptEvent should warn when members missing keys", () => {
     const source = getSource();
     const start = source.indexOf("async encryptEvent(text");
-    const section = source.slice(start, start + 1000);
+    // 1500-char window: WEE-39 diagnostic block (cryptoDebug call + 3-line
+    // comment) sits between the function header and the warn site.
+    const section = source.slice(start, start + 1500);
     expect(section).toContain("missing encryption keys");
   });
 });

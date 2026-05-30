@@ -16,6 +16,11 @@ export type {
   DecryptionJob,
   ListenedMessage,
   SearchCacheRow,
+  LocalChannel,
+  ChannelLastContent,
+  MediaCacheIndexEntry,
+  MediaCacheBlobRow,
+  MediaCacheCategory,
 } from "./schema";
 export { DecryptionWorker } from "./decryption-worker";
 export { ListenedRepository } from "./listened-repository";
@@ -31,6 +36,7 @@ export {
 } from "./timeline-sort";
 export { RoomRepository } from "./room-repository";
 export type { RoomChange } from "./room-repository";
+export { ChannelRepository } from "./channel-repository";
 export { UserRepository } from "./user-repository";
 export { SyncEngine } from "./sync-engine";
 export { EventWriter } from "./event-writer";
@@ -51,6 +57,7 @@ export type { BufferedWrite, WriteBufferOptions } from "./write-buffer";
 import { ChatDatabase } from "./schema";
 import { MessageRepository } from "./message-repository";
 import { RoomRepository } from "./room-repository";
+import { ChannelRepository } from "./channel-repository";
 import { UserRepository } from "./user-repository";
 import { SyncEngine } from "./sync-engine";
 import { EventWriter } from "./event-writer";
@@ -63,6 +70,7 @@ export interface ChatDbKit {
   db: ChatDatabase;
   messages: MessageRepository;
   rooms: RoomRepository;
+  channels: ChannelRepository;
   users: UserRepository;
   syncEngine: SyncEngine;
   eventWriter: EventWriter;
@@ -110,6 +118,7 @@ export function initChatDb(
   const db = new ChatDatabase(userId);
   const messages = new MessageRepository(db);
   const rooms = new RoomRepository(db);
+  const channels = new ChannelRepository(db);
   const users = new UserRepository(db);
   const listened = new ListenedRepository(db);
   const searchCache = new SearchCacheRepository(db);
@@ -178,7 +187,7 @@ export function initChatDb(
     console.warn("[local-db] SearchCache GC failed:", e);
   });
 
-  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
+  currentKit = { db, messages, rooms, channels, users, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
   currentUserId = userId;
 
   return currentKit;
