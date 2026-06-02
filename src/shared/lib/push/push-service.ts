@@ -2,7 +2,9 @@ import { PushNotifications } from '@capacitor/push-notifications';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
+import { shouldRingForCallPush } from './call-push-dedup';
 import { tRaw } from '@/shared/lib/i18n';
+import { interopLog } from '@/shared/lib/interop';
 
 class PushService {
   private fcmToken: string | null = null;
@@ -377,8 +379,19 @@ class PushService {
       // Prefer the stable Matrix call_id over event_id: caller clients
       // resend m.call.invite with a new event_id each retry while keeping
       // the call_id constant. Session 41.
+      const callId = data.call_id || data.event_id || '';
+
+      // WEE-35: drop a duplicate call push (FCM retry / multi-delivery) so we
+      // don't fire the native ringer twice for one call. Push-private window —
+      // does NOT dedup against the real /sync MatrixCall (see call-push-dedup).
+      if (!shouldRingForCallPush(callId)) {
+        interopLog('push', 'duplicate call push suppressed', { callId, roomId });
+        return;
+      }
+      interopLog('push', 'call push → ring', { callId, roomId });
+
       this.onCallPush?.({
-        callId: data.call_id || data.event_id || '',
+        callId,
         callerName: data.sender_display_name || tRaw('push.unknownSender'),
         roomId,
         hasVideo: false,

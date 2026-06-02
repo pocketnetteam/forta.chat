@@ -17,6 +17,7 @@ import {
   useBugReportStatus,
 } from "@/features/bug-report";
 import { getLocalIssueCache } from "@/shared/lib/bug-report";
+import { BastyonInteropBanner } from "@/features/bastyon-interop";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
 // App updater Capacitor plugin (Android only)
@@ -194,6 +195,10 @@ const handleLogout = () => {
           </p>
         </template>
       </div>
+
+      <!-- Dual-install warning (WEE-35) — shown when the account looks
+           Bastyon-registered and both apps can coexist on this device. -->
+      <BastyonInteropBanner />
 
       <!-- Multi-account list (shown between profile header and menu items) -->
       <div class="px-2">

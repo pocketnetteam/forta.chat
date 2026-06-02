@@ -22,6 +22,7 @@ import { clearQueue } from "@/shared/lib/offline-queue";
 import { deleteLegacyCache } from "@/shared/lib/cache/chat-cache";
 import { clearAccountLocalStorage } from "@/shared/lib/clear-account-storage";
 import { isNative } from "@/shared/lib/platform";
+import { interopLog } from "@/shared/lib/interop";
 import { onConnectivityChange } from "@/shared/lib/connectivity";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
@@ -191,6 +192,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSRegPending, value: LSRegPending } =
     useLocalStorage<boolean>("registration_pending", false);
   const registrationPending = ref(LSRegPending);
+
+  // WEE-35: set when login finds an EXISTING on-chain account that lacks
+  // Forta's 12 encryption keys — i.e. it was registered outside Forta, almost
+  // certainly via Bastyon. Feeds the dual-install warning (see bastyon-warning).
+  const likelyBastyonUser = ref(false);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Tracks active (non-backgrounded) time for the registration poll so
@@ -1044,9 +1050,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // Inconclusive — don't block login, keys may well be fine.
         return;
       case "needs-funds":
+        // Existing on-chain account without Forta keys → registered elsewhere
+        // (Bastyon). Flag it for the dual-install warning (WEE-35).
+        likelyBastyonUser.value = true;
+        interopLog("auth", "existing account missing Forta keys (no PKOIN) — likely Bastyon-registered");
         console.warn("[auth] Missing encryption keys but no PKOIN — login proceeds, publish keys later from settings");
         return;
       case "republish": {
+        likelyBastyonUser.value = true;
+        interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
         const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
         const profile = {
           name: userData?.name ?? "",
@@ -1244,6 +1256,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     setRegistrationPending(false);
     setPendingRegProfile(null);
+    likelyBastyonUser.value = false;
     stopRegistrationPoll();
     clearMnemonic();
 
@@ -1922,6 +1935,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     submitComment,
     submitUpvote,
     userInfo,
-    republishKeysFromUi
+    republishKeysFromUi,
+    likelyBastyonUser
   };
 });
