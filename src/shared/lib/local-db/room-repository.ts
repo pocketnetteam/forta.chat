@@ -329,6 +329,23 @@ export class RoomRepository {
     });
   }
 
+  /** Mark the room's last-message preview as deleted (Telegram-style) — keeps
+   *  the slot (eventId/timestamp/sender) but shows "🚫 Message deleted" instead
+   *  of blanking it. The sentinel is recognised by the chat-list getPreview()
+   *  which renders the localised "Сообщение удалено". Used on redaction of the
+   *  current last message. */
+  async markLastMessageDeleted(roomId: string): Promise<void> {
+    await this.db.rooms.where("id").equals(roomId).modify((room) => {
+      // getPreview() matches this sentinel by content before any type logic,
+      // so lastMessageType is left untouched.
+      room.lastMessagePreview = "🚫 Message deleted";
+      delete room.lastMessageDecryptionStatus;
+      delete room.lastMessageCallInfo;
+      delete room.lastMessageSystemMeta;
+      room.lastMessageReaction = null;
+    });
+  }
+
   /** Update reaction on the last message (does NOT touch updatedAt) */
   async updateLastMessageReaction(
     roomId: string,
