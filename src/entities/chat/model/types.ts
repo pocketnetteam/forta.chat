@@ -130,6 +130,8 @@ export interface Message {
   pollInfo?: PollInfo;
   /** Transfer metadata — present when type === transfer */
   transferInfo?: TransferInfo;
+  /** External call-link metadata — present when type === callLink (WEE-57) */
+  callLinkInfo?: CallLinkInfo;
   /** URL link preview metadata (Open Graph) */
   linkPreview?: LinkPreview;
   /** Upload progress 0-100 (only during media upload, undefined when not uploading) */
@@ -166,6 +168,25 @@ export enum MessageType {
   poll = "poll",
   transfer = "transfer",
   videoCircle = "videoCircle",
+  callLink = "callLink",
+}
+
+/** Supported external meeting providers (WEE-57). */
+export type CallProviderKind = "zoom" | "google_meet" | "jitsi" | "custom";
+
+/**
+ * Metadata for an external call-link message (WEE-57).
+ * Travels inside the (encrypted) message body as JSON — mirrors the
+ * `_transfer` envelope pattern so it needs no new Matrix event type.
+ */
+export interface CallLinkInfo {
+  provider: CallProviderKind;
+  /** Which call the sender intended (mirrors entities/call CallType) */
+  kind: "voice" | "video";
+  /** The meeting URL the recipient opens */
+  url: string;
+  /** Human label shown on the card, e.g. "Личный Zoom" */
+  label: string;
 }
 
 export interface PollInfo {

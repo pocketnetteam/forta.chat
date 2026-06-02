@@ -8,6 +8,7 @@ import {
   type ReplyTo,
   type PollInfo,
   type TransferInfo,
+  type CallLinkInfo,
 } from "@/entities/chat/model/types";
 import { WriteBuffer, type BufferedWrite } from "./write-buffer";
 import { perfMark, perfMeasure } from "@/shared/lib/perf-markers";
@@ -37,6 +38,8 @@ export interface ParsedMessage {
   callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number };
   pollInfo?: PollInfo;
   transferInfo?: TransferInfo;
+  /** External call-link card metadata (WEE-57) */
+  callLinkInfo?: CallLinkInfo;
   /** Present when the message is our own echo (matched by clientId) */
   clientId?: string;
   linkPreview?: import("@/entities/chat/model/types").LinkPreview;
@@ -788,6 +791,7 @@ export class EventWriter {
       callInfo: parsed.callInfo,
       pollInfo: parsed.pollInfo,
       transferInfo: parsed.transferInfo,
+      callLinkInfo: parsed.callLinkInfo,
       linkPreview: parsed.linkPreview,
       deleted: parsed.deleted,
       systemMeta: parsed.systemMeta,
@@ -812,6 +816,7 @@ export class EventWriter {
     if (type === MessageType.file) return fileInfo?.name || tRaw("message.file");
     if (type === MessageType.poll) return tRaw("message.poll");
     if (type === MessageType.transfer) return `${tRaw("message.transfer")} ${transferAmount ?? 0} PKOIN`;
+    if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
 

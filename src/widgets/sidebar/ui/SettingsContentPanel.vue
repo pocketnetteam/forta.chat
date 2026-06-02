@@ -15,7 +15,7 @@ import { SettingsSection } from "@/shared/ui/settings-section";
 import { Toggle } from "@/shared/ui/toggle";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import EmojiPicker from "@/features/messaging/ui/EmojiPicker.vue";
-import { UserEditForm } from "@/features/user-management";
+import { UserEditForm, CallProvidersSection } from "@/features/user-management";
 import { StorageSettings } from "@/features/settings";
 import { useLiveQuery, isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import type { TelemetrySnapshot } from "@/shared/lib/telemetry";
@@ -183,8 +183,9 @@ const title = computed(() => {
 
     <!-- ════════ Profile edit ════════ -->
     <div v-if="settingsSubView === 'profile'" class="flex-1 overflow-y-auto">
-      <div class="mx-auto max-w-2xl p-6">
+      <div class="mx-auto max-w-2xl space-y-8 p-6">
         <UserEditForm />
+        <CallProvidersSection />
       </div>
     </div>
 

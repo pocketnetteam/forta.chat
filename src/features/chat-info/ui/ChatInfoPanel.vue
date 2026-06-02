@@ -8,7 +8,7 @@ import { MATRIX_SERVER, APP_PUBLIC_URL } from "@/shared/config";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { matrixIdToAddress, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import ContextMenu from "@/shared/ui/context-menu/ContextMenu.vue";
 import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
 import Toggle from "@/shared/ui/toggle/Toggle.vue";
@@ -35,7 +35,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
-const callService = useCallService();
+const callLauncher = useCallLauncher();
 const room = computed(() => chatStore.activeRoom);
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const roomDisplayName = computed(() => resolveRoomName(room.value));
@@ -408,7 +408,8 @@ const handleClearHistory = () => {
 // ── Call initiation ──
 const startCall = (type: "voice" | "video") => {
   if (!room.value) return;
-  callService.startCall(room.value.id, type);
+  // Groups get external-only options; DMs keep native Forta in the picker (WEE-57)
+  void callLauncher.launch(room.value.id, type, !room.value.isGroup);
   emit("close");
 };
 
@@ -1187,6 +1188,14 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
       @save="handleAliasSave"
       @remove="handleAliasRemove"
       @close="closeRenameDialog"
+    />
+
+    <!-- WEE-57: external call-provider picker -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
     />
   </Teleport>
 </template>

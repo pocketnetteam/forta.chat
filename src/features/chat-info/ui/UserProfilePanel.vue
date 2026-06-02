@@ -3,7 +3,7 @@ import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { UserAvatar } from "@/entities/user";
 import { hexEncode } from "@/shared/lib/matrix/functions";
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import { openBastyonProfile } from "@/shared/lib/open-profile-url";
 
 interface Props {
@@ -19,7 +19,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
-const callService = useCallService();
+const callLauncher = useCallLauncher();
 
 const userData = ref<{ name: string; about: string; site: string; image: string } | null>(null);
 const copiedAddress = ref(false);
@@ -85,7 +85,8 @@ const startCall = (type: "voice" | "video") => {
       (r.members.includes(hexAddr) || (r.invitedMembers ?? []).includes(hexAddr)),
   );
   if (existingRoom) {
-    callService.startCall(existingRoom.id, type);
+    // 1:1 profile → DM, native Forta stays available in the picker (WEE-57)
+    void callLauncher.launch(existingRoom.id, type, true);
   }
   emit("close");
 };
@@ -205,6 +206,14 @@ const startCall = (type: "voice" | "video") => {
         </div>
       </div>
     </transition>
+
+    <!-- WEE-57: external call-provider picker -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
+    />
   </Teleport>
 </template>
 

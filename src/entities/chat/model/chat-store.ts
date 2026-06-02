@@ -27,6 +27,7 @@ import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
 import { tRaw } from "@/shared/lib/i18n";
+import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
@@ -4759,6 +4760,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } catch { /* not valid transfer JSON, continue as text */ }
     }
 
+    // Detect external call-link messages encoded as JSON (WEE-57)
+    {
+      const callLinkInfo = parseCallLinkBody(body);
+      if (callLinkInfo) {
+        return {
+          id: raw.event_id as string,
+          roomId,
+          senderId: matrixIdToAddress(raw.sender as string),
+          content: callLinkPreview(callLinkInfo),
+          timestamp: (raw.origin_server_ts as number) ?? 0,
+          status: MessageStatus.sent,
+          type: MessageType.callLink,
+          callLinkInfo,
+        };
+      }
+    }
+
     // Determine message type and parse file info
     let fileInfo: FileInfo | undefined;
 
@@ -5793,6 +5811,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       callInfo: msg.callInfo,
       pollInfo: msg.pollInfo,
       transferInfo: msg.transferInfo,
+      callLinkInfo: msg.callLinkInfo,
       linkPreview: msg.linkPreview,
       noPreview: !!(raw.content as any)?.no_preview,
       deleted: msg.deleted,
@@ -6182,6 +6201,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
           return;
         } catch { /* not valid transfer JSON, continue as text */ }
+      }
+
+      // Detect external call-link messages encoded as JSON (WEE-57)
+      {
+        const callLinkInfo = parseCallLinkBody(body);
+        if (callLinkInfo) {
+          const callLinkMsg: Message = {
+            id: raw.event_id as string,
+            roomId,
+            senderId: matrixIdToAddress(raw.sender as string),
+            content: callLinkPreview(callLinkInfo),
+            timestamp: (raw.origin_server_ts as number) ?? Date.now(),
+            status: MessageStatus.sent,
+            type: MessageType.callLink,
+            callLinkInfo,
+          };
+          addMessage(roomId, callLinkMsg);
+          dexieWriteMessage(callLinkMsg, roomId, raw);
+          if (roomId === activeRoomId.value) {
+            advanceInboundWatermark(roomId, callLinkMsg.timestamp);
+          }
+          return;
+        }
       }
 
       const mtype = content.msgtype as string;

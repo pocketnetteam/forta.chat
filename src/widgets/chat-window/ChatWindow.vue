@@ -16,7 +16,7 @@ import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
 
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import type { CallType } from "@/entities/call";
 import { useWalletStore } from "@/features/wallet";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
@@ -241,7 +241,6 @@ const pasteDrop = usePasteDrop({
 pasteDrop.setupDragListeners(chatWindowRef);
 
 
-const callService = useCallService();
 const walletStore = useWalletStore();
 const showDonateModal = ref(false);
 
@@ -298,9 +297,16 @@ const otherMemberName = computed(() =>
   otherMemberAddress.value ? chatStore.getDisplayName(otherMemberAddress.value) : "",
 );
 
-const startCallFromHeader = (type: CallType) => {
+// WEE-57: route header calls through the launcher so configured external
+// providers (Zoom/Meet/Jitsi) can override the native call, with a picker
+// when multiple are set. Falls back to native when none/toggle off.
+const callLauncher = useCallLauncher();
+
+const startCallFromHeader = (type: CallType, opts?: { forcePicker?: boolean }) => {
   const roomId = chatStore.activeRoomId;
-  if (roomId) callService.startCall(roomId, type);
+  if (!roomId) return;
+  const isDm = !(chatStore.activeRoom?.isGroup ?? false);
+  void callLauncher.launch(roomId, type, isDm, opts);
 };
 
 const handleScrollToMessage = (messageId: string) => {
@@ -510,13 +516,16 @@ onUnmounted(() => {
           </svg>
         </button>
 
-        <!-- Voice call button (1:1 only) -->
+        <!-- Voice call button (1:1 only). Long-press / right-click forces the
+             provider picker (WEE-57) so a quick-tap default can be overridden. -->
         <button
           v-if="!chatStore.activeRoom.isGroup"
+          data-test="call-button"
           class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
           :title="t('call.voiceCall')"
           :aria-label="t('call.voiceCall')"
           @click="startCallFromHeader('voice')"
+          @contextmenu.prevent="startCallFromHeader('voice', { forcePicker: true })"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
@@ -685,6 +694,14 @@ onUnmounted(() => {
     <ForwardPicker
       :show="showForwardPicker"
       @close="showForwardPicker = false"
+    />
+
+    <!-- WEE-57: external call-provider picker (DM with 2+ providers) -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
     />
 
     <ChatInfoPanel :show="showInfoPanel" @close="showInfoPanel = false" @open-search="showSearch = true" @go-to-message="(id) => { showInfoPanel = false; messageListRef?.scrollToMessage(id); }" />

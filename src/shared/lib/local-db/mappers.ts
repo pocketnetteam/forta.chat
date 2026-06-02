@@ -39,6 +39,7 @@ export function localToMessage(
     callInfo: local.callInfo,
     pollInfo: isDeleted ? undefined : local.pollInfo,
     transferInfo: isDeleted ? undefined : local.transferInfo,
+    callLinkInfo: isDeleted ? undefined : local.callLinkInfo,
     linkPreview: isDeleted ? undefined : local.linkPreview,
     deleted: isDeleted,
     systemMeta: local.systemMeta,

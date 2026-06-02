@@ -21,7 +21,9 @@ export type {
   MediaCacheIndexEntry,
   MediaCacheBlobRow,
   MediaCacheCategory,
+  CallProvider,
 } from "./schema";
+export { CallProvidersRepository } from "./call-providers-repository";
 export { DecryptionWorker } from "./decryption-worker";
 export { ListenedRepository } from "./listened-repository";
 export { SearchCacheRepository } from "./search-cache-repository";
@@ -59,6 +61,7 @@ import { MessageRepository } from "./message-repository";
 import { RoomRepository } from "./room-repository";
 import { ChannelRepository } from "./channel-repository";
 import { UserRepository } from "./user-repository";
+import { CallProvidersRepository } from "./call-providers-repository";
 import { SyncEngine } from "./sync-engine";
 import { EventWriter } from "./event-writer";
 import { DecryptionWorker } from "./decryption-worker";
@@ -72,6 +75,7 @@ export interface ChatDbKit {
   rooms: RoomRepository;
   channels: ChannelRepository;
   users: UserRepository;
+  callProviders: CallProvidersRepository;
   syncEngine: SyncEngine;
   eventWriter: EventWriter;
   decryptionWorker: DecryptionWorker;
@@ -120,6 +124,7 @@ export function initChatDb(
   const rooms = new RoomRepository(db);
   const channels = new ChannelRepository(db);
   const users = new UserRepository(db);
+  const callProviders = new CallProvidersRepository(db);
   const listened = new ListenedRepository(db);
   const searchCache = new SearchCacheRepository(db);
   const syncEngine = new SyncEngine(db, messages, rooms, getRoomCrypto, onChange);
@@ -187,7 +192,7 @@ export function initChatDb(
     console.warn("[local-db] SearchCache GC failed:", e);
   });
 
-  currentKit = { db, messages, rooms, channels, users, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
+  currentKit = { db, messages, rooms, channels, users, callProviders, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
   currentUserId = userId;
 
   return currentKit;
