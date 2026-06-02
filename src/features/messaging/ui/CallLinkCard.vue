@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Capacitor } from "@capacitor/core";
 import type { CallLinkInfo } from "@/entities/chat/model/types";
-import ProviderIcon from "@/features/video-calls/ui/ProviderIcon.vue";
+import CallLinkIcon from "@/features/video-calls/ui/CallLinkIcon.vue";
 
 interface Props {
   info: CallLinkInfo;
@@ -32,12 +32,10 @@ async function join(): Promise<void> {
 
 <template>
   <div class="flex items-center gap-3" data-test="call-link-card">
-    <ProviderIcon :kind="props.info.provider" size-class="h-10 w-10" />
+    <CallLinkIcon size-class="h-10 w-10" />
     <div class="min-w-0 flex-1">
       <div class="truncate text-sm font-semibold">{{ props.info.label }}</div>
-      <div class="truncate text-xs opacity-70">
-        {{ t(props.info.kind === "video" ? "call.videoCall" : "call.voiceCall") }}
-      </div>
+      <div class="truncate text-xs opacity-70">{{ t("call.linkSubtitle") }}</div>
     </div>
     <button
       type="button"

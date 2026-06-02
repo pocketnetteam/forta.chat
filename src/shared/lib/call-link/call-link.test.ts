@@ -3,8 +3,6 @@ import { buildCallLinkBody, parseCallLinkBody, callLinkPreview, CALL_LINK_MARKER
 import type { CallLinkInfo } from "@/entities/chat/model/types";
 
 const sample: CallLinkInfo = {
-  provider: "zoom",
-  kind: "video",
   url: "https://zoom.us/j/1234567890",
   label: "Личный Zoom",
 };
@@ -25,16 +23,14 @@ describe("call-link encoding", () => {
     expect(parseCallLinkBody('{"_transfer":true,"amount":5}')).toBeNull();
   });
 
-  it("rejects malformed / hostile envelopes without throwing", () => {
+  it("rejects malformed envelopes without throwing", () => {
     expect(parseCallLinkBody('{"_callLink":true')).toBeNull();           // truncated JSON
-    expect(parseCallLinkBody('{"_callLink":true}')).toBeNull();          // missing fields
-    expect(parseCallLinkBody('{"_callLink":true,"provider":"zoom","kind":"video"}')).toBeNull(); // no url
-    expect(parseCallLinkBody('{"_callLink":true,"provider":"evil","kind":"video","url":"https://x"}')).toBeNull();
-    expect(parseCallLinkBody('{"_callLink":true,"provider":"zoom","kind":"telepathy","url":"https://x"}')).toBeNull();
+    expect(parseCallLinkBody('{"_callLink":true}')).toBeNull();          // no url
+    expect(parseCallLinkBody('{"_callLink":true,"label":"X"}')).toBeNull(); // no url
   });
 
   it("rejects non-http(s) URL schemes from a peer (security)", () => {
-    const base = (url: string) => `{"_callLink":true,"provider":"custom","kind":"video","url":"${url}"}`;
+    const base = (url: string) => `{"_callLink":true,"url":"${url}","label":"x"}`;
     expect(parseCallLinkBody(base("javascript:alert(1)"))).toBeNull();
     expect(parseCallLinkBody(base("data:text/html,<script>"))).toBeNull();
     expect(parseCallLinkBody(base("file:///etc/passwd"))).toBeNull();
@@ -42,9 +38,8 @@ describe("call-link encoding", () => {
   });
 
   it("falls back label → url when label missing", () => {
-    const body = '{"_callLink":true,"provider":"jitsi","kind":"voice","url":"https://meet.jit.si/room"}';
-    const parsed = parseCallLinkBody(body);
-    expect(parsed?.label).toBe("https://meet.jit.si/room");
+    const body = '{"_callLink":true,"url":"https://meet.jit.si/room"}';
+    expect(parseCallLinkBody(body)?.label).toBe("https://meet.jit.si/room");
   });
 
   it("builds a human-readable preview", () => {

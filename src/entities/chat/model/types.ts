@@ -171,18 +171,15 @@ export enum MessageType {
   callLink = "callLink",
 }
 
-/** Supported external meeting providers (WEE-57). */
-export type CallProviderKind = "zoom" | "google_meet" | "jitsi" | "custom";
-
 /**
  * Metadata for an external call-link message (WEE-57).
  * Travels inside the (encrypted) message body as JSON — mirrors the
  * `_transfer` envelope pattern so it needs no new Matrix event type.
+ *
+ * Provider-agnostic by design: a meeting method is just a labelled URL
+ * (Zoom / Meet / Jitsi / anything), so there is no provider "kind".
  */
 export interface CallLinkInfo {
-  provider: CallProviderKind;
-  /** Which call the sender intended (mirrors entities/call CallType) */
-  kind: "voice" | "video";
   /** The meeting URL the recipient opens */
   url: string;
   /** Human label shown on the card, e.g. "Личный Zoom" */

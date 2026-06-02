@@ -15,20 +15,11 @@ import { buildCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
  * Returns true when the message was made visible locally (sent or failed),
  * false when prerequisites (DB / room) were missing.
  */
-export async function sendCallLink(
-  roomId: string,
-  provider: CallProvider,
-  kind: "voice" | "video",
-): Promise<boolean> {
+export async function sendCallLink(roomId: string, provider: CallProvider): Promise<boolean> {
   if (!roomId) return false;
 
   const authStore = useAuthStore();
-  const info: CallLinkInfo = {
-    provider: provider.kind,
-    kind,
-    url: provider.urlTemplate,
-    label: provider.label,
-  };
+  const info: CallLinkInfo = { url: provider.urlTemplate, label: provider.label };
   const displayContent = callLinkPreview(info);
   const body = buildCallLinkBody(info);
 

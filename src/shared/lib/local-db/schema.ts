@@ -6,7 +6,6 @@ import type {
   PollInfo,
   TransferInfo,
   CallLinkInfo,
-  CallProviderKind,
   LinkPreview,
 } from "@/entities/chat/model/types";
 
@@ -306,10 +305,8 @@ export interface DecryptionJob {
  */
 export interface CallProvider {
   id?: number;                   // Auto-incremented PK
-  kind: CallProviderKind;        // "zoom" | "google_meet" | "jitsi" | "custom"
-  label: string;                 // "Личный Zoom"
-  urlTemplate: string;           // "https://zoom.us/j/1234567890"
-  isDefault: boolean;            // quick-tap target (at most one true)
+  label: string;                 // "Личный Zoom" — any user-chosen name
+  urlTemplate: string;           // "https://zoom.us/j/1234567890" — any meeting URL
 }
 
 // ---------------------------------------------------------------------------
@@ -775,9 +772,8 @@ export class ChatDatabase extends Dexie {
 
     // Version 17: local-only external call providers (WEE-57). Stored here
     // (and never in Matrix account_data) so personal meeting-room URLs stay
-    // on-device. Only `kind` is indexed — `isDefault` is a tiny in-memory
-    // filter (the list is at most a handful of rows) and IndexedDB cannot
-    // index booleans cleanly anyway.
+    // on-device. PK-only — the list is a handful of rows, queried with a
+    // plain toArray(), so no secondary index is needed.
     this.version(17).stores({
       rooms: "id, updatedAt, membership, isDeleted",
       messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
@@ -791,7 +787,7 @@ export class ChatDatabase extends Dexie {
       channels: "address, syncOrder, updatedAt",
       mediaCacheIndex: "mxc, accessedAt, roomId, category",
       mediaCacheBlobs: "mxc",
-      callProviders: "++id, kind",
+      callProviders: "++id",
     });
   }
 }

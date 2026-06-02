@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Toggle } from "@/shared/ui/toggle";
 import { getChatDb, isChatDbReady, useLiveQuery, type CallProvider } from "@/shared/lib/local-db";
-import { useCallProviderSettings } from "@/features/video-calls/model/use-call-provider-settings";
-import ProviderIcon from "@/features/video-calls/ui/ProviderIcon.vue";
+import CallLinkIcon from "@/features/video-calls/ui/CallLinkIcon.vue";
 import CallProviderDialog from "./CallProviderDialog.vue";
 
 const { t } = useI18n();
-const { useExternalProviders, setUseExternalProviders } = useCallProviderSettings();
 
 // Reactive provider list straight from Dexie (local-only).
 const { data: providers } = useLiveQuery<CallProvider[]>(
@@ -30,88 +27,92 @@ function openEdit(provider: CallProvider): void {
   dialogOpen.value = true;
 }
 
+function closeDialog(): void {
+  dialogOpen.value = false;
+  editing.value = undefined;
+}
+
 async function onSave(value: Omit<CallProvider, "id">, id?: number): Promise<void> {
   if (!isChatDbReady()) return;
   const repo = getChatDb().callProviders;
-  if (id !== undefined) {
-    await repo.update(id, value);
-  } else {
-    await repo.add(value);
-  }
-  dialogOpen.value = false;
-  editing.value = undefined;
+  if (id !== undefined) await repo.update(id, value);
+  else await repo.add(value);
+  closeDialog();
 }
 
 async function remove(id?: number): Promise<void> {
   if (id === undefined || !isChatDbReady()) return;
   await getChatDb().callProviders.delete(id);
 }
-
-async function makeDefault(id?: number): Promise<void> {
-  if (id === undefined || !isChatDbReady()) return;
-  await getChatDb().callProviders.setDefault(id);
-}
 </script>
 
 <template>
-  <div class="space-y-3">
-    <div>
-      <h3 class="text-sm font-medium text-text-color">{{ t("settings.callProviders.title") }}</h3>
-      <p class="mt-0.5 text-xs text-text-on-main-bg-color">{{ t("settings.callProviders.privacy") }}</p>
-    </div>
+  <section class="space-y-4">
+    <header class="space-y-1">
+      <h3 class="text-base font-semibold text-text-color">{{ t("settings.callProviders.title") }}</h3>
+      <p class="text-xs leading-relaxed text-text-on-main-bg-color">{{ t("settings.callProviders.description") }}</p>
+    </header>
 
-    <!-- Global toggle -->
-    <label class="flex items-center justify-between">
-      <span class="text-sm text-text-color">{{ t("settings.callProviders.useExternal") }}</span>
-      <Toggle :model-value="useExternalProviders" @update:model-value="setUseExternalProviders" />
-    </label>
-
-    <!-- Provider list -->
-    <ul v-if="hasProviders" class="flex flex-col gap-2">
+    <!-- Provider cards -->
+    <ul v-if="hasProviders" class="space-y-2">
       <li
         v-for="p in providers"
         :key="p.id"
-        class="flex items-center gap-3 rounded-xl border border-neutral-grad-2 px-3 py-2"
+        class="group flex items-center gap-3 rounded-2xl border border-neutral-grad-0 bg-neutral-grad-0/40 p-3 transition-colors hover:border-neutral-grad-2"
       >
-        <ProviderIcon :kind="p.kind" />
+        <CallLinkIcon size-class="h-11 w-11" />
         <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-1.5">
-            <span class="truncate text-sm font-medium text-text-color">{{ p.label }}</span>
-            <span v-if="p.isDefault" class="rounded bg-color-bg-ac/15 px-1.5 py-0.5 text-[10px] font-medium text-color-bg-ac">
-              {{ t("settings.callProviders.isDefault") }}
-            </span>
-          </div>
-          <code class="block truncate text-xs text-text-on-main-bg-color">{{ p.urlTemplate }}</code>
+          <div class="truncate text-sm font-medium text-text-color">{{ p.label }}</div>
+          <div class="truncate text-xs text-text-on-main-bg-color">{{ p.urlTemplate }}</div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
           <button
-            v-if="!p.isDefault"
             type="button"
-            class="rounded-md px-2 py-1 text-xs text-text-on-main-bg-color hover:bg-neutral-grad-0"
-            :title="t('settings.callProviders.makeDefault')"
-            @click="makeDefault(p.id)"
-          >★</button>
-          <button
-            type="button"
-            class="rounded-md px-2 py-1 text-xs text-text-on-main-bg-color hover:bg-neutral-grad-0"
+            class="flex h-9 w-9 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-2/30"
+            :title="t('settings.callProviders.edit')"
+            :aria-label="t('settings.callProviders.edit')"
             @click="openEdit(p)"
-          >{{ t("settings.callProviders.edit") }}</button>
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </button>
           <button
             type="button"
-            class="rounded-md px-2 py-1 text-xs text-color-bad hover:bg-color-bad/10"
+            class="flex h-9 w-9 items-center justify-center rounded-full text-color-bad transition-colors hover:bg-color-bad/10"
+            :title="t('settings.callProviders.delete')"
+            :aria-label="t('settings.callProviders.delete')"
             @click="remove(p.id)"
-          >{{ t("settings.callProviders.delete") }}</button>
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
         </div>
       </li>
     </ul>
-    <p v-else class="text-xs text-text-on-main-bg-color">{{ t("settings.callProviders.empty") }}</p>
 
+    <!-- Empty state -->
+    <div
+      v-else
+      class="rounded-2xl border border-dashed border-neutral-grad-2 px-4 py-6 text-center"
+    >
+      <CallLinkIcon size-class="mx-auto h-12 w-12" />
+      <p class="mt-3 text-sm text-text-on-main-bg-color">{{ t("settings.callProviders.empty") }}</p>
+    </div>
+
+    <!-- Add button -->
     <button
       type="button"
-      class="rounded-lg border border-neutral-grad-2 px-3 py-2 text-sm font-medium text-text-color hover:bg-neutral-grad-0"
+      class="flex w-full items-center justify-center gap-2 rounded-xl bg-color-bg-ac px-4 py-2.5 text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1"
       @click="openAdd"
     >
-      + {{ t("settings.callProviders.add") }}
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+      </svg>
+      {{ t("settings.callProviders.add") }}
     </button>
 
     <CallProviderDialog
@@ -119,7 +120,7 @@ async function makeDefault(id?: number): Promise<void> {
       :show="dialogOpen"
       :provider="editing"
       @save="onSave"
-      @close="dialogOpen = false; editing = undefined"
+      @close="closeDialog"
     />
-  </div>
+  </section>
 </template>

@@ -3,7 +3,7 @@ import { useChatStore, MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
-import { getChatDb } from "@/shared/lib/local-db";
+import { getChatDb, isChatDbReady, useLiveQuery, type CallProvider } from "@/shared/lib/local-db";
 import { ChannelView } from "@/features/channels";
 import { useChannelStore } from "@/entities/channel";
 import { MessageList, MessageInput } from "@/features/messaging";
@@ -298,15 +298,32 @@ const otherMemberName = computed(() =>
 );
 
 // WEE-57: route header calls through the launcher so configured external
-// providers (Zoom/Meet/Jitsi) can override the native call, with a picker
-// when multiple are set. Falls back to native when none/toggle off.
+// meeting links can be offered alongside (DM) or instead of (group) the
+// native call. A menu appears only when there's a real choice.
 const callLauncher = useCallLauncher();
 
-const startCallFromHeader = (type: CallType, opts?: { forcePicker?: boolean }) => {
+// Reactive count of configured providers — drives whether a group chat shows
+// a call button at all (groups have no native call button of their own).
+const { data: callProviders } = useLiveQuery<CallProvider[]>(
+  () => (isChatDbReady() ? getChatDb().callProviders.toArray() : Promise.resolve([])),
+  undefined,
+  [],
+);
+const hasCallProviders = computed(() => (callProviders.value?.length ?? 0) > 0);
+
+// Show the call button in DMs always (native fallback), and in groups only
+// when there is at least one external link to offer.
+const showHeaderCallButton = computed(() => {
+  const room = chatStore.activeRoom;
+  if (!room) return false;
+  return room.isGroup ? hasCallProviders.value : true;
+});
+
+const startCallFromHeader = (type: CallType) => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return;
   const isDm = !(chatStore.activeRoom?.isGroup ?? false);
-  void callLauncher.launch(roomId, type, isDm, opts);
+  void callLauncher.launch(roomId, type, isDm);
 };
 
 const handleScrollToMessage = (messageId: string) => {
@@ -516,16 +533,17 @@ onUnmounted(() => {
           </svg>
         </button>
 
-        <!-- Voice call button (1:1 only). Long-press / right-click forces the
-             provider picker (WEE-57) so a quick-tap default can be overridden. -->
+        <!-- Call button. In a DM it's always present (native fallback + any
+             external links); in a group it appears only when external meeting
+             links are configured (groups have no native call button). A menu
+             opens only when there's more than one option. (WEE-57) -->
         <button
-          v-if="!chatStore.activeRoom.isGroup"
+          v-if="showHeaderCallButton"
           data-test="call-button"
           class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
           :title="t('call.voiceCall')"
           :aria-label="t('call.voiceCall')"
           @click="startCallFromHeader('voice')"
-          @contextmenu.prevent="startCallFromHeader('voice', { forcePicker: true })"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />

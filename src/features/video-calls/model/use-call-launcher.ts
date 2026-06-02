@@ -1,43 +1,31 @@
 import { ref, type Ref } from "vue";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { useCallService } from "./call-service";
-import { useCallProviderSettings } from "./use-call-provider-settings";
 import { resolveCallAction, type CallOption } from "./call-action";
 import { sendCallLink } from "./send-call-link";
-
-export interface LaunchOptions {
-  /** Long-press / "choose method" — always show the picker. */
-  forcePicker?: boolean;
-}
 
 /**
  * Centralized "Позвонить" handler (WEE-57). Every call entry point (chat
  * header, profile panel, info panel) routes through `launch()` so the
- * native-vs-external decision lives in one place. When a picker is needed,
+ * native-vs-external decision lives in one place. When a menu is needed,
  * the consuming component renders `<CallProviderPicker>` bound to the
  * exposed reactive state.
  */
 export function useCallLauncher(): {
   pickerOpen: Ref<boolean>;
   pickerOptions: Ref<CallOption[]>;
-  launch: (roomId: string, kind: "voice" | "video", isDm: boolean, opts?: LaunchOptions) => Promise<void>;
+  launch: (roomId: string, kind: "voice" | "video", isDm: boolean) => Promise<void>;
   pick: (option: CallOption) => Promise<void>;
   closePicker: () => void;
 } {
   const callService = useCallService();
-  const { useExternalProviders } = useCallProviderSettings();
 
   const pickerOpen = ref(false);
   const pickerOptions = ref<CallOption[]>([]);
   const pendingRoomId = ref("");
   const pendingKind = ref<"voice" | "video">("voice");
 
-  async function launch(
-    roomId: string,
-    kind: "voice" | "video",
-    isDm: boolean,
-    opts: LaunchOptions = {},
-  ): Promise<void> {
+  async function launch(roomId: string, kind: "voice" | "video", isDm: boolean): Promise<void> {
     if (!roomId) return;
 
     // DB not ready → nothing configurable, keep the existing native behavior.
@@ -55,19 +43,14 @@ export function useCallLauncher(): {
       return;
     }
 
-    const action = resolveCallAction({
-      providers,
-      useExternal: useExternalProviders.value,
-      isDm,
-      forcePicker: opts.forcePicker,
-    });
+    const action = resolveCallAction({ providers, isDm });
 
     if (action.type === "native") {
       callService.startCall(roomId, kind);
       return;
     }
     if (action.type === "send") {
-      await sendCallLink(roomId, action.provider, kind);
+      await sendCallLink(roomId, action.provider);
       return;
     }
 
@@ -84,7 +67,7 @@ export function useCallLauncher(): {
       callService.startCall(pendingRoomId.value, pendingKind.value);
       return;
     }
-    await sendCallLink(pendingRoomId.value, option.provider, pendingKind.value);
+    await sendCallLink(pendingRoomId.value, option.provider);
   }
 
   function closePicker(): void {
