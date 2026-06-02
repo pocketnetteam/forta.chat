@@ -2,14 +2,17 @@
 interface Props {
   /** Tailwind size classes, default h-10 w-10 */
   sizeClass?: string;
+  /** Render on an accent/own-bubble background (white-on-translucent) so the
+   *  icon stays visible against the blue "own message" bubble. */
+  onAccent?: boolean;
 }
-withDefaults(defineProps<Props>(), { sizeClass: "h-10 w-10" });
+withDefaults(defineProps<Props>(), { sizeClass: "h-10 w-10", onAccent: false });
 </script>
 
 <template>
   <span
-    class="inline-flex shrink-0 items-center justify-center rounded-xl bg-color-bg-ac/12 text-color-bg-ac"
-    :class="sizeClass"
+    class="inline-flex shrink-0 items-center justify-center rounded-xl"
+    :class="[sizeClass, onAccent ? 'bg-white/20 text-white' : 'bg-color-bg-ac/15 text-color-bg-ac']"
     aria-hidden="true"
   >
     <svg width="55%" height="55%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

@@ -3,6 +3,7 @@ import { getMatrixClientService } from "@/entities/matrix/model/matrix-client";
 import { useAuthStore } from "@/entities/auth";
 import { MessageType, type CallLinkInfo } from "@/entities/chat/model/types";
 import { buildCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
+import { openExternalUrl } from "@/shared/lib/open-external-url";
 
 /**
  * Send an external call-link message into a room (WEE-57).
@@ -10,7 +11,8 @@ import { buildCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
  * Mirrors the local-first send path of `sendTransferMessage`: optimistic
  * insert into Dexie, then enqueue a `send_message` op whose body is the
  * call-link JSON envelope (so it rides inside the E2E encryption envelope).
- * The receiver reconstructs the rich card via `parseCallLinkBody`.
+ * The receiver reconstructs the rich card via `parseCallLinkBody`. The caller
+ * (meeting host) also has the link opened in their browser immediately.
  *
  * Returns true when the message was made visible locally (sent or failed),
  * false when prerequisites (DB / room) were missing.
@@ -22,6 +24,13 @@ export async function sendCallLink(roomId: string, provider: CallProvider): Prom
   const info: CallLinkInfo = { url: provider.urlTemplate, label: provider.label };
   const displayContent = callLinkPreview(info);
   const body = buildCallLinkBody(info);
+
+  // The caller is the meeting host — open the link for them right away
+  // (and synchronously w.r.t. the tap, before any awaits, so web browsers
+  // don't treat it as a blocked pop-up). On Android this goes through the
+  // Capacitor Browser custom-tab. Fire-and-forget: joining must not depend
+  // on the message send succeeding.
+  void openExternalUrl(info.url);
 
   if (!isChatDbReady()) {
     console.error("[sendCallLink] local DB not ready — cannot send call link");
