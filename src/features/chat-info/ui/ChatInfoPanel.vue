@@ -4,7 +4,8 @@ import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { MATRIX_SERVER, APP_PUBLIC_URL } from "@/shared/config";
+import { MATRIX_SERVER } from "@/shared/config";
+import { buildJoinUrl } from "@/shared/lib/invite-link";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { matrixIdToAddress, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
@@ -88,14 +89,15 @@ const roomShareable = computed(() => {
   return chatStore.isRoomShareableByLink(room.value.id);
 });
 
-// Path-based URL (NOT hash-based) — AndroidManifest pathPrefix="/join"
-// matches path, not fragment. Using a hash URL means the Android App Link
-// intent-filter never fires and the link opens in the browser.
+// Hash-routing URL via the shared builder. A bare-path `/join?room=...` 404s
+// on the static host (no such file under hash routing), which is the WEE-27
+// onboarding blocker — see invite-link.ts. Native deep-linking still works:
+// legacy bare-path links and `forta://` are accepted by parse-invite-url.ts.
 const inviteLink = computed(() => {
   // eslint-disable-next-line @typescript-eslint/no-unused-expressions
   stateMarker.value;
   if (!room.value) return "";
-  return `${APP_PUBLIC_URL}/join?room=${encodeURIComponent(room.value.id)}`;
+  return buildJoinUrl(room.value.id);
 });
 
 // Subscribe to RoomState.events so toggles by *other* admins appear
