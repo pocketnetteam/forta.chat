@@ -120,6 +120,84 @@ describe("rpcFetchWithFailover", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("cuts off a node after a 502 so the NEXT call skips straight to a healthy one", async () => {
+    const T = 1_000;
+    // Call 1: node 0 → 502 (cut off), node 1 → 200.
+    const call1 = vi
+      .fn()
+      .mockResolvedValueOnce(fakeResponse(502))
+      .mockResolvedValueOnce(fakeResponse(200, { ok: 1 }));
+    await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: call1 as unknown as typeof fetch,
+      startIndex: 0,
+      nowMs: T,
+    });
+
+    // Call 2 within the cooldown window, again starting at index 0: node 0 is
+    // cut off, so the first request must go to node 1 — not node 0.
+    const call2 = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(200, { ok: 2 }));
+    await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: call2 as unknown as typeof fetch,
+      startIndex: 0,
+      nowMs: T + 5_000, // still < cooldown
+    });
+    expect(call2.mock.calls[0][0]).toBe("https://2.pocketnet.app:8899/rpc/x");
+  });
+
+  it("retries a cut-off node once the cooldown has elapsed", async () => {
+    const T = 1_000;
+    const call1 = vi
+      .fn()
+      .mockResolvedValueOnce(fakeResponse(502))
+      .mockResolvedValueOnce(fakeResponse(200, { ok: 1 }));
+    await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: call1 as unknown as typeof fetch,
+      startIndex: 0,
+      nowMs: T,
+      cooldownMs: 30_000,
+    });
+
+    // After cooldown, node 0 is healthy again and tried first.
+    const call2 = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(200, { ok: 2 }));
+    await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: call2 as unknown as typeof fetch,
+      startIndex: 0,
+      nowMs: T + 30_001,
+      cooldownMs: 30_000,
+    });
+    expect(call2.mock.calls[0][0]).toBe("https://1.pocketnet.app:8899/rpc/x");
+  });
+
+  it("still attempts a cut-off node when every node is in cooldown (never hard-fails on cooldown alone)", async () => {
+    const T = 1_000;
+    // Cut every node off via an all-502 call.
+    const seed = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(502));
+    await expect(
+      rpcFetchWithFailover("/rpc/x", {}, {
+        nodes: NODES,
+        fetchImpl: seed as unknown as typeof fetch,
+        startIndex: 0,
+        nowMs: T,
+      })
+    ).rejects.toThrow(/all nodes failed/);
+
+    // Next call still within cooldown: all nodes are cut off, but the call must
+    // still try them (deprioritized) rather than refuse outright.
+    const recover = vi.fn(async (_url: string, _init?: RequestInit) => fakeResponse(200, { ok: 1 }));
+    const json = await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: recover as unknown as typeof fetch,
+      startIndex: 0,
+      nowMs: T + 1_000,
+    });
+    expect(json).toEqual({ ok: 1 });
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
   it("remembers the last healthy node (sticky) for the next call", async () => {
     const fetchImpl = vi
       .fn()
