@@ -15,9 +15,9 @@ withDefaults(defineProps<Props>(), { sizeClass: "h-10 w-10", onAccent: false });
     :class="[sizeClass, onAccent ? 'bg-white/20 text-white' : 'bg-color-bg-ac/15 text-color-bg-ac']"
     aria-hidden="true"
   >
-    <svg width="55%" height="55%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M23 7l-7 5 7 5V7z" />
-      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    <svg width="52%" height="52%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
     </svg>
   </span>
 </template>

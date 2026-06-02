@@ -555,7 +555,7 @@ export const en = {
   "call.picker.title": "Choose a call method",
   "call.join": "Join",
   "call.linkSubtitle": "Meeting link",
-  "settings.callProviders.title": "Video call methods",
+  "settings.callProviders.title": "Call methods",
   "settings.callProviders.how.title": "How it works",
   "settings.callProviders.how.intro": "Add your own meeting links — a personal Zoom room, Google Meet or Jitsi. Then, when you call, you can send a link into the chat instead of placing a built-in Forta call.",
   "settings.callProviders.how.step1": "Add one or more methods below (a name + a link).",

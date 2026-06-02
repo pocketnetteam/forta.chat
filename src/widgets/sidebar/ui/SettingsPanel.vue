@@ -281,7 +281,7 @@ const handleLogout = () => {
           </svg>
         </button>
 
-        <!-- Video call methods (WEE-57) -->
+        <!-- Call methods (WEE-57) -->
         <button
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
           @click="openSettingsContent('callMethods')"
@@ -297,8 +297,8 @@ const handleLogout = () => {
             stroke-linejoin="round"
             class="shrink-0 text-text-on-main-bg-color"
           >
-            <path d="M23 7l-7 5 7 5V7z" />
-            <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
           </svg>
           <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.callProviders.title") }}</span>
           <svg

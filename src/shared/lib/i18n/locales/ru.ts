@@ -557,7 +557,7 @@ export const ru: Record<TranslationKey, string> = {
   "call.picker.title": "Выберите способ звонка",
   "call.join": "Присоединиться",
   "call.linkSubtitle": "Ссылка на встречу",
-  "settings.callProviders.title": "Способы видеосвязи",
+  "settings.callProviders.title": "Способы звонков",
   "settings.callProviders.how.title": "Как это работает",
   "settings.callProviders.how.intro": "Добавьте свои ссылки для звонков — например, личную комнату Zoom, Google Meet или Jitsi. Дальше при звонке можно отправить ссылку в чат вместо встроенного звонка Forta.",
   "settings.callProviders.how.step1": "Добавьте один или несколько способов связи ниже (название + ссылка).",
