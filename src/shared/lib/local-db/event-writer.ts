@@ -676,20 +676,22 @@ export class EventWriter {
       const room = await this.roomRepo.getRoom(redaction.roomId);
       const wasLastMessage = room?.lastMessageEventId === redaction.redactedEventId;
 
-      // Only roll the preview back when the redacted event was actually the
-      // lastMessage of the room — otherwise the preview is already pointing at
-      // a newer message and must stay untouched.
+      // Only touch the preview when the redacted event was actually the
+      // lastMessage of the room — otherwise the preview already points at a
+      // newer message and must stay untouched.
       if (wasLastMessage) {
         const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
         const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
         if (prevMsg) {
+          // Roll the preview back to the previous real message (WEE-43).
           await this.updateRoomPreviewFromLocal(prevMsg, /* force */ true);
         } else {
-          // Every message in the room is redacted/cleared — wipe lastMessage*
-          // metadata entirely. buildLastMessage() returns undefined for rooms
-          // without preview state, which surfaces the localised "no messages"
-          // hint in formatPreview instead of a false-positive "deleted" placeholder.
-          await this.roomRepo.clearLastMessage(redaction.roomId);
+          // No earlier message to fall back to. Instead of blanking the row
+          // (which showed an empty preview), surface "🚫 Message deleted"
+          // (Telegram-style). This is an EXPLICIT redaction signal — not the
+          // empty-text inference WEE-43 guarded against — so the label is
+          // always correct. A newer inbound message overwrites the slot.
+          await this.roomRepo.markLastMessageDeleted(redaction.roomId);
         }
       }
     });

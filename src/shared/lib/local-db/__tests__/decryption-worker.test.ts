@@ -264,6 +264,48 @@ describe("DecryptionWorker", () => {
     });
   });
 
+  describe("decryptMessageNow", () => {
+    it("decrypts a single message immediately and writes the plaintext back", async () => {
+      const { worker } = makeWorker(db, async () => ({ body: "hello" }));
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1,
+        content: "[encrypted]", decryptionStatus: "pending",
+        encryptedBody: '{"type":"m.room.message"}',
+      } as any);
+
+      const ok = await worker.decryptMessageNow("$ev1");
+      expect(ok).toBe(true);
+      const msg = await db.messages.where("eventId").equals("$ev1").first();
+      expect(msg?.content).toBe("hello");
+      expect(msg?.decryptionStatus).toBe("ok");
+      expect(msg?.encryptedBody).toBeUndefined();
+      worker.dispose();
+    });
+
+    it("returns false when there is no ciphertext to decrypt", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1,
+        content: "[encrypted]", decryptionStatus: "pending",
+      } as any);
+      expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      worker.dispose();
+    });
+
+    it("returns false (leaves row intact) when decryption fails", async () => {
+      const { worker } = makeWorker(db, async () => { throw new Error("no key"); });
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1,
+        content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}',
+      } as any);
+      expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      const msg = await db.messages.where("eventId").equals("$ev1").first();
+      expect(msg?.content).toBe("[encrypted]");
+      expect(msg?.decryptionStatus).toBe("pending");
+      worker.dispose();
+    });
+  });
+
   describe("recoverAllStuckMessages", () => {
     it("re-queues only PENDING messages across rooms; skips failed/soft-deleted/ok", async () => {
       const { worker } = makeWorker(db);

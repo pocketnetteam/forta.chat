@@ -52,6 +52,41 @@ export class DecryptionWorker {
     this.scheduleNext();
   }
 
+  /**
+   * Decrypt a single persisted message immediately (user-initiated — e.g. the
+   * refresh button on an "[encrypted]" bubble). Reads the ciphertext from the
+   * message row, writes the plaintext back on success, and clears any queued
+   * job. Returns true on success, false if there's nothing to decrypt or it
+   * failed (keys still unavailable).
+   */
+  async decryptMessageNow(eventId: string): Promise<boolean> {
+    const msg = await this.db.messages.where("eventId").equals(eventId).first();
+    if (!msg || !msg.encryptedBody) return false;
+
+    try {
+      const raw = JSON.parse(msg.encryptedBody);
+      const roomCrypto = await this.getRoomCrypto(msg.roomId);
+      if (!roomCrypto) return false;
+
+      const result = await roomCrypto.decryptEvent(raw);
+      await this.db.messages.update(msg.localId!, {
+        content: result.body,
+        decryptionStatus: "ok",
+        encryptedBody: undefined,
+      });
+      if (this.roomRepo) {
+        await this.updateRoomPreviewIfLatest(
+          msg.roomId, eventId, result.body, msg.senderId, msg.type, msg.timestamp,
+        );
+      }
+      const job = await this.db.decryptionQueue.where("eventId").equals(eventId).first();
+      if (job && job.status !== "processing") await this.db.decryptionQueue.delete(job.id!);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Process all ready jobs in the queue. */
   async tick(): Promise<void> {
     if (this.processing) return;

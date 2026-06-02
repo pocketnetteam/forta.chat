@@ -2133,6 +2133,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     ensureRoomsLoaded([roomId], "high");
   };
 
+  /** Retry decryption of a single persisted "[encrypted]" message (the refresh
+   *  button on an undecrypted bubble). Resolves true on success — the liveQuery
+   *  then re-renders the bubble with the decrypted content. */
+  const retryMessageDecryption = async (eventId: string): Promise<boolean> => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return false;
+    try {
+      return await kit.decryptionWorker.decryptMessageNow(eventId);
+    } catch {
+      return false;
+    }
+  };
+
   /** Background-preload messages for rooms near the active room.
    *  Phase 1: active room + 2 neighbors get immediate network preload.
    *  Phase 2: remaining viewport rooms get cache-only preload via requestIdleCallback. */
@@ -6974,6 +6987,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomFetchStates,
     loadingRooms,
     retryRoomFetch,
+    retryMessageDecryption,
     cyclePinnedMessage,
     refreshRooms,
     refreshRoomsNow,

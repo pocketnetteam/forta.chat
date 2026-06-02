@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
+import { ref, reactive, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { MessageType, MessageStatus } from "@/entities/chat";
@@ -215,6 +215,35 @@ function getRoomTitle(room: ChatRoom): DisplayResult {
   );
 }
 
+// Cap the preview decryption skeleton: after this long we stop showing an
+// indefinite shimmer and surface a "🔒 Encrypted message" label instead. The
+// background DecryptionWorker keeps retrying and will replace it once decrypted.
+const PREVIEW_DECRYPT_TIMEOUT_MS = 10_000;
+const previewTimedOut = reactive(new Set<string>());
+const previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function notePreviewResolving(roomId: string): void {
+  if (previewTimedOut.has(roomId) || previewTimers.has(roomId)) return;
+  previewTimers.set(roomId, setTimeout(() => {
+    previewTimers.delete(roomId);
+    previewTimedOut.add(roomId); // reactive → preview re-renders as the label
+  }, PREVIEW_DECRYPT_TIMEOUT_MS));
+}
+
+/** Resolving preview that degrades to the encrypted label after the timeout. */
+function resolvingPreview(roomId: string): DisplayResult {
+  notePreviewResolving(roomId);
+  if (previewTimedOut.has(roomId)) {
+    return { state: "failed", text: t("message.encryptedPreview") };
+  }
+  return { state: "resolving", text: "" };
+}
+
+onUnmounted(() => {
+  for (const timer of previewTimers.values()) clearTimeout(timer);
+  previewTimers.clear();
+});
+
 /** Unified display state for message preview: resolving → skeleton, failed → fallback, ready → text */
 function getPreview(room: ChatRoom): DisplayResult {
   // Primary: use room.lastMessage from Dexie LiveRoom
@@ -232,11 +261,14 @@ function getPreview(room: ChatRoom): DisplayResult {
     const cleaned = (content && !content.startsWith("[encrypted"))
       ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content, (id) => chatStore.getLocalAlias(id))))
       : content;
-    return getMessagePreviewForUI(
+    const res = getMessagePreviewForUI(
       cleaned,
       room.lastMessage.decryptionStatus,
-      t("message.notDecrypted"),
+      t("message.encryptedPreview"),
+      { timedOut: previewTimedOut.has(room.id) },
     );
+    if (res.state === "resolving") notePreviewResolving(room.id);
+    return res;
   }
   // Fallback: if Dexie doesn't have lastMessage but messages[] does (loaded via viewport-fetch),
   // use the last message from the in-memory array
@@ -258,11 +290,14 @@ function getPreview(room: ChatRoom): DisplayResult {
     }
     // Strip bastyon links and matrix IDs from fallback preview (same as formatPreview does)
     const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content, (id) => chatStore.getLocalAlias(id))));
-    return getMessagePreviewForUI(
+    const res = getMessagePreviewForUI(
       cleaned,
       last.decryptionStatus,
-      t("message.notDecrypted"),
+      t("message.encryptedPreview"),
+      { timedOut: previewTimedOut.has(room.id) },
     );
+    if (res.state === "resolving") notePreviewResolving(room.id);
+    return res;
   }
   // No lastMessage and no in-memory messages.
   // Determine skeleton vs "No messages" from Dexie ground truth:
@@ -270,7 +305,8 @@ function getPreview(room: ChatRoom): DisplayResult {
   //   - lastMessageEventId ABSENT → truly empty chat → "No messages"
   const dexieRoom = chatStore.dexieRoomMap.get(room.id);
   if (dexieRoom?.lastMessageEventId) {
-    return { state: "resolving", text: "" };
+    // Data in transit (decrypt/fetch). Same 10s cap so the skeleton can't hang.
+    return resolvingPreview(room.id);
   }
   return { state: "ready", text: t("contactList.noMessages") };
 }
