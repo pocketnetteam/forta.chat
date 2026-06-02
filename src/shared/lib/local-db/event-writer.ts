@@ -680,19 +680,14 @@ export class EventWriter {
       // lastMessage of the room — otherwise the preview already points at a
       // newer message and must stay untouched.
       if (wasLastMessage) {
-        const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
-        const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
-        if (prevMsg) {
-          // Roll the preview back to the previous real message (WEE-43).
-          await this.updateRoomPreviewFromLocal(prevMsg, /* force */ true);
-        } else {
-          // No earlier message to fall back to. Instead of blanking the row
-          // (which showed an empty preview), surface "🚫 Message deleted"
-          // (Telegram-style). This is an EXPLICIT redaction signal — not the
-          // empty-text inference WEE-43 guarded against — so the label is
-          // always correct. A newer inbound message overwrites the slot.
-          await this.roomRepo.markLastMessageDeleted(redaction.roomId);
-        }
+        // Show the deletion in the chat-list preview (Telegram-style) — always,
+        // not just when there's no earlier message. The previous behaviour
+        // (roll back to an older message, or blank the row) hid the fact that
+        // the latest message was deleted. This is an EXPLICIT redaction signal,
+        // not the empty-text inference WEE-43 guarded against, so "🚫 Message
+        // deleted" is always correct. A newer inbound message overwrites the
+        // slot normally.
+        await this.roomRepo.markLastMessageDeleted(redaction.roomId);
       }
     });
 
@@ -882,45 +877,6 @@ export class EventWriter {
         parsed.systemMeta,
       );
     }
-  }
-
-  /** Update room preview from an existing LocalMessage (used after deletion).
-   *  Same fault-tolerance as updateRoomPreview — never stores empty preview.
-   *
-   *  `force` bypasses the monotonic guard in `updateLastMessage`. Callers that
-   *  intentionally roll the preview back to an older message (e.g. redaction
-   *  rollback in `writeRedaction`) must pass `force: true` — otherwise the
-   *  guard silently swallows the rollback and a stale preview stays put. */
-  private async updateRoomPreviewFromLocal(msg: LocalMessage, force = false): Promise<void> {
-    let preview: string;
-    try {
-      preview = this.getPreviewText(
-        msg.type,
-        msg.content,
-        msg.transferInfo?.amount,
-        msg.fileInfo,
-      );
-    } catch (err) {
-      console.error("[EventWriter] getPreviewText failed for local msg:", msg.eventId ?? msg.clientId, err);
-      preview = "[message]";
-    }
-
-    if (!preview || !preview.trim()) {
-      const isEncrypted = msg.decryptionStatus === "pending" || msg.decryptionStatus === "failed";
-      preview = isEncrypted ? "[encrypted message]" : "[message]";
-    }
-
-    await this.roomRepo.updateLastMessage(
-      msg.roomId,
-      preview,
-      msg.serverTs ?? msg.timestamp,
-      msg.senderId,
-      msg.type,
-      msg.eventId ?? undefined,
-      msg.callInfo,
-      msg.systemMeta,
-      force,
-    );
   }
 
   /** Cascade reaction change to room preview if target is the last message */

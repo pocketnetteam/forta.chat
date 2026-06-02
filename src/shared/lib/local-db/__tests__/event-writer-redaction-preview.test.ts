@@ -66,8 +66,8 @@ afterEach(async () => {
   await db.delete();
 });
 
-describe("EventWriter.writeRedaction — preview rollback (WEE-43)", () => {
-  it("rolls preview back to previous non-redacted message when last message is redacted", async () => {
+describe("EventWriter.writeRedaction — preview shows deletion (Telegram-style)", () => {
+  it("shows the deleted sentinel (not the previous message) when the last message is redacted", async () => {
     // Setup: room where lastMessage is $msg3 (the one we're about to redact).
     const room = makeRoom({
       lastMessageEventId: "$msg3",
@@ -85,10 +85,10 @@ describe("EventWriter.writeRedaction — preview rollback (WEE-43)", () => {
     await eventWriter.writeRedaction({ redactedEventId: "$msg3", roomId: ROOM_ID });
 
     const updatedRoom = await roomRepo.getRoom(ROOM_ID);
-    // Critical: monotonic guard must NOT block the rollback to an older message.
-    expect(updatedRoom!.lastMessagePreview).toBe("second");
-    expect(updatedRoom!.lastMessageEventId).toBe("$msg2");
-    expect(updatedRoom!.lastMessageTimestamp).toBe(2000);
+    // The latest message was deleted → surface "🚫 Message deleted" rather than
+    // resurfacing the older "second" message (which hid that a deletion happened).
+    expect(updatedRoom!.lastMessagePreview).toBe("🚫 Message deleted");
+    expect(updatedRoom!.lastMessageEventId).toBe("$msg3");
   });
 
   it("shows the deleted sentinel when redacting the only remaining message (Telegram-style, not blank)", async () => {
