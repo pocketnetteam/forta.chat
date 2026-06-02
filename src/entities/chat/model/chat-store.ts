@@ -3347,6 +3347,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }).catch(() => {});
     }
     if (roomId) {
+      // Recover any messages stuck as "[encrypted]" from a prior key/RPC outage
+      // (e.g. the 502 wave): re-decrypt persisted ciphertext now that keys load
+      // again. Debounced + idempotent; no-op when nothing is stuck.
+      chatDbKitRef.value?.retryRoomDecryption?.(roomId);
+
       // Load profiles only if not already loaded (removed unconditional delete
       // that caused re-fetching already-cached profiles on every room open)
       if (!profilesRequestedForRooms.has(roomId)) {

@@ -97,6 +97,110 @@ export class DecryptionWorker {
     this.scheduleNext();
   }
 
+  /**
+   * Re-enqueue PERSISTED messages still showing as encrypted for a room.
+   *
+   * The queue can drift from reality: a message that failed to decrypt during a
+   * key/RPC outage (e.g. the 502 wave) is persisted with `decryptionStatus`
+   * "pending"/"failed" and its ciphertext in `encryptedBody`, but its queue job
+   * may have died, been pruned, or never existed in this DB state — so
+   * {@link retryForRoom} (which only touches existing jobs) can't recover it and
+   * the message stays "[encrypted]" forever. This scans the authoritative
+   * `messages` table and (re)creates queue jobs from the stored ciphertext.
+   * Returns the number of messages re-queued.
+   */
+  async recoverStuckMessages(roomId: string): Promise<number> {
+    const rows = await this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, 0], [roomId, Infinity], true, true)
+      .filter(
+        (m) =>
+          !!m.encryptedBody &&
+          !!m.eventId &&
+          (m.decryptionStatus === "pending" || m.decryptionStatus === "failed"),
+      )
+      .toArray();
+
+    let count = 0;
+    for (const m of rows) {
+      if (await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)) count++;
+    }
+    if (count > 0) {
+      console.info(`[decryption] recovered ${count} stuck message(s) for room ${roomId}`);
+      this.scheduleNext();
+    }
+    return count;
+  }
+
+  /**
+   * Boot-time sweep: re-enqueue stuck encrypted messages across ALL rooms (e.g.
+   * after an outage where many rooms accumulated "[encrypted]" messages).
+   *
+   * Targets only `decryptionStatus: "pending"` — NOT "failed". "failed" is the
+   * terminal state a message reaches after MAX_ATTEMPTS, so resurrecting it on
+   * every boot would retry genuinely-undecryptable messages forever. Those are
+   * instead resurrected only by a user-initiated/key-arrival signal (room open
+   * or onKeysLoaded → {@link recoverStuckMessages}). Bounded by `limit` and
+   * self-limiting: recovered rows flip to "ok" (or eventually "failed").
+   */
+  async recoverAllStuckMessages(limit = 500): Promise<number> {
+    const rows = await this.db.messages
+      .filter(
+        (m) =>
+          !!m.encryptedBody &&
+          !!m.eventId &&
+          !m.softDeleted &&
+          m.decryptionStatus === "pending",
+      )
+      .limit(limit)
+      .toArray();
+
+    let count = 0;
+    for (const m of rows) {
+      if (await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)) count++;
+    }
+    if (count > 0) {
+      console.info(`[decryption] boot recovery re-queued ${count} stuck message(s)`);
+      this.scheduleNext();
+    }
+    return count;
+  }
+
+  /** (Re)create a ready queue job for a persisted stuck message. Resets a
+   *  dead/waiting job to queued; skips one that's currently processing.
+   *  The read + write run in one rw transaction so the processing-skip guard
+   *  is atomic against processJob (which flips status to "processing"). */
+  private async requeueStuckMessage(
+    eventId: string,
+    roomId: string,
+    encryptedBody: string,
+  ): Promise<boolean> {
+    return this.db.transaction("rw", this.db.decryptionQueue, async () => {
+      const existing = await this.db.decryptionQueue
+        .where("eventId").equals(eventId).first();
+      if (existing) {
+        if (existing.status === "processing") return false;
+        await this.db.decryptionQueue.update(existing.id!, {
+          status: "queued",
+          attempts: 0,
+          nextAttemptAt: Date.now(),
+          encryptedBody,
+        });
+        return true;
+      }
+      await this.db.decryptionQueue.add({
+        eventId,
+        roomId,
+        encryptedBody,
+        status: "queued",
+        attempts: 0,
+        nextAttemptAt: Date.now(),
+        createdAt: Date.now(),
+      });
+      return true;
+    });
+  }
+
   /** Retry all queued/waiting jobs immediately (called on online transition). */
   async retryAllWaiting(): Promise<void> {
     await this.db.decryptionQueue

@@ -14,7 +14,7 @@ class TestDb extends Dexie {
     super(name, { indexedDB, IDBKeyRange });
     this.version(1).stores({
       decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
-      messages: "++localId, eventId",
+      messages: "++localId, eventId, [roomId+timestamp]",
       rooms: "id",
     });
   }
@@ -172,6 +172,116 @@ describe("DecryptionWorker", () => {
     expect(stats.dead).toBe(1);
     expect(stats.oldestDeadAge).toBeGreaterThanOrEqual(59_000);
     worker.dispose();
+  });
+
+  // ── WEE-35: recover persisted "[encrypted]" messages (e.g. 502 key-outage) ──
+  describe("recoverStuckMessages", () => {
+    it("re-queues a persisted pending message that has no queue job", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1000,
+        content: "[encrypted]", decryptionStatus: "pending",
+        encryptedBody: '{"type":"m.room.message"}',
+      } as any);
+
+      const count = await worker.recoverStuckMessages("!room1");
+      expect(count).toBe(1);
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("queued");
+      expect(job?.attempts).toBe(0);
+      worker.dispose();
+    });
+
+    it("resets an existing dead job for a stuck message back to queued", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1000,
+        content: "[encrypted]", decryptionStatus: "failed",
+        encryptedBody: '{"v":1}',
+      } as any);
+      await db.decryptionQueue.add({
+        eventId: "$ev1", roomId: "!room1", encryptedBody: '{"stale":true}',
+        status: "dead", attempts: 8, nextAttemptAt: 0, createdAt: Date.now(),
+      });
+
+      const count = await worker.recoverStuckMessages("!room1");
+      expect(count).toBe(1);
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("queued");
+      expect(job?.attempts).toBe(0);
+      // Ciphertext refreshed from the authoritative message row.
+      expect(job?.encryptedBody).toBe('{"v":1}');
+      worker.dispose();
+    });
+
+    it("ignores messages without ciphertext or already decrypted", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.bulkAdd([
+        { eventId: "$noBody", roomId: "!room1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$ok", roomId: "!room1", timestamp: 2, content: "hi", decryptionStatus: "ok", encryptedBody: '{}' },
+      ] as any);
+
+      const count = await worker.recoverStuckMessages("!room1");
+      expect(count).toBe(0);
+      expect(await db.decryptionQueue.count()).toBe(0);
+      worker.dispose();
+    });
+
+    it("does not disturb a job that is currently processing", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1,
+        content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}',
+      } as any);
+      await db.decryptionQueue.add({
+        eventId: "$ev1", roomId: "!room1", encryptedBody: '{}',
+        status: "processing", attempts: 1, nextAttemptAt: 0, createdAt: Date.now(),
+      });
+
+      const count = await worker.recoverStuckMessages("!room1");
+      expect(count).toBe(0);
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("processing");
+      worker.dispose();
+    });
+
+    it("recovered message gets decrypted on the next tick", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.add({
+        eventId: "$ev1", roomId: "!room1", timestamp: 1,
+        content: "[encrypted]", decryptionStatus: "pending",
+        encryptedBody: '{"type":"m.room.message"}',
+      } as any);
+
+      await worker.recoverStuckMessages("!room1");
+      await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+      await worker.tick();
+
+      const msg = await db.messages.where("eventId").equals("$ev1").first();
+      expect(msg?.content).toBe("decrypted");
+      expect(msg?.decryptionStatus).toBe("ok");
+      worker.dispose();
+    });
+  });
+
+  describe("recoverAllStuckMessages", () => {
+    it("re-queues only PENDING messages across rooms; skips failed/soft-deleted/ok", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.bulkAdd([
+        { eventId: "$a", roomId: "!r1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+        { eventId: "$pendingR2", roomId: "!r2", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+        // "failed" is terminal — boot sweep must NOT resurrect it (only room-open/keys-loaded does)
+        { eventId: "$failed", roomId: "!r2", timestamp: 2, content: "[encrypted]", decryptionStatus: "failed", encryptedBody: '{}' },
+        { eventId: "$deleted", roomId: "!r2", timestamp: 3, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}', softDeleted: true },
+        { eventId: "$ok", roomId: "!r2", timestamp: 4, content: "ok", decryptionStatus: "ok" },
+      ] as any);
+
+      const count = await worker.recoverAllStuckMessages();
+      expect(count).toBe(2);
+      const queued = await db.decryptionQueue.where("status").equals("queued").toArray();
+      expect(queued.map((j) => j.eventId).sort()).toEqual(["$a", "$pendingR2"]);
+      worker.dispose();
+    });
   });
 
   it("full flow: enqueue → fail → retryForRoom → succeed", async () => {
