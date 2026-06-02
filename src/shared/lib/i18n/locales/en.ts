@@ -588,6 +588,7 @@ export const en = {
   "wallet.balance": "Balance",
   "wallet.insufficientBalance": "Insufficient balance",
   "wallet.transactionError": "Transaction failed",
+  "wallet.operationFailed": "Operation failed. Please try again.",
   "wallet.senderPaysFees": "Sender pays fees",
   "wallet.receiverPaysFees": "Receiver pays fees",
   "wallet.sent": "Sent {amount} PKOIN",

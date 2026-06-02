@@ -590,6 +590,7 @@ export const ru: Record<TranslationKey, string> = {
   "wallet.balance": "Баланс",
   "wallet.insufficientBalance": "Недостаточно средств",
   "wallet.transactionError": "Ошибка транзакции",
+  "wallet.operationFailed": "Не удалось выполнить операцию. Попробуйте позже.",
   "wallet.senderPaysFees": "Комиссию платит отправитель",
   "wallet.receiverPaysFees": "Комиссию платит получатель",
   "wallet.sent": "Отправлено {amount} PKOIN",

@@ -4,6 +4,7 @@ import { useAuthStore } from "@/entities/auth";
 import { useWallet } from "../model/use-wallet";
 import { useWalletStore, formatPkoin } from "../model/wallet-store";
 import { useMessages } from "@/features/messaging/model/use-messages";
+import { extractErrorMessage } from "../lib/extract-error";
 import Modal from "@/shared/ui/modal/Modal.vue";
 
 const props = defineProps<{ show: boolean; receiverAddress: string; receiverName: string }>();
@@ -64,7 +65,8 @@ const calculateFees = async () => {
   try {
     fees.value = await estimateFees(props.receiverAddress, numericAmount.value, feeDirection.value);
   } catch (e) {
-    error.value = String(e);
+    console.error("[wallet] calculate fees failed:", e);
+    error.value = extractErrorMessage(e, t("wallet.operationFailed"));
     fees.value = null;
   } finally {
     feesLoading.value = false;
@@ -85,7 +87,8 @@ const handleSend = async () => {
     await sendTransferMessage(txId, numericAmount.value, props.receiverAddress, message.value || undefined);
     resetAndClose();
   } catch (e) {
-    error.value = t("wallet.transactionError");
+    console.error("[wallet] send transfer failed:", e);
+    error.value = extractErrorMessage(e, t("wallet.transactionError"));
   } finally {
     sending.value = false;
   }
@@ -166,14 +169,14 @@ watch(() => props.show, (v) => {
       <div class="flex gap-2">
         <button
           class="flex-1 rounded-xl border-2 px-3 py-2 text-xs font-medium transition-colors"
-          :class="feeDirection === 'exclude' ? 'border-color-bg-ac bg-color-bg-ac/10 text-color-txt-ac' : 'border-neutral-grad-0 text-text-on-main-bg-color hover:bg-neutral-grad-0/50'"
+          :class="feeDirection === 'exclude' ? 'border-color-bg-ac bg-color-bg-ac/10 text-color-bg-ac' : 'border-neutral-grad-0 text-text-on-main-bg-color hover:bg-neutral-grad-0/50'"
           @click="feeDirection = 'exclude'"
         >
           {{ t("wallet.senderPaysFees") }}
         </button>
         <button
           class="flex-1 rounded-xl border-2 px-3 py-2 text-xs font-medium transition-colors"
-          :class="feeDirection === 'include' ? 'border-color-bg-ac bg-color-bg-ac/10 text-color-txt-ac' : 'border-neutral-grad-0 text-text-on-main-bg-color hover:bg-neutral-grad-0/50'"
+          :class="feeDirection === 'include' ? 'border-color-bg-ac bg-color-bg-ac/10 text-color-bg-ac' : 'border-neutral-grad-0 text-text-on-main-bg-color hover:bg-neutral-grad-0/50'"
           @click="feeDirection = 'include'"
         >
           {{ t("wallet.receiverPaysFees") }}
