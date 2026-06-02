@@ -319,11 +319,12 @@ const showHeaderCallButton = computed(() => {
   return room.isGroup ? hasCallProviders.value : true;
 });
 
-const startCallFromHeader = (type: CallType) => {
+const startCallFromHeader = (type: CallType, event?: MouseEvent) => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return;
   const isDm = !(chatStore.activeRoom?.isGroup ?? false);
-  void callLauncher.launch(roomId, type, isDm);
+  const anchor = event ? { x: event.clientX, y: event.clientY } : undefined;
+  void callLauncher.launch(roomId, type, isDm, anchor);
 };
 
 const handleScrollToMessage = (messageId: string) => {
@@ -543,7 +544,7 @@ onUnmounted(() => {
           class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
           :title="t('call.voiceCall')"
           :aria-label="t('call.voiceCall')"
-          @click="startCallFromHeader('voice')"
+          @click="startCallFromHeader('voice', $event)"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
@@ -714,10 +715,12 @@ onUnmounted(() => {
       @close="showForwardPicker = false"
     />
 
-    <!-- WEE-57: external call-provider picker (DM with 2+ providers) -->
+    <!-- WEE-57: external call-provider picker (sheet on touch, menu on desktop) -->
     <CallProviderPicker
       :show="callLauncher.pickerOpen.value"
       :options="callLauncher.pickerOptions.value"
+      :x="callLauncher.pickerAnchor.value.x"
+      :y="callLauncher.pickerAnchor.value.y"
       @pick="callLauncher.pick"
       @close="callLauncher.closePicker"
     />

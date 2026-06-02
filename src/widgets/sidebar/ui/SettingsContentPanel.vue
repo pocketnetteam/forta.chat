@@ -159,6 +159,7 @@ const title = computed(() => {
   switch (settingsSubView.value) {
     case "profile": return t("settings.editProfile");
     case "appearance": return t("settings.appearance");
+    case "callMethods": return t("settings.callProviders.title");
     case "storage": return t("settings.storage");
     case "about": return t("settings.about");
     default: return "";
@@ -183,8 +184,14 @@ const title = computed(() => {
 
     <!-- ════════ Profile edit ════════ -->
     <div v-if="settingsSubView === 'profile'" class="flex-1 overflow-y-auto">
-      <div class="mx-auto max-w-2xl space-y-8 p-6">
+      <div class="mx-auto max-w-2xl p-6">
         <UserEditForm />
+      </div>
+    </div>
+
+    <!-- ════════ Video call methods (WEE-57) ════════ -->
+    <div v-else-if="settingsSubView === 'callMethods'" class="flex-1 overflow-y-auto">
+      <div class="mx-auto max-w-2xl p-6">
         <CallProvidersSection />
       </div>
     </div>

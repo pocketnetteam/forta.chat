@@ -6,5 +6,6 @@ export { useCallService } from "./model/call-service";
 export { useMediaDevices } from "./model/use-media-devices";
 export { default as CallProviderPicker } from "./ui/CallProviderPicker.vue";
 export { useCallLauncher } from "./model/use-call-launcher";
+export { useCallProviderSettings } from "./model/use-call-provider-settings";
 export { resolveCallAction, buildPickerOptions } from "./model/call-action";
 export type { CallOption, CallAction } from "./model/call-action";

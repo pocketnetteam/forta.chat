@@ -4,17 +4,25 @@ import { useCallService } from "./call-service";
 import { resolveCallAction, type CallOption } from "./call-action";
 import { sendCallLink } from "./send-call-link";
 
+/** Anchor point (viewport coords) for the desktop context-menu presentation. */
+export interface PickerAnchor {
+  x: number;
+  y: number;
+}
+
 /**
  * Centralized "Позвонить" handler (WEE-57). Every call entry point (chat
  * header, profile panel, info panel) routes through `launch()` so the
  * native-vs-external decision lives in one place. When a menu is needed,
  * the consuming component renders `<CallProviderPicker>` bound to the
- * exposed reactive state.
+ * exposed reactive state — a bottom sheet on touch, a context menu on desktop
+ * (anchored at the tapped button via `pickerAnchor`).
  */
 export function useCallLauncher(): {
   pickerOpen: Ref<boolean>;
   pickerOptions: Ref<CallOption[]>;
-  launch: (roomId: string, kind: "voice" | "video", isDm: boolean) => Promise<void>;
+  pickerAnchor: Ref<PickerAnchor>;
+  launch: (roomId: string, kind: "voice" | "video", isDm: boolean, anchor?: PickerAnchor) => Promise<void>;
   pick: (option: CallOption) => Promise<void>;
   closePicker: () => void;
 } {
@@ -22,10 +30,16 @@ export function useCallLauncher(): {
 
   const pickerOpen = ref(false);
   const pickerOptions = ref<CallOption[]>([]);
+  const pickerAnchor = ref<PickerAnchor>({ x: 0, y: 0 });
   const pendingRoomId = ref("");
   const pendingKind = ref<"voice" | "video">("voice");
 
-  async function launch(roomId: string, kind: "voice" | "video", isDm: boolean): Promise<void> {
+  async function launch(
+    roomId: string,
+    kind: "voice" | "video",
+    isDm: boolean,
+    anchor?: PickerAnchor,
+  ): Promise<void> {
     if (!roomId) return;
 
     // DB not ready → nothing configurable, keep the existing native behavior.
@@ -58,6 +72,7 @@ export function useCallLauncher(): {
     pendingRoomId.value = roomId;
     pendingKind.value = kind;
     pickerOptions.value = action.options;
+    if (anchor) pickerAnchor.value = anchor;
     pickerOpen.value = true;
   }
 
@@ -74,5 +89,5 @@ export function useCallLauncher(): {
     pickerOpen.value = false;
   }
 
-  return { pickerOpen, pickerOptions, launch, pick, closePicker };
+  return { pickerOpen, pickerOptions, pickerAnchor, launch, pick, closePicker };
 }

@@ -1,21 +1,73 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { BottomSheet } from "@/shared/ui/bottom-sheet";
+import { ContextMenu, type ContextMenuItem } from "@/shared/ui/context-menu";
+import { isNative } from "@/shared/lib/platform";
 import CallLinkIcon from "./CallLinkIcon.vue";
 import type { CallOption } from "../model/call-action";
 
 interface Props {
   show: boolean;
   options: CallOption[];
+  /** Anchor for the desktop context-menu presentation. */
+  x?: number;
+  y?: number;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), { x: 0, y: 0 });
 const emit = defineEmits<{ pick: [option: CallOption]; close: [] }>();
 
 const { t } = useI18n();
+
+// Desktop (Electron or a fine-pointer browser) → context menu anchored at the
+// button. Touch / native shells keep the bottom sheet. (WEE-57)
+const useMenu = computed(() => {
+  if (isNative) return false;
+  if (typeof window === "undefined") return false;
+  return !!(window as { electronAPI?: { isElectron?: boolean } }).electronAPI?.isElectron
+    || window.matchMedia?.("(pointer: fine)").matches;
+});
+
+const PHONE_ICON =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>';
+const LINK_ICON =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+
+// Context-menu items: action = option index (stable, simple to map back).
+const menuItems = computed<ContextMenuItem[]>(() =>
+  props.options.map((option, i) => ({
+    action: String(i),
+    icon: option.type === "native" ? PHONE_ICON : LINK_ICON,
+    label: option.type === "native" ? t("call.fortaNative") : option.provider.label,
+  })),
+);
+
+function onMenuSelect(action: string): void {
+  const option = props.options[Number(action)];
+  if (option) emit("pick", option);
+}
 </script>
 
 <template>
-  <BottomSheet :show="props.show" :aria-label="t('call.picker.title')" @close="emit('close')">
+  <!-- Desktop: anchored context menu -->
+  <ContextMenu
+    v-if="useMenu"
+    :show="props.show"
+    :x="props.x"
+    :y="props.y"
+    :items="menuItems"
+    @select="onMenuSelect"
+    @close="emit('close')"
+  >
+    <template #header>
+      <div class="px-4 pb-1.5 pt-1 text-xs font-medium text-text-on-main-bg-color">
+        {{ t("call.picker.title") }}
+      </div>
+    </template>
+  </ContextMenu>
+
+  <!-- Touch / native: bottom sheet -->
+  <BottomSheet v-else :show="props.show" :aria-label="t('call.picker.title')" @close="emit('close')">
     <h3 class="mb-3 text-base font-semibold text-text-color">{{ t("call.picker.title") }}</h3>
     <ul class="flex flex-col gap-1">
       <li v-for="(option, i) in props.options" :key="i">

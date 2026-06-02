@@ -1,7 +1,7 @@
 import { ref } from "vue";
 
 export type SidebarTab = "contacts" | "chats" | "settings";
-export type SettingsSubView = "profile" | "appearance" | "storage" | "about" | null;
+export type SettingsSubView = "profile" | "appearance" | "callMethods" | "storage" | "about" | null;
 
 const activeTab = ref<SidebarTab>("chats");
 const settingsSubView = ref<SettingsSubView>(null);
@@ -13,7 +13,7 @@ export function useSidebarTab() {
     if (tab !== "settings") settingsSubView.value = null;
   };
 
-  const openSettingsContent = (view: "profile" | "appearance" | "storage" | "about") => {
+  const openSettingsContent = (view: Exclude<SettingsSubView, null>) => {
     settingsSubView.value = view;
   };
 

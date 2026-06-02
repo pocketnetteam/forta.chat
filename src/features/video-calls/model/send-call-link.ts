@@ -4,6 +4,7 @@ import { useAuthStore } from "@/entities/auth";
 import { MessageType, type CallLinkInfo } from "@/entities/chat/model/types";
 import { buildCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 import { openExternalUrl } from "@/shared/lib/open-external-url";
+import { useCallProviderSettings } from "./use-call-provider-settings";
 
 /**
  * Send an external call-link message into a room (WEE-57).
@@ -25,12 +26,14 @@ export async function sendCallLink(roomId: string, provider: CallProvider): Prom
   const displayContent = callLinkPreview(info);
   const body = buildCallLinkBody(info);
 
-  // The caller is the meeting host — open the link for them right away
-  // (and synchronously w.r.t. the tap, before any awaits, so web browsers
-  // don't treat it as a blocked pop-up). On Android this goes through the
-  // Capacitor Browser custom-tab. Fire-and-forget: joining must not depend
-  // on the message send succeeding.
-  void openExternalUrl(info.url);
+  // The caller is the meeting host — open the link for them right away,
+  // unless they turned the "auto-open after send" sub-setting off. Done
+  // synchronously w.r.t. the tap (before any awaits) so web browsers don't
+  // treat it as a blocked pop-up; on Android this goes through the Capacitor
+  // Browser custom-tab. Fire-and-forget: joining must not depend on send.
+  if (useCallProviderSettings().autoOpenAfterSend.value) {
+    void openExternalUrl(info.url);
+  }
 
   if (!isChatDbReady()) {
     console.error("[sendCallLink] local DB not ready — cannot send call link");
