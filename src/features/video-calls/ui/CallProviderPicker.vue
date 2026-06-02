@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { BottomSheet } from "@/shared/ui/bottom-sheet";
 import { ContextMenu, type ContextMenuItem } from "@/shared/ui/context-menu";
-import { isNative } from "@/shared/lib/platform";
+import { isNative, isElectron } from "@/shared/lib/platform";
 import CallLinkIcon from "./CallLinkIcon.vue";
 import type { CallOption } from "../model/call-action";
 
@@ -19,13 +19,15 @@ const emit = defineEmits<{ pick: [option: CallOption]; close: [] }>();
 
 const { t } = useI18n();
 
-// Desktop (Electron or a fine-pointer browser) → context menu anchored at the
-// button. Touch / native shells keep the bottom sheet. (WEE-57)
+// Desktop → context menu anchored at the button. Touch devices (incl. mobile
+// browsers) keep the bottom sheet. We require BOTH a precise pointer AND hover
+// capability: phones/tablets report "(hover: none)" / "(pointer: coarse)", so
+// a mobile browser that mis-reports a fine pointer still gets the sheet. (WEE-57)
 const useMenu = computed(() => {
-  if (isNative) return false;
-  if (typeof window === "undefined") return false;
-  return !!(window as { electronAPI?: { isElectron?: boolean } }).electronAPI?.isElectron
-    || window.matchMedia?.("(pointer: fine)").matches;
+  if (isNative) return false;            // Android/iOS app shell → sheet
+  if (isElectron) return true;           // desktop app → menu
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 });
 
 const PHONE_ICON =
