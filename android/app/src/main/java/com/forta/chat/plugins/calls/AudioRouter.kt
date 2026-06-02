@@ -194,6 +194,12 @@ class AudioRouter private constructor(private val context: Context) {
     @Volatile private var coreListener: Listener? = null
     @Volatile private var uiListener: Listener? = null
     private var activeDevice: Device = Device.EARPIECE
+    // WEE-56: coarse OEM classification used for vendor-conditional audio
+    // tweaks. Resolved once from Build at construction — the manufacturer
+    // does not change at runtime. GENERIC for any unrecognised device, so the
+    // proven WEE-54 generic path is the default and vendor branches are purely
+    // additive (acceptance criterion A5).
+    private val vendor: CallVendor = VendorAudioPolicy.detect(Build.MANUFACTURER, Build.BRAND)
     // WEE-16: @Volatile so the periodic re-apply runnables observe a
     // stop()/forceStop()-side write across threads. start()/stop()/
     // forceStop() are invoked from arbitrary Capacitor plugin threads
@@ -348,7 +354,35 @@ class AudioRouter private constructor(private val context: Context) {
             setDeviceInternal(activeDevice)
         }
 
-        Log.d(LIFECYCLE_TAG, "start($callType) complete: active=$activeDevice, available=$available")
+        applyVendorStartTweaks()
+
+        Log.d(
+            LIFECYCLE_TAG,
+            "start($callType) complete: active=$activeDevice, available=$available, " +
+                "vendor=$vendor manuf=${Build.MANUFACTURER} brand=${Build.BRAND}",
+        )
+    }
+
+    /**
+     * WEE-56: vendor-conditional reinforcement applied AFTER the generic
+     * routing in [start]. Purely additive — every branch is gated on a
+     * [VendorAudioPolicy] predicate that returns the generic answer for
+     * unrecognised devices, so this is a no-op on the working majority.
+     */
+    private fun applyVendorStartTweaks() {
+        // HONOR MagicOS (#872/#873): the comm-device routing above can leave the
+        // global mic-mute flag asserted, producing caller-only / self-echo
+        // one-way audio. An explicit unmute releases the capture path. Wrapped
+        // because the setter is documented to throw on a few privacy-shield
+        // ROMs and must never crash call setup.
+        if (VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(vendor)) {
+            try {
+                audioManager.setMicrophoneMute(false)
+                Log.d(LIFECYCLE_TAG, "[vendor=$vendor] explicit setMicrophoneMute(false) on start")
+            } catch (e: Exception) {
+                Log.w(LIFECYCLE_TAG, "[vendor=$vendor] setMicrophoneMute(false) on start threw", e)
+            }
+        }
     }
 
     fun stop() = synchronized(lifecycleLock) {
@@ -414,7 +448,27 @@ class AudioRouter private constructor(private val context: Context) {
                 audioManager.isSpeakerphoneOn = false
             } catch (_: Exception) {}
 
+            releaseGlobalMicMute()
+
             Log.d(LIFECYCLE_TAG, "stop(): set mode=MODE_NORMAL, cleared comm device")
+        }
+    }
+
+    /**
+     * WEE-56 (#875 / #898 / #900 + cross-app "Telegram voice empty" report):
+     * clear the process-global microphone-mute flag on call teardown so other
+     * apps can record afterwards. `setMicrophoneMute` is global state — if any
+     * path left it asserted, every other recorder captures silence until
+     * reboot. Resetting it can only release a stuck capture path, so the policy
+     * is vendor-independent. Wrapped because the setter throws on some OEM
+     * privacy-shield ROMs and teardown must never crash.
+     */
+    private fun releaseGlobalMicMute() {
+        if (!VendorAudioPolicy.shouldUnmuteMicOnStop(vendor)) return
+        try {
+            audioManager.setMicrophoneMute(false)
+        } catch (e: Exception) {
+            Log.w(LIFECYCLE_TAG, "setMicrophoneMute(false) on teardown threw", e)
         }
     }
 
@@ -499,6 +553,7 @@ class AudioRouter private constructor(private val context: Context) {
         try { audioManager.mode = AudioManager.MODE_NORMAL } catch (_: Exception) {}
         @Suppress("DEPRECATION")
         try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
+        releaseGlobalMicMute()
 
         Log.d(LIFECYCLE_TAG, "forceStop() complete")
     }
