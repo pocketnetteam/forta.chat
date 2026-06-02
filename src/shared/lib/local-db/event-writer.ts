@@ -817,6 +817,25 @@ export class EventWriter {
    *  missing fields), falls back to a safe placeholder so the sidebar never shows
    *  an empty grey strip. */
   private async updateRoomPreview(parsed: ParsedMessage): Promise<void> {
+    // Redacted message re-synced from the server (content stripped). Show the
+    // deletion in the preview instead of its now-empty body — matches
+    // writeRedaction's sentinel so a reload/sync can't blank a deleted last
+    // message. updateLastMessage's monotonic guard still prevents an older
+    // redacted event from overwriting a newer preview.
+    if (parsed.deleted) {
+      await this.roomRepo.updateLastMessage(
+        parsed.roomId,
+        "🚫 Message deleted",
+        parsed.timestamp,
+        parsed.senderId,
+        parsed.type,
+        parsed.eventId,
+        parsed.callInfo,
+        parsed.systemMeta,
+      );
+      return;
+    }
+
     let preview: string;
     try {
       preview = this.getPreviewText(

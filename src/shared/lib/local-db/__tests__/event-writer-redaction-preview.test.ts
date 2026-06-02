@@ -91,6 +91,29 @@ describe("EventWriter.writeRedaction — preview shows deletion (Telegram-style)
     expect(updatedRoom!.lastMessageEventId).toBe("$msg3");
   });
 
+  it("sets the deleted sentinel when a redacted message is (re)synced from the server", async () => {
+    // Reproduces the reload path: Matrix sync re-delivers the last message
+    // already redacted (content stripped). The preview must show the deletion,
+    // not blank out — otherwise a reload wipes the "deleted" label.
+    await db.rooms.add(makeRoom());
+    await eventWriter.writeMessage(
+      {
+        eventId: "$redacted1",
+        roomId: ROOM_ID,
+        senderId: "user1",
+        content: "",
+        timestamp: 5000,
+        type: MessageType.text,
+        deleted: true,
+      },
+      "me",
+      null,
+    );
+    const room = await roomRepo.getRoom(ROOM_ID);
+    expect(room!.lastMessagePreview).toBe("🚫 Message deleted");
+    expect(room!.lastMessageEventId).toBe("$redacted1");
+  });
+
   it("shows the deleted sentinel when redacting the only remaining message (Telegram-style, not blank)", async () => {
     const room = makeRoom({
       lastMessageEventId: "$msg1",
