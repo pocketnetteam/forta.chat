@@ -6,6 +6,7 @@ import android.media.AudioManager
 import android.media.projection.MediaProjection
 import android.os.Build
 import android.util.Log
+import com.forta.chat.plugins.calls.VendorAudioPolicy
 import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
 
@@ -51,30 +52,24 @@ class NativeWebRTCManager(private val context: Context) {
         var onAudioError: ((type: String, message: String) -> Unit)? = null
 
         /**
-         * OEMs with broken hardware AEC/NS implementations — using HW AEC on these
-         * devices mutes the microphone or locks the audio session. Fall back to
-         * WebRTC software AEC/NS (works everywhere).
+         * Detect vendors with known broken hardware AEC/NS — using HW AEC on
+         * these devices mutes the microphone or locks the audio session, so we
+         * fall back to WebRTC software AEC/NS (works everywhere).
          *
-         * Evidence from user reports: Xiaomi/MIUI, Realme/RealmeUI, Oppo/ColorOS,
-         * Infinix/XOS, Tecno/HiOS, Huawei/EMUI, ZTE. Samsung/Pixel/OnePlus ship
-         * working HW AEC and benefit from it (lower CPU, better quality).
+         * WEE-56: the authoritative vendor list now lives in
+         * [VendorAudioPolicy] so the calls and webrtc packages share one
+         * definition (it was duplicated against AudioRouter's OEM handling)
+         * and a single JVM test locks it. Behaviour-preserving for every real
+         * (non-null manufacturer) Build value; see [VendorAudioPolicy.prefersSoftwareAudioProcessing]
+         * for the one intentional, safer null-brand edge-case change. This is the root-cause handling for
+         * the HUAWEI "video works, no audio" symptom (#874): EMUI hardware AEC
+         * mutes the capture stream. We intentionally do not force a PCMU/G.711
+         * codec fallback — that would degrade Opus quality/interop for every
+         * Huawei user (an A5 regression); software audio processing fixes the
+         * capture mute without touching codec negotiation.
          */
-        private val BROKEN_HW_AEC_VENDORS = setOf(
-            "xiaomi", "redmi", "poco",
-            "realme",
-            "oppo",
-            "infinix", "itel",
-            "tecno",
-            "huawei", "honor",
-            "zte"
-        )
-
-        /** Detect vendors with known broken hardware AEC/NS. */
-        fun hasBrokenHardwareAudioProcessing(): Boolean {
-            val vendor = Build.MANUFACTURER?.lowercase() ?: return false
-            val brand = Build.BRAND?.lowercase() ?: ""
-            return BROKEN_HW_AEC_VENDORS.any { v -> v == vendor || v == brand }
-        }
+        fun hasBrokenHardwareAudioProcessing(): Boolean =
+            VendorAudioPolicy.prefersSoftwareAudioProcessing(Build.MANUFACTURER, Build.BRAND)
     }
 
     interface Listener {
