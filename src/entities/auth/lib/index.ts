@@ -4,3 +4,4 @@ export * from "./poll-timer";
 export * from "./mnemonic-storage";
 export * from "./sync-profile-to-matrix";
 export * from "./self-profile-cache";
+export * from "./key-republish";
