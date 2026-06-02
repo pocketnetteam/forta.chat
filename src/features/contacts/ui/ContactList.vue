@@ -455,9 +455,11 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
 
   // "all": merge-sort rooms + channels (both already sorted by time desc).
   // O(n+m) instead of O((n+m) log(n+m)).
-  // Invites and empty placeholder rooms are filtered out here to prevent
-  // blank stripes in RecycleScroller (each slot reserves ITEM_HEIGHT even
-  // when its content is empty). Invites live on the dedicated Invites tab.
+  // Joined rooms AND pending invites are shown here (WEE-59), interleaved by
+  // activity — their relative order comes from the upstream sortedRooms sort
+  // (membershipRank below only tie-breaks room-vs-channel at equal timestamps).
+  // Only empty placeholder rooms are filtered out to prevent blank stripes in
+  // RecycleScroller (each slot reserves ITEM_HEIGHT even when its content is empty).
   const roomItems: UnifiedItem[] = filterRoomsForTab(rooms, "all").map(toItem);
   const channelItems: UnifiedItem[] = channelStore.channels
     .map(c => ({ ...c, _key: `ch:${c.address}` }))

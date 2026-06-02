@@ -29,9 +29,14 @@ export function hasDisplayableContent(room: ChatRoom): boolean {
  * Filter `rooms` for a given sidebar tab.
  *
  * Rules:
- *   - "all": hide invites (they live on the dedicated Invites tab) and hide
- *     empty placeholder rooms. This removes the blank stripes between chats.
+ *   - "all": joined rooms AND pending invites together (WEE-59). Invites must
+ *     surface here so the user does not miss them; they render with a distinct
+ *     badge and are mixed in by activity (the list is sorted upstream). Only
+ *     empty placeholder rooms (incl. un-hydrated invites) are dropped, to avoid
+ *     blank stripes between chats.
  *   - "personal": 1:1 chats, joined membership only, displayable content.
+ *     Invites are not split across personal/groups — they live in "all" and on
+ *     the dedicated Invites tab.
  *   - "groups": group chats, joined membership only, displayable content.
  *   - "invites": ALL invites (even empty ones — the user still needs to
  *     accept/decline them). No displayability filter.
@@ -44,8 +49,10 @@ export function filterRoomsForTab(rooms: ChatRoom[], tab: ContactListTab): ChatR
   if (tab === "channels") {
     return [];
   }
+  if (tab === "all") {
+    return rooms.filter(hasDisplayableContent);
+  }
   const base = rooms.filter(r => r.membership !== "invite" && hasDisplayableContent(r));
   if (tab === "personal") return base.filter(r => !r.isGroup);
-  if (tab === "groups") return base.filter(r => r.isGroup);
-  return base;
+  return base.filter(r => r.isGroup);
 }
