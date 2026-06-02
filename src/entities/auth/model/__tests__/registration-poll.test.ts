@@ -83,11 +83,12 @@ describe("login key verification", () => {
     const source = getSource();
     const fnStart = source.indexOf("const verifyAndRepublishKeys");
     const fnSection = source.slice(fnStart, fnStart + 2000);
-    // Should check cache first
-    expect(fnSection).toContain("cachedKeys.length >= 12");
+    // Should check the local cache first (fast path)
+    expect(fnSection).toContain("countCachedKeys");
+    expect(fnSection).toContain("REQUIRED_ENCRYPTION_KEYS");
     // Fresh profile via SDK (loadUsersInfoRaw wraps loadUsersInfo + getRawProfile)
     expect(fnSection).toContain("loadUsersInfoRaw");
-    expect(fnSection).toContain("blockchainKeys.length >= 12");
+    expect(fnSection).toContain("countPublishedKeys");
   });
 
   it("verifyAndRepublishKeys should not block login if RPC fails", () => {

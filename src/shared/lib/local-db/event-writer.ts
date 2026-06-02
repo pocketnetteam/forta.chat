@@ -676,21 +676,18 @@ export class EventWriter {
       const room = await this.roomRepo.getRoom(redaction.roomId);
       const wasLastMessage = room?.lastMessageEventId === redaction.redactedEventId;
 
-      // Only roll the preview back when the redacted event was actually the
-      // lastMessage of the room — otherwise the preview is already pointing at
-      // a newer message and must stay untouched.
+      // Only touch the preview when the redacted event was actually the
+      // lastMessage of the room — otherwise the preview already points at a
+      // newer message and must stay untouched.
       if (wasLastMessage) {
-        const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
-        const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
-        if (prevMsg) {
-          await this.updateRoomPreviewFromLocal(prevMsg, /* force */ true);
-        } else {
-          // Every message in the room is redacted/cleared — wipe lastMessage*
-          // metadata entirely. buildLastMessage() returns undefined for rooms
-          // without preview state, which surfaces the localised "no messages"
-          // hint in formatPreview instead of a false-positive "deleted" placeholder.
-          await this.roomRepo.clearLastMessage(redaction.roomId);
-        }
+        // Show the deletion in the chat-list preview (Telegram-style) — always,
+        // not just when there's no earlier message. The previous behaviour
+        // (roll back to an older message, or blank the row) hid the fact that
+        // the latest message was deleted. This is an EXPLICIT redaction signal,
+        // not the empty-text inference WEE-43 guarded against, so "🚫 Message
+        // deleted" is always correct. A newer inbound message overwrites the
+        // slot normally.
+        await this.roomRepo.markLastMessageDeleted(redaction.roomId);
       }
     });
 
@@ -820,6 +817,25 @@ export class EventWriter {
    *  missing fields), falls back to a safe placeholder so the sidebar never shows
    *  an empty grey strip. */
   private async updateRoomPreview(parsed: ParsedMessage): Promise<void> {
+    // Redacted message re-synced from the server (content stripped). Show the
+    // deletion in the preview instead of its now-empty body — matches
+    // writeRedaction's sentinel so a reload/sync can't blank a deleted last
+    // message. updateLastMessage's monotonic guard still prevents an older
+    // redacted event from overwriting a newer preview.
+    if (parsed.deleted) {
+      await this.roomRepo.updateLastMessage(
+        parsed.roomId,
+        "🚫 Message deleted",
+        parsed.timestamp,
+        parsed.senderId,
+        parsed.type,
+        parsed.eventId,
+        parsed.callInfo,
+        parsed.systemMeta,
+      );
+      return;
+    }
+
     let preview: string;
     try {
       preview = this.getPreviewText(
@@ -880,45 +896,6 @@ export class EventWriter {
         parsed.systemMeta,
       );
     }
-  }
-
-  /** Update room preview from an existing LocalMessage (used after deletion).
-   *  Same fault-tolerance as updateRoomPreview — never stores empty preview.
-   *
-   *  `force` bypasses the monotonic guard in `updateLastMessage`. Callers that
-   *  intentionally roll the preview back to an older message (e.g. redaction
-   *  rollback in `writeRedaction`) must pass `force: true` — otherwise the
-   *  guard silently swallows the rollback and a stale preview stays put. */
-  private async updateRoomPreviewFromLocal(msg: LocalMessage, force = false): Promise<void> {
-    let preview: string;
-    try {
-      preview = this.getPreviewText(
-        msg.type,
-        msg.content,
-        msg.transferInfo?.amount,
-        msg.fileInfo,
-      );
-    } catch (err) {
-      console.error("[EventWriter] getPreviewText failed for local msg:", msg.eventId ?? msg.clientId, err);
-      preview = "[message]";
-    }
-
-    if (!preview || !preview.trim()) {
-      const isEncrypted = msg.decryptionStatus === "pending" || msg.decryptionStatus === "failed";
-      preview = isEncrypted ? "[encrypted message]" : "[message]";
-    }
-
-    await this.roomRepo.updateLastMessage(
-      msg.roomId,
-      preview,
-      msg.serverTs ?? msg.timestamp,
-      msg.senderId,
-      msg.type,
-      msg.eventId ?? undefined,
-      msg.callInfo,
-      msg.systemMeta,
-      force,
-    );
   }
 
   /** Cascade reaction change to room preview if target is the last message */

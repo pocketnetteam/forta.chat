@@ -137,6 +137,9 @@ export function initChatDb(
     if (existing) clearTimeout(existing);
     debouncedRetryTimers.set(roomId, setTimeout(() => {
       debouncedRetryTimers.delete(roomId);
+      // Recover persisted "[encrypted]" messages (queue may have drifted/died,
+      // e.g. after the 502 key-outage) AND retry any live queue jobs.
+      decryptionWorker.recoverStuckMessages(roomId).catch(() => {});
       decryptionWorker.retryForRoom(roomId);
     }, 500));
   };
@@ -169,6 +172,13 @@ export function initChatDb(
 
   // Start processing any pending decryption jobs from previous session
   decryptionWorker.tick().catch(() => {});
+
+  // Re-enqueue messages stranded as "[encrypted]" in a previous session whose
+  // ciphertext is still on the row (e.g. failed during the 502 key-outage) but
+  // whose queue job died/was pruned. Self-limiting: recovered rows flip to "ok".
+  decryptionWorker.recoverAllStuckMessages().then((count) => {
+    if (count > 0) console.info(`[local-db] Re-queued ${count} stuck encrypted message(s) for decryption`);
+  }).catch(() => {});
 
   // Post-migration: re-fetch and enqueue cross-device messages marked by v5 migration.
   // These have content="[encrypted]", decryptionStatus="pending", but no encryptedBody.

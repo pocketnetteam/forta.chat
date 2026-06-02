@@ -17,6 +17,7 @@ import {
 } from "../model/video-error";
 import { computeVideoAspectStyle, resolveVideoDimensions } from "../model/video-layout";
 import MessageContent from "./MessageContent.vue";
+import EncryptedMessageNotice from "./EncryptedMessageNotice.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
 import TransferCard from "./TransferCard.vue";
@@ -49,6 +50,16 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), { isGroup: false, isFirstInGroup: false });
+
+/** Encrypted message that hasn't been decrypted yet (pending/failed, or the
+ *  "[encrypted]" placeholder). Rendered as a distinct notice with auto-retry +
+ *  refresh button instead of leaking the literal "[encrypted]" text. */
+const isUndecrypted = computed(() =>
+  !props.message.deleted &&
+  (props.message.decryptionStatus === "pending" ||
+    props.message.decryptionStatus === "failed" ||
+    props.message.content === "[encrypted]"),
+);
 
 /** Tail (pointed corner) only on the last message in a group (= showAvatar) */
 const tailClass = computed(() => {
@@ -675,6 +686,20 @@ const replyPreviewSender = computed(() => {
           </svg>
           {{ t('message.deleted') }}
         </div>
+      </div>
+
+      <!-- Undecrypted message — distinct state with auto-retry + refresh button -->
+      <div
+        v-else-if="isUndecrypted"
+        class="rounded-bubble px-3 py-2"
+        :class="[tailClass, props.isOwn ? 'bg-chat-bubble-own/70' : 'bg-chat-bubble-other/70']"
+      >
+        <EncryptedMessageNotice :message="message" :is-own="props.isOwn" />
+        <span
+          v-if="themeStore.showTimestamps"
+          class="mt-0.5 block text-right text-[10px]"
+          :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'"
+        >{{ time }}</span>
       </div>
 
       <!-- Image message -->

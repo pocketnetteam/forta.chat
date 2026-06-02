@@ -115,6 +115,16 @@ describe("getMessagePreviewForUI", () => {
     expect(result).toEqual({ state: "failed", text: "Cannot decrypt" });
   });
 
+  it("returns failed for [encrypted] when the decrypt skeleton has timed out", () => {
+    const result = getMessagePreviewForUI("[encrypted]", "pending", "Encrypted message", { timedOut: true });
+    expect(result).toEqual({ state: "failed", text: "Encrypted message" });
+  });
+
+  it("keeps resolving for [encrypted] pending when not yet timed out", () => {
+    const result = getMessagePreviewForUI("[encrypted]", "pending", "Encrypted message", { timedOut: false });
+    expect(result).toEqual({ state: "resolving", text: "" });
+  });
+
   it("returns failed for m.bad.encrypted with failed status", () => {
     const result = getMessagePreviewForUI("m.bad.encrypted", "failed", "Cannot decrypt");
     expect(result).toEqual({ state: "failed", text: "Cannot decrypt" });

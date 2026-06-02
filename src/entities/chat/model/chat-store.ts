@@ -2133,6 +2133,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     ensureRoomsLoaded([roomId], "high");
   };
 
+  /** Retry decryption of a single persisted "[encrypted]" message (the refresh
+   *  button on an undecrypted bubble). Resolves true on success — the liveQuery
+   *  then re-renders the bubble with the decrypted content. */
+  const retryMessageDecryption = async (eventId: string): Promise<boolean> => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return false;
+    try {
+      return await kit.decryptionWorker.decryptMessageNow(eventId);
+    } catch {
+      return false;
+    }
+  };
+
   /** Background-preload messages for rooms near the active room.
    *  Phase 1: active room + 2 neighbors get immediate network preload.
    *  Phase 2: remaining viewport rooms get cache-only preload via requestIdleCallback. */
@@ -3347,6 +3360,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }).catch(() => {});
     }
     if (roomId) {
+      // Recover any messages stuck as "[encrypted]" from a prior key/RPC outage
+      // (e.g. the 502 wave): re-decrypt persisted ciphertext now that keys load
+      // again. Debounced + idempotent; no-op when nothing is stuck.
+      chatDbKitRef.value?.retryRoomDecryption?.(roomId);
+
       // Load profiles only if not already loaded (removed unconditional delete
       // that caused re-fetching already-cached profiles on every room open)
       if (!profilesRequestedForRooms.has(roomId)) {
@@ -6969,6 +6987,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomFetchStates,
     loadingRooms,
     retryRoomFetch,
+    retryMessageDecryption,
     cyclePinnedMessage,
     refreshRooms,
     refreshRoomsNow,

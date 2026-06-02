@@ -3,14 +3,16 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 
 /**
- * Regression tests pinning the safety contract of `republishKeysFromUi()`.
+ * Regression tests pinning the safety contract of `republishKeysFromUi()`
+ * and `verifyAndRepublishKeys()`.
  *
- * The original `verifyAndRepublishKeys()` flips `registrationPending` and
- * starts a registration poll on a republish-needed path — that's correct for
- * login but a foot-gun when the same call is wired to a chat-room banner
- * button (App.vue mounts RegistrationStepper as a full-screen overlay
- * whenever `registrationPending` is truthy). The UI variant must broadcast
- * keys without touching that registration-pending state.
+ * App.vue mounts RegistrationStepper as a full-screen overlay whenever
+ * `registrationPending` is truthy. Neither the chat-room banner button
+ * (republishKeysFromUi) nor the login-path key check (verifyAndRepublishKeys,
+ * which runs for an already-authenticated account) may flip that state —
+ * doing so hangs an existing-account session on "Подготовка аккаунта"
+ * (WEE-35 / forta-bugs#520). Both must broadcast keys silently in the
+ * background instead.
  */
 
 const storesSource = readFileSync(
@@ -63,13 +65,25 @@ describe("republishKeysFromUi safety", () => {
   });
 });
 
-describe("verifyAndRepublishKeys (login path) is intact", () => {
-  it("still flips registrationPending on the republish path", () => {
-    // Sanity check — the login path needs the registration overlay so the
-    // user sees the poll progress. Don't accidentally degrade it while
-    // refactoring the UI variant.
+describe("verifyAndRepublishKeys (login path) never mounts the registration UI", () => {
+  // WEE-35 / forta-bugs#520: this runs on the login path for an
+  // ALREADY-AUTHENTICATED account. Flipping `registrationPending` mounts the
+  // full-screen RegistrationStepper ("Подготовка аккаунта / Requesting
+  // resources for registration") over a valid session and hangs the user —
+  // the visible symptom for Bastyon-registered accounts (whose blockchain
+  // profile lacks Forta's 12 keys) and for transient empty-keys RPC responses.
+  it("does not flip registrationPending or start the stepper poll", () => {
     const body = extractFunctionBody("verifyAndRepublishKeys");
-    expect(body).toContain("setRegistrationPending(true)");
-    expect(body).toContain("startRegistrationPoll(");
+    expect(body).not.toContain("setRegistrationPending(true)");
+    expect(body).not.toContain("startRegistrationPoll(");
+    expect(body).not.toContain("setPendingRegProfile(");
+  });
+
+  it("still re-publishes keys in the background when the account is funded", () => {
+    // The fix degrades to a silent broadcast — it must keep calling
+    // registerUserProfile so encryption keys actually get published.
+    const body = extractFunctionBody("verifyAndRepublishKeys");
+    expect(body).toContain("registerUserProfile");
+    expect(body).toContain('action.kind');
   });
 });
