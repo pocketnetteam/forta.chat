@@ -21,6 +21,7 @@ import EncryptedMessageNotice from "./EncryptedMessageNotice.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
 import TransferCard from "./TransferCard.vue";
+import CallLinkCard from "./CallLinkCard.vue";
 import ReactionRow from "./ReactionRow.vue";
 import VoiceMessage from "./VoiceMessage.vue";
 import VideoCirclePlayer from "./VideoCirclePlayer.vue";
@@ -1252,6 +1253,29 @@ const replyPreviewSender = computed(() => {
           {{ senderDisplayResult.text }}
         </div>
         <TransferCard :message="message" :is-own="props.isOwn" />
+        <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
+          <span class="text-[10px]">{{ time }}</span>
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+        </div>
+        <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
+      </div>
+
+      <!-- External call-link message (WEE-57) -->
+      <div
+        v-else-if="message.type === MessageType.callLink && message.callLinkInfo"
+        class="rounded-bubble px-3 py-2"
+        :class="[tailClass, props.isOwn ? 'bg-chat-bubble-own text-text-on-bg-ac-color' : 'bg-chat-bubble-other text-text-color']"
+      >
+        <div
+          v-if="props.isGroup && !props.isOwn && props.isFirstInGroup"
+          class="mb-0.5 cursor-pointer text-sm font-semibold"
+          :class="{ 'italic opacity-70': senderDisplayResult.state === 'failed' }"
+          :style="{ color: senderColor }"
+          @click.stop="openUserProfile?.(message.senderId)"
+        >
+          {{ senderDisplayResult.text }}
+        </div>
+        <CallLinkCard :info="message.callLinkInfo" :is-own="props.isOwn" />
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
           <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />

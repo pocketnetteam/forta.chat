@@ -57,6 +57,10 @@ export function useFormatPreview() {
       case MessageType.transfer:
         preview = `💸 ${msg.transferInfo ? `${msg.transferInfo.amount} PKOIN` : (content || t("message.transfer"))}`;
         break;
+      case MessageType.callLink:
+        // content is already "📞 <label>" (WEE-57)
+        preview = msg.callLinkInfo ? `📞 ${msg.callLinkInfo.label}` : (content || "📞");
+        break;
       case MessageType.system: {
         let sysText: string;
         if (msg.systemMeta?.template) {

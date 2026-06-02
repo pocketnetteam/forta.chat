@@ -281,6 +281,39 @@ const handleLogout = () => {
           </svg>
         </button>
 
+        <!-- Call methods (WEE-57) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('callMethods')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.callProviders.title") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
         <!-- Storage (WEE-33) -->
         <button
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"

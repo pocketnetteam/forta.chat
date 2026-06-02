@@ -5,6 +5,7 @@ import type {
   ReplyTo,
   PollInfo,
   TransferInfo,
+  CallLinkInfo,
   LinkPreview,
 } from "@/entities/chat/model/types";
 
@@ -115,6 +116,7 @@ export interface LocalMessage {
   callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number };
   pollInfo?: PollInfo;
   transferInfo?: TransferInfo;
+  callLinkInfo?: CallLinkInfo;   // External call-link card (WEE-57)
   linkPreview?: LinkPreview;
   deleted?: boolean;
   systemMeta?: {
@@ -294,6 +296,19 @@ export interface DecryptionJob {
   createdAt: number;
 }
 
+/**
+ * A user-configured external meeting provider (WEE-57).
+ *
+ * Privacy: these rows live ONLY in the per-user local IndexedDB
+ * (`bastyon-chat-{userId}`). They are NEVER written to Matrix account_data
+ * or the Pocketnet backend — personal meeting-room URLs stay on-device.
+ */
+export interface CallProvider {
+  id?: number;                   // Auto-incremented PK
+  label: string;                 // "Личный Zoom" — any user-chosen name
+  urlTemplate: string;           // "https://zoom.us/j/1234567890" — any meeting URL
+}
+
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
@@ -312,6 +327,7 @@ export class ChatDatabase extends Dexie {
   channels!: Table<LocalChannel>;
   mediaCacheIndex!: Table<MediaCacheIndexEntry>;
   mediaCacheBlobs!: Table<MediaCacheBlobRow>;
+  callProviders!: Table<CallProvider>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -752,6 +768,26 @@ export class ChatDatabase extends Dexie {
       try { await tx.table("mediaCacheIndex").clear(); } catch { /* ignore */ }
       try { await tx.table("mediaCacheBlobs").clear(); } catch { /* ignore */ }
       console.log("[ChatDB] Media cache v16 migration: wiped v15 index (no roomId)");
+    });
+
+    // Version 17: local-only external call providers (WEE-57). Stored here
+    // (and never in Matrix account_data) so personal meeting-room URLs stay
+    // on-device. PK-only — the list is a handful of rows, queried with a
+    // plain toArray(), so no secondary index is needed.
+    this.version(17).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      mediaCacheIndex: "mxc, accessedAt, roomId, category",
+      mediaCacheBlobs: "mxc",
+      callProviders: "++id",
     });
   }
 }

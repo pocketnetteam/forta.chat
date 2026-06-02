@@ -131,6 +131,7 @@ export class MessageRepository {
     forwardedFrom?: LocalMessage["forwardedFrom"];
     transferInfo?: LocalMessage["transferInfo"];
     pollInfo?: LocalMessage["pollInfo"];
+    callLinkInfo?: LocalMessage["callLinkInfo"];
     fileInfo?: LocalMessage["fileInfo"];
     linkPreview?: LocalMessage["linkPreview"];
     localBlobUrl?: string;
@@ -155,6 +156,7 @@ export class MessageRepository {
       forwardedFrom: params.forwardedFrom,
       transferInfo: params.transferInfo,
       pollInfo: params.pollInfo,
+      callLinkInfo: params.callLinkInfo,
       fileInfo: params.fileInfo,
       linkPreview: params.linkPreview,
       localBlobUrl: params.localBlobUrl,
@@ -189,6 +191,7 @@ export class MessageRepository {
     if (type === MessageType.file) return fileInfo?.name || "[file]";
     if (type === MessageType.poll) return "[poll]";
     if (type === MessageType.transfer) return `[transfer] ${transferAmount ?? 0} PKOIN`;
+    if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
 

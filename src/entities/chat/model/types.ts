@@ -130,6 +130,8 @@ export interface Message {
   pollInfo?: PollInfo;
   /** Transfer metadata — present when type === transfer */
   transferInfo?: TransferInfo;
+  /** External call-link metadata — present when type === callLink (WEE-57) */
+  callLinkInfo?: CallLinkInfo;
   /** URL link preview metadata (Open Graph) */
   linkPreview?: LinkPreview;
   /** Upload progress 0-100 (only during media upload, undefined when not uploading) */
@@ -166,6 +168,22 @@ export enum MessageType {
   poll = "poll",
   transfer = "transfer",
   videoCircle = "videoCircle",
+  callLink = "callLink",
+}
+
+/**
+ * Metadata for an external call-link message (WEE-57).
+ * Travels inside the (encrypted) message body as JSON — mirrors the
+ * `_transfer` envelope pattern so it needs no new Matrix event type.
+ *
+ * Provider-agnostic by design: a meeting method is just a labelled URL
+ * (Zoom / Meet / Jitsi / anything), so there is no provider "kind".
+ */
+export interface CallLinkInfo {
+  /** The meeting URL the recipient opens */
+  url: string;
+  /** Human label shown on the card, e.g. "Личный Zoom" */
+  label: string;
 }
 
 export interface PollInfo {

@@ -3,7 +3,7 @@ import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { UserAvatar } from "@/entities/user";
 import { hexEncode } from "@/shared/lib/matrix/functions";
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import { openBastyonProfile } from "@/shared/lib/open-profile-url";
 
 interface Props {
@@ -19,7 +19,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
-const callService = useCallService();
+const callLauncher = useCallLauncher();
 
 const userData = ref<{ name: string; about: string; site: string; image: string } | null>(null);
 const copiedAddress = ref(false);
@@ -77,7 +77,7 @@ const navigateToChat = () => {
   emit("close");
 };
 
-const startCall = (type: "voice" | "video") => {
+const startCall = (type: "voice" | "video", event?: MouseEvent) => {
   const hexAddr = hexEncode(props.address).toLowerCase();
   const existingRoom = chatStore.sortedRooms.find(
     (r) =>
@@ -85,7 +85,9 @@ const startCall = (type: "voice" | "video") => {
       (r.members.includes(hexAddr) || (r.invitedMembers ?? []).includes(hexAddr)),
   );
   if (existingRoom) {
-    callService.startCall(existingRoom.id, type);
+    // 1:1 profile → DM, native Forta stays available in the picker (WEE-57)
+    const anchor = event ? { x: event.clientX, y: event.clientY } : undefined;
+    void callLauncher.launch(existingRoom.id, type, true, anchor);
   }
   emit("close");
 };
@@ -143,7 +145,7 @@ const startCall = (type: "voice" | "video") => {
               </button>
 
               <!-- Call button -->
-              <button class="flex flex-col items-center gap-1" @click="startCall('voice')">
+              <button class="flex flex-col items-center gap-1" @click="startCall('voice', $event)">
                 <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
@@ -153,7 +155,7 @@ const startCall = (type: "voice" | "video") => {
               </button>
 
               <!-- More button (video call) -->
-              <button class="flex flex-col items-center gap-1" @click="startCall('video')">
+              <button class="flex flex-col items-center gap-1" @click="startCall('video', $event)">
                 <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polygon points="23 7 16 12 23 17 23 7" />
@@ -205,6 +207,16 @@ const startCall = (type: "voice" | "video") => {
         </div>
       </div>
     </transition>
+
+    <!-- WEE-57: external call-provider picker -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      :x="callLauncher.pickerAnchor.value.x"
+      :y="callLauncher.pickerAnchor.value.y"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
+    />
   </Teleport>
 </template>
 
