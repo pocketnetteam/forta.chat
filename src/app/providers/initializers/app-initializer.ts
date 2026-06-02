@@ -3,6 +3,7 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { rpcFetchWithFailover, buildNodeBaseUrls, type RpcEnvelope } from "@/shared/lib/pocketnet";
 
 export type EditUserDataResult =
   | { success: true; action: unknown }
@@ -83,14 +84,36 @@ export class AppInitializer {
     });
   }
 
-  /** Fetch current blockchain block height via getnodeinfo RPC */
+  /** Fetch current blockchain block height via getnodeinfo RPC.
+   *  Block height is the linchpin for Pcrypto key derivation, so a single
+   *  502 node must not zero it out: try the SDK path first, then fall back to a
+   *  direct getnodeinfo fetch that fails over across all configured nodes. */
   async getBlockHeight(): Promise<number> {
-    if (!this.api) return 0;
+    // Primary: SDK Api (has its own internal node handling).
+    if (this.api) {
+      try {
+        const info = await this.api.rpc("getnodeinfo");
+        const height = info?.height ?? 0;
+        if (height > 0) return height;
+        console.warn("[appInit] getBlockHeight via SDK returned 0 — falling back to direct node failover");
+      } catch (e) {
+        console.warn("[appInit] getBlockHeight via SDK failed — falling back to direct node failover:", e);
+      }
+    }
+
+    // Fallback: direct getnodeinfo with cross-node failover. Recovers block
+    // height (and therefore encryption) when the SDK's node is 502 and it does
+    // not rotate. Best-effort — returns 0 like before if every node is down.
     try {
-      const info = await this.api.rpc("getnodeinfo");
-      return info?.height ?? 0;
+      const json = await rpcFetchWithFailover(
+        "/rpc/getnodeinfo",
+        { method: "getnodeinfo", parameters: [] },
+        { nodes: this.rpcNodes() }
+      ) as RpcEnvelope<{ height?: number }> & { height?: number };
+      const result = json.data ?? json.result ?? json;
+      return result?.height ?? 0;
     } catch (e) {
-      console.error("[appInit] getBlockHeight error:", e);
+      console.error("[appInit] getBlockHeight error (all nodes failed):", e);
       return 0;
     }
   }
@@ -727,8 +750,13 @@ export class AppInitializer {
     }
   }
 
-  private static readonly PROXY_URL = "https://1.pocketnet.app:8899";
   private static readonly NODE_ID = "94.156.128.149:38081";
+
+  /** Configured Pocketnet RPC node base URLs (e.g. 1/2/6.pocketnet.app:8899),
+   *  used for cross-node failover on direct fetches. */
+  private rpcNodes(): string[] {
+    return buildNodeBaseUrls(PocketnetInstance.options.listofproxies);
+  }
 
   async getSubscribesChannels(
     address: string,
@@ -737,23 +765,17 @@ export class AppInitializer {
     pageSize = 20
   ): Promise<{ channels: any[]; height: number } | undefined> {
     try {
-      const response = await fetch(
-        `${AppInitializer.PROXY_URL}/rpc/getsubscribeschannels`,
+      // Failover across all configured nodes — node 1 returning 502 must not
+      // sink the whole request (it used to be pinned to PROXY_URL = node 1).
+      const json = await rpcFetchWithFailover(
+        "/rpc/getsubscribeschannels",
         {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            method: "getsubscribeschannels",
-            parameters: [address, blockNumber, page, pageSize],
-            options: { node: AppInitializer.NODE_ID },
-          }),
-        }
-      );
-      if (!response.ok) {
-        console.error("[appInit] getSubscribesChannels HTTP error:", response.status);
-        return undefined;
-      }
-      const json = await response.json();
+          method: "getsubscribeschannels",
+          parameters: [address, blockNumber, page, pageSize],
+          options: { node: AppInitializer.NODE_ID },
+        },
+        { nodes: this.rpcNodes() }
+      ) as RpcEnvelope<{ height?: number; channels?: unknown[] }> & { height?: number; channels?: unknown[] };
       if (json.error) {
         console.error("[appInit] getSubscribesChannels RPC error:", json.error);
         return undefined;
@@ -764,7 +786,7 @@ export class AppInitializer {
         channels: result.channels ?? [],
       };
     } catch (e) {
-      console.error("[appInit] getSubscribesChannels error:", e);
+      console.error("[appInit] getSubscribesChannels error (all nodes failed):", e);
       return undefined;
     }
   }
@@ -775,43 +797,35 @@ export class AppInitializer {
   ): Promise<any[]> {
     try {
       const opts = options ?? {};
-      const response = await fetch(
-        `${AppInitializer.PROXY_URL}/rpc/getprofilefeed`,
+      const json = await rpcFetchWithFailover(
+        "/rpc/getprofilefeed",
         {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            method: "getprofilefeed",
-            parameters: [
-              Number(opts.height ?? 0),
-              opts.startTxid ?? "",
-              opts.count ?? 10,
-              "",   // lang
-              [],   // tagsfilter
-              [],   // type
-              [],   // reserved
-              [],   // reserved
-              [],   // tagsexcluded
-              "",   // keyword
-              authorAddress,
-            ],
-            options: { node: AppInitializer.NODE_ID },
-          }),
-        }
-      );
-      if (!response.ok) {
-        console.error("[appInit] getProfileFeed HTTP error:", response.status);
-        return [];
-      }
-      const json = await response.json();
+          method: "getprofilefeed",
+          parameters: [
+            Number(opts.height ?? 0),
+            opts.startTxid ?? "",
+            opts.count ?? 10,
+            "",   // lang
+            [],   // tagsfilter
+            [],   // type
+            [],   // reserved
+            [],   // reserved
+            [],   // tagsexcluded
+            "",   // keyword
+            authorAddress,
+          ],
+          options: { node: AppInitializer.NODE_ID },
+        },
+        { nodes: this.rpcNodes() }
+      ) as RpcEnvelope<unknown[] | { contents?: unknown[] }> & { contents?: unknown[] };
       if (json.error) {
         console.error("[appInit] getProfileFeed RPC error:", json.error);
         return [];
       }
       const result = json.data ?? json.result ?? json;
-      return Array.isArray(result) ? result : result?.contents ?? [];
+      return Array.isArray(result) ? result : (result as { contents?: unknown[] })?.contents ?? [];
     } catch (e) {
-      console.error("[appInit] getProfileFeed error:", e);
+      console.error("[appInit] getProfileFeed error (all nodes failed):", e);
       return [];
     }
   }
