@@ -11,6 +11,17 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
+/** Outbound message-creating ops whose transport status is mirrored onto the
+ *  room's `lastMessageLocalStatus` (chat-list preview, WEE-64). Edit/reaction/
+ *  delete/vote ops mutate an existing message and must never overwrite the
+ *  preview badge. */
+const SEND_OPS: ReadonlySet<PendingOperation["type"]> = new Set([
+  "send_message",
+  "send_file",
+  "send_transfer",
+  "send_poll",
+]);
+
 /** Watchdog tick interval. The watchdog is a safety net for cases where the
  *  connectivity layer fails to deliver a "back online" signal — most commonly
  *  Android WebView after device sleep+wake, where `window.online` may never
@@ -986,6 +997,24 @@ export class SyncEngine {
       { clientId: op.clientId },
       "failed",
     );
+
+    // WEE-64: mirror the success-path room write (:607-610) so the chat-list
+    // preview shows the same failed badge the open chat does. Guarded twice:
+    //   (a) only outbound send-ops — an edit/reaction/delete failure must not
+    //       corrupt the preview badge of an unrelated last message;
+    //   (b) only when this message is still the room's last message
+    //       (RoomRepository.syncLastMessageLocalStatus enforces the timestamp
+    //       check) — a newer message already advanced the preview.
+    if (SEND_OPS.has(op.type)) {
+      const failedMsg = await this.messageRepo.getByClientId(op.clientId);
+      if (failedMsg) {
+        await this.roomRepo.syncLastMessageLocalStatus(
+          op.roomId,
+          failedMsg.timestamp,
+          "failed",
+        );
+      }
+    }
   }
 
   /** Returns true when the local message row for `clientId` already has a
@@ -1042,10 +1071,26 @@ export class SyncEngine {
 
   /** Retry all failed operations */
   async retryAllFailed(): Promise<void> {
+    // Snapshot the failed ops BEFORE resetting them so we can mirror the
+    // reset onto each room's preview status (WEE-64).
+    const failedOps = await this.db.pendingOps.where("status").equals("failed").toArray();
     await this.db.pendingOps
       .where("status")
       .equals("failed")
       .modify({ status: "pending", retries: 0, errorMessage: undefined, nextAttemptAt: 0 });
+
+    // WEE-64: a failed send returning to the queue must reset its chat-list
+    // preview from "failed" back to "pending" (отправляется), symmetric to
+    // markMessageFailed — otherwise the sidebar shows a stale error while the
+    // retry is in flight. Same send-op + still-last-message guards apply.
+    for (const op of failedOps) {
+      if (!op.clientId || !SEND_OPS.has(op.type)) continue;
+      const msg = await this.messageRepo.getByClientId(op.clientId);
+      if (msg) {
+        await this.roomRepo.syncLastMessageLocalStatus(op.roomId, msg.timestamp, "pending");
+      }
+    }
+
     this.processQueue();
   }
 

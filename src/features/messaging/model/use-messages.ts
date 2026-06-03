@@ -2079,6 +2079,9 @@ export function useMessages() {
       status: "pending" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
       uploadProgress: 0,
     });
+    // WEE-64: mirror the reset onto the chat-list preview (still-last guard
+    // inside the repository) so the sidebar shows "отправляется" during retry.
+    await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
 
     // Re-run upload pipeline (with abort support)
     const controller = registerUploadAbort(localMsg.clientId);
@@ -2205,6 +2208,9 @@ export function useMessages() {
             uploadProgress: undefined,
             uploadPhase: undefined,
           });
+          // WEE-64: the media retry pipeline bypasses SyncEngine, so mirror the
+          // failed badge onto the chat-list preview (still-last guard in the repo).
+          await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
         }
       }
     } finally {
@@ -2230,11 +2236,18 @@ export function useMessages() {
 
     // Reset status to pending
     await dbKit.messages.updateStatus({ clientId: mKey }, "pending");
+    // WEE-64: mirror the reset onto the chat-list preview so the sidebar shows
+    // "отправляется" (not a stale error) while the retry is in flight. Guarded
+    // to the still-last-message case inside the repository.
+    await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
 
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) {
       console.error("[retryMessage] Matrix client still not ready", { roomId, clientId: mKey });
       await dbKit.messages.markFailed(mKey);
+      // WEE-64: this retry never reaches SyncEngine.markMessageFailed, so mirror
+      // the failed badge onto the preview here (still-last guard in the repo).
+      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
       return;
     }
 
@@ -2262,6 +2275,9 @@ export function useMessages() {
     } catch (e) {
       console.error("[retryMessage] Failed to enqueue:", e);
       await dbKit.messages.markFailed(mKey);
+      // WEE-64: enqueue failed before SyncEngine took over — keep the preview
+      // consistent with the failed message (still-last guard in the repo).
+      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
     }
   };
 

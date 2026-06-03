@@ -92,7 +92,7 @@ function makeHarness(name: string): Harness {
     getByClientId: vi.fn(async () => undefined),
     updateUploadProgress: vi.fn(async () => undefined),
   };
-  const roomRepo = { updateRoom: vi.fn(async () => undefined) };
+  const roomRepo = { updateRoom: vi.fn(async () => undefined), syncLastMessageLocalStatus: vi.fn(async () => undefined) };
   const engine = new SyncEngine(
     db as never,
     messageRepo as never,

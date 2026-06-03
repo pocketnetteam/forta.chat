@@ -245,6 +245,27 @@ export class RoomRepository {
     await this.db.rooms.update(roomId, changes);
   }
 
+  /** Keep the chat-list preview transport status in sync with the room's last
+   *  outbound message (WEE-64). Writes `lastMessageLocalStatus` ONLY when
+   *  `messageTimestamp` still matches the room's current `lastMessageTimestamp`
+   *  — i.e. the given message is still the one rendered in the preview. A newer
+   *  message (ours or the peer's) advances `lastMessageTimestamp`, so a stale
+   *  failed/retried send must never overwrite the badge of a later message.
+   *
+   *  Mirrors the SyncEngine success path which stamps `lastMessageLocalStatus:
+   *  "synced"`; used by the failure path (→ "failed") and the retry path
+   *  (→ "pending") so the sidebar matches the open chat. */
+  async syncLastMessageLocalStatus(
+    roomId: string,
+    messageTimestamp: number,
+    status: LocalMessageStatus,
+  ): Promise<void> {
+    const room = await this.db.rooms.get(roomId);
+    if (!room) return;
+    if (room.lastMessageTimestamp !== messageTimestamp) return;
+    await this.db.rooms.update(roomId, { lastMessageLocalStatus: status });
+  }
+
   /** Update the last message preview for a room.
    *  Monotonic: skips the update if the existing preview is already newer,
    *  preventing stale server data from overwriting fresher local-first writes.

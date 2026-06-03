@@ -106,7 +106,7 @@ interface Harness {
     getByClientId: ReturnType<typeof vi.fn>;
     updateUploadProgress: ReturnType<typeof vi.fn>;
   };
-  roomRepo: { updateRoom: ReturnType<typeof vi.fn> };
+  roomRepo: { updateRoom: ReturnType<typeof vi.fn>; syncLastMessageLocalStatus: ReturnType<typeof vi.fn> };
   getRoomCrypto: ReturnType<typeof vi.fn>;
 }
 
@@ -125,7 +125,7 @@ function makeHarness(
     getByClientId: vi.fn(async (..._args: unknown[]) => opts.existingMsg as LocalMessage | undefined),
     updateUploadProgress: vi.fn(async () => undefined),
   };
-  const roomRepo = { updateRoom: vi.fn(async () => undefined) };
+  const roomRepo = { updateRoom: vi.fn(async () => undefined), syncLastMessageLocalStatus: vi.fn(async () => undefined) };
   const roomCrypto = encrypted
     ? {
         canBeEncrypt: () => true,
