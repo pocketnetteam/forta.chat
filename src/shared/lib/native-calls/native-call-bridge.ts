@@ -41,6 +41,16 @@ export interface InviteThrottleSnapshot {
   records: InviteThrottleRecord[];
 }
 
+/** Native AudioRouter device identifiers (see `CallPlugin.setAudioDevice`). */
+export type NativeAudioDeviceType = 'speaker' | 'earpiece' | 'bluetooth' | 'wired_headset';
+
+/** Snapshot of the native AudioRouter routing state. */
+export interface NativeAudioDevicesState {
+  /** Active device type, lowercased (e.g. 'speaker'). Empty when unknown. */
+  active: string;
+  devices: Array<{ type: string; name: string }>;
+}
+
 interface NativeCallNativePlugin {
   reportIncomingCall(options: {
     callId: string;
@@ -98,7 +108,7 @@ interface NativeCallNativePlugin {
     active: string;
     devices: Array<{ type: string; name: string }>;
   }>;
-  setAudioDevice(options: { type: string }): Promise<void>;
+  setAudioDevice(options: { type: NativeAudioDeviceType }): Promise<void>;
   startAudioRouting(options: { callType: string }): Promise<void>;
   stopAudioRouting(): Promise<void>;
   /**
@@ -693,6 +703,75 @@ class NativeCallBridge {
         '[NativeCallBridge] startAudioRouting recovered on attempt',
         result.attempts,
       );
+    }
+  }
+
+  /**
+   * WEE-60: route in-call audio to a specific output through the native
+   * AudioRouter. `type` is one of 'speaker' | 'earpiece' | 'bluetooth' |
+   * 'wired_headset' (see `CallPlugin.setAudioDevice` → `AudioRouter.setDevice`).
+   *
+   * No-op on web: the WebView has no AudioManager, and web output selection is
+   * handled by `setSinkId` on the remote element in CallWindow. Surfaced here so
+   * the Vue speaker toggle has a typed entry point instead of reaching into the
+   * raw Capacitor plugin.
+   */
+  async setAudioDevice(options: { type: NativeAudioDeviceType }): Promise<void> {
+    if (!isNative) return;
+    try {
+      await NativeCall.setAudioDevice(options);
+    } catch (e) {
+      console.warn('[NativeCallBridge] setAudioDevice failed:', e);
+    }
+  }
+
+  /**
+   * WEE-60: read the native AudioRouter's current routing snapshot. Used to
+   * seed the in-call speaker-toggle state on mount so it reflects the real
+   * output (the call may have opened on speaker for video, or BT may already
+   * be connected). Safe default on web / older native builds.
+   */
+  async getAudioDevices(): Promise<NativeAudioDevicesState> {
+    if (!isNative) return { active: '', devices: [] };
+    try {
+      const res = await NativeCall.getAudioDevices();
+      return {
+        active: typeof res?.active === 'string' ? res.active : '',
+        devices: Array.isArray(res?.devices) ? res.devices : [],
+      };
+    } catch (e) {
+      console.warn('[NativeCallBridge] getAudioDevices unavailable:', e);
+      return { active: '', devices: [] };
+    }
+  }
+
+  /**
+   * WEE-60: subscribe to native AudioRouter routing changes (BT/wired hot-swap,
+   * OEM auto-routing). Keeps the speaker toggle in sync with the actual output
+   * instead of drifting after minimize/restore or a headset connect. Returns an
+   * unsubscribe function; no-op on web / older native builds.
+   */
+  async onAudioDevicesChanged(
+    cb: (state: NativeAudioDevicesState) => void,
+  ): Promise<() => void> {
+    if (!isNative) return () => {};
+    try {
+      const handle = await NativeCall.addListener('audioDevicesChanged', (data) => {
+        cb({
+          active: typeof data?.active === 'string' ? data.active : '',
+          devices: Array.isArray(data?.devices) ? data.devices : [],
+        });
+      });
+      return () => {
+        try {
+          handle.remove();
+        } catch {
+          /* listener already detached */
+        }
+      };
+    } catch (e) {
+      console.warn('[NativeCallBridge] onAudioDevicesChanged unavailable:', e);
+      return () => {};
     }
   }
 
