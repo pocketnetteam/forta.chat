@@ -97,7 +97,7 @@ interface Harness {
   db: TestDb;
   engine: SyncEngine;
   messageRepo: MessageRepoStub;
-  roomRepo: { updateRoom: ReturnType<typeof vi.fn> };
+  roomRepo: { updateRoom: ReturnType<typeof vi.fn>; syncLastMessageLocalStatus: ReturnType<typeof vi.fn> };
   /** Backing store the messageRepo stub reads from. Tests mutate this to
    *  simulate Matrix /sync echoes arriving mid-flight. */
   rows: Map<string, Partial<LocalMessage>>;
@@ -121,7 +121,7 @@ function makeHarness(name: string): Harness {
     updateReactions: vi.fn(async () => undefined),
     getByClientId: vi.fn(async (clientId: string) => rows.get(clientId)),
   };
-  const roomRepo = { updateRoom: vi.fn(async () => undefined) };
+  const roomRepo = { updateRoom: vi.fn(async () => undefined), syncLastMessageLocalStatus: vi.fn(async () => undefined) };
   const getRoomCrypto = vi.fn(async () => undefined);
   const engine = new SyncEngine(
     db as never,

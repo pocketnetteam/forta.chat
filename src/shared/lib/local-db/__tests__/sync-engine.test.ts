@@ -67,7 +67,7 @@ interface Harness {
   db: TestDb;
   engine: SyncEngine;
   messageRepo: { confirmSent: ReturnType<typeof vi.fn>; updateStatus: ReturnType<typeof vi.fn>; getByEventId: ReturnType<typeof vi.fn>; updateReactions: ReturnType<typeof vi.fn>; getByClientId: ReturnType<typeof vi.fn> };
-  roomRepo: { updateRoom: ReturnType<typeof vi.fn> };
+  roomRepo: { updateRoom: ReturnType<typeof vi.fn>; syncLastMessageLocalStatus: ReturnType<typeof vi.fn> };
   getRoomCrypto: ReturnType<typeof vi.fn>;
 }
 
@@ -82,6 +82,7 @@ function makeHarness(name: string): Harness {
   };
   const roomRepo = {
     updateRoom: vi.fn(async () => undefined),
+    syncLastMessageLocalStatus: vi.fn(async () => undefined),
   };
   const getRoomCrypto = vi.fn(async () => undefined); // plain-text path by default
   const engine = new SyncEngine(
