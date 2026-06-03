@@ -205,4 +205,22 @@ describe("sendVideoCircle — crash-safe SyncEngine queue (WEE-62)", () => {
     };
     expect(payload.forwardedFrom).toEqual({ senderId: "alice", senderName: "Alice" });
   });
+
+  it("returns false and does NOT enqueue when the chat DB is not ready", async () => {
+    const localDb = await import("@/shared/lib/local-db");
+    vi.mocked(localDb.isChatDbReady).mockReturnValueOnce(false);
+
+    const { sendVideoCircle } = useMessages();
+    const ok = await sendVideoCircle(makeVideoFile());
+
+    expect(ok).toBe(false);
+    expect(mocks.enqueueSpy).not.toHaveBeenCalled();
+    expect(mocks.attachmentsAddSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns true on a successful enqueue", async () => {
+    const { sendVideoCircle } = useMessages();
+    const ok = await sendVideoCircle(makeVideoFile());
+    expect(ok).toBe(true);
+  });
 });

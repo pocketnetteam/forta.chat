@@ -1131,18 +1131,10 @@ export function useMessages() {
           forwardedFrom: forwardMeta,
         });
       case MessageType.videoCircle:
-        // sendVideoCircle returns void and swallows its own errors; wrap so
-        // a failed video-circle forward surfaces as `false` to the caller.
-        try {
-          await sendVideoCircle(file, {
-            duration: source.fileInfo.duration,
-            forwardedFrom: forwardMeta,
-          });
-          return true;
-        } catch (e) {
-          console.error("[sendForward] sendVideoCircle threw:", e);
-          return false;
-        }
+        return await sendVideoCircle(file, {
+          duration: source.fileInfo.duration,
+          forwardedFrom: forwardMeta,
+        });
       case MessageType.video:
       case MessageType.file:
         return await sendFile(file, { forwardedFrom: forwardMeta });

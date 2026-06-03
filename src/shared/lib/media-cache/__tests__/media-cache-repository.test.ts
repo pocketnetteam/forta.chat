@@ -27,14 +27,14 @@ let dbCounter = 0;
  *  `application/octet-stream` and the player spins forever (WEE-62 /
  *  forta-bugs#885). */
 class TypeStrippingStorage implements MediaCacheStorage {
-  private readonly store = new Map<string, Uint8Array>();
+  private readonly store = new Map<string, ArrayBuffer>();
   async read(key: string): Promise<Blob | null> {
     const bytes = this.store.get(key);
     if (!bytes) return null;
     return new Blob([bytes]); // intentionally type-less — simulates disk round-trip
   }
   async write(key: string, blob: Blob): Promise<void> {
-    this.store.set(key, new Uint8Array(await blob.arrayBuffer()));
+    this.store.set(key, await blob.arrayBuffer());
   }
   async delete(key: string): Promise<void> {
     this.store.delete(key);
