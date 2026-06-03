@@ -15,10 +15,34 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MediaCacheRepository, type MediaCachePutMeta } from "../media-cache-repository";
-import { InMemoryMediaCacheStorage } from "../media-cache-storage";
+import { InMemoryMediaCacheStorage, type MediaCacheStorage } from "../media-cache-storage";
 import { ChatDatabase } from "@/shared/lib/local-db/schema";
 
 let dbCounter = 0;
+
+/** Mimics FilesystemMediaCacheStorage on native: Capacitor persists blobs as
+ *  base64 and the read-back `new Blob([bytes])` has NO MIME type (the disk
+ *  round-trip drops it). The repository must re-stamp the MIME from its index
+ *  entry — otherwise old Android WebViews refuse to play a video served as
+ *  `application/octet-stream` and the player spins forever (WEE-62 /
+ *  forta-bugs#885). */
+class TypeStrippingStorage implements MediaCacheStorage {
+  private readonly store = new Map<string, Uint8Array>();
+  async read(key: string): Promise<Blob | null> {
+    const bytes = this.store.get(key);
+    if (!bytes) return null;
+    return new Blob([bytes]); // intentionally type-less — simulates disk round-trip
+  }
+  async write(key: string, blob: Blob): Promise<void> {
+    this.store.set(key, new Uint8Array(await blob.arrayBuffer()));
+  }
+  async delete(key: string): Promise<void> {
+    this.store.delete(key);
+  }
+  async clear(): Promise<void> {
+    this.store.clear();
+  }
+}
 
 function makeBlob(bytes: number, mime: string = "image/jpeg"): Blob {
   // Use a Uint8Array filled with zeros — size matters for eviction tests,
@@ -70,6 +94,21 @@ describe("MediaCacheRepository", () => {
     expect(got).toBeInstanceOf(Blob);
     expect(got!.size).toBe(100);
     expect(got!.type).toBe("image/jpeg");
+  });
+
+  it("re-stamps the MIME from the index when storage drops it (video plays on old WebView)", async () => {
+    // Storage that loses the blob type on read, like the native Filesystem
+    // backend's base64 round-trip.
+    cache = new MediaCacheRepository(db, new TypeStrippingStorage(), {
+      maxBytes: 1_000_000,
+    });
+    await cache.put("mxc://server/clip", makeBlob(300, "video/mp4"), meta());
+
+    const got = await cache.get("mxc://server/clip");
+    expect(got).toBeInstanceOf(Blob);
+    expect(got!.size).toBe(300);
+    // Without the re-stamp this would be "" → octet-stream → eternal spinner.
+    expect(got!.type).toBe("video/mp4");
   });
 
   it("overwrites an existing entry with the same key", async () => {
