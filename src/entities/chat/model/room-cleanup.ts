@@ -2,6 +2,18 @@ import type { LocalRoom } from "@/shared/lib/local-db";
 
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 
+/**
+ * Safety window for orphan removal (WEE-61 / forta-bugs#892 — DATA LOSS).
+ *
+ * `isRoomInSdk` returning false is NOT reliable evidence of an orphan shortly
+ * after a cold-start/update: matrix-js-sdk lazily materializes Room objects, so
+ * on slow WebView / 50+ rooms `getRoom()` returns null for rooms that are still
+ * valid and just haven't loaded yet. A room synced within this window is
+ * therefore kept even if absent from SDK memory. Genuinely-left rooms come
+ * through the `membership === "leave"` branch and are unaffected.
+ */
+export const ORPHAN_SYNC_SAFETY_MS = 24 * 60 * 60 * 1000;
+
 /** Dependency injection interface for testability */
 export interface CleanupContext {
   getAllRooms: () => Promise<LocalRoom[]>;
@@ -29,6 +41,13 @@ export async function cleanupStaleRooms(ctx: CleanupContext): Promise<number> {
       continue;
     }
     if (!ctx.isRoomInSdk(room.id)) {
+      // DATA-LOSS GUARD (WEE-61): a recently-synced room may simply not be
+      // materialized into SDK memory yet on a slow cold-start. Only treat it as
+      // a genuine orphan if it hasn't synced for longer than the safety window.
+      const syncedAt = room.syncedAt ?? 0;
+      if (now - syncedAt < ORPHAN_SYNC_SAFETY_MS) {
+        continue; // fresh — keep, SDK just hasn't loaded it yet
+      }
       toRemove.push(room.id);
       continue;
     }

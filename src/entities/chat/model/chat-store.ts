@@ -35,6 +35,7 @@ import type { RoomChange } from "@/shared/lib/local-db";
 import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
 import type { ChatRoom, FileInfo, ForwardingMessage, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
+import { resolveCachedRoomsAddress } from "./cached-rooms-address";
 
 const NAMESPACE = "chat";
 
@@ -1636,10 +1637,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const runRoomCleanup = async () => {
     if (!chatDbKitRef.value) return;
     const matrixService = getMatrixClientService();
+    // DATA-LOSS GUARD (WEE-61): only run orphan cleanup once the SDK has reached
+    // steady-state incremental sync ("SYNCING"). Right after "PREPARED" the SDK
+    // may not have materialized all rooms into memory yet (slow WebView / 50+
+    // rooms), so isRoomInSdk() reports false for valid rooms. If we're not there
+    // yet, skip this tick — the 30-minute interval will retry safely.
+    if (matrixService.getSyncState() !== "SYNCING") return;
     const { cleanupStaleRooms } = await import("./room-cleanup");
     await cleanupStaleRooms({
       getAllRooms: () => chatDbKitRef.value!.rooms.getAllRooms(),
-      deleteRooms: (ids) => chatDbKitRef.value!.rooms.bulkRemoveRooms(ids).catch(() => {}),
+      // Soft-delete (tombstone) instead of hard-delete: a mistaken orphan is
+      // recoverable (revived on next sync, GC'd after 30 days) — no data loss.
+      deleteRooms: (ids) => chatDbKitRef.value!.rooms.bulkTombstoneRooms(ids, "removed").catch(() => {}),
       isRoomInSdk: (id) => !!matrixService.getRoom(id),
       getRoomHistoryVisibility: (id) => {
         try {
@@ -6737,9 +6746,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (rooms.value.length > 0) return; // already have rooms
 
     try {
-      // Read address from localStorage without going through auth store init
-      const raw = localStorage.getItem("forta-chat:auth");
-      const address = raw ? JSON.parse(raw)?.address : null;
+      // Read address from localStorage without going through auth store init.
+      // WEE-61: the singleton `forta-chat:auth` key is removed by the
+      // multi-account migration — read `forta-chat:activeAccount` (with a
+      // legacy fallback) so the cached sidebar paints post-migration.
+      const address = resolveCachedRoomsAddress();
       if (!address) return;
 
       // Open Dexie DB directly — ChatDatabase constructor is synchronous,

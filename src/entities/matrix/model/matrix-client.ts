@@ -643,6 +643,15 @@ export class MatrixClientService {
     return this.client?.getRoom(roomId);
   }
 
+  /** Current Matrix /sync state, or null if the client is not initialized.
+   *  "SYNCING" means initial sync finished and the client is doing incremental
+   *  syncs — at that point all rooms are materialized into SDK memory (WEE-61).
+   *  Returns the underlying `SyncState` string enum value ("PREPARED" | "SYNCING"
+   *  | "ERROR" | "STOPPED" | "RECONNECTING" | "CATCHUP") widened to string. */
+  getSyncState(): string | null {
+    return this.client?.getSyncState() ?? null;
+  }
+
   /** Create a room */
   async createRoom(opts: Record<string, unknown>): Promise<{ room_id: string }> {
     if (!this.client) throw new Error("Client not initialized");
