@@ -642,191 +642,51 @@ export function useMessages() {
     return true;
   };
 
-  /** Send a video circle (video note) message — circular video like Telegram */
+  /** Send a video circle (video note) message — circular video like Telegram.
+   *  Routed through the crash-safe SyncEngine queue (the same path as
+   *  sendImage / sendFile / sendAudio) so a WebView kill mid-upload auto-retries
+   *  instead of silently dropping the send. Previously this ran encrypt→upload
+   *  →send inline in a fire-and-forget IIFE with no PendingOperation, which is
+   *  why "photo ok, video hangs / next send stuck" (WEE-62 / forta-bugs#852,
+   *  #718). See sendFile for the boolean return contract. */
   const sendVideoCircle = async (
     file: File,
     options: {
       duration?: number;
       forwardedFrom?: { senderId: string; senderName?: string };
     } = {},
-  ) => {
+  ): Promise<boolean> => {
+    sendDiag("videoCircle:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) return false;
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
-
-    const localBlobUrl = URL.createObjectURL(file);
-
-    // Dexie-first path
-    if (isChatDbReady()) {
-      try {
-        const dbKit = getChatDb();
-        const localMsg = await dbKit.messages.createLocal({
-          roomId,
-          senderId: authStore.address ?? "",
-          content: "Video message",
-          type: MessageType.videoCircle,
-          fileInfo: {
-            name: file.name,
-            type: file.type,
-            size: file.size,
-            url: localBlobUrl,
-            w: 480,
-            h: 480,
-            duration: options.duration,
-            videoNote: true,
-          },
-          forwardedFrom: options.forwardedFrom,
-          localBlobUrl,
-          uploadProgress: 0,
-        });
-
-        // Async upload pipeline (with abort support)
-        (async () => {
-          const controller = registerUploadAbort(localMsg.clientId);
-          const { signal } = controller;
-
-          try {
-            const checkAbort = () => {
-              if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
-            };
-
-            const videoMime = resolveMime(file);
-
-            // Phase 1: Encrypt
-            checkAbort();
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
-              .modify({ uploadPhase: "encrypting" });
-
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-
-            let fileToUpload: Blob = file;
-            let secrets: Record<string, unknown> | undefined;
-
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await withTimeout(
-                roomCrypto.encryptFile(file),
-                ENCRYPT_TIMEOUT_MS,
-                "Video circle encrypt",
-              );
-              secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
-
-            // Phase 2: Upload
-            checkAbort();
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
-              .modify({ uploadPhase: "uploading" });
-
-            const onProgress = makeThrottledProgress((percent) => {
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
-            const url = await withTimeout(
-              matrixService.uploadContent(fileToUpload, onProgress, signal),
-              UPLOAD_TIMEOUT_MS,
-              "Video circle upload",
-            );
-
-            // Phase 3: Send event
-            checkAbort();
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
-              .modify({ uploadPhase: "sending_event", uploadProgress: 100 });
-
-            const content: Record<string, unknown> = {
-              body: "Video message",
-              msgtype: "m.video",
-              url,
-              info: {
-                mimetype: videoMime,
-                size: Math.round(file.size),
-                w: 480,
-                h: 480,
-                duration: options.duration ? Math.round(options.duration * 1000) : undefined,
-                videoNote: true,
-                [MSC3245_VIDEO_NOTE_KEY]: true,
-                ...(secrets ? { secrets } : {}),
-              },
-              ...(options.forwardedFrom
-                ? {
-                    forwarded_from: {
-                      sender_id: options.forwardedFrom.senderId,
-                      sender_name: options.forwardedFrom.senderName,
-                    },
-                  }
-                : {}),
-            };
-
-            const serverEventId = await withTimeout(
-              matrixService.sendEncryptedText(roomId, content, localMsg.clientId),
-              SEND_EVENT_TIMEOUT_MS,
-              "Video circle send event",
-            );
-
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: videoMime,
-              size: file.size,
-              url,
-              w: 480,
-              h: 480,
-              duration: options.duration,
-              videoNote: true,
-              ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
-
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
-          } catch (e) {
-            if (e instanceof DOMException && e.name === "AbortError") {
-              await handleUploadCancelled(dbKit, localMsg.clientId, localBlobUrl);
-            } else {
-              console.error("Failed to send video circle (Dexie path):", e);
-              const current = await dbKit.messages.getByClientId(localMsg.clientId);
-              if (current && current.status !== "synced") {
-                await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-                  status: "failed" as LocalMessageStatus,
-                  uploadProgress: undefined,
-                  uploadPhase: undefined,
-                });
-              }
-            }
-          } finally {
-            unregisterUploadAbort(localMsg.clientId);
-          }
-        })();
-
-        return;
-      } catch (e) {
-        console.warn("[use-messages] Dexie sendVideoCircle failed, falling back to legacy:", e);
-      }
+    if (!matrixService.isReady()) {
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
+      return false;
     }
 
-    // Legacy path
-    sendVideoCircleLegacy(file, roomId, localBlobUrl, options, matrixService);
-  };
+    const videoMime = resolveMime(file);
+    const localBlobUrl = URL.createObjectURL(file);
 
-  /** Legacy sendVideoCircle — fallback when Dexie is not ready */
-  const sendVideoCircleLegacy = async (
-    file: File,
-    roomId: string,
-    localBlobUrl: string,
-    options: { duration?: number },
-    matrixService: ReturnType<typeof getMatrixClientService>,
-  ) => {
-    const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const message: Message = {
-      id: tempId,
+    if (!isChatDbReady()) {
+      // Without Dexie there is no crash-safe queue — dropping the send is
+      // safer than leaking a never-completing spinner on a dead pipeline.
+      console.error("[use-messages] sendVideoCircle: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "file" }));
+      URL.revokeObjectURL(localBlobUrl);
+      return false;
+    }
+
+    const dbKit = getChatDb();
+    const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
       content: "Video message",
-      timestamp: Date.now(),
-      status: MessageStatus.sending,
       type: MessageType.videoCircle,
       fileInfo: {
         name: file.name,
-        type: file.type,
+        type: videoMime,
         size: file.size,
         url: localBlobUrl,
         w: 480,
@@ -834,49 +694,49 @@ export function useMessages() {
         duration: options.duration,
         videoNote: true,
       },
-    };
-    chatStore.addMessage(roomId, message);
+      forwardedFrom: options.forwardedFrom,
+      localBlobUrl,
+      uploadProgress: 0,
+    });
 
-    try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+    // Persist the blob so SyncEngine.syncSendFile can resume after a crash.
+    const attachmentId = await dbKit.db.attachments.add({
+      messageLocalId: localMsg.localId!,
+      fileName: file.name,
+      mimeType: videoMime,
+      size: file.size,
+      localBlob: file,
+      status: "local",
+    });
 
-      let fileToUpload: Blob = file;
-      let secrets: Record<string, unknown> | undefined;
-
-      if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await roomCrypto.encryptFile(file);
-        secrets = encrypted.secrets;
-        fileToUpload = encrypted.file;
-      }
-
-      const url = await matrixService.uploadContent(fileToUpload);
-
-      const content: Record<string, unknown> = {
-        body: "Video message",
+    await dbKit.syncEngine.enqueue(
+      "send_file",
+      roomId,
+      {
+        fileName: file.name,
+        mimeType: videoMime,
         msgtype: "m.video",
-        url,
-        info: {
-          mimetype: file.type,
-          size: Math.round(file.size),
+        attachmentId,
+        body: "Video message",
+        eventInfo: {
           w: 480,
           h: 480,
+          mimetype: videoMime,
+          size: Math.round(file.size),
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+          // Video-note markers MUST live inside content.info so the receiver's
+          // isVideoNoteInfo() heuristic classifies this as a circle — the
+          // legacy `videoNote` flag plus the canonical MSC3245 key for
+          // cross-client interop.
           videoNote: true,
           [MSC3245_VIDEO_NOTE_KEY]: true,
-          ...(secrets ? { secrets } : {}),
         },
-      };
-
-      const serverEventId = await matrixService.sendEncryptedText(roomId, content);
-      if (serverEventId) {
-        chatStore.updateMessageIdAndStatus(roomId, tempId, serverEventId, MessageStatus.sent);
-      } else {
-        chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
-      }
-    } catch (e) {
-      console.error("Failed to send video circle:", e);
-      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
-    }
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
+      },
+      localMsg.clientId,
+    );
+    sendDiag("videoCircle:enqueued", { clientId: localMsg.clientId });
+    return true;
   };
 
   const loadMessages = async (roomId: string) => {
@@ -1271,18 +1131,10 @@ export function useMessages() {
           forwardedFrom: forwardMeta,
         });
       case MessageType.videoCircle:
-        // sendVideoCircle returns void and swallows its own errors; wrap so
-        // a failed video-circle forward surfaces as `false` to the caller.
-        try {
-          await sendVideoCircle(file, {
-            duration: source.fileInfo.duration,
-            forwardedFrom: forwardMeta,
-          });
-          return true;
-        } catch (e) {
-          console.error("[sendForward] sendVideoCircle threw:", e);
-          return false;
-        }
+        return await sendVideoCircle(file, {
+          duration: source.fileInfo.duration,
+          forwardedFrom: forwardMeta,
+        });
       case MessageType.video:
       case MessageType.file:
         return await sendFile(file, { forwardedFrom: forwardMeta });
