@@ -465,6 +465,29 @@ export class RoomRepository {
     });
   }
 
+  /** Bulk soft-delete (tombstone) rooms in a single transaction.
+   *  WEE-61: the background cleanup path uses this instead of `bulkRemoveRooms`
+   *  so a false-positive orphan never destroys data — messages are preserved,
+   *  the room is hidden from UI, revived on the next sync upsert, and physically
+   *  GC'd only after the tombstone TTL (`garbageCollectTombstones`, 30 days). */
+  async bulkTombstoneRooms(
+    roomIds: string[],
+    reason: "left" | "kicked" | "banned" | "removed" = "removed",
+  ): Promise<void> {
+    if (roomIds.length === 0) return;
+    const now = Date.now();
+    await this.db.transaction("rw", [this.db.rooms], async () => {
+      for (const id of roomIds) {
+        await this.db.rooms.update(id, {
+          isDeleted: true,
+          deletedAt: now,
+          deleteReason: reason,
+          membership: "leave" as const,
+        });
+      }
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Optimistic update from push notification
   // ---------------------------------------------------------------------------
