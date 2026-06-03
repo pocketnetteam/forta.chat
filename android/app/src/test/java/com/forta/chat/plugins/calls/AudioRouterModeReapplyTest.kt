@@ -115,6 +115,64 @@ class AudioRouterModeReapplyTest {
         )
     }
 
+    // -------------------------------------------------------------------------
+    // WEE-60 — re-apply vendor mic-unmute inside the OEM re-apply window.
+    //
+    // The t=0 applyVendorStartTweaks() unmute is clobbered when the OEM
+    // re-asserts the global mic-mute flag in the same async window it resets the
+    // audio mode, leaving the peer with one-way silence. shouldReapplyMicUnmute
+    // gates the re-release: vendor needs it AND routing active AND mic muted.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun micRemutedByOem_whileActive_triggersReapply() {
+        assertTrue(
+            "vendor-needs-unmute + active + mic muted → must re-release the mic",
+            AudioRouter.shouldReapplyMicUnmute(
+                requiresUnmute = true,
+                isActive = true,
+                isMicMuted = true,
+            ),
+        )
+    }
+
+    @Test
+    fun micNotMuted_doesNotReapply() {
+        assertFalse(
+            "mic already open → re-applying is a pointless framework call",
+            AudioRouter.shouldReapplyMicUnmute(
+                requiresUnmute = true,
+                isActive = true,
+                isMicMuted = false,
+            ),
+        )
+    }
+
+    @Test
+    fun vendorDoesNotRequireUnmute_doesNotReapply() {
+        assertFalse(
+            "gated to vendors with the known start-time mute quirk (A5 — leave " +
+                "the proven generic path untouched on every other device)",
+            AudioRouter.shouldReapplyMicUnmute(
+                requiresUnmute = false,
+                isActive = true,
+                isMicMuted = true,
+            ),
+        )
+    }
+
+    @Test
+    fun inactiveRouter_doesNotReapplyMicUnmute() {
+        assertFalse(
+            "router stopped → must not fight a fresh call's mic state",
+            AudioRouter.shouldReapplyMicUnmute(
+                requiresUnmute = true,
+                isActive = false,
+                isMicMuted = true,
+            ),
+        )
+    }
+
     @Test
     fun reapplySchedule_coversExpectedOemResetWindows() {
         // The schedule must include the original 500 ms catch (fast OEMs) and

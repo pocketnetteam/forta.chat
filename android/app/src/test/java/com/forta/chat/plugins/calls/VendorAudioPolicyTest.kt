@@ -173,6 +173,28 @@ class VendorAudioPolicyTest {
     }
 
     @Test
+    fun brokenHwAecVendors_matchMultiWordBuildStrings() {
+        // WEE-60 regression: real OEM Build fields are rarely the bare token.
+        // Infinix/Tecno/Itel ship multi-word MANUFACTURER/BRAND strings; the
+        // old strict `==` predicate missed them and left the broken hardware
+        // AEC active, producing one-way audio. Substring match fixes it.
+        assertTrue(
+            "multi-word Infinix manufacturer must still prefer software AEC",
+            VendorAudioPolicy.prefersSoftwareAudioProcessing("Infinix Mobility Limited", "Infinix X6525"),
+        )
+        assertTrue(
+            VendorAudioPolicy.prefersSoftwareAudioProcessing("TECNO MOBILE LIMITED", "TECNO KI5k"),
+        )
+        assertTrue(
+            VendorAudioPolicy.prefersSoftwareAudioProcessing("itel", "Itel it2163"),
+        )
+        assertTrue(
+            "Xiaomi marketing brand strings carry the token mid-word",
+            VendorAudioPolicy.prefersSoftwareAudioProcessing("Xiaomi", "Redmi Note 12"),
+        )
+    }
+
+    @Test
     fun workingHwAecVendors_keepHardwareProcessing() {
         // Samsung / Pixel / OnePlus ship working HW AEC and must stay on it.
         assertFalse(VendorAudioPolicy.prefersSoftwareAudioProcessing("samsung", "samsung"))

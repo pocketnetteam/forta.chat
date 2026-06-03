@@ -153,6 +153,12 @@ object VendorAudioPolicy {
         val m = manufacturer?.trim()?.lowercase().orEmpty()
         val b = brand?.trim()?.lowercase().orEmpty()
         if (m.isEmpty() && b.isEmpty()) return false
-        return BROKEN_HW_AEC_VENDORS.any { v -> v == m || v == b }
+        // WEE-60: substring match, not strict equality. detect() above already
+        // uses contains(); this predicate lagged behind with `==`, so OEMs that
+        // report a multi-word Build.MANUFACTURER/BRAND (e.g. "Infinix Mobility
+        // Limited", "TECNO MOBILE LIMITED", brand "Itel it2163") never matched
+        // and kept the broken hardware AEC — muting the capture path into
+        // one-way audio (#894 Xiaomi 12X, #921 Pixel-adjacent reports).
+        return BROKEN_HW_AEC_VENDORS.any { v -> m.contains(v) || b.contains(v) }
     }
 }

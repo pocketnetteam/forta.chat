@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { useCallStore, CallStatus } from "@/entities/call";
+import { isNative } from "@/shared/lib/platform";
+import { nativeCallBridge } from "@/shared/lib/native-calls/native-call-bridge";
+import type { NativeAudioDeviceType } from "@/shared/lib/native-calls/native-call-bridge";
 import { useCallService } from "../model/call-service";
 import { useMediaDevices } from "../model/use-media-devices";
 
@@ -75,11 +78,84 @@ const selectVideo = async (deviceId: string) => {
   }
 };
 
-const selectOutput = (deviceId: string) => {
+// WEE-60 H1: map a (possibly normalised) audiooutput label to the native
+// AudioRouter device type. Android's enumerateDevices rarely yields audiooutput
+// entries at all, so this only fires on the few ROMs that do expose them; the
+// standalone toggle below is the primary native control.
+const mapOutputLabelToNativeType = (label: string): NativeAudioDeviceType => {
+  const key = label.trim().toLowerCase();
+  if (key.includes("bluetooth") || key.includes("блютуз")) return "bluetooth";
+  if (
+    key.includes("headset") || key.includes("headphone") ||
+    key.includes("wired") || key.includes("usb") ||
+    key.includes("гарнитур") || key.includes("наушник")
+  ) {
+    return "wired_headset";
+  }
+  if (key.includes("speaker") || key.includes("динамик") || key.includes("громк")) {
+    // "Динамик телефона" (earpiece) also contains "динамик" — disambiguate.
+    if (key.includes("телефон") || key.includes("phone") || key.includes("ухо")) {
+      return "earpiece";
+    }
+    return "speaker";
+  }
+  return "earpiece";
+};
+
+const selectOutput = async (deviceId: string) => {
   selectedOutputId.value = deviceId;
   saveDeviceChoice(STORAGE_KEY_OUTPUT, deviceId);
+  // Web: CallWindow watches audioOutputId and applies setSinkId on the remote
+  // element. Native: setSinkId is a no-op in the Android WebView, so route
+  // through the native AudioRouter instead.
   callStore.audioOutputId = deviceId;
+  if (!isNative) return;
+  const dev = audioOutputDevices.value.find(d => d.deviceId === deviceId);
+  const type = mapOutputLabelToNativeType(dev?.label ?? "");
+  speakerOn.value = type === "speaker";
+  await nativeCallBridge.setAudioDevice({ type });
 };
+
+// WEE-60 H1: standalone speaker toggle wired straight to the native
+// AudioRouter, independent of enumerateDevices (which is empty on Android, so
+// the gear-menu speaker list never appears — leaving users with no way to
+// switch earpiece↔speaker). Initial guess mirrors AudioRouter.start() (video
+// opens on speaker, voice on earpiece) and is corrected from the real native
+// route on mount + on every audioDevicesChanged event below.
+const speakerOn = ref(callStore.activeCall?.type === "video");
+
+const toggleSpeaker = async () => {
+  const next = !speakerOn.value;
+  speakerOn.value = next;
+  // The native AudioRouter echoes back an audioDevicesChanged event, which
+  // re-syncs speakerOn — so the optimistic flip above self-corrects if the
+  // route ends up elsewhere (e.g. forced to BT).
+  await nativeCallBridge.setAudioDevice({ type: next ? "speaker" : "earpiece" });
+};
+
+// Keep the toggle in sync with the real native output. enumerateDevices is
+// empty on Android, so the only reliable source of truth is the AudioRouter.
+// Re-seeding on mount also fixes drift after minimize→restore (this component
+// is v-if-mounted, so it remounts on restore).
+let unsubscribeAudioDevices: (() => void) | null = null;
+
+const syncSpeakerFromNative = (active: string) => {
+  if (active) speakerOn.value = active.toLowerCase() === "speaker";
+};
+
+onMounted(async () => {
+  if (!isNative) return;
+  const state = await nativeCallBridge.getAudioDevices();
+  syncSpeakerFromNative(state.active);
+  unsubscribeAudioDevices = await nativeCallBridge.onAudioDevicesChanged(
+    (s) => syncSpeakerFromNative(s.active),
+  );
+});
+
+onUnmounted(() => {
+  unsubscribeAudioDevices?.();
+  unsubscribeAudioDevices = null;
+});
 
 // Close device menu when call ends
 watch(
@@ -250,6 +326,31 @@ watch(
           <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
           <line x1="8" y1="21" x2="16" y2="21" />
           <line x1="12" y1="17" x2="12" y2="21" />
+        </svg>
+      </button>
+
+      <!-- Speaker toggle (native) — standalone, independent of enumerateDevices -->
+      <button
+        v-if="isNative"
+        class="ctrl-btn"
+        :class="[
+          speakerOn ? 'ctrl-btn--screen-active' : 'ctrl-btn--default',
+          compact && 'ctrl-btn--compact',
+        ]"
+        :title="speakerOn ? t('call.speakerOn') : t('call.speakerOff')"
+        data-testid="speaker-toggle"
+        @click="toggleSpeaker()"
+      >
+        <!-- Speaker on (loud) -->
+        <svg v-if="speakerOn" :width="compact ? 18 : 20" :height="compact ? 18 : 20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+          <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07" />
+        </svg>
+        <!-- Speaker off (earpiece) -->
+        <svg v-else :width="compact ? 18 : 20" :height="compact ? 18 : 20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+          <line x1="23" y1="9" x2="17" y2="15" />
+          <line x1="17" y1="9" x2="23" y2="15" />
         </svg>
       </button>
 

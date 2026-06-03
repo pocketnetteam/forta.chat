@@ -136,6 +136,36 @@ class AudioRouter private constructor(private val context: Context) {
             listOf(500L, 1_500L, 3_500L, 7_500L)
 
         /**
+         * WEE-60: pure predicate for re-applying the vendor mic-unmute inside
+         * the OEM re-apply window.
+         *
+         * [applyVendorStartTweaks] clears the global mic-mute flag once at t=0
+         * for vendors that need it (HONOR MagicOS), but MIUI/MagicOS can
+         * re-assert that flag in the same async window they reset the audio
+         * mode (the [modeReapplyScheduleMs] ticks). When that happens the
+         * one-time unmute is clobbered and the peer hears one-way silence.
+         *
+         * Returns true only when ALL of:
+         *   - the vendor required the explicit start-time unmute, AND
+         *   - routing is still active (don't fight a fresh call after stop), AND
+         *   - the mic is actually muted right now (no-op otherwise).
+         *
+         * Re-applying `setMicrophoneMute(false)` is safe even on intentional
+         * user mutes: the in-call Mute button toggles the WebRTC track
+         * (`MatrixCall.setMicrophoneMuted` → `track.enabled`), never this
+         * process-global AudioManager flag, so clearing it can only release an
+         * OEM-stuck capture path.
+         *
+         * Companion-scope so a JVM-only test covers it without AudioManager.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun shouldReapplyMicUnmute(
+            requiresUnmute: Boolean,
+            isActive: Boolean,
+            isMicMuted: Boolean,
+        ): Boolean = requiresUnmute && isActive && isMicMuted
+
+        /**
          * WEE-54 / forta-bugs#860 — Samsung A15 (Android 15) bidirectional
          * silence guard.
          *
@@ -300,6 +330,24 @@ class AudioRouter private constructor(private val context: Context) {
                             "Audio mode reset detected at +${delayMs}ms — re-applying MODE_IN_COMMUNICATION",
                         )
                         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    }
+                    // WEE-60: the OEM that resets the audio mode in this window
+                    // can also re-assert the global mic-mute flag, clobbering the
+                    // t=0 applyVendorStartTweaks() unmute and leaving the peer with
+                    // one-way silence. Re-release it on every tick for vendors that
+                    // need it (gated + mic-actually-muted guard → no-op otherwise).
+                    if (
+                        shouldReapplyMicUnmute(
+                            VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(vendor),
+                            isActive,
+                            audioManager.isMicrophoneMute,
+                        )
+                    ) {
+                        audioManager.setMicrophoneMute(false)
+                        Log.w(
+                            LIFECYCLE_TAG,
+                            "[vendor=$vendor] OEM re-muted mic at +${delayMs}ms — releasing",
+                        )
                     }
                 } catch (e: Exception) {
                     Log.w(LIFECYCLE_TAG, "Re-apply tick at +${delayMs}ms threw", e)
