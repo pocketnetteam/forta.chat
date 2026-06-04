@@ -311,6 +311,7 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Message bubble ──
   "message.forwardedFrom": "Переслано от {name}",
+  "message.edited": "изменено",
 
   // ── Voice recorder ──
   "voice.slideToCancel": "< Сдвиньте для отмены",

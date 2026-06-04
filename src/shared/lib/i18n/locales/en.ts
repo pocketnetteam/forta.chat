@@ -309,6 +309,7 @@ export const en = {
 
   // ── Message bubble ──
   "message.forwardedFrom": "Forwarded from {name}",
+  "message.edited": "edited",
 
   // ── Voice recorder ──
   "voice.slideToCancel": "< Slide to cancel",

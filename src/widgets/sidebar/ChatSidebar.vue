@@ -15,6 +15,7 @@ import ContactsPanel from "./ui/ContactsPanel.vue";
 import SettingsPanel from "./ui/SettingsPanel.vue";
 import { useSidebarTab } from "./model/use-sidebar-tab";
 import type { SidebarTab } from "./model/use-sidebar-tab";
+import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions";
 
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
@@ -51,6 +52,30 @@ const searchPlaceholder = computed(() => {
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
 const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels">("all");
+
+// Android Back inside the Chats tab cascades before the app is allowed to
+// minimize (forta-bugs#877): clear an active search first, then collapse a
+// non-default filter tab back to "all". Both fire only on the Chats tab —
+// the sidebar-tab handler (ChatPage, prio 55) already returns to Chats from
+// Contacts/Settings, so a non-default filter sits just below it (prio 54),
+// with search clearing taking precedence (prio 56).
+const backState = () => ({
+  activeTab: activeTab.value,
+  searchQuery: sidebarSearchQuery.value,
+  activeFilter: activeFilter.value,
+});
+
+useAndroidBackHandler("chat-search-clear", 56, () => {
+  if (!shouldClearSearch(backState())) return false;
+  sidebarSearchQuery.value = "";
+  return true;
+});
+
+useAndroidBackHandler("chat-filter-to-all", 54, () => {
+  if (!shouldResetFilter(backState())) return false;
+  activeFilter.value = "all";
+  return true;
+});
 
 const bulkDeleteConfirm = ref(false);
 

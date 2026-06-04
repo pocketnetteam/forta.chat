@@ -1136,7 +1136,7 @@ const replyPreviewSender = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-1 truncate text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t('message.forwardedFrom', { name: forwardedFromName }) }}
         </div>
         <!-- Reply preview -->
         <div
@@ -1210,7 +1210,7 @@ const replyPreviewSender = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-1 truncate text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t('message.forwardedFrom', { name: forwardedFromName }) }}
         </div>
         <!-- Reply preview -->
         <div
@@ -1386,7 +1386,7 @@ const replyPreviewSender = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-0.5 truncate text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t('message.forwardedFrom', { name: forwardedFromName }) }}
         </div>
 
         <!-- Reply preview -->
@@ -1416,7 +1416,7 @@ const replyPreviewSender = computed(() => {
             class="relative -bottom-[3px] ml-2 inline-flex items-center gap-0.5 whitespace-nowrap align-bottom text-[10px]"
             :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'"
           >
-            <span v-if="message.edited" class="italic">edited</span>
+            <span v-if="message.edited" class="italic">{{ t('message.edited') }}</span>
             {{ time }}
             <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
           </span>

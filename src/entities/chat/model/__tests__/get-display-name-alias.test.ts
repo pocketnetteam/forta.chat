@@ -48,6 +48,33 @@ describe("getDisplayName — local alias priority", () => {
     expect(result.length).toBeLessThan(longAddr.length);
   });
 
+  it("does not surface a raw Matrix ID stored as a profile name (forta-bugs#363/#165)", async () => {
+    const { useUserStore } = await import("@/entities/user/model");
+    const userStore = useUserStore();
+    const addr = "PRawMatrixId";
+    // A profile may carry a raw @id:domain when no human name was ever set.
+    userStore.setUser(addr, { address: addr, name: "@abc123def:matrix.org", about: "", image: "", site: "", language: "" });
+    const result = store.getDisplayName(addr);
+    expect(result).not.toBe("@abc123def:matrix.org");
+    expect(result).not.toContain("@");
+  });
+
+  it("does not surface a long hex blob stored as a profile name (forta-bugs#363/#165)", async () => {
+    const { useUserStore } = await import("@/entities/user/model");
+    const userStore = useUserStore();
+    const addr = "PHexBlob";
+    userStore.setUser(addr, { address: addr, name: "0123456789abcdef0123456789abcdef", about: "", image: "", site: "", language: "" });
+    expect(store.getDisplayName(addr)).not.toBe("0123456789abcdef0123456789abcdef");
+  });
+
+  it("still surfaces short hex-like usernames (no false positives)", async () => {
+    const { useUserStore } = await import("@/entities/user/model");
+    const userStore = useUserStore();
+    const addr = "PCafe";
+    userStore.setUser(addr, { address: addr, name: "cafe", about: "", image: "", site: "", language: "" });
+    expect(store.getDisplayName(addr)).toBe("cafe");
+  });
+
   it("hex-encoded address resolves to alias stored under raw address", async () => {
     const raw = "PAddr1";
     const hex = hexEncode(raw);

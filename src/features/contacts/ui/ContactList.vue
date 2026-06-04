@@ -36,7 +36,7 @@ const chatStore = useChatStore();
 const authStore = useAuthStore();
 const channelStore = useChannelStore();
 const userStore = useUserStore();
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { formatPreview } = useFormatPreview();
 const selectionStore = useSelectionStore();
 const emit = defineEmits<{ selectRoom: [roomId: string]; selectChannel: [address: string] }>();
@@ -869,7 +869,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
                 v-if="(item as Channel).lastContent"
                 class="flex shrink-0 items-center gap-0.5 text-xs text-text-on-main-bg-color"
               >
-                {{ formatRelativeTime(new Date((item as Channel).lastContent!.time * 1000)) }}
+                {{ formatRelativeTime(new Date((item as Channel).lastContent!.time * 1000), locale) }}
               </span>
             </div>
             <!-- Preview row -->
@@ -966,7 +966,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
                   v-if="(item as ChatRoom).lastMessage?.senderId === authStore.address && (item as ChatRoom).lastMessage!.type !== MessageType.system && (item as ChatRoom).lastMessage!.content !== ''"
                   :status="(item as ChatRoom).lastMessage!.status"
                 />
-                {{ formatRelativeTime(new Date(getRoomTimestamp(item as ChatRoom)!)) }}
+                {{ formatRelativeTime(new Date(getRoomTimestamp(item as ChatRoom)!), locale) }}
               </span>
             </div>
 
