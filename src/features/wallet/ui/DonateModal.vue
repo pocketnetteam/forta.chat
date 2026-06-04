@@ -5,6 +5,8 @@ import { useWallet } from "../model/use-wallet";
 import { useWalletStore, formatPkoin } from "../model/wallet-store";
 import { useMessages } from "@/features/messaging/model/use-messages";
 import { extractErrorMessage } from "../lib/extract-error";
+import { isTimeoutError, ERR_TOO_MANY_INPUTS } from "../lib/utxo";
+import type { TranslationKey } from "@/shared/lib/i18n";
 import Modal from "@/shared/ui/modal/Modal.vue";
 
 const props = defineProps<{ show: boolean; receiverAddress: string; receiverName: string }>();
@@ -24,6 +26,21 @@ const fees = ref<number | null>(null);
 const sending = ref(false);
 const error = ref("");
 const feesLoading = ref(false);
+// When set, the last action failed and can be retried by invoking this.
+const retryAction = ref<null | (() => void)>(null);
+
+/**
+ * Map a thrown wallet error to user-facing text. Node timeouts (the 408
+ * `GetUnspents` case from WEE-72) get a friendly "network busy" message with a
+ * retry affordance instead of leaking the raw RPC JSON into the UI.
+ */
+const friendlyError = (e: unknown, fallbackKey: TranslationKey): string => {
+  if (isTimeoutError(e)) return t("wallet.networkBusy");
+  const raw = extractErrorMessage(e, t(fallbackKey));
+  // Fragmented funds: balance is enough but split across too many small UTXOs.
+  if (raw === ERR_TOO_MANY_INPUTS) return t("wallet.fundsFragmented");
+  return raw;
+};
 
 const numericAmount = computed(() => {
   const n = parseFloat(amount.value);
@@ -61,12 +78,14 @@ const sendButtonHint = computed(() => {
 const calculateFees = async () => {
   if (!canCalculate.value) return;
   error.value = "";
+  retryAction.value = null;
   feesLoading.value = true;
   try {
     fees.value = await estimateFees(props.receiverAddress, numericAmount.value, feeDirection.value);
   } catch (e) {
     console.error("[wallet] calculate fees failed:", e);
-    error.value = extractErrorMessage(e, t("wallet.operationFailed"));
+    error.value = friendlyError(e, "wallet.operationFailed");
+    retryAction.value = calculateFees;
     fees.value = null;
   } finally {
     feesLoading.value = false;
@@ -77,6 +96,7 @@ const handleSend = async () => {
   if (!canSend.value) return;
   sending.value = true;
   error.value = "";
+  retryAction.value = null;
   try {
     const txId = await sendTransfer(
       props.receiverAddress,
@@ -88,7 +108,8 @@ const handleSend = async () => {
     resetAndClose();
   } catch (e) {
     console.error("[wallet] send transfer failed:", e);
-    error.value = extractErrorMessage(e, t("wallet.transactionError"));
+    error.value = friendlyError(e, "wallet.transactionError");
+    retryAction.value = handleSend;
   } finally {
     sending.value = false;
   }
@@ -100,6 +121,7 @@ const resetAndClose = () => {
   feeDirection.value = "exclude";
   fees.value = null;
   error.value = "";
+  retryAction.value = null;
   sending.value = false;
   emit("close");
 };
@@ -107,6 +129,8 @@ const resetAndClose = () => {
 // Reset fees when amount or direction changes
 watch([amount, feeDirection], () => {
   fees.value = null;
+  error.value = "";
+  retryAction.value = null;
 });
 
 // Refresh balance when modal opens
@@ -200,7 +224,18 @@ watch(() => props.show, (v) => {
       </div>
 
       <!-- Error -->
-      <p v-if="error" class="rounded-lg bg-color-bad/10 px-3 py-2 text-xs font-medium text-color-bad">{{ error }}</p>
+      <div v-if="error" class="flex items-center justify-between gap-3 rounded-lg bg-color-bad/10 px-3 py-2">
+        <p class="text-xs font-medium text-color-bad">{{ error }}</p>
+        <button
+          v-if="retryAction"
+          type="button"
+          :disabled="sending || feesLoading"
+          class="shrink-0 rounded-md bg-color-bad/15 px-2.5 py-1 text-xs font-semibold text-color-bad transition-opacity hover:opacity-80 disabled:opacity-50"
+          @click="retryAction()"
+        >
+          {{ t("wallet.retry") }}
+        </button>
+      </div>
 
       <!-- Action buttons -->
       <div class="flex flex-col gap-2">

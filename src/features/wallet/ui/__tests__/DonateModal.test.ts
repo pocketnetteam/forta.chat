@@ -5,6 +5,9 @@ import { mount, flushPromises } from "@vue/test-utils";
 const dict: Record<string, string> = {
   "wallet.transactionError": "Ошибка транзакции",
   "wallet.operationFailed": "Не удалось выполнить операцию. Попробуйте позже.",
+  "wallet.networkBusy": "Сеть сейчас перегружена. Попробуйте ещё раз через несколько секунд.",
+  "wallet.retry": "Повторить",
+  "wallet.fundsFragmented": "Средства разбиты на слишком много мелких платежей, чтобы отправить их за раз. Попробуйте меньшую сумму.",
   "wallet.senderPaysFees": "Комиссию платит отправитель",
   "wallet.receiverPaysFees": "Комиссию платит получатель",
   "wallet.calculateFees": "Рассчитать комиссию",
@@ -89,6 +92,53 @@ describe("DonateModal", () => {
     const text = wrapper.text();
     expect(text).toContain("Fee estimation failed");
     expect(text).not.toContain("[object Object]");
+  });
+
+  it("shows a friendly message (not raw JSON) and a retry button on a 408 timeout", async () => {
+    // Arrange — the exact node timeout from the bug report.
+    estimateFees.mockRejectedValueOnce({ code: 408, message: "GetUnspents: sql request timeout" });
+    const wrapper = mountDialog();
+    await wrapper.find("input[type='number']").setValue("1000");
+
+    // Act
+    const calcBtn = wrapper
+      .findAll("button")
+      .find((b) => b.text().includes("Рассчитать комиссию"));
+    await calcBtn!.trigger("click");
+    await flushPromises();
+
+    // Assert — friendly text, no raw RPC payload leaked.
+    const text = wrapper.text();
+    expect(text).toContain("Сеть сейчас перегружена");
+    expect(text).not.toContain("GetUnspents");
+    expect(text).not.toContain("408");
+
+    // A retry button is offered and re-invokes the failed action.
+    const retryBtn = wrapper.findAll("button").find((b) => b.text() === "Повторить");
+    expect(retryBtn).toBeTruthy();
+
+    estimateFees.mockResolvedValueOnce(0.0012);
+    await retryBtn!.trigger("click");
+    await flushPromises();
+
+    expect(estimateFees).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).not.toContain("Сеть сейчас перегружена");
+  });
+
+  it("shows a fragmented-funds message instead of the raw TOO_MANY_INPUTS code", async () => {
+    estimateFees.mockRejectedValueOnce(new Error("TOO_MANY_INPUTS"));
+    const wrapper = mountDialog();
+    await wrapper.find("input[type='number']").setValue("1000");
+
+    const calcBtn = wrapper
+      .findAll("button")
+      .find((b) => b.text().includes("Рассчитать комиссию"));
+    await calcBtn!.trigger("click");
+    await flushPromises();
+
+    const text = wrapper.text();
+    expect(text).toContain("Средства разбиты");
+    expect(text).not.toContain("TOO_MANY_INPUTS");
   });
 
   it("styles fee-payer tabs with theme accent tokens, not hardcoded blue", () => {
