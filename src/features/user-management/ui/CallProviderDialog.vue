@@ -41,19 +41,23 @@ function onSave(): void {
     </h3>
 
     <!-- Label -->
-    <label class="mb-1.5 block text-xs font-medium text-text-on-main-bg-color">{{ t("settings.callProviders.label") }}</label>
+    <label class="mb-1.5 block text-xs font-medium text-text-on-main-bg-color">
+      {{ t("settings.callProviders.label") }} <span class="text-color-bad">*</span>
+    </label>
     <input
       v-model="label"
       type="text"
       :placeholder="t('settings.callProviders.labelPlaceholder')"
-      class="mb-4 w-full rounded-xl border border-neutral-grad-2 bg-transparent px-3.5 py-2.5 text-sm text-text-color outline-none transition-colors focus:border-color-bg-ac"
+      class="w-full rounded-xl border bg-transparent px-3.5 py-2.5 text-sm text-text-color outline-none transition-colors focus:border-color-bg-ac"
+      :class="showError && !trimmedLabel.length ? 'border-color-bad' : 'border-neutral-grad-2'"
     />
+    <p v-if="showError && !trimmedLabel.length" class="mt-1.5 text-xs text-color-bad">{{ t("settings.callProviders.labelRequired") }}</p>
 
     <!-- URL -->
-    <label class="mb-1.5 block text-xs font-medium text-text-on-main-bg-color">{{ t("settings.callProviders.url") }}</label>
+    <label class="mb-1.5 mt-4 block text-xs font-medium text-text-on-main-bg-color">{{ t("settings.callProviders.url") }}</label>
     <input
       v-model="url"
-      type="url"
+      type="text"
       inputmode="url"
       autocapitalize="off"
       autocomplete="off"
