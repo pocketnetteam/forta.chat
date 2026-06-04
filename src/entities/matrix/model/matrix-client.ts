@@ -606,6 +606,25 @@ export class MatrixClientService {
     return this.client.mxcUrlToHttp(mxcUrl) ?? null;
   }
 
+  /** Convert an mxc:// URI to a server-side thumbnail HTTP URL
+   *  (`/_matrix/media/.../thumbnail`). The homeserver downscales and
+   *  re-encodes, so the feed can show a light preview almost instantly
+   *  instead of pulling the full-size original (WEE-71, H1).
+   *
+   *  Only valid for UNENCRYPTED media: an E2E attachment is ciphertext on
+   *  the server, so a server-side thumbnail would be undecryptable garbage —
+   *  those must be downscaled client-side after decrypt. Returns null when
+   *  the client is missing or the URI cannot be resolved. */
+  mxcToThumbnail(
+    mxcUrl: string,
+    w: number,
+    h: number,
+    method: "scale" | "crop" = "scale",
+  ): string | null {
+    if (!this.client) return null;
+    return this.client.mxcUrlToHttp(mxcUrl, w, h, method, true) ?? null;
+  }
+
   /** Fetch URL preview (Open Graph metadata) from Matrix server */
   async getUrlPreview(url: string): Promise<{
     siteName?: string;

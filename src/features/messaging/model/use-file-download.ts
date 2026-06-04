@@ -18,6 +18,7 @@ import {
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
+import { createSemaphore } from "@/shared/lib/semaphore";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
 import { MessageType, MessageStatus } from "@/entities/chat";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
@@ -310,6 +311,21 @@ export async function tryHealStaleBlobFileInfo(
     console.warn("[use-file-download] heal: fetchRoomEvent failed:", e);
     return null;
   }
+}
+
+/** Max concurrent media network downloads (fetch + decrypt). Opening a DM
+ *  with N photos used to fire N full-size `fetch` at once: they competed for
+ *  the channel while the serialized decrypt made the last image wait on every
+ *  prior one, and the burst froze the UI on low-end Android. A small pool lets
+ *  the visible media load a few at a time instead of all-at-once (WEE-71, H2).
+ *  Shared module-wide so the cap holds across every `useFileDownload()`
+ *  instance (feed bubbles, MediaGrid, MediaViewer). */
+const MEDIA_FETCH_CONCURRENCY = 3;
+const mediaDownloadGate = createSemaphore(MEDIA_FETCH_CONCURRENCY);
+
+/** TEST-ONLY: expose in-flight count for the concurrency-pool regression. */
+export function _mediaGateActiveForTests(): number {
+  return mediaDownloadGate.active;
 }
 
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
@@ -916,13 +932,24 @@ export function useFileDownload() {
     }
 
     try {
-      const blob = await downloadAndDecrypt(
-        effectiveFileInfo,
-        message.roomId,
-        message.senderId,
-        message.timestamp,
-        signal,
-      );
+      // Concurrency-pool: cap simultaneous network downloads so a chat full of
+      // media doesn't flood the channel / freeze the UI (WEE-71, H2). The
+      // permit covers only fetch + decrypt — released before the cache-write
+      // and objectUrl plumbing so the pool turns over as fast as possible.
+      // Cache hits returned above never reach here, so they bypass the gate.
+      await mediaDownloadGate.acquire();
+      let blob: Blob;
+      try {
+        blob = await downloadAndDecrypt(
+          effectiveFileInfo,
+          message.roomId,
+          message.senderId,
+          message.timestamp,
+          signal,
+        );
+      } finally {
+        mediaDownloadGate.release();
+      }
       const mimeType = effectiveFileInfo.type || "application/octet-stream";
       const typedBlob = new Blob([blob], { type: mimeType });
       const url = URL.createObjectURL(typedBlob);
