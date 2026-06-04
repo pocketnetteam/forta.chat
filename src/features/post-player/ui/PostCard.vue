@@ -10,8 +10,14 @@ import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
 import { renderArticleText } from "@/shared/lib/article-blocks";
+import { withTimeout } from "@/shared/lib/with-timeout";
 import { useChatStore } from "@/entities/chat";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
+
+// Bound the skeleton: on slow networks (Tor) loadPost can hang indefinitely and
+// the skeleton reads as an eternal spinner (WEE-70). After this many ms we drop
+// to an error state with a retry button instead.
+const POST_LOAD_TIMEOUT_MS = 15_000;
 
 interface Props {
   txid: string;
@@ -121,11 +127,13 @@ function onAuthorClick() {
   }
 }
 
-onMounted(async () => {
+async function loadPostData() {
+  loading.value = true;
+  error.value = false;
   try {
     let data = post.value;
     if (!data) {
-      data = await authStore.loadPost(props.txid);
+      data = await withTimeout(authStore.loadPost(props.txid), POST_LOAD_TIMEOUT_MS, "loadPost");
       if (!data) { error.value = true; return; }
       post.value = data;
     }
@@ -136,7 +144,13 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
-});
+}
+
+function onRetry() {
+  loadPostData();
+}
+
+onMounted(loadPostData);
 </script>
 
 <template>
@@ -176,14 +190,19 @@ onMounted(async () => {
   </div>
 
   <!-- Error -->
-  <a
-    v-else-if="error"
-    :href="postUrl"
-    target="_blank"
-    rel="noopener noreferrer"
-    class="text-color-txt-ac underline hover:no-underline"
-    @click.stop
-  >{{ t("post.notFound") }}</a>
+  <div v-else-if="error" class="flex items-center gap-3 py-1">
+    <a
+      :href="postUrl"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="text-color-txt-ac underline hover:no-underline"
+      @click.stop
+    >{{ t("post.notFound") }}</a>
+    <button
+      class="rounded-lg border border-neutral-grad-1/50 px-2.5 py-1 text-xs font-medium text-text-color transition-colors hover:bg-neutral-grad-0"
+      @click.stop="onRetry"
+    >{{ t("post.retry") }}</button>
+  </div>
 
   <!-- Post card -->
   <div

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { parseVideoUrl, fetchPeerTubeThumb } from "@/shared/lib/video-embed";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { isNative } from "@/shared/lib/platform";
+import { openExternalUrl } from "@/shared/lib/open-external-url";
 
 interface Props {
   url: string;
@@ -12,10 +14,42 @@ const props = withDefaults(defineProps<Props>(), { inline: false });
 const videoInfo = computed(() => parseVideoUrl(props.url));
 const playing = ref(false);
 const error = ref(false);
+const iframeLoaded = ref(false);
+const spinnerTimedOut = ref(false);
 const peertubeThumb = ref("");
 const isFullscreen = ref(false);
 
+// Belt-and-suspenders for old Android WebViews where iframe @load may never
+// fire: stop showing our overlay spinner after this long so it can't become
+// the very "eternal spinner" this fix removes. The "Open externally" fallback
+// stays available regardless.
+const SPINNER_TIMEOUT_MS = 10_000;
+let spinnerTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearSpinnerTimer = () => {
+  if (spinnerTimer !== null) {
+    clearTimeout(spinnerTimer);
+    spinnerTimer = null;
+  }
+};
+
 const thumbUrl = computed(() => peertubeThumb.value || videoInfo.value?.thumbUrl || "");
+
+// Android WebView blocks autoplay for cross-origin sandboxed iframes, so the
+// embed silently never starts and its own spinner spins forever (WEE-70). On
+// native we drop ?autoplay=1 and let the user tap play inside the embed; on
+// web/desktop autoplay works as before.
+const embedSrc = computed(() => {
+  const base = videoInfo.value?.embedUrl ?? "";
+  return isNative ? base : `${base}?autoplay=1`;
+});
+
+// Our own overlay spinner is only shown while the iframe is still fetching.
+// Once @load fires we hide it; if it never loads, the "Open externally"
+// fallback is available from the first tap as a safety net.
+const showSpinner = computed(
+  () => playing.value && !iframeLoaded.value && !error.value && !spinnerTimedOut.value,
+);
 
 const onFullscreenChange = () => {
   isFullscreen.value = !!document.fullscreenElement;
@@ -32,6 +66,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener("fullscreenchange", onFullscreenChange);
+  clearSpinnerTimer();
 });
 
 // Android back: exit iframe fullscreen instead of closing the post.
@@ -46,11 +81,29 @@ useAndroidBackHandler("post-video-fullscreen", 100, () => {
 
 const play = () => {
   playing.value = true;
+  spinnerTimedOut.value = false;
+  clearSpinnerTimer();
+  spinnerTimer = setTimeout(() => {
+    spinnerTimedOut.value = true;
+    spinnerTimer = null;
+  }, SPINNER_TIMEOUT_MS);
+};
+
+const onIframeLoad = () => {
+  iframeLoaded.value = true;
+  clearSpinnerTimer();
 };
 
 const onIframeError = () => {
   error.value = true;
   playing.value = false;
+  clearSpinnerTimer();
+};
+
+// Route through openExternalUrl: on native a plain <a target="_blank"> is a
+// no-op inside Capacitor's WebView, so we launch a Custom Tab instead.
+const openExternal = () => {
+  void openExternalUrl(props.url);
 };
 </script>
 
@@ -62,16 +115,39 @@ const onIframeError = () => {
   >
     <iframe
       v-if="playing && !error"
-      :src="videoInfo.embedUrl + '?autoplay=1'"
+      :src="embedSrc"
       class="absolute inset-0 h-full w-full"
       frameborder="0"
       sandbox="allow-same-origin allow-scripts allow-presentation allow-forms allow-popups"
       allow="autoplay; picture-in-picture; fullscreen"
       allowfullscreen
+      @load="onIframeLoad"
       @error="onIframeError"
     />
 
-    <template v-else>
+    <!-- Loading overlay while the iframe is fetching; hidden once @load fires -->
+    <div
+      v-if="showSpinner"
+      data-testid="video-loading"
+      class="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60"
+    >
+      <svg class="animate-spin" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" opacity="0.85">
+        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+      </svg>
+    </div>
+
+    <!-- External fallback available from the first tap (not only on error) -->
+    <a
+      v-if="playing && !error"
+      data-testid="video-external"
+      :href="url"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="absolute bottom-2 right-2 z-10 rounded bg-black/60 px-2 py-1 text-xs text-white underline"
+      @click.stop.prevent="openExternal"
+    >Open externally</a>
+
+    <template v-if="!playing && !error">
       <img
         v-if="thumbUrl"
         :src="thumbUrl"
@@ -104,7 +180,7 @@ const onIframeError = () => {
         target="_blank"
         rel="noopener noreferrer"
         class="text-sm text-color-txt-ac underline"
-        @click.stop
+        @click.stop.prevent="openExternal"
       >Open video externally</a>
     </div>
   </div>
