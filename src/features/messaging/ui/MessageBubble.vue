@@ -4,6 +4,8 @@ import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { useFileDownload } from "../model/use-file-download";
+import { getMatrixClientService } from "@/entities/matrix";
+import { useLazyLoad } from "@/shared/lib/use-lazy-load";
 import { isMessageFailedForRetry } from "../model/message-failed-state";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
@@ -481,20 +483,93 @@ const fileIcon = computed(() => {
   return "file";
 });
 
-// Download image immediately — virtual scroller already handles lazy rendering
-onMounted(() => {
-  if (props.message.type === MessageType.image && props.message.fileInfo) {
-    download(props.message);
+// ── Thumbnail-first + lazy-by-visibility for feed images (WEE-71) ──
+// An UNENCRYPTED image renders a light server-side thumbnail directly — no
+// eager full-size fetch. Full-size loads on tap, inside MediaViewer. An
+// ENCRYPTED image (the common DM case) has no usable server thumbnail, so it
+// still goes through the full download/decrypt path — but gated by visibility
+// (download only when the bubble nears the viewport) and capped by the
+// concurrency-pool inside useFileDownload.
+const imageContainerRef = ref<HTMLElement>();
+const { isVisible: imageInViewport } = useLazyLoad(imageContainerRef, "400px");
+
+// Set when a server thumbnail fails to load — falls back to the full-size
+// download so an unencrypted image never regresses to a broken-image state.
+const thumbnailFetchFailed = ref(false);
+
+/** True for an unencrypted image whose URL points at the homeserver — the
+ *  only case where a server `/thumbnail` is meaningful. Encrypted media,
+ *  optimistic `blob:`/`data:` placeholders and non-image types are excluded. */
+const isUnencryptedFeedImage = computed(() => {
+  const fi = props.message.fileInfo;
+  if (props.message.type !== MessageType.image || !fi) return false;
+  if (fi.secrets?.keys) return false;
+  const u = fi.url ?? "";
+  return u.startsWith("mxc://") || u.startsWith("http://") || u.startsWith("https://");
+});
+
+/** Light preview source for the feed `<img>`: a server thumbnail for mxc://
+ *  media, the plain URL for already-http images, or null once it has failed. */
+const feedThumbnailSrc = computed<string | null>(() => {
+  if (thumbnailFetchFailed.value || !isUnencryptedFeedImage.value) return null;
+  const u = props.message.fileInfo!.url;
+  if (!u.startsWith("mxc://")) return u;
+  try {
+    return getMatrixClientService().mxcToThumbnail(u, 400, 400, "scale");
+  } catch {
+    return null;
   }
 });
 
-// Re-download if message changes (virtual scroller recycling)
-watch(() => props.message.id, () => {
-  if (props.message.type === MessageType.image && props.message.fileInfo) {
+/** What the feed image actually shows: the light thumbnail when available,
+ *  otherwise the decrypted/full object URL from the download pipeline. */
+const feedImageSrc = computed<string | null>(
+  () => feedThumbnailSrc.value ?? fileState.value.objectUrl,
+);
+
+/** Kick off the full download for an image only when there is no light
+ *  preview to show: encrypted media (no usable server thumbnail) or an
+ *  unencrypted image whose thumbnail URL couldn't be resolved — e.g. the
+ *  Matrix client wasn't ready yet at cold start. Without this fallback such
+ *  an image would be stuck on the spinner (the download is otherwise skipped
+ *  for the unencrypted/thumbnail path). */
+const triggerImageDownload = () => {
+  if (
+    props.message.type === MessageType.image &&
+    props.message.fileInfo &&
+    !feedThumbnailSrc.value
+  ) {
     download(props.message);
   }
+};
+
+// Gate the encrypted-image download on viewport visibility. `useLazyLoad`
+// latches `isVisible` to true on first intersection (and stays true), so a
+// recycled bubble that is already on screen re-downloads via the id-watch.
+watch(imageInViewport, (visible) => {
+  if (visible) triggerImageDownload();
+}, { immediate: true });
+
+// Re-download / reset preview state if the message changes (virtual scroller
+// recycling reuses the same component instance for a different message).
+watch(() => props.message.id, () => {
   imageDecodeFailed.value = false;
+  thumbnailFetchFailed.value = false;
+  if (imageInViewport.value) triggerImageDownload();
 });
+
+/** A server thumbnail failed to load. For an unencrypted image with no
+ *  full-size objectUrl yet, recover by fetching the full original instead of
+ *  showing the broken-image placeholder. Otherwise it's a genuine decode
+ *  failure (e.g. HEIC) — keep the existing fallback UI. */
+const onFeedImageError = () => {
+  if (feedThumbnailSrc.value && !fileState.value.objectUrl) {
+    thumbnailFetchFailed.value = true;
+    download(props.message);
+    return;
+  }
+  imageDecodeFailed.value = true;
+};
 
 // `imageDecodeFailed` is for images the WebView refuses to decode (typically
 // HEIC/HEIF from senders on other clients that didn't transcode). Without
@@ -509,7 +584,15 @@ const isLikelyHeic = computed(() => {
 });
 
 const handleMediaClick = () => {
-  if ((props.message.type === MessageType.image || props.message.type === MessageType.video) && fileState.value.objectUrl) {
+  if (props.message.type === MessageType.image) {
+    // Open the viewer when we have either the full object URL or a thumbnail
+    // preview (unencrypted path); MediaViewer fetches the full-size on open.
+    if (fileState.value.objectUrl || feedThumbnailSrc.value) {
+      emit("openMedia", props.message);
+    }
+    return;
+  }
+  if (props.message.type === MessageType.video && fileState.value.objectUrl) {
     emit("openMedia", props.message);
   }
 };
@@ -732,9 +815,9 @@ const replyPreviewSender = computed(() => {
             <div class="truncate text-[11px] opacity-70">{{ replyPreviewText }}</div>
           </div>
         </div>
-        <div class="relative cursor-pointer" @click="handleMediaClick">
+        <div ref="imageContainerRef" class="relative cursor-pointer" @click="handleMediaClick">
           <div
-            v-if="fileState.loading || (!fileState.objectUrl && !fileState.error)"
+            v-if="!feedImageSrc && (fileState.loading || (!fileState.objectUrl && !fileState.error))"
             class="flex items-center justify-center bg-neutral-grad-0"
             :style="imagePlaceholderStyle"
           >
@@ -774,7 +857,7 @@ const replyPreviewSender = computed(() => {
             <span class="truncate max-w-full font-medium">{{ message.fileInfo?.name }}</span>
             <span v-if="isLikelyHeic" class="text-[10px] opacity-70">{{ t('message.heicNotSupported') }}</span>
           </div>
-          <img v-else-if="fileState.objectUrl" :src="fileState.objectUrl" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" @error="imageDecodeFailed = true" />
+          <img v-else-if="feedImageSrc" :src="feedImageSrc" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" @error="onFeedImageError" />
           <!-- Upload progress overlay -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <button class="relative flex h-14 w-14 items-center justify-center" @click.stop="emit('cancelUpload', message)">

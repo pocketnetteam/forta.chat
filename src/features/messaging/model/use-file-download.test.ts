@@ -109,6 +109,7 @@ const {
   appendCacheBust,
   wrapTransientError,
   _resetToastDedupForTests,
+  _mediaGateActiveForTests,
 } = await import("./use-file-download");
 const { MediaUnavailableError, NetworkBlockedError } = await import(
   "@/shared/lib/network/typed-network-errors"
@@ -1151,6 +1152,87 @@ describe("useFileDownload", () => {
       });
       scope.stop();
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // WEE-71 (H2): concurrency-pool — opening a DM full of photos must not fire
+  // every full-size fetch at once (channel flooding + UI freeze on low-end
+  // Android). The shared semaphore caps simultaneous network downloads to 3.
+  // -------------------------------------------------------------------------
+  describe("download — concurrency pool (WEE-71)", () => {
+    it("never runs more than 3 media downloads concurrently", async () => {
+      const originalFetch = global.fetch;
+
+      let activeFetches = 0;
+      let peakFetches = 0;
+      let releaseFetches: () => void = () => {};
+      const fetchGate = new Promise<void>((resolve) => {
+        releaseFetches = resolve;
+      });
+
+      // Each fetch parks on the shared gate so several can be in flight at once
+      // — letting us observe how many the semaphore actually admits.
+      global.fetch = vi.fn(async () => {
+        activeFetches++;
+        peakFetches = Math.max(peakFetches, activeFetches);
+        await fetchGate;
+        activeFetches--;
+        return {
+          ok: true,
+          status: 200,
+          blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" })),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+
+      const scope = effectScope();
+      try {
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+          // 6 distinct encrypted-less images — all want the network at once.
+          const downloads = Array.from({ length: 6 }, (_, i) =>
+            download({
+              id: `$evt_pool_${i}`,
+              _key: `client_pool_${i}`,
+              roomId: "!room:server",
+              senderId: "@u:server",
+              content: "photo.jpg",
+              timestamp: Date.now(),
+              status: "sent",
+              type: "image",
+              fileInfo: {
+                name: "photo.jpg",
+                type: "image/jpeg",
+                size: 1024,
+                url: `https://example.com/photo_${i}.jpg`,
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any),
+          );
+
+          // Let the admitted downloads reach their fetch() and park on the gate.
+          await new Promise((r) => setTimeout(r, 0));
+
+          // At most 3 in flight; the rest queue on the semaphore.
+          expect(_mediaGateActiveForTests()).toBeLessThanOrEqual(3);
+          expect(peakFetches).toBeLessThanOrEqual(3);
+          expect(activeFetches).toBe(3);
+
+          // Drain: release the gate, let every download complete.
+          releaseFetches();
+          await Promise.all(downloads);
+
+          // Pool fully turned over — no leaked permits, and the 6th still ran.
+          expect(_mediaGateActiveForTests()).toBe(0);
+          expect(peakFetches).toBeLessThanOrEqual(3);
+          expect((global.fetch as Mock).mock.calls.length).toBe(6);
+        });
+      } finally {
+        scope.stop();
+        global.fetch = originalFetch;
+      }
+    }, 15_000);
   });
 
   // -------------------------------------------------------------------------
