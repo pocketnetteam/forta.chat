@@ -642,6 +642,7 @@ export const ru: Record<TranslationKey, string> = {
   // ── Post embeds ──
   "post.loading": "Загрузка поста...",
   "post.notFound": "Пост не найден",
+  "post.retry": "Повторить",
   "post.readMore": "Читать далее",
   "post.video": "Видео",
   "post.article": "Статья",

@@ -640,6 +640,7 @@ export const en = {
   // ── Post embeds ──
   "post.loading": "Loading post...",
   "post.notFound": "Post not found",
+  "post.retry": "Retry",
   "post.readMore": "Read more",
   "post.video": "Video",
   "post.article": "Article",
