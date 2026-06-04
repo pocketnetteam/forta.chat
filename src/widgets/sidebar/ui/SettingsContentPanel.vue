@@ -190,7 +190,7 @@ const title = computed(() => {
     </div>
 
     <!-- ════════ Video call methods (WEE-57) ════════ -->
-    <div v-else-if="settingsSubView === 'callMethods'" class="flex-1 overflow-y-auto">
+    <div v-else-if="settingsSubView === 'callMethods'" class="flex-1 overflow-y-auto pb-safe">
       <div class="mx-auto max-w-2xl p-6">
         <CallProvidersSection />
       </div>

@@ -582,6 +582,7 @@ export const en = {
   "settings.callProviders.addTitle": "New call method",
   "settings.callProviders.editTitle": "Edit call method",
   "settings.callProviders.invalidUrl": "Enter a valid link (https://…)",
+  "settings.callProviders.labelRequired": "Enter a name for this method",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",

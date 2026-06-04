@@ -584,6 +584,7 @@ export const ru: Record<TranslationKey, string> = {
   "settings.callProviders.addTitle": "Новый способ связи",
   "settings.callProviders.editTitle": "Изменить способ связи",
   "settings.callProviders.invalidUrl": "Введите корректную ссылку (https://…)",
+  "settings.callProviders.labelRequired": "Введите название способа связи",
 
   // ── Auth / Login ──
   "auth.signIn": "Войти",
