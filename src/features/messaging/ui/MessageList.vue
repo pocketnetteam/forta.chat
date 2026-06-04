@@ -34,7 +34,7 @@ const themeStore = useThemeStore();
 const { loadMessages, toggleReaction, deleteMessage, deleteMessages, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
 const { getState: getFileState, download: downloadFile, saveFile } = useFileDownload();
 const { toast } = useToast();
-const { t } = useI18n();
+const { t, locale } = useI18n();
 
 const { bannerState, freezeBanner, dismissBanner, forceDismiss, hasBanner } = useUnreadBanner();
 
@@ -1171,10 +1171,10 @@ const getDateLabel = (
   prevTimestamp?: number,
 ): string | null => {
   const date = new Date(timestamp);
-  if (!prevTimestamp) return formatDate(date);
+  if (!prevTimestamp) return formatDate(date, locale.value);
   const prevDate = new Date(prevTimestamp);
   if (date.toDateString() !== prevDate.toDateString()) {
-    return formatDate(date);
+    return formatDate(date, locale.value);
   }
   return null;
 };

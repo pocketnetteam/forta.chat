@@ -39,6 +39,18 @@ import { resolveCachedRoomsAddress } from "./cached-rooms-address";
 
 const NAMESPACE = "chat";
 
+/** A cached value is usable as a display name only if it is not a raw
+ *  identifier: a full Matrix ID (`@localpart:domain`) or a long hex blob
+ *  (≥20 chars, e.g. an undecoded hex user ID). Short hex-like usernames
+ *  ("cafe", "abc123") and handle-style names ("@nickname" without a domain)
+ *  are intentionally allowed — only unambiguous machine IDs are rejected so
+ *  they fall through to the truncated-address fallback (forta-bugs#363/#165).
+ *  Note: the local-alias branch in getDisplayName is deliberately NOT guarded
+ *  — an alias is explicit human input and must always win (Session 51). */
+function isDisplayableName(value: string): boolean {
+  return !!value && !/^@[^:]+:.+/.test(value) && !/^[a-f0-9]{20,}$/i.test(value);
+}
+
 /** Extract raw event data from a MatrixEvent object */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getRawEvent(matrixEvent: any): Record<string, unknown> | null {
@@ -616,17 +628,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     //    normalized above, so a single lookup is enough.
     const alias = localAliases.value[resolvedAddr];
     if (alias) return alias;
-    // 2) Matrix displayName cache — direct (raw) lookup, then decoded
+    // 2) Matrix displayName cache — direct (raw) lookup, then decoded.
+    //    Guard against raw identifiers (full Matrix IDs or long hex blobs)
+    //    leaking into the UI as a "name" — they must fall through to the
+    //    address fallback instead (forta-bugs#363/#165).
     const cached = userDisplayNames.value[address];
-    if (cached) return cached;
+    if (cached && isDisplayableName(cached)) return cached;
     if (resolvedAddr !== address) {
       const decodedCached = userDisplayNames.value[resolvedAddr];
-      if (decodedCached) return decodedCached;
+      if (decodedCached && isDisplayableName(decodedCached)) return decodedCached;
     }
     // 3) Check user store (synchronously restored from localStorage — available before Matrix sync)
     const uStore = useUserStore();
     const userProfile = uStore.users[resolvedAddr];
-    if (userProfile?.name) return userProfile.name;
+    if (userProfile?.name && isDisplayableName(userProfile.name)) return userProfile.name;
     // Fallback: truncated address
     if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
     return address;
