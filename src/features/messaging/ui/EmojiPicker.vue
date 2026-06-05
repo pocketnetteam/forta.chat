@@ -52,7 +52,9 @@ watch(() => props.show, (v) => {
     activeTab.value = "emoji";
     lastSelectedEmoji.value = null;
     nextTick(() => {
-      searchInputRef.value?.focus();
+      // WEE-34 (#807): do NOT auto-focus the search input. On mobile the
+      // focus pops the on-screen keyboard, which covers the emoji grid — the
+      // user has to tap the input themselves to search. Just reset scroll.
       if (gridRef.value) gridRef.value.scrollTop = 0;
     });
   }
