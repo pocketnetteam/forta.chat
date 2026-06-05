@@ -6,6 +6,7 @@ import { useThemeStore } from "@/entities/theme";
 import { isConsecutiveMessage } from "@/entities/chat/lib/message-utils";
 import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
 import { formatDate } from "@/shared/lib/format";
+import { stripMentionAddresses } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
 import { useFileDownload } from "../model/use-file-download";
@@ -145,8 +146,19 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
         && (sel.anchorNode as Element | null)
             ?.parentElement
             ?.closest(`[data-message-id="${message.id}"]`) != null;
-      const payload = isSelectionInBubble ? selectedText : message.content;
-      navigator.clipboard.writeText(payload).then(() => toast(t("chat.copiedToClipboard")));
+      // Copying the whole bubble must yield readable text — strip the
+      // `@hexaddr:Name` mention wire-syntax down to `@Name` (renamed contacts
+      // resolved via local alias), matching what the bubble renders (#897).
+      // A manual in-bubble selection is copied verbatim.
+      const payload = isSelectionInBubble
+        ? selectedText
+        : stripMentionAddresses(message.content, (userId) => chatStore.getLocalAlias(userId));
+      navigator.clipboard.writeText(payload)
+        .then(() => toast(t("chat.copiedToClipboard")))
+        .catch((e) => {
+          console.error("[MessageList] copy failed:", e);
+          toast(t("chat.copyFailed"), "error");
+        });
       break;
     }
     case "edit":

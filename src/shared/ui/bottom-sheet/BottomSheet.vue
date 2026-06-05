@@ -119,6 +119,10 @@ onUnmounted(() => {
 }
 .bs-fade-leave-active {
   transition: opacity 0.2s ease-in;
+  /* Once the sheet starts closing, stop the fading backdrop from swallowing
+     the next tap. Without this, selecting "Select" and immediately tapping a
+     bubble loses the first tap to the closing overlay (WEE-66 / #863). */
+  pointer-events: none;
 }
 .bs-fade-enter-from,
 .bs-fade-leave-to {

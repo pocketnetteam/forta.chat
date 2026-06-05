@@ -11,6 +11,10 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), { inline: false });
 
+// Inline (channel feed) playback asks the host to open the post instead of
+// embedding the iframe in the feed — see `play()` for why (WEE-74).
+const emit = defineEmits<{ expand: [] }>();
+
 const videoInfo = computed(() => parseVideoUrl(props.url));
 const playing = ref(false);
 const error = ref(false);
@@ -80,6 +84,19 @@ useAndroidBackHandler("post-video-fullscreen", 100, () => {
 });
 
 const play = () => {
+  // WEE-74: a playing cross-origin sandboxed iframe captures Android WebView
+  // touch gestures over its area, so inside the channel feed the feed stops
+  // scrolling and tap-to-pause never reaches the embed (regression surfaced
+  // once WEE-70 made the embed actually reach a playing state). Native inline
+  // playback also needs a tap *inside* the iframe to start (no autoplay), which
+  // is exactly what locks the gesture. Route feed playback to the post modal,
+  // where the iframe lives in its own scroll context and can't lock the feed.
+  // Web/desktop (mouse) keeps inline playback as before.
+  if (props.inline && isNative) {
+    emit("expand");
+    return;
+  }
+
   playing.value = true;
   spinnerTimedOut.value = false;
   clearSpinnerTimer();

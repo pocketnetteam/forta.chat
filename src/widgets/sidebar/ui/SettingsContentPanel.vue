@@ -16,7 +16,7 @@ import { Toggle } from "@/shared/ui/toggle";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import EmojiPicker from "@/features/messaging/ui/EmojiPicker.vue";
 import { UserEditForm, CallProvidersSection } from "@/features/user-management";
-import { StorageSettings } from "@/features/settings";
+import { StorageSettings, NotificationSettings } from "@/features/settings";
 import { useLiveQuery, isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import type { TelemetrySnapshot } from "@/shared/lib/telemetry";
 import { isNative, isAndroid } from "@/shared/lib/platform";
@@ -160,6 +160,7 @@ const title = computed(() => {
     case "profile": return t("settings.editProfile");
     case "appearance": return t("settings.appearance");
     case "callMethods": return t("settings.callProviders.title");
+    case "notifications": return t("settings.notifications");
     case "storage": return t("settings.storage");
     case "about": return t("settings.about");
     default: return "";
@@ -518,6 +519,11 @@ const title = computed(() => {
           </div>
         </div>
       </Modal>
+    </div>
+
+    <!-- ════════ Notifications (WEE-75) ════════ -->
+    <div v-else-if="settingsSubView === 'notifications'" class="flex-1 overflow-y-auto">
+      <NotificationSettings />
     </div>
 
     <!-- ════════ Storage ════════ -->

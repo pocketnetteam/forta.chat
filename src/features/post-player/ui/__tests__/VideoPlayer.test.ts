@@ -129,3 +129,41 @@ describe("VideoPlayer channel spinner (WEE-70)", () => {
     expect(openExternalUrl).toHaveBeenCalledWith(YT_URL);
   });
 });
+
+describe("VideoPlayer channel feed touch/scroll lock (WEE-74)", () => {
+  it("inline на native не встраивает iframe в ленту, а эмитит expand", async () => {
+    mockIsNative = true;
+    const wrapper = mount(VideoPlayer, { props: { url: YT_URL, inline: true } });
+
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+
+    // No iframe is mounted in the feed — so it can't capture touch/scroll.
+    expect(wrapper.find("iframe").exists()).toBe(false);
+    // The host is asked to open the post modal instead.
+    expect(wrapper.emitted("expand")).toHaveLength(1);
+  });
+
+  it("inline на web сохраняет встроенное воспроизведение (мышь, не Android WebView)", async () => {
+    const wrapper = mount(VideoPlayer, { props: { url: YT_URL, inline: true } });
+
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+
+    // Desktop has no touch gesture-lock, so inline playback stays.
+    expect(wrapper.find("iframe").exists()).toBe(true);
+    expect(wrapper.emitted("expand")).toBeUndefined();
+  });
+
+  it("в модалке (inline=false) на native играет встроенно, не эмитит expand", async () => {
+    mockIsNative = true;
+    const wrapper = mount(VideoPlayer, { props: { url: YT_URL } });
+
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+
+    // Modal context: the iframe is fine here — it doesn't lock the channel feed.
+    expect(wrapper.find("iframe").exists()).toBe(true);
+    expect(wrapper.emitted("expand")).toBeUndefined();
+  });
+});

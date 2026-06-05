@@ -18,6 +18,7 @@ import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
+import { isServerEventId } from "./redact-target";
 import { SendError, sendDiag } from "./send-errors";
 import { reportSendError } from "./send-error-bus";
 
@@ -1234,7 +1235,11 @@ export function useMessages() {
           redactedEventId: messageId,
           roomId,
         });
-        if (forEveryone) {
+        // Only redact on the server when the message actually has a server
+        // identity. A pending message is identified by its clientId, which the
+        // server has never seen — queuing a redact for it silently fails
+        // (WEE-66 / #773). Such messages are deleted locally only.
+        if (forEveryone && isServerEventId(messageId)) {
           await dbKit.syncEngine.enqueue(
             "delete_message",
             roomId,
@@ -1432,7 +1437,9 @@ export function useMessages() {
               redactedEventId: id,
               roomId,
             });
-            if (forEveryone) {
+            // Pending messages (clientId, no server identity) delete locally
+            // only — a server redact for a clientId silently fails (WEE-66).
+            if (forEveryone && isServerEventId(id)) {
               await dbKit.syncEngine.enqueue(
                 "delete_message",
                 roomId,

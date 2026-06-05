@@ -103,18 +103,27 @@ const forwardedFromName = computed(() => {
 const longPressTriggered = ref(false);
 const { onPointerdown: lpPointerdown, onPointermove, onPointerup: lpPointerup, onPointerleave: lpPointerleave } = useLongPress({
   onTrigger: (e) => {
+    // Guard emission (not the timer cleanup) — re-opening the context menu
+    // mid-multiselect would steal the tap (WEE-66 / #863, #924).
+    if (chatStore.selectionMode) return;
     longPressTriggered.value = true;
     emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
   },
 });
 const onPointerdown = (e: PointerEvent) => {
+  // In selection mode a tap toggles selection (see handleBubbleClick) — don't
+  // arm long-press at all.
+  if (chatStore.selectionMode) return;
   longPressTriggered.value = false;
   lpPointerdown(e);
 };
+// Always run cleanup so a timer armed just before selection mode flipped on
+// can't survive to fire.
 const onPointerup = () => { lpPointerup(); };
 const onPointerleave = () => { lpPointerleave(); };
 
 const handleRightClick = (e: MouseEvent) => {
+  if (chatStore.selectionMode) return;
   // .prevent modifier already calls preventDefault
   emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
 };
@@ -128,7 +137,7 @@ const handleRightClick = (e: MouseEvent) => {
 // `isOwn && swipeDirection === 'right'` block in the template), so we only emit
 // quote on right-swipe when the bubble is a peer's.
 const triggerReply = () => emit("reply", props.message);
-const { offsetX: swipeOffsetX, isSwiping, swipeDirection, onTouchstart, onTouchmove, onTouchend } = useSwipeGesture({
+const { offsetX: swipeOffsetX, isSwiping, swipeDirection, onTouchstart: swipeTouchstart, onTouchmove: swipeTouchmove, onTouchend: swipeTouchend } = useSwipeGesture({
   direction: "both",
   threshold: 60,
   maxOffset: 100,
@@ -145,6 +154,12 @@ const swipeStyle = computed(() => {
     transition: isSwiping.value ? "none" : "transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94)",
   };
 });
+
+// Swipe-to-reply is disabled while selecting so a horizontal drag across
+// bubbles toggles selection cleanly instead of firing reply gestures.
+const onTouchstart = (e: TouchEvent) => { if (chatStore.selectionMode) return; swipeTouchstart(e); };
+const onTouchmove = (e: TouchEvent) => { if (chatStore.selectionMode) return; swipeTouchmove(e); };
+const onTouchend = () => { if (chatStore.selectionMode) return; swipeTouchend(); };
 
 const swipeArrowOpacity = computed(() => Math.min(swipeOffsetX.value / 60, 1));
 
@@ -745,6 +760,15 @@ const replyPreviewSender = computed(() => {
 
     <!-- Bubble container -->
     <div class="relative min-w-0 max-w-[85%] md:max-w-[80%] lg:max-w-[65%] overflow-hidden">
+      <!-- Selection tap-target: while selecting, a tap anywhere on the bubble
+           toggles selection instead of opening media / replies / downloads.
+           Overlaying the whole bubble (vs the tiny checkbox only) is what makes
+           multi-select usable on mobile (WEE-66 / #863, #924). -->
+      <div
+        v-if="chatStore.selectionMode"
+        class="absolute inset-0 z-20 cursor-pointer"
+        @click.stop="handleBubbleClick"
+      />
       <!-- Reply action (on hover) -->
       <button
         class="absolute top-1/2 hidden h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-text-on-main-bg-color opacity-0 transition-opacity hover:bg-neutral-grad-0 group-hover:flex group-hover:opacity-100"
