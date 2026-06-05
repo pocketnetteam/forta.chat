@@ -47,6 +47,16 @@ function healFileInfoFromEcho(
   return incoming;
 }
 
+/** A local-only phantom: a pending message the user deleted before it ever
+ *  reached the server. It has no `eventId` (never synced) and is softDeleted,
+ *  so it must vanish from the timeline without a placeholder — there is no
+ *  peer-side redaction to surface (WEE-66 #864, WEE-81). Server-redacted
+ *  messages (real `eventId` + softDeleted) are NOT phantoms and stay visible
+ *  as the «Сообщение удалено» placeholder. */
+function isLocalOnlyPhantom(m: LocalMessage): boolean {
+  return m.eventId == null && !!m.softDeleted;
+}
+
 export class MessageRepository {
   constructor(private db: ChatDatabase) {}
 
@@ -55,7 +65,15 @@ export class MessageRepository {
   // ---------------------------------------------------------------------------
 
   /** Load messages for a room (paginated, chronological order).
-   *  Returns up to `limit` messages with timestamp < `beforeTimestamp`. */
+   *  Returns up to `limit` messages with timestamp < `beforeTimestamp`.
+   *
+   *  WEE-81: a server-redacted message (softDeleted with a real `eventId`) is
+   *  intentionally kept so the bubble renders the «Сообщение удалено»
+   *  placeholder — redaction is a Matrix protocol event that reaches every
+   *  participant, so the deletion can't be hidden. The ONLY row dropped is the
+   *  local-only phantom (`eventId == null && softDeleted`): a pending message
+   *  the user deleted before it was ever sent, which leaves no trace for the
+   *  peer either (WEE-66 #864). */
   async getMessages(
     roomId: string,
     limit = 50,
@@ -68,6 +86,7 @@ export class MessageRepository {
       .where("[roomId+timestamp]")
       .between([roomId, lower], [roomId, upper], !clearedAtTs, !beforeTimestamp)
       .reverse()
+      .filter((m) => !isLocalOnlyPhantom(m))
       .limit(limit)
       .toArray();
 
@@ -692,7 +711,13 @@ export class MessageRepository {
     return { messages: all, targetIndex };
   }
 
-  /** Load messages after a given timestamp (forward pagination for detached mode). */
+  /** Load messages after a given timestamp (forward pagination for detached mode).
+   *  Mirrors `getMessages`' phantom exclusion (WEE-81): this result is rendered
+   *  directly in detached/forward-pagination mode (MessageList.doLoadNewer), so
+   *  a just-deleted local-only phantom (newest timestamp, no eventId) must be
+   *  dropped here too — otherwise it resurfaces as an empty bubble. The other
+   *  read paths (getMessagesAround/Context, getLast*) are jump-anchor or
+   *  watermark math, never a phantom's render path, so they stay unfiltered. */
   async getMessagesAfter(
     roomId: string,
     afterTimestamp: number,
@@ -703,6 +728,7 @@ export class MessageRepository {
     const msgs = await this.db.messages
       .where("[roomId+timestamp]")
       .between([roomId, effectiveAfter], [roomId, Dexie.maxKey], false, true)
+      .filter((m) => !isLocalOnlyPhantom(m))
       .limit(limit)
       .toArray();
     return sortLocalMessagesTimelineAsc(msgs);
