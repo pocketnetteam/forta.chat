@@ -5,6 +5,7 @@ import {
   computeMobileReactionPanelStyle,
   computeAnchoredPanelStyle,
   PICKER_PAD,
+  PICKER_GAP,
 } from "../emoji-picker-layout";
 
 describe("emoji-picker-layout", () => {
@@ -26,23 +27,27 @@ describe("emoji-picker-layout", () => {
   });
 
   describe("mobile reaction mode", () => {
-    it("places the picker above the tap point when there's room", () => {
-      const style = computeMobileReactionPanelStyle(700, 800);
+    it("places the picker above the tap point (with a gap) when there's room", () => {
+      const y = 700;
+      const style = computeMobileReactionPanelStyle(y, 800);
       const top = parseInt(style.top, 10);
+      const panelH = parseInt(style.height, 10);
       expect(Number.isNaN(top)).toBe(false);
-      expect(top).toBeLessThan(700);
+      // Panel sits fully above the tap point, clearing it by at least the gap.
+      expect(top + panelH).toBeLessThanOrEqual(y - PICKER_GAP);
       expect(top).toBeGreaterThanOrEqual(PICKER_PAD);
       expect(style.bottom).toBe("auto");
       expect(style.width).toBe("100%");
     });
 
-    it("falls back to bottom-anchored placement when there isn't enough room above", () => {
+    it("drops below the tap point (not covering the message) when there's no room above", () => {
       const vh = 800;
-      const style = computeMobileReactionPanelStyle(40, vh);
+      const y = 40;
+      const style = computeMobileReactionPanelStyle(y, vh);
       const top = parseInt(style.top, 10);
       const panelH = parseInt(style.height, 10);
-      // No room above (y=40, panelH=360) → anchor near the viewport bottom.
-      expect(top).toBeGreaterThan(vh / 2);
+      // No room above (y=40) → place below the tap point with a gap, never on it.
+      expect(top).toBeGreaterThanOrEqual(y + PICKER_GAP);
       expect(top + panelH).toBeLessThanOrEqual(vh);
     });
 
@@ -53,6 +58,31 @@ describe("emoji-picker-layout", () => {
       const style = computeMobileReactionPanelStyle(10, 300);
       const top = parseInt(style.top, 10);
       expect(top).toBeGreaterThanOrEqual(PICKER_PAD);
+    });
+
+    it("avoids the tap point across a range of press positions on a normal viewport (forta-bugs#791)", () => {
+      const vh = 800;
+      for (const y of [80, 200, 400, 600, 720]) {
+        const style = computeMobileReactionPanelStyle(y, vh);
+        const top = parseInt(style.top, 10);
+        const panelH = parseInt(style.height, 10);
+        const coversTap = y >= top && y <= top + panelH;
+        expect(coversTap).toBe(false);
+      }
+    });
+
+    it("stays on-screen even on a short viewport where the panel can't fully clear the tap", () => {
+      // vh=480 → panelH = min(360, 240) = 240, which is half the viewport, so a
+      // mid-screen tap can't be cleared on either side. The clamp must still
+      // keep the panel fully within the viewport (best-effort placement).
+      const vh = 480;
+      for (const y of [60, 240, 420]) {
+        const style = computeMobileReactionPanelStyle(y, vh);
+        const top = parseInt(style.top, 10);
+        const panelH = parseInt(style.height, 10);
+        expect(top).toBeGreaterThanOrEqual(PICKER_PAD);
+        expect(top + panelH).toBeLessThanOrEqual(vh);
+      }
     });
 
     it("computePanelStyle uses props.y on mobile + reaction mode (regression: do not pin to bottom: 0)", () => {
