@@ -262,4 +262,43 @@ class PushDataPlugin : Plugin() {
         result.put("sdk", android.os.Build.VERSION.SDK_INT)
         call.resolve(result)
     }
+
+    /**
+     * WEE-75 / forta-bugs#942: deep-link into the OS notification settings
+     * for this app. On Android O+ the per-channel sound/vibration controls
+     * live in the system UI (the channel is immutable from app code), so
+     * this is the honest "manage notification sound" surface. On MIUI and
+     * similar OEMs this is also where the user can re-enable a sound the
+     * system muted. Falls back to the app-details screen on pre-O / when the
+     * notification-settings intent can't be resolved.
+     */
+    @PluginMethod
+    fun openNotificationSettings(call: PluginCall) {
+        val ctx = context
+        val intents = buildList {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                add(
+                    Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                    }
+                )
+            }
+            add(
+                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", ctx.packageName, null)
+                }
+            )
+        }
+        for (intent in intents) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                ctx.startActivity(intent)
+                call.resolve()
+                return
+            } catch (e: Exception) {
+                android.util.Log.w("FortaPush", "openNotificationSettings: intent failed, trying fallback", e)
+            }
+        }
+        call.reject("No settings activity could be opened")
+    }
 }

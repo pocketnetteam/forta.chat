@@ -40,13 +40,43 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(NotificationManager::class.java) ?: return
 
-        if (nm.getNotificationChannel(CHANNEL_MESSAGES) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_MESSAGES, getString(R.string.channel_messages), NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = getString(R.string.channel_messages_desc)
-                    enableVibration(true)
+        // WEE-75 / forta-bugs#942: the original `messages` channel shipped
+        // without an explicit sound, so MIUI and a handful of other OEMs
+        // posted message notifications silently. A NotificationChannel is
+        // immutable once created, so adding a sound to the old channel is a
+        // no-op on existing installs. We delete the legacy channel and
+        // recreate under a new id with an explicit notification sound —
+        // the same migration shape used for the incoming-call channel
+        // (WEE-18 above).
+        for (legacyId in MessageNotificationConfig.LEGACY_MESSAGE_CHANNEL_IDS) {
+            if (nm.getNotificationChannel(legacyId) != null) {
+                try {
+                    nm.deleteNotificationChannel(legacyId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to delete legacy message channel $legacyId", e)
                 }
+            }
+        }
+        if (nm.getNotificationChannel(CHANNEL_MESSAGES) == null) {
+            val spec = MessageNotificationConfig.messageChannelSpec(
+                name = getString(R.string.channel_messages),
+                description = getString(R.string.channel_messages_desc),
             )
+            val channel = NotificationChannel(spec.id, spec.name, spec.importance).apply {
+                description = spec.description
+                enableVibration(spec.withVibration)
+                setShowBadge(true)
+                if (spec.withSound) {
+                    setSound(
+                        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+                        android.media.AudioAttributes.Builder()
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                            .build(),
+                    )
+                }
+            }
+            nm.createNotificationChannel(channel)
         }
 
         // WEE-18 / forta-bugs#768: NotificationChannel settings are
@@ -489,7 +519,10 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
     companion object {
         private const val TAG = "FortaPush"
         const val PREFS_NAME = "forta_push"
-        const val CHANNEL_MESSAGES = "messages"
+        // WEE-75: single source of truth is MessageNotificationConfig. Kept
+        // here as a const so existing references (PushDataPlugin builders,
+        // badge-reset sweep) resolve to the migrated channel id.
+        const val CHANNEL_MESSAGES = MessageNotificationConfig.MESSAGES_CHANNEL_ID
         const val NOTIF_TAG = "forta_push"
         const val EXTRA_PUSH_ROOM_ID = "push_room_id"
         const val EXTRA_PUSH_EVENT_ID = "push_event_id"
