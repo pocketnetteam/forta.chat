@@ -39,8 +39,10 @@ vi.mock("../model/use-post-boost", () => ({
 vi.mock("@/shared/lib/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
+// Mutable so a test can simulate a post that carries a recognized video URL.
+let mockVideoInfo: unknown = null;
 vi.mock("@/shared/lib/video-embed", () => ({
-  parseVideoUrl: () => null,
+  parseVideoUrl: () => mockVideoInfo,
 }));
 vi.mock("@/shared/lib/image-url", () => ({
   normalizePocketnetImageUrl: (x: string) => x,
@@ -49,8 +51,21 @@ vi.mock("@/shared/lib/image-url", () => ({
 vi.stubGlobal("useI18n", () => ({ t: (k: string) => k }));
 
 import PostCard from "../PostCard.vue";
+import type { BastyonPostData } from "@/app/providers/initializers";
 
 const POST_LOAD_TIMEOUT_MS = 15_000;
+
+const videoPost: BastyonPostData = {
+  txid: "tx123",
+  address: "author",
+  caption: "clip",
+  message: "",
+  images: [],
+  url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  tags: [],
+  settings: {},
+  time: 1_700_000_000,
+};
 
 const stubs = {
   VideoPlayer: true,
@@ -113,5 +128,33 @@ describe("PostCard bounded skeleton + retry (WEE-70)", () => {
     await w.find("button").trigger("click");
     await flushPromises();
     expect(loadPost).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("PostCard channel feed video expand (WEE-74)", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    getCachedPost.mockReturnValue(videoPost);
+    mockVideoInfo = { type: "youtube", embedUrl: "https://www.youtube.com/embed/dQw4w9WgXcQ" };
+  });
+
+  afterEach(() => {
+    mockVideoInfo = null;
+  });
+
+  it("expand от inline-видео открывает пост-модалку (а не лочит ленту)", async () => {
+    const w = mountCard();
+    await flushPromises();
+
+    // Cached post renders straight to the card with the inline VideoPlayer.
+    const player = w.findComponent({ name: "VideoPlayer" });
+    expect(player.exists()).toBe(true);
+    expect(w.findComponent({ name: "PostPlayerModal" }).exists()).toBe(false);
+
+    player.vm.$emit("expand");
+    await flushPromises();
+
+    // Playback is routed to the modal instead of embedding in the feed.
+    expect(w.findComponent({ name: "PostPlayerModal" }).exists()).toBe(true);
   });
 });
