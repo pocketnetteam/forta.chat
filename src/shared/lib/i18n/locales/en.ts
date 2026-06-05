@@ -224,6 +224,7 @@ export const en = {
   "chat.typingMany": "{name} and {count} more are typing...",
   "chat.members": "{count} members",
   "chat.copiedToClipboard": "Copied to clipboard",
+  "chat.copyFailed": "Couldn't copy",
   "chat.updatingMessages": "Updating messages…",
   "chat.returnToLatest": "Return to latest",
 

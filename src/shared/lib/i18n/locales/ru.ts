@@ -226,6 +226,7 @@ export const ru: Record<TranslationKey, string> = {
   "chat.typingMany": "{name} и ещё {count} печатают...",
   "chat.members": "{count} участн.",
   "chat.copiedToClipboard": "Скопировано в буфер обмена",
+  "chat.copyFailed": "Не удалось скопировать",
   "chat.updatingMessages": "Обновление сообщений…",
   "chat.returnToLatest": "К последним",
 

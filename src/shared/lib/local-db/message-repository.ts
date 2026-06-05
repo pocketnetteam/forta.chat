@@ -55,7 +55,15 @@ export class MessageRepository {
   // ---------------------------------------------------------------------------
 
   /** Load messages for a room (paginated, chronological order).
-   *  Returns up to `limit` messages with timestamp < `beforeTimestamp`. */
+   *  Returns up to `limit` messages with timestamp < `beforeTimestamp`.
+   *
+   *  Deleted rows (softDeleted via local/peer redaction, or `deleted` parsed
+   *  from a server-redacted event) are filtered out so the timeline drops them
+   *  instead of rendering an undeletable "[message deleted]" placeholder
+   *  (WEE-66 / #864). This keeps the chat window consistent with the chat-list
+   *  preview, which already skips deleted rows via `getLastNonDeleted` (#938).
+   *  Deletions are rare, so the post-index `.filter()` reads only marginally
+   *  more rows than `limit`. */
   async getMessages(
     roomId: string,
     limit = 50,
@@ -68,6 +76,7 @@ export class MessageRepository {
       .where("[roomId+timestamp]")
       .between([roomId, lower], [roomId, upper], !clearedAtTs, !beforeTimestamp)
       .reverse()
+      .filter((m) => !m.softDeleted && !m.deleted)
       .limit(limit)
       .toArray();
 
@@ -345,15 +354,27 @@ export class MessageRepository {
       });
   }
 
-  /** Soft-delete a message locally */
-  async softDelete(eventId: string): Promise<void> {
-    await this.db.messages
+  /** Soft-delete a message locally.
+   *
+   *  Matches by `eventId` first, falling back to `clientId` when no row was
+   *  touched. A pending message (not yet confirmed by the server) has
+   *  `eventId: null` and is identified only by its clientId — `deleteMessage`
+   *  passes `eventId ?? clientId`, so without the clientId fallback the
+   *  redaction was a silent no-op for pending messages (WEE-66 / #773, #864).
+   *  Server redactions always carry a `$eventId`, and clientIds are UUIDs, so
+   *  the two id spaces never collide. */
+  async softDelete(id: string): Promise<void> {
+    const patch = { softDeleted: true, deletedAt: Date.now() };
+    const touched = await this.db.messages
       .where("eventId")
-      .equals(eventId)
-      .modify({
-        softDeleted: true,
-        deletedAt: Date.now(),
-      });
+      .equals(id)
+      .modify(patch);
+    if (touched === 0) {
+      await this.db.messages
+        .where("clientId")
+        .equals(id)
+        .modify(patch);
+    }
   }
 
   /** Mark replyTo.deleted on all messages referencing a given eventId */
@@ -590,16 +611,21 @@ export class MessageRepository {
     clearedAtTs?: number,
   ): Promise<{ messages: LocalMessage[]; anchorIndex: number }> {
     const lower = clearedAtTs ?? Dexie.minKey;
+    // Exclude deleted rows here too — otherwise jump-to-unread re-surfaces the
+    // undeletable "[message deleted]" placeholder that getMessages filters out
+    // (WEE-66 / #864).
     const [before, after] = await Promise.all([
       this.db.messages
         .where("[roomId+timestamp]")
         .between([roomId, lower], [roomId, timestamp], !clearedAtTs, true)
         .reverse()
+        .filter((m) => !m.softDeleted && !m.deleted)
         .limit(beforeCount)
         .toArray(),
       this.db.messages
         .where("[roomId+timestamp]")
         .between([roomId, timestamp], [roomId, Dexie.maxKey], false, true)
+        .filter((m) => !m.softDeleted && !m.deleted)
         .limit(afterCount)
         .toArray(),
     ]);
@@ -622,7 +648,7 @@ export class MessageRepository {
     return this.db.messages
       .where("[roomId+timestamp]")
       .between([roomId, effectiveAfter], [roomId, Dexie.maxKey], false, true)
-      .filter(m => m.senderId !== excludeSenderId && !m.softDeleted)
+      .filter(m => m.senderId !== excludeSenderId && !m.softDeleted && !m.deleted)
       .count();
   }
 
@@ -670,6 +696,9 @@ export class MessageRepository {
     const target = await this.getByEventId(targetEventId);
     if (!target || target.roomId !== roomId) return null;
     if (clearedAtTs && target.timestamp <= clearedAtTs) return null;
+    // A deleted message is no longer in the timeline — jumping to it would land
+    // on the placeholder getMessages now hides (WEE-66 / #864).
+    if (target.softDeleted || target.deleted) return null;
 
     const lower = clearedAtTs ?? Dexie.minKey;
     const [before, after] = await Promise.all([
@@ -677,11 +706,13 @@ export class MessageRepository {
         .where("[roomId+timestamp]")
         .between([roomId, lower], [roomId, target.timestamp], !clearedAtTs, false)
         .reverse()
+        .filter((m) => !m.softDeleted && !m.deleted)
         .limit(contextSize)
         .toArray(),
       this.db.messages
         .where("[roomId+timestamp]")
         .between([roomId, target.timestamp], [roomId, Dexie.maxKey], false, true)
+        .filter((m) => !m.softDeleted && !m.deleted)
         .limit(contextSize)
         .toArray(),
     ]);
@@ -703,6 +734,9 @@ export class MessageRepository {
     const msgs = await this.db.messages
       .where("[roomId+timestamp]")
       .between([roomId, effectiveAfter], [roomId, Dexie.maxKey], false, true)
+      // Forward pagination must hide deleted rows too, matching getMessages
+      // (WEE-66 / #864).
+      .filter((m) => !m.softDeleted && !m.deleted)
       .limit(limit)
       .toArray();
     return sortLocalMessagesTimelineAsc(msgs);
