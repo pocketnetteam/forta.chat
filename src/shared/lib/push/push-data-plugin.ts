@@ -34,6 +34,11 @@ interface PushDataPlugin extends Plugin {
    *  settings for known-hostile vendors (Samsung, HONOR/Huawei, Xiaomi, OPPO,
    *  OnePlus). Empty strings on non-Android or when the field is unavailable. */
   getDeviceManufacturer(): Promise<{ manufacturer: string; model: string; sdk: number }>;
+  /** WEE-75 / forta-bugs#942: deep-link into the OS notification settings for
+   *  this app. On Android O+ the per-channel sound/vibration toggles are
+   *  system-owned (the channel is immutable), so this is the canonical place
+   *  to manage notification sound. */
+  openNotificationSettings(): Promise<void>;
   addListener(event: 'pushReceived', handler: (data: PushPayload) => void): Promise<PluginListenerHandle>;
   addListener(event: 'pushOpenRoom', handler: (data: { roomId: string; eventId?: string }) => void): Promise<PluginListenerHandle>;
 }

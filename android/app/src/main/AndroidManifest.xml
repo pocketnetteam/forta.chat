@@ -11,9 +11,13 @@
         android:supportsRtl="false"
         android:theme="@style/AppTheme">
 
+        <!-- WEE-75: must match MessageNotificationConfig.MESSAGES_CHANNEL_ID
+             ("messages_v2"). The legacy "messages" channel is deleted at
+             startup, so an FCM notification-type payload falling back to a
+             dead channel would resurface the silent-notification bug #942. -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="messages" />
+            android:value="messages_v2" />
 
         <activity
             android:windowSoftInputMode="adjustResize"
