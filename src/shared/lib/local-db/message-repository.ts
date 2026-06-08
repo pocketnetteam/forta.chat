@@ -496,12 +496,35 @@ export class MessageRepository {
     }
   }
 
-  /** Mark a pending message as failed (e.g. Matrix client not ready, enqueue error) */
+  /** Mark a pending message as failed (e.g. enqueue error).
+   *
+   *  Also mirrors the failed status onto the room's chat-list preview
+   *  (`lastMessageLocalStatus`), but only when this message is still the
+   *  room's last one — a timestamp guard symmetric to
+   *  RoomRepository.syncLastMessageLocalStatus, so a stale failure can't
+   *  overwrite the badge of a newer message. Without this the bubble shows
+   *  «не доставлено» while the sidebar preview stays «отправляется» (WEE-85,
+   *  closing the WEE-64 gap that only the SyncEngine fail-path covered).
+   *
+   *  Unlike SyncEngine.markMessageFailed this has NO already-confirmed (WEE-40)
+   *  guard — safe because its callers fire on a *synchronous* enqueue failure,
+   *  before any send is in flight, so there is no server-echo race to lose to.
+   *  Do not reuse from a post-send/async context without adding that guard. */
   async markFailed(clientId: string): Promise<void> {
-    await this.db.messages
-      .where("clientId")
-      .equals(clientId)
-      .modify({ status: "failed" as LocalMessageStatus });
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      const msg = await this.db.messages.where("clientId").equals(clientId).first();
+      if (!msg) return;
+      await this.db.messages
+        .where("clientId")
+        .equals(clientId)
+        .modify({ status: "failed" as LocalMessageStatus });
+      const room = await this.db.rooms.get(msg.roomId);
+      if (room && room.lastMessageTimestamp === msg.timestamp) {
+        await this.db.rooms.update(msg.roomId, {
+          lastMessageLocalStatus: "failed" as LocalMessageStatus,
+        });
+      }
+    });
   }
 
   /** Update the eventId on a pending message (after server confirms) */
