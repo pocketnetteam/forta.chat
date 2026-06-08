@@ -5,6 +5,7 @@ import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
+import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
@@ -3497,20 +3498,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const matrixRoom = matrixService.getRoom(roomId) as any;
 
-      // Room doesn't exist in Matrix SDK at all — definitely a zombie
-      if (!matrixRoom) {
-        console.warn("[chat-store] selfHeal: room not found in Matrix SDK, tombstoning", roomId);
-        tombstoneAndRedirect(roomId, "removed");
-        return;
-      }
-
-      // Room exists but membership is not "join" or "invite" — zombie
-      const membership = matrixRoom.selfMembership ?? matrixRoom.getMyMembership?.();
-      if (membership !== "join" && membership !== "invite") {
+      // WEE-84: a missing SDK room or an `undefined` self-membership is NOT proof
+      // of a zombie — matrix-js-sdk lazily materializes rooms (slow WebView / 50+
+      // rooms) and channels (world_readable broadcast) live outside the SDK. The
+      // previous logic defaulted both to a tombstone, so a freshly-opened
+      // chat/channel vanished on re-entry ("opened → wrote → left → re-entered").
+      // Only an EXPLICIT leave/ban is healed here; genuine orphans are GC'd by
+      // cleanupStaleRooms with its 24h sync safety window.
+      const membership = matrixRoom
+        ? (matrixRoom.selfMembership ?? matrixRoom.getMyMembership?.())
+        : undefined;
+      const verdict = classifyOpenedRoomHealth(!!matrixRoom, membership);
+      if (verdict.action === "tombstone") {
         console.warn("[chat-store] selfHeal: membership is", membership, "— tombstoning", roomId);
-        const reason = membership === "ban" ? "banned" as const : "left" as const;
-        tombstoneAndRedirect(roomId, reason);
-        return;
+        tombstoneAndRedirect(roomId, verdict.reason);
       }
     } catch {
       // Matrix service not ready — skip self-healing, will catch on next interaction

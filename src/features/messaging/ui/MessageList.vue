@@ -716,9 +716,12 @@ watch(
         if (isStale()) return;
 
         if (chatStore.activeMessages.length === 0) {
-          // Skip waiting for messages if history was cleared — no messages will arrive
-          const dbKit = getChatDb();
-          const hasClearedHistory = dbKit?.eventWriter.getClearedAtTs(roomId);
+          // Skip waiting for messages if history was cleared — no messages will arrive.
+          // Guard getChatDb(): it throws before initChatDb() completes (boot race on
+          // login / after logout). Mirrors the isChatDbReady() pattern used above.
+          const hasClearedHistory = isChatDbReady()
+            ? getChatDb().eventWriter.getClearedAtTs(roomId)
+            : undefined;
           if (!hasClearedHistory) {
             const SYNC_WAIT_MS = 8_000;
             await new Promise<void>((resolve) => {
