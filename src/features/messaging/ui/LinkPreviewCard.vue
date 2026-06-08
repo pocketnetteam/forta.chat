@@ -49,7 +49,8 @@ const imageError = ref(false);
       v-if="preview.imageUrl && !imageError"
       :src="preview.imageUrl"
       :alt="preview.title || ''"
-      class="block max-h-[200px] w-full object-cover"
+      class="block max-h-[200px] w-full object-cover select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]"
+      draggable="false"
       loading="lazy"
       @error="imageError = true"
     />
