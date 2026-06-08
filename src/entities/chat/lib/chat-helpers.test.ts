@@ -11,7 +11,7 @@
  *   A bug here breaks: encrypted file decryption, image/video rendering.
  */
 import { describe, it, expect } from "vitest";
-import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, isVoiceAudioContent, MSC3245_VOICE_KEY } from "./chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, isVoiceAudioContent, isVoiceAudioMessage, MSC3245_VOICE_KEY } from "./chat-helpers";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MessageType } from "../model/types";
 
@@ -295,10 +295,40 @@ describe("parseFileInfo", () => {
     expect(info!.waveform).toBeUndefined();
   });
 
-  // ─── m.audio voice vs file (WEE-50 / forta-bugs#841) ───────────
-  // The voice player UI must only render for actual voice recordings.
-  // Generic audio attachments (MP3 from gallery, podcasts, …) must be
-  // surfaced as files with a save-to-disk affordance.
+  // WEE-83: a non-finite duration (NaN/Infinity from a buggy AudioContext
+  // decode) JSON-serializes to `null` on the wire, so the recipient must treat
+  // null / non-numeric / non-finite duration as "unknown" rather than letting
+  // it surface as 0:00 garbage. The sender now sanitizes at source, but the
+  // parser stays defensive for legacy messages already on the server.
+  it("treats null duration (non-finite serialized over JSON) as undefined", () => {
+    const content = {
+      body: "Audio",
+      info: { mimetype: "audio/webm", size: 3000, url: "https://url", duration: null, waveform: [100, 200] },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.duration).toBeUndefined();
+    // voice classification + waveform still survive
+    expect(info!.isVoice).toBe(true);
+    expect(info!.waveform).toEqual([100 / 1024, 200 / 1024]);
+  });
+
+  it("treats Infinity duration as undefined", () => {
+    const content = {
+      body: "Audio",
+      info: { mimetype: "audio/webm", size: 3000, url: "https://url", duration: Infinity },
+    };
+    expect(parseFileInfo(content, "m.audio")!.duration).toBeUndefined();
+  });
+
+  // ─── m.audio voice vs file (WEE-83, regression of WEE-50 / #841) ───
+  // In Forta `m.audio` is *exclusively* a voice recording: voice notes are the
+  // only thing sent as m.audio (use-messages → sendAudio), while gallery /
+  // file-picker picks — including .mp3 — always ship as m.file (sendFile
+  // hardcodes msgtype "m.file"). The MSC3245 marker / info.waveform do not
+  // reliably survive the media round-trip to the recipient, so WEE-50 gating
+  // voice rendering on them turned every received voice note into an
+  // "Audio.mp3" file bubble. The corrected rule: m.audio ⟹ voice; the
+  // gallery-mp3-stays-a-file guarantee lives on the m.file path below.
 
   it("flags m.audio with MSC3245 voice marker as a voice recording", () => {
     const content = {
@@ -319,13 +349,26 @@ describe("parseFileInfo", () => {
     expect(info!.isVoice).toBe(true);
   });
 
-  it("does NOT flag plain m.audio MP3 (gallery attachment) as a voice recording", () => {
+  // WEE-83 regression: a received voice note whose MSC3245 marker AND waveform
+  // were lost in transit must STILL render as voice — m.audio alone is the
+  // authoritative signal in Forta. Previously this returned false and the
+  // recipient saw an "Audio.mp3" file bubble.
+  it("flags marker-less / waveform-less m.audio as voice (WEE-83)", () => {
     const content = {
-      body: "song.mp3",
-      info: { mimetype: "audio/mpeg", size: 3000, url: "https://url" },
+      body: "Audio",
+      info: { mimetype: "audio/mpeg", size: 3000, url: "https://url", duration: 7000 },
     };
     const info = parseFileInfo(content, "m.audio");
-    expect(info!.isVoice).toBe(false);
+    expect(info!.isVoice).toBe(true);
+  });
+
+  it("flags m.audio with a minimal info bag (no marker/waveform) as voice", () => {
+    // parseFileInfo's m.audio branch needs an info bag to build FileInfo; this
+    // documents that a voice note with only the bare minimum still classifies
+    // as voice.
+    const content = { body: "Audio", info: { url: "https://url" } };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.isVoice).toBe(true);
   });
 
   // m.file is never a voice recording — Forta ships gallery picks as m.file
@@ -484,6 +527,34 @@ describe("parseFileInfo — encrypted attachment (content.file.url fallback)", (
     const fi = parseFileInfo(content, "m.file");
     expect(fi).toBeDefined();
     expect(fi!.url).toBe("mxc://matrix.bastyon.com/abc123");
+  });
+});
+
+// ─── isVoiceAudioMessage — the m.audio ⟹ voice rule (WEE-83) ──────
+// Distinct from isVoiceAudioContent (positive marker/waveform detector):
+// isVoiceAudioMessage layers Forta's "m.audio is always a voice recording"
+// invariant on top, so a received voice note renders as voice even when its
+// MSC3245 marker / waveform did not survive the round-trip.
+describe("isVoiceAudioMessage", () => {
+  it("treats any m.audio as voice, even with no marker and no waveform (WEE-83)", () => {
+    expect(isVoiceAudioMessage("m.audio", { body: "Audio", info: { mimetype: "audio/mpeg" } }, { mimetype: "audio/mpeg" })).toBe(true);
+  });
+
+  it("treats m.audio with marker as voice", () => {
+    expect(isVoiceAudioMessage("m.audio", { [MSC3245_VOICE_KEY]: {} }, {})).toBe(true);
+  });
+
+  it("does NOT treat m.file audio (gallery mp3) as voice — WEE-50 / #841 stays fixed", () => {
+    expect(isVoiceAudioMessage("m.file", { body: "song.mp3" }, { mimetype: "audio/mpeg" })).toBe(false);
+  });
+
+  it("treats m.file as voice only when it carries an explicit marker (cross-client)", () => {
+    expect(isVoiceAudioMessage("m.file", { [MSC3245_VOICE_KEY]: {} }, undefined)).toBe(true);
+    expect(isVoiceAudioMessage("m.file", undefined, { waveform: [1, 2, 3] })).toBe(true);
+  });
+
+  it("falls back to false for non-audio types with no signal", () => {
+    expect(isVoiceAudioMessage("m.video", { body: "clip" }, { mimetype: "video/mp4" })).toBe(false);
   });
 });
 

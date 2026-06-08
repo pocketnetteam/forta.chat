@@ -574,6 +574,15 @@ export function useMessages() {
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
 
+    // Drop non-finite / non-positive durations: a NaN or Infinity (some Android
+    // WebViews decode webm/opus with a bad duration) serializes to `null` over
+    // JSON and leaves the recipient's voice bubble at 0:00 (WEE-83). Keep a
+    // single sanitized value for both the local echo and the wire payload.
+    const durationSec =
+      typeof options.duration === "number" && Number.isFinite(options.duration) && options.duration > 0
+        ? options.duration
+        : undefined;
+
     if (!isChatDbReady()) {
       console.error("[use-messages] sendAudio: chat DB not ready");
       reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "audio" }));
@@ -592,7 +601,7 @@ export function useMessages() {
         type: audioMime,
         size: file.size,
         url: localBlobUrl,
-        duration: options.duration,
+        duration: durationSec,
         waveform: options.waveform,
         // Voice recordings created via VoiceRecorder are always voice messages;
         // recipients without an MSC3245 marker (older app versions) keep the
@@ -627,7 +636,7 @@ export function useMessages() {
         eventInfo: {
           mimetype: audioMime,
           size: Math.round(file.size),
-          duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+          duration: durationSec ? Math.round(durationSec * 1000) : undefined,
           waveform: intWaveform,
         },
         // MSC3245 voice marker — canonical Matrix signal that this m.audio
@@ -2013,7 +2022,9 @@ export function useMessages() {
           url,
           info: {
             mimetype: fi.type, size: Math.round(fi.size),
-            duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
+            duration: typeof fi.duration === "number" && Number.isFinite(fi.duration) && fi.duration > 0
+              ? Math.round(fi.duration * 1000)
+              : undefined,
             waveform: intWaveform,
             ...(secrets ? { secrets } : {}),
           },
