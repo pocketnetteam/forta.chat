@@ -77,6 +77,36 @@ export function isVoiceAudioContent(
   return false;
 }
 
+/** Whether an audio attachment should render as a voice message (player +
+ *  waveform) rather than a downloadable file bubble.
+ *
+ *  Forta sends voice recordings *exclusively* as `m.audio` (see
+ *  `use-messages.ts` → `sendAudio`), while every gallery / file-picker pick —
+ *  including `.mp3` — is shipped as `m.file` regardless of MIME (see
+ *  `sendFile`, which hardcodes `msgtype: "m.file"`). So inside Forta the event
+ *  type alone is authoritative: `m.audio` ⟹ voice.
+ *
+ *  The MSC3245 marker and `info.waveform` are best-effort cross-client signals,
+ *  but they do NOT reliably survive Forta's media round-trip on the recipient
+ *  side. Gating voice rendering on them made every received voice note collapse
+ *  into an "Audio.mp3" file bubble (WEE-83 — the regression introduced by the
+ *  WEE-50 / forta-bugs#841 voice/file split). We therefore must not gate
+ *  `m.audio` on those markers.
+ *
+ *  For any *other* msgtype we fall back to the explicit positive signal: a
+ *  gallery `.mp3` (m.file + audio mime, no marker, no waveform) stays a file,
+ *  so WEE-50 / forta-bugs#841 remains fixed, while a real voice note that some
+ *  other client ships outside `m.audio` still renders as voice when it carries
+ *  the marker / waveform. */
+export function isVoiceAudioMessage(
+  msgtype: string,
+  content: Record<string, unknown> | undefined | null,
+  info: Record<string, unknown> | undefined | null,
+): boolean {
+  if (msgtype === "m.audio") return true;
+  return isVoiceAudioContent(content, info);
+}
+
 /** Determine MessageType from MIME type string */
 export function messageTypeFromMime(mime: string): MessageType {
   const m = normalizeMime(mime);
@@ -205,10 +235,12 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
         ? Math.round(info.duration / 1000)
         : undefined,
       waveform: normalizedWaveform,
-      // Detect MSC3245 voice marker so generic mp3/aac attachments (no marker,
-      // no waveform) render as files instead of being forced into the voice
-      // player UI (forta-bugs#841 / WEE-50).
-      isVoice: isVoiceAudioContent(content, info),
+      // `m.audio` is always a voice recording in Forta (gallery/file picks ship
+      // as `m.file`), so it must render as voice even when the MSC3245 marker /
+      // waveform are lost in transit to the recipient (WEE-83, regression of
+      // WEE-50 / forta-bugs#841). Generic mp3 attachments arrive as `m.file`
+      // and keep their file bubble.
+      isVoice: isVoiceAudioMessage(msgtype, content, info),
       secrets: info.secrets ? {
         block: info.secrets.block,
         keys: info.secrets.keys,

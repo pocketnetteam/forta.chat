@@ -2,7 +2,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioContent } from "../lib/chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
@@ -228,12 +228,13 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
         previewBody = "[photo]";
         previewType = MessageType.image;
       } else if (msgtype === "m.audio") {
-        // Voice recording vs generic audio file (mp3 from gallery, podcast, …):
-        // only the former should preview as "[voice message]". Without the
-        // distinction MP3 attachments preview with the voice-bubble label even
-        // though the bubble below renders them as files (forta-bugs#841 / WEE-50).
+        // In Forta `m.audio` is always a voice recording — gallery / file-picker
+        // audio (including .mp3) ships as `m.file` and previews via that branch.
+        // Gating on the MSC3245 marker / waveform here made every received voice
+        // note preview as a plain "[audio]" file (WEE-83, regression of WEE-50 /
+        // forta-bugs#841). See isVoiceAudioMessage for the full rationale.
         const info = content.info as Record<string, unknown> | undefined;
-        const isVoice = isVoiceAudioContent(content, info);
+        const isVoice = isVoiceAudioMessage("m.audio", content, info);
         previewBody = isVoice ? "[voice message]" : (content?.body as string) || "[audio]";
         previewType = isVoice ? MessageType.audio : MessageType.file;
       } else if (msgtype === "m.video") {
