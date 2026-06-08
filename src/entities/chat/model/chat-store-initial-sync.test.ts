@@ -82,14 +82,24 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
     expect(store.initialSyncStatus).toBe("ready");
   });
 
-  it("keeps isSyncing true while the connection is lost, even after ready", () => {
+  // WEE-80 (forta-bugs#956): supersedes the original WEE-55 expectation that a
+  // lost connection re-raised isSyncing. The local-first read path must NOT
+  // depend on the network — once the first sync (or the watchdog degrade) has
+  // settled, the in-room message skeleton (isSyncing) stays down so cached
+  // Dexie content keeps rendering. Connection status is exposed separately via
+  // `syncState` (and the sync banner), not via isSyncing.
+  it("does NOT re-raise isSyncing when the connection drops after ready (WEE-80)", () => {
     store.setHelpers(mockMatrixService.kit as never, {} as never);
     store.refreshRooms("PREPARED");
     vi.advanceTimersByTime(150);
     expect(store.isSyncing).toBe(false);
 
     store.setSyncState("RECONNECTING");
-    expect(store.isSyncing).toBe(true);
+    expect(store.isSyncing).toBe(false);
+    expect(store.syncState).toBe("RECONNECTING"); // connection state still observable
+
+    store.setSyncState("ERROR");
+    expect(store.isSyncing).toBe(false);
   });
 
   it("upgrades degraded → ready when a real PREPARED sync arrives late", () => {
