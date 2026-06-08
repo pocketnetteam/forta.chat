@@ -190,6 +190,43 @@ class AudioRouter private constructor(private val context: Context) {
         @androidx.annotation.VisibleForTesting
         internal fun shouldClearWhenTargetMissing(device: Device): Boolean =
             device == Device.BLUETOOTH || device == Device.WIRED_HEADSET
+
+        /**
+         * WEE-76 (#944/#960) — desired legacy `isSpeakerphoneOn` value used to
+         * reinforce the modern [setCommunicationDevice] route for the built-in
+         * earpiece/speaker pair.
+         *
+         * Multi-user reports on 1.10.38/39 show the in-call speaker button never
+         * engaging the loudspeaker. On API 31+ the toggle routes ONLY through
+         * `setCommunicationDevice(TYPE_BUILTIN_SPEAKER)`, which on several OEMs
+         * is a silent no-op: it returns `false` under audio-stack contention, or
+         * `TYPE_BUILTIN_SPEAKER` is momentarily absent from
+         * `availableCommunicationDevices` (the WEE-54 guard then deliberately
+         * keeps the current earpiece route to avoid the A15 silence bug). Either
+         * way an explicit user tap does nothing — exactly the #944/#960 symptom,
+         * confirmed across multiple users (not a single OEM).
+         *
+         * The legacy `isSpeakerphoneOn` flag is the reliable cross-OEM switch for
+         * the built-in loudspeaker, so we mirror it to the requested built-in
+         * device after the modern call. It expresses the same routing as the
+         * modern path (no conflict on healthy devices) and is the same mechanism
+         * the API < 31 path ([setDeviceLegacy]) already uses.
+         *
+         * Returns:
+         *   - `true`  → engage the loudspeaker (SPEAKER)
+         *   - `false` → disengage the loudspeaker (EARPIECE)
+         *   - `null`  → leave untouched (BLUETOOTH / WIRED_HEADSET are owned by
+         *               [setCommunicationDevice]; the legacy flag must not fight
+         *               them — A5: zero change to the proven BT/wired path).
+         *
+         * Companion-scope so a JVM-only test covers it without an AudioManager.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun legacySpeakerphoneTarget(device: Device): Boolean? = when (device) {
+            Device.SPEAKER -> true
+            Device.EARPIECE -> false
+            Device.BLUETOOTH, Device.WIRED_HEADSET -> null
+        }
     }
 
     enum class Device(val label: String) {
@@ -750,6 +787,23 @@ class AudioRouter private constructor(private val context: Context) {
                 LIFECYCLE_TAG,
                 "Built-in target $device not yet enumerated (Android 15 race) — keeping current routing",
             )
+        }
+
+        // WEE-76 (#944/#960): reinforce the built-in earpiece/speaker route with
+        // the legacy speakerphone flag. setCommunicationDevice(SPEAKER) is an
+        // unreliable no-op on several OEMs (returns false under contention, or
+        // the speaker is briefly un-enumerated and the guard above keeps the
+        // earpiece), so an explicit speaker tap never engaged the loudspeaker for
+        // many users. Mirroring isSpeakerphoneOn to the requested built-in device
+        // is the reliable cross-OEM switch and matches the modern route, so it is
+        // safe on healthy devices. BT/wired → null → left to the modern path.
+        legacySpeakerphoneTarget(device)?.let { speakerphoneOn ->
+            try {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = speakerphoneOn
+            } catch (e: Exception) {
+                Log.w(LIFECYCLE_TAG, "legacy isSpeakerphoneOn=$speakerphoneOn threw", e)
+            }
         }
     }
 
