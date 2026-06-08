@@ -11,6 +11,13 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
+/** Re-check interval while the Matrix client is not ready (boot / re-init).
+ *  A claimed send op is released back to "pending" WITHOUT counting a retry
+ *  and re-polled at this cadence, so messages sent during the not-ready
+ *  window queue up and flush once the client is ready instead of failing
+ *  instantly or exhausting maxRetries during a slow boot (WEE-85). */
+const MATRIX_NOT_READY_RETRY_MS = 1_000;
+
 /** Outbound message-creating ops whose transport status is mirrored onto the
  *  room's `lastMessageLocalStatus` (chat-list preview, WEE-64). Edit/reaction/
  *  delete/vote ops mutate an existing message and must never overwrite the
@@ -402,6 +409,25 @@ export class SyncEngine {
         // Nothing due right now — check whether an op is scheduled for later
         // so we can set a wake-up timer and then stop this tick cleanly.
         nextRetryDelay = await this.findNextRetryDelay();
+        return;
+      }
+
+      // Matrix-readiness gate (WEE-85): during the boot / re-init window the
+      // client object isn't ready (`isReady()` false). Sending now would throw
+      // and burn a retry, so instead release the op back to "pending" WITHOUT
+      // counting a retry and reschedule a short re-poll. The op flushes once
+      // the client is ready — mirroring how `online` gates the whole loop.
+      // Real failures still surface via maxRetries once the client is ready.
+      // NOTE: recovery is intentionally poll-based (this 1s re-poll, backed by
+      // the watchdog) — there is no `onReady` event that re-kicks the scheduler
+      // when Matrix becomes ready.
+      if (!this.isMatrixReady()) {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
+        });
+        op = null; // don't execute; finally schedules the re-poll wake
+        nextRetryDelay = MATRIX_NOT_READY_RETRY_MS;
         return;
       }
 
@@ -1026,6 +1052,16 @@ export class SyncEngine {
     const msg = await this.messageRepo.getByClientId(clientId);
     if (!msg) return false;
     return Boolean(msg.eventId) || msg.status === "synced";
+  }
+
+  /** Whether the Matrix client is ready to transport ops. Gates ONLY on an
+   *  explicit `isReady() === false`; anything else (true, or a test double that
+   *  omits `isReady` / returns undefined) is treated as ready, so the gate is a
+   *  no-op under harnesses that don't model readiness. The real service always
+   *  returns a boolean, so prod behaviour is exactly `isReady() === true`. */
+  private isMatrixReady(): boolean {
+    const svc = getMatrixClientService() as { isReady?: () => boolean };
+    return svc.isReady?.() !== false;
   }
 
   /** Enqueue a new operation. Returns the operation ID. */

@@ -196,17 +196,12 @@ export function useMessages() {
         });
         localClientId = localMsg.clientId;
 
-        // 2. Validate readiness AFTER insert — if not ready, mark as failed
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendMessage] Matrix client not ready — message saved locally as failed", {
-            roomId, clientId: localClientId,
-          });
-          await dbKit.messages.markFailed(localClientId);
-          return true; // message IS visible (as failed)
-        }
-
-        // 3. Enqueue for background sync (no linkPreview in payload — always async)
+        // 2. Enqueue for background sync. If the Matrix client isn't ready yet
+        //    (boot / re-init window) the SyncEngine holds the op as "pending"
+        //    and flushes it once the client is ready, instead of an instant
+        //    failure (WEE-85). Real failures still surface after retry
+        //    exhaustion → "failed" (incl. chat-list preview, via markFailed).
+        //    (no linkPreview in payload — always async)
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -846,17 +841,9 @@ export function useMessages() {
         localClientId = localMsg.clientId;
         chatStore.replyingTo = null;
 
-        // 2. Validate readiness AFTER insert
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendReply] Matrix client not ready — message saved locally as failed", {
-            roomId, clientId: localClientId,
-          });
-          await dbKit.messages.markFailed(localClientId);
-          return true;
-        }
-
-        // 3. Enqueue for background sync (no linkPreview — always async)
+        // 2. Enqueue for background sync. Not-ready Matrix client (boot/re-init)
+        //    → SyncEngine queues the op until ready instead of instant-fail
+        //    (WEE-85). (no linkPreview — always async)
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -1011,17 +998,8 @@ export function useMessages() {
         });
         localClientId = localMsg.clientId;
 
-        // 2. Validate Matrix readiness
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendForward] Matrix client not ready — message saved locally as failed", {
-            roomId, clientId: localClientId,
-          });
-          await dbKit.messages.markFailed(localClientId);
-          return true;
-        }
-
-        // 3. Enqueue for sync
+        // 2. Enqueue for sync. Not-ready Matrix client (boot/re-init) →
+        //    SyncEngine queues the op until ready instead of instant-fail (WEE-85).
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -1502,15 +1480,9 @@ export function useMessages() {
         });
         localClientId = localMsg.clientId;
 
-        // 2. Validate readiness AFTER insert — if not ready, mark as failed
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendTransferMessage] Matrix client not ready — saved locally as failed");
-          await dbKit.messages.markFailed(localClientId);
-          return;
-        }
-
-        // 3. Enqueue for background sync — SyncEngine.syncSendTransfer() handles
+        // 2. Enqueue for background sync. Not-ready Matrix client (boot/re-init)
+        //    → SyncEngine queues the op until ready instead of instant-fail (WEE-85).
+        //    SyncEngine.syncSendTransfer() handles
         //    encryption and Matrix API call, then confirms via messageRepo.confirmSent()
         await dbKit.syncEngine.enqueue(
           "send_transfer",
