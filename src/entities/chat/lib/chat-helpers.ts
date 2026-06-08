@@ -231,7 +231,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       type: info.mimetype ?? "audio/mpeg",
       size: info.size ?? 0,
       url: info.url ?? encryptedUrl ?? (content.url as string) ?? "",
-      duration: typeof info.duration === "number" && info.duration > 0
+      duration: typeof info.duration === "number" && Number.isFinite(info.duration) && info.duration > 0
         ? Math.round(info.duration / 1000)
         : undefined,
       waveform: normalizedWaveform,

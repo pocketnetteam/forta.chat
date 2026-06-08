@@ -295,6 +295,31 @@ describe("parseFileInfo", () => {
     expect(info!.waveform).toBeUndefined();
   });
 
+  // WEE-83: a non-finite duration (NaN/Infinity from a buggy AudioContext
+  // decode) JSON-serializes to `null` on the wire, so the recipient must treat
+  // null / non-numeric / non-finite duration as "unknown" rather than letting
+  // it surface as 0:00 garbage. The sender now sanitizes at source, but the
+  // parser stays defensive for legacy messages already on the server.
+  it("treats null duration (non-finite serialized over JSON) as undefined", () => {
+    const content = {
+      body: "Audio",
+      info: { mimetype: "audio/webm", size: 3000, url: "https://url", duration: null, waveform: [100, 200] },
+    };
+    const info = parseFileInfo(content, "m.audio");
+    expect(info!.duration).toBeUndefined();
+    // voice classification + waveform still survive
+    expect(info!.isVoice).toBe(true);
+    expect(info!.waveform).toEqual([100 / 1024, 200 / 1024]);
+  });
+
+  it("treats Infinity duration as undefined", () => {
+    const content = {
+      body: "Audio",
+      info: { mimetype: "audio/webm", size: 3000, url: "https://url", duration: Infinity },
+    };
+    expect(parseFileInfo(content, "m.audio")!.duration).toBeUndefined();
+  });
+
   // ─── m.audio voice vs file (WEE-83, regression of WEE-50 / #841) ───
   // In Forta `m.audio` is *exclusively* a voice recording: voice notes are the
   // only thing sent as m.audio (use-messages → sendAudio), while gallery /

@@ -172,15 +172,24 @@ export function useVoiceRecorder() {
     });
   };
 
-  /** Get audio duration from blob via AudioContext */
+  /** Get audio duration (seconds) from blob via AudioContext.
+   *  The wall-clock counter incremented during recording is the reliable
+   *  fallback: AudioContext.decodeAudioData on some Android WebViews returns a
+   *  NaN/Infinity duration for MediaRecorder webm/opus (the WebM header carries
+   *  no Duration element). A non-finite duration then JSON-serializes to `null`
+   *  on the wire and leaves the recipient's voice bubble showing 0:00 even
+   *  though the audio plays for its full length (WEE-83). Always resolve to a
+   *  finite, non-negative integer. */
   const getAudioDuration = async (blob: Blob): Promise<number> => {
+    const counter = Number.isFinite(duration.value) && duration.value > 0 ? duration.value : 0;
     try {
       const ctx = new AudioContext();
       const buffer = await ctx.decodeAudioData(await blob.arrayBuffer());
       ctx.close();
-      return Math.round(buffer.duration);
+      const decoded = Math.round(buffer.duration);
+      return Number.isFinite(decoded) && decoded > 0 ? decoded : counter;
     } catch {
-      return duration.value;
+      return counter;
     }
   };
 
