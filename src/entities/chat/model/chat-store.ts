@@ -519,13 +519,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }, INITIAL_SYNC_TIMEOUT_MS);
   };
 
-  /** True during initial sync or when connection is lost. Degraded mode is
-   *  intentionally NOT syncing — we have stopped blocking the UI. */
-  const isSyncing = computed(() =>
-    initialSyncStatus.value === "loading"
-    || syncState.value === "ERROR"
-    || syncState.value === "RECONNECTING",
-  );
+  /** True ONLY during the genuine first-load phase (before the first sync or
+   *  the watchdog degrade). It gates the in-room message skeleton.
+   *
+   *  WEE-80 (forta-bugs#956): local-first read path must NOT depend on the
+   *  network. Previously this also flipped true on `syncState` ERROR/
+   *  RECONNECTING, so a cold-start with no connection (or a lost connection)
+   *  left empty rooms stuck on an eternal "loading" skeleton instead of
+   *  rendering the cached Dexie truth ("No messages yet"), and caused the
+   *  message skeleton to flicker on every WebSocket reconnect (same flicker
+   *  ContactList.vue already side-steps). Connection status is surfaced
+   *  separately by the sync banner (use-sync-status), not by the read path.
+   *  `initialSyncStatus` leaves "loading" via the first real sync OR the 8s
+   *  degrade watchdog, so this still bounds the genuine first-load skeleton. */
+  const isSyncing = computed(() => initialSyncStatus.value === "loading");
 
   // Cache for decrypted room previews — persists across refreshRooms() rebuilds
   const decryptedPreviewCache = new Map<string, string>();
