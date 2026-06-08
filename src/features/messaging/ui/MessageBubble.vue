@@ -881,7 +881,7 @@ const replyPreviewSender = computed(() => {
             <span class="truncate max-w-full font-medium">{{ message.fileInfo?.name }}</span>
             <span v-if="isLikelyHeic" class="text-[10px] opacity-70">{{ t('message.heicNotSupported') }}</span>
           </div>
-          <img v-else-if="feedImageSrc" :src="feedImageSrc" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" @error="onFeedImageError" />
+          <img v-else-if="feedImageSrc" :src="feedImageSrc" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]" draggable="false" :style="imageStyle" @load="emit('resize')" @error="onFeedImageError" />
           <!-- Upload progress overlay -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <button class="relative flex h-14 w-14 items-center justify-center" @click.stop="emit('cancelUpload', message)">
@@ -1027,7 +1027,8 @@ const replyPreviewSender = computed(() => {
             :controlslist="isVideoPlaying ? 'nodownload' : undefined"
             playsinline
             preload="metadata"
-            class="block h-full w-full object-contain"
+            draggable="false"
+            class="block h-full w-full object-contain select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]"
             @loadedmetadata="onInlineVideoLoadedMetadata"
             @canplay="onInlineVideoCanPlay"
             @error="onInlineVideoError"
