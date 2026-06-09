@@ -850,7 +850,7 @@ export const ru: Record<TranslationKey, string> = {
   "register.registrationFailed": "Ошибка регистрации",
   "register.captchaLoadFailed": "Не удалось загрузить капчу",
   "register.nameTaken": "Это имя уже занято",
-  "register.nameInvalidChars": "Имя содержит недопустимые символы. Допустимы: буквы, цифры, пробелы, . - _ @ # &",
+  "register.nameInvalidChars": "Имя может содержать только латинские буквы, цифры, точку и подчёркивание",
   "register.nameTooLong": "Имя должно быть не длиннее {max} символов",
   "register.nameReserved": "Имя не может содержать \"{name}\"",
   "register.usernameRejected": "Имя недоступно",
