@@ -317,6 +317,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // The helper swallows its own errors; .catch is here only so an
       // unexpected throw doesn't bubble up as an unhandled rejection.
       if (result?.success === true && matrixReady.value) {
+        // No `clearAvatar` flag: an empty `userData.image` here means the
+        // avatar simply wasn't loaded into the edit form (or Pocketnet hasn't
+        // propagated it yet), not that the user removed it. syncProfileToMatrix
+        // therefore leaves the existing Matrix avatar untouched rather than
+        // wiping it — root cause of WEE-77 / forta-bugs#954, #943, #976. A
+        // real "remove avatar" action would pass clearAvatar: true.
         void syncProfileToMatrix(getMatrixClientService(), {
           name: userData.name,
           image: userData.image,

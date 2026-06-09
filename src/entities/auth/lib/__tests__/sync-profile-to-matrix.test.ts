@@ -116,11 +116,35 @@ describe("syncProfileToMatrix", () => {
     expect(setAvatarMxc).not.toHaveBeenCalled();
   });
 
-  it("clears avatar via setAvatarMxc('') when image is explicitly empty", async () => {
-    // user removed their avatar; peers must see it cleared in Matrix too
+  it("does NOT clear the avatar when image is empty without an explicit clear flag (WEE-77)", async () => {
+    // Regression: a re-sync with an unloaded/empty avatar (Pocketnet still
+    // propagating, transient empty RPC row, or form opened before userInfo
+    // settled) must NOT wipe the valid Matrix avatar — forta-bugs#954/#943/#976.
     globalThis.fetch = vi.fn() as unknown as typeof fetch;
 
     await syncProfileToMatrix(matrix(), { image: "" });
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(uploadAvatar).not.toHaveBeenCalled();
+    expect(setAvatarMxc).not.toHaveBeenCalled();
+  });
+
+  it("does NOT clear the avatar on a name-only re-sync that leaves image empty (WEE-77)", async () => {
+    // The common flicker path: user edits only their name; the form still
+    // submits image:"" because the avatar wasn't loaded. Matrix avatar stays.
+    globalThis.fetch = vi.fn() as unknown as typeof fetch;
+
+    await syncProfileToMatrix(matrix(), { name: "Alice", image: "" });
+
+    expect(setDisplayName).toHaveBeenCalledWith("Alice");
+    expect(setAvatarMxc).not.toHaveBeenCalled();
+  });
+
+  it("clears avatar via setAvatarMxc('') only on an explicit user clear (clearAvatar: true)", async () => {
+    // user genuinely removed their avatar; peers must see it cleared in Matrix
+    globalThis.fetch = vi.fn() as unknown as typeof fetch;
+
+    await syncProfileToMatrix(matrix(), { image: "", clearAvatar: true });
 
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(uploadAvatar).not.toHaveBeenCalled();
