@@ -562,8 +562,19 @@ class NativeCallBridge {
     }
     // Older native build — best-effort fall back to reportIncomingCall.
     // It's not perfectly idempotent (it can stack a second Telecom call
-    // if one is already up), but anything is better than a silent
-    // ringer on the foreground sync path.
+    // if one is already up), so on the cold-start-from-push path it can
+    // raise a *second* answer dialog on top of the IncomingCallActivity the
+    // FCM handler already launched — exactly the duplicate-ringer bug in
+    // forta-bugs#832 / #893 (WEE-63). Guard it: if the SDK already tracks
+    // this callId, the push path has (or is about to) surface a ringer, so
+    // skip the non-idempotent fallback rather than stack a duplicate.
+    if (await this.sdkHasCall(options.callId)) {
+      console.warn(
+        '[NativeCallBridge] skipping non-idempotent reportIncomingCall fallback — SDK already has call:',
+        options.callId,
+      );
+      return;
+    }
     try {
       await NativeCall.reportIncomingCall(options);
     } catch (e) {
