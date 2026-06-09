@@ -3,6 +3,7 @@ import { useCallStore, CallStatus } from "@/entities/call";
 import { UserAvatar } from "@/entities/user";
 import { useCallService } from "../model/call-service";
 import { isNative } from "@/shared/lib/platform";
+import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 
 const INCOMING_TIMEOUT_SECONDS = 30;
 
@@ -36,6 +37,16 @@ function onReject() {
   rejecting.value = true;
   callService.rejectCall();
 }
+
+// WEE-63 / forta-bugs#759 — Android Back on the incoming ringer rejects the
+// call instead of minimizing the app. Priority 100 (same tier as the active
+// call window) so it wins over chat/router handlers. Returns false when the
+// modal isn't showing so Back falls through to the normal handler chain.
+useAndroidBackHandler("incoming-call-modal", 100, () => {
+  if (!show.value) return false;
+  onReject();
+  return true;
+});
 
 const countdown = ref(INCOMING_TIMEOUT_SECONDS);
 let countdownInterval: ReturnType<typeof setInterval> | null = null;
