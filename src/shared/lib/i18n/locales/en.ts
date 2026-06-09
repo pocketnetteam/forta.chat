@@ -848,7 +848,7 @@ export const en = {
   "register.registrationFailed": "Registration failed",
   "register.captchaLoadFailed": "Failed to load captcha",
   "register.nameTaken": "This name is already taken",
-  "register.nameInvalidChars": "Name contains invalid characters. Allowed: letters, digits, spaces, . - _ @ # &",
+  "register.nameInvalidChars": "Name can only contain latin letters, digits, dot and underscore",
   "register.nameTooLong": "Name must be {max} characters or less",
   "register.nameReserved": "Name cannot contain \"{name}\"",
   "register.usernameRejected": "Username unavailable",
