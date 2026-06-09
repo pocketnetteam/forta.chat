@@ -9,9 +9,17 @@
  * Failures must never block the calling Pocketnet save: we swallow them and
  * surface a console.warn so the user still sees a successful save.
  *
- * Semantics: an `undefined` field means "caller didn't touch this — leave
- * Matrix alone"; an empty string means "user explicitly cleared this field —
- * mirror the clear into Matrix" so peers don't see a stale name/avatar.
+ * Name semantics: an `undefined` name means "caller didn't touch this — leave
+ * Matrix alone"; an empty string means "user explicitly cleared the name —
+ * mirror the clear into Matrix" so peers don't see a stale name.
+ *
+ * Avatar semantics (WEE-77, forta-bugs#954/#943/#976): an empty `image` is
+ * NOT a clear by default. A profile re-sync routinely runs with no loaded
+ * avatar (Pocketnet still propagating, transient empty RPC row, form opened
+ * before userInfo settled) — treating that as a clear wiped valid avatars and
+ * caused the "avatar flickers / can't re-set it" reports. So an empty `image`
+ * means "no avatar to sync — leave Matrix's avatar untouched". A genuine
+ * user-initiated clear must pass `clearAvatar: true` explicitly.
  */
 
 /** Matrix homeserver upload limit. Synapse default is 50 MB; Pocketnet uploads
@@ -28,6 +36,11 @@ export interface MatrixProfileSync {
 export interface SyncProfileParams {
   name?: string;
   image?: string;
+  /** Explicit opt-in to mirror an avatar removal into Matrix. Only when this
+   *  is `true` does an empty `image` trigger `setAvatarMxc("")`. Without it an
+   *  empty `image` is a no-op so a stale/unloaded re-sync can't wipe a valid
+   *  avatar (WEE-77). */
+  clearAvatar?: boolean;
 }
 
 export async function syncProfileToMatrix(
@@ -45,6 +58,10 @@ export async function syncProfileToMatrix(
   if (params.image === undefined) return;
 
   if (params.image === "") {
+    // Guard: only an explicit user-clear wipes the Matrix avatar. An empty
+    // image from an ordinary re-sync means "nothing to upload", not "remove
+    // it" — see avatar semantics above (WEE-77).
+    if (!params.clearAvatar) return;
     try {
       await matrix.setAvatarMxc("");
     } catch (e) {
