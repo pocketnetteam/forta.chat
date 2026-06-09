@@ -42,6 +42,7 @@ import {
   getAddressFromPubKey,
   PollTimer,
   ProxyRotator,
+  fetchCaptchaWithProxyFallback,
   saveMnemonic,
   loadMnemonic,
   clearMnemonic,
@@ -1315,9 +1316,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const fetchCaptcha = async () => {
-    if (!regProxyId.value) throw new Error("No proxy selected");
-    const result = await appInitializer.getCaptcha(regProxyId.value, regCaptchaId.value || undefined);
-    if (!result) throw new Error("Failed to fetch captcha");
+    // Fetch with proxy fallback: a blocked/unreachable proxy (WEE-23, same
+    // root cause as WEE-13) is rotated past instead of hanging the captcha step.
+    const result = await fetchCaptchaWithProxyFallback({
+      getProxyId: () => regProxyId.value,
+      pickProxy: async () => {
+        // New proxy issues a new captcha session — drop any stale captcha id.
+        regCaptchaId.value = null;
+        const proxy = await findRegistrationProxy();
+        return proxy.id;
+      },
+      getCaptcha: (proxyId) =>
+        appInitializer.getCaptcha(proxyId, regCaptchaId.value || undefined),
+    });
     regCaptchaId.value = result.id;
     regCaptchaDone.value = false;
     return result;

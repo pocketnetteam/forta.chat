@@ -51,6 +51,14 @@ export interface PostComment {
 
 type OnLoadUserData = (userData: UserData) => void;
 
+/** Per-RPC ceiling for the blockchain-registration (step 2) proxy calls.
+ *  These hit a single pinned Pocketnet proxy (`N.pocketnet.app:8899`); when that
+ *  node is blocked/unreachable (RU ISP filtering — same root cause as WEE-13)
+ *  the SDK fetch never settles and the registration UI "spins on step 2"
+ *  indefinitely. A 15s bound converts that hang into a surfaced error so the
+ *  caller can rotate to another proxy / show retry UX (WEE-23). */
+const REGISTRATION_RPC_TIMEOUT = 15_000;
+
 export class AppInitializer {
   private actions: InstanceType<typeof Actions> | null = null;
   private api: InstanceType<typeof Api> | null = null;
@@ -133,8 +141,14 @@ export class AppInitializer {
       await this.initApi();
       await this.waitForApiReady();
       // Use proxywithwallet() instead of proxywithwalletls() to avoid
-      // globalpreloader() which depends on jQuery ($) not available in chat app
-      const proxy = await this.api.get.proxywithwallet();
+      // globalpreloader() which depends on jQuery ($) not available in chat app.
+      // 15s bound so a blocked proxy can't hang the "preparing account" step —
+      // the caller's ProxyRotator then retries / surfaces an error (WEE-23).
+      const proxy = await withTimeout(
+        this.api.get.proxywithwallet(),
+        REGISTRATION_RPC_TIMEOUT,
+        "proxywithwallet",
+      );
       return proxy ? { id: proxy.id ?? proxy } : null;
     } catch (e) {
       console.error("[appInit] getRegistrationProxy error:", e);
@@ -148,7 +162,11 @@ export class AppInitializer {
     if (!this.api) return null;
     try {
       const payload: Record<string, unknown> = { captcha: currentCaptchaId || null };
-      const raw = await this.api.fetchauth("captcha", payload, { proxy: proxyId });
+      const raw = await withTimeout(
+        this.api.fetchauth("captcha", payload, { proxy: proxyId }),
+        REGISTRATION_RPC_TIMEOUT,
+        "getCaptcha",
+      );
       // fetchauth may return { data: { id, img, done } } or { id, img, done } directly
       const result = raw?.data ?? raw;
       return result;
@@ -163,10 +181,14 @@ export class AppInitializer {
   async solveCaptcha(proxyId: string, captchaId: string, text: string) {
     if (!this.api) return null;
     try {
-      const raw = await this.api.fetchauth(
-        "makecaptcha",
-        { captcha: captchaId, text, angles: null },
-        { proxy: proxyId }
+      const raw = await withTimeout(
+        this.api.fetchauth(
+          "makecaptcha",
+          { captcha: captchaId, text, angles: null },
+          { proxy: proxyId }
+        ),
+        REGISTRATION_RPC_TIMEOUT,
+        "solveCaptcha",
       );
       const result = raw?.data ?? raw;
       return result;
@@ -181,10 +203,14 @@ export class AppInitializer {
   async requestFreeRegistration(address: string, captchaId: string, proxyId: string) {
     if (!this.api) return null;
     try {
-      const raw = await this.api.fetchauth(
-        "free/balance",
-        { address, captcha: captchaId, key: "registration" },
-        { proxy: proxyId }
+      const raw = await withTimeout(
+        this.api.fetchauth(
+          "free/balance",
+          { address, captcha: captchaId, key: "registration" },
+          { proxy: proxyId }
+        ),
+        REGISTRATION_RPC_TIMEOUT,
+        "requestFreeRegistration",
       );
       const result = raw?.data ?? raw;
       return result;
