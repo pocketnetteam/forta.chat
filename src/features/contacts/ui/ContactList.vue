@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
+import { ref, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
+import { usePreviewTimeout } from "../model/use-preview-timeout";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { MessageType, MessageStatus } from "@/entities/chat";
@@ -215,34 +216,23 @@ function getRoomTitle(room: ChatRoom): DisplayResult {
   );
 }
 
-// Cap the preview decryption skeleton: after this long we stop showing an
-// indefinite shimmer and surface a "🔒 Encrypted message" label instead. The
-// background DecryptionWorker keeps retrying and will replace it once decrypted.
-const PREVIEW_DECRYPT_TIMEOUT_MS = 10_000;
-const previewTimedOut = reactive(new Set<string>());
-const previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-function notePreviewResolving(roomId: string): void {
-  if (previewTimedOut.has(roomId) || previewTimers.has(roomId)) return;
-  previewTimers.set(roomId, setTimeout(() => {
-    previewTimers.delete(roomId);
-    previewTimedOut.add(roomId); // reactive → preview re-renders as the label
-  }, PREVIEW_DECRYPT_TIMEOUT_MS));
-}
+// Preview-decrypt skeleton timeout — extracted to a composable (WEE-96 A4):
+// the timer is cancelled when the preview decrypts in time, so the row isn't
+// re-rendered a second time by a stale timeout firing after success.
+const {
+  noteResolving: notePreviewResolving,
+  noteReady: notePreviewReady,
+  isTimedOut: isPreviewTimedOut,
+} = usePreviewTimeout();
 
 /** Resolving preview that degrades to the encrypted label after the timeout. */
 function resolvingPreview(roomId: string): DisplayResult {
   notePreviewResolving(roomId);
-  if (previewTimedOut.has(roomId)) {
+  if (isPreviewTimedOut(roomId)) {
     return { state: "failed", text: t("message.encryptedPreview") };
   }
   return { state: "resolving", text: "" };
 }
-
-onUnmounted(() => {
-  for (const timer of previewTimers.values()) clearTimeout(timer);
-  previewTimers.clear();
-});
 
 /** Unified display state for message preview: resolving → skeleton, failed → fallback, ready → text */
 function getPreview(room: ChatRoom): DisplayResult {
@@ -265,9 +255,10 @@ function getPreview(room: ChatRoom): DisplayResult {
       cleaned,
       room.lastMessage.decryptionStatus,
       t("message.encryptedPreview"),
-      { timedOut: previewTimedOut.has(room.id) },
+      { timedOut: isPreviewTimedOut(room.id) },
     );
     if (res.state === "resolving") notePreviewResolving(room.id);
+    else notePreviewReady(room.id);
     return res;
   }
   // Fallback: if Dexie doesn't have lastMessage but messages[] does (loaded via viewport-fetch),
@@ -294,9 +285,10 @@ function getPreview(room: ChatRoom): DisplayResult {
       cleaned,
       last.decryptionStatus,
       t("message.encryptedPreview"),
-      { timedOut: previewTimedOut.has(room.id) },
+      { timedOut: isPreviewTimedOut(room.id) },
     );
     if (res.state === "resolving") notePreviewResolving(room.id);
+    else notePreviewReady(room.id);
     return res;
   }
   // No lastMessage and no in-memory messages.

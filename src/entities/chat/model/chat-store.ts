@@ -25,6 +25,8 @@ import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { signalChatsInteractive } from "@/shared/lib/boot-signals";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
+import { runInBatches } from "@/shared/lib/run-in-batches";
+import { isCryptoWorkerSupported } from "@/shared/lib/crypto-worker/bridge";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
@@ -593,6 +595,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const peerKeysStatus = reactive(new Map<string, PeerKeysStatus>());
   const DECRYPT_RETRY_DELAY = 10_000; // 10s before retrying a failed room
   const DECRYPT_MAX_RETRIES = 3;
+  // Preview decrypt parallelism (WEE-96): rooms per batch, yield between batches
+  const PREVIEW_DECRYPT_BATCH_SIZE = 5;
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -2994,17 +2998,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Cap at 20 rooms per cycle to avoid blocking
     const capped = toDecrypt.slice(0, 20);
 
-    // Decrypt sequentially with yield between each room to keep UI responsive.
-    // Previously used Promise.all(batch of 5) which ran 5 heavy ECDH+pbkdf2
-    // computations without yielding — causing 370ms+ long tasks.
-    const decryptedResults: Array<{ roomId: string; body: string }> = [];
-
-    for (const { roomId, matrixRoom } of capped) {
+    /** Decrypt one room's preview. Never throws — failures are recorded in
+     *  decryptFailedRooms so the retry/backoff bookkeeping stays per-room. */
+    const decryptOnePreview = async (
+      { roomId, matrixRoom }: { roomId: string; matrixRoom: unknown },
+    ): Promise<{ roomId: string; body: string } | null> => {
       try {
         const roomCrypto = await ensureRoomCrypto(roomId);
-        if (!roomCrypto) continue;
+        if (!roomCrypto) return null;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let timelineEvents: unknown[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3022,9 +3024,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
           try {
             const decrypted = await roomCrypto.decryptEvent(raw);
-            if (decrypted.body) {
-              decryptedResults.push({ roomId, body: decrypted.body });
-            }
+            if (decrypted.body) return { roomId, body: decrypted.body };
           } catch {
             decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
           }
@@ -3033,10 +3033,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } catch {
         decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
       }
+      return null;
+    };
 
-      // Yield to main thread between each room decryption
-      await yieldToMain();
-    }
+    // Decrypt in parallel batches with a yield in between (WEE-96). Heavy
+    // crypto (ECDH + pbkdf2 + AES-SIV) runs in the crypto worker, so the main
+    // thread only awaits worker roundtrips and key-resolution RPCs — those
+    // parallelize safely. The batch size also bounds concurrent getusersinfo
+    // calls during room prepare().
+    // When the worker is unavailable (main-thread fallback on old WebViews),
+    // batch=1 keeps the old per-room yield — 5 synchronous pbkdf2 chains
+    // back-to-back would recreate the 370ms+ long tasks this code once had.
+    const batchSize = isCryptoWorkerSupported() ? PREVIEW_DECRYPT_BATCH_SIZE : 1;
+    const batched = await runInBatches(capped, batchSize, decryptOnePreview, yieldToMain);
+    const decryptedResults = batched.filter((r): r is { roomId: string; body: string } => r !== null);
 
     // Apply ALL decrypted results in one pass with a single triggerRef
     if (decryptedResults.length > 0) {
