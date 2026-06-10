@@ -597,6 +597,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const DECRYPT_MAX_RETRIES = 3;
   // Preview decrypt parallelism (WEE-96): rooms per batch, yield between batches
   const PREVIEW_DECRYPT_BATCH_SIZE = 5;
+  // Rooms attempted per decryptRoomPreviews pass (cap to avoid long pipelines)
+  const PREVIEW_DECRYPT_MAX_PER_CYCLE = 20;
+  // Rotation cursor so consecutive passes don't always pick the same first 20
+  // rooms — without it, retry passes that reset the failure budget would
+  // starve rooms 21+ of any attempt until the 15-min full refresh.
+  let previewCapCursor = 0;
+  // Delayed retry passes for encrypted previews after initial sync (WEE-96):
+  // covers RPC/Tor warm-up failures during the very first preview pass
+  const PREVIEW_RETRY_PASS_DELAYS_MS = [10_000, 30_000, 90_000] as const;
+  const previewRetryTimers: ReturnType<typeof setTimeout>[] = [];
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -2937,6 +2947,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Start preview polling for rooms without preview after initial load
       setTimeout(() => syncPreviewPolling(), 1500);
 
+      // Retry "[encrypted]" previews after the RPC backend warms up (WEE-96):
+      // the initial pass often runs while getusersinfo still times out.
+      // Timers are tracked so cleanup() cancels them — otherwise a re-login
+      // within 90s would stack stale passes on top of the new session's own.
+      for (const delay of PREVIEW_RETRY_PASS_DELAYS_MS) {
+        previewRetryTimers.push(setTimeout(() => retryEncryptedPreviews(), delay));
+      }
+
       // Schedule room cleanup 30s after init, then every 30 minutes
       scheduleRoomCleanup();
     }
@@ -2995,8 +3013,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     if (toDecrypt.length === 0) return;
 
-    // Cap at 20 rooms per cycle to avoid blocking
-    const capped = toDecrypt.slice(0, 20);
+    // Cap rooms per cycle to avoid blocking; rotate the window so repeated
+    // passes (incl. fresh-budget retry passes) eventually reach every room.
+    let capped = toDecrypt;
+    if (toDecrypt.length > PREVIEW_DECRYPT_MAX_PER_CYCLE) {
+      const start = previewCapCursor % toDecrypt.length;
+      capped = [...toDecrypt.slice(start), ...toDecrypt.slice(0, start)]
+        .slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
+      previewCapCursor = (start + PREVIEW_DECRYPT_MAX_PER_CYCLE) % toDecrypt.length;
+    }
 
     /** Decrypt one room's preview. Never throws — failures are recorded in
      *  decryptFailedRooms so the retry/backoff bookkeeping stays per-room. */
@@ -3059,6 +3084,27 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       triggerRef(rooms);
     }
+  };
+
+  /** Cold-start retry for encrypted previews (WEE-96 follow-up).
+   *  During the first ~30s the sync-driven passes can exhaust
+   *  DECRYPT_MAX_RETRIES while the Pocketnet RPC / Tor proxy is still warming
+   *  up (getusersinfo timeouts). Incremental refreshes only re-attempt rooms
+   *  that CHANGE, so quiet rooms then stay "[encrypted]" until the next
+   *  15-min full refresh (which clears the failure map) or until the chat is
+   *  opened. These early passes re-run with a fresh retry budget so previews
+   *  appear within seconds of the backend warming up instead. */
+  const retryEncryptedPreviews = () => {
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const matrixRooms = matrixService.getRooms() as any[];
+    if (!matrixRooms.length) return;
+    // Fresh budget: cold-start failures (RPC timeouts) must not count against
+    // the per-room retry cap. decryptRoomPreviews itself skips rooms whose
+    // preview is already decrypted, so a warm re-pass is a cheap O(n) scan.
+    decryptFailedRooms.clear();
+    decryptRoomPreviews(matrixRooms).then(() => debouncedCacheRooms());
   };
 
   // Pending read receipts: queued when tab is hidden, sent when visible.
@@ -6990,6 +7036,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     decryptedPreviewCache.clear();
     changedRoomIds.clear();
     decryptFailedRooms.clear();
+    for (const timer of previewRetryTimers) clearTimeout(timer);
+    previewRetryTimers.length = 0;
     peerKeysStatus.clear();
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
@@ -7115,6 +7163,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     inviteCount,
     setActiveRoom,
     setHelpers,
+    retryEncryptedPreviews,
     muteMember,
     setMemberPowerLevel,
     setMessages,
