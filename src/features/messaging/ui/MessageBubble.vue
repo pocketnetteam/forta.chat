@@ -598,6 +598,75 @@ const isLikelyHeic = computed(() => {
   return /heic|heif/.test(t) || /\.(heic|heif)$/.test(n);
 });
 
+// ── Image spinner watchdog (WEE-90 H3) ──
+// The image placeholder shows a spinner while there is no preview and no
+// error — including the neutral "not started yet" window. If the download
+// stalls past the lower-level timeouts, that spinner would spin forever.
+// Mirror the video watchdog (WEE-21): after a deadline with no image and no
+// error, flip to the error+retry overlay so the spinner is always finite.
+//
+// The deadline is gated on `imageInViewport`: the encrypted-image download is
+// only triggered once the bubble scrolls into view (see triggerImageDownload),
+// and ChatVirtualScroller mounts every row eagerly. Arming on mount instead of
+// on visibility would falsely time out off-screen images before they ever
+// started downloading — so we only measure download time, not mount time.
+const IMAGE_LOAD_TIMEOUT_MS = 20_000;
+const imageLoadTimedOut = ref(false);
+let imageLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearImageLoadTimer = () => {
+  if (imageLoadTimer !== null) {
+    clearTimeout(imageLoadTimer);
+    imageLoadTimer = null;
+  }
+};
+
+/** True while the bubble would render the loading spinner for an image whose
+ *  download has actually started — i.e. an in-viewport image with file info,
+ *  no preview/object URL, and no error yet. */
+const imageSpinnerActive = computed(
+  () =>
+    props.message.type === MessageType.image &&
+    hasFileInfo.value &&
+    imageInViewport.value &&
+    !feedImageSrc.value &&
+    !fileState.value.error,
+);
+
+/** Arm the deadline when the spinner is genuinely in-flight, clear it
+ *  otherwise. Idempotent so it can be re-run after a recycle reset without
+ *  stacking timers. */
+const syncImageLoadWatchdog = () => {
+  if (imageSpinnerActive.value && !imageLoadTimedOut.value) {
+    if (imageLoadTimer === null) {
+      imageLoadTimer = setTimeout(() => {
+        imageLoadTimer = null;
+        // Re-check live state: a late objectUrl/error between arming and the
+        // deadline must not be clobbered by a stale timeout.
+        if (imageSpinnerActive.value) imageLoadTimedOut.value = true;
+      }, IMAGE_LOAD_TIMEOUT_MS);
+    }
+  } else {
+    clearImageLoadTimer();
+  }
+};
+
+watch(imageSpinnerActive, syncImageLoadWatchdog, { immediate: true });
+
+// Reset the watchdog when the bubble is recycled for a different message
+// (virtual scroller reuse) so a fresh image isn't born already timed-out, and
+// re-arm if the new message is itself a freshly-loading image.
+watch(
+  () => props.message.id,
+  () => {
+    imageLoadTimedOut.value = false;
+    clearImageLoadTimer();
+    syncImageLoadWatchdog();
+  },
+);
+
+onBeforeUnmount(clearImageLoadTimer);
+
 const handleMediaClick = () => {
   if (props.message.type === MessageType.image) {
     // Open the viewer when we have either the full object URL or a thumbnail
@@ -642,7 +711,14 @@ const retryDownload = () => {
   const state = getState(fileCacheKey.value);
   state.error = null;
   state.errorKind = null;
-  download(props.message);
+  // Reset the image spinner watchdog so the retry shows the spinner again
+  // rather than the timed-out error overlay (WEE-90 H3).
+  imageLoadTimedOut.value = false;
+  clearImageLoadTimer();
+  // forceRefetch drops any cached objectUrl and re-runs fetch+decrypt so the
+  // retry actually re-hits the network (and the mirror host on the next
+  // attempt) instead of replaying the same stale failure.
+  download(props.message, undefined, { forceRefetch: true });
 };
 
 /** Manual escape hatch for crypto/decryption errors: the auto-bug-report
@@ -841,7 +917,7 @@ const replyPreviewSender = computed(() => {
         </div>
         <div ref="imageContainerRef" class="relative cursor-pointer" @click="handleMediaClick">
           <div
-            v-if="!feedImageSrc && (fileState.loading || (!fileState.objectUrl && !fileState.error))"
+            v-if="!feedImageSrc && !imageLoadTimedOut && (fileState.loading || (!fileState.objectUrl && !fileState.error))"
             class="flex items-center justify-center bg-neutral-grad-0"
             :style="imagePlaceholderStyle"
           >
@@ -860,7 +936,7 @@ const replyPreviewSender = computed(() => {
             </div>
           </div>
           <div
-            v-else-if="fileState.error"
+            v-else-if="fileState.error || imageLoadTimedOut"
             class="flex cursor-pointer flex-col items-center justify-center gap-1 bg-neutral-grad-0 text-xs text-color-bad"
             :style="imagePlaceholderStyle"
             @click.stop="retryDownload"
