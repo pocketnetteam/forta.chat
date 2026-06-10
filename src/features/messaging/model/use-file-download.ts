@@ -17,7 +17,7 @@ import {
   NetworkBlockedError,
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
-import { enqueueDecrypt } from "./decrypt-queue";
+import { runFileDecrypt } from "./decrypt-queue";
 import { createSemaphore } from "@/shared/lib/semaphore";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
 import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
@@ -597,13 +597,15 @@ async function downloadAndDecrypt(
         };
 
         const decryptKey = await roomCrypto.decryptKey(event);
-        // Serialise decryption: parallel decryptFile calls on low-end
-        // Android WebViews saturate the CPU and freeze the UI.
+        // Decrypt via the crypto Web Worker when available — parallel and
+        // off the main thread (WEE-92); falls back to the legacy serial
+        // main-thread queue otherwise (#306/#370 freeze guard).
         // Pass the declared plaintext MIME so new ciphertexts (stored as
         // application/octet-stream) restore with the right type instead
         // of falling through to a generic binary fallback.
-        const decryptedFile = await enqueueDecrypt(() =>
-          roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+        const decryptedFile = await runFileDecrypt(
+          () => roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+          { sizeBytes: blob.size },
         );
         blob = decryptedFile;
       }
