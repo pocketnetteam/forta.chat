@@ -25,6 +25,8 @@ import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { signalChatsInteractive } from "@/shared/lib/boot-signals";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
+import { runInBatches } from "@/shared/lib/run-in-batches";
+import { isCryptoWorkerSupported } from "@/shared/lib/crypto-worker/bridge";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
@@ -593,6 +595,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const peerKeysStatus = reactive(new Map<string, PeerKeysStatus>());
   const DECRYPT_RETRY_DELAY = 10_000; // 10s before retrying a failed room
   const DECRYPT_MAX_RETRIES = 3;
+  // Preview decrypt parallelism (WEE-96): rooms per batch, yield between batches
+  const PREVIEW_DECRYPT_BATCH_SIZE = 5;
+  // Rooms attempted per decryptRoomPreviews pass (cap to avoid long pipelines)
+  const PREVIEW_DECRYPT_MAX_PER_CYCLE = 20;
+  // Rotation cursor so consecutive passes don't always pick the same first 20
+  // rooms — without it, retry passes that reset the failure budget would
+  // starve rooms 21+ of any attempt until the 15-min full refresh.
+  let previewCapCursor = 0;
+  // Delayed retry passes for encrypted previews after initial sync (WEE-96):
+  // covers RPC/Tor warm-up failures during the very first preview pass
+  const PREVIEW_RETRY_PASS_DELAYS_MS = [10_000, 30_000, 90_000] as const;
+  const previewRetryTimers: ReturnType<typeof setTimeout>[] = [];
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -2933,6 +2947,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Start preview polling for rooms without preview after initial load
       setTimeout(() => syncPreviewPolling(), 1500);
 
+      // Retry "[encrypted]" previews after the RPC backend warms up (WEE-96):
+      // the initial pass often runs while getusersinfo still times out.
+      // Timers are tracked so cleanup() cancels them — otherwise a re-login
+      // within 90s would stack stale passes on top of the new session's own.
+      for (const delay of PREVIEW_RETRY_PASS_DELAYS_MS) {
+        previewRetryTimers.push(setTimeout(() => retryEncryptedPreviews(), delay));
+      }
+
       // Schedule room cleanup 30s after init, then every 30 minutes
       scheduleRoomCleanup();
     }
@@ -2991,20 +3013,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     if (toDecrypt.length === 0) return;
 
-    // Cap at 20 rooms per cycle to avoid blocking
-    const capped = toDecrypt.slice(0, 20);
+    // Cap rooms per cycle to avoid blocking; rotate the window so repeated
+    // passes (incl. fresh-budget retry passes) eventually reach every room.
+    let capped = toDecrypt;
+    if (toDecrypt.length > PREVIEW_DECRYPT_MAX_PER_CYCLE) {
+      const start = previewCapCursor % toDecrypt.length;
+      capped = [...toDecrypt.slice(start), ...toDecrypt.slice(0, start)]
+        .slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
+      previewCapCursor = (start + PREVIEW_DECRYPT_MAX_PER_CYCLE) % toDecrypt.length;
+    }
 
-    // Decrypt sequentially with yield between each room to keep UI responsive.
-    // Previously used Promise.all(batch of 5) which ran 5 heavy ECDH+pbkdf2
-    // computations without yielding — causing 370ms+ long tasks.
-    const decryptedResults: Array<{ roomId: string; body: string }> = [];
-
-    for (const { roomId, matrixRoom } of capped) {
+    /** Decrypt one room's preview. Never throws — failures are recorded in
+     *  decryptFailedRooms so the retry/backoff bookkeeping stays per-room. */
+    const decryptOnePreview = async (
+      { roomId, matrixRoom }: { roomId: string; matrixRoom: unknown },
+    ): Promise<{ roomId: string; body: string } | null> => {
       try {
         const roomCrypto = await ensureRoomCrypto(roomId);
-        if (!roomCrypto) continue;
+        if (!roomCrypto) return null;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let timelineEvents: unknown[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3022,9 +3049,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
           try {
             const decrypted = await roomCrypto.decryptEvent(raw);
-            if (decrypted.body) {
-              decryptedResults.push({ roomId, body: decrypted.body });
-            }
+            if (decrypted.body) return { roomId, body: decrypted.body };
           } catch {
             decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
           }
@@ -3033,10 +3058,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } catch {
         decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
       }
+      return null;
+    };
 
-      // Yield to main thread between each room decryption
-      await yieldToMain();
-    }
+    // Decrypt in parallel batches with a yield in between (WEE-96). Heavy
+    // crypto (ECDH + pbkdf2 + AES-SIV) runs in the crypto worker, so the main
+    // thread only awaits worker roundtrips and key-resolution RPCs — those
+    // parallelize safely. The batch size also bounds concurrent getusersinfo
+    // calls during room prepare().
+    // When the worker is unavailable (main-thread fallback on old WebViews),
+    // batch=1 keeps the old per-room yield — 5 synchronous pbkdf2 chains
+    // back-to-back would recreate the 370ms+ long tasks this code once had.
+    const batchSize = isCryptoWorkerSupported() ? PREVIEW_DECRYPT_BATCH_SIZE : 1;
+    const batched = await runInBatches(capped, batchSize, decryptOnePreview, yieldToMain);
+    const decryptedResults = batched.filter((r): r is { roomId: string; body: string } => r !== null);
 
     // Apply ALL decrypted results in one pass with a single triggerRef
     if (decryptedResults.length > 0) {
@@ -3049,6 +3084,27 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       triggerRef(rooms);
     }
+  };
+
+  /** Cold-start retry for encrypted previews (WEE-96 follow-up).
+   *  During the first ~30s the sync-driven passes can exhaust
+   *  DECRYPT_MAX_RETRIES while the Pocketnet RPC / Tor proxy is still warming
+   *  up (getusersinfo timeouts). Incremental refreshes only re-attempt rooms
+   *  that CHANGE, so quiet rooms then stay "[encrypted]" until the next
+   *  15-min full refresh (which clears the failure map) or until the chat is
+   *  opened. These early passes re-run with a fresh retry budget so previews
+   *  appear within seconds of the backend warming up instead. */
+  const retryEncryptedPreviews = () => {
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const matrixRooms = matrixService.getRooms() as any[];
+    if (!matrixRooms.length) return;
+    // Fresh budget: cold-start failures (RPC timeouts) must not count against
+    // the per-room retry cap. decryptRoomPreviews itself skips rooms whose
+    // preview is already decrypted, so a warm re-pass is a cheap O(n) scan.
+    decryptFailedRooms.clear();
+    decryptRoomPreviews(matrixRooms).then(() => debouncedCacheRooms());
   };
 
   // Pending read receipts: queued when tab is hidden, sent when visible.
@@ -6980,6 +7036,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     decryptedPreviewCache.clear();
     changedRoomIds.clear();
     decryptFailedRooms.clear();
+    for (const timer of previewRetryTimers) clearTimeout(timer);
+    previewRetryTimers.length = 0;
     peerKeysStatus.clear();
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
@@ -7105,6 +7163,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     inviteCount,
     setActiveRoom,
     setHelpers,
+    retryEncryptedPreviews,
     muteMember,
     setMemberPowerLevel,
     setMessages,

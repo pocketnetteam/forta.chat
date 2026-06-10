@@ -1051,6 +1051,8 @@ export class Pcrypto {
 
       // Internal decrypt — offloaded to Web Worker for zero main-thread blocking.
       // All heavy crypto (ECDH, pbkdf2, AES-SIV) runs in a separate thread.
+      // Falls back to the main-thread eaa path when the worker is unavailable
+      // (old WebViews without module-worker support) — WEE-96 A3.
       async _decrypt(
         userid: string,
         encData: { encrypted: string; nonce: string },
@@ -1068,21 +1070,37 @@ export class Pcrypto {
           _block = tetatet ? pcrypto.currentblock.height : 10;
         }
 
-        // Prepare serializable data for Worker (fast — no crypto, just array ops)
-        const workerUsers = prepareWorkerUsers(usersIds, v || version);
-        const myId = pcrypto.user!.userinfo!.id;
-        const privateKeys = getPrivateKeysHex();
+        if (isCryptoWorkerSupported()) {
+          // Prepare serializable data for Worker (fast — no crypto, just array ops)
+          const workerUsers = prepareWorkerUsers(usersIds, v || version);
+          const myId = pcrypto.user!.userinfo!.id;
+          const privateKeys = getPrivateKeysHex();
 
-        // All heavy crypto (ECDH + pbkdf2 + AES-SIV) runs in Worker thread
-        return workerDecrypt({
-          users: workerUsers,
-          myId,
-          privateKeys,
-          targetUserId: userid,
-          encData,
-          time: _time,
-          block: _block,
-        });
+          try {
+            // All heavy crypto (ECDH + pbkdf2 + AES-SIV) runs in Worker thread
+            return await workerDecrypt({
+              users: workerUsers,
+              myId,
+              privateKeys,
+              targetUserId: userid,
+              encData,
+              time: _time,
+              block: _block,
+            });
+          } catch (e) {
+            // Crypto errors (emptykey, MAC failure) must propagate — only
+            // worker infrastructure failures fall back to the main thread.
+            if (!isWorkerInfraError(e)) throw e;
+            console.warn("[pcrypto] crypto worker unavailable, decrypting on main thread:", e);
+          }
+        }
+
+        // Main-thread fallback for environments without (module) Worker
+        // support — same ECDH + pbkdf2 derivation via eaa, AES-SIV via miscreant.
+        const aeskeysls = eaa.aeskeys(_time, _block, usersIds, v || version);
+        const key = aeskeysls[userid];
+        if (!key) throw new Error("emptykey");
+        return decrypt(key, encData);
       },
 
       // Internal encrypt — offloaded to Web Worker.
@@ -1100,19 +1118,32 @@ export class Pcrypto {
           _block = pcrypto.currentblock.height;
         }
 
-        const workerUsers = prepareWorkerUsers(null, v || version);
-        const myId = pcrypto.user!.userinfo!.id;
-        const privateKeys = getPrivateKeysHex();
+        if (isCryptoWorkerSupported()) {
+          const workerUsers = prepareWorkerUsers(null, v || version);
+          const myId = pcrypto.user!.userinfo!.id;
+          const privateKeys = getPrivateKeysHex();
 
-        return workerEncrypt({
-          users: workerUsers,
-          myId,
-          privateKeys,
-          targetUserId: userid,
-          text,
-          time: _time,
-          block: _block,
-        });
+          try {
+            return await workerEncrypt({
+              users: workerUsers,
+              myId,
+              privateKeys,
+              targetUserId: userid,
+              text,
+              time: _time,
+              block: _block,
+            });
+          } catch (e) {
+            if (!isWorkerInfraError(e)) throw e;
+            console.warn("[pcrypto] crypto worker unavailable, encrypting on main thread:", e);
+          }
+        }
+
+        // Main-thread fallback — see _decrypt above.
+        const aeskeysls = eaa.aeskeys(_time, _block, null, v || version);
+        const key = aeskeysls[userid];
+        if (!key) throw new Error("emptykey");
+        return encrypt(text, key);
       },
 
       async encryptFile(file: Blob): Promise<{ file: File; secrets: Record<string, unknown> }> {
