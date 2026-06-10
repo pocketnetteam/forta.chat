@@ -23,6 +23,7 @@ import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
 import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
+import { signalChatsInteractive } from "@/shared/lib/boot-signals";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { isNative } from "@/shared/lib/platform";
@@ -516,6 +517,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // cached room list (or the empty-state hint) becomes visible. A later
       // PREPARED sync still runs a full refresh and upgrades back to "ready".
       roomsInitialized.value = true;
+      // WEE-97: release deferred boot work (recovery scans, Tor, telemetry)
+      signalChatsInteractive();
     }, INITIAL_SYNC_TIMEOUT_MS);
   };
 
@@ -2899,6 +2902,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // already flipped roomsInitialized=true before the first real sync landed.
     const firstSyncComplete = initialSyncStatus.value !== "ready";
     if (!roomsInitialized.value) roomsInitialized.value = true;
+    // WEE-97: release deferred boot work (recovery scans, Tor, telemetry).
+    // Idempotent — safe to call on every refresh after the first.
+    signalChatsInteractive();
     if (firstSyncComplete) {
       initialSyncStatus.value = "ready";
       clearInitialSyncTimer();

@@ -58,6 +58,7 @@ import {
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { createKeyPair } from "./key-pair";
+import { generateEncryptionKeys, clearEncryptionKeysCache } from "./encryption-keys";
 
 const NAMESPACE = "auth";
 
@@ -99,24 +100,6 @@ function hexDecode(hex: string): string {
     result += String.fromCharCode(ch);
   }
   return result;
-}
-
-/** Generate 12 BIP32 key pairs at m/33'/0'/0'/{1-12}' for Pcrypto encryption.
- *  Matches original: bitcoin.bip32.fromSeed(Buffer.from(privateKey, "hex")) */
-function generateEncryptionKeys(privateKeyHex: string) {
-  const key = Buffer.from(privateKeyHex, "hex");
-  const root = bitcoin.bip32.fromSeed(key);
-
-  const keys: Array<{ pair: unknown; public: string; private: Buffer }> = [];
-  for (let i = 1; i <= 12; i++) {
-    const child = root.derivePath(`m/33'/0'/0'/${i}'`);
-    keys.push({
-      pair: bitcoin.ECPair.fromPrivateKey(child.privateKey),
-      public: child.publicKey.toString("hex"),
-      private: child.privateKey,
-    });
-  }
-  return keys;
 }
 
 let _onSyncStatusCallback: ((state: string) => void) | null = null;
@@ -449,7 +432,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           matrixKit.value?.chatIsPublic(room as Record<string, unknown>) ?? false,
         matrixId: (id: string) => matrixService.matrixId(id),
       });
-      await withTimeout(cryptoInstance.prepare(address.value ?? undefined), 10_000, "Pcrypto storage init");
+      // WEE-97 item 3: prepare() opens two IndexedDB stores (~50-150ms) —
+      // run it concurrently with the Matrix connection below instead of
+      // serializing the boot path. Safe because all Pcrypto ls/lse access is
+      // optional-chained (storage miss = cache miss), and rooms are only
+      // created after the first /sync, by which point prepare has resolved.
+      const pcryptoPreparePromise = withTimeout(
+        cryptoInstance.prepare(address.value ?? undefined),
+        10_000,
+        "Pcrypto storage init",
+      );
+      // Suppress premature unhandled-rejection (real handling happens in the
+      // Promise.all together with the Matrix connection below).
+      pcryptoPreparePromise.catch(() => {});
       pcrypto.value = cryptoInstance;
 
       // Step 7: Wire Matrix events → chat store
@@ -647,24 +642,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // state on cold start. Retry-with-backoff turns a single brittle attempt
       // into 3 attempts (1s/2s backoff, 45s per attempt) so transient transport
       // failures don't surface as a fatal boot error.
-      const connectResult = await connectMatrixWithRetry(matrixService, {
-        attemptTimeoutMs: 45_000,
-        maxAttempts: 3,
-        baseDelayMs: 1_000,
-        maxDelayMs: 30_000,
-        onAttempt: (attempt, max) => {
-          matrixError.value =
-            attempt === 1
-              ? "Connecting to Matrix server..."
-              : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
-        },
-        onAttemptFail: (attempt, err) => {
-          console.warn(
-            `[auth] Matrix connect attempt ${attempt} failed:`,
-            err instanceof Error ? err.message : err,
-          );
-        },
-      });
+      // WEE-97 item 3: await the deferred Pcrypto storage init together with
+      // the connection — both must be settled before matrixReady flips.
+      const [connectResult] = await Promise.all([
+        connectMatrixWithRetry(matrixService, {
+          attemptTimeoutMs: 45_000,
+          maxAttempts: 3,
+          baseDelayMs: 1_000,
+          maxDelayMs: 30_000,
+          onAttempt: (attempt, max) => {
+            matrixError.value =
+              attempt === 1
+                ? "Connecting to Matrix server..."
+                : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
+          },
+          onAttemptFail: (attempt, err) => {
+            console.warn(
+              `[auth] Matrix connect attempt ${attempt} failed:`,
+              err instanceof Error ? err.message : err,
+            );
+          },
+        }),
+        pcryptoPreparePromise,
+      ]);
 
       if (connectResult.ready) {
         bootStatus.setStep("sync");
@@ -1222,6 +1222,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
       pcrypto.value = null;
     }
+    // WEE-97: drop memoized BIP32 key material with the rest of the session
+    clearEncryptionKeysCache();
 
     // ── 3. Clean up listeners & intervals ──
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
