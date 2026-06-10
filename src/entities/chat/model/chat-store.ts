@@ -5877,31 +5877,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       encryptedRaw: isEncrypted ? raw : undefined,
     };
     const myAddr = useAuthStore().address ?? "";
-    const isActiveRoom = roomId === activeRoomId.value;
-    if (isActiveRoom) {
-      // Active room: write immediately for instant UI feedback
-      chatDbKitRef.value.eventWriter.writeMessage(parsed, myAddr, activeRoomId.value).then(result => {
-        // Enqueue decryption retry if message couldn't be decrypted
-        if (isEncrypted && result !== "duplicate" && chatDbKitRef.value?.decryptionWorker) {
-          chatDbKitRef.value.decryptionWorker.enqueue(
-            raw.event_id as string,
-            roomId,
-            JSON.stringify(raw),
-          ).catch(() => {});
-        }
-      }).catch(e => {
-        console.warn("[chat-store] EventWriter.writeMessage failed:", e);
+    // WEE-93: ALL rooms (active included) write through the batched buffer.
+    // The active room used to write per-event "for instant feedback", but
+    // during sync catch-up that meant one Dexie transaction per backlog event
+    // — the main reason chats were slow to catch up after reconnect. The
+    // buffer flushes by size/150ms timer, so visible latency stays bounded
+    // while a burst lands in 1-2 transactions.
+    chatDbKitRef.value.eventWriter.writeMessageBuffered(parsed, myAddr, activeRoomId.value)
+      .catch(e => {
+        console.warn("[chat-store] EventWriter.writeMessageBuffered failed:", e);
       });
-    } else {
-      // Background room: batch writes to reduce liveQuery notifications
-      chatDbKitRef.value.eventWriter.writeMessageBuffered(parsed, myAddr, activeRoomId.value);
-      if (isEncrypted && chatDbKitRef.value?.decryptionWorker) {
-        chatDbKitRef.value.decryptionWorker.enqueue(
-          raw.event_id as string,
-          roomId,
-          JSON.stringify(raw),
-        ).catch(() => {});
-      }
+    if (isEncrypted && chatDbKitRef.value?.decryptionWorker) {
+      chatDbKitRef.value.decryptionWorker.enqueue(
+        raw.event_id as string,
+        roomId,
+        JSON.stringify(raw),
+      ).catch(() => {});
     }
   };
 

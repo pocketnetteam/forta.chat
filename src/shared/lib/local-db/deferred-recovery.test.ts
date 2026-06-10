@@ -35,6 +35,7 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
     recoverStuckMedia: ReturnType<typeof vi.spyOn>;
     cleanupCancelledUploads: ReturnType<typeof vi.spyOn>;
     recoverAllStuckMessages: ReturnType<typeof vi.spyOn>;
+    recoverOrphanedProcessing: ReturnType<typeof vi.spyOn>;
     tick: ReturnType<typeof vi.spyOn>;
     gcTombstones: ReturnType<typeof vi.spyOn>;
     gcSearchCache: ReturnType<typeof vi.spyOn>;
@@ -52,6 +53,10 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
       recoverStuckMedia: vi.spyOn(MessageRepository.prototype, "recoverStuckMedia").mockResolvedValue(0 as never),
       cleanupCancelledUploads: vi.spyOn(MessageRepository.prototype, "cleanupCancelledUploads").mockResolvedValue(0 as never),
       recoverAllStuckMessages: vi.spyOn(DecryptionWorker.prototype, "recoverAllStuckMessages").mockResolvedValue(0 as never),
+      // WEE-93: cheap indexed reset that runs BEFORE the first tick — mocked so
+      // the recoverOrphanedProcessing → tick chain resolves in microtasks
+      // under fake timers (real Dexie ops don't settle here).
+      recoverOrphanedProcessing: vi.spyOn(DecryptionWorker.prototype, "recoverOrphanedProcessing").mockResolvedValue(0 as never),
       tick: vi.spyOn(DecryptionWorker.prototype, "tick").mockResolvedValue(undefined as never),
       gcTombstones: vi.spyOn(RoomRepository.prototype, "garbageCollectTombstones").mockResolvedValue(0 as never),
       gcSearchCache: vi.spyOn(SearchCacheRepository.prototype, "garbageCollect").mockResolvedValue(0 as never),
@@ -72,6 +77,8 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
 
     // Live-messaging machinery runs right away
     expect(spies.processQueue).toHaveBeenCalledTimes(1);
+    // WEE-93: orphaned-"processing" reset precedes the first tick
+    expect(spies.recoverOrphanedProcessing).toHaveBeenCalledTimes(1);
     expect(spies.tick).toHaveBeenCalledTimes(1);
 
     // Heavy table scans do NOT run before the chats-interactive signal

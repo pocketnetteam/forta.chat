@@ -326,6 +326,138 @@ describe("DecryptionWorker", () => {
     });
   });
 
+  // ── WEE-93: tick commits all results in a single transaction ──
+  describe("batched tick commits", () => {
+    it("decrypts N jobs and commits all results in one explicit transaction", async () => {
+      const { worker } = makeWorker(db, async (raw: any) => ({ body: `dec-${raw.n}` }));
+      await db.messages.bulkAdd([
+        { eventId: "$e1", roomId: "!r1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$e2", roomId: "!r1", timestamp: 2, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$e3", roomId: "!r2", timestamp: 3, content: "[encrypted]", decryptionStatus: "pending" },
+      ] as any);
+      await db.decryptionQueue.bulkAdd([
+        { eventId: "$e1", roomId: "!r1", encryptedBody: '{"n":1}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: Date.now() },
+        { eventId: "$e2", roomId: "!r1", encryptedBody: '{"n":2}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: Date.now() },
+        { eventId: "$e3", roomId: "!r2", encryptedBody: '{"n":3}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: Date.now() },
+      ]);
+
+      const txSpy = vi.spyOn(db, "transaction");
+      await worker.tick();
+
+      // One pick + one commit transaction for the whole tick (not one per job)
+      expect(txSpy).toHaveBeenCalledTimes(2);
+      expect(await db.decryptionQueue.count()).toBe(0);
+      const m1 = await db.messages.where("eventId").equals("$e1").first();
+      const m2 = await db.messages.where("eventId").equals("$e2").first();
+      const m3 = await db.messages.where("eventId").equals("$e3").first();
+      expect(m1?.content).toBe("dec-1");
+      expect(m2?.content).toBe("dec-2");
+      expect(m3?.content).toBe("dec-3");
+      expect(m1?.decryptionStatus).toBe("ok");
+      worker.dispose();
+    });
+
+    it("mixed batch: failures back off while successes commit", async () => {
+      const decryptFn = vi.fn().mockImplementation(async (raw: any) => {
+        if (raw.fail) throw new Error("no key");
+        return { body: "plain" };
+      });
+      const { worker } = makeWorker(db, decryptFn);
+      await db.messages.bulkAdd([
+        { eventId: "$ok", roomId: "!r1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$bad", roomId: "!r1", timestamp: 2, content: "[encrypted]", decryptionStatus: "pending" },
+      ] as any);
+      await db.decryptionQueue.bulkAdd([
+        { eventId: "$ok", roomId: "!r1", encryptedBody: '{}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: Date.now() },
+        { eventId: "$bad", roomId: "!r1", encryptedBody: '{"fail":true}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: Date.now() },
+      ]);
+
+      await worker.tick();
+
+      const okMsg = await db.messages.where("eventId").equals("$ok").first();
+      expect(okMsg?.content).toBe("plain");
+      expect(await db.decryptionQueue.where("eventId").equals("$ok").count()).toBe(0);
+
+      const badJob = await db.decryptionQueue.where("eventId").equals("$bad").first();
+      expect(badJob?.status).toBe("waiting");
+      expect(badJob?.attempts).toBe(1);
+      const badMsg = await db.messages.where("eventId").equals("$bad").first();
+      expect(badMsg?.content).toBe("[encrypted]");
+      worker.dispose();
+    });
+
+    it("tick with no ready jobs performs no commit transaction", async () => {
+      const { worker } = makeWorker(db);
+      const txSpy = vi.spyOn(db, "transaction");
+      await worker.tick();
+      // Only the pick transaction runs; no commit transaction
+      expect(txSpy.mock.calls.length).toBeLessThanOrEqual(1);
+      expect(await db.decryptionQueue.count()).toBe(0);
+      worker.dispose();
+    });
+
+    it("does NOT delete the job when the message row is not persisted yet", async () => {
+      // Message still sitting in the EventWriter write buffer → decrypt
+      // succeeds but there is no row to write to. The job must back off,
+      // not be deleted (deleting would strand the message as [encrypted]).
+      const { worker } = makeWorker(db, async () => ({ body: "plain" }));
+      await db.decryptionQueue.add({
+        eventId: "$notYet", roomId: "!r1", encryptedBody: '{}',
+        status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: Date.now(),
+      });
+
+      await worker.tick();
+
+      const job = await db.decryptionQueue.where("eventId").equals("$notYet").first();
+      expect(job).toBeTruthy();
+      expect(job?.status).toBe("waiting");
+      expect(job?.attempts).toBe(1);
+      worker.dispose();
+    });
+  });
+
+  // ── WEE-93: jobs stranded in "processing" by a crashed session ──
+  describe("recoverOrphanedProcessing", () => {
+    it("re-queues processing jobs left over from a dead session", async () => {
+      const { worker } = makeWorker(db);
+      await db.decryptionQueue.bulkAdd([
+        { eventId: "$p1", roomId: "!r1", encryptedBody: '{}', status: "processing", attempts: 2, nextAttemptAt: 0, createdAt: Date.now() },
+        { eventId: "$p2", roomId: "!r1", encryptedBody: '{}', status: "processing", attempts: 0, nextAttemptAt: 0, createdAt: Date.now() },
+        { eventId: "$q1", roomId: "!r1", encryptedBody: '{}', status: "waiting", attempts: 1, nextAttemptAt: 99, createdAt: Date.now() },
+      ]);
+
+      const count = await worker.recoverOrphanedProcessing();
+      expect(count).toBe(2);
+
+      const jobs = await db.decryptionQueue.orderBy("eventId").toArray();
+      const p1 = jobs.find(j => j.eventId === "$p1");
+      const p2 = jobs.find(j => j.eventId === "$p2");
+      const q1 = jobs.find(j => j.eventId === "$q1");
+      expect(p1?.status).toBe("queued");
+      expect(p2?.status).toBe("queued");
+      expect(q1?.status).toBe("waiting"); // untouched
+      worker.dispose();
+    });
+
+    it("recovered jobs get decrypted on the next tick", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.add({ eventId: "$p1", roomId: "!r1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending" } as any);
+      await db.decryptionQueue.add({
+        eventId: "$p1", roomId: "!r1", encryptedBody: '{"type":"m.room.message"}',
+        status: "processing", attempts: 0, nextAttemptAt: 0, createdAt: Date.now(),
+      });
+
+      await worker.recoverOrphanedProcessing();
+      await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+      await worker.tick();
+
+      const msg = await db.messages.where("eventId").equals("$p1").first();
+      expect(msg?.content).toBe("decrypted");
+      expect(await db.decryptionQueue.count()).toBe(0);
+      worker.dispose();
+    });
+  });
+
   it("full flow: enqueue → fail → retryForRoom → succeed", async () => {
     let shouldFail = true;
     const conditionalCrypto = vi.fn().mockImplementation(async () => {
