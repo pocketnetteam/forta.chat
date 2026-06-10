@@ -109,6 +109,8 @@ const {
   invalidateDownloadCache,
   appendCacheBust,
   wrapTransientError,
+  mediaHostForAttempt,
+  rewriteMediaHost,
   _resetToastDedupForTests,
   _mediaGateActiveForTests,
 } = await import("./use-file-download");
@@ -1429,6 +1431,51 @@ describe("useFileDownload", () => {
         expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
       });
       scope.stop();
+    });
+  });
+
+  // ── WEE-90 H2: media-server mirror fallback ───────────────────────────
+  // The old chat (bastyon-chat) survives a blocked/throttled primary media
+  // repo because `pingServers` picks a live host from `matrix` + `matrixMirrors`.
+  // Forta hits a single hardcoded host, so every retry replays the same dead
+  // URL. These cover the host-selection + URL-rewrite primitives that let the
+  // download retry loop alternate primary↔mirror.
+  describe("media-server mirror fallback (WEE-90 H2)", () => {
+    it("alternates primary↔mirror across retry attempts", () => {
+      // attempt 0 = primary; odd attempts hit the mirror; even attempts the
+      // primary — so a transient primary blip still recovers while a hard
+      // block is bypassed on the very next try.
+      expect(mediaHostForAttempt(0)).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(1)).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(2)).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(3)).toBe("matrix.2.pocketnet.app");
+    });
+
+    it("rewrites the primary homeserver host to the mirror", () => {
+      expect(
+        rewriteMediaHost(
+          "https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc",
+          "matrix.2.pocketnet.app",
+        ),
+      ).toBe("https://matrix.2.pocketnet.app/_matrix/media/v3/download/x/abc");
+    });
+
+    it("is a no-op when the target host is the primary", () => {
+      const url = "https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc";
+      expect(rewriteMediaHost(url, "matrix.pocketnet.app")).toBe(url);
+    });
+
+    it("never repoints a foreign/CDN host at a Pocketnet mirror", () => {
+      // An attachment resolved against some other host (forwarded media,
+      // Element/Cinny sender) must not be silently rerouted to our mirror.
+      const foreign = "https://cdn.example.com/media/abc";
+      expect(rewriteMediaHost(foreign, "matrix.2.pocketnet.app")).toBe(foreign);
+    });
+
+    it("leaves non-URL inputs (blob:/data:) untouched", () => {
+      expect(rewriteMediaHost("blob:http://localhost/abc", "matrix.2.pocketnet.app")).toBe(
+        "blob:http://localhost/abc",
+      );
     });
   });
 });

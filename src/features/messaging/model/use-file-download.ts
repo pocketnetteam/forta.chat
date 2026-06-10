@@ -20,6 +20,7 @@ import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
 import { enqueueDecrypt } from "./decrypt-queue";
 import { createSemaphore } from "@/shared/lib/semaphore";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
+import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
 import { MessageType, MessageStatus } from "@/entities/chat";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 
@@ -408,6 +409,36 @@ export function resolveMediaUrl(url: string): string | null {
   }
 }
 
+/** All media hosts in attempt-priority order: primary first, then mirrors.
+ *  Mirrors bastyon-chat's `[].concat([baseUrl], mirrors)` in `pingServers`. */
+const MEDIA_HOSTS = [MATRIX_SERVER, ...MATRIX_MIRRORS];
+
+/** Pick the media host for a given retry attempt, alternating
+ *  primary↔mirror(s) so a throttled/blocked primary media-repo gets bypassed
+ *  on the next try while a transient primary blip can still recover (WEE-90 H2).
+ *  attempt 0 → primary, 1 → mirror[0], 2 → primary, 3 → mirror[0]… */
+export function mediaHostForAttempt(attempt: number): string {
+  const idx = ((attempt % MEDIA_HOSTS.length) + MEDIA_HOSTS.length) % MEDIA_HOSTS.length;
+  return MEDIA_HOSTS[idx];
+}
+
+/** Rewrite a resolved media URL's host to `host`. Only our own primary
+ *  homeserver host is ever rewritten — external/CDN hosts and anything that
+ *  isn't a parseable absolute URL (e.g. `blob:`/`data:` left untouched by
+ *  resolveMediaUrl) pass through unchanged so we never point a foreign URL at
+ *  a Pocketnet mirror. */
+export function rewriteMediaHost(url: string, host: string): string {
+  if (host === MATRIX_SERVER) return url;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== MATRIX_SERVER) return url;
+    u.hostname = host;
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 /** True for failures that look like a network/server issue we should label
  *  as such (5xx, timeouts, AbortError, fetch-network errors). Used to scope
  *  `wrapTransientError`: only network-shaped errors get re-cast into
@@ -522,7 +553,11 @@ async function downloadAndDecrypt(
         // This is terminal: the retry budget will hit the same null every time.
         throw new MediaUnavailableError(fileInfo.url);
       }
-      const fetchUrl = appendCacheBust(resolvedUrl, attempt);
+      // Alternate primary↔mirror across attempts so a blocked/throttled primary
+      // media-repo is bypassed on retry (WEE-90 H2). No-op for the first attempt
+      // and for non-primary hosts.
+      const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt));
+      const fetchUrl = appendCacheBust(hostUrl, attempt);
       const response = await fetchWithTimeout(fetchUrl, signal);
       if (!response.ok) {
         const err = new Error(`Download failed: ${response.status}`);
