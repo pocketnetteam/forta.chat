@@ -106,6 +106,7 @@ global.fetch = vi.fn(() => Promise.resolve(mockFetchResponse)) as Mock;
 const {
   useFileDownload,
   revokeAllFileUrls,
+  invalidateDownloadCache,
   appendCacheBust,
   wrapTransientError,
   mediaHostForAttempt,
@@ -1321,6 +1322,115 @@ describe("useFileDownload", () => {
       } finally {
         revokeSpy.mockRestore();
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // WEE-88 — sender cannot play their OWN voice (#990 spinner / #986 silent)
+  // -------------------------------------------------------------------------
+  // Root cause: seedLocalUrl used to write the optimistic blob: URL into the
+  // long-lived module `cache`. After confirmMediaSent the blob is revoked
+  // (~5s), but the cache entry survived — so the post-confirm re-download
+  // short-circuited on `cache.has()` and handed the player a DEAD blob. The
+  // receiver never seeds a blob, so it always decrypted the server copy and
+  // heard the message fine. The fix keeps the seed instance-local so the
+  // blob→mxc transition re-downloads the durable server file.
+  describe("own voice playback — sender's own message (WEE-88)", () => {
+    it("seedLocalUrl does NOT poison the long-lived cache: a confirmed own voice re-downloads from the server", async () => {
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])], { type: "audio/ogg" })),
+      });
+
+      const blobUrl = "blob:http://localhost:5173/own-voice-88";
+      const cacheKey = "client_voice_88";
+
+      // 1) Pending send: the sender's bubble seeds the local blob for instant
+      //    playback while the upload is still in flight.
+      const scope1 = effectScope();
+      await scope1.run(async () => {
+        const { seedLocalUrl, getState } = useFileDownload();
+        seedLocalUrl(cacheKey, blobUrl);
+        expect(getState(cacheKey).objectUrl).toBe(blobUrl);
+      });
+      scope1.stop();
+
+      // 2) confirmMediaSent flips the row to a real mxc URL and revokes the
+      //    blob. A fresh download() (the watch-triggered re-fetch) must hit the
+      //    server — NOT replay the dead blob from a poisoned module cache.
+      const scope2 = effectScope();
+      await scope2.run(async () => {
+        const { download } = useFileDownload();
+        const confirmed = {
+          id: "$evt_voice_88",
+          _key: cacheKey,
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "Audio",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "audio",
+          fileInfo: {
+            name: "voice.ogg",
+            type: "audio/ogg",
+            size: 4096,
+            url: "mxc://server/voice88",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(confirmed);
+
+        // The server file was fetched (no short-circuit on a stale blob).
+        expect(fetchSpy).toHaveBeenCalled();
+        // The returned URL is a fresh decrypted objectUrl, never the dead blob.
+        expect(result).not.toBe(blobUrl);
+      });
+      scope2.stop();
+    });
+
+    it("invalidateDownloadCache drops the entry so the next download re-fetches the server copy", async () => {
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([9])], { type: "audio/ogg" })),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const msg = {
+          id: "$evt_inv_88",
+          _key: "client_inv_88",
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "Audio",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "audio",
+          fileInfo: { name: "v.ogg", type: "audio/ogg", size: 1, url: "mxc://server/inv88" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(msg);
+        const callsAfterFirst = fetchSpy.mock.calls.length;
+
+        // Second download hits the cache — no new network call.
+        await download(msg);
+        expect(fetchSpy.mock.calls.length).toBe(callsAfterFirst);
+
+        // After invalidation (the blob→mxc watch path), the next download must
+        // re-fetch instead of replaying the cached entry.
+        invalidateDownloadCache("client_inv_88");
+        await download(msg);
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      });
+      scope.stop();
     });
   });
 
