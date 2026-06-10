@@ -186,7 +186,13 @@ export function initChatDb(
   // are needed for live messaging. Heavy recovery table scans are deferred
   // below (WEE-97) so they don't compete with the first fullRoomRefresh.
   strandedOpIdsPromise.then(() => syncEngine.processQueue()).catch(() => {});
-  decryptionWorker.tick().catch(() => {});
+  // WEE-93: first re-queue jobs stranded in "processing" by a session that
+  // died mid-tick (cheap indexed modify — NOT a table scan, safe before the
+  // deferred recovery block), then start the decryption worker.
+  decryptionWorker.recoverOrphanedProcessing()
+    .catch(() => {})
+    .then(() => decryptionWorker.tick())
+    .catch(() => {});
 
   // WEE-97: recovery/GC sweeps are full-table scans that used to run on every
   // login BEFORE the chat list was interactive, competing with fullRoomRefresh

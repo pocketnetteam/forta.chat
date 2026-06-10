@@ -20,21 +20,25 @@ export interface WriteBufferOptions {
   maxSize?: number;
 }
 
-type FlushCallback = (items: BufferedWrite[]) => Promise<void>;
+type FlushCallback<T> = (items: T[]) => Promise<void>;
 
 // ---------------------------------------------------------------------------
 // WriteBuffer — accumulates DB writes and flushes them in a single batch
 // ---------------------------------------------------------------------------
 
-export class WriteBuffer {
-  private buffer: BufferedWrite[] = [];
+export class WriteBuffer<T = BufferedWrite> {
+  private buffer: T[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly delayMs: number;
   private readonly maxSize: number;
   private disposed = false;
+  /** In-flight flush chain — flushes are serialized and awaitable, so
+   *  flushNow() callers get a real "everything enqueued before this call
+   *  is committed" guarantee even when a maxSize force-flush is running. */
+  private inFlight: Promise<void> | null = null;
 
   constructor(
-    private readonly onFlush: FlushCallback,
+    private readonly onFlush: FlushCallback<T>,
     options?: WriteBufferOptions,
   ) {
     this.delayMs = options?.delayMs ?? 150;
@@ -42,7 +46,7 @@ export class WriteBuffer {
   }
 
   /** Add an item to the buffer. Starts the flush timer or force-flushes if full. */
-  enqueue(item: BufferedWrite): void {
+  enqueue(item: T): void {
     if (this.disposed) return;
 
     this.buffer.push(item);
@@ -61,9 +65,12 @@ export class WriteBuffer {
     }
   }
 
-  /** Immediately drain the buffer (returns when flush completes). */
+  /** Immediately drain the buffer (returns when flush completes — including
+   *  any flush that was already in flight when this was called). */
   async flushNow(): Promise<void> {
     this.clearTimer();
+    const pending = this.inFlight;
+    if (pending) await pending;
     await this.flush();
   }
 
@@ -71,6 +78,8 @@ export class WriteBuffer {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.clearTimer();
+    const pending = this.inFlight;
+    if (pending) await pending;
     if (this.buffer.length > 0) {
       await this.flush();
     }
@@ -86,10 +95,19 @@ export class WriteBuffer {
     const items = this.buffer;
     this.buffer = [];
 
-    try {
-      await this.onFlush(items);
-    } catch (err) {
-      console.error("[WriteBuffer] flush failed:", err);
+    // Chain on any in-flight flush so batches commit in enqueue order.
+    const prev = this.inFlight ?? Promise.resolve();
+    const run = prev.then(async () => {
+      try {
+        await this.onFlush(items);
+      } catch (err) {
+        console.error("[WriteBuffer] flush failed:", err);
+      }
+    });
+    this.inFlight = run;
+    await run;
+    if (this.inFlight === run) {
+      this.inFlight = null;
     }
   }
 

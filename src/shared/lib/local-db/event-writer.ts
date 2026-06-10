@@ -154,6 +154,11 @@ export class EventWriter {
 
   private writeBuffer: WriteBuffer | null = null;
 
+  /** Buffered inbound reactions (WEE-93) — flushed in one transaction.
+   *  Slightly longer delay than the message buffer so a reaction whose target
+   *  message is still sitting in the message buffer lands AFTER it. */
+  private reactionBuffer: WriteBuffer<ParsedReaction> | null = null;
+
   /**
    * Enable write batching. Creates an internal WriteBuffer that accumulates
    * messages and flushes them in a single Dexie transaction.
@@ -163,6 +168,10 @@ export class EventWriter {
     this.writeBuffer = new WriteBuffer(
       (items) => this.flushBatch(items),
       { delayMs: 150, maxSize: 50 },
+    );
+    this.reactionBuffer = new WriteBuffer<ParsedReaction>(
+      (items) => this.flushReactions(items),
+      { delayMs: 500, maxSize: 100 },
     );
   }
 
@@ -193,6 +202,7 @@ export class EventWriter {
   /** Force-flush the write buffer immediately. No-op if batching not enabled. */
   async flushWriteBuffer(): Promise<void> {
     await this.writeBuffer?.flushNow();
+    await this.reactionBuffer?.flushNow();
   }
 
   /** Flush remaining items and dispose the write buffer. */
@@ -200,6 +210,10 @@ export class EventWriter {
     if (this.writeBuffer) {
       await this.writeBuffer.dispose();
       this.writeBuffer = null;
+    }
+    if (this.reactionBuffer) {
+      await this.reactionBuffer.dispose();
+      this.reactionBuffer = null;
     }
   }
 
@@ -214,6 +228,17 @@ export class EventWriter {
   private async flushBatch(items: BufferedWrite[]): Promise<void> {
     perfMark("flush-batch:start");
     const changedRooms = new Set<string>();
+    const insertedItems: BufferedWrite[] = [];
+    // WEE-93: per-room coalescing within the batch. The room preview only needs
+    // the newest message per room (updateLastMessage's monotonic guard would
+    // discard the rest anyway), and ensureRoomExists only needs to run once per
+    // room — not once per message (N db.rooms.get() reads on a backlog batch).
+    const latestPerRoom = new Map<string, ParsedMessage>();
+    // Newest NON-encrypted-pending message per room: when the batch's newest
+    // message is "[encrypted]", writing the newest plaintext first preserves
+    // the sequential behaviour of keeping meaningful preview text instead of
+    // the "[encrypted]" placeholder.
+    const latestPlainPerRoom = new Map<string, ParsedMessage>();
 
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
       for (const item of items) {
@@ -221,8 +246,19 @@ export class EventWriter {
           const result = await this.messageRepo.upsertFromServer(item.localMsg, this.clearedAtTsCache.get(item.roomId));
 
           if (result === "inserted" || result === "updated") {
-            await this.ensureRoomExists(item.roomId);
-            await this.updateRoomPreview(item.parsed);
+            const parsed = item.parsed;
+            const prev = latestPerRoom.get(item.roomId);
+            // >= keeps the later batch item among equal timestamps — matches
+            // sequential updateLastMessage semantics (its guard is strict <).
+            if (!prev || parsed.timestamp >= prev.timestamp) {
+              latestPerRoom.set(item.roomId, parsed);
+            }
+            if (!(parsed.content === "[encrypted]" && parsed.encryptedRaw)) {
+              const prevPlain = latestPlainPerRoom.get(item.roomId);
+              if (!prevPlain || parsed.timestamp >= prevPlain.timestamp) {
+                latestPlainPerRoom.set(item.roomId, parsed);
+              }
+            }
           }
 
           if (result === "inserted") {
@@ -230,10 +266,25 @@ export class EventWriter {
             // getUnreadNotificationCount("total") is the single source of truth,
             // synced to Dexie via bulkSyncRooms during room refresh cycles.
             changedRooms.add(item.roomId);
+            insertedItems.push(item);
           }
         } catch (err) {
           // Fault-tolerant: one corrupted message must not abort the entire batch.
           console.error("[EventWriter] flushBatch: failed to write message, skipping:", item.parsed.eventId, err);
+        }
+      }
+
+      // One ensureRoomExists + (at most two) preview writes per unique room.
+      for (const [roomId, latest] of latestPerRoom) {
+        try {
+          await this.ensureRoomExists(roomId);
+          const latestPlain = latestPlainPerRoom.get(roomId);
+          if (latestPlain && latestPlain.eventId !== latest.eventId) {
+            await this.updateRoomPreview(latestPlain);
+          }
+          await this.updateRoomPreview(latest);
+        } catch (err) {
+          console.error("[EventWriter] flushBatch: failed to update room preview, skipping:", roomId, err);
         }
       }
     });
@@ -253,6 +304,18 @@ export class EventWriter {
         && this.pendingPollVotes.has(item.parsed.eventId)
       ) {
         await this.applyPendingPollUpdates(item.parsed.eventId);
+      }
+    }
+
+    // Async link preview for inserted messages — parity with writeMessage().
+    // Needed since the active room also writes through the buffer (WEE-93).
+    for (const item of insertedItems) {
+      const p = item.parsed;
+      if (!p.linkPreview && !p.noPreview && p.type === MessageType.text && this.fetchPreviewFn) {
+        const url = p.content.match(URL_RE)?.[0];
+        if (url) {
+          this.fetchAndStoreLinkPreview(url, item.localMsg);
+        }
       }
     }
 
@@ -354,37 +417,84 @@ export class EventWriter {
   // Reactions
   // ---------------------------------------------------------------------------
 
-  /** Apply a reaction to a message in the local DB */
+  /** Apply a reaction to a message in the local DB.
+   *  When batching is enabled, the reaction is enqueued and flushed together
+   *  with other reactions in a single transaction (WEE-93) — a sync backlog
+   *  of N reactions used to cost N separate read+write round-trips. */
   async writeReaction(reaction: ParsedReaction): Promise<void> {
-    const msg = await this.messageRepo.getByEventId(reaction.targetEventId);
-    if (!msg) return;
+    if (this.reactionBuffer) {
+      this.reactionBuffer.enqueue(reaction);
+      return;
+    }
+    await this.flushReactions([reaction]);
+  }
 
-    const reactions = msg.reactions ?? {};
-    if (!reactions[reaction.emoji]) {
-      reactions[reaction.emoji] = { count: 0, users: [] };
+  /** Flush buffered reactions: one read + one write per target message,
+   *  all inside a single Dexie transaction. onChange fires once per room. */
+  private async flushReactions(ops: ParsedReaction[]): Promise<void> {
+    // Deterministic ordering: a reaction's target message may still be sitting
+    // in the message buffer (e.g. reactionBuffer force-flushed at maxSize).
+    // Land messages first so the getByEventId lookups below don't drop fresh
+    // reactions whose targets are merely un-flushed.
+    await this.writeBuffer?.flushNow();
+
+    const changedRooms = new Set<string>();
+
+    // Group by target message — one getByEventId + one updateReactions each.
+    const byTarget = new Map<string, ParsedReaction[]>();
+    for (const op of ops) {
+      const list = byTarget.get(op.targetEventId);
+      if (list) list.push(op);
+      else byTarget.set(op.targetEventId, [op]);
     }
 
-    const data = reactions[reaction.emoji];
-    if (!data.users.includes(reaction.senderAddress)) {
-      data.users.push(reaction.senderAddress);
-      data.count = data.users.length;
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      for (const [targetEventId, list] of byTarget) {
+        try {
+          const msg = await this.messageRepo.getByEventId(targetEventId);
+          if (!msg) continue; // target not in Dexie (yet) — same drop semantics as before
+
+          const reactions = msg.reactions ?? {};
+          let last: ParsedReaction | null = null;
+          for (const reaction of list) {
+            if (!reactions[reaction.emoji]) {
+              reactions[reaction.emoji] = { count: 0, users: [] };
+            }
+            const data = reactions[reaction.emoji];
+            if (!data.users.includes(reaction.senderAddress)) {
+              data.users.push(reaction.senderAddress);
+              data.count = data.users.length;
+            }
+            // Track our own reaction eventId for future removal
+            if (reaction.isMine && reaction.eventId.startsWith("$")) {
+              data.myEventId = reaction.eventId;
+            }
+            last = reaction;
+          }
+
+          await this.messageRepo.updateReactions(targetEventId, reactions);
+
+          // Cascade: update room preview if this is the last message
+          // (same transaction — rooms table is in scope).
+          if (last) {
+            await this.cascadeReactionToRoom(msg.roomId, targetEventId, {
+              emoji: last.emoji,
+              senderAddress: last.senderAddress,
+              timestamp: Date.now(),
+            });
+          }
+
+          changedRooms.add(msg.roomId);
+        } catch (err) {
+          // Fault-tolerant: one corrupted reaction must not abort the batch.
+          console.error("[EventWriter] flushReactions: failed for target, skipping:", targetEventId, err);
+        }
+      }
+    });
+
+    for (const roomId of changedRooms) {
+      this.onChange?.(roomId);
     }
-
-    // Track our own reaction eventId for future removal
-    if (reaction.isMine && reaction.eventId.startsWith("$")) {
-      data.myEventId = reaction.eventId;
-    }
-
-    await this.messageRepo.updateReactions(reaction.targetEventId, reactions);
-
-    // Cascade: update room preview if this is the last message (non-blocking)
-    this.cascadeReactionToRoom(msg.roomId, reaction.targetEventId, {
-      emoji: reaction.emoji,
-      senderAddress: reaction.senderAddress,
-      timestamp: Date.now(),
-    }).catch(() => {});
-
-    this.onChange?.(msg.roomId);
   }
 
   /** Remove a reaction (redaction of a reaction event) */

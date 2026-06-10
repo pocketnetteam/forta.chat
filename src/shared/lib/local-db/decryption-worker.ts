@@ -87,7 +87,13 @@ export class DecryptionWorker {
     }
   }
 
-  /** Process all ready jobs in the queue. */
+  /** Process all ready jobs in the queue.
+   *
+   *  WEE-93: DB writes are batched per tick. Previously every job committed
+   *  its results (message update, room preview, job delete) as separate
+   *  transactions — a backlog tick of 20 jobs cost ~100+ IndexedDB
+   *  transactions on slow Android. Now: one bulk "processing" mark, a pure
+   *  decrypt phase with no DB writes, and one commit transaction per tick. */
   async tick(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
@@ -95,24 +101,69 @@ export class DecryptionWorker {
     try {
       const now = Date.now();
 
-      const queuedJobs = await this.db.decryptionQueue
-        .where("[status+nextAttemptAt]")
-        .between(["queued", 0], ["queued", now], true, true)
-        .limit(BATCH_SIZE)
-        .toArray();
+      // Pick + bulk "processing" mark in ONE transaction so a concurrent
+      // retryForRoom reset can't be clobbered between read and mark.
+      const jobs = await this.db.transaction("rw", this.db.decryptionQueue, async () => {
+        const queuedJobs = await this.db.decryptionQueue
+          .where("[status+nextAttemptAt]")
+          .between(["queued", 0], ["queued", now], true, true)
+          .limit(BATCH_SIZE)
+          .toArray();
 
-      const remaining = BATCH_SIZE - queuedJobs.length;
-      const waitingJobs = remaining > 0
-        ? await this.db.decryptionQueue
-            .where("[status+nextAttemptAt]")
-            .between(["waiting", 0], ["waiting", now], true, true)
-            .limit(remaining)
-            .toArray()
-        : [];
+        const remaining = BATCH_SIZE - queuedJobs.length;
+        const waitingJobs = remaining > 0
+          ? await this.db.decryptionQueue
+              .where("[status+nextAttemptAt]")
+              .between(["waiting", 0], ["waiting", now], true, true)
+              .limit(remaining)
+              .toArray()
+          : [];
 
-      for (const job of [...queuedJobs, ...waitingJobs]) {
-        await this.processJob(job);
+        const picked = [...queuedJobs, ...waitingJobs];
+        if (picked.length > 0) {
+          await this.db.decryptionQueue
+            .where("id")
+            .anyOf(picked.map((j) => j.id!))
+            .modify({ status: "processing" });
+        }
+        return picked;
+      });
+
+      if (jobs.length === 0) return;
+
+      // Decrypt phase — pure crypto, no DB writes.
+      const results: Array<{ job: DecryptionJob; ok: boolean; body?: string; error?: unknown }> = [];
+      for (const job of jobs) {
+        try {
+          const raw = JSON.parse(job.encryptedBody);
+          const roomCrypto = await this.getRoomCrypto(job.roomId);
+          if (!roomCrypto) throw new Error("Room crypto not available");
+          const result = await roomCrypto.decryptEvent(raw);
+          results.push({ job, ok: true, body: result.body });
+        } catch (e) {
+          results.push({ job, ok: false, error: e });
+        }
       }
+
+      // Commit phase — one transaction for the whole tick.
+      await this.db.transaction(
+        "rw",
+        [this.db.messages, this.db.rooms, this.db.decryptionQueue],
+        async () => {
+          for (const r of results) {
+            try {
+              if (r.ok) {
+                await this.commitSuccess(r.job, r.body!);
+              } else {
+                await this.commitFailure(r.job, r.error);
+              }
+            } catch (err) {
+              // Fault-tolerant: one bad job must not abort the whole commit.
+              console.error("[decryption] commit failed for", r.job.eventId, err);
+            }
+          }
+        },
+      );
     } finally {
       this.processing = false;
       this.scheduleNext();
@@ -236,6 +287,20 @@ export class DecryptionWorker {
     });
   }
 
+  /** Boot recovery: re-queue jobs left in "processing" by a previous session
+   *  that died mid-tick. They are otherwise stranded forever — retryForRoom
+   *  skips "processing" jobs and requeueStuckMessage refuses to touch them.
+   *  Safe at init: no tick is running yet in this session. */
+  async recoverOrphanedProcessing(): Promise<number> {
+    const count = await this.db.decryptionQueue
+      .where("status").equals("processing")
+      .modify({ status: "queued", nextAttemptAt: Date.now() });
+    if (count > 0) {
+      console.info(`[decryption] recovered ${count} orphaned processing job(s)`);
+    }
+    return count;
+  }
+
   /** Retry all queued/waiting jobs immediately (called on online transition). */
   async retryAllWaiting(): Promise<void> {
     await this.db.decryptionQueue
@@ -274,94 +339,95 @@ export class DecryptionWorker {
     }
   }
 
-  private async processJob(job: DecryptionJob): Promise<void> {
-    await this.db.decryptionQueue.update(job.id!, { status: "processing" });
+  /** Commit a successful decrypt — runs inside the tick's commit transaction. */
+  private async commitSuccess(job: DecryptionJob, body: string): Promise<void> {
+    // Update message content in DB
+    const msg = await this.db.messages
+      .where("eventId").equals(job.eventId).first();
+    if (!msg) {
+      // Message row not persisted yet (e.g. still sitting in the EventWriter
+      // write buffer). Deleting the job here would discard the only retry
+      // handle and leave the message "[encrypted]" until the next boot sweep
+      // — back off and retry instead (bounded by MAX_ATTEMPTS).
+      await this.commitFailure(job, new Error("message row not yet persisted"));
+      return;
+    }
 
+    await this.db.messages.update(msg.localId!, {
+      content: body,
+      decryptionStatus: "ok",
+      encryptedBody: undefined,
+    });
+
+    // Update room preview if this is the latest message
+    if (this.roomRepo) {
+      await this.updateRoomPreviewIfLatest(msg.roomId, msg.eventId!, body, msg.senderId, msg.type, msg.timestamp);
+    }
+
+    // Clear room-level decryption status
     try {
-      const raw = JSON.parse(job.encryptedBody);
-      const roomCrypto = await this.getRoomCrypto(job.roomId);
-      if (!roomCrypto) throw new Error("Room crypto not available");
+      const room = await this.db.rooms.where("id").equals(job.roomId).first();
+      if (room && room.lastMessageEventId === job.eventId) {
+        await this.db.rooms.update(job.roomId, {
+          lastMessageDecryptionStatus: undefined,
+        });
+      }
+    } catch { /* non-critical */ }
 
-      const result = await roomCrypto.decryptEvent(raw);
+    // Remove completed job
+    await this.db.decryptionQueue.delete(job.id!);
+  }
 
-      // Success: update message content in DB
+  /** Commit a failed decrypt (backoff/dead) — runs inside the tick's commit transaction. */
+  private async commitFailure(job: DecryptionJob, e: unknown): Promise<void> {
+    const attempts = job.attempts + 1;
+    const isDead = attempts >= MAX_ATTEMPTS;
+
+    cryptoDebug("retry:fail", {
+      eventId: job.eventId,
+      roomId: job.roomId,
+      attempts,
+      isDead,
+      error: e instanceof Error ? e.message : String(e),
+    });
+
+    let delay: number;
+    if (attempts <= FAST_BACKOFF_MS.length) {
+      delay = FAST_BACKOFF_MS[attempts - 1];
+    } else {
+      const slowIdx = Math.min(
+        attempts - FAST_BACKOFF_MS.length - 1,
+        SLOW_BACKOFF_MS.length - 1,
+      );
+      delay = SLOW_BACKOFF_MS[slowIdx];
+    }
+    const jitter = Math.random() * delay * 0.2;
+
+    await this.db.decryptionQueue.update(job.id!, {
+      status: isDead ? "dead" : "waiting",
+      attempts,
+      nextAttemptAt: isDead ? 0 : Date.now() + delay + jitter,
+      lastError: String(e instanceof Error ? e.message : e),
+    });
+
+    // Mark message as failed if dead
+    if (isDead) {
       const msg = await this.db.messages
         .where("eventId").equals(job.eventId).first();
       if (msg) {
         await this.db.messages.update(msg.localId!, {
-          content: result.body,
-          decryptionStatus: "ok",
-          encryptedBody: undefined,
+          decryptionStatus: "failed",
         });
-
-        // Update room preview if this is the latest message
-        if (this.roomRepo) {
-          await this.updateRoomPreviewIfLatest(msg.roomId, msg.eventId!, result.body, msg.senderId, msg.type, msg.timestamp);
-        }
       }
 
-      // Clear room-level decryption status
       try {
         const room = await this.db.rooms.where("id").equals(job.roomId).first();
         if (room && room.lastMessageEventId === job.eventId) {
           await this.db.rooms.update(job.roomId, {
-            lastMessageDecryptionStatus: undefined,
+            lastMessageDecryptionStatus: "failed",
           });
         }
       } catch { /* non-critical */ }
-
-      // Remove completed job
-      await this.db.decryptionQueue.delete(job.id!);
-    } catch (e) {
-      const attempts = job.attempts + 1;
-      const isDead = attempts >= MAX_ATTEMPTS;
-
-      cryptoDebug("retry:fail", {
-        eventId: job.eventId,
-        roomId: job.roomId,
-        attempts,
-        isDead,
-        error: e instanceof Error ? e.message : String(e),
-      });
-
-      let delay: number;
-      if (attempts <= FAST_BACKOFF_MS.length) {
-        delay = FAST_BACKOFF_MS[attempts - 1];
-      } else {
-        const slowIdx = Math.min(
-          attempts - FAST_BACKOFF_MS.length - 1,
-          SLOW_BACKOFF_MS.length - 1,
-        );
-        delay = SLOW_BACKOFF_MS[slowIdx];
-      }
-      const jitter = Math.random() * delay * 0.2;
-
-      await this.db.decryptionQueue.update(job.id!, {
-        status: isDead ? "dead" : "waiting",
-        attempts,
-        nextAttemptAt: isDead ? 0 : Date.now() + delay + jitter,
-        lastError: String(e instanceof Error ? e.message : e),
-      });
-
-      // Mark message as failed if dead
-      if (isDead) {
-        const msg = await this.db.messages
-          .where("eventId").equals(job.eventId).first();
-        if (msg) {
-          await this.db.messages.update(msg.localId!, {
-            decryptionStatus: "failed",
-          });
-        }
-
-        try {
-          const room = await this.db.rooms.where("id").equals(job.roomId).first();
-          if (room && room.lastMessageEventId === job.eventId) {
-            await this.db.rooms.update(job.roomId, {
-              lastMessageDecryptionStatus: "failed",
-            });
-          }
-        } catch { /* non-critical */ }
-      }
     }
   }
 
