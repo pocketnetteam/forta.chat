@@ -256,13 +256,23 @@ const toggleSearch = () => {
           autofocus
         />
       </div>
+      <!-- Render results only once there's a query — ContactSearch's empty
+           state ("No chats or users found") would otherwise show on an empty
+           input. Until then, show a neutral prompt. -->
       <ContactSearch
+        v-if="addQuery.trim()"
         :query="addQuery"
         class="flex-1 overflow-y-auto py-1"
         @room-created="handleAddRoomCreated"
         @select-message="handleAddSelectMessage"
         @clear="addQuery = ''"
       />
+      <div
+        v-else
+        class="flex flex-1 items-start justify-center p-6 text-center text-sm text-text-on-main-bg-color"
+      >
+        {{ t("contacts.addPlaceholder") }}
+      </div>
     </template>
 
     <!-- Search bar -->
