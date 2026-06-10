@@ -1197,6 +1197,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     _setUnreadCount(roomId, serverCount, "matrix-sync");
   };
 
+  /** Unread count as it was the moment the user opened the room (WEE-95).
+   *  setActiveRoom zeroes the badge synchronously (sidebar UX / WEE-44 push-tap),
+   *  but the unread banner renders AFTER that and needs the pre-open value. */
+  let _preOpenUnread: { roomId: string; count: number } | null = null;
+
+  /** Pre-open unread count for the unread banner; undefined when the room
+   *  wasn't opened via setActiveRoom (e.g. cold-boot deep link). */
+  const getPreOpenUnreadCount = (roomId: string): number | undefined =>
+    _preOpenUnread?.roomId === roomId ? _preOpenUnread.count : undefined;
+
   const markRoomAsRead = (roomId: string) => {
     _setUnreadCount(roomId, 0, "markAsRead");
 
@@ -3484,6 +3494,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // useUnreadBanner can still see unread messages and show the banner.
       // The actual watermark advancement happens via useReadTracker (IntersectionObserver)
       // when the user scrolls through and actually sees the messages.
+      //
+      // WEE-95: snapshot the pre-open count FIRST — the unread banner reads it
+      // after this synchronous zeroing (MessageList's watcher runs post-flush),
+      // so without the snapshot the banner would never appear.
+      {
+        const lrPre = dexieRoomMap.get(roomId);
+        const inMemPre = getRoomById(roomId);
+        _preOpenUnread = {
+          roomId,
+          count: lrPre?.unreadCount ?? inMemPre?.unreadCount ?? 0,
+        };
+      }
       if (chatDbKitRef.value) {
         chatDbKitRef.value.eventWriter.clearUnread(roomId);
       }
@@ -7118,6 +7140,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getDbKit,
     dexieMessagesReady,
     dexieRoomMap,
+    getPreOpenUnreadCount,
     dexieRoomsReady,
     expandMessageWindow,
     messageWindowSize,

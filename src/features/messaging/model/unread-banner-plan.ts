@@ -15,11 +15,21 @@ export interface UnreadBannerPlan {
 
 export interface UnreadBannerSources {
   /** Sync in-memory LocalRoom from chat-store's dexieRoomMap — preferred,
-   *  zero I/O. `unreadCount` here is the same value the sidebar badge shows,
-   *  so the banner always agrees with what the user saw before opening. */
-  cachedRoom: Pick<LocalRoom, "unreadCount" | "lastReadInboundTs"> | undefined;
+   *  zero I/O. Only the watermark is read from here: setActiveRoom does NOT
+   *  touch lastReadInboundTs (it advances later via the read tracker). */
+  cachedRoom: Pick<LocalRoom, "lastReadInboundTs"> | undefined;
+  /** Unread count snapshotted by setActiveRoom BEFORE it zeroes the badge.
+   *  The cached/Dexie unreadCount cannot be trusted here — by the time the
+   *  banner computes, setActiveRoom has already cleared it synchronously
+   *  (sidebar UX). The snapshot is server-reconciled (same value as the badge
+   *  the user just tapped), so multi-device reads are reflected. */
+  preOpenUnreadCount: number | undefined;
   /** Async Dexie fallback when the in-memory cache has no entry yet (cold boot) */
-  getRoom: () => Promise<Pick<LocalRoom, "unreadCount" | "lastReadInboundTs"> | undefined>;
+  getRoom: () => Promise<Pick<LocalRoom, "lastReadInboundTs"> | undefined>;
+  /** Honest unread recount from messages (index scan) — only used when no
+   *  pre-open snapshot exists (cold-boot deep link), where the zeroed Dexie
+   *  field would otherwise hide the banner. Rare path, scan cost acceptable. */
+  countUnreadAfter: (watermarkTs: number) => Promise<number>;
   /** Anchor lookup — cheap [roomId+timestamp] limit(1) point query */
   getLastMessageAtOrBefore: (
     watermarkTs: number,
@@ -36,12 +46,12 @@ const noBanner = (needsBootstrap: boolean): UnreadBannerPlan => ({
 /**
  * Resolve the unread-banner plan for a room being opened.
  *
- * WEE-95: previously this path scanned the room's messages with
+ * WEE-95: previously this path always scanned the room's messages with
  * `countInboundAfter()` (a JS-filter pass — 100-500ms on 10k+ message rooms)
- * before the first render. The unread count is already maintained in
- * `dexieRoomMap`, so the common path is now fully synchronous; the only
- * remaining await is the cheap anchor point-query, and only when there
- * actually are unread messages.
+ * before the first render. The common path is now fully synchronous (cached
+ * watermark + pre-open count snapshot); the scan survives only as the
+ * cold-boot fallback, and the only other await is the cheap anchor
+ * point-query when there actually are unread messages.
  */
 export async function resolveUnreadBannerPlan(
   sources: UnreadBannerSources,
@@ -51,7 +61,8 @@ export async function resolveUnreadBannerPlan(
 
   if (watermarkTs <= 0) return noBanner(true);
 
-  const unreadCount = room?.unreadCount ?? 0;
+  const unreadCount =
+    sources.preOpenUnreadCount ?? (await sources.countUnreadAfter(watermarkTs));
   if (unreadCount <= 0) return noBanner(false);
 
   const lastReadMsg = await sources.getLastMessageAtOrBefore(watermarkTs);
