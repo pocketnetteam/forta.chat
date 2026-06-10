@@ -668,13 +668,17 @@ watch(
       const dbKit = getChatDb();
       const clearedAtTs = dbKit.eventWriter.getClearedAtTs(roomId);
 
-      // WEE-95: read watermark + unread count from the in-memory dexieRoomMap
-      // cache (sync, no I/O) instead of scanning the room's messages with
-      // countInboundAfter() — a 100-500ms JS-filter pass on 10k+ message rooms
-      // that blocked the first render. Dexie fallback only on a cold cache.
+      // WEE-95: watermark from the in-memory dexieRoomMap cache + unread count
+      // from the pre-open snapshot (sync, no I/O) instead of scanning the
+      // room's messages with countInboundAfter() — a 100-500ms JS-filter pass
+      // on 10k+ message rooms that blocked the first render. The async
+      // fallbacks only run on a cold cache (boot deep-link).
       const plan = await resolveUnreadBannerPlan({
         cachedRoom: chatStore.dexieRoomMap.get(roomId),
+        preOpenUnreadCount: chatStore.getPreOpenUnreadCount(roomId),
         getRoom: () => dbKit.rooms.getRoom(roomId),
+        countUnreadAfter: (ts) =>
+          dbKit.messages.countInboundAfter(roomId, ts, authStore.address ?? "", clearedAtTs),
         getLastMessageAtOrBefore: (ts) => dbKit.messages.getLastMessageAtOrBefore(roomId, ts, clearedAtTs),
       });
       if (isStale()) return;

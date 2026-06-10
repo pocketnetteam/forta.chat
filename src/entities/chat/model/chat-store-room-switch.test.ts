@@ -143,6 +143,9 @@ function makeKit(opts: {
       writeMessages: vi.fn((_msgs: unknown[]) => (opts.writeMessages ? opts.writeMessages() : Promise.resolve())),
       writeEdit: vi.fn(async () => {}),
     },
+    db: {
+      rooms: { update: vi.fn(async () => 1) },
+    },
     retryRoomDecryption: vi.fn(),
   };
 }
@@ -193,6 +196,23 @@ describe("WEE-95 A2 — room switch drops stale liveQuery snapshot synchronously
     resolveB!([makeLocalMsg("!b:s", "$b1")]);
     await waitFor(() => store.activeMessages.length > 0);
     expect(store.activeMessages[0]?.roomId).toBe("!b:s");
+  });
+
+  it("snapshots the pre-open unread count BEFORE zeroing the badge (banner source)", async () => {
+    const kit = makeKit();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    store.setChatDbKit(kit as any);
+    // Simulate server-reconciled unread state in the in-memory room cache
+    store.dexieRoomMap.set("!a:s", makeLocalRoom("!a:s", { unreadCount: 5, lastReadInboundTs: 1000 }));
+
+    await store.setActiveRoom("!a:s");
+
+    // Badge zeroed synchronously for the sidebar...
+    expect(store.dexieRoomMap.get("!a:s")?.unreadCount).toBe(0);
+    // ...but the banner can still read the pre-open value
+    expect(store.getPreOpenUnreadCount("!a:s")).toBe(5);
+    // The snapshot is scoped to the opened room only
+    expect(store.getPreOpenUnreadCount("!b:s")).toBeUndefined();
   });
 
   it("re-setting the SAME room does not clear messages (no skeleton flash)", async () => {
