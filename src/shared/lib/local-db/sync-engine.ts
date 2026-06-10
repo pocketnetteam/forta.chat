@@ -247,9 +247,9 @@ export class SyncEngine {
       // Fire-and-forget — retryAllFailed itself calls processQueue().
       // NOTE: we intentionally do NOT call recoverStrandedOps() here because
       // it has a race with an already-in-flight processQueue() (it could
-      // reset a "syncing" op that's mid-execution). recoverStrandedOps is
-      // documented as "call once at startup before processQueue()" — callers
-      // own that ordering.
+      // reset a "syncing" op that's mid-execution). Callers own that ordering:
+      // run it before processQueue(), or pass the snapshotStrandedOpIds()
+      // whitelist when deferring it past queue start (WEE-97).
       this.retryAllFailed().catch((e) => {
         console.warn("[SyncEngine] retryAllFailed on reconnect failed:", e);
         this.processQueue();
@@ -258,15 +258,43 @@ export class SyncEngine {
   }
 
   /**
+   * Snapshot the ids of ops currently stranded in "syncing" — carried over
+   * from a previous session (crash mid-send). Indexed lookup over a handful
+   * of rows, NOT a table scan.
+   *
+   * WEE-97: recovery is deferred until after the chat list is interactive,
+   * but processQueue() starts immediately and marks in-flight ops "syncing".
+   * Taking this snapshot at startup (before processQueue) lets the deferred
+   * recoverStrandedOps(onlyIds) reset only genuinely stranded ops, never an
+   * op this session has since claimed.
+   */
+  async snapshotStrandedOpIds(): Promise<number[]> {
+    const ids = await this.db.pendingOps
+      .where("status")
+      .equals("syncing")
+      .primaryKeys();
+    return ids as number[];
+  }
+
+  /**
    * Recover operations stranded in "syncing" state (e.g. after app crash mid-send).
    * Resets them back to "pending" so processQueue() will pick them up.
-   * Must be called once at startup before processQueue().
+   *
+   * Ordering contract: either call once at startup BEFORE processQueue(), or
+   * — when deferred past processQueue() start (WEE-97) — pass the `onlyIds`
+   * snapshot taken at startup via snapshotStrandedOpIds() so ops claimed by
+   * the live queue in the meantime are never reset mid-flight.
    */
-  async recoverStrandedOps(): Promise<void> {
-    const stranded = await this.db.pendingOps
+  async recoverStrandedOps(onlyIds?: number[]): Promise<void> {
+    let stranded = await this.db.pendingOps
       .where("status")
       .equals("syncing")
       .toArray();
+
+    if (onlyIds) {
+      const allow = new Set(onlyIds);
+      stranded = stranded.filter((op) => op.id != null && allow.has(op.id));
+    }
 
     if (stranded.length === 0) return;
 

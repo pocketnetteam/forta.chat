@@ -307,13 +307,17 @@ export class MatrixClientService {
     }
 
     // Sync config: lazy loading for speed, members loaded explicitly when needed
-    // initialSyncLimit: 1 keeps sync payload small for accounts with many rooms.
-    // Only the last timeline event per room is included; full history is loaded
-    // on-demand when a room is opened (loadAllMessages).
+    // initialSyncLimit applies ONLY to the very first /sync (no saved token) —
+    // the SDK clones the filter inline with this timeline limit, while all
+    // incremental syncs use the uploaded filter above (limit 20). Was 1, which
+    // made the first sync return a single event per room and forced sequential
+    // per-room scrollback to fill timelines — skeletons on every first room
+    // open after install/re-login (WEE-97 item 4). 20 matches the incremental
+    // filter limit; full history is still loaded on-demand (loadAllMessages).
     await userClient.startClient({
       pollTimeout: 60000,
       resolveInvitesToProfiles: false,
-      initialSyncLimit: 1,
+      initialSyncLimit: 20,
       disablePresence: true,
       lazyLoadMembers: true,
       ...(syncFilter ? { filter: syncFilter } : {}),
