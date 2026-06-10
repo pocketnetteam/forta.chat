@@ -12,6 +12,8 @@ export const en = {
   "contacts.searchPlaceholder": "Search contacts...",
   "contacts.noFound": "No contacts found",
   "contacts.noYet": "No contacts yet",
+  "contacts.addContact": "Add contact",
+  "contacts.addPlaceholder": "Search by name or address...",
 
   // ── Contact list ──
   "contactList.loadingChats": "Loading your chats and contacts",
@@ -34,6 +36,9 @@ export const en = {
   "contactList.delete": "Delete",
   "contactList.deleteChat": "Delete chat?",
   "contactList.deleteChatConfirm": "Do you really want to leave and delete this chat?",
+  "contactList.deleteDmConfirm": "Clear just the message history, or delete the chat entirely? The contact stays if you only clear history.",
+  "contactList.clearHistory": "Clear history",
+  "contactList.deleteAndLeave": "Delete and leave",
   "contactList.cancel": "Cancel",
   "contactList.draft": "Draft",
 

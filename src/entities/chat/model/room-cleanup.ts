@@ -90,12 +90,21 @@ export async function cleanupStaleRooms(ctx: CleanupContext): Promise<number> {
       continue;
     }
     if (!ctx.isRoomInSdk(room.id)) {
-      // DATA-LOSS GUARD (WEE-61): a recently-synced room may simply not be
-      // materialized into SDK memory yet on a slow cold-start. Only treat it as
-      // a genuine orphan if it hasn't synced for longer than the safety window.
-      const syncedAt = room.syncedAt ?? 0;
-      if (now - syncedAt < ORPHAN_SYNC_SAFETY_MS) {
-        continue; // fresh — keep, SDK just hasn't loaded it yet
+      // DATA-LOSS GUARD (WEE-61 + WEE-65): a recently-synced room may simply not
+      // be materialized into SDK memory yet on a slow cold-start. Only treat it
+      // as a genuine orphan if it hasn't synced for longer than the safety
+      // window.
+      //
+      // WEE-65 — NEW-DEVICE DATA LOSS: on a fresh install / reinstall every room
+      // lands in Dexie with `syncedAt = undefined` *before* the first sync
+      // materializes it into the SDK. The previous `syncedAt ?? 0` collapsed
+      // that to epoch 0, so `now - 0` always exceeded the window and valid
+      // never-synced rooms (= contacts) were tombstoned before the first sync
+      // could claim them. A never-synced room is therefore kept unconditionally;
+      // it is only ever removed once it HAS a syncedAt older than the window
+      // (i.e. it was synced before and has since gone genuinely orphaned).
+      if (!room.syncedAt || now - room.syncedAt < ORPHAN_SYNC_SAFETY_MS) {
+        continue; // never-synced (new device) or fresh — keep
       }
       toRemove.push(room.id);
       continue;

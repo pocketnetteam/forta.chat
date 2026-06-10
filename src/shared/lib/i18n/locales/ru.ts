@@ -14,6 +14,8 @@ export const ru: Record<TranslationKey, string> = {
   "contacts.searchPlaceholder": "Поиск контактов...",
   "contacts.noFound": "Контакты не найдены",
   "contacts.noYet": "Контактов пока нет",
+  "contacts.addContact": "Добавить контакт",
+  "contacts.addPlaceholder": "Поиск по имени или адресу...",
 
   // ── Contact list ──
   "contactList.loadingChats": "Загружаем ваши чаты и контакты",
@@ -36,6 +38,9 @@ export const ru: Record<TranslationKey, string> = {
   "contactList.delete": "Удалить",
   "contactList.deleteChat": "Удалить чат?",
   "contactList.deleteChatConfirm": "Вы действительно хотите выйти и удалить этот чат?",
+  "contactList.deleteDmConfirm": "Очистить только историю переписки или удалить чат полностью? Контакт сохранится, если очистить историю.",
+  "contactList.clearHistory": "Очистить историю",
+  "contactList.deleteAndLeave": "Удалить и выйти",
   "contactList.cancel": "Отмена",
   "contactList.draft": "Черновик",
 
