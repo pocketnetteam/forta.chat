@@ -1,0 +1,64 @@
+import type { LocalRoom, LocalMessage } from "@/shared/lib/local-db";
+
+/** Decision for the unread banner on room open (WEE-95). */
+export interface UnreadBannerPlan {
+  /** Stable id of the last read message — banner anchor (may be null when
+   *  the anchor message fell out of the local window) */
+  lastReadId: string | null;
+  unreadCount: number;
+  /** True when the banner should be frozen and scrolled to */
+  scrollToBanner: boolean;
+  /** Room has no read watermark yet — needs a first-visit bootstrap
+   *  (caller runs it fire-and-forget, off the render path) */
+  needsBootstrap: boolean;
+}
+
+export interface UnreadBannerSources {
+  /** Sync in-memory LocalRoom from chat-store's dexieRoomMap — preferred,
+   *  zero I/O. `unreadCount` here is the same value the sidebar badge shows,
+   *  so the banner always agrees with what the user saw before opening. */
+  cachedRoom: Pick<LocalRoom, "unreadCount" | "lastReadInboundTs"> | undefined;
+  /** Async Dexie fallback when the in-memory cache has no entry yet (cold boot) */
+  getRoom: () => Promise<Pick<LocalRoom, "unreadCount" | "lastReadInboundTs"> | undefined>;
+  /** Anchor lookup — cheap [roomId+timestamp] limit(1) point query */
+  getLastMessageAtOrBefore: (
+    watermarkTs: number,
+  ) => Promise<Pick<LocalMessage, "eventId" | "clientId"> | undefined>;
+}
+
+const noBanner = (needsBootstrap: boolean): UnreadBannerPlan => ({
+  lastReadId: null,
+  unreadCount: 0,
+  scrollToBanner: false,
+  needsBootstrap,
+});
+
+/**
+ * Resolve the unread-banner plan for a room being opened.
+ *
+ * WEE-95: previously this path scanned the room's messages with
+ * `countInboundAfter()` (a JS-filter pass — 100-500ms on 10k+ message rooms)
+ * before the first render. The unread count is already maintained in
+ * `dexieRoomMap`, so the common path is now fully synchronous; the only
+ * remaining await is the cheap anchor point-query, and only when there
+ * actually are unread messages.
+ */
+export async function resolveUnreadBannerPlan(
+  sources: UnreadBannerSources,
+): Promise<UnreadBannerPlan> {
+  const room = sources.cachedRoom ?? (await sources.getRoom());
+  const watermarkTs = room?.lastReadInboundTs ?? 0;
+
+  if (watermarkTs <= 0) return noBanner(true);
+
+  const unreadCount = room?.unreadCount ?? 0;
+  if (unreadCount <= 0) return noBanner(false);
+
+  const lastReadMsg = await sources.getLastMessageAtOrBefore(watermarkTs);
+  return {
+    lastReadId: lastReadMsg?.eventId ?? lastReadMsg?.clientId ?? null,
+    unreadCount,
+    scrollToBanner: true,
+    needsBootstrap: false,
+  };
+}

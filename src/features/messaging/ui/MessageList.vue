@@ -24,6 +24,7 @@ import TypingBubble from "./TypingBubble.vue";
 import ChatVirtualScroller from "@/shared/ui/ChatVirtualScroller.vue";
 import { useI18n } from "@/shared/lib/i18n";
 import { useUnreadBanner } from "../model/use-unread-banner";
+import { resolveUnreadBannerPlan } from "../model/unread-banner-plan";
 import { useReadTracker } from "../model/use-read-tracker";
 import { decideFabAction, shouldAutoDismissBanner } from "../model/fab-decision";
 import UnreadBanner from "./UnreadBanner.vue";
@@ -570,6 +571,52 @@ let scrollThrottleRaf: number | null = null;
 // Track the settled safety timeout so it can be cleared on room switch
 let pendingSettledTimeout: ReturnType<typeof setTimeout> | null = null;
 
+/** Resolve when activeMessages belong to `roomId`, when the user switches to
+ *  another room, or after `timeoutMs` — whichever comes first. Event-driven
+ *  replacement for the old 10ms polling loop (WEE-95): setActiveRoom now resets
+ *  the liveQuery synchronously, so this only waits for its first emission. */
+const waitForRoomMessages = (roomId: string, timeoutMs: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    const matches = (msgs: readonly { roomId: string }[]) =>
+      msgs.length > 0 && msgs[0]?.roomId === roomId;
+    if (matches(chatStore.activeMessages)) {
+      resolve();
+      return;
+    }
+    let stop: (() => void) | null = null;
+    const finish = () => {
+      clearTimeout(timer);
+      stop?.();
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    stop = watch(
+      () => [chatStore.activeMessages, chatStore.activeRoomId] as const,
+      ([msgs, activeId]) => {
+        if (activeId !== roomId || matches(msgs)) finish();
+      },
+    );
+  });
+
+/** Resolve when the Dexie liveQuery produced its first emission, or after `timeoutMs`. */
+const waitForDexieReady = (timeoutMs: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    if (chatStore.dexieMessagesReady) {
+      resolve();
+      return;
+    }
+    let stop: (() => void) | null = null;
+    const finish = () => {
+      clearTimeout(timer);
+      stop?.();
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    stop = watch(() => chatStore.dexieMessagesReady, (ready) => {
+      if (ready) finish();
+    });
+  });
+
 // Load messages when active room changes
 watch(
   () => chatStore.activeRoomId,
@@ -619,54 +666,46 @@ watch(
 
     if (isChatDbReady()) {
       const dbKit = getChatDb();
-      const room = await dbKit.rooms.getRoom(roomId);
-      if (isStale()) return;
-
-      const watermarkTs = room?.lastReadInboundTs ?? 0;
-      const myAddr = authStore.address ?? "";
       const clearedAtTs = dbKit.eventWriter.getClearedAtTs(roomId);
 
+      // WEE-95: read watermark + unread count from the in-memory dexieRoomMap
+      // cache (sync, no I/O) instead of scanning the room's messages with
+      // countInboundAfter() — a 100-500ms JS-filter pass on 10k+ message rooms
+      // that blocked the first render. Dexie fallback only on a cold cache.
+      const plan = await resolveUnreadBannerPlan({
+        cachedRoom: chatStore.dexieRoomMap.get(roomId),
+        getRoom: () => dbKit.rooms.getRoom(roomId),
+        getLastMessageAtOrBefore: (ts) => dbKit.messages.getLastMessageAtOrBefore(roomId, ts, clearedAtTs),
+      });
+      if (isStale()) return;
+
       if (import.meta.env.DEV) {
-        console.log("[unread-banner] roomId=%s watermarkTs=%d myAddr=%s", roomId, watermarkTs, myAddr);
+        console.log("[unread-banner] roomId=%s unread=%d lastReadId=%s", roomId, plan.unreadCount, plan.lastReadId);
       }
 
-      if (watermarkTs > 0) {
-        const unreadCount = await dbKit.messages.countInboundAfter(roomId, watermarkTs, myAddr, clearedAtTs);
-        if (isStale()) return;
+      if (plan.needsBootstrap) {
+        // Bootstrap watermark for legacy rooms (first visit after feature was
+        // added) — fire-and-forget, must not delay the first render (WEE-95).
+        dbKit.messages.getLastNonDeleted(roomId, clearedAtTs)
+          .then((latestMsg) => {
+            if (latestMsg && latestMsg.timestamp > 0) {
+              return dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
+            }
+          })
+          .catch((e) => {
+            console.warn("[unread-banner] watermark bootstrap failed:", e);
+          });
+      } else if (plan.scrollToBanner) {
+        freezeBanner(plan.lastReadId, plan.unreadCount);
 
-        if (import.meta.env.DEV) {
-          console.log("[unread-banner] unreadCount=%d", unreadCount);
+        // Ensure the Dexie liveQuery window is large enough to include the
+        // last-read message so the banner can match it in virtualItems.
+        const neededWindow = plan.unreadCount + 20;
+        if (neededWindow > chatStore.messageWindowSize) {
+          chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
         }
 
-        if (unreadCount > 0) {
-          const lastReadMsg = await dbKit.messages.getLastMessageAtOrBefore(roomId, watermarkTs, clearedAtTs);
-          if (isStale()) return;
-
-          const lastReadId = lastReadMsg?.eventId ?? lastReadMsg?.clientId ?? null;
-
-          if (import.meta.env.DEV) {
-            console.log("[unread-banner] lastReadId=%s lastReadMsg.ts=%d", lastReadId, lastReadMsg?.timestamp);
-          }
-
-          freezeBanner(lastReadId, unreadCount);
-
-          // Ensure the Dexie liveQuery window is large enough to include the
-          // last-read message so the banner can match it in virtualItems.
-          const neededWindow = unreadCount + 20;
-          if (neededWindow > chatStore.messageWindowSize) {
-            chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
-          }
-
-          scrollToBanner = true;
-        }
-      } else {
-        // Bootstrap watermark for legacy rooms (first visit after feature was added).
-        // Set the watermark to the latest message so future visits can detect unread.
-        const latestMsg = await dbKit.messages.getLastNonDeleted(roomId, clearedAtTs);
-        if (isStale()) return;
-        if (latestMsg && latestMsg.timestamp > 0) {
-          await dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
-        }
+        scrollToBanner = true;
       }
     }
 
@@ -685,23 +724,16 @@ watch(
         const dbKit = getChatDb();
         const clearedAtPeek = dbKit.eventWriter.getClearedAtTs(roomId);
         const peek = await dbKit.messages.getMessages(roomId, 1, undefined, clearedAtPeek);
+        if (isStale()) return;
         if (peek.length > 0) {
-          const dexieWaitDeadline = Date.now() + 2000;
-          while (Date.now() < dexieWaitDeadline) {
-            if (isStale()) return;
-            const am = chatStore.activeMessages;
-            if (am.length > 0 && am[0]?.roomId === roomId) break;
-            await new Promise<void>(r => setTimeout(r, 10));
-          }
+          await waitForRoomMessages(roomId, 2000);
+          if (isStale()) return;
         }
       }
 
       if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
-        const readyDeadline = Date.now() + 500;
-        while (!chatStore.dexieMessagesReady && Date.now() < readyDeadline) {
-          await new Promise(r => setTimeout(r, 10));
-          if (isStale()) return;
-        }
+        await waitForDexieReady(500);
+        if (isStale()) return;
       }
 
       const hasCached = chatStore.activeMessages.length > 0

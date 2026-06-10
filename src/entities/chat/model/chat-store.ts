@@ -1243,7 +1243,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   // Primary message source: Dexie liveQuery (auto-subscribes to DB changes)
-  const { data: dexieMessages, isReady: dexieMessagesReady } = useLiveQuery(
+  const { data: dexieMessages, isReady: dexieMessagesReady, reset: resetDexieMessages } = useLiveQuery(
     () => {
       if (!activeRoomId.value || !chatDbKitRef.value) return [] as import("@/shared/lib/local-db").LocalMessage[];
       const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(activeRoomId.value);
@@ -3386,6 +3386,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // This closes the race where buffered messages land in Dexie during the
     // re-subscription gap and would otherwise be missed until the next mutation.
     const flushPromise = chatDbKitRef.value?.eventWriter.flushWriteBuffer();
+    // WEE-95: synchronously drop the previous room's liveQuery snapshot and force
+    // a re-subscribe. useLiveQuery re-subscribes asynchronously (deps watcher) and
+    // intentionally keeps stale data, so without this reset the OLD room's messages
+    // remain in activeMessages until the new query emits — MessageList had to poll
+    // `activeMessages[0]?.roomId === roomId` every 10ms to paper over the flash.
+    if (roomId !== activeRoomId.value) {
+      resetDexieMessages([]);
+      _liveQueryGen.value++;
+    }
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
     if (flushPromise && roomId) {
@@ -5420,10 +5429,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       setMessages(roomId, filteredMsgs);
 
       // Dual-write: persist all parsed messages to Dexie.
-      // For the active room: awaited so data reaches IndexedDB before a potential F5.
-      // For stale rooms (user switched away): fire-and-forget to avoid blocking
-      // Dexie transactions that the active room needs.
-      const isActiveRoom = activeRoomId.value === roomId;
+      // WEE-95: fire-and-forget for ALL rooms — never block the render-critical
+      // path on a 100+ message Dexie transaction (200-800ms on slow devices,
+      // competing with background writes of other rooms). The active room's UI
+      // is fed by the liveQuery as soon as the write commits; if a refresh races
+      // the write, messages are re-fetched from Matrix on next open.
       if (chatDbKitRef.value && msgs.length > 0) {
         const parsedMessages: ParsedMessage[] = msgs
           .filter(m => m.id && !m.id.startsWith("msg_")) // Skip optimistic temp messages
@@ -5470,19 +5480,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
         };
 
-        if (isActiveRoom) {
-          // Active room: await so data is persisted before user can F5
-          try {
-            await dexieWriteWork();
-          } catch (e) {
-            console.warn("[chat-store] EventWriter.writeMessages failed:", e);
-          }
-        } else {
-          // Stale room: fire-and-forget to unblock Dexie for the active room
-          dexieWriteWork().catch(e => {
-            console.warn("[chat-store] EventWriter.writeMessages (background) failed:", e);
-          });
-        }
+        dexieWriteWork().catch(e => {
+          console.warn("[chat-store] EventWriter.writeMessages failed:", e);
+        });
       }
 
       // Load server-synced pinned messages after messages are available
