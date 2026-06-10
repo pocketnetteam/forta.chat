@@ -87,7 +87,7 @@ class VendorAudioPolicyTest {
     }
 
     // -------------------------------------------------------------------------
-    // requiresExplicitMicUnmuteOnStart() — HONOR-only (A1)
+    // requiresExplicitMicUnmuteOnStart() — aggressive Chinese ROM family (A1)
     // -------------------------------------------------------------------------
 
     @Test
@@ -96,11 +96,32 @@ class VendorAudioPolicyTest {
     }
 
     @Test
-    fun nonHonorVendorsDoNotForceMicUnmuteOnStart() {
-        // Gated to HONOR so the proven generic start path is untouched on every
-        // other device (A5). Post-call reset covers the rest.
+    fun colorOsFamilyRequiresExplicitMicUnmuteOnStart() {
+        // WEE-87 regression: WEE-76 gated the start-time mic unmute to HONOR
+        // only, leaving realme RealmeUI (#994/#995), OPPO ColorOS and Xiaomi
+        // MIUI — the same aggressive HALs that re-assert the global mic-mute
+        // flag mid-setup — without the protection. Mirror-image one-way audio
+        // and 1.10.40 both-way silence followed. These must now opt in.
+        for (v in listOf(CallVendor.REALME, CallVendor.OPPO, CallVendor.XIAOMI)) {
+            assertTrue(
+                "$v (ColorOS/RealmeUI/MIUI) must force a mic unmute mid-setup",
+                VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(v),
+            )
+        }
+    }
+
+    @Test
+    fun workingVendorsDoNotForceMicUnmuteOnStart() {
+        // SAMSUNG / GENERIC ship working HW AEC and must stay byte-for-byte on
+        // the proven generic WEE-54 start path (A5). HUAWEI's #874 symptom was
+        // HW-AEC capture mute (fixed via software AEC), not a mic-mute flag, so
+        // its routing path stays untouched too. Derived as the complement of the
+        // aggressive family over the WHOLE enum so a future CallVendor (e.g.
+        // VIVO / ONEPLUS) is automatically asserted negative until someone opts
+        // it in deliberately — the regression net stays exhaustive.
+        val aggressive = setOf(CallVendor.HONOR, CallVendor.REALME, CallVendor.OPPO, CallVendor.XIAOMI)
         for (v in CallVendor.entries) {
-            if (v == CallVendor.HONOR) continue
+            if (v in aggressive) continue
             assertFalse(
                 "$v must not force a mic unmute mid-setup",
                 VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(v),
