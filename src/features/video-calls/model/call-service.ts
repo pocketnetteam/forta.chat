@@ -324,6 +324,32 @@ function unwireCallEvents(call: MatrixCall) {
   boundHandlers = null;
 }
 
+/**
+ * Stop every local camera/mic (and screenshare) track held by a call.
+ *
+ * WEE-89 (regression of WEE-47): matrix-js-sdk does not reliably stop the
+ * local getUserMedia tracks when a call ends on web, so the browser keeps
+ * the camera/microphone captured and the tab's recording indicator (🔴)
+ * stays lit after the call is over — a privacy problem. On mobile the held
+ * mic also blocks the next call / the system from re-acquiring it. Stop the
+ * tracks explicitly on every platform.
+ *
+ * Native audio-routing teardown stays in finalizeCall(); this only releases
+ * the getUserMedia tracks the SDK leaves behind. MediaStreamTrack.stop() is
+ * idempotent (a no-op on an already-ended track), so calling this from the
+ * overlapping teardown paths (onState→ended, onHangup, onError, rejectCall,
+ * hangup) is safe.
+ */
+function releaseLocalMedia(call: MatrixCall): void {
+  for (const stream of [call.localUsermediaStream, call.localScreensharingStream]) {
+    try {
+      stream?.getTracks().forEach((track) => track.stop());
+    } catch (e) {
+      console.warn("[call-service] releaseLocalMedia: track.stop failed:", e);
+    }
+  }
+}
+
 function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // Defensive: remove any prior handlers first
   unwireCallEvents(call);
@@ -397,6 +423,11 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       playEndTone();
       callStore.stopTimer();
       unwireCallEvents(call);
+      // WEE-89: stop local camera/mic tracks on every platform. The SDK
+      // doesn't reliably release getUserMedia on web, leaving the tab's
+      // recording indicator lit after the call. Native finalizeCall below
+      // still handles audio routing.
+      releaseLocalMedia(call);
       // Single point of native cleanup. Idempotent per callId — if
       // hangup() / rejectCall() already finalized this call, this is a
       // no-op. Steps (stopAudioRouting → reportCallEnded → dismissCallUI
@@ -432,6 +463,10 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     stopAllSounds();
     clearIncomingTimeout();
     clearConnectingWatchdog();
+    // WEE-89: release local media here too — the SDK sometimes fires Hangup
+    // before State transitions to Ended (rejected-while-ringing), so don't
+    // wait for onState→ended to stop the camera/mic tracks.
+    releaseLocalMedia(call);
     // Also tear down the native surface. Without this, when the remote
     // cancels a call we never answered, or when another of our devices
     // picks up (m.call.select_answer), the SDK fires Hangup but the
@@ -458,6 +493,9 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     clearIncomingTimeout();
     clearConnectingWatchdog();
     unwireCallEvents(call);
+    // WEE-89: a failed call may have already acquired local media; release
+    // it so the camera/mic don't stay captured after the error.
+    releaseLocalMedia(call);
     if (isNative) {
       void finalizeCall("error", call.callId);
     }
@@ -987,6 +1025,9 @@ export function useCallService() {
       useBugReport().open({ context: tRaw("bugReport.ctx.placeCall"), error: e });
       stopAllSounds();
       unwireCallEvents(call);
+      // WEE-89: placeCall may have run getUserMedia before throwing — release
+      // any acquired camera/mic tracks so they aren't left captured.
+      releaseLocalMedia(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       // H1/H7 + Session 23: native side of startAudioRouting may have
@@ -1384,6 +1425,10 @@ export function useCallService() {
       try {
         call.hangup(CallErrorCode.UserHangup, false);
       } catch { /* ignore */ }
+      // WEE-89: listeners are unwired above, so onHangup/onState→ended won't
+      // fire — release the media acquired in call.answer() ourselves so the
+      // camera/mic don't stay captured after a watchdog timeout.
+      releaseLocalMedia(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       if (isNative) {
@@ -1424,6 +1469,9 @@ export function useCallService() {
       useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });
       clearConnectingWatchdog();
       unwireCallEvents(call);
+      // WEE-89: call.answer may have run getUserMedia before throwing —
+      // release any acquired camera/mic tracks so they aren't left captured.
+      releaseLocalMedia(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       // H1 + H7 + Session 23: always tear down audio routing on answer
@@ -1495,6 +1543,11 @@ export function useCallService() {
       void finalizeCall("reject", call.callId);
     }
 
+    // WEE-89: a call rejected after it acquired media (e.g. answered then
+    // declined elsewhere) must release the camera/mic. No-op when rejected
+    // while still ringing (no local stream acquired yet).
+    releaseLocalMedia(call);
+
     unwireCallEvents(call);
 
     if (callStore.activeCall) {
@@ -1536,6 +1589,11 @@ export function useCallService() {
     if (isNative) {
       void finalizeCall("hangup", call.callId);
     }
+
+    // WEE-89: stop local tracks immediately on user hangup so the browser's
+    // recording indicator clears without waiting for the SDK's Ended
+    // transition (which onState→ended also releases — idempotent).
+    releaseLocalMedia(call);
 
     // Fallback cleanup if SDK doesn't fire Ended event (#11)
     callStore.scheduleClearCall(3000);
