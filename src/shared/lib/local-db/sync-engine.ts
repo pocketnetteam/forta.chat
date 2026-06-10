@@ -11,6 +11,14 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
+/** Max rooms processed concurrently (WEE-94). Outbound ops stay strictly FIFO
+ *  *within* a room (message order is a hard invariant), but a slow room —
+ *  heavy encryption, slow link, retry backoff — must not head-of-line block
+ *  sends in other rooms. 3 mirrors the `mediaDownloadGate` budget from
+ *  use-file-download: enough overlap to hide one stuck room, small enough not
+ *  to saturate CPU/network on low-end Android. */
+const MAX_CONCURRENT_ROOMS = 3;
+
 /** Re-check interval while the Matrix client is not ready (boot / re-init).
  *  A claimed send op is released back to "pending" WITHOUT counting a retry
  *  and re-polled at this cadence, so messages sent during the not-ready
@@ -36,6 +44,13 @@ const SEND_OPS: ReadonlySet<PendingOperation["type"]> = new Set([
  *  tick we look for stuck pending ops and resume the queue if the underlying
  *  network is actually available. */
 const WATCHDOG_INTERVAL_MS = 30_000;
+
+/** Lease on a claimed ("syncing") op. Under per-room claims (WEE-94) a
+ *  stranded "syncing" row — crashed sibling tab, unexpected rejection —
+ *  blocks its whole room, not just itself, so the watchdog releases claims
+ *  older than this back to "pending". Must comfortably exceed the slowest
+ *  legitimate op: media encrypt (30s) + upload (4min) + send event (20s). */
+const SYNCING_LEASE_MS = 6 * 60_000;
 
 /** Per-phase media pipeline timeouts. Splitting one 5-minute cap into
  *  per-phase caps lets retries surface phase-specific failures (e.g. crypto
@@ -158,7 +173,8 @@ async function uploadWithRetry(
  *
  * Lifecycle:
  *   1. User action → MessageRepository writes to local DB + creates PendingOp
- *   2. SyncEngine.processQueue() picks up ops in FIFO order
+ *   2. SyncEngine.processQueue() picks up ops — strictly FIFO within a room,
+ *      up to MAX_CONCURRENT_ROOMS rooms in parallel (WEE-94)
  *   3. Each op: encrypt if needed → call Matrix API → update local message status
  *   4. On failure: exponential backoff + retry, or mark as "failed"
  *
@@ -166,11 +182,23 @@ async function uploadWithRetry(
  * `setOnline(true)` resumes.
  */
 export class SyncEngine {
+  /** True while the claim loop in processTick is running. Serializes claiming
+   *  (op execution itself runs concurrently per room — see `activeRooms`). */
   private processing = false;
+  /** Rooms with an op currently executing in THIS engine instance. Bounded by
+   *  MAX_CONCURRENT_ROOMS; claimDueOp skips these rooms so per-room FIFO holds. */
+  private activeRooms = new Set<string>();
+  /** A kick arrived while the claim loop was running. processTick re-runs the
+   *  loop once after it finishes so a room freed mid-loop is not stranded
+   *  until the watchdog. */
+  private rekick = false;
   private online = true;
   private scheduled = false;
   private disposed = false;
   private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Epoch ms when the pending scheduledTimer fires; lets kickScheduler pull
+   *  an existing far-future wake (retry backoff) forward for new work. */
+  private scheduledAt = 0;
   /** Watchdog interval handle. Drains stuck queues even when no
    *  connectivity transition signal arrives (Android WebView sleep+wake). */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -307,10 +335,11 @@ export class SyncEngine {
   // ---------------------------------------------------------------------------
 
   /**
-   * Process one op from the queue per tick, then yield to the event loop.
-   * Re-schedules itself via setTimeout until the queue is empty or a retry
-   * is not yet due. This prevents head-of-line blocking: a single failing op
-   * cannot hold the queue for its 30s backoff.
+   * Kick the claim loop. Each tick claims due ops — at most one in-flight op
+   * per room, at most MAX_CONCURRENT_ROOMS rooms in parallel (WEE-94) — and
+   * executes them concurrently. Within a room, order is strictly FIFO: only
+   * the room's head op is ever claimed, so a retrying head blocks its own
+   * room (message order is a hard invariant) but never other rooms.
    *
    * External callers use the public `processQueue()` which is a thin wrapper
    * kicking off the first tick without double-scheduling.
@@ -361,6 +390,8 @@ export class SyncEngine {
    *     wake-up timer was cleared; kick a fresh tick.
    */
   private async watchdogCheck(): Promise<void> {
+    await this.releaseExpiredClaims();
+
     const pending = await this.db.pendingOps
       .where("status")
       .anyOf(["pending", "syncing"])
@@ -382,114 +413,117 @@ export class SyncEngine {
     }
   }
 
-  /** Schedule processTick after `delayMs` unless a tick is already pending. */
+  /** Release "syncing" claims whose lease expired (WEE-94 self-heal). A row
+   *  stranded by a crashed sibling tab or a failed bookkeeping write blocks
+   *  its whole room under per-room claims, and recoverStrandedOps only runs
+   *  at startup — so the watchdog sweeps expired leases each tick. Rooms
+   *  with a live worker in THIS engine are skipped: their op is legitimately
+   *  in flight even if (pathologically) past the lease. Retries are NOT
+   *  incremented — recovery is not a transport failure. */
+  private async releaseExpiredClaims(): Promise<void> {
+    const cutoff = Date.now() - SYNCING_LEASE_MS;
+    const expired = await this.db.pendingOps
+      .where("status")
+      .equals("syncing")
+      .filter(
+        (op) =>
+          !this.activeRooms.has(op.roomId) &&
+          (op.lastAttemptAt ?? op.createdAt ?? 0) <= cutoff,
+      )
+      .toArray();
+    if (expired.length === 0) return;
+
+    console.info(
+      `[SyncEngine] watchdog: releasing ${expired.length} expired "syncing" claim(s)`,
+    );
+    for (const op of expired) {
+      await this.db.pendingOps.update(op.id!, {
+        status: "pending",
+        nextAttemptAt: Date.now(),
+      });
+    }
+  }
+
+  /** Schedule processTick after `delayMs` unless a tick is already pending.
+   *  A kick that arrives while the claim loop itself is running is deferred
+   *  via `rekick` (not dropped) — the loop re-runs once after finishing, so
+   *  a room freed by a just-completed worker is picked up immediately. */
   private kickScheduler(delayMs: number): void {
-    if (this.disposed || this.scheduled || this.processing || !this.online) return;
+    if (this.disposed || !this.online) return;
+    if (this.processing) {
+      this.rekick = true;
+      return;
+    }
+    const fireAt = Date.now() + Math.max(0, delayMs);
+    if (this.scheduled) {
+      // A timer is already pending. Keep it if it fires soon enough;
+      // otherwise pull it forward — e.g. a fresh send enqueued while the
+      // only pending timer is a 30s backoff wake must process immediately,
+      // not wait out the backoff (or the 30s watchdog).
+      if (fireAt >= this.scheduledAt) return;
+      if (this.scheduledTimer !== null) {
+        clearTimeout(this.scheduledTimer);
+        this.scheduledTimer = null;
+      }
+    }
     this.scheduled = true;
+    this.scheduledAt = fireAt;
     this.scheduledTimer = setTimeout(() => {
       this.scheduledTimer = null;
       this.processTick();
     }, Math.max(0, delayMs));
   }
 
+  /**
+   * Claim loop (WEE-94): claim due ops from distinct rooms until either no
+   * claimable op remains or MAX_CONCURRENT_ROOMS workers are in flight.
+   * Each claimed op is executed concurrently via runClaimedOp; its completion
+   * frees the room and kicks the scheduler again.
+   */
   private async processTick(): Promise<void> {
     this.scheduled = false;
     if (this.disposed || this.processing || !this.online) return;
     this.processing = true;
 
-    let op: PendingOperation | null = null;
     let nextRetryDelay: number | null = null; // smallest remaining wait
 
     try {
-      // Claim one due pending op transactionally so concurrent engines
-      // (multi-tab) can't both pick the same record.
-      op = await this.claimDueOp();
+      while (
+        !this.disposed &&
+        this.online &&
+        this.activeRooms.size < MAX_CONCURRENT_ROOMS
+      ) {
+        // Claim the head op of a free room transactionally so concurrent
+        // engines (multi-tab) can't both pick the same record.
+        const op = await this.claimDueOp();
 
-      if (!op) {
-        // Nothing due right now — check whether an op is scheduled for later
-        // so we can set a wake-up timer and then stop this tick cleanly.
-        nextRetryDelay = await this.findNextRetryDelay();
-        return;
-      }
+        if (!op) {
+          // Nothing claimable right now — check whether an op is scheduled
+          // for later so we can set a wake-up timer in the finally block.
+          nextRetryDelay = await this.findNextRetryDelay();
+          break;
+        }
 
-      // Matrix-readiness gate (WEE-85): during the boot / re-init window the
-      // client object isn't ready (`isReady()` false). Sending now would throw
-      // and burn a retry, so instead release the op back to "pending" WITHOUT
-      // counting a retry and reschedule a short re-poll. The op flushes once
-      // the client is ready — mirroring how `online` gates the whole loop.
-      // Real failures still surface via maxRetries once the client is ready.
-      // NOTE: recovery is intentionally poll-based (this 1s re-poll, backed by
-      // the watchdog) — there is no `onReady` event that re-kicks the scheduler
-      // when Matrix becomes ready.
-      if (!this.isMatrixReady()) {
-        await this.db.pendingOps.update(op.id!, {
-          status: "pending",
-          nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
+        this.activeRooms.add(op.roomId);
+        // Deliberately NOT awaited — rooms run in parallel. Errors are fully
+        // handled inside runClaimedOp; the finally here only frees the slot.
+        void this.runClaimedOp(op).finally(() => {
+          this.activeRooms.delete(op.roomId);
+          // Re-check the queue: this room is free again, and the op may have
+          // scheduled a retry whose wake-up needs (re)computing.
+          this.kickScheduler(0);
         });
-        op = null; // don't execute; finally schedules the re-poll wake
-        nextRetryDelay = MATRIX_NOT_READY_RETRY_MS;
-        return;
-      }
-
-      try {
-        await this.executeOperation(op);
-        // If dispose() was called while the send was in flight, skip writing
-        // to a DB we no longer own. The send itself already landed server-side;
-        // the next engine instance will reconcile via Matrix sync.
-        if (this.disposed) return;
-        await this.db.pendingOps.delete(op.id!);
-        this.onChange?.(op.roomId);
-      } catch (e) {
-        if (this.disposed) return;
-
-        // Race guard: Matrix may have accepted the event server-side even
-        // though the SDK threw (read timeout, CORS race, etc.). When the
-        // server-side `/sync` echo arrives via EventWriter → upsertFromServer
-        // the local message picks up its eventId and flips to "synced"
-        // before this catch runs. In that case the queued op is already
-        // satisfied — drop it without flagging the message as failed,
-        // otherwise the user sees a red retry indicator on a message the
-        // peer actually received (WEE-40).
-        if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
-          await this.db.pendingOps.delete(op.id!);
-          this.onChange?.(op.roomId);
-          return;
-        }
-
-        const retries = op.retries + 1;
-        if (retries >= op.maxRetries) {
-          await this.db.pendingOps.update(op.id!, {
-            status: "failed",
-            retries,
-            errorMessage: String(e),
-            lastAttemptAt: Date.now(),
-          });
-          await this.markMessageFailed(op);
-          this.onChange?.(op.roomId);
-        } else {
-          const delay = computeBackoff(retries);
-          await this.db.pendingOps.update(op.id!, {
-            status: "pending",
-            retries,
-            lastAttemptAt: Date.now(),
-            nextAttemptAt: Date.now() + delay,
-          });
-          // We don't `await sleep(delay)` here — other due ops must proceed
-          // immediately. The delay is tracked via nextAttemptAt in the DB,
-          // and a wake-up timer is scheduled in the finally block below.
-        }
       }
     } finally {
       this.processing = false;
-      if (this.online) {
-        if (op) {
-          // We just processed one op. Immediately yield and check for the
-          // next due op. claimDueOp will skip any op whose nextAttemptAt is
-          // still in the future.
+      if (this.online && !this.disposed) {
+        if (this.rekick) {
+          // A worker finished (or new work arrived) mid-loop; re-run now.
+          this.rekick = false;
           this.kickScheduler(0);
         } else if (nextRetryDelay !== null) {
-          // Queue is empty of due ops but a retry is scheduled for later.
-          // Set a single wake-up timer so that retry is actually attempted.
+          // No due ops but a retry is scheduled for later. Set a single
+          // wake-up timer so that retry is actually attempted.
           this.scheduleWake(nextRetryDelay);
         }
       }
@@ -497,26 +531,170 @@ export class SyncEngine {
   }
 
   /**
-   * Atomically claim the next due pending op (status = "pending"
-   * and nextAttemptAt <= now). Returns null if nothing is due.
+   * Execute one claimed op and persist the outcome. Never rejects — a
+   * rejection escaping the spawn site's `.finally()` would surface as an
+   * unhandled promise rejection AND leave the op stuck in "syncing",
+   * blocking its whole room under per-room claims. Bookkeeping failures
+   * (Dexie closed during a logout race, quota errors) are caught here and
+   * the claim is released best-effort; the watchdog's SYNCING_LEASE_MS
+   * recovery is the backstop when even the release write fails.
+   */
+  private async runClaimedOp(op: PendingOperation): Promise<void> {
+    try {
+      await this.processClaimedOp(op);
+    } catch (e) {
+      if (this.disposed) return;
+      console.warn("[SyncEngine] op bookkeeping failed, releasing claim:", e);
+      try {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now() + MIN_BACKOFF_MS,
+        });
+      } catch {
+        // DB is gone (logout/teardown race) — nothing to release; a future
+        // engine instance recovers the row via recoverStrandedOps / lease.
+      }
+    }
+  }
+
+  /**
+   * One claimed op: readiness gate → execute → persist success/failure.
+   * Runs concurrently — one in-flight instance per room, bounded by
+   * MAX_CONCURRENT_ROOMS. Transport errors are handled internally
+   * (backoff / failed); only bookkeeping failures propagate to runClaimedOp.
+   */
+  private async processClaimedOp(op: PendingOperation): Promise<void> {
+    // Matrix-readiness gate (WEE-85): during the boot / re-init window the
+    // client object isn't ready (`isReady()` false). Sending now would throw
+    // and burn a retry, so instead release the op back to "pending" WITHOUT
+    // counting a retry and reschedule a short re-poll. The op flushes once
+    // the client is ready — mirroring how `online` gates the whole loop.
+    // Real failures still surface via maxRetries once the client is ready.
+    // NOTE: recovery is intentionally poll-based (the released op's
+    // nextAttemptAt drives a re-poll via findNextRetryDelay, backed by the
+    // watchdog) — there is no `onReady` event that re-kicks the scheduler
+    // when Matrix becomes ready.
+    if (!this.isMatrixReady()) {
+      if (this.disposed) return;
+      await this.db.pendingOps.update(op.id!, {
+        status: "pending",
+        nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
+      });
+      return;
+    }
+
+    try {
+      await this.executeOperation(op);
+      // If dispose() was called while the send was in flight, skip writing
+      // to a DB we no longer own. The send itself already landed server-side;
+      // the next engine instance will reconcile via Matrix sync.
+      if (this.disposed) return;
+      await this.db.pendingOps.delete(op.id!);
+      this.onChange?.(op.roomId);
+    } catch (e) {
+      if (this.disposed) return;
+
+      // Race guard: Matrix may have accepted the event server-side even
+      // though the SDK threw (read timeout, CORS race, etc.). When the
+      // server-side `/sync` echo arrives via EventWriter → upsertFromServer
+      // the local message picks up its eventId and flips to "synced"
+      // before this catch runs. In that case the queued op is already
+      // satisfied — drop it without flagging the message as failed,
+      // otherwise the user sees a red retry indicator on a message the
+      // peer actually received (WEE-40).
+      if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
+        await this.db.pendingOps.delete(op.id!);
+        this.onChange?.(op.roomId);
+        return;
+      }
+
+      const retries = op.retries + 1;
+      if (retries >= op.maxRetries) {
+        await this.db.pendingOps.update(op.id!, {
+          status: "failed",
+          retries,
+          errorMessage: String(e),
+          lastAttemptAt: Date.now(),
+        });
+        await this.markMessageFailed(op);
+        this.onChange?.(op.roomId);
+      } else {
+        const delay = computeBackoff(retries);
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          retries,
+          lastAttemptAt: Date.now(),
+          nextAttemptAt: Date.now() + delay,
+        });
+        // We don't `await sleep(delay)` here — ops in other rooms must
+        // proceed immediately. The delay is tracked via nextAttemptAt in the
+        // DB; the post-completion kick recomputes the wake-up timer. Note
+        // that within THIS room the retrying op stays the head, so later
+        // messages in the room wait for it — FIFO order is a hard invariant.
+      }
+    }
+  }
+
+  /**
+   * Atomically claim the next claimable op (WEE-94). An op is claimable when
+   * it is the HEAD of its room's queue (first pending op of the room in
+   * creation order — FIFO within a room is a hard invariant), it is due
+   * (nextAttemptAt <= now), and its room is busy in neither this engine
+   * (`activeRooms`) nor any other tab (a "syncing" op of the same room).
+   * Returns null if nothing is claimable.
    *
-   * Uses the [status+nextAttemptAt] compound index added in v11 so this is
-   * O(log n) even with thousands of queued ops. Freshly-enqueued ops get
-   * nextAttemptAt=0 and are naturally prioritised over retry-scheduled ops
-   * (which have larger nextAttemptAt values). Within the same nextAttemptAt
-   * bucket Dexie falls back to the primary key order, which is creation
-   * order for `++id` — preserving FIFO for fresh sends.
+   * The whole select-and-mark runs in one rw-transaction on pendingOps, same
+   * as before — concurrent engines (multi-tab) can't both claim the same
+   * record, and a room claimed by another tab is excluded via its "syncing"
+   * marker row, so two tabs can't run the same room out of order either.
+   *
+   * Iteration walks the "status" index, whose entries within one status value
+   * are ordered by primary key (`++id` = creation order), and stops at the
+   * first claimable head. The realistic outbound queue is tiny (tens of ops);
+   * the previous O(log n) single-op lookup via [status+nextAttemptAt] cannot
+   * express "head per room", so a short ordered walk replaces it.
    */
   private async claimDueOp(): Promise<PendingOperation | null> {
     return this.db.transaction("rw", this.db.pendingOps, async () => {
       const now = Date.now();
-      const due = await this.db.pendingOps
-        .where("[status+nextAttemptAt]")
-        .between(["pending", -Infinity], ["pending", now], true, true)
-        .first();
-      if (!due) return null;
-      await this.db.pendingOps.update(due.id!, { status: "syncing" });
-      return { ...due, status: "syncing" };
+
+      // Rooms with an op currently in flight somewhere (this tab marks ops
+      // "syncing" too, but activeRooms is checked as well to close the gap
+      // between transaction commit and the worker registering the room).
+      const busyRooms = new Set<string>(this.activeRooms);
+      await this.db.pendingOps
+        .where("status")
+        .equals("syncing")
+        .each((op) => {
+          busyRooms.add(op.roomId);
+        });
+
+      // Walk pending ops in creation order; the first op seen for a room is
+      // that room's head. Only a due head of a free room may be claimed.
+      const seenRooms = new Set<string>();
+      let claimed: PendingOperation | null = null;
+      await this.db.pendingOps
+        .where("status")
+        .equals("pending")
+        .until(() => claimed !== null)
+        .each((op) => {
+          if (claimed || seenRooms.has(op.roomId)) return;
+          seenRooms.add(op.roomId);
+          if (busyRooms.has(op.roomId)) return;
+          if ((op.nextAttemptAt ?? 0) > now) return; // head not due → room waits
+          claimed = op;
+        });
+
+      if (!claimed) return null;
+      const head = claimed as PendingOperation;
+      // lastAttemptAt doubles as the claim lease timestamp — the watchdog
+      // releases "syncing" rows whose lease expired (SYNCING_LEASE_MS).
+      const claimedAt = Date.now();
+      await this.db.pendingOps.update(head.id!, {
+        status: "syncing",
+        lastAttemptAt: claimedAt,
+      });
+      return { ...head, status: "syncing", lastAttemptAt: claimedAt };
     });
   }
 
