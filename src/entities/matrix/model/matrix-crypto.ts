@@ -22,9 +22,20 @@ import {
 } from "@/shared/lib/matrix/functions";
 import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix/chat-storage";
 import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
+import { withTimeout } from "@/shared/lib/with-timeout";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const m = 12;
+
+/** Hard ceiling for the Pocketnet getuserprofile RPC that resolves
+ *  participants' encryption keys (`getUsersInfoCb` → loadUsersInfo →
+ *  psdk.userInfo.load). A blocked/slow node — typical under RU ISP filtering
+ *  — used to leave `getusersinfo` pending forever, which wedged decryptKey,
+ *  so the media `download()` promise never settled and the image spinner spun
+ *  indefinitely (WEE-90 H1). On timeout we proceed with whatever keys are
+ *  already cached; a genuine key gap then fails decrypt deterministically and
+ *  the download path surfaces error+retry instead of an eternal spinner. */
+const GETUSERSINFO_TIMEOUT_MS = 15_000;
 
 /** Safe accessor for crypto.subtle — throws a clear error on HTTP instead of cryptic 'undefined' */
 function getSubtle(): SubtleCrypto {
@@ -444,7 +455,22 @@ export class Pcrypto {
     async function getusersinfo(): Promise<void> {
       const us = Object.values(users).map(function (uh) { return uh.id; });
       if (!pcrypto.getUsersInfoCb) return;
-      const _usersinfo = await pcrypto.getUsersInfoCb(us);
+      let _usersinfo: CryptoUserInfo[];
+      try {
+        // Bound the key-resolution RPC: a stalled Pocketnet node must never
+        // wedge decryptKey/prepare forever (WEE-90 H1). On timeout we keep the
+        // previously-resolved `usersinfo` and return — missing keys then fail
+        // decrypt deterministically downstream, surfacing error+retry instead
+        // of an eternal media spinner.
+        _usersinfo = await withTimeout(
+          pcrypto.getUsersInfoCb(us),
+          GETUSERSINFO_TIMEOUT_MS,
+          "getusersinfo",
+        );
+      } catch (e) {
+        console.warn("[pcrypto] getusersinfo timed out/failed:", e);
+        return;
+      }
       usersinfo = {};
       for (const ui of _usersinfo) {
         usersinfo[ui.id] = ui;
