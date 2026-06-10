@@ -97,20 +97,54 @@ object VendorAudioPolicy {
     }
 
     /**
-     * HONOR MagicOS (#872/#873 — caller-only / self-echo one-way audio).
+     * Aggressive Chinese ROMs (MagicOS / RealmeUI / ColorOS / MIUI) that are
+     * known to re-assert the process-global microphone-mute flag during call
+     * setup, stranding the local capture path in silence so the peer hears
+     * nothing. These all already ship broken HW AEC (see
+     * [BROKEN_HW_AEC_VENDORS]) — the same audio HAL that mutes capture also
+     * flips the mute flag — so they are the family that needs the explicit
+     * start-time + reapply-window unmute, not just MagicOS.
      *
-     * On MagicOS the explicit `setCommunicationDevice` routing applied by
-     * [AudioRouter.start] can leave the global microphone-mute flag asserted,
-     * so the local capture path is silent and the peer hears nothing while the
+     * Deliberately excludes SAMSUNG / GENERIC (working HW AEC, proven WEE-54
+     * generic path — acceptance criterion A5) and HUAWEI (its #874 symptom was
+     * HW-AEC capture mute, fixed via [prefersSoftwareAudioProcessing]; no
+     * mic-mute-flag report, so its routing path stays untouched).
+     */
+    private val AGGRESSIVE_MIC_MUTE_VENDORS = setOf(
+        CallVendor.HONOR,
+        CallVendor.REALME,
+        CallVendor.OPPO,
+        CallVendor.XIAOMI,
+    )
+
+    /**
+     * Aggressive Chinese ROMs (HONOR MagicOS #872/#873, realme RealmeUI / OPPO
+     * ColorOS / Xiaomi MIUI WEE-87 #993/#994/#995) — caller-only / one-way audio
+     * because the global microphone-mute flag is left asserted.
+     *
+     * On these HALs the explicit `setCommunicationDevice` routing applied by
+     * [AudioRouter.start] can leave the global microphone-mute flag asserted, so
+     * the local capture path is silent and the peer hears nothing while the
      * caller hears themselves. An explicit `setMicrophoneMute(false)` after the
-     * mode flip releases it.
+     * mode flip releases it, and the OEM mode-reapply window re-releases it on
+     * each tick because these same ROMs re-assert the flag asynchronously after
+     * setup (see [AudioRouter.shouldReapplyMicUnmute]).
      *
-     * Gated to HONOR rather than applied everywhere on *start* because forcing
-     * an unmute mid-setup is only known-needed on MagicOS; the post-call reset
-     * ([shouldUnmuteMicOnStop]) is what covers every other vendor.
+     * WEE-87: WEE-76 gated this to HONOR only, so the mirror-image one-way
+     * reports on realme 12 (#994 — peer hears me, I don't) / realme C25s (#995 —
+     * I hear, peer doesn't) and the both-way silence on 1.10.40 (#993) slipped
+     * through. Extending to the ColorOS/RealmeUI/MIUI family closes that gap.
+     *
+     * Still gated (not applied everywhere on *start*) because the proven generic
+     * WEE-54 path must stay byte-for-byte unchanged on the working majority
+     * (Samsung / Pixel / OnePlus / unknown OEMs — A5); the post-call reset
+     * ([shouldUnmuteMicOnStop]) is what defensively covers every other vendor.
+     * Re-asserting the unmute is itself safe (it can only release a stuck
+     * capture path, never break a healthy one), so this gate is about avoiding
+     * needless mid-call AudioManager churn on devices that never exhibit the bug.
      */
     fun requiresExplicitMicUnmuteOnStart(vendor: CallVendor): Boolean =
-        vendor == CallVendor.HONOR
+        vendor in AGGRESSIVE_MIC_MUTE_VENDORS
 
     /**
      * Post-call defensive microphone unmute for **every** vendor

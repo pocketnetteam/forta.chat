@@ -140,7 +140,8 @@ class AudioRouter private constructor(private val context: Context) {
          * the OEM re-apply window.
          *
          * [applyVendorStartTweaks] clears the global mic-mute flag once at t=0
-         * for vendors that need it (HONOR MagicOS), but MIUI/MagicOS can
+         * for vendors that need it (HONOR MagicOS, realme RealmeUI / OPPO
+         * ColorOS / Xiaomi MIUI — WEE-87), but those same aggressive ROMs can
          * re-assert that flag in the same async window they reset the audio
          * mode (the [modeReapplyScheduleMs] ticks). When that happens the
          * one-time unmute is clobbered and the peer hears one-way silence.
@@ -455,11 +456,12 @@ class AudioRouter private constructor(private val context: Context) {
      * unrecognised devices, so this is a no-op on the working majority.
      */
     private fun applyVendorStartTweaks() {
-        // HONOR MagicOS (#872/#873): the comm-device routing above can leave the
-        // global mic-mute flag asserted, producing caller-only / self-echo
-        // one-way audio. An explicit unmute releases the capture path. Wrapped
-        // because the setter is documented to throw on a few privacy-shield
-        // ROMs and must never crash call setup.
+        // Aggressive Chinese ROMs (HONOR MagicOS #872/#873; realme RealmeUI /
+        // OPPO ColorOS / Xiaomi MIUI — WEE-87 #993/#994/#995): the comm-device
+        // routing above can leave the global mic-mute flag asserted, producing
+        // caller-only / self-echo one-way audio. An explicit unmute releases the
+        // capture path. Wrapped because the setter is documented to throw on a
+        // few privacy-shield ROMs and must never crash call setup.
         if (VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(vendor)) {
             try {
                 audioManager.setMicrophoneMute(false)
