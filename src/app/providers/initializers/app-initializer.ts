@@ -398,25 +398,57 @@ export class AppInitializer {
     }
   }
 
-  /** Search Pocketnet users by text query — calls "searchusers" RPC.
-   *  Throws on transport / availability errors so callers can trigger fallback
-   *  (Matrix user_directory). The old silent-empty behaviour masked CORS failures
-   *  on web and left users looking at an empty list with no signal. */
-  async searchUsers(query: string): Promise<Array<{ address: string; name: string; image: string }>> {
-    await this.initApi();
-    if (!this._available || !this.api) {
-      throw new Error("search_service_unavailable");
-    }
-    try {
-      const data = await this.api.rpc("searchusers", [query, "users"]);
-      const results = (data as Array<Record<string, unknown>>) || [];
-      return results.map((info) => ({
+  /** Normalize a raw `searchusers` RPC record into a local user shape. */
+  private mapSearchUserRecords(
+    records: Array<Record<string, unknown>>,
+  ): Array<{ address: string; name: string; image: string }> {
+    return records
+      .map((info) => ({
         address: (info.address as string) ?? "",
         name: info.name ? decodeURI(info.name as string) : "",
         image: (info.i as string) ?? (info.image as string) ?? "",
-      })).filter(u => u.address);
+      }))
+      .filter((u) => u.address);
+  }
+
+  /** Search Pocketnet users by text query — calls the "searchusers" RPC.
+   *
+   *  WEE-65 (H3): the Bastyon SDK (`this.api`) only exists inside the Bastyon
+   *  WebView. On standalone Android / Electron `_available` is false, so the old
+   *  code threw `search_service_unavailable` and the user got an empty list with
+   *  no way to find anyone by nick. We now fall back to the centralized
+   *  cross-node RPC client ({@link callPocketnetRpc}) — the same failover path
+   *  `getBlockHeight` uses — which works without the SDK globals. The SDK path
+   *  is still tried first when available (richer, already-authenticated), then
+   *  the direct node failover covers standalone and SDK-transport failures.
+   *
+   *  Still throws only when BOTH paths fail, so callers (useContacts) can fall
+   *  through to the Matrix user_directory / local-cache tiers. */
+  async searchUsers(query: string): Promise<Array<{ address: string; name: string; image: string }>> {
+    await this.initApi();
+
+    // Primary: Bastyon SDK Api (only present inside the Bastyon WebView).
+    if (this._available && this.api) {
+      try {
+        const data = await this.api.rpc("searchusers", [query, "users"]);
+        return this.mapSearchUserRecords((data as Array<Record<string, unknown>>) || []);
+      } catch (e) {
+        console.warn("[appInit] searchUsers via SDK failed — falling back to direct node failover:", e);
+      }
+    }
+
+    // Fallback: direct searchusers with cross-node failover. Works on standalone
+    // Android / Electron (no SDK globals) and recovers from SDK-transport errors.
+    try {
+      const envelope = await callPocketnetRpc<Array<Record<string, unknown>>>({
+        method: "searchusers",
+        parameters: [query, "users"],
+      });
+      const payload = unwrapRpcPayload(envelope);
+      const records = Array.isArray(payload) ? payload : [];
+      return this.mapSearchUserRecords(records);
     } catch (e) {
-      console.error("[appInit] searchUsers error:", e);
+      console.error("[appInit] searchUsers error (all paths failed):", e);
       throw e instanceof Error ? e : new Error(String(e));
     }
   }

@@ -781,11 +781,35 @@ const handleCtxAction = (action: string) => {
   ctxMenu.value.show = false;
 };
 
+/** WEE-65 (H2 / #334): a "contact" IS its DM room, so deleting the chat used to
+ *  destroy the contact with no way back. For 1:1 rooms the delete dialog now
+ *  offers "Clear history" (keeps the contact — wipes messages via the existing
+ *  sync-safe `clearHistory` watermark) alongside the full "Delete and leave".
+ *  Group rooms keep the single destructive delete. */
+const deleteTargetIsDm = computed<boolean>(() => {
+  const id = deleteConfirm.value.roomId;
+  if (!id) return false;
+  const room = chatStore.rooms.find(r => r.id === id);
+  return !!room && !room.isGroup;
+});
+
+const closeDeleteConfirm = () => {
+  deleteConfirm.value = { show: false, roomId: null };
+};
+
 const confirmDeleteRoom = () => {
   if (deleteConfirm.value.roomId) {
     chatStore.removeRoom(deleteConfirm.value.roomId);
   }
-  deleteConfirm.value = { show: false, roomId: null };
+  closeDeleteConfirm();
+};
+
+/** Clear only the message history; the DM room (= contact) survives. */
+const confirmClearHistory = () => {
+  if (deleteConfirm.value.roomId) {
+    chatStore.clearHistory(deleteConfirm.value.roomId);
+  }
+  closeDeleteConfirm();
 };
 
 // Per-room long press: cache a single useLongPress instance per room
@@ -1084,11 +1108,35 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
         >
           <div class="w-full max-w-xs rounded-xl bg-background-total-theme p-5 shadow-xl">
             <h3 class="mb-3 text-base font-semibold text-text-color">{{ t("contactList.deleteChat") }}</h3>
-            <p class="mb-4 text-sm text-text-on-main-bg-color">{{ t("contactList.deleteChatConfirm") }}</p>
-            <div class="flex gap-2">
+            <p class="mb-4 text-sm text-text-on-main-bg-color">
+              {{ deleteTargetIsDm ? t("contactList.deleteDmConfirm") : t("contactList.deleteChatConfirm") }}
+            </p>
+            <!-- DM: offer "clear history" (keeps contact) vs "delete and leave" -->
+            <div v-if="deleteTargetIsDm" class="flex flex-col gap-2">
+              <button
+                class="w-full rounded-lg bg-color-bg-ac px-4 py-2.5 text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1"
+                @click="confirmClearHistory"
+              >
+                {{ t("contactList.clearHistory") }}
+              </button>
+              <button
+                class="w-full rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
+                @click="confirmDeleteRoom"
+              >
+                {{ t("contactList.deleteAndLeave") }}
+              </button>
+              <button
+                class="w-full rounded-lg bg-neutral-grad-0 px-4 py-2.5 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
+                @click="closeDeleteConfirm"
+              >
+                {{ t("contactList.cancel") }}
+              </button>
+            </div>
+            <!-- Group: single destructive delete -->
+            <div v-else class="flex gap-2">
               <button
                 class="flex-1 rounded-lg bg-neutral-grad-0 px-4 py-2.5 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
-                @click="deleteConfirm = { show: false, roomId: null }"
+                @click="closeDeleteConfirm"
               >
                 {{ t("contactList.cancel") }}
               </button>
