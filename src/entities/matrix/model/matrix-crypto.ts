@@ -11,7 +11,19 @@ import pbkdf2 from "pbkdf2";
 // @ts-expect-error — no types for bn.js default export
 import BN from "bn.js";
 
-import { workerDecrypt, workerEncrypt } from "@/shared/lib/crypto-worker/bridge";
+import {
+  workerDecrypt,
+  workerEncrypt,
+  workerDecryptFile,
+  isCryptoWorkerSupported,
+  isWorkerInfraError,
+} from "@/shared/lib/crypto-worker/bridge";
+import {
+  deriveFileKey,
+  encryptFileBuffer,
+  decryptFileBuffer,
+  resolveDecryptedMime,
+} from "@/shared/lib/crypto-worker/file-cipher";
 
 import {
   sha224,
@@ -37,17 +49,8 @@ const m = 12;
  *  the download path surfaces error+retry instead of an eternal spinner. */
 const GETUSERSINFO_TIMEOUT_MS = 15_000;
 
-/** Safe accessor for crypto.subtle — throws a clear error on HTTP instead of cryptic 'undefined' */
-function getSubtle(): SubtleCrypto {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    throw new Error(
-      "crypto.subtle is unavailable (requires HTTPS or localhost). " +
-      "Serve the app over HTTPS to enable encryption."
-    );
-  }
-  return subtle;
-}
+// crypto.subtle access lives in shared/lib/crypto-worker/file-cipher.ts
+// (shared with the crypto Web Worker, WEE-92).
 
 // secp256k1 curve order
 const secp256k1CurveN = new BN(
@@ -77,43 +80,26 @@ function _base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-// ---- PcryptoFile: AES-CBC file encryption (unchanged) ----
+// ---- PcryptoFile: AES-CBC file encryption ----
+// Cipher internals live in shared/lib/crypto-worker/file-cipher.ts so the
+// main thread and the crypto Web Worker share one format (WEE-92).
 
 export class PcryptoFile {
-  private iv = new Uint8Array([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]);
-
   async randomKey(): Promise<string> {
     const array = new Uint32Array(24);
     return window.crypto.getRandomValues(array).toString();
   }
 
   async deriveKey(str: string): Promise<CryptoKey> {
-    const subtle = getSubtle();
-    const enc = new TextEncoder();
-    const keyMaterial = await subtle.importKey(
-      "raw",
-      enc.encode(str),
-      "PBKDF2",
-      false,
-      ["deriveBits", "deriveKey"]
-    );
-    return subtle.deriveKey(
-      { name: "PBKDF2", salt: enc.encode("matrix.pocketnet"), iterations: 10000, hash: "SHA-256" },
-      keyMaterial,
-      { name: "AES-CBC", length: 256 },
-      true,
-      ["encrypt", "decrypt"]
-    );
+    return deriveFileKey(str);
   }
 
   async encrypt(data: ArrayBuffer, secret: string): Promise<ArrayBuffer> {
-    const key = await this.deriveKey(secret);
-    return getSubtle().encrypt({ name: "AES-CBC", iv: this.iv }, key, data);
+    return encryptFileBuffer(data, secret);
   }
 
   async decrypt(data: ArrayBuffer, secret: string): Promise<ArrayBuffer> {
-    const key = await this.deriveKey(secret);
-    return getSubtle().decrypt({ name: "AES-CBC", iv: this.iv }, key, data);
+    return decryptFileBuffer(data, secret);
   }
 
   async encryptFile(file: Blob, secret: string): Promise<File> {
@@ -138,12 +124,9 @@ export class PcryptoFile {
   async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
     const buffer = await readFile(file);
     const decrypted = await this.decrypt(buffer, secret);
-    const type = originalMime
-      ? originalMime
-      : file.type.startsWith("encrypted/")
-        ? file.type.replace("encrypted/", "")
-        : "application/octet-stream";
-    return new File([decrypted], "decrypted", { type });
+    return new File([decrypted], "decrypted", {
+      type: resolveDecryptedMime(file.type, originalMime),
+    });
   }
 }
 
@@ -1140,6 +1123,26 @@ export class Pcrypto {
       },
 
       async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
+        // Worker-first: PBKDF2 + AES-CBC runs off the main thread so several
+        // attachments can decrypt concurrently without freezing low-end
+        // WebViews (WEE-92). The buffer is transferred (zero-copy); readFile
+        // already produced a private copy, so detaching it is safe.
+        if (isCryptoWorkerSupported()) {
+          const buffer = await readFile(file);
+          try {
+            const decrypted = await workerDecryptFile(buffer, secret);
+            return new File([decrypted], "decrypted", {
+              type: resolveDecryptedMime(file.type, originalMime),
+            });
+          } catch (e) {
+            // Infra failures (worker died / terminated mid-flight) fall back
+            // to the main-thread path. Genuine decrypt failures (wrong key,
+            // corrupt ciphertext) are deterministic — rethrow, a retry on the
+            // main thread would fail identically.
+            if (!isWorkerInfraError(e)) throw e;
+            console.warn("[matrix-crypto] file-decrypt worker failed, falling back to main thread:", e);
+          }
+        }
         return pcrypto.pcryptoFile.decryptFile(file as File, secret, originalMime);
       },
 

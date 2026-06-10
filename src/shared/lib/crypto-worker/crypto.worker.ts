@@ -18,6 +18,8 @@ import pbkdf2 from "pbkdf2";
 // @ts-expect-error — no types for bn.js default export
 import BN from "bn.js";
 
+import { decryptFileBuffer } from "./file-cipher";
+
 // ---------------------------------------------------------------------------
 // Constants (must match matrix-crypto.ts)
 // ---------------------------------------------------------------------------
@@ -293,7 +295,21 @@ export interface ComputeKeysRequest {
   block: number;
 }
 
-export type WorkerRequest = DecryptRequest | EncryptRequest | ComputeKeysRequest;
+/** File-attachment decrypt (PBKDF2 + AES-CBC, see file-cipher.ts). `data` is
+ *  posted as a Transferable, and the decrypted buffer is transferred back —
+ *  no structured-clone copies of multi-megabyte media (WEE-92). */
+export interface DecryptFileRequest {
+  id: number;
+  type: "decryptFile";
+  data: ArrayBuffer;
+  secret: string;
+}
+
+export type WorkerRequest =
+  | DecryptRequest
+  | EncryptRequest
+  | ComputeKeysRequest
+  | DecryptFileRequest;
 
 export interface WorkerResponse {
   id: number;
@@ -352,11 +368,28 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         } satisfies WorkerResponse);
         break;
       }
+      case "decryptFile": {
+        const decrypted = await decryptFileBuffer(msg.data, msg.secret);
+        // Transfer the result buffer back — zero-copy for large media.
+        (self as unknown as Worker).postMessage(
+          { id: msg.id, result: decrypted } satisfies WorkerResponse,
+          [decrypted],
+        );
+        break;
+      }
     }
   } catch (err) {
+    // WebCrypto rejects AES-CBC failures with a DOMException whose message is
+    // often EMPTY — an empty string is falsy and would be treated as success
+    // by the bridge, resolving the request with `undefined` (WEE-92 C1).
+    // Always send a non-empty error string.
+    const message =
+      err instanceof Error
+        ? err.message || err.name || "worker operation failed"
+        : String(err) || "worker operation failed";
     (self as unknown as Worker).postMessage({
       id: msg.id,
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
     } satisfies WorkerResponse);
   }
 };

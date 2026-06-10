@@ -12,6 +12,7 @@
  */
 
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { isCryptoWorkerSupported } from "@/shared/lib/crypto-worker/bridge";
 
 /** Hard ceiling for a single decrypt task. The queue is strictly serial, so a
  *  task that never settles (e.g. a worker that hangs, or an upstream promise
@@ -41,4 +42,37 @@ export function enqueueDecrypt<T>(task: () => Promise<T>): Promise<T> {
   // promise (`run`), which is not the same object.
   tail = run.catch(() => undefined);
   return run;
+}
+
+/** Files at or above this size stay on the serial queue even when the
+ *  worker is available. A decrypt holds ciphertext + plaintext (~2× file
+ *  size) in memory; three concurrent 100 MB videos would spike ~600 MB of
+ *  transient buffers — OOM-kill territory on the same low-end devices this
+ *  feature targets. Photos and voice notes (the latency-sensitive bulk of
+ *  chat media) sit far below this line and still parallelise. */
+const LARGE_FILE_SERIAL_THRESHOLD_BYTES = 32 * 1024 * 1024;
+
+/** Run a file-decrypt task with the right concurrency policy (WEE-92).
+ *
+ *  With the crypto Web Worker available, decryption runs OFF the main
+ *  thread — the reason for serialising (#306/#370 main-thread freezes) is
+ *  gone, so tasks run in parallel. Effective parallelism is still capped by
+ *  `mediaDownloadGate` in use-file-download (its permit covers fetch +
+ *  decrypt), so a media-heavy chat can't stampede the worker. The same
+ *  per-task timeout applies: a wedged worker call surfaces error+retry
+ *  instead of an eternal spinner (WEE-90 H4).
+ *
+ *  Large files (≥ LARGE_FILE_SERIAL_THRESHOLD_BYTES) and environments
+ *  without worker support (exotic WebViews, worker construction failed)
+ *  keep the legacy strictly-serial queue — for memory pressure and the
+ *  #306/#370 main-thread freeze guard respectively. */
+export function runFileDecrypt<T>(
+  task: () => Promise<T>,
+  opts?: { sizeBytes?: number },
+): Promise<T> {
+  const isLarge = (opts?.sizeBytes ?? 0) >= LARGE_FILE_SERIAL_THRESHOLD_BYTES;
+  if (isCryptoWorkerSupported() && !isLarge) {
+    return withTimeout(task(), DECRYPT_TASK_TIMEOUT_MS, "decryptFile");
+  }
+  return enqueueDecrypt(task);
 }
