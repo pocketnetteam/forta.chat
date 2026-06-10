@@ -570,6 +570,7 @@ watch(imageInViewport, (visible) => {
 watch(() => props.message.id, () => {
   imageDecodeFailed.value = false;
   thumbnailFetchFailed.value = false;
+  imageLoaded.value = false;
   if (imageInViewport.value) triggerImageDownload();
 });
 
@@ -592,6 +593,30 @@ const onFeedImageError = () => {
 // intrinsic size, blowing past the bubble's max-h and producing the
 // "huge blurry preview" reported in forta-bugs#757 and #743.
 const imageDecodeFailed = ref(false);
+
+// WEE-91: thumbnail-first (WEE-71) made `feedImageSrc` available the instant a
+// server-thumbnail URL resolves, before the browser has fetched the image. The
+// old spinner gated on `!feedImageSrc`, so it was skipped and the bare `<img>`
+// rendered its `alt` (the filename, e.g. "img1.png") until `@load` fired —
+// looking like a broken image. Track per-image load state and keep a
+// placeholder over the `<img>` until it actually paints.
+const imageLoaded = ref(false);
+// Reset on src change (new message or thumbnail→full fallback) so a recycled
+// bubble or a swapped source shows the placeholder again until it repaints.
+watch(feedImageSrc, () => {
+  imageLoaded.value = false;
+});
+
+/** The `<img>` branch is active (a source exists, no error/decode-fallback UI)
+ *  but the image hasn't painted yet — show the placeholder, not the alt text. */
+const showImagePlaceholder = computed(
+  () =>
+    !!feedImageSrc.value &&
+    !imageLoaded.value &&
+    !fileState.value.error &&
+    !imageDecodeFailed.value,
+);
+
 const isLikelyHeic = computed(() => {
   const t = (props.message.fileInfo?.type ?? "").toLowerCase();
   const n = (props.message.fileInfo?.name ?? "").toLowerCase();
@@ -957,7 +982,15 @@ const replyPreviewSender = computed(() => {
             <span class="truncate max-w-full font-medium">{{ message.fileInfo?.name }}</span>
             <span v-if="isLikelyHeic" class="text-[10px] opacity-70">{{ t('message.heicNotSupported') }}</span>
           </div>
-          <img v-else-if="feedImageSrc" :src="feedImageSrc" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]" draggable="false" :style="imageStyle" @load="emit('resize')" @error="onFeedImageError" />
+          <img v-else-if="feedImageSrc" :src="feedImageSrc" alt="" class="block max-h-[460px] max-w-full object-cover select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]" draggable="false" :style="imageStyle" @load="imageLoaded = true; emit('resize')" @error="onFeedImageError" />
+          <!-- WEE-91: placeholder over the image until it paints — never the alt filename -->
+          <div
+            v-if="showImagePlaceholder"
+            class="absolute left-0 top-0 flex items-center justify-center bg-neutral-grad-0"
+            :style="imagePlaceholderStyle"
+          >
+            <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+          </div>
           <!-- Upload progress overlay -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <button class="relative flex h-14 w-14 items-center justify-center" @click.stop="emit('cancelUpload', message)">
