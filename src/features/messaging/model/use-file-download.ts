@@ -1001,12 +1001,22 @@ export function useFileDownload() {
     }
   };
 
-  /** Seed the cache with a local blob URL (e.g. for pending voice messages).
-   *  This avoids the full download+decrypt pipeline for files we already have locally. */
+  /** Seed a local blob URL (e.g. for pending voice messages) so the player can
+   *  start immediately, skipping the download+decrypt pipeline for bytes we
+   *  already hold locally.
+   *
+   *  Seeds ONLY the per-instance reactive `state` — never the long-lived module
+   *  `cache`. The optimistic blob is revoked ~5s after `confirmMediaSent`
+   *  (sync-engine.ts). If it leaked into `cache`, the post-confirm
+   *  `watch → download()` in VoiceMessage.vue would short-circuit on
+   *  `cache.has(cacheKey)` and hand the player a *dead* blob URL for the
+   *  SENDER's own voice — an eternal loading spinner (#990) or a silent, empty
+   *  `<audio>` (#986). The receiver never seeds a blob, so it decrypts the
+   *  server copy and plays fine. Keeping the seed instance-local lets the
+   *  blob→mxc transition re-download the durable server file (WEE-88). */
   const seedLocalUrl = (cacheKey: string, blobUrl: string) => {
-    if (cache.has(cacheKey)) return;
-    cache.set(cacheKey, blobUrl);
     const state = getState(cacheKey);
+    if (state.objectUrl) return;
     state.objectUrl = blobUrl;
     state.loading = false;
     state.error = null;
