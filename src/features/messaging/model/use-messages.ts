@@ -29,6 +29,11 @@ const ENCRYPT_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 4 * 60 * 1000;
 const SEND_EVENT_TIMEOUT_MS = 20_000;
 
+/** Bulk forward is sequential (WEE-98) — cap each item so one hung media
+ *  download/upload can't block every later message. Covers the worst-case
+ *  media chain: download+decrypt source blob, encrypt, upload, send. */
+const FORWARD_ITEM_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** Max file size for uploads (100 MB — typical Matrix homeserver limit) */
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024;
 
@@ -1300,98 +1305,112 @@ export function useMessages() {
     // Ship in original chronological order so recipients see the conversation flow.
     collected.sort((a, b) => a.timestamp - b.timestamp);
 
-    const results = await Promise.allSettled(
-      collected.map(async (src) => {
-        const senderName = chatStore.getDisplayName(src.senderId);
-        const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
+    // Sends ONE forwarded message; throws on failure. Invoked strictly
+    // sequentially below — SyncEngine is FIFO, so enqueue order is send order,
+    // and a parallel map would race the enqueues and scramble the recipient's
+    // order (WEE-98).
+    const sendOne = async (src: (typeof collected)[number]): Promise<void> => {
+      const senderName = chatStore.getDisplayName(src.senderId);
+      const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
 
-        // Media branch — reuse the singular forwardMediaMessage path. It
-        // re-uploads the original blob via sendImage/sendFile/sendAudio so
-        // the recipient receives a real attachment, not a text body.
-        if (src.type !== MessageType.text && src.fileInfo) {
-          // forwardMediaMessage dispatches through sendImage/sendFile, which
-          // read chatStore.activeRoomId. The current UI guarantees
-          // targetRoomId === activeRoomId (ForwardPicker switches the active
-          // room before invoking forwardMessages). Surface that invariant
-          // here so a future caller that forwards into a non-active room
-          // gets a clear error instead of silently posting into the wrong
-          // chat.
-          if (targetRoomId !== chatStore.activeRoomId) {
-            throw new Error(
-              "Bulk media forward requires targetRoomId === activeRoomId " +
-                "(sendImage/sendFile read activeRoomId). Switch the active " +
-                "room before calling forwardMessages, or thread a room " +
-                "override through the per-type send functions.",
-            );
-          }
-          const ok = await forwardMediaMessage(src.content, fwdMeta, {
-            type: src.type,
-            fileInfo: src.fileInfo,
-            sourceMessageId: src.id,
-            roomId: src.roomId,
-            sourceSenderId: src.senderId,
-            sourceTimestamp: src.timestamp,
+      // Media branch — reuse the singular forwardMediaMessage path. It
+      // re-uploads the original blob via sendImage/sendFile/sendAudio so
+      // the recipient receives a real attachment, not a text body.
+      if (src.type !== MessageType.text && src.fileInfo) {
+        // forwardMediaMessage dispatches through sendImage/sendFile, which
+        // read chatStore.activeRoomId. The current UI guarantees
+        // targetRoomId === activeRoomId (ForwardPicker switches the active
+        // room before invoking forwardMessages). Surface that invariant
+        // here so a future caller that forwards into a non-active room
+        // gets a clear error instead of silently posting into the wrong
+        // chat.
+        if (targetRoomId !== chatStore.activeRoomId) {
+          throw new Error(
+            "Bulk media forward requires targetRoomId === activeRoomId " +
+              "(sendImage/sendFile read activeRoomId). Switch the active " +
+              "room before calling forwardMessages, or thread a room " +
+              "override through the per-type send functions.",
+          );
+        }
+        const ok = await forwardMediaMessage(src.content, fwdMeta, {
+          type: src.type,
+          fileInfo: src.fileInfo,
+          sourceMessageId: src.id,
+          roomId: src.roomId,
+          sourceSenderId: src.senderId,
+          sourceTimestamp: src.timestamp,
+        });
+        if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
+        return;
+      }
+
+      if (isChatDbReady()) {
+        try {
+          const dbKit = getChatDb();
+          const localMsg = await dbKit.messages.createLocal({
+            roomId: targetRoomId,
+            senderId: authStore.address ?? "",
+            content: src.content,
+            type: MessageType.text,
+            forwardedFrom: fwdMeta,
           });
-          if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
+          await dbKit.syncEngine.enqueue(
+            "send_message",
+            targetRoomId,
+            fwdMeta
+              ? { content: src.content, forwardedFrom: fwdMeta }
+              : { content: src.content },
+            localMsg.clientId,
+          );
           return;
+        } catch (e) {
+          console.warn("[use-messages] Dexie bulk forward failed, falling back:", e);
         }
+      }
 
-        if (isChatDbReady()) {
-          try {
-            const dbKit = getChatDb();
-            const localMsg = await dbKit.messages.createLocal({
-              roomId: targetRoomId,
-              senderId: authStore.address ?? "",
-              content: src.content,
-              type: MessageType.text,
-              forwardedFrom: fwdMeta,
-            });
-            await dbKit.syncEngine.enqueue(
-              "send_message",
-              targetRoomId,
-              fwdMeta
-                ? { content: src.content, forwardedFrom: fwdMeta }
-                : { content: src.content },
-              localMsg.clientId,
-            );
-            return;
-          } catch (e) {
-            console.warn("[use-messages] Dexie bulk forward failed, falling back:", e);
-          }
-        }
-
-        // Legacy fallback — direct encrypted/plaintext send to target room.
-        const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
-        if (roomCrypto?.canBeEncrypt()) {
-          const encrypted = await roomCrypto.encryptEvent(src.content);
-          if (withSenderInfo) {
-            (encrypted as Record<string, unknown>).forwarded_from = {
-              sender_id: src.senderId,
-              sender_name: senderName,
-            };
-          }
-          await matrixService.sendEncryptedText(targetRoomId, encrypted);
-        } else {
-          // Defense in depth: bulk forward multiplies the leak across N
-          // target rooms — Promise.allSettled below keeps the others
-          // going so one locked room does not block the others.
-          if (roomCrypto?.requiresEncryption()) {
-            throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — bulk forward to ${targetRoomId}`);
-          }
-          const payload: Record<string, unknown> = {
-            body: src.content,
-            msgtype: "m.text",
+      // Legacy fallback — direct encrypted/plaintext send to target room.
+      const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
+      if (roomCrypto?.canBeEncrypt()) {
+        const encrypted = await roomCrypto.encryptEvent(src.content);
+        if (withSenderInfo) {
+          (encrypted as Record<string, unknown>).forwarded_from = {
+            sender_id: src.senderId,
+            sender_name: senderName,
           };
-          if (withSenderInfo) {
-            payload.forwarded_from = { sender_id: src.senderId, sender_name: senderName };
-          }
-          await matrixService.sendEncryptedText(targetRoomId, payload);
         }
-      }),
-    );
+        await matrixService.sendEncryptedText(targetRoomId, encrypted);
+      } else {
+        // Defense in depth: bulk forward multiplies the leak across N
+        // target rooms — the per-item try/catch in the sequential loop
+        // keeps going so one locked room does not block the others.
+        if (roomCrypto?.requiresEncryption()) {
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — bulk forward to ${targetRoomId}`);
+        }
+        const payload: Record<string, unknown> = {
+          body: src.content,
+          msgtype: "m.text",
+        };
+        if (withSenderInfo) {
+          payload.forwarded_from = { sender_id: src.senderId, sender_name: senderName };
+        }
+        await matrixService.sendEncryptedText(targetRoomId, payload);
+      }
+    };
 
-    const succeeded = results.filter((r) => r.status === "fulfilled").length;
-    const failed = results.length - succeeded;
+    // Strictly sequential — one failure logs and moves on (same continue-on-error
+    // semantics the previous Promise.allSettled gave), but order is preserved.
+    // Per-item timeout: a hung send would otherwise block every later message.
+    let succeeded = 0;
+    let failed = 0;
+    for (const src of collected) {
+      try {
+        await withTimeout(sendOne(src), FORWARD_ITEM_TIMEOUT_MS, `bulk forward ${src.id}`);
+        succeeded++;
+      } catch (e) {
+        failed++;
+        console.error("[use-messages] bulk forward failed for", src.id, e);
+      }
+    }
     return { succeeded, failed };
   };
 
