@@ -334,7 +334,9 @@ const handleScrollToMessage = (messageId: string) => {
 // Auto-open ForwardPicker when "forward" is selected from context menu (not on draft restore)
 watch(() => chatStore.forwardPickerRequested, (v) => {
   if (v) {
-    showForwardPicker.value = true;
+    // Defensive no-op guard (WEE-100): re-setting `true` doesn't trigger
+    // reactivity anyway, but makes "repeated taps don't reopen" explicit.
+    if (!showForwardPicker.value) showForwardPicker.value = true;
     chatStore.forwardPickerRequested = false;
   }
 });
