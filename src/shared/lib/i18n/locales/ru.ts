@@ -782,6 +782,8 @@ export const ru: Record<TranslationKey, string> = {
   "system.updatedRoom": "{sender} обновил комнату",
   "system.changedName": "{sender} изменил название комнаты на \"{name}\"",
   "system.changedPermissions": "{sender} изменил права доступа",
+  "system.markedModerator": "{sender} назначил {target} модератором",
+  "system.unmarkedModerator": "{sender} снял {target} с роли модератора",
   "system.changedPhoto": "{sender} изменил фото комнаты",
   "system.setDescription": "{sender} обновил описание комнаты",
   "system.clearedDescription": "{sender} очистил описание комнаты",
