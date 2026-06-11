@@ -209,64 +209,67 @@ const handleClose = () => {
             </div>
 
             <!-- Room list: spinner while the deferred list mounts, then a
-                 virtualized scroller — only visible rows render. -->
-            <div class="min-h-0 flex-1" :class="isMobile ? 'pb-safe' : ''">
-              <div
-                v-if="!listReady"
-                data-testid="forward-list-loading"
-                class="flex h-24 items-center justify-center"
-              >
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="animate-spin text-neutral-grad-2">
-                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                </svg>
-              </div>
+                 virtualized scroller — only visible rows render. The scroller
+                 itself is the flex item (mirrors the pre-virtualization
+                 `min-h-0 flex-1 overflow-y-auto` wrapper): a percentage height
+                 inside the auto-height desktop modal resolves to the full
+                 content height and overflows the max-h cap. -->
+            <div
+              v-if="!listReady"
+              data-testid="forward-list-loading"
+              class="flex h-24 shrink-0 items-center justify-center"
+            >
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="animate-spin text-neutral-grad-2">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            </div>
 
-              <RecycleScroller
-                v-else-if="listItems.length > 0"
-                data-testid="forward-room-list"
-                :items="listItems"
-                :item-size="ROW_HEIGHT"
-                key-field="id"
-                class="h-full"
-              >
-                <template #default="{ item }">
-                  <button
-                    class="flex w-full items-center gap-3 px-4 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
-                    :style="{ height: `${ROW_HEIGHT}px` }"
-                    @click="selectRoom(item.room.id)"
-                  >
-                    <div class="relative shrink-0">
-                      <UserAvatar
-                        v-if="item.room.avatar?.startsWith('__pocketnet__:')"
-                        :address="item.room.avatar.replace('__pocketnet__:', '')"
-                        size="md"
-                      />
-                      <Avatar v-else :src="item.room.avatar" :name="item.name || ''" size="md" />
-                      <!-- Group badge -->
-                      <div
-                        v-if="item.room.isGroup"
-                        class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background-total-theme"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
-                          <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
-                        </svg>
-                      </div>
+            <RecycleScroller
+              v-else-if="listItems.length > 0"
+              data-testid="forward-room-list"
+              :items="listItems"
+              :item-size="ROW_HEIGHT"
+              key-field="id"
+              class="min-h-0 flex-1"
+              :class="isMobile ? 'pb-safe' : ''"
+            >
+              <template #default="{ item }">
+                <button
+                  class="flex w-full items-center gap-3 px-4 transition-colors hover:bg-neutral-grad-0 active:bg-neutral-grad-0"
+                  :style="{ height: `${ROW_HEIGHT}px` }"
+                  @click="selectRoom(item.room.id)"
+                >
+                  <div class="relative shrink-0">
+                    <UserAvatar
+                      v-if="item.room.avatar?.startsWith('__pocketnet__:')"
+                      :address="item.room.avatar.replace('__pocketnet__:', '')"
+                      size="md"
+                    />
+                    <Avatar v-else :src="item.room.avatar" :name="item.name || ''" size="md" />
+                    <!-- Group badge -->
+                    <div
+                      v-if="item.room.isGroup"
+                      class="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background-total-theme"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" class="text-text-on-main-bg-color">
+                        <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+                      </svg>
                     </div>
+                  </div>
 
-                    <div class="min-w-0 flex-1 text-left">
-                      <div v-if="isUnresolvedName(item.name)" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
-                      <template v-else>
-                        <div class="truncate text-[15px] font-medium text-text-color">{{ item.name }}</div>
-                        <div v-if="getRoomSubtitle(item.room)" class="truncate text-xs text-text-on-main-bg-color">{{ getRoomSubtitle(item.room) }}</div>
-                      </template>
-                    </div>
-                  </button>
-                </template>
-              </RecycleScroller>
+                  <div class="min-w-0 flex-1 text-left">
+                    <div v-if="isUnresolvedName(item.name)" class="inline-block h-3.5 w-24 animate-pulse rounded bg-neutral-grad-2" />
+                    <template v-else>
+                      <div class="truncate text-[15px] font-medium text-text-color">{{ item.name }}</div>
+                      <div v-if="getRoomSubtitle(item.room)" class="truncate text-xs text-text-on-main-bg-color">{{ getRoomSubtitle(item.room) }}</div>
+                    </template>
+                  </div>
+                </button>
+              </template>
+            </RecycleScroller>
 
-              <div v-else class="p-8 text-center text-sm text-text-on-main-bg-color">
-                {{ t("forward.noChats") }}
-              </div>
+            <div v-else class="p-8 text-center text-sm text-text-on-main-bg-color">
+              {{ t("forward.noChats") }}
             </div>
           </div>
         </transition>
