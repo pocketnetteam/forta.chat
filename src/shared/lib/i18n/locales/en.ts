@@ -780,6 +780,8 @@ export const en = {
   "system.updatedRoom": "{sender} updated the room",
   "system.changedName": "{sender} changed the room name to \"{name}\"",
   "system.changedPermissions": "{sender} changed room permissions",
+  "system.markedModerator": "{sender} marked {target} as moderator",
+  "system.unmarkedModerator": "{sender} unmarked {target} as moderator",
   "system.changedPhoto": "{sender} changed the room photo",
   "system.setDescription": "{sender} set the room description",
   "system.clearedDescription": "{sender} cleared the room description",

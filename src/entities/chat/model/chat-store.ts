@@ -9,6 +9,7 @@ import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
+import { getModeratorChange, isServiceRoomName, isWithinCreationBurst, isCreationBurstMemberEvent } from "../lib/system-event-filter";
 import { preservePendingRooms } from "../lib/preserve-pending-rooms";
 import {
   readJoinRule,
@@ -4665,23 +4666,52 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** origin_server_ts of the room's m.room.create event (null if unknown).
+   *  Used to suppress the room-creation system-event burst (WEE-99). */
+  const getRoomCreationTs = (roomId: string): number | null => {
+    try {
+      const matrixRoom = getMatrixClientService().getRoom(roomId);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const createEvents = (matrixRoom as any)?.currentState?.getStateEvents?.("m.room.create");
+      const createEvent = Array.isArray(createEvents) ? createEvents[0] : createEvents;
+      const ts = createEvent?.getTs?.() ?? createEvent?.event?.origin_server_ts;
+      return typeof ts === "number" ? ts : null;
+    } catch {
+      return null;
+    }
+  };
+
   /** Build a human-readable system message for room state events.
    *  Stores a template + raw addresses in systemMeta so names can be
-   *  re-resolved at render time (avoids stale truncated addresses). */
+   *  re-resolved at render time (avoids stale truncated addresses).
+   *  Returns null for noisy room-setup events (WEE-99): initial
+   *  power_levels, service hash names, creation-burst join/invite/avatar. */
   const buildSystemMessage = (raw: Record<string, unknown>, roomId: string): Message | null => {
     const content = raw.content as Record<string, unknown>;
     const eventType = raw.type as string;
     const sender = matrixIdToAddress(raw.sender as string);
+    const eventTs = (raw.origin_server_ts as number) ?? 0;
+    // prev_content normally lives in unsigned; some servers still emit the
+    // deprecated top-level location
+    const prevContent = ((raw.unsigned as Record<string, unknown> | undefined)?.prev_content
+      ?? raw.prev_content) as Record<string, unknown> | undefined;
 
     let templateKey = "";
     let targetAddr: string | undefined;
     let extraMeta: Record<string, string> | undefined;
+    // member events collapse target===sender to "no target" ("{sender} joined");
+    // moderator templates always need {target}, even on self-demotion
+    let keepSelfTarget = false;
 
     if (eventType === "m.room.member") {
       const membership = content.membership as string;
       const stateKey = raw.state_key as string | undefined;
       targetAddr = stateKey ? matrixIdToAddress(stateKey) : sender;
       const isSelf = targetAddr === sender;
+
+      if (isCreationBurstMemberEvent(membership, isSelf, eventTs, getRoomCreationTs(roomId))) {
+        return null;
+      }
 
       if (membership === "join") {
         templateKey = isSelf ? "system.joined" : "system.added";
@@ -4696,16 +4726,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     } else if (eventType === "m.room.name") {
       const newName = (content.name as string) || "";
-      const isHash = /^#?[0-9a-f]{20,}$/i.test(newName);
-      if (isHash || !newName) {
-        templateKey = "system.updatedRoom";
-      } else {
-        templateKey = "system.changedName";
-        extraMeta = { name: newName };
+      if (isServiceRoomName(newName)) {
+        return null;
       }
+      templateKey = "system.changedName";
+      extraMeta = { name: newName };
     } else if (eventType === "m.room.power_levels") {
-      templateKey = "system.changedPermissions";
+      if (isWithinCreationBurst(eventTs, getRoomCreationTs(roomId))) return null;
+      const change = getModeratorChange(content, prevContent);
+      if (!change) return null;
+      templateKey = change.promoted ? "system.markedModerator" : "system.unmarkedModerator";
+      targetAddr = matrixIdToAddress(change.userId);
+      keepSelfTarget = true;
     } else if (eventType === "m.room.avatar") {
+      if (isWithinCreationBurst(eventTs, getRoomCreationTs(roomId))) return null;
       templateKey = "system.changedPhoto";
     } else if (eventType === "m.room.topic") {
       const newTopic = (content.topic as string) || "";
@@ -4719,7 +4753,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // content stores a snapshot for Dexie preview (English fallback);
     // the real display text is resolved at render time via systemMeta.template + i18n
     const senderName = getDisplayName(sender) || sender.slice(0, 8) + "...";
-    const targetName = targetAddr && targetAddr !== sender
+    const hasTarget = !!targetAddr && (targetAddr !== sender || keepSelfTarget);
+    const targetName = hasTarget && targetAddr
       ? (getDisplayName(targetAddr) || targetAddr.slice(0, 8) + "...")
       : senderName;
     const fallbackText = templateKey
@@ -4727,7 +4762,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       .replace(/([A-Z])/g, " $1")
       .toLowerCase();
     const snapshotText = cleanMatrixIds(
-      `${senderName} ${fallbackText}${targetAddr && targetAddr !== sender ? ` ${targetName}` : ""}`,
+      `${senderName} ${fallbackText}${hasTarget ? ` ${targetName}` : ""}`,
     );
 
     return {
@@ -4741,7 +4776,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       systemMeta: {
         template: templateKey,
         senderAddr: sender,
-        targetAddr: targetAddr !== sender ? targetAddr : undefined,
+        targetAddr: hasTarget ? targetAddr : undefined,
         ...extraMeta && { extra: extraMeta },
       },
     };
