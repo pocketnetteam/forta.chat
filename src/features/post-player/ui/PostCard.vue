@@ -89,15 +89,21 @@ const visibleTags = computed(() => {
 const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
+const hasOwnContent = computed(() =>
+  !!(post.value?.caption || truncatedMessage.value || firstImage.value || videoInfo.value),
+);
+
 /** WEE-101: a repost wrapper whose original txid could not be resolved has no
  *  renderable content of its own — show a link fallback instead of a bare card. */
 const isUnresolvedRepost = computed(() =>
-  !!post.value?.repostUnresolved &&
-  !post.value.repost &&
-  !post.value.caption &&
-  !truncatedMessage.value &&
-  !firstImage.value &&
-  !videoInfo.value,
+  !!post.value?.repostUnresolved && !post.value.repost && !hasOwnContent.value,
+);
+
+/** WEE-101: a repost wrapper with no content of its own renders as
+ *  "header + nested original" — its own rating row and open button would
+ *  duplicate the nested card's controls and open an empty modal. */
+const isBareRepostWrapper = computed(() =>
+  !!post.value?.repost && !hasOwnContent.value,
 );
 
 async function loadAuthor(data: BastyonPostData) {
@@ -304,14 +310,18 @@ onMounted(loadPostData);
       <div
         v-if="post.repost"
         class="mt-1 rounded-xl border p-2"
-        :class="isOwn ? 'border-white/10 bg-white/5' : 'border-neutral-grad-1/50 bg-neutral-grad-0/30'"
+        :class="[
+          isOwn ? 'border-white/10 bg-white/5' : 'border-neutral-grad-1/50 bg-neutral-grad-0/30',
+          isBareRepostWrapper ? 'mb-3' : '',
+        ]"
       >
         <PostCard :txid="post.repost.txid" :is-own="isOwn" />
       </div>
     </div>
 
-    <!-- Rating + actions row -->
-    <div class="flex items-center gap-2 px-3 py-3 sm:gap-3 sm:px-4 sm:py-4" @click.stop @pointerdown.stop @touchstart.stop>
+    <!-- Rating + actions row — hidden for a bare repost wrapper, whose only
+         content is the nested original card with its own controls -->
+    <div v-if="!isBareRepostWrapper" class="flex items-center gap-2 px-3 py-3 sm:gap-3 sm:px-4 sm:py-4" @click.stop @pointerdown.stop @touchstart.stop>
       <!-- Interactive star rating -->
       <StarRating
         :model-value="myScore"
@@ -363,8 +373,9 @@ onMounted(loadPostData);
       </button>
     </div>
 
-    <!-- Open button -->
-    <div class="px-3 pb-3 sm:px-4 sm:pb-4">
+    <!-- Open button — opening the empty wrapper shows a blank modal, so a
+         bare repost wrapper defers to the nested card's own open button -->
+    <div v-if="!isBareRepostWrapper" class="px-3 pb-3 sm:px-4 sm:pb-4">
       <button
         class="w-full rounded-xl py-2 text-xs font-semibold text-white transition-colors sm:py-2.5 sm:text-sm"
         :class="isOwn ? 'bg-white/20 hover:bg-white/30' : 'bg-color-bg-ac hover:bg-color-bg-ac-1'"

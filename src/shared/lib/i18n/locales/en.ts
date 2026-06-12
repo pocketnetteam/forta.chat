@@ -75,6 +75,8 @@ export const en = {
   "tabs.channels": "Channels",
 
   // ── Channels ──
+  "channels.repostPreview": "Repost",
+  "channels.postPreview": "Post",
   "channels.noChannels": "No channel subscriptions",
   "channels.noChannelsHint": "Subscribe to channels on Bastyon to see them here",
   "channels.noPosts": "No posts in this channel yet",

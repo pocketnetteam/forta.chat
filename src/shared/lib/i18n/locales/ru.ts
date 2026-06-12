@@ -77,6 +77,8 @@ export const ru: Record<TranslationKey, string> = {
   "tabs.channels": "Каналы",
 
   // ── Каналы ──
+  "channels.repostPreview": "Репост",
+  "channels.postPreview": "Пост",
   "channels.noChannels": "Нет подписок на каналы",
   "channels.noChannelsHint": "Подпишитесь на каналы в Bastyon, чтобы видеть их здесь",
   "channels.noPosts": "В этом канале пока нет постов",
