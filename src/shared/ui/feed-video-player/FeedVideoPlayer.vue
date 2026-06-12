@@ -7,12 +7,20 @@ interface Props {
   poster?: string;
   aspectRatio?: string;
   autoplay?: boolean;
+  /** Start muted (default true — feed convention). Pass false for post viewing. */
+  startMuted?: boolean;
+  /** Persist playback position under this key (WEE-82 / forta-bugs#964). */
+  persistKey?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   aspectRatio: "16/9",
   autoplay: false,
+  startMuted: true,
 });
+
+// Fired when all retries are exhausted — host may switch playback strategy.
+const emit = defineEmits<{ "fatal-error": [] }>();
 
 const containerRef = ref<HTMLElement | null>(null);
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -30,6 +38,9 @@ const {
   src: toRef(props, "src"),
   poster: props.poster,
   autoplay: props.autoplay,
+  startMuted: props.startMuted,
+  persistKey: props.persistKey,
+  onFatalError: () => emit("fatal-error"),
 });
 
 const progress = computed(() =>

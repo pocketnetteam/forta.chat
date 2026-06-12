@@ -17,6 +17,12 @@ import com.getcapacitor.annotation.CapacitorPlugin
 @CapacitorPlugin(name = "PushData")
 class PushDataPlugin : Plugin() {
 
+    companion object {
+        private const val INTENT_PREFS = "forta_push_intents"
+        private const val KEY_CONSUMED = "consumed_push_keys"
+        private const val MAX_CONSUMED_KEYS = 20
+    }
+
     /** Buffered push intent data for cold-start retrieval by JS */
     private var pendingPushRoom: JSObject? = null
 
@@ -26,6 +32,48 @@ class PushDataPlugin : Plugin() {
 
         // Buffer push intent for cold-start (JS listeners aren't ready yet)
         activity?.intent?.let { bufferPushIntent(it) }
+    }
+
+    // ── Stale-intent guards (WEE-82 / forta-bugs#962) ────────────────────────
+    //
+    // `intent.removeExtra()` below only mutates the in-memory Intent. Android
+    // keeps the ORIGINAL launch intent in the task record: when the process is
+    // killed in background (e.g. memory pressure while the user watched a
+    // video) and the task is re-entered, the activity is recreated with the
+    // push extras present again — and we'd re-open a chat the user tapped into
+    // days ago instead of leaving them where they were. Two guards:
+    //   1. FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY — relaunch via recents is never
+    //      a fresh notification tap.
+    //   2. A persisted LRU of consumed (roomId|eventId) keys — covers
+    //      recreation paths that don't set the history flag. Event IDs are
+    //      unique per message, so a fresh tap is never falsely skipped; null
+    //      eventId intents skip this check (room-only key could swallow a
+    //      legitimate second tap for the same room).
+
+    private fun intentKey(roomId: String, eventId: String?): String? =
+        eventId?.let { "$roomId|$it" }
+
+    private fun consumedKeys(): List<String> =
+        context.getSharedPreferences(INTENT_PREFS, android.content.Context.MODE_PRIVATE)
+            .getString(KEY_CONSUMED, "")
+            ?.split('\n')
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+
+    private fun markConsumed(key: String?) {
+        if (key == null) return
+        val keys = (consumedKeys().filter { it != key } + key).takeLast(MAX_CONSUMED_KEYS)
+        context.getSharedPreferences(INTENT_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_CONSUMED, keys.joinToString("\n"))
+            .apply()
+    }
+
+    /** True when this intent must not navigate (historical relaunch or already handled). */
+    private fun isStalePushIntent(intent: Intent, roomId: String, eventId: String?): Boolean {
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return true
+        val key = intentKey(roomId, eventId) ?: return false
+        return consumedKeys().contains(key)
     }
 
     override fun handleOnDestroy() {
@@ -58,6 +106,12 @@ class PushDataPlugin : Plugin() {
         intent.removeExtra(FortaFirebaseMessagingService.EXTRA_PUSH_ROOM_ID)
         intent.removeExtra(FortaFirebaseMessagingService.EXTRA_PUSH_EVENT_ID)
 
+        if (isStalePushIntent(intent, roomId, eventId)) {
+            android.util.Log.d("FortaPush", "bufferPushIntent: stale push intent skipped (roomId=$roomId)")
+            return
+        }
+        markConsumed(intentKey(roomId, eventId))
+
         val data = JSObject()
         data.put("roomId", roomId)
         if (eventId != null) data.put("eventId", eventId)
@@ -72,6 +126,12 @@ class PushDataPlugin : Plugin() {
         // Clear to avoid re-firing
         intent.removeExtra(FortaFirebaseMessagingService.EXTRA_PUSH_ROOM_ID)
         intent.removeExtra(FortaFirebaseMessagingService.EXTRA_PUSH_EVENT_ID)
+
+        if (isStalePushIntent(intent, roomId, eventId)) {
+            android.util.Log.d("FortaPush", "forwardPushIntent: stale push intent skipped (roomId=$roomId)")
+            return
+        }
+        markConsumed(intentKey(roomId, eventId))
 
         val data = JSObject()
         data.put("roomId", roomId)
