@@ -26,7 +26,7 @@ vi.mock("../chat-scripts/config/pocketnetinstance", () => ({
   PocketnetInstance: { options: { listofproxies: null } },
 }));
 
-import { createAppInitializer } from "../app-initializer";
+import { createAppInitializer, extractRepostTxid } from "../app-initializer";
 import type { AppInitializer } from "../app-initializer";
 
 const ORIGINAL_TXID = "a".repeat(63) + "1";
@@ -117,6 +117,61 @@ describe("loadPost — repost txid extraction (WEE-101)", () => {
     expect(post?.message).toBe("hello");
     expect(post?.repost).toBeUndefined();
     expect(post?.repostUnresolved).toBeUndefined();
+  });
+});
+
+describe("extractRepostTxid — unit (WEE-101)", () => {
+  it("нормализует uppercase-hex к lowercase", () => {
+    const upper = "A".repeat(63) + "1";
+    expect(extractRepostTxid(upper)).toEqual({ txid: upper.toLowerCase(), source: upper });
+  });
+
+  it("принимает legacy-форму {txid}", () => {
+    const source = { txid: ORIGINAL_TXID };
+    expect(extractRepostTxid(source)).toEqual({ txid: ORIGINAL_TXID, source });
+  });
+
+  it("возвращает source вместе с txid — контент-поля читаются из того же payload", () => {
+    const unrelated = { m: "wrong content" };
+    const match = { v: ORIGINAL_TXID, m: "right content" };
+    expect(extractRepostTxid(unrelated, match)?.source).toBe(match);
+  });
+
+  it("отклоняет не-hex строки и числа", () => {
+    expect(extractRepostTxid("not-a-txid", 42, { v: "short" })).toBeNull();
+  });
+});
+
+describe("loadPost — защита от ложных маркеров и дивергенции источников (WEE-101 review)", () => {
+  it("txid из голой строки + посторонний объект в кандидатах → поля репоста НЕ берутся из постороннего объекта", async () => {
+    const init = createAppInitializer();
+    withRpcResponse(init, [
+      {
+        txid: WRAPPER_TXID,
+        repost: ORIGINAL_TXID,
+        msg: { m: "", r: { m: "unrelated%20content", address: "PWrongAuthor" } },
+      },
+    ]);
+
+    const post = await init.loadPost(WRAPPER_TXID);
+
+    expect(post?.repost?.txid).toBe(ORIGINAL_TXID);
+    expect(post?.repost?.message).toBe("");
+    expect(post?.repost?.address).toBe("");
+    // And nothing got cached under the original txid from the wrong object.
+    expect(init.getCachedPost(ORIGINAL_TXID)).toBeNull();
+  });
+
+  it("строка-рейтинг в content.r не ставит repostUnresolved", async () => {
+    const init = createAppInitializer();
+    withRpcResponse(init, [
+      { txid: WRAPPER_TXID, msg: { m: "normal post", r: "12" } },
+    ]);
+
+    const post = await init.loadPost(WRAPPER_TXID);
+
+    expect(post?.repostUnresolved).toBeUndefined();
+    expect(post?.repost).toBeUndefined();
   });
 });
 

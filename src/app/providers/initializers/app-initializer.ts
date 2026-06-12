@@ -37,8 +37,11 @@ const HEX64_RE = /^[a-f0-9]{64}$/;
 
 /** Pocketnet encodes the reblogged txid as `repost.v` (golden reference:
  *  pocketnet `_map.js` → `txidRepost: self.repost.v`), or ships a bare txid
- *  string; there is no `repost.txid` in the node schema (WEE-101). */
-export function extractRepostTxid(...sources: unknown[]): string | null {
+ *  string; there is no `repost.txid` in the node schema (WEE-101).
+ *  Returns the matched source alongside the txid so callers read the repost's
+ *  content fields from the same payload the txid came from — never from an
+ *  unrelated object earlier in the candidate list. */
+export function extractRepostTxid(...sources: unknown[]): { txid: string; source: unknown } | null {
   for (const source of sources) {
     const candidate =
       typeof source === "string"
@@ -47,7 +50,7 @@ export function extractRepostTxid(...sources: unknown[]): string | null {
           ? ((source as Record<string, unknown>).v ?? (source as Record<string, unknown>).txid)
           : undefined;
     if (typeof candidate === "string" && HEX64_RE.test(candidate.toLowerCase())) {
-      return candidate.toLowerCase();
+      return { txid: candidate.toLowerCase(), source };
     }
   }
   return null;
@@ -533,17 +536,20 @@ export class AppInitializer {
 
       // Parse repost data — the original txid lives in `repost.v` or a bare
       // txid string, never `repost.txid` (WEE-101)
-      const repostSources = [raw.repost, content.repost, content.r, raw.relayedBy, raw.share, content.relayedBy];
-      const repostTxid = extractRepostTxid(...repostSources);
-      if (repostTxid) {
-        const repostRaw = repostSources.find(
-          (s): s is Record<string, unknown> => !!s && typeof s === "object",
-        ) ?? {};
+      const extracted = extractRepostTxid(
+        raw.repost, content.repost, content.r, raw.relayedBy, raw.share, content.relayedBy,
+      );
+      if (extracted) {
+        // Read content fields only from the payload the txid came from — an
+        // unrelated object in the candidate list must not contribute fields.
+        const repostRaw = (
+          extracted.source && typeof extracted.source === "object" ? extracted.source : {}
+        ) as Record<string, unknown>;
         const rc = (repostRaw.msg ?? repostRaw.p ?? repostRaw) as Record<string, unknown>;
         const rImages = rc.i ?? rc.images;
         const rTags = rc.t ?? rc.tags;
         post.repost = {
-          txid: repostTxid,
+          txid: extracted.txid,
           address: (repostRaw.address as string) ?? (rc.address as string) ?? "",
           caption: tryDecode(rc.c ?? rc.caption),
           message: tryDecode(rc.m ?? rc.message),
@@ -556,10 +562,12 @@ export class AppInitializer {
         // Cache the repost under the original's txid only when the wrapper
         // actually carried its content — a bare {v: txid} stub would shadow
         // the real post and the nested PostCard would render it empty.
-        if (hasPostContent(post.repost) && !this.postCache.has(repostTxid)) {
-          this.postCache.set(repostTxid, post.repost);
+        if (hasPostContent(post.repost) && !this.postCache.has(extracted.txid)) {
+          this.postCache.set(extracted.txid, post.repost);
         }
-      } else if (repostSources.some(isRepostMarker)) {
+      } else if ([raw.repost, content.repost].some(isRepostMarker)) {
+        // Only explicit repost fields count as an unresolved marker —
+        // r/relayedBy/share can hold ratings, addresses or URLs (false flags).
         post.repostUnresolved = true;
       }
 
@@ -602,16 +610,17 @@ export class AppInitializer {
 
     // Parse repost (shared post) data — original txid is `repost.v` or a bare
     // txid string, never `repost.txid` (WEE-101)
-    const repostSources = [raw.repost, raw.r, raw.relayedBy, raw.share];
-    const repostTxid = extractRepostTxid(...repostSources);
-    if (repostTxid) {
-      const r = repostSources.find(
-        (s): s is Record<string, unknown> => !!s && typeof s === "object",
-      ) ?? {};
+    const extracted = extractRepostTxid(raw.repost, raw.r, raw.relayedBy, raw.share);
+    if (extracted) {
+      // Read content fields only from the payload the txid came from — an
+      // unrelated object in the candidate list must not contribute fields.
+      const r = (
+        extracted.source && typeof extracted.source === "object" ? extracted.source : {}
+      ) as Record<string, unknown>;
       const rImages = r.i ?? r.images;
       const rTags = r.t ?? r.tags;
       post.repost = {
-        txid: repostTxid,
+        txid: extracted.txid,
         address: (r.address as string) ?? "",
         caption: tryDecode(r.c ?? r.caption),
         message: tryDecode(r.m ?? r.message),
@@ -624,10 +633,12 @@ export class AppInitializer {
       // Cache the repost under the original's txid only when the feed item
       // actually carried its content — a bare {v: txid} stub would shadow
       // the real post and the nested PostCard would render it empty.
-      if (hasPostContent(post.repost) && !this.postCache.has(repostTxid)) {
-        this.postCache.set(repostTxid, post.repost);
+      if (hasPostContent(post.repost) && !this.postCache.has(extracted.txid)) {
+        this.postCache.set(extracted.txid, post.repost);
       }
-    } else if (repostSources.some(isRepostMarker)) {
+    } else if (isRepostMarker(raw.repost)) {
+      // Only the explicit repost field counts as an unresolved marker —
+      // r/relayedBy/share can hold ratings, addresses or URLs (false flags).
       post.repostUnresolved = true;
     }
 
