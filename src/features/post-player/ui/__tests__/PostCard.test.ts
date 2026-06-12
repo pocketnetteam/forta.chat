@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 
 // Stub composables/stores BEFORE component import (vi.mock is hoisted).
 const loadPost = vi.fn();
-const getCachedPost = vi.fn(() => null);
+const getCachedPost = vi.fn((): BastyonPostData | null => null);
 vi.mock("@/entities/auth", () => ({
   useAuthStore: () => ({
     address: "myaddr",
@@ -128,6 +128,94 @@ describe("PostCard bounded skeleton + retry (WEE-70)", () => {
     await w.find("button").trigger("click");
     await flushPromises();
     expect(loadPost).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("PostCard unresolved repost fallback (WEE-101)", () => {
+  const emptyRepostWrapper: BastyonPostData = {
+    txid: "tx123",
+    address: "sharer",
+    caption: "",
+    message: "",
+    images: [],
+    url: "",
+    tags: [],
+    settings: {},
+    time: 1_700_000_000,
+    repostUnresolved: true,
+  };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  afterEach(() => {
+    getCachedPost.mockReturnValue(null);
+  });
+
+  it("пустая обёртка с нерезолвнутым repost → fallback-ссылка, не голая карточка", async () => {
+    getCachedPost.mockReturnValue(emptyRepostWrapper);
+    const w = mountCard();
+    await flushPromises();
+
+    const link = w.find("a");
+    expect(link.exists()).toBe(true);
+    expect(link.text()).toBe("Open in Bastyon");
+    // No bare card and no retry button (retry can't fix an unresolved repost).
+    expect(w.find(".post-card").exists()).toBe(false);
+    expect(w.find("button").exists()).toBe(false);
+  });
+
+  it("обёртка с разрешённым repost рендерит вложенный PostCard, а не fallback", async () => {
+    getCachedPost.mockReturnValue({
+      ...emptyRepostWrapper,
+      repostUnresolved: undefined,
+      repost: { ...emptyRepostWrapper, txid: "orig456", repostUnresolved: undefined },
+    });
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.find(".post-card").exists()).toBe(true);
+    expect(w.findComponent({ name: "PostCard" }).exists()).toBe(true);
+  });
+
+  it("голая repost-обёртка не рендерит свои рейтинг/экшены/«Открыть» — только хедер + вложенный оригинал", async () => {
+    getCachedPost.mockReturnValue({
+      ...emptyRepostWrapper,
+      repostUnresolved: undefined,
+      repost: { ...emptyRepostWrapper, txid: "orig456", repostUnresolved: undefined },
+    });
+    const w = mountCard();
+    await flushPromises();
+
+    // Nested original card is there, the wrapper's own controls are not:
+    // no buttons (open/share/boost) and no StarRating row of the wrapper.
+    expect(w.findComponent({ name: "PostCard" }).exists()).toBe(true);
+    expect(w.findAll("button").length).toBe(0);
+    expect(w.findComponent({ name: "StarRating" }).exists()).toBe(false);
+  });
+
+  it("обёртка с собственным текстом сохраняет свои контролы при вложенном репосте", async () => {
+    getCachedPost.mockReturnValue({
+      ...emptyRepostWrapper,
+      repostUnresolved: undefined,
+      caption: "my hot take",
+      repost: { ...emptyRepostWrapper, txid: "orig456", repostUnresolved: undefined },
+    });
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.findComponent({ name: "PostCard" }).exists()).toBe(true);
+    expect(w.findAll("button").length).toBeGreaterThan(0);
+  });
+
+  it("обычный пост с контентом не задевается fallback'ом (регрессия)", async () => {
+    getCachedPost.mockReturnValue({ ...emptyRepostWrapper, repostUnresolved: undefined, caption: "hello" });
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.find(".post-card").exists()).toBe(true);
+    expect(w.text()).toContain("hello");
   });
 });
 

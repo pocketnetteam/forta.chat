@@ -28,6 +28,42 @@ export interface BastyonPostData {
   scoreCnt?: number;
   myVal?: number;
   repost?: BastyonPostData;
+  /** A repost marker was present in the RPC payload but no original txid
+   *  could be extracted — UI should show a fallback link, not a bare card. */
+  repostUnresolved?: boolean;
+}
+
+const HEX64_RE = /^[a-f0-9]{64}$/;
+
+/** Pocketnet encodes the reblogged txid as `repost.v` (golden reference:
+ *  pocketnet `_map.js` → `txidRepost: self.repost.v`), or ships a bare txid
+ *  string; there is no `repost.txid` in the node schema (WEE-101).
+ *  Returns the matched source alongside the txid so callers read the repost's
+ *  content fields from the same payload the txid came from — never from an
+ *  unrelated object earlier in the candidate list. */
+export function extractRepostTxid(...sources: unknown[]): { txid: string; source: unknown } | null {
+  for (const source of sources) {
+    const candidate =
+      typeof source === "string"
+        ? source
+        : source && typeof source === "object"
+          ? ((source as Record<string, unknown>).v ?? (source as Record<string, unknown>).txid)
+          : undefined;
+    if (typeof candidate === "string" && HEX64_RE.test(candidate.toLowerCase())) {
+      return { txid: candidate.toLowerCase(), source };
+    }
+  }
+  return null;
+}
+
+function hasPostContent(post: BastyonPostData): boolean {
+  return !!(post.caption || post.message || post.images.length || post.url);
+}
+
+/** True when a value looks like a repost marker (object or non-empty string).
+ *  Numbers are excluded on purpose — feed fields like `r` can be ratings. */
+function isRepostMarker(value: unknown): boolean {
+  return (typeof value === "object" && value !== null) || (typeof value === "string" && value !== "");
 }
 
 export interface PostScore {
@@ -498,28 +534,41 @@ export class AppInitializer {
         time: (raw.time as number) ?? (content.time as number) ?? 0,
       };
 
-      // Parse repost data
-      const repostRaw = raw.repost ?? raw.relayedBy ?? raw.share ?? content.repost ?? content.relayedBy;
-      if (repostRaw && typeof repostRaw === "object" && (repostRaw as any).txid) {
-        const r = repostRaw as Record<string, unknown>;
-        const rc = (r.msg ?? r.p ?? r) as Record<string, unknown>;
+      // Parse repost data — the original txid lives in `repost.v` or a bare
+      // txid string, never `repost.txid` (WEE-101)
+      const extracted = extractRepostTxid(
+        raw.repost, content.repost, content.r, raw.relayedBy, raw.share, content.relayedBy,
+      );
+      if (extracted) {
+        // Read content fields only from the payload the txid came from — an
+        // unrelated object in the candidate list must not contribute fields.
+        const repostRaw = (
+          extracted.source && typeof extracted.source === "object" ? extracted.source : {}
+        ) as Record<string, unknown>;
+        const rc = (repostRaw.msg ?? repostRaw.p ?? repostRaw) as Record<string, unknown>;
         const rImages = rc.i ?? rc.images;
         const rTags = rc.t ?? rc.tags;
         post.repost = {
-          txid: (r.txid as string) ?? "",
-          address: (r.address as string) ?? (rc.address as string) ?? "",
+          txid: extracted.txid,
+          address: (repostRaw.address as string) ?? (rc.address as string) ?? "",
           caption: tryDecode(rc.c ?? rc.caption),
           message: tryDecode(rc.m ?? rc.message),
           images: Array.isArray(rImages) ? (rImages as string[]) : [],
           url: tryDecode(rc.u ?? rc.url),
           tags: Array.isArray(rTags) ? (rTags as string[]) : [],
           settings: (rc.s as { v?: string }) ?? (rc.settings as { v?: string }) ?? {},
-          time: (r.time as number) ?? (rc.time as number) ?? 0,
+          time: (repostRaw.time as number) ?? (rc.time as number) ?? 0,
         };
-        // Cache repost separately so nested PostCard can find it
-        if (post.repost.txid && !this.postCache.has(post.repost.txid)) {
-          this.postCache.set(post.repost.txid, post.repost);
+        // Cache the repost under the original's txid only when the wrapper
+        // actually carried its content — a bare {v: txid} stub would shadow
+        // the real post and the nested PostCard would render it empty.
+        if (hasPostContent(post.repost) && !this.postCache.has(extracted.txid)) {
+          this.postCache.set(extracted.txid, post.repost);
         }
+      } else if ([raw.repost, content.repost].some(isRepostMarker)) {
+        // Only explicit repost fields count as an unresolved marker —
+        // r/relayedBy/share can hold ratings, addresses or URLs (false flags).
+        post.repostUnresolved = true;
       }
 
       this.postCache.set(txid, post);
@@ -559,14 +608,19 @@ export class AppInitializer {
       time: Number(raw.time ?? 0),
     };
 
-    // Parse repost (shared post) data
-    const repostRaw = raw.repost ?? raw.relayedBy ?? raw.share;
-    if (repostRaw && typeof repostRaw === "object" && (repostRaw as any).txid) {
-      const r = repostRaw as Record<string, unknown>;
+    // Parse repost (shared post) data — original txid is `repost.v` or a bare
+    // txid string, never `repost.txid` (WEE-101)
+    const extracted = extractRepostTxid(raw.repost, raw.r, raw.relayedBy, raw.share);
+    if (extracted) {
+      // Read content fields only from the payload the txid came from — an
+      // unrelated object in the candidate list must not contribute fields.
+      const r = (
+        extracted.source && typeof extracted.source === "object" ? extracted.source : {}
+      ) as Record<string, unknown>;
       const rImages = r.i ?? r.images;
       const rTags = r.t ?? r.tags;
       post.repost = {
-        txid: (r.txid as string) ?? "",
+        txid: extracted.txid,
         address: (r.address as string) ?? "",
         caption: tryDecode(r.c ?? r.caption),
         message: tryDecode(r.m ?? r.message),
@@ -576,10 +630,16 @@ export class AppInitializer {
         settings: (r.s as { v?: string }) ?? (r.settings as { v?: string }) ?? {},
         time: Number(r.time ?? 0),
       };
-      // Cache repost separately so nested PostCard can find it
-      if (post.repost.txid && !this.postCache.has(post.repost.txid)) {
-        this.postCache.set(post.repost.txid, post.repost);
+      // Cache the repost under the original's txid only when the feed item
+      // actually carried its content — a bare {v: txid} stub would shadow
+      // the real post and the nested PostCard would render it empty.
+      if (hasPostContent(post.repost) && !this.postCache.has(extracted.txid)) {
+        this.postCache.set(extracted.txid, post.repost);
       }
+    } else if (isRepostMarker(raw.repost)) {
+      // Only the explicit repost field counts as an unresolved marker —
+      // r/relayedBy/share can hold ratings, addresses or URLs (false flags).
+      post.repostUnresolved = true;
     }
 
     this.postCache.set(txid, post);
