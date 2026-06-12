@@ -56,6 +56,48 @@ export interface RpcFailoverOptions {
   nowMs?: number;
   /** Cooldown for a failed node before it is retried; defaults to {@link NODE_COOLDOWN_MS}. */
   cooldownMs?: number;
+  /** Per-node request ceiling; defaults to {@link NODE_REQUEST_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
+
+/**
+ * Per-node request ceiling. On blocked networks (RU/CIS ISP filtering — the
+ * WEE-13 root cause) a blackholed host doesn't refuse the connection, it just
+ * never answers; the WebView's own TCP timeout is minutes. Without this bound
+ * the failover loop is stuck on the first dead node and never reaches a
+ * reachable mirror within the user's patience window.
+ */
+export const NODE_REQUEST_TIMEOUT_MS = 10_000;
+
+/** fetch with a hard deadline. The deadline is enforced by Promise.race, so it
+ *  holds even on ancient WebViews without AbortController and with fetch
+ *  implementations that ignore `init.signal`; when AbortController IS available
+ *  the request is also aborted so the underlying socket is actually freed.
+ *  Note: any caller-provided `init.signal` is replaced (no current caller sets
+ *  one; `AbortSignal.any` is unavailable on the old WebViews we support). */
+async function fetchWithDeadline(
+  doFetch: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new Error(`timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  const request = doFetch(url, controller ? { ...init, signal: controller.signal } : init);
+  // If the deadline wins, the late abort/network rejection of the losing fetch
+  // must not surface as an unhandled rejection.
+  request.catch(() => undefined);
+  try {
+    return await Promise.race([request, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** How long a node that returned 502/network-error stays "cut off" before retry. */
@@ -121,19 +163,25 @@ export async function rpcFetchWithFailover(
   const doFetch = opts.fetchImpl ?? fetch;
   const nowMs = opts.nowMs ?? Date.now();
   const cooldownMs = opts.cooldownMs ?? NODE_COOLDOWN_MS;
+  const timeoutMs = opts.timeoutMs ?? NODE_REQUEST_TIMEOUT_MS;
   const start = opts.startIndex ?? stickyIndex;
   const errors: string[] = [];
 
   for (const base of orderedCandidates(nodes, start, nowMs)) {
     let response: Response;
     try {
-      response = await doFetch(`${base}${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      response = await fetchWithDeadline(
+        doFetch,
+        `${base}${path}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        timeoutMs
+      );
     } catch (e) {
-      // Network error / abort → cut the node off and try the next one.
+      // Network error / timeout abort → cut the node off and try the next one.
       errors.push(`${base}: ${e instanceof Error ? e.message : String(e)}`);
       disableNode(base, nowMs, cooldownMs);
       continue;
