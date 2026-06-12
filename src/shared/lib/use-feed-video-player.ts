@@ -1,4 +1,9 @@
 import { ref, onMounted, onBeforeUnmount, watch, type Ref } from "vue";
+import {
+  getVideoPosition,
+  saveVideoPosition,
+  clearVideoPosition,
+} from "@/shared/lib/video-position-store";
 
 export type FeedPlayerState = "idle" | "loading" | "ready" | "playing" | "paused" | "error";
 
@@ -15,6 +20,20 @@ export interface FeedPlayerOptions {
   autoplay?: boolean;
   /** rootMargin for preload zone */
   preloadMargin?: string;
+  /** Start muted (default true — feed convention). Pass false for post viewing. */
+  startMuted?: boolean;
+  /**
+   * Stable key (e.g. the post video URL) to persist playback position under
+   * (WEE-82 / forta-bugs#964). When set, the position is restored on load and
+   * saved on pause/background/unmount so minimizing the app doesn't lose it.
+   */
+  persistKey?: string;
+  /**
+   * Called once all error retries are exhausted — the source is not going to
+   * play. Lets the host switch to a different playback strategy (e.g. the
+   * iframe embed fallback in VideoPlayer, WEE-82).
+   */
+  onFatalError?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,13 +74,16 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     poster,
     autoplay = false,
     preloadMargin = "200px",
+    startMuted = true,
+    persistKey,
+    onFatalError,
   } = options;
 
   const state = ref<FeedPlayerState>("idle");
   const currentTime = ref(0);
   const duration = ref(0);
   const buffered = ref(0);
-  const isMuted = ref(true);
+  const isMuted = ref(startMuted);
   const errorCount = ref(0);
 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -91,12 +113,30 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     const el = videoRef.value;
     if (!el) return;
 
+    flushPosition();
     el.pause();
     el.removeAttribute("src");
     el.load();
     state.value = "idle";
     releaseActivePlayer(playerHandle);
     clearIdleTimer();
+  }
+
+  // --- Position persistence (WEE-82 / forta-bugs#964) ---
+
+  /** Write the current position to the persistent store. */
+  function flushPosition() {
+    if (!persistKey) return;
+    const el = videoRef.value;
+    if (!el || state.value === "idle" || state.value === "error") return;
+    saveVideoPosition(persistKey, el.currentTime, el.duration || 0);
+  }
+
+  // The WebView pauses media on background but never fires our pause() path,
+  // so flush when the page hides — that's exactly the "minimize app" moment
+  // the position must survive.
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") flushPosition();
   }
 
   // --- Play / Pause ---
@@ -152,6 +192,7 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     if (state.value === "playing") {
       state.value = "paused";
     }
+    flushPosition();
     releaseActivePlayer(playerHandle);
     startIdleTimer();
   }
@@ -199,7 +240,10 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
   // --- Error recovery ---
 
   function scheduleRetry() {
-    if (errorCount.value >= MAX_RETRIES) return;
+    if (errorCount.value >= MAX_RETRIES) {
+      onFatalError?.();
+      return;
+    }
 
     const delay = RETRY_DELAYS[errorCount.value] ?? 6000;
     errorCount.value++;
@@ -216,7 +260,25 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     const el = videoRef.value;
     if (!el) return;
     duration.value = el.duration;
+
+    // Restore the saved position (WEE-82 / forta-bugs#964). The store already
+    // drops near-start/near-end positions, so any non-zero value is resumable.
+    if (persistKey) {
+      const saved = getVideoPosition(persistKey);
+      if (saved > 0 && saved < el.duration) {
+        el.currentTime = saved;
+        currentTime.value = saved;
+      }
+    }
+
     state.value = "ready";
+
+    // Autoplay couldn't fire from the visibility observer: its initial
+    // callback runs while the source is still loading (state !== "ready").
+    // Once metadata lands, start playback if we're visible and asked to.
+    if (autoplay && isInViewport && !playInProgress) {
+      void play();
+    }
   }
 
   function onTimeUpdate() {
@@ -236,6 +298,7 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     if (el) el.currentTime = 0;
     currentTime.value = 0;
     state.value = "paused";
+    if (persistKey) clearVideoPosition(persistKey);
     releaseActivePlayer(playerHandle);
   }
 
@@ -305,6 +368,9 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
   onMounted(() => {
     bindListeners();
     setupObservers();
+    if (persistKey) {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
   });
 
   watch(src, (newSrc) => {
@@ -314,6 +380,9 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
   });
 
   onBeforeUnmount(() => {
+    if (persistKey) {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    }
     unbindListeners();
     detachSource();
     clearIdleTimer();

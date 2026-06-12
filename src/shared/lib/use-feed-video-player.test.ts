@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ref, effectScope, type EffectScope } from "vue";
 import { useFeedVideoPlayer, _resetActivePlayer } from "./use-feed-video-player";
+import {
+  getVideoPosition,
+  saveVideoPosition,
+  _resetVideoPositionCache,
+} from "./video-position-store";
 
 // ---------------------------------------------------------------------------
 // Mock HTMLVideoElement with real event dispatching
@@ -126,7 +131,14 @@ describe("useFeedVideoPlayer", () => {
     vi.useRealTimers();
   });
 
-  function setup(overrides: { src?: string | null; autoplay?: boolean } = {}) {
+  function setup(
+    overrides: {
+      src?: string | null;
+      autoplay?: boolean;
+      persistKey?: string;
+      onFatalError?: () => void;
+    } = {},
+  ) {
     const scope = effectScope();
     scopes.push(scope);
 
@@ -140,6 +152,8 @@ describe("useFeedVideoPlayer", () => {
         containerRef,
         src: srcRef,
         autoplay: overrides.autoplay ?? false,
+        persistKey: overrides.persistKey,
+        onFatalError: overrides.onFatalError,
       }),
     )!;
 
@@ -314,9 +328,154 @@ describe("useFeedVideoPlayer", () => {
       triggerIO(getVisibilityObserver(), true);
       expect(videoEl.play).toHaveBeenCalled();
     });
+
+    it("auto-plays when metadata arrives AFTER visibility fired (WEE-82/#963)", () => {
+      // Modal flow: the player becomes visible while the source is still
+      // loading. The visibility callback can't start playback (not ready yet)
+      // — loadedmetadata must pick it up, otherwise autoplay never happens.
+      setup({ autoplay: true });
+
+      triggerIO(getVisibilityObserver(), true); // visible, but still idle/loading
+      triggerIO(getPreloadObserver(), true); // attach source → loading
+
+      expect(videoEl.play).not.toHaveBeenCalled();
+
+      Object.defineProperty(videoEl, "duration", { value: 30, writable: true });
+      videoEl._emit("loadedmetadata");
+
+      expect(videoEl.play).toHaveBeenCalled();
+    });
+  });
+
+  describe("position persistence (WEE-82 / forta-bugs#964)", () => {
+    const PERSIST_KEY = "peertube://host/uuid";
+
+    beforeEach(() => {
+      localStorage.clear();
+      _resetVideoPositionCache();
+    });
+
+    it("restores the saved position when metadata loads", () => {
+      saveVideoPosition(PERSIST_KEY, 120, 600);
+
+      setup({ persistKey: PERSIST_KEY });
+      triggerIO(getPreloadObserver(), true);
+
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+
+      expect(videoEl.currentTime).toBe(120);
+    });
+
+    it("does not touch currentTime when nothing is saved", () => {
+      setup({ persistKey: PERSIST_KEY });
+      triggerIO(getPreloadObserver(), true);
+
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+
+      expect(videoEl.currentTime).toBe(0);
+    });
+
+    it("saves the position on pause", async () => {
+      const player = setup({ persistKey: PERSIST_KEY });
+
+      const playPromise = player.play();
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+      await playPromise;
+
+      videoEl.currentTime = 240;
+      player.pause();
+
+      expect(getVideoPosition(PERSIST_KEY)).toBe(240);
+    });
+
+    it("flushes the position when the page is hidden (app minimized)", async () => {
+      const player = setup({ persistKey: PERSIST_KEY });
+
+      const playPromise = player.play();
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+      await playPromise;
+
+      videoEl.currentTime = 333;
+      Object.defineProperty(document, "visibilityState", {
+        value: "hidden",
+        configurable: true,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      expect(getVideoPosition(PERSIST_KEY)).toBe(333);
+
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      });
+    });
+
+    it("saves the position when the player unmounts", async () => {
+      const player = setup({ persistKey: PERSIST_KEY });
+
+      const playPromise = player.play();
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+      await playPromise;
+
+      videoEl.currentTime = 90;
+      simulateUnmount();
+
+      expect(getVideoPosition(PERSIST_KEY)).toBe(90);
+    });
+
+    it("clears the saved position when the video ends", async () => {
+      saveVideoPosition(PERSIST_KEY, 120, 600);
+      const player = setup({ persistKey: PERSIST_KEY });
+
+      const playPromise = player.play();
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+      await playPromise;
+
+      videoEl._emit("ended");
+
+      expect(getVideoPosition(PERSIST_KEY)).toBe(0);
+    });
+
+    it("does not persist anything without a persistKey", async () => {
+      const player = setup();
+
+      const playPromise = player.play();
+      Object.defineProperty(videoEl, "duration", { value: 600, writable: true });
+      videoEl._emit("loadedmetadata");
+      await playPromise;
+
+      videoEl.currentTime = 240;
+      player.pause();
+
+      expect(localStorage.getItem("forta-video-positions")).toBeNull();
+    });
   });
 
   describe("error recovery", () => {
+    it("calls onFatalError once retries are exhausted (WEE-82 iframe fallback)", async () => {
+      const onFatalError = vi.fn();
+      const player = setup({ onFatalError });
+
+      await playAndReady(player, videoEl);
+
+      // 3 retries with backoff (1s, 3s, 6s), each failing again
+      for (const delay of [1000, 3000, 6000]) {
+        videoEl._emit("error");
+        expect(onFatalError).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(delay);
+      }
+
+      // 4th error → retry budget gone → fatal
+      videoEl._emit("error");
+      expect(onFatalError).toHaveBeenCalledTimes(1);
+    });
+
     it("retries on error with backoff", async () => {
       const player = setup();
 
