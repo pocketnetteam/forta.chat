@@ -815,8 +815,6 @@ export class AppInitializer {
     }
   }
 
-  private static readonly NODE_ID = "94.156.128.149:38081";
-
   async getSubscribesChannels(
     address: string,
     blockNumber = 0,
@@ -826,10 +824,13 @@ export class AppInitializer {
     try {
       // Centralized RPC client with node failover — node 1 returning 502 must
       // not sink the whole request (it used to be pinned to a single node).
+      // No `options.node` pin: pinning one backend node (94.156.128.149 before
+      // WEE-13) made every gateway proxy hit the same backend, so one dead
+      // backend failed all mirrors identically. Each gateway now picks its own
+      // healthy default backend.
       const envelope = await callPocketnetRpc<{ height?: number; channels?: unknown[] }>({
         method: "getsubscribeschannels",
         parameters: [address, blockNumber, page, pageSize],
-        node: AppInitializer.NODE_ID,
       });
       if (envelope.error) {
         console.error("[appInit] getSubscribesChannels RPC error:", envelope.error);
@@ -867,7 +868,6 @@ export class AppInitializer {
           "",   // keyword
           authorAddress,
         ],
-        node: AppInitializer.NODE_ID,
       });
       if (envelope.error) {
         console.error("[appInit] getProfileFeed RPC error:", envelope.error);

@@ -198,6 +198,78 @@ describe("rpcFetchWithFailover", () => {
     expect(recover).toHaveBeenCalledTimes(1);
   });
 
+  it("aborts a hung node after timeoutMs and fails over to the next (WEE-13)", async () => {
+    // Node 1 emulates a blackholed host: the fetch never settles on its own,
+    // it only rejects when the failover's deadline aborts it.
+    const hungFetch = (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError"))
+        );
+      });
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(hungFetch)
+      .mockResolvedValueOnce(fakeResponse(200, { data: { channels: [] } }));
+
+    const json = await rpcFetchWithFailover("/rpc/getsubscribeschannels", {}, {
+      nodes: NODES,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      startIndex: 0,
+      timeoutMs: 30,
+    });
+
+    expect(json).toEqual({ data: { channels: [] } });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1][0]).toBe("https://2.pocketnet.app:8899/rpc/getsubscribeschannels");
+  });
+
+  it("enforces the deadline even when fetch ignores the abort signal (old WebViews)", async () => {
+    // Node 1 hangs AND has no AbortController support — the promise never
+    // settles regardless of the signal. The Promise.race deadline must still
+    // advance the loop to node 2.
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => { /* never settles */ }))
+      .mockResolvedValueOnce(fakeResponse(200, { ok: 1 }));
+
+    const json = await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      startIndex: 0,
+      timeoutMs: 30,
+    });
+
+    expect(json).toEqual({ ok: 1 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("tags timed-out nodes as timeouts in the aggregate error", async () => {
+    const fetchImpl = vi.fn(() => new Promise<Response>(() => { /* never settles */ }));
+    await expect(
+      rpcFetchWithFailover("/rpc/x", {}, {
+        nodes: NODES,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        startIndex: 0,
+        timeoutMs: 20,
+      })
+    ).rejects.toThrow(/timeout after 20ms/);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("passes an abort signal to fetch so the deadline is enforceable", async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return fakeResponse(200, { ok: 1 });
+    });
+    await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      startIndex: 0,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("remembers the last healthy node (sticky) for the next call", async () => {
     const fetchImpl = vi
       .fn()
