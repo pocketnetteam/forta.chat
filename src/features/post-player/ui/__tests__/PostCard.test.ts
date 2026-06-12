@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 
 // Stub composables/stores BEFORE component import (vi.mock is hoisted).
 const loadPost = vi.fn();
-const getCachedPost = vi.fn(() => null);
+const getCachedPost = vi.fn((): BastyonPostData | null => null);
 vi.mock("@/entities/auth", () => ({
   useAuthStore: () => ({
     address: "myaddr",
