@@ -131,6 +131,64 @@ describe("PostCard bounded skeleton + retry (WEE-70)", () => {
   });
 });
 
+describe("PostCard unresolved repost fallback (WEE-101)", () => {
+  const emptyRepostWrapper: BastyonPostData = {
+    txid: "tx123",
+    address: "sharer",
+    caption: "",
+    message: "",
+    images: [],
+    url: "",
+    tags: [],
+    settings: {},
+    time: 1_700_000_000,
+    repostUnresolved: true,
+  };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  afterEach(() => {
+    getCachedPost.mockReturnValue(null);
+  });
+
+  it("пустая обёртка с нерезолвнутым repost → fallback-ссылка, не голая карточка", async () => {
+    getCachedPost.mockReturnValue(emptyRepostWrapper);
+    const w = mountCard();
+    await flushPromises();
+
+    const link = w.find("a");
+    expect(link.exists()).toBe(true);
+    expect(link.text()).toBe("Open in Bastyon");
+    // No bare card and no retry button (retry can't fix an unresolved repost).
+    expect(w.find(".post-card").exists()).toBe(false);
+    expect(w.find("button").exists()).toBe(false);
+  });
+
+  it("обёртка с разрешённым repost рендерит вложенный PostCard, а не fallback", async () => {
+    getCachedPost.mockReturnValue({
+      ...emptyRepostWrapper,
+      repostUnresolved: undefined,
+      repost: { ...emptyRepostWrapper, txid: "orig456", repostUnresolved: undefined },
+    });
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.find(".post-card").exists()).toBe(true);
+    expect(w.findComponent({ name: "PostCard" }).exists()).toBe(true);
+  });
+
+  it("обычный пост с контентом не задевается fallback'ом (регрессия)", async () => {
+    getCachedPost.mockReturnValue({ ...emptyRepostWrapper, repostUnresolved: undefined, caption: "hello" });
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.find(".post-card").exists()).toBe(true);
+    expect(w.text()).toContain("hello");
+  });
+});
+
 describe("PostCard channel feed video expand (WEE-74)", () => {
   beforeEach(() => {
     setActivePinia(createPinia());

@@ -658,6 +658,7 @@ export const en = {
   // ── Post embeds ──
   "post.loading": "Loading post...",
   "post.notFound": "Post not found",
+  "post.openOriginal": "Open in Bastyon",
   "post.retry": "Retry",
   "post.readMore": "Read more",
   "post.video": "Video",

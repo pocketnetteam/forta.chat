@@ -89,6 +89,17 @@ const visibleTags = computed(() => {
 const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
+/** WEE-101: a repost wrapper whose original txid could not be resolved has no
+ *  renderable content of its own — show a link fallback instead of a bare card. */
+const isUnresolvedRepost = computed(() =>
+  !!post.value?.repostUnresolved &&
+  !post.value.repost &&
+  !post.value.caption &&
+  !truncatedMessage.value &&
+  !firstImage.value &&
+  !videoInfo.value,
+);
+
 async function loadAuthor(data: BastyonPostData) {
   if (!data.address) return;
   await authStore.loadUsersInfo([data.address]);
@@ -189,16 +200,17 @@ onMounted(loadPostData);
     </div>
   </div>
 
-  <!-- Error -->
-  <div v-else-if="error" class="flex items-center gap-3 py-1">
+  <!-- Error / unresolved repost — retry can't fix an unresolved repost, so it's link-only -->
+  <div v-else-if="error || isUnresolvedRepost" class="flex items-center gap-3 py-1">
     <a
       :href="postUrl"
       target="_blank"
       rel="noopener noreferrer"
       class="text-color-txt-ac underline hover:no-underline"
       @click.stop
-    >{{ t("post.notFound") }}</a>
+    >{{ t(isUnresolvedRepost ? "post.openOriginal" : "post.notFound") }}</a>
     <button
+      v-if="!isUnresolvedRepost"
       class="rounded-lg border border-neutral-grad-1/50 px-2.5 py-1 text-xs font-medium text-text-color transition-colors hover:bg-neutral-grad-0"
       @click.stop="onRetry"
     >{{ t("post.retry") }}</button>
