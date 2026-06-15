@@ -18,6 +18,15 @@ import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { withTimeout } from "@/shared/lib/with-timeout";
 
 import { getStoredDeviceId, storeDeviceId } from "./device-id-storage";
+import {
+  pickLiveMatrixHost,
+  nextMatrixHost,
+  hostFromBaseUrl,
+  SyncWatchdog,
+  PING_TIMEOUT_MS,
+  ERROR_RETRY_BASE_MS,
+  ERROR_RETRY_MAX_MS,
+} from "./sync-failover";
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
 
 export type SyncCallback = (state: "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING") => void;
@@ -41,6 +50,21 @@ export class MatrixClientService {
   private sdk = sdk;
   store: Record<string, unknown> | null = null;
   private torProxyUrl: string = '';
+
+  // Runtime sync watchdog + mirror failover (WEE-105). Created lazily on first
+  // init, persists across mirror recreates, stopped on destroy/logout.
+  private watchdog: SyncWatchdog | null = null;
+  // True while a watchdog-driven mirror recreate is in flight, so init() does
+  // not ping-and-pick the baseUrl back to the primary mid-failover.
+  private failoverActive = false;
+  // True while any client (re)creation is in flight (boot init OR mirror
+  // recreate). Serializes the two writers of `this.client` so a watchdog
+  // failover can't race a concurrent boot-retry init() for ownership.
+  private building = false;
+  // Exponential backoff state for retrying the SAME host on a sync ERROR,
+  // replacing the old tight retryImmediately() loop (WEE-105 H2).
+  private errorRetryAttempt = 0;
+  private errorRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   setTorProxyUrl(url: string) {
     this.torProxyUrl = url;
@@ -491,13 +515,121 @@ export class MatrixClientService {
         if (!this.chatsReady) {
           this.chatsReady = true;
         }
+        // Healthy sync — drop any pending backoff retry and reset its attempt
+        // counter so the next error episode starts from the base delay again.
+        this.clearErrorRetry();
       } else if (state === "ERROR") {
-        console.warn("[matrix] Sync error — requesting immediate retry");
-        this.client?.retryImmediately();
+        // Was retryImmediately() on every ERROR — that hammered the SAME dead
+        // host with no backoff and span the ERROR↔RECONNECTING loop forever
+        // (WEE-105 H2). Now we retry the same host behind exponential backoff
+        // while the watchdog (below) escalates to a mirror if it stays stuck.
+        this.scheduleErrorRetry();
       } else if (state === "STOPPED") {
         console.warn("[matrix] Sync stopped unexpectedly");
       }
+      // Feed every state to the watchdog so it can fail over to a mirror when
+      // the sync is wedged while online (WEE-105 H3).
+      this.watchdog?.notifySync(state);
       this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING");
+    });
+  }
+
+  /** Schedule a single retry of the CURRENT host behind exponential backoff.
+   *  No-op when a retry is already pending (one in flight at a time). */
+  private scheduleErrorRetry(): void {
+    if (this.errorRetryTimer !== null) return;
+    const delay = Math.min(ERROR_RETRY_BASE_MS * 2 ** this.errorRetryAttempt, ERROR_RETRY_MAX_MS);
+    this.errorRetryAttempt += 1;
+    console.warn(`[matrix] Sync error — backoff retry in ${delay}ms (attempt ${this.errorRetryAttempt})`);
+    this.errorRetryTimer = setTimeout(() => {
+      this.errorRetryTimer = null;
+      try {
+        this.client?.retryImmediately();
+      } catch (e) {
+        console.warn("[matrix] retryImmediately failed:", e);
+      }
+    }, delay);
+  }
+
+  /** Cancel any pending backoff retry and reset its attempt counter. */
+  private clearErrorRetry(): void {
+    if (this.errorRetryTimer !== null) {
+      clearTimeout(this.errorRetryTimer);
+      this.errorRetryTimer = null;
+    }
+    this.errorRetryAttempt = 0;
+  }
+
+  /** Probe `[primary, ...mirrors]` and return the first live homeserver host.
+   *  Used before connecting so a dead/throttled primary doesn't strand /sync
+   *  (WEE-105 H1). Honours primary priority so a healthy primary is untouched. */
+  async pingServers(): Promise<string> {
+    // Under Tor the SDK routes through the local reverse proxy; a bare axios
+    // ping would always fail and just burn 2×PING_TIMEOUT_MS of dead boot
+    // latency. Tor is out of scope here (it isn't a working transport for us),
+    // so keep the current host and skip probing entirely.
+    if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
+    return pickLiveMatrixHost((host) =>
+      axios
+        .get(`https://${host}/_matrix/client/versions`, { timeout: PING_TIMEOUT_MS })
+        .then(() => true)
+        .catch(() => false),
+    );
+  }
+
+  /** Stop the current SDK client without tearing down handlers/credentials/
+   *  watchdog — used by the mirror failover recreate so the rebuilt client
+   *  keeps the same callbacks and the watchdog keeps monitoring. */
+  private stopClientOnly(): void {
+    this.clearErrorRetry();
+    if (this.client) {
+      try { this.client.removeAllListeners(); } catch { /* ignore */ }
+      try { this.client.stopClient(); } catch { /* ignore */ }
+    }
+    this.client = null;
+    this.chatsReady = false;
+  }
+
+  /** Watchdog-triggered recovery: rotate baseUrl to the next mirror and rebuild
+   *  the client without a page reload (WEE-105 A2). */
+  private async recreateOnNextMirror(): Promise<void> {
+    // Yield to any in-flight client (re)creation — a concurrent boot-retry
+    // init() or a previous recreate owns `this.client` until it settles.
+    if (this.failoverActive || this.building) return;
+    this.failoverActive = true;
+    this.building = true;
+    const current = hostFromBaseUrl(this.baseUrl);
+    const next = nextMatrixHost(current);
+    console.warn(`[matrix] sync stuck — failing over ${current} → ${next}`);
+    try {
+      this.stopClientOnly();
+      this.baseUrl = `https://${next}`;
+      this.client = await this.getClient();
+      if (this.client) {
+        this.store = this.client.store;
+        this.ready = true;
+      }
+    } catch (e) {
+      console.error("[matrix] mirror failover recreate error:", e);
+    } finally {
+      this.building = false;
+      this.failoverActive = false;
+      // Re-arm so the new mirror is watched too — if it is also dead the
+      // watchdog rotates to the next host on the following episode (up to the
+      // failover budget).
+      this.watchdog?.reset();
+    }
+  }
+
+  /** Create the sync watchdog once. Persists across mirror recreates so the
+   *  rebuilt client is monitored too; torn down only in destroy(). */
+  private ensureWatchdog(): void {
+    if (this.watchdog) return;
+    this.watchdog = new SyncWatchdog({
+      onFailover: () => { void this.recreateOnNextMirror(); },
+      isOnline: () => (typeof navigator === "undefined" ? true : navigator.onLine),
+      setTimer: (cb, ms) => setTimeout(cb, ms),
+      clearTimer: (h) => clearTimeout(h),
     });
   }
 
@@ -509,7 +641,19 @@ export class MatrixClientService {
     // healthy attempt N+1 — see WEE-46 retry path.
     this.error = false;
     this.ready = false;
+    this.building = true;
     try {
+      // Ping-and-pick a live homeserver before connecting (WEE-105 H1/A1).
+      // Skipped during an in-flight mirror failover, which has already set
+      // baseUrl to the mirror it wants and must not be reset back to primary.
+      if (!this.failoverActive) {
+        try {
+          this.baseUrl = `https://${await this.pingServers()}`;
+        } catch (e) {
+          console.warn("[matrix] pingServers failed, using current baseUrl:", e);
+        }
+      }
+      this.ensureWatchdog();
       this.client = await this.getClient();
       if (this.client) {
         this.store = this.client.store;
@@ -518,6 +662,8 @@ export class MatrixClientService {
     } catch (e) {
       console.error("Matrix init error:", e);
       this.error = String(e);
+    } finally {
+      this.building = false;
     }
 
     // Init file storage
@@ -984,6 +1130,11 @@ export class MatrixClientService {
 
   /** Destroy the client */
   destroy() {
+    this.watchdog?.stop();
+    this.watchdog = null;
+    this.failoverActive = false;
+    this.building = false;
+    this.clearErrorRetry();
     if (this.client) {
       this.client.removeAllListeners();
       this.client.stopClient();
