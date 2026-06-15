@@ -261,6 +261,30 @@ export function initChatDb(
 }
 
 /**
+ * Read a user's local contact aliases straight from Dexie, WITHOUT spinning up
+ * the full ChatDbKit (no SyncEngine, no decryption worker, no recovery scans,
+ * no network). Used to hydrate chat-store.localAliases at cold boot / offline
+ * BEFORE Matrix init, so locally renamed contacts render their alias from the
+ * first frame even with zero connectivity (WEE-102).
+ *
+ * Reuses the live kit's connection when one is already open for this user;
+ * otherwise opens a short-lived connection and closes it after the read.
+ */
+export async function readUserAliases(
+  userId: string,
+): Promise<Record<string, { alias: string; updatedAt: number }>> {
+  if (currentKit && currentUserId === userId) {
+    return currentKit.users.getAllAliases();
+  }
+  const db = new ChatDatabase(userId);
+  try {
+    return await new UserRepository(db).getAllAliases();
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Get the current ChatDbKit. Throws if not initialized.
  * Use this in composables/stores after login.
  */

@@ -1177,6 +1177,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           privateKey: convertToHexString(keyPair.privateKey)
         };
         setAuthData(authData);
+
+        // WEE-102: hydrate local contact aliases from Dexie BEFORE any network
+        // step (fetchUserInfo / verifyAndRepublishKeys / initMatrix). Offline,
+        // those steps can stall and the alias hydration buried inside initMatrix
+        // would never run, leaving every renamed contact stuck on its raw
+        // nickname. Reading Dexie needs no connectivity, so it is safe and
+        // user-visible from the first frame; initMatrix's loadLocalAliases later
+        // refreshes it via the live kit.
+        useChatStore().hydrateLocalAliasesEarly(addr).catch(() => { /* best-effort */ });
+
         await fetchUserInfo();
 
         // Verify encryption keys are published; re-publish if missing
@@ -1197,6 +1207,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
     }
   );
+
+  /** WEE-102: hydrate local contact aliases from Dexie ahead of any network
+   *  step. Used by the cold-boot path (App.vue) where `fetchUserInfo()` runs —
+   *  and can stall offline — before `initMatrix()` would otherwise hydrate them.
+   *  No-op until the session address is known. Best-effort; never throws. */
+  const hydrateLocalAliasesEarly = async (): Promise<void> => {
+    if (!address.value) return;
+    await useChatStore().hydrateLocalAliasesEarly(address.value);
+  };
 
   const logout = async () => {
     const logoutAddress = activeAddress.value;
@@ -1909,6 +1928,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     fetchUserInfo,
     findRegistrationProxy,
     generateRegistrationKeys,
+    hydrateLocalAliasesEarly,
     cachePost,
     getCachedPost,
     getBastyonUserData,

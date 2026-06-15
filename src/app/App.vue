@@ -410,6 +410,12 @@ onMounted(async () => {
     }
   }
 
+  // WEE-102: on reload, hydrate local contact aliases from Dexie BEFORE the
+  // (network) profile fetch + Matrix init below. Offline, fetchUserInfo can
+  // stall and initMatrix's own hydration would never run, so renamed contacts
+  // would show raw nicknames forever. Reading Dexie needs no connectivity.
+  authStore.hydrateLocalAliasesEarly().catch(() => { /* best-effort */ });
+
   try {
     await authStore.fetchUserInfo();
   } catch (e) {
