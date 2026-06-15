@@ -97,54 +97,41 @@ object VendorAudioPolicy {
     }
 
     /**
-     * Aggressive Chinese ROMs (MagicOS / RealmeUI / ColorOS / MIUI) that are
-     * known to re-assert the process-global microphone-mute flag during call
-     * setup, stranding the local capture path in silence so the peer hears
-     * nothing. These all already ship broken HW AEC (see
-     * [BROKEN_HW_AEC_VENDORS]) — the same audio HAL that mutes capture also
-     * flips the mute flag — so they are the family that needs the explicit
-     * start-time + reapply-window unmute, not just MagicOS.
+     * Whether [AudioRouter.start] must force an explicit `setMicrophoneMute(false)`
+     * after the comm-device routing, and re-release it on each OEM mode-reapply
+     * tick — because the device's audio HAL is known to leave the process-global
+     * microphone-mute flag asserted during call setup, stranding the local
+     * capture path in silence so the peer hears nothing while video (a separate
+     * track) plays normally.
      *
-     * Deliberately excludes SAMSUNG / GENERIC (working HW AEC, proven WEE-54
-     * generic path — acceptance criterion A5) and HUAWEI (its #874 symptom was
-     * HW-AEC capture mute, fixed via [prefersSoftwareAudioProcessing]; no
-     * mic-mute-flag report, so its routing path stays untouched).
+     * WEE-103: keyed off the SAME broken-HW-AEC family as
+     * [prefersSoftwareAudioProcessing] (see [BROKEN_HW_AEC_VENDORS]) rather than a
+     * hand-maintained [CallVendor] subset. The mic-mute-flag bug and the broken
+     * HW-AEC bug share one root — the vendor audio HAL — so every device that
+     * needs software AEC is also a device that can strand the capture path muted.
+     * The previous gate keyed off the coarse [detect] enum ({HONOR, REALME, OPPO,
+     * XIAOMI}), which kept missing OEMs that [detect] classifies as GENERIC:
+     * Infinix/XOS (#1008) and ZTE/nubia (#1009) both ship broken HW AEC yet fell
+     * through to the generic path with the mic left muted → both-ways silence on
+     * 1.10.44. HUAWEI was also excluded by WEE-87 on the assumption it had "no
+     * mic-mute-flag report" — #1009 (Huawei pure 70 ultra ↔ nubia, both-ways
+     * silence + working video) falsifies that, and Huawei is in the broken-AEC
+     * family too, so it is now covered.
+     *
+     * This is the same too-narrow-vendor-gate regression that bit WEE-76→WEE-87;
+     * tying the predicate to the broken-AEC family (instead of re-enumerating
+     * vendors by hand) ends that cycle — the next broken-AEC OEM is covered
+     * automatically.
+     *
+     * Samsung / Pixel / OnePlus / unknown-working OEMs are NOT in
+     * [BROKEN_HW_AEC_VENDORS], so the proven generic WEE-54 start path stays
+     * byte-for-byte unchanged on the working majority (acceptance criterion A5).
+     * Re-asserting the unmute is itself documented-safe — it can only release a
+     * stuck capture path, never break a healthy one (the in-call Mute button
+     * toggles the WebRTC track's `enabled`, not this AudioManager flag).
      */
-    private val AGGRESSIVE_MIC_MUTE_VENDORS = setOf(
-        CallVendor.HONOR,
-        CallVendor.REALME,
-        CallVendor.OPPO,
-        CallVendor.XIAOMI,
-    )
-
-    /**
-     * Aggressive Chinese ROMs (HONOR MagicOS #872/#873, realme RealmeUI / OPPO
-     * ColorOS / Xiaomi MIUI WEE-87 #993/#994/#995) — caller-only / one-way audio
-     * because the global microphone-mute flag is left asserted.
-     *
-     * On these HALs the explicit `setCommunicationDevice` routing applied by
-     * [AudioRouter.start] can leave the global microphone-mute flag asserted, so
-     * the local capture path is silent and the peer hears nothing while the
-     * caller hears themselves. An explicit `setMicrophoneMute(false)` after the
-     * mode flip releases it, and the OEM mode-reapply window re-releases it on
-     * each tick because these same ROMs re-assert the flag asynchronously after
-     * setup (see [AudioRouter.shouldReapplyMicUnmute]).
-     *
-     * WEE-87: WEE-76 gated this to HONOR only, so the mirror-image one-way
-     * reports on realme 12 (#994 — peer hears me, I don't) / realme C25s (#995 —
-     * I hear, peer doesn't) and the both-way silence on 1.10.40 (#993) slipped
-     * through. Extending to the ColorOS/RealmeUI/MIUI family closes that gap.
-     *
-     * Still gated (not applied everywhere on *start*) because the proven generic
-     * WEE-54 path must stay byte-for-byte unchanged on the working majority
-     * (Samsung / Pixel / OnePlus / unknown OEMs — A5); the post-call reset
-     * ([shouldUnmuteMicOnStop]) is what defensively covers every other vendor.
-     * Re-asserting the unmute is itself safe (it can only release a stuck
-     * capture path, never break a healthy one), so this gate is about avoiding
-     * needless mid-call AudioManager churn on devices that never exhibit the bug.
-     */
-    fun requiresExplicitMicUnmuteOnStart(vendor: CallVendor): Boolean =
-        vendor in AGGRESSIVE_MIC_MUTE_VENDORS
+    fun requiresExplicitMicUnmuteOnStart(manufacturer: String?, brand: String?): Boolean =
+        matchesBrokenHwAecFamily(manufacturer, brand)
 
     /**
      * Post-call defensive microphone unmute for **every** vendor
@@ -183,16 +170,26 @@ object VendorAudioPolicy {
      * is observable only on emulator / malformed-ROM builds — and there the
      * brand-aware answer is the safer one.
      */
-    fun prefersSoftwareAudioProcessing(manufacturer: String?, brand: String?): Boolean {
+    fun prefersSoftwareAudioProcessing(manufacturer: String?, brand: String?): Boolean =
+        matchesBrokenHwAecFamily(manufacturer, brand)
+
+    /**
+     * Case-insensitive substring membership test against [BROKEN_HW_AEC_VENDORS]
+     * over both `Build.MANUFACTURER` and `Build.BRAND`. Shared by
+     * [prefersSoftwareAudioProcessing] and [requiresExplicitMicUnmuteOnStart]
+     * (WEE-103) so the two HAL-driven remedies key off one definition of the
+     * broken-audio-HAL family and can never drift apart again.
+     *
+     * WEE-60: substring match, not strict equality. detect() above already uses
+     * contains(); the prior `==` predicate missed OEMs that report a multi-word
+     * Build.MANUFACTURER/BRAND (e.g. "Infinix Mobility Limited", "TECNO MOBILE
+     * LIMITED", brand "Itel it2163") and kept the broken hardware AEC — muting
+     * the capture path into one-way audio (#894 Xiaomi 12X, #921 Pixel-adjacent).
+     */
+    private fun matchesBrokenHwAecFamily(manufacturer: String?, brand: String?): Boolean {
         val m = manufacturer?.trim()?.lowercase().orEmpty()
         val b = brand?.trim()?.lowercase().orEmpty()
         if (m.isEmpty() && b.isEmpty()) return false
-        // WEE-60: substring match, not strict equality. detect() above already
-        // uses contains(); this predicate lagged behind with `==`, so OEMs that
-        // report a multi-word Build.MANUFACTURER/BRAND (e.g. "Infinix Mobility
-        // Limited", "TECNO MOBILE LIMITED", brand "Itel it2163") never matched
-        // and kept the broken hardware AEC — muting the capture path into
-        // one-way audio (#894 Xiaomi 12X, #921 Pixel-adjacent reports).
         return BROKEN_HW_AEC_VENDORS.any { v -> m.contains(v) || b.contains(v) }
     }
 }

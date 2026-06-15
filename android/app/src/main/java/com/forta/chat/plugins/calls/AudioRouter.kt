@@ -140,9 +140,10 @@ class AudioRouter private constructor(private val context: Context) {
          * the OEM re-apply window.
          *
          * [applyVendorStartTweaks] clears the global mic-mute flag once at t=0
-         * for vendors that need it (HONOR MagicOS, realme RealmeUI / OPPO
-         * ColorOS / Xiaomi MIUI — WEE-87), but those same aggressive ROMs can
-         * re-assert that flag in the same async window they reset the audio
+         * for the broken-HW-AEC family that needs it (HONOR MagicOS; realme /
+         * OPPO / Xiaomi — WEE-87; Infinix / ZTE / Huawei — WEE-103), but those
+         * same aggressive HALs can re-assert that flag in the same async window
+         * they reset the audio
          * mode (the [modeReapplyScheduleMs] ticks). When that happens the
          * one-time unmute is clobbered and the peer hears one-way silence.
          *
@@ -268,6 +269,13 @@ class AudioRouter private constructor(private val context: Context) {
     // proven WEE-54 generic path is the default and vendor branches are purely
     // additive (acceptance criterion A5).
     private val vendor: CallVendor = VendorAudioPolicy.detect(Build.MANUFACTURER, Build.BRAND)
+    // WEE-103: whether this device's audio HAL strands the mic-mute flag asserted
+    // on call setup (the broken-HW-AEC family). Resolved once from Build like
+    // [vendor]; keyed off manufacturer/brand rather than the coarse CallVendor
+    // enum so OEMs that detect() classifies as GENERIC (Infinix/XOS #1008,
+    // ZTE/nubia #1009) — and HUAWEI (#1009) — are no longer missed by the gate.
+    private val requiresMicUnmute: Boolean =
+        VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(Build.MANUFACTURER, Build.BRAND)
     // WEE-16: @Volatile so the periodic re-apply runnables observe a
     // stop()/forceStop()-side write across threads. start()/stop()/
     // forceStop() are invoked from arbitrary Capacitor plugin threads
@@ -376,7 +384,7 @@ class AudioRouter private constructor(private val context: Context) {
                     // need it (gated + mic-actually-muted guard → no-op otherwise).
                     if (
                         shouldReapplyMicUnmute(
-                            VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(vendor),
+                            requiresMicUnmute,
                             isActive,
                             audioManager.isMicrophoneMute,
                         )
@@ -456,13 +464,14 @@ class AudioRouter private constructor(private val context: Context) {
      * unrecognised devices, so this is a no-op on the working majority.
      */
     private fun applyVendorStartTweaks() {
-        // Aggressive Chinese ROMs (HONOR MagicOS #872/#873; realme RealmeUI /
-        // OPPO ColorOS / Xiaomi MIUI — WEE-87 #993/#994/#995): the comm-device
-        // routing above can leave the global mic-mute flag asserted, producing
-        // caller-only / self-echo one-way audio. An explicit unmute releases the
-        // capture path. Wrapped because the setter is documented to throw on a
-        // few privacy-shield ROMs and must never crash call setup.
-        if (VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(vendor)) {
+        // Broken-HW-AEC family (HONOR MagicOS #872/#873; realme/OPPO/Xiaomi
+        // WEE-87 #993/#994/#995; Infinix/XOS #1008, ZTE/nubia + Huawei #1009 —
+        // WEE-103): the comm-device routing above can leave the global mic-mute
+        // flag asserted, producing one-way or both-ways silence while video plays.
+        // An explicit unmute releases the capture path. Wrapped because the setter
+        // is documented to throw on a few privacy-shield ROMs and must never crash
+        // call setup.
+        if (requiresMicUnmute) {
             try {
                 audioManager.setMicrophoneMute(false)
                 Log.d(LIFECYCLE_TAG, "[vendor=$vendor] explicit setMicrophoneMute(false) on start")
