@@ -37,7 +37,7 @@ import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import type { RoomChange } from "@/shared/lib/local-db";
-import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
+import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus, readUserAliases } from "@/shared/lib/local-db";
 import type { ChatRoom, FileInfo, ForwardingMessage, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
 import { resolveCachedRoomsAddress } from "./cached-rooms-address";
@@ -730,22 +730,51 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** True iff a local alias is set for the address (raw or hex form). */
   const hasLocalAlias = (address: string): boolean => getLocalAlias(address) !== null;
 
-  /** Load the alias cache from Dexie. Called on login + chat-db init. */
+  /** Replace the in-memory alias caches from a raw Dexie alias map.
+   *  Full replace (not a merge) on purpose: `getAllAliases()` only returns rows
+   *  that currently HAVE an alias, so an alias cleared on another device (and
+   *  LWW-synced into Dexie) is absent from `all` and must drop out of the
+   *  in-memory cache too. A merge would leave the stale alias stuck on screen.
+   *  Per-entry LWW tombstoning lives in handleAccountDataEvent, which receives
+   *  explicit cleared entries; this path is a wholesale reload from Dexie. */
+  const applyAliasMap = (all: Record<string, { alias: string; updatedAt: number }>) => {
+    const nameNext: Record<string, string> = {};
+    const tsNext: Record<string, number> = {};
+    for (const [addr, { alias, updatedAt }] of Object.entries(all)) {
+      nameNext[addr] = alias;
+      tsNext[addr] = updatedAt;
+    }
+    localAliases.value = nameNext;
+    aliasUpdatedAtCache.value = tsNext;
+  };
+
+  /** Load the alias cache from Dexie via the live kit. Called on login +
+   *  chat-db init (refreshes whatever hydrateLocalAliasesEarly seeded). */
   const loadLocalAliases = async () => {
     const kit = chatDbKitRef.value;
     if (!kit) return;
     try {
-      const all = await kit.users.getAllAliases();
-      const nameNext: Record<string, string> = {};
-      const tsNext: Record<string, number> = {};
-      for (const [addr, { alias, updatedAt }] of Object.entries(all)) {
-        nameNext[addr] = alias;
-        tsNext[addr] = updatedAt;
-      }
-      localAliases.value = nameNext;
-      aliasUpdatedAtCache.value = tsNext;
+      applyAliasMap(await kit.users.getAllAliases());
     } catch (e) {
       console.warn("[chat-store] loadLocalAliases failed:", e);
+    }
+  };
+
+  /** Hydrate the alias cache directly from Dexie BEFORE Matrix/network init.
+   *  Local-first invariant (WEE-102): a user's contact renames must apply from
+   *  the first frame and fully offline, never gated behind /sync, RPC, or the
+   *  late chat-db kit that `login()` only wires after its network steps. Reads
+   *  Dexie through `readUserAliases`, which needs no SyncEngine/crypto/network. */
+  const hydrateLocalAliasesEarly = async (rawAddress: string) => {
+    if (!rawAddress) return;
+    // Already seeded (a prior hydrate, or an in-session setContactAlias that
+    // beat this boot-time read) — skip so a pre-edit Dexie snapshot can't
+    // clobber it. The live-kit loadLocalAliases() still does the full refresh.
+    if (Object.keys(localAliases.value).length > 0) return;
+    try {
+      applyAliasMap(await readUserAliases(rawAddress));
+    } catch (e) {
+      console.warn("[chat-store] hydrateLocalAliasesEarly failed:", e);
     }
   };
 
@@ -7124,6 +7153,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     hasLocalAlias,
     localAliases,
     loadLocalAliases,
+    hydrateLocalAliasesEarly,
     setContactAlias,
     getRoomMemberCount,
     getRoomPowerLevels,
