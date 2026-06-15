@@ -87,46 +87,84 @@ class VendorAudioPolicyTest {
     }
 
     // -------------------------------------------------------------------------
-    // requiresExplicitMicUnmuteOnStart() — aggressive Chinese ROM family (A1)
+    // requiresExplicitMicUnmuteOnStart() — broken-HW-AEC family (A1)
+    // WEE-103: keyed off manufacturer/brand (the broken-AEC family), not the
+    // coarse CallVendor enum, so OEMs detect() classifies as GENERIC are covered.
     // -------------------------------------------------------------------------
 
     @Test
-    fun honorRequiresExplicitMicUnmuteOnStart() {
-        assertTrue(VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(CallVendor.HONOR))
+    fun colorOsFamilyRequiresExplicitMicUnmuteOnStart() {
+        // WEE-87 family: HONOR MagicOS, realme RealmeUI (#994/#995), OPPO ColorOS
+        // and Xiaomi MIUI re-assert the global mic-mute flag mid-setup and must
+        // force a start-time unmute.
+        for (mfr in listOf("HONOR", "realme", "OPPO", "Xiaomi", "Redmi", "POCO")) {
+            assertTrue(
+                "$mfr (broken-HW-AEC ROM) must force a mic unmute mid-setup",
+                VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(mfr, ""),
+            )
+        }
     }
 
     @Test
-    fun colorOsFamilyRequiresExplicitMicUnmuteOnStart() {
-        // WEE-87 regression: WEE-76 gated the start-time mic unmute to HONOR
-        // only, leaving realme RealmeUI (#994/#995), OPPO ColorOS and Xiaomi
-        // MIUI — the same aggressive HALs that re-assert the global mic-mute
-        // flag mid-setup — without the protection. Mirror-image one-way audio
-        // and 1.10.40 both-way silence followed. These must now opt in.
-        for (v in listOf(CallVendor.REALME, CallVendor.OPPO, CallVendor.XIAOMI)) {
-            assertTrue(
-                "$v (ColorOS/RealmeUI/MIUI) must force a mic unmute mid-setup",
-                VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(v),
+    fun brokenAecOemsMissedByDetectStillRequireMicUnmute() {
+        // WEE-103 regression: the previous gate keyed off detect()'s coarse
+        // CallVendor enum, which returns GENERIC for Infinix/XOS (#1008) and
+        // ZTE/nubia (#1009) — both ship broken HW AEC and strand the mic-mute
+        // flag, but fell through to the generic path → both-ways silence on
+        // 1.10.44 while video played. HUAWEI (#1009) was excluded by WEE-87 on a
+        // "no mic-mute-flag report" assumption that #1009 falsifies. All three
+        // are in the broken-HW-AEC family and must now force the unmute.
+        assertTrue(
+            "Infinix/XOS (#1008) must force a mic unmute mid-setup",
+            VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("Infinix Mobility Limited", "Infinix X665E"),
+        )
+        assertTrue(
+            "ZTE/nubia (#1009) must force a mic unmute mid-setup",
+            VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("ZTE", "nubia NX733J"),
+        )
+        assertTrue(
+            "HUAWEI (#1009) must force a mic unmute mid-setup",
+            VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("HUAWEI", "HUAWEI pure 70 ultra"),
+        )
+        assertTrue(
+            "TECNO (broken-AEC family) must force a mic unmute mid-setup",
+            VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("TECNO MOBILE LIMITED", "TECNO KI5k"),
+        )
+    }
+
+    @Test
+    fun micUnmuteStaysInLockstepWithSoftwareAecFamily() {
+        // The two HAL-driven remedies must key off ONE definition of the
+        // broken-audio-HAL family so they can never drift apart again (the
+        // WEE-76→WEE-87→WEE-103 too-narrow-gate cycle). For every (mfr, brand)
+        // pair, needing software AEC ⇔ needing the start-time mic unmute.
+        val samples = listOf(
+            "HONOR" to "", "huawei" to "", "realme" to "", "Xiaomi" to "Redmi",
+            "OPPO" to "", "Infinix Mobility Limited" to "Infinix X665E",
+            "X665E" to "Infinix", // brand-only match (manufacturer carries no token)
+            "ZTE" to "nubia NX733J", "TECNO MOBILE LIMITED" to "TECNO KI5k",
+            "itel" to "Itel it2163",
+            "samsung" to "samsung", "Google" to "Pixel", "OnePlus" to "",
+            "" to "", null to null,
+        )
+        for ((mfr, brand) in samples) {
+            assertEquals(
+                "mic-unmute gate must match software-AEC gate for ($mfr, $brand)",
+                VendorAudioPolicy.prefersSoftwareAudioProcessing(mfr, brand),
+                VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(mfr, brand),
             )
         }
     }
 
     @Test
     fun workingVendorsDoNotForceMicUnmuteOnStart() {
-        // SAMSUNG / GENERIC ship working HW AEC and must stay byte-for-byte on
-        // the proven generic WEE-54 start path (A5). HUAWEI's #874 symptom was
-        // HW-AEC capture mute (fixed via software AEC), not a mic-mute flag, so
-        // its routing path stays untouched too. Derived as the complement of the
-        // aggressive family over the WHOLE enum so a future CallVendor (e.g.
-        // VIVO / ONEPLUS) is automatically asserted negative until someone opts
-        // it in deliberately — the regression net stays exhaustive.
-        val aggressive = setOf(CallVendor.HONOR, CallVendor.REALME, CallVendor.OPPO, CallVendor.XIAOMI)
-        for (v in CallVendor.entries) {
-            if (v in aggressive) continue
-            assertFalse(
-                "$v must not force a mic unmute mid-setup",
-                VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(v),
-            )
-        }
+        // Samsung / Pixel / OnePlus / unknown-working OEMs ship working HW AEC and
+        // must stay byte-for-byte on the proven generic WEE-54 start path (A5).
+        assertFalse(VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("samsung", "samsung"))
+        assertFalse(VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("Google", "Pixel"))
+        assertFalse(VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("OnePlus", ""))
+        assertFalse(VendorAudioPolicy.requiresExplicitMicUnmuteOnStart(null, null))
+        assertFalse(VendorAudioPolicy.requiresExplicitMicUnmuteOnStart("", ""))
     }
 
     // -------------------------------------------------------------------------
