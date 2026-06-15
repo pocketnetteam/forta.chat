@@ -89,10 +89,11 @@ const roomShareable = computed(() => {
   return chatStore.isRoomShareableByLink(room.value.id);
 });
 
-// Hash-routing URL via the shared builder. A bare-path `/join?room=...` 404s
-// on the static host (no such file under hash routing), which is the WEE-27
-// onboarding blocker — see invite-link.ts. Native deep-linking still works:
-// legacy bare-path links and `forta://` are accepted by parse-invite-url.ts.
+// Bare-path join URL via the shared builder so Android App Links match the
+// /join intent-filter (WEE-104). A browser without the app is caught by the
+// static shim public/join/index.html, which bounces to the SPA hash route —
+// no 404 (the old WEE-27 blocker). Native deep-linking also accepts forta://
+// and legacy hash links via parse-invite-url.ts — see invite-link.ts.
 const inviteLink = computed(() => {
   // eslint-disable-next-line @typescript-eslint/no-unused-expressions
   stateMarker.value;

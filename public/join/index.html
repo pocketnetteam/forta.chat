@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Forta Chat</title>
+  <script>
+    // Static browser fallback for https://forta.chat/join?room=... (WEE-104).
+    //
+    // On a device with Forta installed, Android's App-Link intent-filter
+    // (pathPrefix="/join") intercepts this URL and opens the app before this
+    // page ever loads. Reaching this HTML means we are in a plain browser, so
+    // bounce into the SPA hash route, preserving ?room=..., instead of 404ing
+    // on the static host. The link is generated in src/shared/lib/invite-link.ts.
+    (function () {
+      var search = window.location.search || "";
+      window.location.replace("/#/join" + search);
+    })();
+  </script>
+</head>
+<body>
+  <noscript>
+    <p>Open <a href="/#/join">Forta Chat</a> to join this chat.</p>
+  </noscript>
+</body>
+</html>
