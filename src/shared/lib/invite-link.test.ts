@@ -7,12 +7,14 @@ const ADDR = "PABCdefGHIjklMNOpqrSTUvwx12";
 const ROOM_ID = "!abc123:matrix.bastyon.com";
 
 describe("buildInviteUrl", () => {
-  it("emits the hash-routing path so the static host never 404s", () => {
-    const url = buildInviteUrl(ADDR);
-    expect(url).toContain("#/invite");
-    // The bug we are fixing: a bare `forta.chat/invite` path has no file on
-    // the static host and returns 404. Assert we never regress to it.
-    expect(url).not.toMatch(/forta\.chat\/invite/);
+  it("puts the target in the URL path (not the hash) so Android App Links match", () => {
+    // WEE-104 regression: a hash-form link `forta.chat/#/invite?ref=...` has
+    // path "/" — the `/invite` lives in the fragment, which Android App Links
+    // never see — so the OS hands it to the browser (forta-bugs#1014). The
+    // intent-filter `pathPrefix="/invite"` can only match a real path.
+    const url = new URL(buildInviteUrl(ADDR));
+    expect(url.pathname).toBe("/invite");
+    expect(url.hash).toBe("");
   });
 
   it("carries the referral address", () => {
@@ -25,12 +27,13 @@ describe("buildInviteUrl", () => {
 });
 
 describe("buildJoinUrl", () => {
-  it("emits the hash-routing path so the static host never 404s", () => {
-    const url = buildJoinUrl(ROOM_ID);
-    expect(url).toContain("#/join");
-    // Confirmed root cause of WEE-27 (forta-bugs#435/#29): the bare
-    // `forta.chat/join?room=...` link 404s under hash routing.
-    expect(url).not.toMatch(/forta\.chat\/join/);
+  it("puts the target in the URL path (not the hash) so Android App Links match", () => {
+    // Same App-Link path requirement as invites: the room id travels in the
+    // query with `/join` as the real path the intent-filter claims, never the
+    // fragment (which the OS can't route to the installed app).
+    const url = new URL(buildJoinUrl(ROOM_ID));
+    expect(url.pathname).toBe("/join");
+    expect(url.hash).toBe("");
   });
 
   it("URL-encodes the room id separator", () => {
