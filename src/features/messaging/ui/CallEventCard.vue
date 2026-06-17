@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { Message } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
-import { useCallService } from "@/features/video-calls/model/call-service";
 import { useCallStore } from "@/entities/call";
+import { useChatStore } from "@/entities/chat";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 
 const props = defineProps<{
   message: Message;
@@ -11,8 +12,15 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
-const callService = useCallService();
 const callStore = useCallStore();
+const chatStore = useChatStore();
+
+// WEE-63 / forta-bugs#923 — route the call-back through the provider-aware
+// launcher so configured external meeting links (WEE-57) surface a picker
+// instead of silently placing a native call. Instantiated per-component so
+// each card in the virtual scroller owns its own picker state (sharing a
+// module-scope launcher would leak one card's open picker onto its siblings).
+const callLauncher = useCallLauncher();
 
 const missed = computed(() => props.message.callInfo?.missed ?? false);
 const isVideo = computed(() => props.message.callInfo?.callType === "video");
@@ -43,14 +51,20 @@ const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
 
 // WEE-49 / forta-bugs#754: tapping a call-event card initiates a callback
 // to the same peer using the same call type. Disabled while another call
-// is already active so the user does not accidentally fire startCall while
+// is already active so the user does not accidentally fire a call while
 // the existing call is still tearing down.
 const isClickable = computed(() => !callStore.isInCall);
 
-const handleCallback = () => {
+const handleCallback = (event?: MouseEvent) => {
   if (!isClickable.value) return;
   const callType = props.message.callInfo?.callType ?? "voice";
-  void callService.startCall(props.message.roomId, callType);
+  // DM vs group decides native-only vs picker. Unknown room (not yet synced)
+  // falls back to DM → native call, matching the pre-launcher behavior.
+  const isDm = !(
+    chatStore.rooms.find((r) => r.id === props.message.roomId)?.isGroup ?? false
+  );
+  const anchor = event ? { x: event.clientX, y: event.clientY } : undefined;
+  void callLauncher.launch(props.message.roomId, callType, isDm, anchor);
 };
 </script>
 
@@ -65,7 +79,7 @@ const handleCallback = () => {
       isClickable ? 'cursor-pointer hover:opacity-90 active:opacity-80' : 'cursor-default opacity-100',
     ]"
     :aria-label="`${callTypeLabel} — ${statusLabel} — ${t('call.callBack')}`"
-    @click="handleCallback"
+    @click="handleCallback($event)"
   >
     <!-- Phone / video icon in circle -->
     <div
@@ -117,6 +131,18 @@ const handleCallback = () => {
       </div>
     </div>
   </button>
+
+  <!-- WEE-57/WEE-63: provider picker (bottom sheet on touch, context menu on
+       desktop). Teleports to body, so this second root node renders no inline
+       DOM. -->
+  <CallProviderPicker
+    :show="callLauncher.pickerOpen.value"
+    :options="callLauncher.pickerOptions.value"
+    :x="callLauncher.pickerAnchor.value.x"
+    :y="callLauncher.pickerAnchor.value.y"
+    @pick="callLauncher.pick"
+    @close="callLauncher.closePicker"
+  />
 </template>
 
 <style scoped>

@@ -204,6 +204,19 @@ describe("stripBastyonLinks", () => {
   it("returns original text if no bastyon links", () => {
     expect(stripBastyonLinks("Hello world")).toBe("Hello world");
   });
+
+  // WEE-101: cleanMatrixIds truncates bare 40+ hex strings ("aabbccdd…"),
+  // which breaks BASTYON_LINK_RE's 64-hex requirement. Preview pipelines must
+  // strip bastyon links BEFORE cleaning matrix IDs, never after.
+  it("must run before cleanMatrixIds — hex truncation breaks the link regex", async () => {
+    const { cleanMatrixIds } = await import("@/entities/chat/lib/chat-helpers");
+    const link = `bastyon://post?s=${"a".repeat(64)}`;
+
+    expect(cleanMatrixIds(stripBastyonLinks(link))).toBe("📝 Bastyon post");
+    // The reversed order leaves a mangled link in the preview — pinned so
+    // nobody "simplifies" the call order back.
+    expect(stripBastyonLinks(cleanMatrixIds(link))).not.toBe("📝 Bastyon post");
+  });
 });
 
 // ─── isSafeUrl ───────────────────────────────────────────────────────

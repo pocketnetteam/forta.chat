@@ -17,8 +17,10 @@ import {
   NetworkBlockedError,
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
-import { enqueueDecrypt } from "./decrypt-queue";
+import { runFileDecrypt } from "./decrypt-queue";
+import { createSemaphore } from "@/shared/lib/semaphore";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
+import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
 import { MessageType, MessageStatus } from "@/entities/chat";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 
@@ -312,6 +314,21 @@ export async function tryHealStaleBlobFileInfo(
   }
 }
 
+/** Max concurrent media network downloads (fetch + decrypt). Opening a DM
+ *  with N photos used to fire N full-size `fetch` at once: they competed for
+ *  the channel while the serialized decrypt made the last image wait on every
+ *  prior one, and the burst froze the UI on low-end Android. A small pool lets
+ *  the visible media load a few at a time instead of all-at-once (WEE-71, H2).
+ *  Shared module-wide so the cap holds across every `useFileDownload()`
+ *  instance (feed bubbles, MediaGrid, MediaViewer). */
+const MEDIA_FETCH_CONCURRENCY = 3;
+const mediaDownloadGate = createSemaphore(MEDIA_FETCH_CONCURRENCY);
+
+/** TEST-ONLY: expose in-flight count for the concurrency-pool regression. */
+export function _mediaGateActiveForTests(): number {
+  return mediaDownloadGate.active;
+}
+
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
 const cache = new Map<string, string>();
 
@@ -389,6 +406,36 @@ export function resolveMediaUrl(url: string): string | null {
     // Matrix service not yet initialised (cold start race) — treat as a
     // resolve miss; the outer error path surfaces MediaUnavailableError.
     return null;
+  }
+}
+
+/** All media hosts in attempt-priority order: primary first, then mirrors.
+ *  Mirrors bastyon-chat's `[].concat([baseUrl], mirrors)` in `pingServers`. */
+const MEDIA_HOSTS = [MATRIX_SERVER, ...MATRIX_MIRRORS];
+
+/** Pick the media host for a given retry attempt, alternating
+ *  primary↔mirror(s) so a throttled/blocked primary media-repo gets bypassed
+ *  on the next try while a transient primary blip can still recover (WEE-90 H2).
+ *  attempt 0 → primary, 1 → mirror[0], 2 → primary, 3 → mirror[0]… */
+export function mediaHostForAttempt(attempt: number): string {
+  const idx = ((attempt % MEDIA_HOSTS.length) + MEDIA_HOSTS.length) % MEDIA_HOSTS.length;
+  return MEDIA_HOSTS[idx];
+}
+
+/** Rewrite a resolved media URL's host to `host`. Only our own primary
+ *  homeserver host is ever rewritten — external/CDN hosts and anything that
+ *  isn't a parseable absolute URL (e.g. `blob:`/`data:` left untouched by
+ *  resolveMediaUrl) pass through unchanged so we never point a foreign URL at
+ *  a Pocketnet mirror. */
+export function rewriteMediaHost(url: string, host: string): string {
+  if (host === MATRIX_SERVER) return url;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== MATRIX_SERVER) return url;
+    u.hostname = host;
+    return u.toString();
+  } catch {
+    return url;
   }
 }
 
@@ -506,7 +553,11 @@ async function downloadAndDecrypt(
         // This is terminal: the retry budget will hit the same null every time.
         throw new MediaUnavailableError(fileInfo.url);
       }
-      const fetchUrl = appendCacheBust(resolvedUrl, attempt);
+      // Alternate primary↔mirror across attempts so a blocked/throttled primary
+      // media-repo is bypassed on retry (WEE-90 H2). No-op for the first attempt
+      // and for non-primary hosts.
+      const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt));
+      const fetchUrl = appendCacheBust(hostUrl, attempt);
       const response = await fetchWithTimeout(fetchUrl, signal);
       if (!response.ok) {
         const err = new Error(`Download failed: ${response.status}`);
@@ -546,13 +597,15 @@ async function downloadAndDecrypt(
         };
 
         const decryptKey = await roomCrypto.decryptKey(event);
-        // Serialise decryption: parallel decryptFile calls on low-end
-        // Android WebViews saturate the CPU and freeze the UI.
+        // Decrypt via the crypto Web Worker when available — parallel and
+        // off the main thread (WEE-92); falls back to the legacy serial
+        // main-thread queue otherwise (#306/#370 freeze guard).
         // Pass the declared plaintext MIME so new ciphertexts (stored as
         // application/octet-stream) restore with the right type instead
         // of falling through to a generic binary fallback.
-        const decryptedFile = await enqueueDecrypt(() =>
-          roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+        const decryptedFile = await runFileDecrypt(
+          () => roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+          { sizeBytes: blob.size },
         );
         blob = decryptedFile;
       }
@@ -916,13 +969,24 @@ export function useFileDownload() {
     }
 
     try {
-      const blob = await downloadAndDecrypt(
-        effectiveFileInfo,
-        message.roomId,
-        message.senderId,
-        message.timestamp,
-        signal,
-      );
+      // Concurrency-pool: cap simultaneous network downloads so a chat full of
+      // media doesn't flood the channel / freeze the UI (WEE-71, H2). The
+      // permit covers only fetch + decrypt — released before the cache-write
+      // and objectUrl plumbing so the pool turns over as fast as possible.
+      // Cache hits returned above never reach here, so they bypass the gate.
+      await mediaDownloadGate.acquire();
+      let blob: Blob;
+      try {
+        blob = await downloadAndDecrypt(
+          effectiveFileInfo,
+          message.roomId,
+          message.senderId,
+          message.timestamp,
+          signal,
+        );
+      } finally {
+        mediaDownloadGate.release();
+      }
       const mimeType = effectiveFileInfo.type || "application/octet-stream";
       const typedBlob = new Blob([blob], { type: mimeType });
       const url = URL.createObjectURL(typedBlob);
@@ -974,12 +1038,22 @@ export function useFileDownload() {
     }
   };
 
-  /** Seed the cache with a local blob URL (e.g. for pending voice messages).
-   *  This avoids the full download+decrypt pipeline for files we already have locally. */
+  /** Seed a local blob URL (e.g. for pending voice messages) so the player can
+   *  start immediately, skipping the download+decrypt pipeline for bytes we
+   *  already hold locally.
+   *
+   *  Seeds ONLY the per-instance reactive `state` — never the long-lived module
+   *  `cache`. The optimistic blob is revoked ~5s after `confirmMediaSent`
+   *  (sync-engine.ts). If it leaked into `cache`, the post-confirm
+   *  `watch → download()` in VoiceMessage.vue would short-circuit on
+   *  `cache.has(cacheKey)` and hand the player a *dead* blob URL for the
+   *  SENDER's own voice — an eternal loading spinner (#990) or a silent, empty
+   *  `<audio>` (#986). The receiver never seeds a blob, so it decrypts the
+   *  server copy and plays fine. Keeping the seed instance-local lets the
+   *  blob→mxc transition re-download the durable server file (WEE-88). */
   const seedLocalUrl = (cacheKey: string, blobUrl: string) => {
-    if (cache.has(cacheKey)) return;
-    cache.set(cacheKey, blobUrl);
     const state = getState(cacheKey);
+    if (state.objectUrl) return;
     state.objectUrl = blobUrl;
     state.loading = false;
     state.error = null;

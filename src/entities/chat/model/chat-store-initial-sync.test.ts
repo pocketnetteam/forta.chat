@@ -23,11 +23,13 @@ vi.mock("@/entities/matrix", () => ({
 }));
 
 import { useChatStore } from "./chat-store";
+import { isChatsInteractive, __resetBootSignalsForTests } from "@/shared/lib/boot-signals";
 
 describe("chat-store WEE-55 initial-sync watchdog", () => {
   let store: ReturnType<typeof useChatStore>;
 
   beforeEach(() => {
+    __resetBootSignalsForTests();
     vi.useFakeTimers();
     setActivePinia(createTestingPinia({ stubActions: false }));
     store = useChatStore();
@@ -82,14 +84,24 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
     expect(store.initialSyncStatus).toBe("ready");
   });
 
-  it("keeps isSyncing true while the connection is lost, even after ready", () => {
+  // WEE-80 (forta-bugs#956): supersedes the original WEE-55 expectation that a
+  // lost connection re-raised isSyncing. The local-first read path must NOT
+  // depend on the network — once the first sync (or the watchdog degrade) has
+  // settled, the in-room message skeleton (isSyncing) stays down so cached
+  // Dexie content keeps rendering. Connection status is exposed separately via
+  // `syncState` (and the sync banner), not via isSyncing.
+  it("does NOT re-raise isSyncing when the connection drops after ready (WEE-80)", () => {
     store.setHelpers(mockMatrixService.kit as never, {} as never);
     store.refreshRooms("PREPARED");
     vi.advanceTimersByTime(150);
     expect(store.isSyncing).toBe(false);
 
     store.setSyncState("RECONNECTING");
-    expect(store.isSyncing).toBe(true);
+    expect(store.isSyncing).toBe(false);
+    expect(store.syncState).toBe("RECONNECTING"); // connection state still observable
+
+    store.setSyncState("ERROR");
+    expect(store.isSyncing).toBe(false);
   });
 
   it("upgrades degraded → ready when a real PREPARED sync arrives late", () => {
@@ -108,6 +120,24 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
     expect(store.initialSyncStatus).toBe("ready");
     expect(store.roomsInitialized).toBe(true);
     expect(store.isSyncing).toBe(false);
+  });
+
+  // WEE-97: deferred boot work (recovery scans, Tor, telemetry) is released
+  // by the chats-interactive signal — it must fire on BOTH paths that flip
+  // roomsInitialized, or the deferred work waits for the 15-30s fallbacks.
+  it("WEE-97: signals chats-interactive when the first PREPARED refresh lands", () => {
+    expect(isChatsInteractive()).toBe(false);
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
+    store.refreshRooms("PREPARED");
+    vi.advanceTimersByTime(150);
+    expect(isChatsInteractive()).toBe(true);
+  });
+
+  it("WEE-97: signals chats-interactive on watchdog degrade too", () => {
+    expect(isChatsInteractive()).toBe(false);
+    store.startInitialSyncWatch();
+    vi.advanceTimersByTime(8000);
+    expect(isChatsInteractive()).toBe(true);
   });
 
   it("cleanup resets the lifecycle back to 'loading'", () => {

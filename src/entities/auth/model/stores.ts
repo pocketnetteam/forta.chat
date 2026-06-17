@@ -22,6 +22,7 @@ import { clearQueue } from "@/shared/lib/offline-queue";
 import { deleteLegacyCache } from "@/shared/lib/cache/chat-cache";
 import { clearAccountLocalStorage } from "@/shared/lib/clear-account-storage";
 import { isNative } from "@/shared/lib/platform";
+import { interopLog } from "@/shared/lib/interop";
 import { onConnectivityChange } from "@/shared/lib/connectivity";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
@@ -41,6 +42,7 @@ import {
   getAddressFromPubKey,
   PollTimer,
   ProxyRotator,
+  fetchCaptchaWithProxyFallback,
   saveMnemonic,
   loadMnemonic,
   clearMnemonic,
@@ -49,9 +51,14 @@ import {
   writeSelfProfile,
   clearSelfProfile,
   mergeSelfProfileWithRemote,
+  resolveKeyRepublishAction,
+  countCachedKeys,
+  countPublishedKeys,
+  REQUIRED_ENCRYPTION_KEYS,
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { createKeyPair } from "./key-pair";
+import { generateEncryptionKeys, clearEncryptionKeysCache } from "./encryption-keys";
 
 const NAMESPACE = "auth";
 
@@ -93,24 +100,6 @@ function hexDecode(hex: string): string {
     result += String.fromCharCode(ch);
   }
   return result;
-}
-
-/** Generate 12 BIP32 key pairs at m/33'/0'/0'/{1-12}' for Pcrypto encryption.
- *  Matches original: bitcoin.bip32.fromSeed(Buffer.from(privateKey, "hex")) */
-function generateEncryptionKeys(privateKeyHex: string) {
-  const key = Buffer.from(privateKeyHex, "hex");
-  const root = bitcoin.bip32.fromSeed(key);
-
-  const keys: Array<{ pair: unknown; public: string; private: Buffer }> = [];
-  for (let i = 1; i <= 12; i++) {
-    const child = root.derivePath(`m/33'/0'/0'/${i}'`);
-    keys.push({
-      pair: bitcoin.ECPair.fromPrivateKey(child.privateKey),
-      public: child.publicKey.toString("hex"),
-      private: child.privateKey,
-    });
-  }
-  return keys;
 }
 
 let _onSyncStatusCallback: ((state: string) => void) | null = null;
@@ -187,6 +176,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSRegPending, value: LSRegPending } =
     useLocalStorage<boolean>("registration_pending", false);
   const registrationPending = ref(LSRegPending);
+
+  // WEE-35: set when login finds an EXISTING on-chain account that lacks
+  // Forta's 12 encryption keys — i.e. it was registered outside Forta, almost
+  // certainly via Bastyon. Feeds the dual-install warning (see bastyon-warning).
+  const likelyBastyonUser = ref(false);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Tracks active (non-backgrounded) time for the registration poll so
@@ -307,6 +301,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // The helper swallows its own errors; .catch is here only so an
       // unexpected throw doesn't bubble up as an unhandled rejection.
       if (result?.success === true && matrixReady.value) {
+        // No `clearAvatar` flag: an empty `userData.image` here means the
+        // avatar simply wasn't loaded into the edit form (or Pocketnet hasn't
+        // propagated it yet), not that the user removed it. syncProfileToMatrix
+        // therefore leaves the existing Matrix avatar untouched rather than
+        // wiping it — root cause of WEE-77 / forta-bugs#954, #943, #976. A
+        // real "remove avatar" action would pass clearAvatar: true.
         void syncProfileToMatrix(getMatrixClientService(), {
           name: userData.name,
           image: userData.image,
@@ -432,7 +432,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           matrixKit.value?.chatIsPublic(room as Record<string, unknown>) ?? false,
         matrixId: (id: string) => matrixService.matrixId(id),
       });
-      await withTimeout(cryptoInstance.prepare(address.value ?? undefined), 10_000, "Pcrypto storage init");
+      // WEE-97 item 3: prepare() opens two IndexedDB stores (~50-150ms) —
+      // run it concurrently with the Matrix connection below instead of
+      // serializing the boot path. Safe because all Pcrypto ls/lse access is
+      // optional-chained (storage miss = cache miss), and rooms are only
+      // created after the first /sync, by which point prepare has resolved.
+      const pcryptoPreparePromise = withTimeout(
+        cryptoInstance.prepare(address.value ?? undefined),
+        10_000,
+        "Pcrypto storage init",
+      );
+      // Suppress premature unhandled-rejection (real handling happens in the
+      // Promise.all together with the Matrix connection below).
+      pcryptoPreparePromise.catch(() => {});
       pcrypto.value = cryptoInstance;
 
       // Step 7: Wire Matrix events → chat store
@@ -630,24 +642,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // state on cold start. Retry-with-backoff turns a single brittle attempt
       // into 3 attempts (1s/2s backoff, 45s per attempt) so transient transport
       // failures don't surface as a fatal boot error.
-      const connectResult = await connectMatrixWithRetry(matrixService, {
-        attemptTimeoutMs: 45_000,
-        maxAttempts: 3,
-        baseDelayMs: 1_000,
-        maxDelayMs: 30_000,
-        onAttempt: (attempt, max) => {
-          matrixError.value =
-            attempt === 1
-              ? "Connecting to Matrix server..."
-              : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
-        },
-        onAttemptFail: (attempt, err) => {
-          console.warn(
-            `[auth] Matrix connect attempt ${attempt} failed:`,
-            err instanceof Error ? err.message : err,
-          );
-        },
-      });
+      // WEE-97 item 3: await the deferred Pcrypto storage init together with
+      // the connection — both must be settled before matrixReady flips.
+      const [connectResult] = await Promise.all([
+        connectMatrixWithRetry(matrixService, {
+          attemptTimeoutMs: 45_000,
+          maxAttempts: 3,
+          baseDelayMs: 1_000,
+          maxDelayMs: 30_000,
+          onAttempt: (attempt, max) => {
+            matrixError.value =
+              attempt === 1
+                ? "Connecting to Matrix server..."
+                : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
+          },
+          onAttemptFail: (attempt, err) => {
+            console.warn(
+              `[auth] Matrix connect attempt ${attempt} failed:`,
+              err instanceof Error ? err.message : err,
+            );
+          },
+        }),
+        pcryptoPreparePromise,
+      ]);
 
       if (connectResult.ready) {
         bootStatus.setStep("sync");
@@ -986,78 +1003,92 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Step 1: Quick check via local SDK cache
+    // Step 1: Quick check via local SDK cache.
     const userData = appInitializer.getUserData(address.value);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cachedKeys: string[] = (userData as any)?.keys ?? [];
+    const cachedKeyCount = countCachedKeys(userData);
 
-    if (cachedKeys.length >= 12) {
-      console.log("[auth] Key verification OK (cache):", cachedKeys.length, "keys");
-      return;
-    }
-
-    // Step 2: Cache may be stale/empty after login — verify via fresh SDK profile load
-    console.log("[auth] Cache shows", cachedKeys.length, "keys, verifying via RPC...");
-    try {
-      const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
-      const rawProfile = rawProfiles[0];
-      if (rawProfile) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
-        let blockchainKeys: string[] = [];
-        if (Array.isArray(rawKeys)) {
-          blockchainKeys = rawKeys.filter((k: string) => k);
-        } else if (typeof rawKeys === "string" && rawKeys) {
-          blockchainKeys = rawKeys.split(",").filter((k: string) => k);
-        }
-
-        if (blockchainKeys.length >= 12) {
-          console.log("[auth] Key verification OK (blockchain):", blockchainKeys.length, "keys");
-          return;
-        }
-        console.warn("[auth] Blockchain confirms only", blockchainKeys.length, "keys. Re-publishing...");
-      } else {
-        console.warn("[auth] No profile found on blockchain. Re-publishing...");
+    // Step 2: Cache may be stale/empty after login — verify via fresh SDK
+    // profile load, but only when the cache is short.
+    let blockchainKeyCount: number | null = null;
+    let blockchainCheckFailed = false;
+    if (cachedKeyCount < REQUIRED_ENCRYPTION_KEYS) {
+      console.log("[auth] Cache shows", cachedKeyCount, "keys, verifying via RPC...");
+      try {
+        const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+        blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
+      } catch (e) {
+        console.warn("[auth] RPC key check failed, skipping re-publish:", e);
+        blockchainCheckFailed = true;
       }
-    } catch (e) {
-      console.warn("[auth] RPC key check failed, skipping re-publish:", e);
-      // Don't block login if RPC fails — keys might be fine, cache just didn't load
-      return;
     }
 
-    // Step 3: Keys genuinely missing — re-derive and re-publish
-    const encKeys = generateEncryptionKeys(privateKey.value);
-    const encPublicKeys = encKeys.map(k => k.public);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const name = (userData as any)?.name ?? "";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const language = (userData as any)?.language ?? "en";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const about = (userData as any)?.about ?? "";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const image = (userData as any)?.image ?? "";
+    // checkUnspents only affects the republish-vs-needs-funds split; query it
+    // only when a re-publish might actually be required (cache short, RPC
+    // conclusive, and the chain itself confirms < 12 keys).
+    const mayNeedRepublish =
+      cachedKeyCount < REQUIRED_ENCRYPTION_KEYS &&
+      !blockchainCheckFailed &&
+      (blockchainKeyCount ?? 0) < REQUIRED_ENCRYPTION_KEYS;
+    const hasUnspents = mayNeedRepublish
+      ? await appInitializer.checkUnspents(address.value)
+      : false;
 
-    const hasUnspents = await appInitializer.checkUnspents(address.value);
-    if (!hasUnspents) {
-      console.warn("[auth] No PKOIN for key re-publish. Setting pending for poll.");
-      setPendingRegProfile({ name, language, about, encPublicKeys, image });
-      setRegistrationPending(true);
-      startRegistrationPoll();
-      return;
-    }
+    const action = resolveKeyRepublishAction({
+      cachedKeyCount,
+      blockchainKeyCount,
+      blockchainCheckFailed,
+      hasUnspents,
+    });
 
-    try {
-      await appInitializer.syncNodeTime();
-      const { registrationNode } = await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
-      registrationFnode = registrationNode;
-      console.log("[auth] Key re-publish broadcast sent (fnode:", registrationFnode, "). Starting confirmation poll.");
-      setRegistrationPending(true);
-      startRegistrationPoll();
-    } catch (e) {
-      console.error("[auth] Key re-publish failed:", e);
-      setPendingRegProfile({ name, language, about, encPublicKeys });
-      setRegistrationPending(true);
-      startRegistrationPoll();
+    // CRITICAL (WEE-35 / forta-bugs#520): this runs on the login path for an
+    // ALREADY-AUTHENTICATED account (register()'s own auto-login is guarded out
+    // above). It must NEVER flip `registrationPending` — that mounts the
+    // full-screen RegistrationStepper ("Подготовка аккаунта / Requesting
+    // resources for registration on the network") over a valid session and
+    // hangs the user. This was the visible symptom for Bastyon-registered
+    // accounts (whose blockchain profile lacks Forta's 12 keys) and for
+    // transient empty-keys RPC responses. Re-publishing happens silently in the
+    // background; recovery when unfunded is the manual republishKeysFromUi flow.
+    switch (action.kind) {
+      case "keys-ok":
+        console.log(`[auth] Key verification OK (${action.source}):`, action.keyCount, "keys");
+        return;
+      case "rpc-failed":
+        // Inconclusive — don't block login, keys may well be fine.
+        return;
+      case "needs-funds":
+        // Existing on-chain account without Forta keys → registered elsewhere
+        // (Bastyon). Flag it for the dual-install warning (WEE-35).
+        likelyBastyonUser.value = true;
+        interopLog("auth", "existing account missing Forta keys (no PKOIN) — likely Bastyon-registered");
+        console.warn("[auth] Missing encryption keys but no PKOIN — login proceeds, publish keys later from settings");
+        return;
+      case "republish": {
+        likelyBastyonUser.value = true;
+        interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
+        const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
+        const profile = {
+          name: userData?.name ?? "",
+          language: userData?.language ?? "en",
+          about: userData?.about ?? "",
+        };
+        const image = userData?.image ?? "";
+        const republishAddress = address.value;
+        // Fire-and-forget: the broadcast is a blockchain round-trip that must
+        // not add latency to login. It can no longer hang the UI (never flips
+        // registrationPending) and failure is non-fatal — login proceeds either
+        // way and the manual republishKeysFromUi flow remains as recovery.
+        void (async () => {
+          try {
+            await appInitializer.syncNodeTime();
+            await appInitializer.registerUserProfile(republishAddress, profile, encPublicKeys, image);
+            console.log("[auth] Encryption keys re-published in background (existing-account login)");
+          } catch (e) {
+            console.error("[auth] Background key re-publish failed (login proceeds):", e);
+          }
+        })();
+        return;
+      }
     }
   };
 
@@ -1146,6 +1177,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           privateKey: convertToHexString(keyPair.privateKey)
         };
         setAuthData(authData);
+
+        // WEE-102: hydrate local contact aliases from Dexie BEFORE any network
+        // step (fetchUserInfo / verifyAndRepublishKeys / initMatrix). Offline,
+        // those steps can stall and the alias hydration buried inside initMatrix
+        // would never run, leaving every renamed contact stuck on its raw
+        // nickname. Reading Dexie needs no connectivity, so it is safe and
+        // user-visible from the first frame; initMatrix's loadLocalAliases later
+        // refreshes it via the live kit.
+        useChatStore().hydrateLocalAliasesEarly(addr).catch(() => { /* best-effort */ });
+
         await fetchUserInfo();
 
         // Verify encryption keys are published; re-publish if missing
@@ -1166,6 +1207,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
     }
   );
+
+  /** WEE-102: hydrate local contact aliases from Dexie ahead of any network
+   *  step. Used by the cold-boot path (App.vue) where `fetchUserInfo()` runs —
+   *  and can stall offline — before `initMatrix()` would otherwise hydrate them.
+   *  No-op until the session address is known. Best-effort; never throws. */
+  const hydrateLocalAliasesEarly = async (): Promise<void> => {
+    if (!address.value) return;
+    await useChatStore().hydrateLocalAliasesEarly(address.value);
+  };
 
   const logout = async () => {
     const logoutAddress = activeAddress.value;
@@ -1191,6 +1241,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
       pcrypto.value = null;
     }
+    // WEE-97: drop memoized BIP32 key material with the rest of the session
+    clearEncryptionKeysCache();
 
     // ── 3. Clean up listeners & intervals ──
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
@@ -1232,6 +1284,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     setRegistrationPending(false);
     setPendingRegProfile(null);
+    likelyBastyonUser.value = false;
     stopRegistrationPoll();
     clearMnemonic();
 
@@ -1290,9 +1343,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const fetchCaptcha = async () => {
-    if (!regProxyId.value) throw new Error("No proxy selected");
-    const result = await appInitializer.getCaptcha(regProxyId.value, regCaptchaId.value || undefined);
-    if (!result) throw new Error("Failed to fetch captcha");
+    // Fetch with proxy fallback: a blocked/unreachable proxy (WEE-23, same
+    // root cause as WEE-13) is rotated past instead of hanging the captcha step.
+    const result = await fetchCaptchaWithProxyFallback({
+      getProxyId: () => regProxyId.value,
+      pickProxy: async () => {
+        // New proxy issues a new captcha session — drop any stale captcha id.
+        regCaptchaId.value = null;
+        const proxy = await findRegistrationProxy();
+        return proxy.id;
+      },
+      getCaptcha: (proxyId) =>
+        appInitializer.getCaptcha(proxyId, regCaptchaId.value || undefined),
+    });
     regCaptchaId.value = result.id;
     regCaptchaDone.value = false;
     return result;
@@ -1865,6 +1928,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     fetchUserInfo,
     findRegistrationProxy,
     generateRegistrationKeys,
+    hydrateLocalAliasesEarly,
     cachePost,
     getCachedPost,
     getBastyonUserData,
@@ -1910,6 +1974,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     submitComment,
     submitUpvote,
     userInfo,
-    republishKeysFromUi
+    republishKeysFromUi,
+    likelyBastyonUser
   };
 });

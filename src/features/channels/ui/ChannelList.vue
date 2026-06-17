@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, nextTick, onMounted, onUnmounted, watch } from "vue";
-import { useChannelStore } from "@/entities/channel";
+import { useChannelStore, getChannelPreviewText } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
 import { useChatStore } from "@/entities/chat";
 import { formatRelativeTime } from "@/shared/lib/format";
@@ -49,11 +49,7 @@ const handleSelect = (channel: Channel) => {
   emit("selectChannel", channel.address);
 };
 
-const getPreviewText = (channel: Channel): string => {
-  if (!channel.lastContent) return "";
-  const text = channel.lastContent.caption || channel.lastContent.message || "";
-  return text.length > 80 ? text.slice(0, 80) + "..." : text;
-};
+const getPreviewText = (channel: Channel): string => getChannelPreviewText(channel, t);
 
 const getPreviewTime = (channel: Channel): string => {
   if (!channel.lastContent) return "";

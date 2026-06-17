@@ -10,6 +10,11 @@
 export interface InputLayoutInput {
   /** Tailwind `md` breakpoint — matches the `useMobile()` composable. */
   isMobile: boolean;
+  /** A phone held in landscape. Width-based `md` detection reports such
+   *  devices as desktop (a landscape phone is wider than 768px), which kept
+   *  the secondary-action row pinned open and broke the edit layout (#829).
+   *  Treated as mobile-like here. Optional — defaults to false. */
+  isLandscapePhone?: boolean;
   /** Current textarea contents — trimmed empty hides primary actions on mobile. */
   text: string;
   /** Whether the host supports the wallet shortcut at all. */
@@ -27,7 +32,8 @@ export interface InputLayoutResult {
 }
 
 export const deriveInputLayout = (input: InputLayoutInput): InputLayoutResult => {
-  const showSecondaryActions = !input.isMobile || input.text.trim().length === 0;
+  const mobileLike = input.isMobile || input.isLandscapePhone === true;
+  const showSecondaryActions = !mobileLike || input.text.trim().length === 0;
   const showDonateShortcut = input.showDonate && showSecondaryActions;
   return { showSecondaryActions, showDonateShortcut };
 };

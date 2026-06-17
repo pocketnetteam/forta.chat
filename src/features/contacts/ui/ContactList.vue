@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onUnmounted, triggerRef } from "vue";
+import { usePreviewTimeout } from "../model/use-preview-timeout";
 import { useChatStore } from "@/entities/chat";
 import type { ChatRoom, Message } from "@/entities/chat";
 import { MessageType, MessageStatus } from "@/entities/chat";
@@ -36,7 +37,7 @@ const chatStore = useChatStore();
 const authStore = useAuthStore();
 const channelStore = useChannelStore();
 const userStore = useUserStore();
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { formatPreview } = useFormatPreview();
 const selectionStore = useSelectionStore();
 const emit = defineEmits<{ selectRoom: [roomId: string]; selectChannel: [address: string] }>();
@@ -215,6 +216,24 @@ function getRoomTitle(room: ChatRoom): DisplayResult {
   );
 }
 
+// Preview-decrypt skeleton timeout — extracted to a composable (WEE-96 A4):
+// the timer is cancelled when the preview decrypts in time, so the row isn't
+// re-rendered a second time by a stale timeout firing after success.
+const {
+  noteResolving: notePreviewResolving,
+  noteReady: notePreviewReady,
+  isTimedOut: isPreviewTimedOut,
+} = usePreviewTimeout();
+
+/** Resolving preview that degrades to the encrypted label after the timeout. */
+function resolvingPreview(roomId: string): DisplayResult {
+  notePreviewResolving(roomId);
+  if (isPreviewTimedOut(roomId)) {
+    return { state: "failed", text: t("message.encryptedPreview") };
+  }
+  return { state: "resolving", text: "" };
+}
+
 /** Unified display state for message preview: resolving → skeleton, failed → fallback, ready → text */
 function getPreview(room: ChatRoom): DisplayResult {
   // Primary: use room.lastMessage from Dexie LiveRoom
@@ -230,13 +249,17 @@ function getPreview(room: ChatRoom): DisplayResult {
     // For non-encrypted content, clean links/IDs (getPreview text is shown directly in some template branches)
     const content = room.lastMessage.content;
     const cleaned = (content && !content.startsWith("[encrypted"))
-      ? stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(content, (id) => chatStore.getLocalAlias(id))))
+      ? cleanMatrixIds(stripBastyonLinks(stripMentionAddresses(content, (id) => chatStore.getLocalAlias(id))))
       : content;
-    return getMessagePreviewForUI(
+    const res = getMessagePreviewForUI(
       cleaned,
       room.lastMessage.decryptionStatus,
-      t("message.notDecrypted"),
+      t("message.encryptedPreview"),
+      { timedOut: isPreviewTimedOut(room.id) },
     );
+    if (res.state === "resolving") notePreviewResolving(room.id);
+    else notePreviewReady(room.id);
+    return res;
   }
   // Fallback: if Dexie doesn't have lastMessage but messages[] does (loaded via viewport-fetch),
   // use the last message from the in-memory array
@@ -257,12 +280,16 @@ function getPreview(room: ChatRoom): DisplayResult {
       return { state: "ready", text: formatPreview(last, room) };
     }
     // Strip bastyon links and matrix IDs from fallback preview (same as formatPreview does)
-    const cleaned = stripBastyonLinks(cleanMatrixIds(stripMentionAddresses(last.content, (id) => chatStore.getLocalAlias(id))));
-    return getMessagePreviewForUI(
+    const cleaned = cleanMatrixIds(stripBastyonLinks(stripMentionAddresses(last.content, (id) => chatStore.getLocalAlias(id))));
+    const res = getMessagePreviewForUI(
       cleaned,
       last.decryptionStatus,
-      t("message.notDecrypted"),
+      t("message.encryptedPreview"),
+      { timedOut: isPreviewTimedOut(room.id) },
     );
+    if (res.state === "resolving") notePreviewResolving(room.id);
+    else notePreviewReady(room.id);
+    return res;
   }
   // No lastMessage and no in-memory messages.
   // Determine skeleton vs "No messages" from Dexie ground truth:
@@ -270,7 +297,8 @@ function getPreview(room: ChatRoom): DisplayResult {
   //   - lastMessageEventId ABSENT → truly empty chat → "No messages"
   const dexieRoom = chatStore.dexieRoomMap.get(room.id);
   if (dexieRoom?.lastMessageEventId) {
-    return { state: "resolving", text: "" };
+    // Data in transit (decrypt/fetch). Same 10s cap so the skeleton can't hang.
+    return resolvingPreview(room.id);
   }
   return { state: "ready", text: t("contactList.noMessages") };
 }
@@ -455,9 +483,11 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
 
   // "all": merge-sort rooms + channels (both already sorted by time desc).
   // O(n+m) instead of O((n+m) log(n+m)).
-  // Invites and empty placeholder rooms are filtered out here to prevent
-  // blank stripes in RecycleScroller (each slot reserves ITEM_HEIGHT even
-  // when its content is empty). Invites live on the dedicated Invites tab.
+  // Joined rooms AND pending invites are shown here (WEE-59), interleaved by
+  // activity — their relative order comes from the upstream sortedRooms sort
+  // (membershipRank below only tie-breaks room-vs-channel at equal timestamps).
+  // Only empty placeholder rooms are filtered out to prevent blank stripes in
+  // RecycleScroller (each slot reserves ITEM_HEIGHT even when its content is empty).
   const roomItems: UnifiedItem[] = filterRoomsForTab(rooms, "all").map(toItem);
   const channelItems: UnifiedItem[] = channelStore.channels
     .map(c => ({ ...c, _key: `ch:${c.address}` }))
@@ -743,11 +773,35 @@ const handleCtxAction = (action: string) => {
   ctxMenu.value.show = false;
 };
 
+/** WEE-65 (H2 / #334): a "contact" IS its DM room, so deleting the chat used to
+ *  destroy the contact with no way back. For 1:1 rooms the delete dialog now
+ *  offers "Clear history" (keeps the contact — wipes messages via the existing
+ *  sync-safe `clearHistory` watermark) alongside the full "Delete and leave".
+ *  Group rooms keep the single destructive delete. */
+const deleteTargetIsDm = computed<boolean>(() => {
+  const id = deleteConfirm.value.roomId;
+  if (!id) return false;
+  const room = chatStore.rooms.find(r => r.id === id);
+  return !!room && !room.isGroup;
+});
+
+const closeDeleteConfirm = () => {
+  deleteConfirm.value = { show: false, roomId: null };
+};
+
 const confirmDeleteRoom = () => {
   if (deleteConfirm.value.roomId) {
     chatStore.removeRoom(deleteConfirm.value.roomId);
   }
-  deleteConfirm.value = { show: false, roomId: null };
+  closeDeleteConfirm();
+};
+
+/** Clear only the message history; the DM room (= contact) survives. */
+const confirmClearHistory = () => {
+  if (deleteConfirm.value.roomId) {
+    chatStore.clearHistory(deleteConfirm.value.roomId);
+  }
+  closeDeleteConfirm();
 };
 
 // Per-room long press: cache a single useLongPress instance per room
@@ -831,7 +885,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
                 v-if="(item as Channel).lastContent"
                 class="flex shrink-0 items-center gap-0.5 text-xs text-text-on-main-bg-color"
               >
-                {{ formatRelativeTime(new Date((item as Channel).lastContent!.time * 1000)) }}
+                {{ formatRelativeTime(new Date((item as Channel).lastContent!.time * 1000), locale) }}
               </span>
             </div>
             <!-- Preview row -->
@@ -928,7 +982,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
                   v-if="(item as ChatRoom).lastMessage?.senderId === authStore.address && (item as ChatRoom).lastMessage!.type !== MessageType.system && (item as ChatRoom).lastMessage!.content !== ''"
                   :status="(item as ChatRoom).lastMessage!.status"
                 />
-                {{ formatRelativeTime(new Date(getRoomTimestamp(item as ChatRoom)!)) }}
+                {{ formatRelativeTime(new Date(getRoomTimestamp(item as ChatRoom)!), locale) }}
               </span>
             </div>
 
@@ -1046,11 +1100,35 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
         >
           <div class="w-full max-w-xs rounded-xl bg-background-total-theme p-5 shadow-xl">
             <h3 class="mb-3 text-base font-semibold text-text-color">{{ t("contactList.deleteChat") }}</h3>
-            <p class="mb-4 text-sm text-text-on-main-bg-color">{{ t("contactList.deleteChatConfirm") }}</p>
-            <div class="flex gap-2">
+            <p class="mb-4 text-sm text-text-on-main-bg-color">
+              {{ deleteTargetIsDm ? t("contactList.deleteDmConfirm") : t("contactList.deleteChatConfirm") }}
+            </p>
+            <!-- DM: offer "clear history" (keeps contact) vs "delete and leave" -->
+            <div v-if="deleteTargetIsDm" class="flex flex-col gap-2">
+              <button
+                class="w-full rounded-lg bg-color-bg-ac px-4 py-2.5 text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1"
+                @click="confirmClearHistory"
+              >
+                {{ t("contactList.clearHistory") }}
+              </button>
+              <button
+                class="w-full rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
+                @click="confirmDeleteRoom"
+              >
+                {{ t("contactList.deleteAndLeave") }}
+              </button>
+              <button
+                class="w-full rounded-lg bg-neutral-grad-0 px-4 py-2.5 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
+                @click="closeDeleteConfirm"
+              >
+                {{ t("contactList.cancel") }}
+              </button>
+            </div>
+            <!-- Group: single destructive delete -->
+            <div v-else class="flex gap-2">
               <button
                 class="flex-1 rounded-lg bg-neutral-grad-0 px-4 py-2.5 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-2"
-                @click="deleteConfirm = { show: false, roomId: null }"
+                @click="closeDeleteConfirm"
               >
                 {{ t("contactList.cancel") }}
               </button>

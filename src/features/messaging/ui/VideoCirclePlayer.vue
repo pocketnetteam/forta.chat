@@ -121,8 +121,9 @@ onUnmounted(() => {
   <div ref="containerEl" class="video-circle-container relative inline-block cursor-pointer" @click="handleClick">
     <video
       ref="videoEl"
-      class="video-circle block h-[150px] w-[150px] object-cover sm:h-[200px] sm:w-[200px]"
+      class="video-circle block h-[150px] w-[150px] object-cover sm:h-[200px] sm:w-[200px] select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]"
       :src="videoSrc ?? undefined"
+      draggable="false"
       muted
       playsinline
       preload="auto"

@@ -106,9 +106,13 @@ global.fetch = vi.fn(() => Promise.resolve(mockFetchResponse)) as Mock;
 const {
   useFileDownload,
   revokeAllFileUrls,
+  invalidateDownloadCache,
   appendCacheBust,
   wrapTransientError,
+  mediaHostForAttempt,
+  rewriteMediaHost,
   _resetToastDedupForTests,
+  _mediaGateActiveForTests,
 } = await import("./use-file-download");
 const { MediaUnavailableError, NetworkBlockedError } = await import(
   "@/shared/lib/network/typed-network-errors"
@@ -1154,6 +1158,87 @@ describe("useFileDownload", () => {
   });
 
   // -------------------------------------------------------------------------
+  // WEE-71 (H2): concurrency-pool — opening a DM full of photos must not fire
+  // every full-size fetch at once (channel flooding + UI freeze on low-end
+  // Android). The shared semaphore caps simultaneous network downloads to 3.
+  // -------------------------------------------------------------------------
+  describe("download — concurrency pool (WEE-71)", () => {
+    it("never runs more than 3 media downloads concurrently", async () => {
+      const originalFetch = global.fetch;
+
+      let activeFetches = 0;
+      let peakFetches = 0;
+      let releaseFetches: () => void = () => {};
+      const fetchGate = new Promise<void>((resolve) => {
+        releaseFetches = resolve;
+      });
+
+      // Each fetch parks on the shared gate so several can be in flight at once
+      // — letting us observe how many the semaphore actually admits.
+      global.fetch = vi.fn(async () => {
+        activeFetches++;
+        peakFetches = Math.max(peakFetches, activeFetches);
+        await fetchGate;
+        activeFetches--;
+        return {
+          ok: true,
+          status: 200,
+          blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" })),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+
+      const scope = effectScope();
+      try {
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+          // 6 distinct encrypted-less images — all want the network at once.
+          const downloads = Array.from({ length: 6 }, (_, i) =>
+            download({
+              id: `$evt_pool_${i}`,
+              _key: `client_pool_${i}`,
+              roomId: "!room:server",
+              senderId: "@u:server",
+              content: "photo.jpg",
+              timestamp: Date.now(),
+              status: "sent",
+              type: "image",
+              fileInfo: {
+                name: "photo.jpg",
+                type: "image/jpeg",
+                size: 1024,
+                url: `https://example.com/photo_${i}.jpg`,
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any),
+          );
+
+          // Let the admitted downloads reach their fetch() and park on the gate.
+          await new Promise((r) => setTimeout(r, 0));
+
+          // At most 3 in flight; the rest queue on the semaphore.
+          expect(_mediaGateActiveForTests()).toBeLessThanOrEqual(3);
+          expect(peakFetches).toBeLessThanOrEqual(3);
+          expect(activeFetches).toBe(3);
+
+          // Drain: release the gate, let every download complete.
+          releaseFetches();
+          await Promise.all(downloads);
+
+          // Pool fully turned over — no leaked permits, and the 6th still ran.
+          expect(_mediaGateActiveForTests()).toBe(0);
+          expect(peakFetches).toBeLessThanOrEqual(3);
+          expect((global.fetch as Mock).mock.calls.length).toBe(6);
+        });
+      } finally {
+        scope.stop();
+        global.fetch = originalFetch;
+      }
+    }, 15_000);
+  });
+
+  // -------------------------------------------------------------------------
   // forceRefetch — Session 44
   // Voice-message retry button needs to bypass the per-message media cache
   // so a stuck encrypted blob can be re-fetched + re-decrypted with a fresh
@@ -1237,6 +1322,160 @@ describe("useFileDownload", () => {
       } finally {
         revokeSpy.mockRestore();
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // WEE-88 — sender cannot play their OWN voice (#990 spinner / #986 silent)
+  // -------------------------------------------------------------------------
+  // Root cause: seedLocalUrl used to write the optimistic blob: URL into the
+  // long-lived module `cache`. After confirmMediaSent the blob is revoked
+  // (~5s), but the cache entry survived — so the post-confirm re-download
+  // short-circuited on `cache.has()` and handed the player a DEAD blob. The
+  // receiver never seeds a blob, so it always decrypted the server copy and
+  // heard the message fine. The fix keeps the seed instance-local so the
+  // blob→mxc transition re-downloads the durable server file.
+  describe("own voice playback — sender's own message (WEE-88)", () => {
+    it("seedLocalUrl does NOT poison the long-lived cache: a confirmed own voice re-downloads from the server", async () => {
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])], { type: "audio/ogg" })),
+      });
+
+      const blobUrl = "blob:http://localhost:5173/own-voice-88";
+      const cacheKey = "client_voice_88";
+
+      // 1) Pending send: the sender's bubble seeds the local blob for instant
+      //    playback while the upload is still in flight.
+      const scope1 = effectScope();
+      await scope1.run(async () => {
+        const { seedLocalUrl, getState } = useFileDownload();
+        seedLocalUrl(cacheKey, blobUrl);
+        expect(getState(cacheKey).objectUrl).toBe(blobUrl);
+      });
+      scope1.stop();
+
+      // 2) confirmMediaSent flips the row to a real mxc URL and revokes the
+      //    blob. A fresh download() (the watch-triggered re-fetch) must hit the
+      //    server — NOT replay the dead blob from a poisoned module cache.
+      const scope2 = effectScope();
+      await scope2.run(async () => {
+        const { download } = useFileDownload();
+        const confirmed = {
+          id: "$evt_voice_88",
+          _key: cacheKey,
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "Audio",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "audio",
+          fileInfo: {
+            name: "voice.ogg",
+            type: "audio/ogg",
+            size: 4096,
+            url: "mxc://server/voice88",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(confirmed);
+
+        // The server file was fetched (no short-circuit on a stale blob).
+        expect(fetchSpy).toHaveBeenCalled();
+        // The returned URL is a fresh decrypted objectUrl, never the dead blob.
+        expect(result).not.toBe(blobUrl);
+      });
+      scope2.stop();
+    });
+
+    it("invalidateDownloadCache drops the entry so the next download re-fetches the server copy", async () => {
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([9])], { type: "audio/ogg" })),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const msg = {
+          id: "$evt_inv_88",
+          _key: "client_inv_88",
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "Audio",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "audio",
+          fileInfo: { name: "v.ogg", type: "audio/ogg", size: 1, url: "mxc://server/inv88" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(msg);
+        const callsAfterFirst = fetchSpy.mock.calls.length;
+
+        // Second download hits the cache — no new network call.
+        await download(msg);
+        expect(fetchSpy.mock.calls.length).toBe(callsAfterFirst);
+
+        // After invalidation (the blob→mxc watch path), the next download must
+        // re-fetch instead of replaying the cached entry.
+        invalidateDownloadCache("client_inv_88");
+        await download(msg);
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      });
+      scope.stop();
+    });
+  });
+
+  // ── WEE-90 H2: media-server mirror fallback ───────────────────────────
+  // The old chat (bastyon-chat) survives a blocked/throttled primary media
+  // repo because `pingServers` picks a live host from `matrix` + `matrixMirrors`.
+  // Forta hits a single hardcoded host, so every retry replays the same dead
+  // URL. These cover the host-selection + URL-rewrite primitives that let the
+  // download retry loop alternate primary↔mirror.
+  describe("media-server mirror fallback (WEE-90 H2)", () => {
+    it("alternates primary↔mirror across retry attempts", () => {
+      // attempt 0 = primary; odd attempts hit the mirror; even attempts the
+      // primary — so a transient primary blip still recovers while a hard
+      // block is bypassed on the very next try.
+      expect(mediaHostForAttempt(0)).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(1)).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(2)).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(3)).toBe("matrix.2.pocketnet.app");
+    });
+
+    it("rewrites the primary homeserver host to the mirror", () => {
+      expect(
+        rewriteMediaHost(
+          "https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc",
+          "matrix.2.pocketnet.app",
+        ),
+      ).toBe("https://matrix.2.pocketnet.app/_matrix/media/v3/download/x/abc");
+    });
+
+    it("is a no-op when the target host is the primary", () => {
+      const url = "https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc";
+      expect(rewriteMediaHost(url, "matrix.pocketnet.app")).toBe(url);
+    });
+
+    it("never repoints a foreign/CDN host at a Pocketnet mirror", () => {
+      // An attachment resolved against some other host (forwarded media,
+      // Element/Cinny sender) must not be silently rerouted to our mirror.
+      const foreign = "https://cdn.example.com/media/abc";
+      expect(rewriteMediaHost(foreign, "matrix.2.pocketnet.app")).toBe(foreign);
+    });
+
+    it("leaves non-URL inputs (blob:/data:) untouched", () => {
+      expect(rewriteMediaHost("blob:http://localhost/abc", "matrix.2.pocketnet.app")).toBe(
+        "blob:http://localhost/abc",
+      );
     });
   });
 });

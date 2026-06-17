@@ -50,9 +50,13 @@ export function getMessagePreviewForUI(
   content: string | undefined | null,
   decryptionStatus: string | undefined | null,
   failedText: string,
+  opts?: { timedOut?: boolean },
 ): DisplayResult {
   if (isEncryptedPlaceholder(content)) {
-    if (decryptionStatus === "failed") {
+    // "failed" = decryption gave up; `timedOut` = the skeleton has shown long
+    // enough (~10s) that we stop waiting and surface a human-readable label
+    // instead of an indefinite shimmer. Either way, show the fallback text.
+    if (decryptionStatus === "failed" || opts?.timedOut) {
       return { state: "failed", text: failedText };
     }
     return { state: "resolving", text: "" };

@@ -4,6 +4,7 @@ import { useUserStore } from "@/entities/user/model";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import { ContactSearch } from "@/features/contacts";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
@@ -15,6 +16,42 @@ const { resolve: resolveRoomName } = useResolvedRoomName();
 const { t } = useI18n();
 const searchQuery = ref("");
 const searchOpen = ref(false);
+
+// WEE-65 (H4 / #168, #545, #819): explicit "Add contact" entry. The Contacts
+// tab previously only filtered EXISTING DM rooms locally, so there was no
+// discoverable way to find a new user and start a chat from here. Add-mode
+// reuses the proven global directory search (`ContactSearch`) which already
+// wires `useContacts.searchUsers` (RPC → Matrix → local) + `getOrCreateRoom`,
+// so picking a user creates/opens the DM. Self-contained: opening add-mode
+// closes the local filter, and a created room hands off via `selectRoom`.
+const addMode = ref(false);
+const addQuery = ref("");
+
+const openAddContact = () => {
+  searchOpen.value = false;
+  searchQuery.value = "";
+  addQuery.value = "";
+  addMode.value = true;
+};
+
+const closeAddContact = () => {
+  addMode.value = false;
+  addQuery.value = "";
+};
+
+const handleAddRoomCreated = (roomId: string) => {
+  chatStore.setActiveRoom(roomId);
+  closeAddContact();
+  emit("selectRoom");
+};
+
+// ContactSearch also surfaces chat/message hits; tapping one in add-mode should
+// open that room rather than no-op.
+const handleAddSelectMessage = (payload: { roomId: string }) => {
+  chatStore.setActiveRoom(payload.roomId);
+  closeAddContact();
+  emit("selectRoom");
+};
 
 interface ContactItem {
   id: string;
@@ -139,13 +176,28 @@ const toggleSearch = () => {
 
 <template>
   <div class="flex h-full flex-col">
-    <!-- Header -->
+    <!-- Header (browse mode) -->
     <div
-      class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-4"
+      v-if="!addMode"
+      class="flex h-14 shrink-0 items-center gap-1 border-b border-neutral-grad-0 px-4"
     >
       <span class="flex-1 text-base font-semibold text-text-color">{{ t("nav.contacts") }}</span>
       <button
         class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+        :title="t('contacts.addContact')"
+        :aria-label="t('contacts.addContact')"
+        @click="openAddContact"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <line x1="19" y1="8" x2="19" y2="14" />
+          <line x1="22" y1="11" x2="16" y2="11" />
+        </svg>
+      </button>
+      <button
+        class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+        :aria-label="t('contacts.searchPlaceholder')"
         @click="toggleSearch"
       >
         <svg
@@ -175,8 +227,56 @@ const toggleSearch = () => {
       </button>
     </div>
 
+    <!-- Header (add-contact mode) -->
+    <div
+      v-else
+      class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-4"
+    >
+      <button
+        class="btn-press flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+        :aria-label="t('contactList.cancel')"
+        @click="closeAddContact"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="19" y1="12" x2="5" y2="12" />
+          <polyline points="12 19 5 12 12 5" />
+        </svg>
+      </button>
+      <span class="flex-1 text-base font-semibold text-text-color">{{ t("contacts.addContact") }}</span>
+    </div>
+
+    <!-- Add-contact mode: directory search + create DM (reuses ContactSearch) -->
+    <template v-if="addMode">
+      <div class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
+        <input
+          v-model="addQuery"
+          type="text"
+          :placeholder="t('contacts.addPlaceholder')"
+          class="h-9 w-full rounded-lg bg-neutral-grad-0 px-3 text-sm text-text-color outline-none placeholder:text-text-on-main-bg-color focus:ring-1 focus:ring-color-bg-ac"
+          autofocus
+        />
+      </div>
+      <!-- Render results only once there's a query — ContactSearch's empty
+           state ("No chats or users found") would otherwise show on an empty
+           input. Until then, show a neutral prompt. -->
+      <ContactSearch
+        v-if="addQuery.trim()"
+        :query="addQuery"
+        class="flex-1 overflow-y-auto py-1"
+        @room-created="handleAddRoomCreated"
+        @select-message="handleAddSelectMessage"
+        @clear="addQuery = ''"
+      />
+      <div
+        v-else
+        class="flex flex-1 items-start justify-center p-6 text-center text-sm text-text-on-main-bg-color"
+      >
+        {{ t("contacts.addPlaceholder") }}
+      </div>
+    </template>
+
     <!-- Search bar -->
-    <div v-if="searchOpen" class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
+    <div v-if="!addMode && searchOpen" class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
       <input
         v-model="searchQuery"
         type="text"
@@ -187,7 +287,7 @@ const toggleSearch = () => {
     </div>
 
     <!-- List -->
-    <div class="flex-1 overflow-hidden">
+    <div v-if="!addMode" class="flex-1 overflow-hidden">
       <!-- Skeleton while rooms haven't loaded yet -->
       <div v-if="contacts.length === 0 && !chatStore.roomsInitialized" class="space-y-1 p-2">
         <div v-for="i in 5" :key="i" class="flex items-center gap-3 px-4 py-2.5">
@@ -197,9 +297,22 @@ const toggleSearch = () => {
       </div>
       <div
         v-else-if="contacts.length === 0"
-        class="p-6 text-center text-sm text-text-on-main-bg-color"
+        class="flex flex-col items-center gap-3 p-6 text-center text-sm text-text-on-main-bg-color"
       >
-        {{ searchQuery.trim() ? t("contacts.noFound") : t("contacts.noYet") }}
+        <span>{{ searchQuery.trim() ? t("contacts.noFound") : t("contacts.noYet") }}</span>
+        <button
+          v-if="!searchQuery.trim()"
+          class="btn-press inline-flex items-center gap-2 rounded-lg bg-color-bg-ac px-4 py-2 text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1"
+          @click="openAddContact"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <line x1="19" y1="8" x2="19" y2="14" />
+            <line x1="22" y1="11" x2="16" y2="11" />
+          </svg>
+          {{ t("contacts.addContact") }}
+        </button>
       </div>
       <RecycleScroller
         v-else

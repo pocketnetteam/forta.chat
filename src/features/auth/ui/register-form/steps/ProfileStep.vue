@@ -5,6 +5,7 @@ import { useLocaleStore } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
 import { isNative } from "@/shared/lib/platform";
+import { validateUsername, USERNAME_MAX_LENGTH } from "./username-validation";
 
 const emit = defineEmits<{
   done: [data: { name: string; language: string; about: string; image?: string }]
@@ -38,30 +39,20 @@ const avatarUrl = ref("");
 const avatarUploading = ref(false);
 const avatarFileInput = ref<HTMLInputElement>();
 
-// Username format validation (matches pocketnet rules)
-// Allowed: latin letters, digits, space, dot, hyphen, underscore, @, #, &
-// Cyrillic is NOT allowed — blockchain rejects it at sendrawtransaction
-const USERNAME_REGEX = /^[a-zA-Z0-9 .\-_@#&]+$/;
-const USERNAME_MAX_LENGTH = 20;
-const RESERVED_NAMES = ["pocketnet", "bastyon"];
-
+// Username format validation lives in a pure, i18n-free module so it can be
+// unit-tested and kept in lockstep with Bastyon's name rules (see WEE-78).
+// Here we only map the structured error to localized copy.
 const validateNameFormat = (value: string): string | null => {
-  const trimmed = value.trim();
-  if (!trimmed) return null; // empty is handled by required
-  if (trimmed.length > USERNAME_MAX_LENGTH) {
-    return t("register.nameTooLong", { max: USERNAME_MAX_LENGTH });
+  const err = validateUsername(value);
+  if (!err) return null;
+  switch (err.code) {
+    case "tooLong":
+      return t("register.nameTooLong", { max: err.max });
+    case "invalidChars":
+      return t("register.nameInvalidChars");
+    case "reserved":
+      return t("register.nameReserved", { name: err.name });
   }
-  if (!USERNAME_REGEX.test(trimmed)) {
-    return t("register.nameInvalidChars");
-  }
-  // Check reserved names (case-insensitive, after stripping non-alpha)
-  const normalized = trimmed.toLowerCase().replace(/[^a-z]/g, "");
-  for (const reserved of RESERVED_NAMES) {
-    if (normalized.includes(reserved)) {
-      return t("register.nameReserved", { name: reserved });
-    }
-  }
-  return null;
 };
 
 const checkNameAvailability = () => {

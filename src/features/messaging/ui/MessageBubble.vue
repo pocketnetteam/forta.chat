@@ -4,6 +4,8 @@ import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { useFileDownload } from "../model/use-file-download";
+import { getMatrixClientService } from "@/entities/matrix";
+import { useLazyLoad } from "@/shared/lib/use-lazy-load";
 import { isMessageFailedForRetry } from "../model/message-failed-state";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
@@ -17,9 +19,11 @@ import {
 } from "../model/video-error";
 import { computeVideoAspectStyle, resolveVideoDimensions } from "../model/video-layout";
 import MessageContent from "./MessageContent.vue";
+import EncryptedMessageNotice from "./EncryptedMessageNotice.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
 import TransferCard from "./TransferCard.vue";
+import CallLinkCard from "./CallLinkCard.vue";
 import ReactionRow from "./ReactionRow.vue";
 import VoiceMessage from "./VoiceMessage.vue";
 import VideoCirclePlayer from "./VideoCirclePlayer.vue";
@@ -49,6 +53,16 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), { isGroup: false, isFirstInGroup: false });
+
+/** Encrypted message that hasn't been decrypted yet (pending/failed, or the
+ *  "[encrypted]" placeholder). Rendered as a distinct notice with auto-retry +
+ *  refresh button instead of leaking the literal "[encrypted]" text. */
+const isUndecrypted = computed(() =>
+  !props.message.deleted &&
+  (props.message.decryptionStatus === "pending" ||
+    props.message.decryptionStatus === "failed" ||
+    props.message.content === "[encrypted]"),
+);
 
 /** Tail (pointed corner) only on the last message in a group (= showAvatar) */
 const tailClass = computed(() => {
@@ -89,18 +103,27 @@ const forwardedFromName = computed(() => {
 const longPressTriggered = ref(false);
 const { onPointerdown: lpPointerdown, onPointermove, onPointerup: lpPointerup, onPointerleave: lpPointerleave } = useLongPress({
   onTrigger: (e) => {
+    // Guard emission (not the timer cleanup) — re-opening the context menu
+    // mid-multiselect would steal the tap (WEE-66 / #863, #924).
+    if (chatStore.selectionMode) return;
     longPressTriggered.value = true;
     emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
   },
 });
 const onPointerdown = (e: PointerEvent) => {
+  // In selection mode a tap toggles selection (see handleBubbleClick) — don't
+  // arm long-press at all.
+  if (chatStore.selectionMode) return;
   longPressTriggered.value = false;
   lpPointerdown(e);
 };
+// Always run cleanup so a timer armed just before selection mode flipped on
+// can't survive to fire.
 const onPointerup = () => { lpPointerup(); };
 const onPointerleave = () => { lpPointerleave(); };
 
 const handleRightClick = (e: MouseEvent) => {
+  if (chatStore.selectionMode) return;
   // .prevent modifier already calls preventDefault
   emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
 };
@@ -114,7 +137,7 @@ const handleRightClick = (e: MouseEvent) => {
 // `isOwn && swipeDirection === 'right'` block in the template), so we only emit
 // quote on right-swipe when the bubble is a peer's.
 const triggerReply = () => emit("reply", props.message);
-const { offsetX: swipeOffsetX, isSwiping, swipeDirection, onTouchstart, onTouchmove, onTouchend } = useSwipeGesture({
+const { offsetX: swipeOffsetX, isSwiping, swipeDirection, onTouchstart: swipeTouchstart, onTouchmove: swipeTouchmove, onTouchend: swipeTouchend } = useSwipeGesture({
   direction: "both",
   threshold: 60,
   maxOffset: 100,
@@ -131,6 +154,12 @@ const swipeStyle = computed(() => {
     transition: isSwiping.value ? "none" : "transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94)",
   };
 });
+
+// Swipe-to-reply is disabled while selecting so a horizontal drag across
+// bubbles toggles selection cleanly instead of firing reply gestures.
+const onTouchstart = (e: TouchEvent) => { if (chatStore.selectionMode) return; swipeTouchstart(e); };
+const onTouchmove = (e: TouchEvent) => { if (chatStore.selectionMode) return; swipeTouchmove(e); };
+const onTouchend = () => { if (chatStore.selectionMode) return; swipeTouchend(); };
 
 const swipeArrowOpacity = computed(() => Math.min(swipeOffsetX.value / 60, 1));
 
@@ -469,20 +498,94 @@ const fileIcon = computed(() => {
   return "file";
 });
 
-// Download image immediately — virtual scroller already handles lazy rendering
-onMounted(() => {
-  if (props.message.type === MessageType.image && props.message.fileInfo) {
-    download(props.message);
+// ── Thumbnail-first + lazy-by-visibility for feed images (WEE-71) ──
+// An UNENCRYPTED image renders a light server-side thumbnail directly — no
+// eager full-size fetch. Full-size loads on tap, inside MediaViewer. An
+// ENCRYPTED image (the common DM case) has no usable server thumbnail, so it
+// still goes through the full download/decrypt path — but gated by visibility
+// (download only when the bubble nears the viewport) and capped by the
+// concurrency-pool inside useFileDownload.
+const imageContainerRef = ref<HTMLElement>();
+const { isVisible: imageInViewport } = useLazyLoad(imageContainerRef, "400px");
+
+// Set when a server thumbnail fails to load — falls back to the full-size
+// download so an unencrypted image never regresses to a broken-image state.
+const thumbnailFetchFailed = ref(false);
+
+/** True for an unencrypted image whose URL points at the homeserver — the
+ *  only case where a server `/thumbnail` is meaningful. Encrypted media,
+ *  optimistic `blob:`/`data:` placeholders and non-image types are excluded. */
+const isUnencryptedFeedImage = computed(() => {
+  const fi = props.message.fileInfo;
+  if (props.message.type !== MessageType.image || !fi) return false;
+  if (fi.secrets?.keys) return false;
+  const u = fi.url ?? "";
+  return u.startsWith("mxc://") || u.startsWith("http://") || u.startsWith("https://");
+});
+
+/** Light preview source for the feed `<img>`: a server thumbnail for mxc://
+ *  media, the plain URL for already-http images, or null once it has failed. */
+const feedThumbnailSrc = computed<string | null>(() => {
+  if (thumbnailFetchFailed.value || !isUnencryptedFeedImage.value) return null;
+  const u = props.message.fileInfo!.url;
+  if (!u.startsWith("mxc://")) return u;
+  try {
+    return getMatrixClientService().mxcToThumbnail(u, 400, 400, "scale");
+  } catch {
+    return null;
   }
 });
 
-// Re-download if message changes (virtual scroller recycling)
-watch(() => props.message.id, () => {
-  if (props.message.type === MessageType.image && props.message.fileInfo) {
+/** What the feed image actually shows: the light thumbnail when available,
+ *  otherwise the decrypted/full object URL from the download pipeline. */
+const feedImageSrc = computed<string | null>(
+  () => feedThumbnailSrc.value ?? fileState.value.objectUrl,
+);
+
+/** Kick off the full download for an image only when there is no light
+ *  preview to show: encrypted media (no usable server thumbnail) or an
+ *  unencrypted image whose thumbnail URL couldn't be resolved — e.g. the
+ *  Matrix client wasn't ready yet at cold start. Without this fallback such
+ *  an image would be stuck on the spinner (the download is otherwise skipped
+ *  for the unencrypted/thumbnail path). */
+const triggerImageDownload = () => {
+  if (
+    props.message.type === MessageType.image &&
+    props.message.fileInfo &&
+    !feedThumbnailSrc.value
+  ) {
     download(props.message);
   }
+};
+
+// Gate the encrypted-image download on viewport visibility. `useLazyLoad`
+// latches `isVisible` to true on first intersection (and stays true), so a
+// recycled bubble that is already on screen re-downloads via the id-watch.
+watch(imageInViewport, (visible) => {
+  if (visible) triggerImageDownload();
+}, { immediate: true });
+
+// Re-download / reset preview state if the message changes (virtual scroller
+// recycling reuses the same component instance for a different message).
+watch(() => props.message.id, () => {
   imageDecodeFailed.value = false;
+  thumbnailFetchFailed.value = false;
+  imageLoaded.value = false;
+  if (imageInViewport.value) triggerImageDownload();
 });
+
+/** A server thumbnail failed to load. For an unencrypted image with no
+ *  full-size objectUrl yet, recover by fetching the full original instead of
+ *  showing the broken-image placeholder. Otherwise it's a genuine decode
+ *  failure (e.g. HEIC) — keep the existing fallback UI. */
+const onFeedImageError = () => {
+  if (feedThumbnailSrc.value && !fileState.value.objectUrl) {
+    thumbnailFetchFailed.value = true;
+    download(props.message);
+    return;
+  }
+  imageDecodeFailed.value = true;
+};
 
 // `imageDecodeFailed` is for images the WebView refuses to decode (typically
 // HEIC/HEIF from senders on other clients that didn't transcode). Without
@@ -490,14 +593,115 @@ watch(() => props.message.id, () => {
 // intrinsic size, blowing past the bubble's max-h and producing the
 // "huge blurry preview" reported in forta-bugs#757 and #743.
 const imageDecodeFailed = ref(false);
+
+// WEE-91: thumbnail-first (WEE-71) made `feedImageSrc` available the instant a
+// server-thumbnail URL resolves, before the browser has fetched the image. The
+// old spinner gated on `!feedImageSrc`, so it was skipped and the bare `<img>`
+// rendered its `alt` (the filename, e.g. "img1.png") until `@load` fired —
+// looking like a broken image. Track per-image load state and keep a
+// placeholder over the `<img>` until it actually paints.
+const imageLoaded = ref(false);
+// Reset on src change (new message or thumbnail→full fallback) so a recycled
+// bubble or a swapped source shows the placeholder again until it repaints.
+watch(feedImageSrc, () => {
+  imageLoaded.value = false;
+});
+
+/** The `<img>` branch is active (a source exists, no error/decode-fallback UI)
+ *  but the image hasn't painted yet — show the placeholder, not the alt text. */
+const showImagePlaceholder = computed(
+  () =>
+    !!feedImageSrc.value &&
+    !imageLoaded.value &&
+    !fileState.value.error &&
+    !imageDecodeFailed.value,
+);
+
 const isLikelyHeic = computed(() => {
   const t = (props.message.fileInfo?.type ?? "").toLowerCase();
   const n = (props.message.fileInfo?.name ?? "").toLowerCase();
   return /heic|heif/.test(t) || /\.(heic|heif)$/.test(n);
 });
 
+// ── Image spinner watchdog (WEE-90 H3) ──
+// The image placeholder shows a spinner while there is no preview and no
+// error — including the neutral "not started yet" window. If the download
+// stalls past the lower-level timeouts, that spinner would spin forever.
+// Mirror the video watchdog (WEE-21): after a deadline with no image and no
+// error, flip to the error+retry overlay so the spinner is always finite.
+//
+// The deadline is gated on `imageInViewport`: the encrypted-image download is
+// only triggered once the bubble scrolls into view (see triggerImageDownload),
+// and ChatVirtualScroller mounts every row eagerly. Arming on mount instead of
+// on visibility would falsely time out off-screen images before they ever
+// started downloading — so we only measure download time, not mount time.
+const IMAGE_LOAD_TIMEOUT_MS = 20_000;
+const imageLoadTimedOut = ref(false);
+let imageLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearImageLoadTimer = () => {
+  if (imageLoadTimer !== null) {
+    clearTimeout(imageLoadTimer);
+    imageLoadTimer = null;
+  }
+};
+
+/** True while the bubble would render the loading spinner for an image whose
+ *  download has actually started — i.e. an in-viewport image with file info,
+ *  no preview/object URL, and no error yet. */
+const imageSpinnerActive = computed(
+  () =>
+    props.message.type === MessageType.image &&
+    hasFileInfo.value &&
+    imageInViewport.value &&
+    !feedImageSrc.value &&
+    !fileState.value.error,
+);
+
+/** Arm the deadline when the spinner is genuinely in-flight, clear it
+ *  otherwise. Idempotent so it can be re-run after a recycle reset without
+ *  stacking timers. */
+const syncImageLoadWatchdog = () => {
+  if (imageSpinnerActive.value && !imageLoadTimedOut.value) {
+    if (imageLoadTimer === null) {
+      imageLoadTimer = setTimeout(() => {
+        imageLoadTimer = null;
+        // Re-check live state: a late objectUrl/error between arming and the
+        // deadline must not be clobbered by a stale timeout.
+        if (imageSpinnerActive.value) imageLoadTimedOut.value = true;
+      }, IMAGE_LOAD_TIMEOUT_MS);
+    }
+  } else {
+    clearImageLoadTimer();
+  }
+};
+
+watch(imageSpinnerActive, syncImageLoadWatchdog, { immediate: true });
+
+// Reset the watchdog when the bubble is recycled for a different message
+// (virtual scroller reuse) so a fresh image isn't born already timed-out, and
+// re-arm if the new message is itself a freshly-loading image.
+watch(
+  () => props.message.id,
+  () => {
+    imageLoadTimedOut.value = false;
+    clearImageLoadTimer();
+    syncImageLoadWatchdog();
+  },
+);
+
+onBeforeUnmount(clearImageLoadTimer);
+
 const handleMediaClick = () => {
-  if ((props.message.type === MessageType.image || props.message.type === MessageType.video) && fileState.value.objectUrl) {
+  if (props.message.type === MessageType.image) {
+    // Open the viewer when we have either the full object URL or a thumbnail
+    // preview (unencrypted path); MediaViewer fetches the full-size on open.
+    if (fileState.value.objectUrl || feedThumbnailSrc.value) {
+      emit("openMedia", props.message);
+    }
+    return;
+  }
+  if (props.message.type === MessageType.video && fileState.value.objectUrl) {
     emit("openMedia", props.message);
   }
 };
@@ -532,7 +736,14 @@ const retryDownload = () => {
   const state = getState(fileCacheKey.value);
   state.error = null;
   state.errorKind = null;
-  download(props.message);
+  // Reset the image spinner watchdog so the retry shows the spinner again
+  // rather than the timed-out error overlay (WEE-90 H3).
+  imageLoadTimedOut.value = false;
+  clearImageLoadTimer();
+  // forceRefetch drops any cached objectUrl and re-runs fetch+decrypt so the
+  // retry actually re-hits the network (and the mirror host on the next
+  // attempt) instead of replaying the same stale failure.
+  download(props.message, undefined, { forceRefetch: true });
 };
 
 /** Manual escape hatch for crypto/decryption errors: the auto-bug-report
@@ -650,6 +861,15 @@ const replyPreviewSender = computed(() => {
 
     <!-- Bubble container -->
     <div class="relative min-w-0 max-w-[85%] md:max-w-[80%] lg:max-w-[65%] overflow-hidden">
+      <!-- Selection tap-target: while selecting, a tap anywhere on the bubble
+           toggles selection instead of opening media / replies / downloads.
+           Overlaying the whole bubble (vs the tiny checkbox only) is what makes
+           multi-select usable on mobile (WEE-66 / #863, #924). -->
+      <div
+        v-if="chatStore.selectionMode"
+        class="absolute inset-0 z-20 cursor-pointer"
+        @click.stop="handleBubbleClick"
+      />
       <!-- Reply action (on hover) -->
       <button
         class="absolute top-1/2 hidden h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-text-on-main-bg-color opacity-0 transition-opacity hover:bg-neutral-grad-0 group-hover:flex group-hover:opacity-100"
@@ -675,6 +895,20 @@ const replyPreviewSender = computed(() => {
           </svg>
           {{ t('message.deleted') }}
         </div>
+      </div>
+
+      <!-- Undecrypted message — distinct state with auto-retry + refresh button -->
+      <div
+        v-else-if="isUndecrypted"
+        class="rounded-bubble px-3 py-2"
+        :class="[tailClass, props.isOwn ? 'bg-chat-bubble-own/70' : 'bg-chat-bubble-other/70']"
+      >
+        <EncryptedMessageNotice :message="message" :is-own="props.isOwn" />
+        <span
+          v-if="themeStore.showTimestamps"
+          class="mt-0.5 block text-right text-[10px]"
+          :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'"
+        >{{ time }}</span>
       </div>
 
       <!-- Image message -->
@@ -706,9 +940,9 @@ const replyPreviewSender = computed(() => {
             <div class="truncate text-[11px] opacity-70">{{ replyPreviewText }}</div>
           </div>
         </div>
-        <div class="relative cursor-pointer" @click="handleMediaClick">
+        <div ref="imageContainerRef" class="relative cursor-pointer" @click="handleMediaClick">
           <div
-            v-if="fileState.loading || (!fileState.objectUrl && !fileState.error)"
+            v-if="!feedImageSrc && !imageLoadTimedOut && (fileState.loading || (!fileState.objectUrl && !fileState.error))"
             class="flex items-center justify-center bg-neutral-grad-0"
             :style="imagePlaceholderStyle"
           >
@@ -727,7 +961,7 @@ const replyPreviewSender = computed(() => {
             </div>
           </div>
           <div
-            v-else-if="fileState.error"
+            v-else-if="fileState.error || imageLoadTimedOut"
             class="flex cursor-pointer flex-col items-center justify-center gap-1 bg-neutral-grad-0 text-xs text-color-bad"
             :style="imagePlaceholderStyle"
             @click.stop="retryDownload"
@@ -748,7 +982,15 @@ const replyPreviewSender = computed(() => {
             <span class="truncate max-w-full font-medium">{{ message.fileInfo?.name }}</span>
             <span v-if="isLikelyHeic" class="text-[10px] opacity-70">{{ t('message.heicNotSupported') }}</span>
           </div>
-          <img v-else-if="fileState.objectUrl" :src="fileState.objectUrl" :alt="message.fileInfo?.name" class="block max-h-[460px] max-w-full object-cover" :style="imageStyle" @load="emit('resize')" @error="imageDecodeFailed = true" />
+          <img v-else-if="feedImageSrc" :src="feedImageSrc" alt="" class="block max-h-[460px] max-w-full object-cover select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]" draggable="false" :style="imageStyle" @load="imageLoaded = true; emit('resize')" @error="onFeedImageError" />
+          <!-- WEE-91: placeholder over the image until it paints — never the alt filename -->
+          <div
+            v-if="showImagePlaceholder"
+            class="absolute left-0 top-0 flex items-center justify-center bg-neutral-grad-0"
+            :style="imagePlaceholderStyle"
+          >
+            <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
+          </div>
           <!-- Upload progress overlay -->
           <div v-if="isUploading" class="absolute inset-0 flex items-center justify-center bg-black/30">
             <button class="relative flex h-14 w-14 items-center justify-center" @click.stop="emit('cancelUpload', message)">
@@ -894,7 +1136,8 @@ const replyPreviewSender = computed(() => {
             :controlslist="isVideoPlaying ? 'nodownload' : undefined"
             playsinline
             preload="metadata"
-            class="block h-full w-full object-contain"
+            draggable="false"
+            class="block h-full w-full object-contain select-none [-webkit-touch-callout:none] [-webkit-user-drag:none]"
             @loadedmetadata="onInlineVideoLoadedMetadata"
             @canplay="onInlineVideoCanPlay"
             @error="onInlineVideoError"
@@ -1027,7 +1270,7 @@ const replyPreviewSender = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-1 truncate text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t('message.forwardedFrom', { name: forwardedFromName }) }}
         </div>
         <!-- Reply preview -->
         <div
@@ -1101,7 +1344,7 @@ const replyPreviewSender = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-1 truncate text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t('message.forwardedFrom', { name: forwardedFromName }) }}
         </div>
         <!-- Reply preview -->
         <div
@@ -1234,6 +1477,29 @@ const replyPreviewSender = computed(() => {
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
       </div>
 
+      <!-- External call-link message (WEE-57) -->
+      <div
+        v-else-if="message.type === MessageType.callLink && message.callLinkInfo"
+        class="rounded-bubble px-3 py-2"
+        :class="[tailClass, props.isOwn ? 'bg-chat-bubble-own text-text-on-bg-ac-color' : 'bg-chat-bubble-other text-text-color']"
+      >
+        <div
+          v-if="props.isGroup && !props.isOwn && props.isFirstInGroup"
+          class="mb-0.5 cursor-pointer text-sm font-semibold"
+          :class="{ 'italic opacity-70': senderDisplayResult.state === 'failed' }"
+          :style="{ color: senderColor }"
+          @click.stop="openUserProfile?.(message.senderId)"
+        >
+          {{ senderDisplayResult.text }}
+        </div>
+        <CallLinkCard :info="message.callLinkInfo" :is-own="props.isOwn" />
+        <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
+          <span class="text-[10px]">{{ time }}</span>
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+        </div>
+        <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
+      </div>
+
       <!-- Text message (default) -->
       <div
         v-else
@@ -1254,7 +1520,7 @@ const replyPreviewSender = computed(() => {
         <!-- Forwarded indicator -->
         <div v-if="message.forwardedFrom" class="mb-0.5 truncate text-[11px] italic"
           :class="props.isOwn ? 'text-white/70' : 'text-color-bg-ac'">
-          Forwarded from {{ message.forwardedFrom.senderName || chatStore.getDisplayName(message.forwardedFrom.senderId) }}
+          {{ t('message.forwardedFrom', { name: forwardedFromName }) }}
         </div>
 
         <!-- Reply preview -->
@@ -1284,7 +1550,7 @@ const replyPreviewSender = computed(() => {
             class="relative -bottom-[3px] ml-2 inline-flex items-center gap-0.5 whitespace-nowrap align-bottom text-[10px]"
             :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'"
           >
-            <span v-if="message.edited" class="italic">edited</span>
+            <span v-if="message.edited" class="italic">{{ t('message.edited') }}</span>
             {{ time }}
             <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
           </span>

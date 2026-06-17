@@ -39,4 +39,26 @@ describe("deriveInputLayout — WEE-48 / forta-bugs#593, #515", () => {
     expect(deriveInputLayout({ isMobile: false, text: "", showDonate: true }).showSecondaryActions).toBe(true);
     expect(deriveInputLayout({ isMobile: false, text: "long message", showDonate: true }).showSecondaryActions).toBe(true);
   });
+
+  // WEE-66 / #829 — a landscape phone is wider than the md breakpoint, so
+  // isMobile is false; it must still collapse secondary actions while typing so
+  // the edit row stays usable.
+  describe("landscape phone (#829)", () => {
+    it("treats a landscape phone as mobile: collapses secondary actions while typing", () => {
+      const r = deriveInputLayout({ isMobile: false, isLandscapePhone: true, text: "hello", showDonate: true });
+      expect(r.showSecondaryActions).toBe(false);
+      expect(r.showDonateShortcut).toBe(false);
+    });
+
+    it("keeps secondary actions on a landscape phone while the input is idle", () => {
+      const r = deriveInputLayout({ isMobile: false, isLandscapePhone: true, text: "", showDonate: true });
+      expect(r.showSecondaryActions).toBe(true);
+      expect(r.showDonateShortcut).toBe(true);
+    });
+
+    it("defaults isLandscapePhone to false (desktop keeps actions while typing)", () => {
+      const r = deriveInputLayout({ isMobile: false, text: "hello", showDonate: true });
+      expect(r.showSecondaryActions).toBe(true);
+    });
+  });
 });

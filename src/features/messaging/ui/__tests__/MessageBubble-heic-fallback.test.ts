@@ -23,8 +23,11 @@ describe("MessageBubble — HEIC / broken-image fallback (WEE-51)", () => {
     expect(source).toMatch(/const imageDecodeFailed = ref\(false\)/);
   });
 
-  it("wires <img>'s @error to flip the fallback flag", () => {
-    expect(source).toMatch(/@error="imageDecodeFailed = true"/);
+  it("wires <img>'s @error to the fallback handler that flips the flag", () => {
+    // WEE-71 routed @error through onFeedImageError (thumbnail-first recovery),
+    // but a genuine decode failure still flips imageDecodeFailed inside it.
+    expect(source).toMatch(/@error="onFeedImageError"/);
+    expect(source).toMatch(/imageDecodeFailed\.value = true/);
   });
 
   it("resets the fallback flag when the bubble is recycled for a different message", () => {

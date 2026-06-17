@@ -10,6 +10,9 @@
 export const PICKER_PAD = 8;
 export const PICKER_W = 370;
 export const PICKER_H = 420;
+/** Breathing room between the picker and the tap point, so the panel never
+ *  sits directly on top of the long-pressed message (WEE-34 / forta-bugs#791). */
+export const PICKER_GAP = 12;
 
 export interface PickerStyle {
   left: string;
@@ -44,15 +47,33 @@ export function computeMobileInputPanelStyle(): PickerStyle {
   };
 }
 
-/** Mobile (reaction mode): show the picker above the long-pressed message
- *  when there's vertical room, otherwise fall back near the viewport bottom
- *  but still leave breathing room from the edge. */
+/** Mobile (reaction mode): place the picker clear of the long-pressed message.
+ *  forta-bugs#791 — the panel used to anchor its bottom edge exactly at the tap
+ *  point, covering the upper half of the pressed bubble. Now we leave a gap and
+ *  prefer above → below → whichever side has more room, so the picker adapts to
+ *  the viewport and avoids the tap point whenever a side fits. On very short
+ *  viewports the panel is up to half the height, so a mid-screen tap can't be
+ *  fully cleared — the final clamp keeps it on-screen as a best effort. */
 export function computeMobileReactionPanelStyle(y: number, vh: number): PickerStyle {
   const panelH = Math.min(360, vh * 0.5);
   const spaceAbove = y - PICKER_PAD;
-  const top = spaceAbove >= panelH
-    ? Math.max(PICKER_PAD, y - panelH)
-    : Math.max(PICKER_PAD, vh - panelH - PICKER_PAD);
+  const spaceBelow = vh - y - PICKER_PAD;
+
+  let top: number;
+  if (spaceAbove >= panelH + PICKER_GAP) {
+    // Sit fully above the tap point with a gap.
+    top = y - PICKER_GAP - panelH;
+  } else if (spaceBelow >= panelH + PICKER_GAP) {
+    // Drop below the tap point, again leaving a gap.
+    top = y + PICKER_GAP;
+  } else {
+    // Neither side fully fits: anchor to whichever side has more room.
+    top = spaceAbove >= spaceBelow ? PICKER_PAD : vh - panelH - PICKER_PAD;
+  }
+
+  // Keep the panel inside the viewport regardless of the branch taken.
+  top = Math.max(PICKER_PAD, Math.min(top, vh - panelH - PICKER_PAD));
+
   return {
     left: "0px",
     top: `${top}px`,

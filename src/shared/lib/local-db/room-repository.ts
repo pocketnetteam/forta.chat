@@ -245,6 +245,27 @@ export class RoomRepository {
     await this.db.rooms.update(roomId, changes);
   }
 
+  /** Keep the chat-list preview transport status in sync with the room's last
+   *  outbound message (WEE-64). Writes `lastMessageLocalStatus` ONLY when
+   *  `messageTimestamp` still matches the room's current `lastMessageTimestamp`
+   *  — i.e. the given message is still the one rendered in the preview. A newer
+   *  message (ours or the peer's) advances `lastMessageTimestamp`, so a stale
+   *  failed/retried send must never overwrite the badge of a later message.
+   *
+   *  Mirrors the SyncEngine success path which stamps `lastMessageLocalStatus:
+   *  "synced"`; used by the failure path (→ "failed") and the retry path
+   *  (→ "pending") so the sidebar matches the open chat. */
+  async syncLastMessageLocalStatus(
+    roomId: string,
+    messageTimestamp: number,
+    status: LocalMessageStatus,
+  ): Promise<void> {
+    const room = await this.db.rooms.get(roomId);
+    if (!room) return;
+    if (room.lastMessageTimestamp !== messageTimestamp) return;
+    await this.db.rooms.update(roomId, { lastMessageLocalStatus: status });
+  }
+
   /** Update the last message preview for a room.
    *  Monotonic: skips the update if the existing preview is already newer,
    *  preventing stale server data from overwriting fresher local-first writes.
@@ -322,6 +343,23 @@ export class RoomRepository {
       delete room.lastMessageType;
       delete room.lastMessageEventId;
       delete room.lastMessageLocalStatus;
+      delete room.lastMessageDecryptionStatus;
+      delete room.lastMessageCallInfo;
+      delete room.lastMessageSystemMeta;
+      room.lastMessageReaction = null;
+    });
+  }
+
+  /** Mark the room's last-message preview as deleted (Telegram-style) — keeps
+   *  the slot (eventId/timestamp/sender) but shows "🚫 Message deleted" instead
+   *  of blanking it. The sentinel is recognised by the chat-list getPreview()
+   *  which renders the localised "Сообщение удалено". Used on redaction of the
+   *  current last message. */
+  async markLastMessageDeleted(roomId: string): Promise<void> {
+    await this.db.rooms.where("id").equals(roomId).modify((room) => {
+      // getPreview() matches this sentinel by content before any type logic,
+      // so lastMessageType is left untouched.
+      room.lastMessagePreview = "🚫 Message deleted";
       delete room.lastMessageDecryptionStatus;
       delete room.lastMessageCallInfo;
       delete room.lastMessageSystemMeta;
@@ -445,6 +483,29 @@ export class RoomRepository {
           .delete();
       }
       await this.db.rooms.bulkDelete(roomIds);
+    });
+  }
+
+  /** Bulk soft-delete (tombstone) rooms in a single transaction.
+   *  WEE-61: the background cleanup path uses this instead of `bulkRemoveRooms`
+   *  so a false-positive orphan never destroys data — messages are preserved,
+   *  the room is hidden from UI, revived on the next sync upsert, and physically
+   *  GC'd only after the tombstone TTL (`garbageCollectTombstones`, 30 days). */
+  async bulkTombstoneRooms(
+    roomIds: string[],
+    reason: "left" | "kicked" | "banned" | "removed" = "removed",
+  ): Promise<void> {
+    if (roomIds.length === 0) return;
+    const now = Date.now();
+    await this.db.transaction("rw", [this.db.rooms], async () => {
+      for (const id of roomIds) {
+        await this.db.rooms.update(id, {
+          isDeleted: true,
+          deletedAt: now,
+          deleteReason: reason,
+          membership: "leave" as const,
+        });
+      }
     });
   }
 

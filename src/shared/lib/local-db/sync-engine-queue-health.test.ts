@@ -34,7 +34,7 @@ function buildEngine(db: TestDb): SyncEngine {
     updateReactions: vi.fn(),
     getByClientId: vi.fn(),
   };
-  const roomRepo = { updateRoom: vi.fn() };
+  const roomRepo = { updateRoom: vi.fn(), syncLastMessageLocalStatus: vi.fn() };
   return new SyncEngine(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db as any,

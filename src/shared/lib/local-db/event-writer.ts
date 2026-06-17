@@ -8,6 +8,7 @@ import {
   type ReplyTo,
   type PollInfo,
   type TransferInfo,
+  type CallLinkInfo,
 } from "@/entities/chat/model/types";
 import { WriteBuffer, type BufferedWrite } from "./write-buffer";
 import { perfMark, perfMeasure } from "@/shared/lib/perf-markers";
@@ -37,6 +38,8 @@ export interface ParsedMessage {
   callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number };
   pollInfo?: PollInfo;
   transferInfo?: TransferInfo;
+  /** External call-link card metadata (WEE-57) */
+  callLinkInfo?: CallLinkInfo;
   /** Present when the message is our own echo (matched by clientId) */
   clientId?: string;
   linkPreview?: import("@/entities/chat/model/types").LinkPreview;
@@ -151,6 +154,11 @@ export class EventWriter {
 
   private writeBuffer: WriteBuffer | null = null;
 
+  /** Buffered inbound reactions (WEE-93) — flushed in one transaction.
+   *  Slightly longer delay than the message buffer so a reaction whose target
+   *  message is still sitting in the message buffer lands AFTER it. */
+  private reactionBuffer: WriteBuffer<ParsedReaction> | null = null;
+
   /**
    * Enable write batching. Creates an internal WriteBuffer that accumulates
    * messages and flushes them in a single Dexie transaction.
@@ -160,6 +168,10 @@ export class EventWriter {
     this.writeBuffer = new WriteBuffer(
       (items) => this.flushBatch(items),
       { delayMs: 150, maxSize: 50 },
+    );
+    this.reactionBuffer = new WriteBuffer<ParsedReaction>(
+      (items) => this.flushReactions(items),
+      { delayMs: 500, maxSize: 100 },
     );
   }
 
@@ -190,6 +202,7 @@ export class EventWriter {
   /** Force-flush the write buffer immediately. No-op if batching not enabled. */
   async flushWriteBuffer(): Promise<void> {
     await this.writeBuffer?.flushNow();
+    await this.reactionBuffer?.flushNow();
   }
 
   /** Flush remaining items and dispose the write buffer. */
@@ -197,6 +210,10 @@ export class EventWriter {
     if (this.writeBuffer) {
       await this.writeBuffer.dispose();
       this.writeBuffer = null;
+    }
+    if (this.reactionBuffer) {
+      await this.reactionBuffer.dispose();
+      this.reactionBuffer = null;
     }
   }
 
@@ -211,6 +228,17 @@ export class EventWriter {
   private async flushBatch(items: BufferedWrite[]): Promise<void> {
     perfMark("flush-batch:start");
     const changedRooms = new Set<string>();
+    const insertedItems: BufferedWrite[] = [];
+    // WEE-93: per-room coalescing within the batch. The room preview only needs
+    // the newest message per room (updateLastMessage's monotonic guard would
+    // discard the rest anyway), and ensureRoomExists only needs to run once per
+    // room — not once per message (N db.rooms.get() reads on a backlog batch).
+    const latestPerRoom = new Map<string, ParsedMessage>();
+    // Newest NON-encrypted-pending message per room: when the batch's newest
+    // message is "[encrypted]", writing the newest plaintext first preserves
+    // the sequential behaviour of keeping meaningful preview text instead of
+    // the "[encrypted]" placeholder.
+    const latestPlainPerRoom = new Map<string, ParsedMessage>();
 
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
       for (const item of items) {
@@ -218,8 +246,19 @@ export class EventWriter {
           const result = await this.messageRepo.upsertFromServer(item.localMsg, this.clearedAtTsCache.get(item.roomId));
 
           if (result === "inserted" || result === "updated") {
-            await this.ensureRoomExists(item.roomId);
-            await this.updateRoomPreview(item.parsed);
+            const parsed = item.parsed;
+            const prev = latestPerRoom.get(item.roomId);
+            // >= keeps the later batch item among equal timestamps — matches
+            // sequential updateLastMessage semantics (its guard is strict <).
+            if (!prev || parsed.timestamp >= prev.timestamp) {
+              latestPerRoom.set(item.roomId, parsed);
+            }
+            if (!(parsed.content === "[encrypted]" && parsed.encryptedRaw)) {
+              const prevPlain = latestPlainPerRoom.get(item.roomId);
+              if (!prevPlain || parsed.timestamp >= prevPlain.timestamp) {
+                latestPlainPerRoom.set(item.roomId, parsed);
+              }
+            }
           }
 
           if (result === "inserted") {
@@ -227,10 +266,25 @@ export class EventWriter {
             // getUnreadNotificationCount("total") is the single source of truth,
             // synced to Dexie via bulkSyncRooms during room refresh cycles.
             changedRooms.add(item.roomId);
+            insertedItems.push(item);
           }
         } catch (err) {
           // Fault-tolerant: one corrupted message must not abort the entire batch.
           console.error("[EventWriter] flushBatch: failed to write message, skipping:", item.parsed.eventId, err);
+        }
+      }
+
+      // One ensureRoomExists + (at most two) preview writes per unique room.
+      for (const [roomId, latest] of latestPerRoom) {
+        try {
+          await this.ensureRoomExists(roomId);
+          const latestPlain = latestPlainPerRoom.get(roomId);
+          if (latestPlain && latestPlain.eventId !== latest.eventId) {
+            await this.updateRoomPreview(latestPlain);
+          }
+          await this.updateRoomPreview(latest);
+        } catch (err) {
+          console.error("[EventWriter] flushBatch: failed to update room preview, skipping:", roomId, err);
         }
       }
     });
@@ -250,6 +304,18 @@ export class EventWriter {
         && this.pendingPollVotes.has(item.parsed.eventId)
       ) {
         await this.applyPendingPollUpdates(item.parsed.eventId);
+      }
+    }
+
+    // Async link preview for inserted messages — parity with writeMessage().
+    // Needed since the active room also writes through the buffer (WEE-93).
+    for (const item of insertedItems) {
+      const p = item.parsed;
+      if (!p.linkPreview && !p.noPreview && p.type === MessageType.text && this.fetchPreviewFn) {
+        const url = p.content.match(URL_RE)?.[0];
+        if (url) {
+          this.fetchAndStoreLinkPreview(url, item.localMsg);
+        }
       }
     }
 
@@ -351,37 +417,84 @@ export class EventWriter {
   // Reactions
   // ---------------------------------------------------------------------------
 
-  /** Apply a reaction to a message in the local DB */
+  /** Apply a reaction to a message in the local DB.
+   *  When batching is enabled, the reaction is enqueued and flushed together
+   *  with other reactions in a single transaction (WEE-93) — a sync backlog
+   *  of N reactions used to cost N separate read+write round-trips. */
   async writeReaction(reaction: ParsedReaction): Promise<void> {
-    const msg = await this.messageRepo.getByEventId(reaction.targetEventId);
-    if (!msg) return;
+    if (this.reactionBuffer) {
+      this.reactionBuffer.enqueue(reaction);
+      return;
+    }
+    await this.flushReactions([reaction]);
+  }
 
-    const reactions = msg.reactions ?? {};
-    if (!reactions[reaction.emoji]) {
-      reactions[reaction.emoji] = { count: 0, users: [] };
+  /** Flush buffered reactions: one read + one write per target message,
+   *  all inside a single Dexie transaction. onChange fires once per room. */
+  private async flushReactions(ops: ParsedReaction[]): Promise<void> {
+    // Deterministic ordering: a reaction's target message may still be sitting
+    // in the message buffer (e.g. reactionBuffer force-flushed at maxSize).
+    // Land messages first so the getByEventId lookups below don't drop fresh
+    // reactions whose targets are merely un-flushed.
+    await this.writeBuffer?.flushNow();
+
+    const changedRooms = new Set<string>();
+
+    // Group by target message — one getByEventId + one updateReactions each.
+    const byTarget = new Map<string, ParsedReaction[]>();
+    for (const op of ops) {
+      const list = byTarget.get(op.targetEventId);
+      if (list) list.push(op);
+      else byTarget.set(op.targetEventId, [op]);
     }
 
-    const data = reactions[reaction.emoji];
-    if (!data.users.includes(reaction.senderAddress)) {
-      data.users.push(reaction.senderAddress);
-      data.count = data.users.length;
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      for (const [targetEventId, list] of byTarget) {
+        try {
+          const msg = await this.messageRepo.getByEventId(targetEventId);
+          if (!msg) continue; // target not in Dexie (yet) — same drop semantics as before
+
+          const reactions = msg.reactions ?? {};
+          let last: ParsedReaction | null = null;
+          for (const reaction of list) {
+            if (!reactions[reaction.emoji]) {
+              reactions[reaction.emoji] = { count: 0, users: [] };
+            }
+            const data = reactions[reaction.emoji];
+            if (!data.users.includes(reaction.senderAddress)) {
+              data.users.push(reaction.senderAddress);
+              data.count = data.users.length;
+            }
+            // Track our own reaction eventId for future removal
+            if (reaction.isMine && reaction.eventId.startsWith("$")) {
+              data.myEventId = reaction.eventId;
+            }
+            last = reaction;
+          }
+
+          await this.messageRepo.updateReactions(targetEventId, reactions);
+
+          // Cascade: update room preview if this is the last message
+          // (same transaction — rooms table is in scope).
+          if (last) {
+            await this.cascadeReactionToRoom(msg.roomId, targetEventId, {
+              emoji: last.emoji,
+              senderAddress: last.senderAddress,
+              timestamp: Date.now(),
+            });
+          }
+
+          changedRooms.add(msg.roomId);
+        } catch (err) {
+          // Fault-tolerant: one corrupted reaction must not abort the batch.
+          console.error("[EventWriter] flushReactions: failed for target, skipping:", targetEventId, err);
+        }
+      }
+    });
+
+    for (const roomId of changedRooms) {
+      this.onChange?.(roomId);
     }
-
-    // Track our own reaction eventId for future removal
-    if (reaction.isMine && reaction.eventId.startsWith("$")) {
-      data.myEventId = reaction.eventId;
-    }
-
-    await this.messageRepo.updateReactions(reaction.targetEventId, reactions);
-
-    // Cascade: update room preview if this is the last message (non-blocking)
-    this.cascadeReactionToRoom(msg.roomId, reaction.targetEventId, {
-      emoji: reaction.emoji,
-      senderAddress: reaction.senderAddress,
-      timestamp: Date.now(),
-    }).catch(() => {});
-
-    this.onChange?.(msg.roomId);
   }
 
   /** Remove a reaction (redaction of a reaction event) */
@@ -676,21 +789,18 @@ export class EventWriter {
       const room = await this.roomRepo.getRoom(redaction.roomId);
       const wasLastMessage = room?.lastMessageEventId === redaction.redactedEventId;
 
-      // Only roll the preview back when the redacted event was actually the
-      // lastMessage of the room — otherwise the preview is already pointing at
-      // a newer message and must stay untouched.
+      // Only touch the preview when the redacted event was actually the
+      // lastMessage of the room — otherwise the preview already points at a
+      // newer message and must stay untouched.
       if (wasLastMessage) {
-        const clearedAtTs = this.clearedAtTsCache.get(redaction.roomId);
-        const prevMsg = await this.messageRepo.getLastNonDeleted(redaction.roomId, clearedAtTs);
-        if (prevMsg) {
-          await this.updateRoomPreviewFromLocal(prevMsg, /* force */ true);
-        } else {
-          // Every message in the room is redacted/cleared — wipe lastMessage*
-          // metadata entirely. buildLastMessage() returns undefined for rooms
-          // without preview state, which surfaces the localised "no messages"
-          // hint in formatPreview instead of a false-positive "deleted" placeholder.
-          await this.roomRepo.clearLastMessage(redaction.roomId);
-        }
+        // Show the deletion in the chat-list preview (Telegram-style) — always,
+        // not just when there's no earlier message. The previous behaviour
+        // (roll back to an older message, or blank the row) hid the fact that
+        // the latest message was deleted. This is an EXPLICIT redaction signal,
+        // not the empty-text inference WEE-43 guarded against, so "🚫 Message
+        // deleted" is always correct. A newer inbound message overwrites the
+        // slot normally.
+        await this.roomRepo.markLastMessageDeleted(redaction.roomId);
       }
     });
 
@@ -788,6 +898,7 @@ export class EventWriter {
       callInfo: parsed.callInfo,
       pollInfo: parsed.pollInfo,
       transferInfo: parsed.transferInfo,
+      callLinkInfo: parsed.callLinkInfo,
       linkPreview: parsed.linkPreview,
       deleted: parsed.deleted,
       systemMeta: parsed.systemMeta,
@@ -812,6 +923,7 @@ export class EventWriter {
     if (type === MessageType.file) return fileInfo?.name || tRaw("message.file");
     if (type === MessageType.poll) return tRaw("message.poll");
     if (type === MessageType.transfer) return `${tRaw("message.transfer")} ${transferAmount ?? 0} PKOIN`;
+    if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
 
@@ -820,6 +932,25 @@ export class EventWriter {
    *  missing fields), falls back to a safe placeholder so the sidebar never shows
    *  an empty grey strip. */
   private async updateRoomPreview(parsed: ParsedMessage): Promise<void> {
+    // Redacted message re-synced from the server (content stripped). Show the
+    // deletion in the preview instead of its now-empty body — matches
+    // writeRedaction's sentinel so a reload/sync can't blank a deleted last
+    // message. updateLastMessage's monotonic guard still prevents an older
+    // redacted event from overwriting a newer preview.
+    if (parsed.deleted) {
+      await this.roomRepo.updateLastMessage(
+        parsed.roomId,
+        "🚫 Message deleted",
+        parsed.timestamp,
+        parsed.senderId,
+        parsed.type,
+        parsed.eventId,
+        parsed.callInfo,
+        parsed.systemMeta,
+      );
+      return;
+    }
+
     let preview: string;
     try {
       preview = this.getPreviewText(
@@ -880,45 +1011,6 @@ export class EventWriter {
         parsed.systemMeta,
       );
     }
-  }
-
-  /** Update room preview from an existing LocalMessage (used after deletion).
-   *  Same fault-tolerance as updateRoomPreview — never stores empty preview.
-   *
-   *  `force` bypasses the monotonic guard in `updateLastMessage`. Callers that
-   *  intentionally roll the preview back to an older message (e.g. redaction
-   *  rollback in `writeRedaction`) must pass `force: true` — otherwise the
-   *  guard silently swallows the rollback and a stale preview stays put. */
-  private async updateRoomPreviewFromLocal(msg: LocalMessage, force = false): Promise<void> {
-    let preview: string;
-    try {
-      preview = this.getPreviewText(
-        msg.type,
-        msg.content,
-        msg.transferInfo?.amount,
-        msg.fileInfo,
-      );
-    } catch (err) {
-      console.error("[EventWriter] getPreviewText failed for local msg:", msg.eventId ?? msg.clientId, err);
-      preview = "[message]";
-    }
-
-    if (!preview || !preview.trim()) {
-      const isEncrypted = msg.decryptionStatus === "pending" || msg.decryptionStatus === "failed";
-      preview = isEncrypted ? "[encrypted message]" : "[message]";
-    }
-
-    await this.roomRepo.updateLastMessage(
-      msg.roomId,
-      preview,
-      msg.serverTs ?? msg.timestamp,
-      msg.senderId,
-      msg.type,
-      msg.eventId ?? undefined,
-      msg.callInfo,
-      msg.systemMeta,
-      force,
-    );
   }
 
   /** Cascade reaction change to room preview if target is the last message */

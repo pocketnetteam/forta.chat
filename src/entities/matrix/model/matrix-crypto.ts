@@ -11,7 +11,19 @@ import pbkdf2 from "pbkdf2";
 // @ts-expect-error — no types for bn.js default export
 import BN from "bn.js";
 
-import { workerDecrypt, workerEncrypt } from "@/shared/lib/crypto-worker/bridge";
+import {
+  workerDecrypt,
+  workerEncrypt,
+  workerDecryptFile,
+  isCryptoWorkerSupported,
+  isWorkerInfraError,
+} from "@/shared/lib/crypto-worker/bridge";
+import {
+  deriveFileKey,
+  encryptFileBuffer,
+  decryptFileBuffer,
+  resolveDecryptedMime,
+} from "@/shared/lib/crypto-worker/file-cipher";
 
 import {
   sha224,
@@ -22,21 +34,23 @@ import {
 } from "@/shared/lib/matrix/functions";
 import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix/chat-storage";
 import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
+import { withTimeout } from "@/shared/lib/with-timeout";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const m = 12;
 
-/** Safe accessor for crypto.subtle — throws a clear error on HTTP instead of cryptic 'undefined' */
-function getSubtle(): SubtleCrypto {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    throw new Error(
-      "crypto.subtle is unavailable (requires HTTPS or localhost). " +
-      "Serve the app over HTTPS to enable encryption."
-    );
-  }
-  return subtle;
-}
+/** Hard ceiling for the Pocketnet getuserprofile RPC that resolves
+ *  participants' encryption keys (`getUsersInfoCb` → loadUsersInfo →
+ *  psdk.userInfo.load). A blocked/slow node — typical under RU ISP filtering
+ *  — used to leave `getusersinfo` pending forever, which wedged decryptKey,
+ *  so the media `download()` promise never settled and the image spinner spun
+ *  indefinitely (WEE-90 H1). On timeout we proceed with whatever keys are
+ *  already cached; a genuine key gap then fails decrypt deterministically and
+ *  the download path surfaces error+retry instead of an eternal spinner. */
+const GETUSERSINFO_TIMEOUT_MS = 15_000;
+
+// crypto.subtle access lives in shared/lib/crypto-worker/file-cipher.ts
+// (shared with the crypto Web Worker, WEE-92).
 
 // secp256k1 curve order
 const secp256k1CurveN = new BN(
@@ -66,43 +80,26 @@ function _base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-// ---- PcryptoFile: AES-CBC file encryption (unchanged) ----
+// ---- PcryptoFile: AES-CBC file encryption ----
+// Cipher internals live in shared/lib/crypto-worker/file-cipher.ts so the
+// main thread and the crypto Web Worker share one format (WEE-92).
 
 export class PcryptoFile {
-  private iv = new Uint8Array([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]);
-
   async randomKey(): Promise<string> {
     const array = new Uint32Array(24);
     return window.crypto.getRandomValues(array).toString();
   }
 
   async deriveKey(str: string): Promise<CryptoKey> {
-    const subtle = getSubtle();
-    const enc = new TextEncoder();
-    const keyMaterial = await subtle.importKey(
-      "raw",
-      enc.encode(str),
-      "PBKDF2",
-      false,
-      ["deriveBits", "deriveKey"]
-    );
-    return subtle.deriveKey(
-      { name: "PBKDF2", salt: enc.encode("matrix.pocketnet"), iterations: 10000, hash: "SHA-256" },
-      keyMaterial,
-      { name: "AES-CBC", length: 256 },
-      true,
-      ["encrypt", "decrypt"]
-    );
+    return deriveFileKey(str);
   }
 
   async encrypt(data: ArrayBuffer, secret: string): Promise<ArrayBuffer> {
-    const key = await this.deriveKey(secret);
-    return getSubtle().encrypt({ name: "AES-CBC", iv: this.iv }, key, data);
+    return encryptFileBuffer(data, secret);
   }
 
   async decrypt(data: ArrayBuffer, secret: string): Promise<ArrayBuffer> {
-    const key = await this.deriveKey(secret);
-    return getSubtle().decrypt({ name: "AES-CBC", iv: this.iv }, key, data);
+    return decryptFileBuffer(data, secret);
   }
 
   async encryptFile(file: Blob, secret: string): Promise<File> {
@@ -127,12 +124,9 @@ export class PcryptoFile {
   async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
     const buffer = await readFile(file);
     const decrypted = await this.decrypt(buffer, secret);
-    const type = originalMime
-      ? originalMime
-      : file.type.startsWith("encrypted/")
-        ? file.type.replace("encrypted/", "")
-        : "application/octet-stream";
-    return new File([decrypted], "decrypted", { type });
+    return new File([decrypted], "decrypted", {
+      type: resolveDecryptedMime(file.type, originalMime),
+    });
   }
 }
 
@@ -444,7 +438,22 @@ export class Pcrypto {
     async function getusersinfo(): Promise<void> {
       const us = Object.values(users).map(function (uh) { return uh.id; });
       if (!pcrypto.getUsersInfoCb) return;
-      const _usersinfo = await pcrypto.getUsersInfoCb(us);
+      let _usersinfo: CryptoUserInfo[];
+      try {
+        // Bound the key-resolution RPC: a stalled Pocketnet node must never
+        // wedge decryptKey/prepare forever (WEE-90 H1). On timeout we keep the
+        // previously-resolved `usersinfo` and return — missing keys then fail
+        // decrypt deterministically downstream, surfacing error+retry instead
+        // of an eternal media spinner.
+        _usersinfo = await withTimeout(
+          pcrypto.getUsersInfoCb(us),
+          GETUSERSINFO_TIMEOUT_MS,
+          "getusersinfo",
+        );
+      } catch (e) {
+        console.warn("[pcrypto] getusersinfo timed out/failed:", e);
+        return;
+      }
       usersinfo = {};
       for (const ui of _usersinfo) {
         usersinfo[ui.id] = ui;
@@ -1042,6 +1051,8 @@ export class Pcrypto {
 
       // Internal decrypt — offloaded to Web Worker for zero main-thread blocking.
       // All heavy crypto (ECDH, pbkdf2, AES-SIV) runs in a separate thread.
+      // Falls back to the main-thread eaa path when the worker is unavailable
+      // (old WebViews without module-worker support) — WEE-96 A3.
       async _decrypt(
         userid: string,
         encData: { encrypted: string; nonce: string },
@@ -1059,21 +1070,37 @@ export class Pcrypto {
           _block = tetatet ? pcrypto.currentblock.height : 10;
         }
 
-        // Prepare serializable data for Worker (fast — no crypto, just array ops)
-        const workerUsers = prepareWorkerUsers(usersIds, v || version);
-        const myId = pcrypto.user!.userinfo!.id;
-        const privateKeys = getPrivateKeysHex();
+        if (isCryptoWorkerSupported()) {
+          // Prepare serializable data for Worker (fast — no crypto, just array ops)
+          const workerUsers = prepareWorkerUsers(usersIds, v || version);
+          const myId = pcrypto.user!.userinfo!.id;
+          const privateKeys = getPrivateKeysHex();
 
-        // All heavy crypto (ECDH + pbkdf2 + AES-SIV) runs in Worker thread
-        return workerDecrypt({
-          users: workerUsers,
-          myId,
-          privateKeys,
-          targetUserId: userid,
-          encData,
-          time: _time,
-          block: _block,
-        });
+          try {
+            // All heavy crypto (ECDH + pbkdf2 + AES-SIV) runs in Worker thread
+            return await workerDecrypt({
+              users: workerUsers,
+              myId,
+              privateKeys,
+              targetUserId: userid,
+              encData,
+              time: _time,
+              block: _block,
+            });
+          } catch (e) {
+            // Crypto errors (emptykey, MAC failure) must propagate — only
+            // worker infrastructure failures fall back to the main thread.
+            if (!isWorkerInfraError(e)) throw e;
+            console.warn("[pcrypto] crypto worker unavailable, decrypting on main thread:", e);
+          }
+        }
+
+        // Main-thread fallback for environments without (module) Worker
+        // support — same ECDH + pbkdf2 derivation via eaa, AES-SIV via miscreant.
+        const aeskeysls = eaa.aeskeys(_time, _block, usersIds, v || version);
+        const key = aeskeysls[userid];
+        if (!key) throw new Error("emptykey");
+        return decrypt(key, encData);
       },
 
       // Internal encrypt — offloaded to Web Worker.
@@ -1091,19 +1118,32 @@ export class Pcrypto {
           _block = pcrypto.currentblock.height;
         }
 
-        const workerUsers = prepareWorkerUsers(null, v || version);
-        const myId = pcrypto.user!.userinfo!.id;
-        const privateKeys = getPrivateKeysHex();
+        if (isCryptoWorkerSupported()) {
+          const workerUsers = prepareWorkerUsers(null, v || version);
+          const myId = pcrypto.user!.userinfo!.id;
+          const privateKeys = getPrivateKeysHex();
 
-        return workerEncrypt({
-          users: workerUsers,
-          myId,
-          privateKeys,
-          targetUserId: userid,
-          text,
-          time: _time,
-          block: _block,
-        });
+          try {
+            return await workerEncrypt({
+              users: workerUsers,
+              myId,
+              privateKeys,
+              targetUserId: userid,
+              text,
+              time: _time,
+              block: _block,
+            });
+          } catch (e) {
+            if (!isWorkerInfraError(e)) throw e;
+            console.warn("[pcrypto] crypto worker unavailable, encrypting on main thread:", e);
+          }
+        }
+
+        // Main-thread fallback — see _decrypt above.
+        const aeskeysls = eaa.aeskeys(_time, _block, null, v || version);
+        const key = aeskeysls[userid];
+        if (!key) throw new Error("emptykey");
+        return encrypt(text, key);
       },
 
       async encryptFile(file: Blob): Promise<{ file: File; secrets: Record<string, unknown> }> {
@@ -1114,6 +1154,26 @@ export class Pcrypto {
       },
 
       async decryptFile(file: Blob, secret: string, originalMime?: string): Promise<File> {
+        // Worker-first: PBKDF2 + AES-CBC runs off the main thread so several
+        // attachments can decrypt concurrently without freezing low-end
+        // WebViews (WEE-92). The buffer is transferred (zero-copy); readFile
+        // already produced a private copy, so detaching it is safe.
+        if (isCryptoWorkerSupported()) {
+          const buffer = await readFile(file);
+          try {
+            const decrypted = await workerDecryptFile(buffer, secret);
+            return new File([decrypted], "decrypted", {
+              type: resolveDecryptedMime(file.type, originalMime),
+            });
+          } catch (e) {
+            // Infra failures (worker died / terminated mid-flight) fall back
+            // to the main-thread path. Genuine decrypt failures (wrong key,
+            // corrupt ciphertext) are deterministic — rethrow, a retry on the
+            // main thread would fail identically.
+            if (!isWorkerInfraError(e)) throw e;
+            console.warn("[matrix-crypto] file-decrypt worker failed, falling back to main thread:", e);
+          }
+        }
         return pcrypto.pcryptoFile.decryptFile(file as File, secret, originalMime);
       },
 

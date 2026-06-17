@@ -4,11 +4,12 @@ import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { MATRIX_SERVER, APP_PUBLIC_URL } from "@/shared/config";
+import { MATRIX_SERVER } from "@/shared/config";
+import { buildJoinUrl } from "@/shared/lib/invite-link";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { matrixIdToAddress, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import ContextMenu from "@/shared/ui/context-menu/ContextMenu.vue";
 import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
 import Toggle from "@/shared/ui/toggle/Toggle.vue";
@@ -35,7 +36,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
-const callService = useCallService();
+const callLauncher = useCallLauncher();
 const room = computed(() => chatStore.activeRoom);
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const roomDisplayName = computed(() => resolveRoomName(room.value));
@@ -88,14 +89,16 @@ const roomShareable = computed(() => {
   return chatStore.isRoomShareableByLink(room.value.id);
 });
 
-// Path-based URL (NOT hash-based) — AndroidManifest pathPrefix="/join"
-// matches path, not fragment. Using a hash URL means the Android App Link
-// intent-filter never fires and the link opens in the browser.
+// Bare-path join URL via the shared builder so Android App Links match the
+// /join intent-filter (WEE-104). A browser without the app is caught by the
+// static shim public/join/index.html, which bounces to the SPA hash route —
+// no 404 (the old WEE-27 blocker). Native deep-linking also accepts forta://
+// and legacy hash links via parse-invite-url.ts — see invite-link.ts.
 const inviteLink = computed(() => {
   // eslint-disable-next-line @typescript-eslint/no-unused-expressions
   stateMarker.value;
   if (!room.value) return "";
-  return `${APP_PUBLIC_URL}/join?room=${encodeURIComponent(room.value.id)}`;
+  return buildJoinUrl(room.value.id);
 });
 
 // Subscribe to RoomState.events so toggles by *other* admins appear
@@ -406,9 +409,11 @@ const handleClearHistory = () => {
 };
 
 // ── Call initiation ──
-const startCall = (type: "voice" | "video") => {
+const startCall = (type: "voice" | "video", event?: MouseEvent) => {
   if (!room.value) return;
-  callService.startCall(room.value.id, type);
+  // Groups get external-only options; DMs keep native Forta in the picker (WEE-57)
+  const anchor = event ? { x: event.clientX, y: event.clientY } : undefined;
+  void callLauncher.launch(room.value.id, type, !room.value.isGroup, anchor);
   emit("close");
 };
 
@@ -698,7 +703,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               </button>
 
               <!-- Call button (1:1 only) -->
-              <button v-if="!room.isGroup" class="flex flex-col items-center gap-1" @click="startCall('voice')">
+              <button v-if="!room.isGroup" class="flex flex-col items-center gap-1" @click="startCall('voice', $event)">
                 <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
@@ -1187,6 +1192,16 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
       @save="handleAliasSave"
       @remove="handleAliasRemove"
       @close="closeRenameDialog"
+    />
+
+    <!-- WEE-57: external call-provider picker -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      :x="callLauncher.pickerAnchor.value.x"
+      :y="callLauncher.pickerAnchor.value.y"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
     />
   </Teleport>
 </template>

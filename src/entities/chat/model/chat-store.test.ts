@@ -297,6 +297,18 @@ describe("chat-store", () => {
       expect(store.selectionMode).toBe(false);
       expect(store.selectedMessageIds.size).toBe(0);
     });
+
+    // WEE-66 / #863, #924 — multi-select must accumulate beyond the seed
+    // message so users can delete/forward several DM messages or images at once.
+    it("accumulates multiple selections via repeated toggles", () => {
+      store.enterSelectionMode("msg1");
+      store.toggleSelection("msg2");
+      store.toggleSelection("msg3");
+      expect(store.selectedMessageIds.size).toBe(3);
+      expect(store.selectedMessageIds.has("msg1")).toBe(true);
+      expect(store.selectedMessageIds.has("msg2")).toBe(true);
+      expect(store.selectedMessageIds.has("msg3")).toBe(true);
+    });
   });
 
   // ─── togglePinRoom / toggleMuteRoom ───────────────────────────

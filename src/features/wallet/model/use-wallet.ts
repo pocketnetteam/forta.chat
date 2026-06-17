@@ -2,40 +2,17 @@ import { storeToRefs } from "pinia";
 import { getPocketnetInstance } from "@/shared/api/sdk-bridge";
 import { useAuthStore } from "@/entities/auth";
 import { useWalletStore, getApi } from "./wallet-store";
+import { SATOSHI, DUST_LIMIT, selectUtxos, type UTXO } from "../lib/utxo";
 
-export interface UTXO {
-  txid: string;
-  vout: number;
-  address: string;
-  amount: number;
-  amountSat: number;
-  scriptPubKey: string;
-  confirmations: number;
-}
+// Re-export so existing importers (`./use-wallet`) keep working.
+export { SATOSHI, DUST_LIMIT, selectUtxos, type UTXO };
 
-export const SATOSHI = 100_000_000;
 const MAX_FEE = 0.0999;
-export const DUST_LIMIT = 700; // satoshis
 
 function getKeyPair() {
   const inst = getPocketnetInstance();
   if (!inst.user.keys) throw new Error("No signing keys");
   return inst.user.keys();
-}
-
-/** Select UTXOs to cover targetSat, returns [selected, totalSat] */
-export function selectUtxos(utxos: UTXO[], targetSat: number): [UTXO[], number] {
-  // Sort by amount descending — prefer fewer, larger UTXOs
-  const sorted = [...utxos].sort((a, b) => b.amountSat - a.amountSat);
-  const selected: UTXO[] = [];
-  let sum = 0;
-  for (const u of sorted) {
-    selected.push(u);
-    sum += u.amountSat;
-    if (sum >= targetSat) break;
-  }
-  if (sum < targetSat) throw new Error("Insufficient balance");
-  return [selected, sum];
 }
 
 /** Build a raw transaction, returns { hex, virtualSize, txId } */
@@ -91,12 +68,12 @@ export function useWallet() {
     const address = requireAddress();
     const api = await getApi(address);
 
-    // Get fee rate
-    const feeResult = await api.rpc("estimatesmartfee", [6]) as { feerate: number };
+    // Get fee rate + UTXOs (cached, with timeout retry) in parallel
+    const [feeResult, utxos] = await Promise.all([
+      api.rpc("estimatesmartfee", [6]) as Promise<{ feerate: number }>,
+      walletStore.getUtxos(),
+    ]);
     const feerate = feeResult.feerate;
-
-    // Get UTXOs
-    const utxos = (await api.rpc("txunspent", [[address], 1, 9999999])) as UTXO[];
 
     // Figure out how much we need
     const amountSat = Math.round(amount * SATOSHI);
@@ -123,10 +100,12 @@ export function useWallet() {
     const address = requireAddress();
     const api = await getApi(address);
 
-    // Get fee rate + UTXOs + balance in parallel
+    // Get fee rate + UTXOs + balance in parallel. Force a fresh UTXO fetch for
+    // the actual send (cache is for the fee-estimation path) so we never sign
+    // already-spent inputs — falls back to cache only if the fetch fails.
     const [feeResult, utxos, balanceInfo] = await Promise.all([
       api.rpc("estimatesmartfee", [6]) as Promise<{ feerate: number }>,
-      api.rpc("txunspent", [[address], 1, 9999999]) as Promise<UTXO[]>,
+      walletStore.getUtxos({ force: true }),
       api.rpc("getaddressinfo", [address]) as Promise<{ balance: number }>,
     ]);
 
@@ -160,7 +139,8 @@ export function useWallet() {
     // Broadcast
     await api.rpc("sendrawtransaction", [hex]);
 
-    // Refresh wallet balance after successful broadcast
+    // Spent UTXOs are now invalid — drop the cache and refresh the balance.
+    walletStore.invalidateUtxos();
     walletStore.refresh();
 
     return txId;

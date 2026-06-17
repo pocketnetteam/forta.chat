@@ -19,7 +19,7 @@ import { useVoiceRecorder } from "../model/use-voice-recorder";
 import { useVideoCircleRecorder } from "../model/use-video-circle-recorder";
 import { useMentionAutocomplete } from "../model/use-mention-autocomplete";
 import MentionAutocomplete from "./MentionAutocomplete.vue";
-import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { useMobile, useLandscapePhone } from "@/shared/lib/composables/use-media-query";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { shouldSendOnEnter } from "../model/enter-key-behavior";
 import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
@@ -32,6 +32,11 @@ import { readShareUriAsBlob } from "@/shared/lib/share-target";
 const PEER_KEYS_GRACE_MS = 2000;
 
 const isMobile = useMobile();
+const isLandscapePhone = useLandscapePhone();
+// A landscape phone must behave like mobile (#829): width-based `useMobile`
+// reports it as desktop, which kept secondary buttons open and made Enter send
+// mid-edit instead of inserting a newline.
+const isMobileLike = computed(() => isMobile.value || isLandscapePhone.value);
 
 const props = defineProps<{
   showDonate?: boolean;
@@ -228,7 +233,7 @@ const cancelEdit = () => {
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
 };
 
-const maxTextareaHeight = computed(() => isMobile.value ? 120 : 200);
+const maxTextareaHeight = computed(() => isMobileLike.value ? 120 : 200);
 
 let resizeRaf = 0;
 const autoGrow = () => {
@@ -260,6 +265,7 @@ const autoResize = autoGrow;
 // through AttachmentPanel either way.
 const inputLayout = computed(() => deriveInputLayout({
   isMobile: isMobile.value,
+  isLandscapePhone: isLandscapePhone.value,
   text: text.value,
   showDonate: !!props.showDonate,
 }));
@@ -392,7 +398,7 @@ const handleSend = async () => {
 const handleKeydown = (e: KeyboardEvent) => {
   if (mention.handleKeydown(e)) return;
 
-  if (shouldSendOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.isComposing, isMobile: isMobile.value, isNative })) {
+  if (shouldSendOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.isComposing, isMobile: isMobileLike.value, isNative })) {
     e.preventDefault();
     handleSend();
   }

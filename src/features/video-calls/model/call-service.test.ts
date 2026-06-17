@@ -1311,3 +1311,195 @@ describe('call-service permission flow', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// WEE-89 — camera/mic released after a call (web recording-indicator leak,
+// regression of WEE-47). matrix-js-sdk doesn't reliably stop the local
+// getUserMedia tracks on web, so the tab's 🔴 indicator stays lit and the
+// mic stays captured after ended/hangup/reject. The fix stops every local
+// track on all teardown paths via releaseLocalMedia().
+// ---------------------------------------------------------------------------
+describe('local media release on call teardown (WEE-89)', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockCallStore.isInCall = false;
+    mockCallStore.activeCall = null;
+    mockCallStore.matrixCall = null;
+    mockCallStore.videoMuted = false;
+    mockEnsureCallPermissions.mockResolvedValue(undefined);
+    mockGetUser.mockReset();
+    mockGetUser.mockReturnValue({ name: 'Peer' });
+    mockLoadUsersBatch.mockReset();
+    mockLoadUsersBatch.mockResolvedValue(undefined);
+    const { __resetFinalizeCallStateForTests } = await import('./finalize-call');
+    __resetFinalizeCallStateForTests();
+  });
+
+  /** Track stub whose stop() is observable. */
+  function track(stop: Mock) {
+    return { stop } as unknown as MediaStreamTrack;
+  }
+
+  /**
+   * MatrixCall stub carrying observable local tracks. `on`/`off` reuse the
+   * shared mocks so wireCallEvents registrations land in mockOn.mock.calls
+   * and can be captured below.
+   */
+  function makeCallWithTracks(
+    userStops: Mock[],
+    screenStops: Mock[] = [],
+  ): Record<string, unknown> {
+    return {
+      callId: 'test-call-id',
+      roomId: 'test-room-id',
+      type: 'voice',
+      on: mockOn,
+      off: mockOff,
+      placeVoiceCall: mockPlaceVoiceCall,
+      placeVideoCall: mockPlaceVideoCall,
+      answer: mockAnswer,
+      reject: mockReject,
+      hangup: mockHangup,
+      isMicrophoneMuted: vi.fn(() => false),
+      localUsermediaStream: { getTracks: () => userStops.map(track) },
+      localScreensharingStream: screenStops.length
+        ? { getTracks: () => screenStops.map(track) }
+        : null,
+      remoteUsermediaStream: null,
+      remoteScreensharingStream: null,
+      remoteUsermediaFeed: null,
+      getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+    };
+  }
+
+  function captureHandler(event: string) {
+    const entry = mockOn.mock.calls.find((c: unknown[]) => c[0] === event);
+    return entry?.[1] as ((...args: unknown[]) => void) | undefined;
+  }
+
+  it('stops all local media tracks when the call ends (A1: web indicator clears)', async () => {
+    const stopAudio = vi.fn();
+    const stopVideo = vi.fn();
+    const fakeCall = makeCallWithTracks([stopAudio, stopVideo]);
+    const { createNewMatrixCall } = await import('matrix-js-sdk-bastyon/lib/webrtc/call');
+    vi.mocked(createNewMatrixCall).mockReturnValueOnce(fakeCall as never);
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    const onState = captureHandler('State');
+    expect(onState).toBeTruthy();
+    onState?.('ended', 'connected');
+
+    expect(stopAudio).toHaveBeenCalledTimes(1);
+    expect(stopVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it('also stops screenshare tracks on call end', async () => {
+    const stopMic = vi.fn();
+    const stopScreen = vi.fn();
+    const fakeCall = makeCallWithTracks([stopMic], [stopScreen]);
+    const { createNewMatrixCall } = await import('matrix-js-sdk-bastyon/lib/webrtc/call');
+    vi.mocked(createNewMatrixCall).mockReturnValueOnce(fakeCall as never);
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    captureHandler('State')?.('ended', 'connected');
+
+    expect(stopMic).toHaveBeenCalledTimes(1);
+    expect(stopScreen).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops local media tracks when the SDK fires Hangup before Ended', async () => {
+    const stop = vi.fn();
+    const fakeCall = makeCallWithTracks([stop]);
+    const { createNewMatrixCall } = await import('matrix-js-sdk-bastyon/lib/webrtc/call');
+    vi.mocked(createNewMatrixCall).mockReturnValueOnce(fakeCall as never);
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    captureHandler('Hangup')?.();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops local media tracks on user-initiated hangup (A2: mic freed)', async () => {
+    const stop = vi.fn();
+    mockCallStore.matrixCall = makeCallWithTracks([stop]);
+
+    const { useCallService } = await import('./call-service');
+    useCallService().hangup();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops local media tracks on reject', async () => {
+    const stop = vi.fn();
+    mockCallStore.matrixCall = makeCallWithTracks([stop]);
+
+    const { useCallService } = await import('./call-service');
+    useCallService().rejectCall();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw on reject when no local stream was acquired (ringing reject)', async () => {
+    const fakeCall = makeCallWithTracks([]);
+    fakeCall.localUsermediaStream = null;
+    mockCallStore.matrixCall = fakeCall;
+
+    const { useCallService } = await import('./call-service');
+    expect(() => useCallService().rejectCall()).not.toThrow();
+    expect(mockReject).toHaveBeenCalled();
+  });
+
+  it('does NOT stop local media while the call is still connected (A3: active call works)', async () => {
+    const stop = vi.fn();
+    const fakeCall = makeCallWithTracks([stop]);
+    const { createNewMatrixCall } = await import('matrix-js-sdk-bastyon/lib/webrtc/call');
+    vi.mocked(createNewMatrixCall).mockReturnValueOnce(fakeCall as never);
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    captureHandler('State')?.('connected', 'connecting');
+
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  // The answerCall connecting-watchdog unwires SDK listeners before
+  // call.hangup(), so onHangup/onState→ended never run — the media acquired
+  // by call.answer() must be released by the watchdog itself.
+  it('stops local media when the answerCall connecting-watchdog times out', async () => {
+    vi.useFakeTimers();
+    try {
+      const stop = vi.fn();
+      const fakeCall = makeCallWithTracks([stop]);
+      mockCallStore.matrixCall = fakeCall;
+      mockCallStore.activeCall = {
+        callId: 'test-call-id',
+        roomId: 'test-room-id',
+        type: 'voice',
+        direction: 'incoming',
+        peerName: 'Peer',
+        status: 'incoming',
+      };
+      // call.answer resolves (media acquired) but the call never connects.
+      mockAnswer.mockResolvedValue(undefined);
+
+      const { useCallService } = await import('./call-service');
+      void useCallService().answerCall();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Keep status stuck at connecting so the watchdog fires.
+      (mockCallStore.activeCall as { status: string }).status = 'connecting';
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(stop).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

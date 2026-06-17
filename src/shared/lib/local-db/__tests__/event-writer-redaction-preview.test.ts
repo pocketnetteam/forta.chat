@@ -66,8 +66,8 @@ afterEach(async () => {
   await db.delete();
 });
 
-describe("EventWriter.writeRedaction — preview rollback (WEE-43)", () => {
-  it("rolls preview back to previous non-redacted message when last message is redacted", async () => {
+describe("EventWriter.writeRedaction — preview shows deletion (Telegram-style)", () => {
+  it("shows the deleted sentinel (not the previous message) when the last message is redacted", async () => {
     // Setup: room where lastMessage is $msg3 (the one we're about to redact).
     const room = makeRoom({
       lastMessageEventId: "$msg3",
@@ -85,13 +85,36 @@ describe("EventWriter.writeRedaction — preview rollback (WEE-43)", () => {
     await eventWriter.writeRedaction({ redactedEventId: "$msg3", roomId: ROOM_ID });
 
     const updatedRoom = await roomRepo.getRoom(ROOM_ID);
-    // Critical: monotonic guard must NOT block the rollback to an older message.
-    expect(updatedRoom!.lastMessagePreview).toBe("second");
-    expect(updatedRoom!.lastMessageEventId).toBe("$msg2");
-    expect(updatedRoom!.lastMessageTimestamp).toBe(2000);
+    // The latest message was deleted → surface "🚫 Message deleted" rather than
+    // resurfacing the older "second" message (which hid that a deletion happened).
+    expect(updatedRoom!.lastMessagePreview).toBe("🚫 Message deleted");
+    expect(updatedRoom!.lastMessageEventId).toBe("$msg3");
   });
 
-  it("clears all lastMessage* fields when redacting the only remaining message", async () => {
+  it("sets the deleted sentinel when a redacted message is (re)synced from the server", async () => {
+    // Reproduces the reload path: Matrix sync re-delivers the last message
+    // already redacted (content stripped). The preview must show the deletion,
+    // not blank out — otherwise a reload wipes the "deleted" label.
+    await db.rooms.add(makeRoom());
+    await eventWriter.writeMessage(
+      {
+        eventId: "$redacted1",
+        roomId: ROOM_ID,
+        senderId: "user1",
+        content: "",
+        timestamp: 5000,
+        type: MessageType.text,
+        deleted: true,
+      },
+      "me",
+      null,
+    );
+    const room = await roomRepo.getRoom(ROOM_ID);
+    expect(room!.lastMessagePreview).toBe("🚫 Message deleted");
+    expect(room!.lastMessageEventId).toBe("$redacted1");
+  });
+
+  it("shows the deleted sentinel when redacting the only remaining message (Telegram-style, not blank)", async () => {
     const room = makeRoom({
       lastMessageEventId: "$msg1",
       lastMessagePreview: "only",
@@ -106,16 +129,15 @@ describe("EventWriter.writeRedaction — preview rollback (WEE-43)", () => {
     await eventWriter.writeRedaction({ redactedEventId: "$msg1", roomId: ROOM_ID });
 
     const updatedRoom = await roomRepo.getRoom(ROOM_ID);
-    // Sidebar must not render the "deleted" placeholder when the room is effectively empty:
-    // every lastMessage* field is cleared so buildLastMessage() returns undefined.
-    expect(updatedRoom!.lastMessagePreview).toBeUndefined();
-    expect(updatedRoom!.lastMessageEventId).toBeUndefined();
-    expect(updatedRoom!.lastMessageTimestamp).toBeUndefined();
-    expect(updatedRoom!.lastMessageSenderId).toBeUndefined();
-    expect(updatedRoom!.lastMessageType).toBeUndefined();
+    // No earlier message to fall back to → show "🚫 Message deleted" (getPreview
+    // localises it) instead of blanking the row. The slot is kept so the row
+    // doesn't collapse to "no messages".
+    expect(updatedRoom!.lastMessagePreview).toBe("🚫 Message deleted");
+    expect(updatedRoom!.lastMessageEventId).toBe("$msg1");
+    expect(updatedRoom!.lastMessageTimestamp).toBe(1000);
   });
 
-  it("clears lastMessage* fields when redacting the last remaining message among many redacted ones", async () => {
+  it("shows the deleted sentinel when redacting the last message among many already-redacted ones", async () => {
     const room = makeRoom({
       lastMessageEventId: "$msg3",
       lastMessagePreview: "third",
@@ -132,8 +154,8 @@ describe("EventWriter.writeRedaction — preview rollback (WEE-43)", () => {
     await eventWriter.writeRedaction({ redactedEventId: "$msg3", roomId: ROOM_ID });
 
     const updatedRoom = await roomRepo.getRoom(ROOM_ID);
-    expect(updatedRoom!.lastMessagePreview).toBeUndefined();
-    expect(updatedRoom!.lastMessageEventId).toBeUndefined();
+    expect(updatedRoom!.lastMessagePreview).toBe("🚫 Message deleted");
+    expect(updatedRoom!.lastMessageEventId).toBe("$msg3");
   });
 
   it("does not touch preview when redacting a non-last message", async () => {

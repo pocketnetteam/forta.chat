@@ -83,6 +83,7 @@ describe("SyncEngine.setOnline — retryAllFailed on transition to online", () =
     };
     const roomRepo = {
       updateRoom: vi.fn(),
+      syncLastMessageLocalStatus: vi.fn(),
     };
 
     engine = new SyncEngine(

@@ -17,6 +17,7 @@ import {
   useBugReportStatus,
 } from "@/features/bug-report";
 import { getLocalIssueCache } from "@/shared/lib/bug-report";
+import { BastyonInteropBanner } from "@/features/bastyon-interop";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
 // App updater Capacitor plugin (Android only)
@@ -195,6 +196,10 @@ const handleLogout = () => {
         </template>
       </div>
 
+      <!-- Dual-install warning (WEE-35) — shown when the account looks
+           Bastyon-registered and both apps can coexist on this device. -->
+      <BastyonInteropBanner />
+
       <!-- Multi-account list (shown between profile header and menu items) -->
       <div class="px-2">
         <AccountList
@@ -263,6 +268,72 @@ const handleLogout = () => {
             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
           </svg>
           <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.appearance") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
+        <!-- Call methods (WEE-57) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('callMethods')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.callProviders.title") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
+        <!-- Notifications (WEE-75) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('notifications')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.notifications") }}</span>
           <svg
             width="16"
             height="16"

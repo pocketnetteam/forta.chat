@@ -49,6 +49,54 @@ export function parseVideoUrl(url: string): VideoInfo | null {
   return null;
 }
 
+interface PeerTubeFile {
+  fileUrl?: string;
+  resolution?: { id?: number };
+}
+
+/** Pick the file closest to 720p — good quality without mobile bandwidth waste. */
+const TARGET_RESOLUTION = 720;
+
+function pickBestFile(files: PeerTubeFile[]): string | null {
+  const candidates = files.filter((f) => typeof f.fileUrl === "string" && f.fileUrl);
+  if (candidates.length === 0) return null;
+  const best = candidates.reduce((a, b) => {
+    const da = Math.abs((a.resolution?.id ?? 0) - TARGET_RESOLUTION);
+    const db = Math.abs((b.resolution?.id ?? 0) - TARGET_RESOLUTION);
+    return db < da ? b : a;
+  });
+  return best.fileUrl ?? null;
+}
+
+/**
+ * Resolve a direct media file URL for a PeerTube video (WEE-82).
+ *
+ * Cross-origin iframe embeds can't single-tap-play on Android (autoplay is
+ * blocked inside the sandbox) and never expose currentTime, so the native
+ * `<video>` path needs a direct file. PeerTube lists progressive "web video"
+ * files at the top level and fMP4 files under streamingPlaylists — both play
+ * in Chrome WebView as plain <video> sources. Returns null when the instance
+ * exposes neither (caller falls back to the iframe embed).
+ */
+export async function fetchPeerTubeFileUrl(apiUrl: string): Promise<string | null> {
+  try {
+    const resp = await fetch(apiUrl, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+
+    const direct = pickBestFile(Array.isArray(data.files) ? data.files : []);
+    if (direct) return direct;
+
+    const playlists = Array.isArray(data.streamingPlaylists) ? data.streamingPlaylists : [];
+    const playlistFiles = playlists.flatMap((p: { files?: PeerTubeFile[] }) =>
+      Array.isArray(p.files) ? p.files : [],
+    );
+    return pickBestFile(playlistFiles);
+  } catch {
+    return null;
+  }
+}
+
 /** Fetch PeerTube thumbnail via API (the preview UUID differs from the video UUID) */
 export async function fetchPeerTubeThumb(apiUrl: string): Promise<string> {
   try {
