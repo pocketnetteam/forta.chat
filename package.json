@@ -18,9 +18,10 @@
     "electron:build:win": "vite build && electron-builder --config electron-builder.json --win",
     "electron:build:mac": "vite build && electron-builder --config electron-builder.json --mac",
     "electron:build:linux": "vite build && electron-builder --config electron-builder.json --linux",
-    "cap:build": "vite build && cap sync android",
-    "cap:open": "cap open android",
-    "cap:run": "cap run android",
+    "cap:prepare": "node scripts/ensure-android-sdk.mjs",
+    "cap:build": "npm run cap:prepare && vite build && npx cap sync android",
+    "cap:open": "npx cap open android",
+    "cap:run": "npm run cap:build && npx cap run android",
     "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\""
   },
   "dependencies": {

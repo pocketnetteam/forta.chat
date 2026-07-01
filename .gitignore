@@ -13,6 +13,7 @@ Bastyon Chat.app/
 android/app/build/
 android/build/
 android/.gradle/
+android/local.properties
 android/capacitor-cordova-android-plugins/build/
 android/capacitor-filesystem/build/
 *.apk
@@ -61,3 +62,4 @@ auto-imports.d.ts
 
 # Planning artifacts
 .planning/
+*.plist

@@ -28,6 +28,7 @@ vi.mock('@/shared/lib/platform', () => ({
 
 vi.mock('./push-data-plugin', () => ({
   PushData: {
+    isFcmAvailable: vi.fn().mockResolvedValue({ available: true }),
     cacheRoomNames: vi.fn().mockResolvedValue(undefined),
     cacheSenderNames: vi.fn().mockResolvedValue(undefined),
     cancelNotification: vi.fn().mockResolvedValue(undefined),

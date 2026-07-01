@@ -42,6 +42,7 @@ vi.mock('./push-data-plugin', () => ({
     cancelAllMessageNotifications: vi.fn().mockResolvedValue(undefined),
     replaceNotificationContent: vi.fn().mockResolvedValue(undefined),
     getPendingIntent: vi.fn().mockResolvedValue({}),
+    isFcmAvailable: vi.fn().mockResolvedValue({ available: true }),
     addListener: vi.fn().mockResolvedValue({ remove: vi.fn() }),
   },
 }));

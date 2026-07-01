@@ -29,6 +29,8 @@ interface PushDataPlugin extends Plugin {
   /** Replace native notification content (keeps native PendingIntent for tap handling) */
   replaceNotificationContent(options: { roomId: string; eventId?: string; title: string; body: string }): Promise<void>;
   getPendingIntent(): Promise<{ roomId?: string; eventId?: string }>;
+  /** False when google-services.json was missing at APK build time — skip FCM register. */
+  isFcmAvailable(): Promise<{ available: boolean }>;
   /** WEE-44 / forta-bugs#732, #766: returns Build.MANUFACTURER + MODEL so JS
    *  can show a one-time hint pointing the user at battery optimization
    *  settings for known-hostile vendors (Samsung, HONOR/Huawei, Xiaomi, OPPO,

@@ -64,9 +64,6 @@ jobs:
           sed -i 's/versionCode .*/versionCode ${{ steps.version.outputs.VERSION_CODE }}/' android/app/build.gradle
           sed -i 's/versionName ".*"/versionName "${{ steps.version.outputs.VERSION }}"/' android/app/build.gradle
 
-      - name: Override Gradle Java home for CI
-        run: sed -i 's|^org.gradle.java.home=.*|org.gradle.java.home='"$JAVA_HOME"'|' android/gradle.properties
-
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
