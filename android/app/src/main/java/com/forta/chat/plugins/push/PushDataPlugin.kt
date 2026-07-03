@@ -151,6 +151,14 @@ class PushDataPlugin : Plugin() {
         }
     }
 
+    /** True when google-services.json was present at build time (FCM safe to register). */
+    @PluginMethod
+    fun isFcmAvailable(call: PluginCall) {
+        val result = JSObject()
+        result.put("available", com.forta.chat.BuildConfig.FIREBASE_ENABLED)
+        call.resolve(result)
+    }
+
     @PluginMethod
     fun cacheRoomName(call: PluginCall) {
         val roomId = call.getString("roomId") ?: run {

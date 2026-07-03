@@ -191,8 +191,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
-      } catch {
-        // Silently fail
+      } catch (e) {
+        console.warn("[UserStore] loadUsersBatch failed:", e);
       }
     });
   };
@@ -252,7 +252,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
             debouncedTrigger();
             debouncedCacheUsers(users.value);
           }
-        } catch {
+        } catch (e) {
+          console.warn("[UserStore] background profile revalidation failed:", e);
           // Network issue — stale profiles remain visible, retry on next cycle
         }
         if (i + BATCH < batch.length) {
@@ -313,7 +314,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
-      } catch {
+      } catch (e) {
+        console.warn("[UserStore] refreshStaleUsers failed:", e);
         // Network issue — skip, will retry next cycle
       }
       // Yield between batches so we don't block anything

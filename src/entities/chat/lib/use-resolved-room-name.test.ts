@@ -46,7 +46,7 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
   it("returns Pocketnet displayname when no alias is set", () => {
     const auth = useAuthStore();
-    auth.address = "PMyAddr";
+    auth.$patch({ address: "PMyAddr" });
     const user = useUserStore();
     const peer = "PPeerAddr";
     user.users[peer] = { name: "Peer Pocketnet Name" } as any;
@@ -58,7 +58,7 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
   it("returns local alias when set, overriding Pocketnet displayname", () => {
     const auth = useAuthStore();
-    auth.address = "PMyAddr";
+    auth.$patch({ address: "PMyAddr" });
     const user = useUserStore();
     const chat = useChatStore();
     const peer = "PPeerAddr";
@@ -72,7 +72,7 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
   it("falls back to Pocketnet after alias is cleared", async () => {
     const auth = useAuthStore();
-    auth.address = "PMyAddr";
+    auth.$patch({ address: "PMyAddr" });
     const user = useUserStore();
     const chat = useChatStore();
     const peer = "PPeerAddr";
@@ -85,5 +85,43 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
     await chat.setContactAlias(peer, null);
     expect(resolve(room)).toBe("Pocketnet Name");
+  });
+});
+
+describe("useResolvedRoomName — Matrix display name fallback", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    setActivePinia(createTestingPinia({ stubActions: false }));
+  });
+
+  it("returns Matrix display name when Pocketnet profile is missing", () => {
+    const auth = useAuthStore();
+    auth.$patch({ address: "PMyAddr" });
+    const chat = useChatStore();
+    const peer = "PPeerAddr1234567890123456789012";
+    vi.spyOn(chat, "getDisplayName").mockImplementation((addr) =>
+      addr === peer ? "Matrix Peer Name" : addr,
+    );
+
+    const room = {
+      ...makeDmRoom(hexEncode(peer)),
+      avatar: `__pocketnet__:${peer}`,
+    };
+    const { resolve } = useResolvedRoomName();
+    expect(resolve(room)).toBe("Matrix Peer Name");
+  });
+
+  it("returns empty string instead of raw address when no profile data exists", () => {
+    const auth = useAuthStore();
+    auth.$patch({ address: "PMyAddr" });
+    const peer = "PPeerAddr1234567890123456789012";
+
+    const room = {
+      ...makeDmRoom(hexEncode(peer)),
+      avatar: `__pocketnet__:${peer}`,
+      name: peer,
+    };
+    const { resolve } = useResolvedRoomName();
+    expect(resolve(room)).toBe("");
   });
 });

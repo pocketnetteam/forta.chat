@@ -58,6 +58,38 @@ cd android && ./gradlew assembleRelease && cd ..
 
 Результат: `android/app/build/outputs/apk/release/app-release.apk`
 
+## Тестовая сборка (QA)
+
+Release-подписанный тестовый APK выкладывается на сервер **вручную** через GitHub Actions:
+
+1. Откройте [Actions → Android Test APK](https://github.com/pocketnetteam/forta.chat/actions/workflows/android-test-apk.yml).
+2. Нажмите **Run workflow**, выберите ветку (обычно `master`) и подтвердите.
+3. После успешного прогона APK доступен по ссылке:
+
+**https://forta.chat/apktests/latest.apk**
+
+Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/android-test-apk.yml)
+
+| | Prod (тег `v*`) | Тест (ручной запуск) |
+|---|---|---|
+| Канал | GitHub Releases | FTP `apktests/latest.apk` |
+| Триггер | Push тега `v*` | `workflow_dispatch` в GitHub Actions |
+| Имя файла | `forta-chat-<version>.apk` | `latest.apk` (внутри CI: `forta-chat-test-<sha>.apk`) |
+| Автообновление в приложении | Да (`releases/latest`) | Нет |
+| Подпись | Release keystore | Тот же release keystore |
+
+### Установка для тестировщиков
+
+1. Скачать [latest.apk](https://forta.chat/apktests/latest.apk) на устройство.
+2. Разрешить установку из неизвестных источников (если потребуется).
+3. Установить APK.
+
+### Важно
+
+- Тестовый APK **можно поставить поверх** production-версии (та же подпись, `versionCode` в диапазоне `900000+`).
+- **Откат на prod без удаления не сработает** — у prod `versionCode` ниже. Чтобы вернуться на production, переустановите APK с [GitHub Releases](https://github.com/pocketnetteam/forta.chat/releases/latest).
+- Тестовая сборка **не** создаёт GitHub Release и **не** влияет на автообновление у обычных пользователей.
+
 ## Установка на устройство
 
 ```bash

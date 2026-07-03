@@ -497,7 +497,23 @@ class PushService {
       console.warn('[PushService] Failed to check pending intent:', e);
     }
 
-    // 4. Register for FCM
+    // 4. Register for FCM (skip when google-services.json was not bundled — crashes otherwise)
+    let fcmAvailable = true;
+    try {
+      const status = await PushData.isFcmAvailable();
+      fcmAvailable = status.available;
+    } catch (e) {
+      console.warn('[PushService] isFcmAvailable check failed, assuming FCM disabled:', e);
+      fcmAvailable = false;
+    }
+
+    if (!fcmAvailable) {
+      console.warn(
+        '[PushService] FCM not configured (no google-services.json at build time) — skipping PushNotifications.register()',
+      );
+      return;
+    }
+
     await PushNotifications.removeAllListeners();
 
     PushNotifications.addListener('registration', async ({ value: token }) => {
