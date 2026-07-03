@@ -74,9 +74,19 @@ Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/androi
 |---|---|---|
 | Канал | GitHub Releases | FTP `apktests/latest.apk` |
 | Триггер | Push тега `v*` | `workflow_dispatch` в GitHub Actions |
-| Имя файла | `forta-chat-<version>.apk` | `latest.apk` (внутри CI: `forta-chat-test-<sha>.apk`) |
+| `versionName` / `versionCode` | Из тега, напр. `1.10.46` → `11046` | Из `package.json` +1 patch (та же формула `versionCode`) |
+| Имя файла | `forta-chat-<version>.apk` | `latest.apk` (внутри CI: `forta-chat-test-<version>.apk`) |
 | Автообновление в приложении | Да (`releases/latest`) | Нет |
 | Подпись | Release keystore | Тот же release keystore |
+
+### Версионирование (тест → релиз)
+
+Источник версии — **`package.json`** (`version`). GitHub Releases не используется.
+
+1. В `package.json` хранится последняя выпущенная версия (сейчас совпадает с prod).
+2. **Тест:** CI берёт max(`package.json`, [`apktests/version.json`](https://forta.chat/apktests/version.json)), поднимает **patch на 1** и собирает APK.
+3. **Релиз:** после QA поднимаете `package.json` до протестированной версии, коммитите и ставите тег `v*` с тем же номером.
+4. Повторный тест до релиза снова поднимает patch (учитывается `version.json` на сервере).
 
 ### Установка для тестировщиков
 
@@ -86,8 +96,8 @@ Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/androi
 
 ### Важно
 
-- Тестовый APK **можно поставить поверх** production-версии (та же подпись, `versionCode` в диапазоне `900000+`).
-- **Откат на prod без удаления не сработает** — у prod `versionCode` ниже. Чтобы вернуться на production, переустановите APK с [GitHub Releases](https://github.com/pocketnetteam/forta.chat/releases/latest).
+- Тестовый APK **можно поставить поверх** production-версии (та же подпись, тот же `versionCode`-диапазон).
+- После теста: обновите `package.json` до протестированной версии и выпускайте prod с тегом `v*` с **тем же номером**.
 - Тестовая сборка **не** создаёт GitHub Release и **не** влияет на автообновление у обычных пользователей.
 
 ## Установка на устройство
