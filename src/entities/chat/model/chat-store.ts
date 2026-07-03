@@ -2877,17 +2877,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const loadProfilesForRoomIds = (roomIds: string[]) => {
     const uStore = useUserStore();
     const addressesToLoad: string[] = [];
-    const roomsInThisBatch: string[] = [];
     for (const roomId of roomIds) {
       if (profilesRequestedForRooms.has(roomId)) continue;
+
+      const roomUncached: string[] = [];
 
       // Prefer Matrix SDK addresses (populated by updateDisplayNames)
       const sdkAddrs = matrixRoomAddresses.get(roomId);
       if (sdkAddrs && sdkAddrs.length > 0) {
-        profilesRequestedForRooms.add(roomId);
-        roomsInThisBatch.push(roomId);
         for (const addr of sdkAddrs) {
-          if (!uStore.users[addr]) addressesToLoad.push(addr);
+          if (!uStore.users[addr]) roomUncached.push(addr);
+        }
+        if (roomUncached.length === 0) {
+          profilesRequestedForRooms.add(roomId);
+        } else {
+          addressesToLoad.push(...roomUncached);
         }
         continue;
       }
@@ -2901,14 +2905,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const addr = hexDecode(hexId);
           if (addr && /^[A-Za-z0-9]+$/.test(addr)) {
             foundAddrs = true;
-            if (!uStore.users[addr]) addressesToLoad.push(addr);
+            if (!uStore.users[addr]) roomUncached.push(addr);
           }
         } catch { /* ignore invalid hex */ }
       }
-      // Only mark as requested if we found member addresses (otherwise retry later when members load)
-      if (foundAddrs) {
+      if (!foundAddrs) continue;
+      if (roomUncached.length === 0) {
         profilesRequestedForRooms.add(roomId);
-        roomsInThisBatch.push(roomId);
+      } else {
+        addressesToLoad.push(...roomUncached);
       }
     }
     if (addressesToLoad.length > 0) {

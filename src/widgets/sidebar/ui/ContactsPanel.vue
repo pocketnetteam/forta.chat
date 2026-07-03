@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useChatStore } from "@/entities/chat";
 import { useUserStore } from "@/entities/user/model";
+import UserAvatar from "@/entities/user/ui/UserAvatar.vue";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
@@ -58,7 +59,6 @@ interface ContactItem {
   _key: string;
   name: string;
   address: string | undefined;
-  image: string | undefined;
 }
 
 const contacts = computed<ContactItem[]>(() => {
@@ -75,7 +75,6 @@ const contacts = computed<ContactItem[]>(() => {
         _key: room.id,
         name: user?.name || (isUnresolvedName(resolved) ? "" : resolved),
         address,
-        image: user?.image,
       };
     });
 
@@ -329,9 +328,14 @@ const toggleSearch = () => {
             :style="{ height: ITEM_HEIGHT + 'px' }"
             @click="handleSelect((item as ContactItem).id)"
           >
+            <UserAvatar
+              v-if="(item as ContactItem).address"
+              :address="(item as ContactItem).address!"
+              size="md"
+            />
             <Avatar
-              :src="(item as ContactItem).image"
-              :name="(item as ContactItem).name || (item as ContactItem).address || '?'"
+              v-else
+              :name="(item as ContactItem).name || '?'"
               size="md"
             />
             <span v-if="!(item as ContactItem).name" class="inline-block h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />
