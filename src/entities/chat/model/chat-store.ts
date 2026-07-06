@@ -517,8 +517,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (initialSyncStatus.value !== "loading") return;
       initialSyncStatus.value = "degraded";
       // Release every skeleton/preloader that keys off roomsInitialized so the
-      // cached room list (or the empty-state hint) becomes visible. A later
-      // PREPARED sync still runs a full refresh and upgrades back to "ready".
+      // cached room list becomes visible. When the cache is still empty the
+      // room-list keeps a "taking longer than usual" placeholder (see
+      // isRoomListLoadingSlow) instead of flashing the "no dialogs" empty
+      // state — the authoritative empty is gated on a real SYNCING sync
+      // (isRoomListAuthoritativeEmpty). A later PREPARED sync still runs a full
+      // refresh and upgrades back to "ready".
       roomsInitialized.value = true;
       // WEE-97: release deferred boot work (recovery scans, Tor, telemetry)
       signalChatsInteractive();
@@ -1918,6 +1922,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   );
 
   const sortedRooms = computed(() => _sortedRoomsRef.value);
+
+  // ── Room-list first-load states ──────────────────────────────────────────
+  // Split the single roomsInitialized flag into three UI states so the 8s
+  // degrade watchdog switches the placeholder text instead of revealing a
+  // premature "no dialogs" empty state (see startInitialSyncWatch).
+  //
+  // The list is authoritatively empty ONLY once the SDK reached steady-state
+  // incremental sync ("SYNCING"). At "PREPARED" the SDK may not have
+  // materialized all rooms into memory yet (slow WebView / large account) —
+  // the same reason runRoomCleanup waits for "SYNCING" before pruning.
+  const isRoomListAuthoritativeEmpty = computed(() =>
+    sortedRooms.value.length === 0
+    && initialSyncStatus.value === "ready"
+    && syncState.value === "SYNCING",
+  );
+  // Still loading the first room snapshot → show skeleton.
+  const isRoomListLoading = computed(() =>
+    sortedRooms.value.length === 0 && !isRoomListAuthoritativeEmpty.value,
+  );
+  // Loading is taking longer than usual (watchdog degraded, cache still empty)
+  // → show the same skeleton with a "taking longer" placeholder text.
+  const isRoomListLoadingSlow = computed(() =>
+    isRoomListLoading.value && initialSyncStatus.value === "degraded",
+  );
 
   const totalUnread = computed(() => {
     void _dexieRoomMapVersion.value;
@@ -7219,6 +7247,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     removeRoom,
     roomsInitialized,
     initialSyncStatus,
+    isRoomListAuthoritativeEmpty,
+    isRoomListLoading,
+    isRoomListLoadingSlow,
     startInitialSyncWatch,
     namesReady,
     syncState,

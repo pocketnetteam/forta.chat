@@ -124,10 +124,9 @@ watch(activeTab, (newVal, oldVal) => {
 });
 
 // Show skeleton until rooms appear from ANY source (Dexie cache or Matrix sync).
-// Uses computed so it re-activates on account switch (cleanup resets roomsInitialized).
-const roomsLoading = computed(() =>
-  chatStore.sortedRooms.length === 0 && !chatStore.roomsInitialized,
-);
+// Three states now live in the store (isRoomListLoading / isRoomListLoadingSlow /
+// isRoomListAuthoritativeEmpty): the 8s degrade watchdog switches the skeleton's
+// placeholder text instead of revealing a premature "no dialogs" empty state.
 
 // Auto-switch away from "invites" tab when no invites remain
 watch(
@@ -295,7 +294,7 @@ const walletStore = useWalletStore();
         <template v-else>
           <FolderTabs v-model="activeFilter" :scroll-progress="tabProgress" />
           <div class="relative flex-1 overflow-hidden">
-            <RoomListSkeleton v-if="roomsLoading" :first-load="true" />
+            <RoomListSkeleton v-if="chatStore.isRoomListLoading" :first-load="true" :slow="chatStore.isRoomListLoadingSlow" />
             <SwipeableTabs
               v-else
               v-model="activeFilter"

@@ -18,6 +18,8 @@ export const en = {
   // ── Contact list ──
   "contactList.loadingChats": "Loading your chats and contacts",
   "contactList.loadingChatsHint": "This may take a moment on the first launch",
+  "contactList.loadingChatsSlow": "Loading is taking longer than usual…",
+  "contactList.loadingChatsSlowHint": "Still syncing with the server",
   "contactList.noConversations": "No conversations yet",
   "contactList.inviteToChat": "Invitation to chat",
   "contactList.noMessages": "No messages",

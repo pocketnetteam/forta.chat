@@ -155,3 +155,69 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
     expect(store.initialSyncStatus).toBe("degraded");
   });
 });
+
+describe("chat-store room-list first-load states", () => {
+  let store: ReturnType<typeof useChatStore>;
+
+  beforeEach(() => {
+    __resetBootSignalsForTests();
+    vi.useFakeTimers();
+    setActivePinia(createTestingPinia({ stubActions: false }));
+    store = useChatStore();
+    // getRooms() returns [] for the whole suite → sortedRooms stays empty.
+    mockMatrixService.getRooms.mockReturnValue([]);
+  });
+
+  afterEach(() => {
+    store.cleanup();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("is 'loading' before the watchdog: skeleton on, not slow, not empty", () => {
+    store.startInitialSyncWatch();
+    expect(store.isRoomListLoading).toBe(true);
+    expect(store.isRoomListLoadingSlow).toBe(false);
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+  });
+
+  it("switches to slow placeholder after the 8s degrade (still not empty)", () => {
+    store.startInitialSyncWatch();
+    vi.advanceTimersByTime(8000);
+    expect(store.initialSyncStatus).toBe("degraded");
+    expect(store.isRoomListLoading).toBe(true);
+    expect(store.isRoomListLoadingSlow).toBe(true);
+    // Must NOT flash the "no dialogs" empty state on degrade.
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+  });
+
+  it("does NOT show authoritative empty at PREPARED with an empty snapshot", () => {
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
+    store.refreshRooms("PREPARED");
+    vi.advanceTimersByTime(150); // debounce → refreshRoomsImmediate
+
+    expect(store.initialSyncStatus).toBe("ready");
+    expect(store.syncState).toBe("PREPARED");
+    // Rooms may not be materialized at PREPARED → keep the skeleton, no empty.
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+    expect(store.isRoomListLoading).toBe(true);
+    expect(store.isRoomListLoadingSlow).toBe(false);
+  });
+
+  it("shows authoritative empty only once sync reaches steady-state SYNCING", () => {
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
+    store.refreshRooms("PREPARED");
+    vi.advanceTimersByTime(150);
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+
+    store.refreshRooms("SYNCING");
+    vi.advanceTimersByTime(150);
+
+    expect(store.initialSyncStatus).toBe("ready");
+    expect(store.syncState).toBe("SYNCING");
+    expect(store.isRoomListAuthoritativeEmpty).toBe(true);
+    expect(store.isRoomListLoading).toBe(false);
+    expect(store.isRoomListLoadingSlow).toBe(false);
+  });
+});
