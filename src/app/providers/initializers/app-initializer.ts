@@ -66,12 +66,6 @@ function isRepostMarker(value: unknown): boolean {
   return (typeof value === "object" && value !== null) || (typeof value === "string" && value !== "");
 }
 
-export interface PostScore {
-  address: string;
-  value: number;
-  posttxid: string;
-}
-
 export interface PostComment {
   id: string;
   postid: string;
@@ -95,14 +89,26 @@ type OnLoadUserData = (userData: UserData) => void;
  *  caller can rotate to another proxy / show retry UX (WEE-23). */
 const REGISTRATION_RPC_TIMEOUT = 15_000;
 
+/** Window for coalescing per-post getpagescores requests into one batched call. */
+const SCORE_BATCH_WINDOW_MS = 50;
+
 export class AppInitializer {
   private actions: InstanceType<typeof Actions> | null = null;
   private api: InstanceType<typeof Api> | null = null;
   private psdk: InstanceType<typeof pSDK> | null = null;
+  private pocketnetInstance: PocketnetInstanceType | null = null;
   private _available = false;
   private postCache = new Map<string, BastyonPostData>();
 
+  // Coalesce per-post getpagescores requests into a single psdk.myScore.load
+  // call (the SDK batches + caches, but only when all txids share one call).
+  private pendingScores = new Map<string, Array<(v: number | null) => void>>();
+  private scoreFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private scoreFlushUpdate = false;
+
   constructor(pocketnetInstance: PocketnetInstanceType) {
+    this.pocketnetInstance = pocketnetInstance;
+
     // Configure the shared RPC node pool (1/2/3/6.pocketnet.app:8899) for the
     // centralized failover client — done before the standalone guard so direct
     // fetches have failover even when the SDK globals are absent.
@@ -533,6 +539,9 @@ export class AppInitializer {
         tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
         settings: (content.s as { v?: string }) ?? (content.settings as { v?: string }) ?? {},
         time: (raw.time as number) ?? (content.time as number) ?? 0,
+        scoreSum: Number(raw.scoreSum ?? raw.score ?? content.scoreSum ?? content.score ?? 0),
+        scoreCnt: Number(raw.scoreCnt ?? raw.scnt ?? content.scoreCnt ?? content.scnt ?? 0),
+        myVal: raw.myVal != null ? Number(raw.myVal) : (content.myVal != null ? Number(content.myVal) : undefined),
       };
 
       // Parse repost data — the original txid lives in `repost.v` or a bare
@@ -607,6 +616,9 @@ export class AppInitializer {
       tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
       settings: (raw.s as { v?: string }) ?? (raw.settings as { v?: string }) ?? {},
       time: Number(raw.time ?? 0),
+      scoreSum: Number(raw.scoreSum ?? raw.score ?? 0),
+      scoreCnt: Number(raw.scoreCnt ?? raw.scnt ?? 0),
+      myVal: raw.myVal != null ? Number(raw.myVal) : undefined,
     };
 
     // Parse repost (shared post) data — original txid is `repost.v` or a bare
@@ -644,23 +656,6 @@ export class AppInitializer {
     }
 
     this.postCache.set(txid, post);
-  }
-
-  async loadPostScores(txid: string): Promise<PostScore[]> {
-    if (!this.api) return [];
-    try {
-      const data = await this.api.rpc("getpostscores", [txid]);
-      console.log("[appInit] loadPostScores raw response:", data);
-      if (!Array.isArray(data)) return [];
-      return data.map((s: any) => ({
-        address: s.address ?? "",
-        value: Number(s.value ?? 0),
-        posttxid: s.posttxid ?? txid,
-      }));
-    } catch (e) {
-      console.error("[appInit] loadPostScores error:", e);
-      return [];
-    }
   }
 
   async loadPostComments(txid: string, userAddress?: string): Promise<PostComment[]> {
@@ -719,16 +714,77 @@ export class AppInitializer {
     }
   }
 
-  async loadMyPostScore(txid: string, address: string): Promise<number | null> {
-    if (!this.api) return null;
-    try {
-      const data = await this.api.rpc("getpagescores", [[txid], address, []]);
-      if (Array.isArray(data) && data.length > 0) {
-        return Number(data[0]?.value ?? 0);
+  /** The logged-in user's Bastyon address, or "" when nobody is logged in. */
+  private currentUserAddress(): string {
+    const value = this.pocketnetInstance?.user?.address?.value;
+    return typeof value === "string" ? value : "";
+  }
+
+  /**
+   *  Fetch the current user's own score for a post.
+   *
+   *  Requests are coalesced within a short window and dispatched through the
+   *  SDK's `myScore.load`, which batches into a single `getpagescores` RPC and
+   *  caches results in IndexedDB (per-user, ~12h). The `address` param is kept
+   *  for signature compatibility — the SDK derives the address from
+   *  `POCKETNETINSTANCE.user.address.value`. */
+  loadMyPostScore(txid: string, _address?: string, update = false): Promise<number | null> {
+    if (!this.psdk || !txid) return Promise.resolve(null);
+
+    // getpagescores requires the user's address as a string second arg — skip
+    // the batch entirely when nobody is logged in (avoids a null-address RPC).
+    if (!this.currentUserAddress()) return Promise.resolve(null);
+
+    // An explicit refresh forces a cache-bypassing batch.
+    if (update) this.scoreFlushUpdate = true;
+
+    return new Promise<number | null>((resolve) => {
+      const waiters = this.pendingScores.get(txid);
+      if (waiters) {
+        waiters.push(resolve);
+      } else {
+        this.pendingScores.set(txid, [resolve]);
       }
-      return null;
-    } catch {
-      return null;
+
+      if (this.scoreFlushTimer === null) {
+        this.scoreFlushTimer = setTimeout(() => {
+          void this.flushScores();
+        }, SCORE_BATCH_WINDOW_MS);
+      }
+    });
+  }
+
+  private async flushScores(): Promise<void> {
+    this.scoreFlushTimer = null;
+    const batch = this.pendingScores;
+    const update = this.scoreFlushUpdate;
+    this.pendingScores = new Map<string, Array<(v: number | null) => void>>();
+    this.scoreFlushUpdate = false;
+
+    const txids = Array.from(batch.keys());
+    if (!txids.length) return;
+
+    const resolveAll = (fn: (txid: string) => number | null) => {
+      for (const [txid, waiters] of batch) {
+        const value = fn(txid);
+        for (const waiter of waiters) waiter(value);
+      }
+    };
+
+    if (!this.psdk) {
+      resolveAll(() => null);
+      return;
+    }
+
+    try {
+      const result = await this.psdk.myScore.load(txids, [], update);
+      resolveAll((txid) => {
+        const rec = result?.[txid];
+        return rec && rec.value != null ? Number(rec.value) : null;
+      });
+    } catch (e) {
+      console.error("[appInit] loadMyPostScore batch error:", e);
+      resolveAll(() => null);
     }
   }
 

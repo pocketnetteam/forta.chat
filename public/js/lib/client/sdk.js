@@ -74,12 +74,12 @@ var pSDK = function ({ app, api, actions }) {
         },
 
         myScore: {
-            time: 6000,
+            time: 43200,
             authorized: true
         },
 
         myScoreFB: {
-            time: 6000,
+            time: 43200,
             authorized: true
         },
 
@@ -2952,7 +2952,7 @@ var pSDK = function ({ app, api, actions }) {
                     return _.indexOf(commentIds, id) > -1
                 })
 
-                return api.rpc('getpagescores', [sIds, app.user.address.value, cIds]).then((data) => {
+                return api.rpc('getpagescores', [sIds, String(app.user.address.value || ''), cIds]).then((data) => {
 
                     return _.map(ids, (id) => {
                         return {
@@ -3101,7 +3101,7 @@ var pSDK = function ({ app, api, actions }) {
 
             return loadList('postScores', txids, (txids) => {
 
-                return api.rpc('getpostscores', txids).then((d) => {
+                return api.rpc('getpostscores', [txids]).then((d) => {
 
                     var g = group(d, (info) => {
                         return info.posttxid

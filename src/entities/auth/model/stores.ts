@@ -1758,7 +1758,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */
   const loadPost = (txid: string) => appInitializer.loadPost(txid);
 
-  const loadPostScores = (txid: string) => appInitializer.loadPostScores(txid);
   const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
   const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
   const submitUpvote = (txid: string, value: number) => appInitializer.submitUpvote(txid, value, address.value!);
@@ -1941,7 +1940,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     loadMyPostScore,
     loadPost,
     loadPostComments,
-    loadPostScores,
     loadUsersInfo: (addresses: string[], options?: { update?: boolean }) =>
       appInitializer.loadUsersInfo(addresses, options),
     login,

@@ -167,6 +167,13 @@ declare var pSDK: new (opts: {
     load(addresses: string[], light?: boolean, reload?: boolean): Promise<void>;
     get(address: string): UserDataSDK;
   };
+  myScore: {
+    load(
+      shareIds: string[],
+      commentIds: string[],
+      update?: boolean,
+    ): Promise<Record<string, { posttxid?: string; cmntid?: string; value?: number | string } | undefined>>;
+  };
 };
 declare var UserInfo: new () => {
   name: { set(v: string): void };

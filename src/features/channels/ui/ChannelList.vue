@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { useChannelStore, getChannelPreviewText } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
 import { useChatStore } from "@/entities/chat";
@@ -24,14 +24,9 @@ onMounted(async () => {
     await channelStore.hydrateFromDexie();
   }
 
-  if (channelStore.channels.length === 0) {
-    channelStore.fetchChannels(true).then(() => nextTick(prefetchVisiblePosts));
-  } else {
-    nextTick(prefetchVisiblePosts);
-    // Refresh in the background so newly subscribed channels appear and stale
-    // previews update — Dexie data is the first-paint, RPC the second.
-    channelStore.fetchChannels(true);
-  }
+  // Refresh in the background so newly subscribed channels appear and stale
+  // previews update — Dexie data is the first-paint, RPC the second.
+  channelStore.fetchChannels(true);
   attachScrollListener();
 });
 
@@ -56,34 +51,13 @@ const getPreviewTime = (channel: Channel): string => {
   return formatRelativeTime(new Date(channel.lastContent.time * 1000));
 };
 
-// Scroll handling for infinite load + prefetch visible channels' posts
+// Scroll handling for infinite load of the channel list.
+// NOTE: We intentionally do NOT prefetch per-channel posts (getProfileFeed)
+// here — the list preview reads from `channel.lastContent`, which
+// `getsubscribeschannels` already returns. `getProfileFeed` fires only when a
+// channel is opened (see channel-store `setActiveChannel`).
 const ITEM_HEIGHT = 68;
-const PREFETCH_BUFFER = 3;
 let scrollEl: HTMLElement | null = null;
-let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Prefetch posts for channels visible in viewport (+ buffer) */
-const prefetchVisiblePosts = () => {
-  const el = scrollerRef.value?.$el as HTMLElement | undefined;
-  if (!el) return;
-  const { scrollTop, clientHeight } = el;
-  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 1);
-  const lastIdx = Math.min(
-    channelStore.channels.length - 1,
-    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + PREFETCH_BUFFER,
-  );
-  for (let i = firstIdx; i <= lastIdx; i++) {
-    const addr = channelStore.channels[i]?.address;
-    if (addr && !channelStore.posts.has(addr)) {
-      channelStore.fetchPosts(addr, true);
-    }
-  }
-};
-
-const schedulePrefetch = () => {
-  if (prefetchTimer) clearTimeout(prefetchTimer);
-  prefetchTimer = setTimeout(prefetchVisiblePosts, 300);
-};
 
 const onScroll = () => {
   const el = scrollerRef.value?.$el as HTMLElement | undefined;
@@ -96,7 +70,6 @@ const onScroll = () => {
   ) {
     channelStore.fetchChannels();
   }
-  schedulePrefetch();
 };
 
 const attachScrollListener = () => {
@@ -108,7 +81,6 @@ const attachScrollListener = () => {
 watch(scrollerRef, attachScrollListener);
 onUnmounted(() => {
   scrollEl?.removeEventListener("scroll", onScroll);
-  if (prefetchTimer) clearTimeout(prefetchTimer);
 });
 </script>
 

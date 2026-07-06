@@ -29,6 +29,7 @@ import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
 import { runInBatches } from "@/shared/lib/run-in-batches";
 import { isCryptoWorkerSupported } from "@/shared/lib/crypto-worker/bridge";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
+import { createBurstCoalescer } from "@/shared/lib/burst-coalescer";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
 import { tRaw } from "@/shared/lib/i18n";
@@ -1609,7 +1610,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  Call this before direct `_sortedRoomsRef.value` assignments
    *  (fallback recompute, fullRebuildSortedRoomsAsync, cleanup) so stale
    *  patches don't later overwrite the freshly-built state. */
-  const cancelPendingPatches = () => sortedRoomsPatcher.cancel();
+  const cancelPendingPatches = () => {
+    sortedRoomsPatcher.cancel();
+    // Drop any pending coalesced deltas too — the caller is about to rebuild
+    // sortedRooms from dexieRoomMap, which already reflects those deltas.
+    sidebarDeltaCoalescer.cancel();
+  };
 
   const patchSortedRooms = (changes: RoomChange[]) => {
     sortedRoomsPatcher.schedule(changes);
@@ -1778,6 +1784,33 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   // ---------------------------------------------------------------------------
+  // Burst-coalesced sidebar re-sort for backlog catch-up
+  //
+  // WHY: when a room is opened after being away, its backlog is decrypted and
+  // written one event at a time (~1 per EventWriter flush window). Each write
+  // surfaces as a Dexie room delta, and rAF coalescing can't merge them because
+  // they land in separate frames — so the chat list re-sorts once *per message*
+  // ("chats jumping around" until the backlog finishes). This coalescer waits
+  // for the delta stream to go quiet, then applies the whole burst as a single
+  // re-sort (the sort key only cares about the newest message per room anyway).
+  // Interactive/optimistic patches (unread-clear on open, sends) bypass this and
+  // stay instant — they call patchSortedRooms directly, not via applyDexieDeltas.
+  //
+  // Trade-off: a live single message's sidebar preview/reorder is delayed by up
+  // to SIDEBAR_DELTA_SETTLE_MS. The open room's own message list is unaffected
+  // (it renders from the in-memory addMessage path, not from these deltas).
+  // ---------------------------------------------------------------------------
+  const SIDEBAR_DELTA_SETTLE_MS = 220;
+  const SIDEBAR_DELTA_MAX_WAIT_MS = 1500;
+  const sidebarDeltaCoalescer = createBurstCoalescer<RoomChange>(
+    (batch) => {
+      if (batch.length > 100) scheduleFullSortedRebuild();
+      else patchSortedRooms(batch);
+    },
+    { settleMs: SIDEBAR_DELTA_SETTLE_MS, maxWaitMs: SIDEBAR_DELTA_MAX_WAIT_MS },
+  );
+
+  // ---------------------------------------------------------------------------
   // Delta-based Dexie room tracking
   // ---------------------------------------------------------------------------
 
@@ -1858,10 +1891,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     dexieRooms.value = Array.from(dexieRoomMap.values());
+    // Coalesce the delta stream so a backlog catch-up collapses into a single
+    // sidebar re-sort once it settles, instead of re-sorting per message.
+    // dexieRoomMap (ground truth) is already updated above, so deferring the
+    // visible re-sort never loses data.
     if (relevantChanges.length > 100) {
+      // A single large batch is already "one step" — apply without extra delay.
+      sidebarDeltaCoalescer.cancel();
       scheduleFullSortedRebuild();
     } else {
-      patchSortedRooms(relevantChanges);
+      sidebarDeltaCoalescer.push(relevantChanges);
     }
 
     // Check if any changed rooms just got their preview — stop polling for them
