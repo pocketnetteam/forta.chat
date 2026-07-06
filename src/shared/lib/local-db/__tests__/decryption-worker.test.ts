@@ -29,6 +29,38 @@ function makeWorker(
   return { worker, getRoomCrypto };
 }
 
+/** Worker wired with a minimal RoomRepository backed by the test rooms table —
+ *  enough to exercise updateRoomPreviewIfLatest / preview writes. */
+function makeWorkerWithRoomRepo(
+  db: TestDb,
+  decryptFn: (raw: unknown) => Promise<{ body: string }> = async () => ({ body: "decrypted" }),
+) {
+  const getRoomCrypto = vi.fn().mockResolvedValue({ decryptEvent: decryptFn });
+  const roomRepo = {
+    getRoom: vi.fn(async (id: string) => db.rooms.get(id)),
+    updateLastMessage: vi.fn(
+      async (
+        roomId: string,
+        preview: string,
+        timestamp: number,
+        senderId: string,
+        type: unknown,
+        eventId: string,
+      ) => {
+        await db.rooms.update(roomId, {
+          lastMessagePreview: preview,
+          lastMessageTimestamp: timestamp,
+          lastMessageSenderId: senderId,
+          lastMessageType: type,
+          lastMessageEventId: eventId,
+        });
+      },
+    ),
+  };
+  const worker = new DecryptionWorker(db as any, getRoomCrypto, roomRepo as any);
+  return { worker, getRoomCrypto, roomRepo };
+}
+
 describe("DecryptionWorker", () => {
   let db: TestDb;
 
@@ -322,6 +354,124 @@ describe("DecryptionWorker", () => {
       expect(count).toBe(2);
       const queued = await db.decryptionQueue.where("status").equals("queued").toArray();
       expect(queued.map((j) => j.eventId).sort()).toEqual(["$a", "$pendingR2"]);
+      worker.dispose();
+    });
+  });
+
+  // ── Latest-only sidebar preview: no more 5 -> 4 -> 3 -> 2 -> 1 flicker ──
+  describe("updateRoomPreviewIfLatest (latest-only)", () => {
+    it("only the room's latest event rewrites the sidebar preview", async () => {
+      const { worker, roomRepo } = makeWorkerWithRoomRepo(db);
+      await db.rooms.add({
+        id: "!r1",
+        lastMessageEventId: "$new",
+        lastMessagePreview: "[encrypted]",
+        lastMessageTimestamp: 5000,
+      } as any);
+      await db.messages.bulkAdd([
+        { eventId: "$old", roomId: "!r1", timestamp: 1000, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$new", roomId: "!r1", timestamp: 5000, content: "[encrypted]", decryptionStatus: "pending" },
+      ] as any);
+      await db.decryptionQueue.bulkAdd([
+        { eventId: "$old", roomId: "!r1", encryptedBody: '{}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: 1 },
+        { eventId: "$new", roomId: "!r1", encryptedBody: '{}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: 2 },
+      ]);
+
+      await worker.tick();
+
+      const room = await db.rooms.get("!r1");
+      expect(room?.lastMessagePreview).toBe("decrypted");
+      expect(room?.lastMessageEventId).toBe("$new");
+      // Preview written exactly once — for the latest event, never for $old.
+      const previewedEventIds = roomRepo.updateLastMessage.mock.calls.map((c) => c[5]);
+      expect(previewedEventIds).toEqual(["$new"]);
+      worker.dispose();
+    });
+
+    it("decrypting a non-latest backlog message never touches the preview", async () => {
+      const { worker, roomRepo } = makeWorkerWithRoomRepo(db);
+      await db.rooms.add({
+        id: "!r1",
+        lastMessageEventId: "$new",
+        lastMessagePreview: "[encrypted]",
+        lastMessageTimestamp: 5000,
+      } as any);
+      await db.messages.add({
+        eventId: "$old", roomId: "!r1", timestamp: 1000,
+        content: "[encrypted]", decryptionStatus: "pending",
+      } as any);
+      await db.decryptionQueue.add({
+        eventId: "$old", roomId: "!r1", encryptedBody: '{}',
+        status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: 1,
+      });
+
+      await worker.tick();
+
+      const room = await db.rooms.get("!r1");
+      expect(room?.lastMessagePreview).toBe("[encrypted]");
+      expect(roomRepo.updateLastMessage).not.toHaveBeenCalled();
+      // The message row itself is still decrypted so it renders on scroll.
+      const msg = await db.messages.where("eventId").equals("$old").first();
+      expect(msg?.content).toBe("decrypted");
+      worker.dispose();
+    });
+  });
+
+  // ── Latest-per-room recovery replaces the whole-backlog sweep ──
+  describe("recoverLatestStuckMessages", () => {
+    it("boot sweep re-queues only the newest pending message per room", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.bulkAdd([
+        { eventId: "$r1old", roomId: "!r1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+        { eventId: "$r1new", roomId: "!r1", timestamp: 3, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+        { eventId: "$r2", roomId: "!r2", timestamp: 2, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+      ] as any);
+
+      const count = await worker.recoverLatestStuckMessages();
+      expect(count).toBe(2);
+      const queued = await db.decryptionQueue.where("status").equals("queued").toArray();
+      expect(queued.map((j) => j.eventId).sort()).toEqual(["$r1new", "$r2"]);
+      worker.dispose();
+    });
+
+    it("scoped to a room, re-queues only that room's newest stuck message (pending or failed)", async () => {
+      const { worker } = makeWorker(db);
+      await db.messages.bulkAdd([
+        { eventId: "$old", roomId: "!r1", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+        { eventId: "$new", roomId: "!r1", timestamp: 5, content: "[encrypted]", decryptionStatus: "failed", encryptedBody: '{}' },
+        { eventId: "$other", roomId: "!r2", timestamp: 9, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+      ] as any);
+
+      const count = await worker.recoverLatestStuckMessages("!r1");
+      expect(count).toBe(1);
+      const queued = await db.decryptionQueue.toArray();
+      expect(queued.map((j) => j.eventId)).toEqual(["$new"]);
+      worker.dispose();
+    });
+  });
+
+  // ── Newest-first decrypt order within a tick ──
+  describe("newest-first tick ordering", () => {
+    it("decrypts newest-enqueued jobs first", async () => {
+      const order: string[] = [];
+      const { worker } = makeWorker(db, async (raw: any) => {
+        order.push(raw.id);
+        return { body: "x" };
+      });
+      await db.messages.bulkAdd([
+        { eventId: "$a", roomId: "!r", timestamp: 1, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$b", roomId: "!r", timestamp: 2, content: "[encrypted]", decryptionStatus: "pending" },
+        { eventId: "$c", roomId: "!r", timestamp: 3, content: "[encrypted]", decryptionStatus: "pending" },
+      ] as any);
+      await db.decryptionQueue.bulkAdd([
+        { eventId: "$a", roomId: "!r", encryptedBody: '{"id":"a"}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: 10 },
+        { eventId: "$b", roomId: "!r", encryptedBody: '{"id":"b"}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: 20 },
+        { eventId: "$c", roomId: "!r", encryptedBody: '{"id":"c"}', status: "queued", attempts: 0, nextAttemptAt: 0, createdAt: 30 },
+      ]);
+
+      await worker.tick();
+
+      expect(order).toEqual(["c", "b", "a"]);
       worker.dispose();
     });
   });

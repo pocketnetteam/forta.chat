@@ -255,10 +255,23 @@ export const useChannelStore = defineStore("channel", () => {
         fresh.push(channel);
       }
 
-      if (reset) {
-        channels.value = fresh;
-      } else {
-        channels.value = [...channels.value, ...fresh];
+      // Guard against a transient/malformed empty response wiping a populated
+      // list. A `reset` fetch that yields ZERO channels while we already show a
+      // hydrated non-empty list is far more likely a flaky RPC (Tor hiccup,
+      // partial page, all-broken outputs) than the user genuinely unsubscribing
+      // from everything. Keep the existing list + Dexie rows instead of
+      // flashing an empty sidebar (WEE-24 follow-up). Trade-off: unsubscribing
+      // from ALL channels on another device won't reflect until a non-empty
+      // fetch reconciles — an acceptable, self-healing edge case.
+      const isSuspiciousEmptyReset =
+        reset && fresh.length === 0 && channels.value.length > 0;
+
+      if (!isSuspiciousEmptyReset) {
+        if (reset) {
+          channels.value = fresh;
+        } else {
+          channels.value = [...channels.value, ...fresh];
+        }
       }
 
       hasMoreChannels.value = pageHadFullCount;
@@ -267,8 +280,11 @@ export const useChannelStore = defineStore("channel", () => {
       // Persist fresh server data so the next cold-start renders immediately.
       // `reset` mirrors the full list (drops unsubscribed channels); pages
       // upsert only the newly appended slice. Mark hydrated since post-fetch
-      // Dexie state is now authoritative.
-      await persistChannels(reset, fresh);
+      // Dexie state is now authoritative. Skip the destructive `replaceAll([])`
+      // when we suppressed a suspicious empty reset above.
+      if (!isSuspiciousEmptyReset) {
+        await persistChannels(reset, fresh);
+      }
       isHydrated.value = true;
     } catch (e) {
       console.error("[channel-store] fetchChannels error:", e);

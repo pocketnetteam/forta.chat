@@ -6062,7 +6062,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       .catch(e => {
         console.warn("[chat-store] EventWriter.writeMessageBuffered failed:", e);
       });
-    if (isEncrypted && chatDbKitRef.value?.decryptionWorker) {
+    // Only enqueue for background retry once we're past the initial catch-up
+    // sync. When returning after being away, the initial sync replays the whole
+    // accumulated backlog through here — enqueuing every event would drag the
+    // entire history through the crypto worker (wasted work + the sidebar
+    // preview churn users saw as messages resolving 5 -> 4 -> 3 -> 2 -> 1).
+    // During catch-up the sidebar preview is recovered latest-only
+    // (recoverLatestStuckMessages + decryptRoomPreviews) and off-screen history
+    // decrypts lazily when scrolled into view. Live messages (post-ready) are
+    // the room's newest, so retrying them keeps the preview fresh.
+    const isInitialCatchUp = initialSyncStatus.value === "loading";
+    if (isEncrypted && !isInitialCatchUp && chatDbKitRef.value?.decryptionWorker) {
       chatDbKitRef.value.decryptionWorker.enqueue(
         raw.event_id as string,
         roomId,

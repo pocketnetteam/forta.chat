@@ -1,4 +1,4 @@
-import type { ChatDatabase, DecryptionJob } from "./schema";
+import type { ChatDatabase, DecryptionJob, LocalMessage } from "./schema";
 import type { RoomRepository } from "./room-repository";
 import { MessageType } from "@/entities/chat/model/types";
 import { cryptoDebug } from "@/shared/lib/utils/crypto-debug";
@@ -131,6 +131,12 @@ export class DecryptionWorker {
 
       if (jobs.length === 0) return;
 
+      // Decrypt newest-enqueued first. During a catch-up burst events are
+      // enqueued oldest -> newest, so `createdAt` desc approximates newest
+      // message first — the ones the user is most likely looking at (bottom of
+      // the open chat / the sidebar preview) resolve before older history.
+      jobs.sort((a, b) => b.createdAt - a.createdAt);
+
       // Decrypt phase — pure crypto, no DB writes.
       const results: Array<{ job: DecryptionJob; ok: boolean; body?: string; error?: unknown }> = [];
       for (const job of jobs) {
@@ -247,6 +253,60 @@ export class DecryptionWorker {
     }
     if (count > 0) {
       console.info(`[decryption] boot recovery re-queued ${count} stuck message(s)`);
+      this.scheduleNext();
+    }
+    return count;
+  }
+
+  /**
+   * Re-queue ONLY the newest still-encrypted message per room — used for the
+   * sidebar preview instead of decrypting the whole backlog.
+   *
+   * `roomId` given: newest stuck (pending OR failed) message of that one room —
+   * called when keys arrive / a room activates, so the preview recovers without
+   * dragging the room's entire history through the crypto worker.
+   *
+   * `roomId` omitted: newest `pending` message of EACH room — the boot sweep.
+   *
+   * Messages below the newest are intentionally left "[encrypted]" and decrypt
+   * lazily when their bubble scrolls into view (EncryptedMessageNotice), so we
+   * never eagerly decrypt off-screen history. Returns the number re-queued.
+   */
+  async recoverLatestStuckMessages(roomId?: string): Promise<number> {
+    const rows = roomId
+      ? await this.db.messages
+          .where("[roomId+timestamp]")
+          .between([roomId, 0], [roomId, Infinity], true, true)
+          .filter(
+            (m) =>
+              !!m.encryptedBody &&
+              !!m.eventId &&
+              !m.softDeleted &&
+              (m.decryptionStatus === "pending" || m.decryptionStatus === "failed"),
+          )
+          .toArray()
+      : await this.db.messages
+          .filter(
+            (m) =>
+              !!m.encryptedBody &&
+              !!m.eventId &&
+              !m.softDeleted &&
+              m.decryptionStatus === "pending",
+          )
+          .toArray();
+
+    const latestPerRoom = new Map<string, LocalMessage>();
+    for (const m of rows) {
+      const cur = latestPerRoom.get(m.roomId);
+      if (!cur || m.timestamp > cur.timestamp) latestPerRoom.set(m.roomId, m);
+    }
+
+    let count = 0;
+    for (const m of latestPerRoom.values()) {
+      if (await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)) count++;
+    }
+    if (count > 0) {
+      console.info(`[decryption] re-queued ${count} latest stuck message(s)`);
       this.scheduleNext();
     }
     return count;
@@ -444,9 +504,15 @@ export class DecryptionWorker {
     try {
       const room = await this.roomRepo.getRoom(roomId);
       if (!room) return;
-      if (room.lastMessageEventId === eventId ||
-          ((room.lastMessagePreview === "[encrypted]" || room.lastMessagePreview === "") &&
-           timestamp >= (room.lastMessageTimestamp ?? 0))) {
+      // Only the room's TRUE latest message may (re)write the sidebar preview.
+      // The previous fallback — "preview is a placeholder AND timestamp >=
+      // lastMessageTimestamp" — let any not-yet-latest backlog message bump the
+      // preview while catching up, so the list visibly flickered through old
+      // messages (5 -> 4 -> 3 -> 2 -> 1) as the queue decrypted them oldest
+      // first. `lastMessageEventId` is owned by EventWriter/decryptRoomPreviews
+      // and always points at the newest event, so matching it is the single
+      // authoritative signal that this decrypt belongs in the sidebar.
+      if (room.lastMessageEventId === eventId) {
         let preview = decryptedBody;
         if (type === MessageType.image) preview = "[photo]";
         else if (type === MessageType.video) preview = "[video]";

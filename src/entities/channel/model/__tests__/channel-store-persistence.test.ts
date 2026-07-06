@@ -236,6 +236,69 @@ describe("channel-store — Dexie hydration + persistence (WEE-24)", () => {
     expect(store.channels.map((c) => c.address)).toEqual(["fresh"]);
   });
 
+  it("does NOT wipe a hydrated non-empty list when a reset fetch returns empty", async () => {
+    const repo = makeRepo([
+      { address: "persisted", name: "Persisted", avatar: "", lastContent: null, syncOrder: 0, updatedAt: 0 },
+    ]);
+    vi.mocked(isChatDbReady).mockReturnValue(true);
+    vi.mocked(getChatDb).mockReturnValue({ channels: repo } as never);
+    vi.mocked(useAuthStore).mockReturnValue({
+      address: "me",
+      // Transient/malformed RPC returns zero channels with a valid height.
+      getSubscribesChannels: vi.fn().mockResolvedValueOnce({ channels: [], height: 1000 }),
+    } as unknown as ReturnType<typeof useAuthStore>);
+
+    const store = useChannelStore();
+    await store.hydrateFromDexie();
+    expect(store.channels.map((c) => c.address)).toEqual(["persisted"]);
+
+    await store.fetchChannels(true);
+
+    // The suspicious empty reset is suppressed: keep the hydrated list and do
+    // NOT destroy the Dexie mirror with replaceAll([]).
+    expect(store.channels.map((c) => c.address)).toEqual(["persisted"]);
+    expect(repo.replaceAll).not.toHaveBeenCalled();
+  });
+
+  it("allows an empty reset result when nothing is hydrated (authoritative empty)", async () => {
+    const repo = makeRepo();
+    vi.mocked(isChatDbReady).mockReturnValue(true);
+    vi.mocked(getChatDb).mockReturnValue({ channels: repo } as never);
+    vi.mocked(useAuthStore).mockReturnValue({
+      address: "me",
+      getSubscribesChannels: vi.fn().mockResolvedValueOnce({ channels: [], height: 1000 }),
+    } as unknown as ReturnType<typeof useAuthStore>);
+
+    const store = useChannelStore();
+    await store.fetchChannels(true);
+
+    expect(store.channels).toEqual([]);
+    // With nothing to protect, the empty server view is mirrored to Dexie.
+    expect(repo.replaceAll).toHaveBeenCalledTimes(1);
+    expect(repo.replaceAll.mock.calls[0][0]).toEqual([]);
+  });
+
+  it("retries hydration after the DB becomes ready (early no-op, later succeeds)", async () => {
+    const repo = makeRepo([
+      { address: "a", name: "A", avatar: "", lastContent: null, syncOrder: 0, updatedAt: 0 },
+    ]);
+
+    // Sidebar mounts before initChatDb(): first hydration must no-op.
+    vi.mocked(isChatDbReady).mockReturnValue(false);
+    const store = useChannelStore();
+    await store.hydrateFromDexie();
+    expect(store.isHydrated).toBe(false);
+    expect(store.channels).toEqual([]);
+
+    // matrixReady flips true → DB is ready → the ChatSidebar watch re-hydrates.
+    vi.mocked(isChatDbReady).mockReturnValue(true);
+    vi.mocked(getChatDb).mockReturnValue({ channels: repo } as never);
+    await store.hydrateFromDexie();
+
+    expect(store.isHydrated).toBe(true);
+    expect(store.channels.map((c) => c.address)).toEqual(["a"]);
+  });
+
   it("Dexie persistence failure does not break fetchChannels (warn-and-continue)", async () => {
     const repo = makeRepo();
     repo.replaceAll.mockRejectedValueOnce(new Error("db kaput"));
