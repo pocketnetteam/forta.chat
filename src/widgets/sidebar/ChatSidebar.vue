@@ -5,6 +5,7 @@ import { useChannelStore } from "@/entities/channel";
 import { InviteModal } from "@/features/invite";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import { useChatStore } from "@/entities/chat";
+import { useAuthStore } from "@/entities/auth";
 import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import { SelectionBar, useSelectionStore } from "@/features/selection";
@@ -20,6 +21,7 @@ import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions"
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
 const channelStore = useChannelStore();
+const authStore = useAuthStore();
 const selectionStore = useSelectionStore();
 const tabProgress = ref<number | undefined>(undefined);
 
@@ -38,6 +40,19 @@ onMounted(async () => {
   await channelStore.hydrateFromDexie();
   channelStore.fetchChannels(true);
 });
+
+// hydrateFromDexie() silently no-ops if the sidebar mounts before initChatDb()
+// has run (cold boot). It has no internal retry, so channels would stay hidden
+// until a manual fetch. matrixReady flips true only AFTER initChatDb(), so it's
+// a reliable "DB is ready" signal — re-run the local-first hydration then.
+watch(
+  () => authStore.matrixReady,
+  (ready) => {
+    if (!ready) return;
+    void channelStore.hydrateFromDexie();
+  },
+  { immediate: true },
+);
 
 const { t } = useI18n();
 const { activeTab, setTab } = useSidebarTab();
@@ -114,6 +129,14 @@ const visibleTabValues = computed(() => {
   return tabs;
 });
 
+// The room-list skeleton must not hide channels that are already hydrated from
+// Dexie: channels are a separate local-first pipeline and shouldn't wait on the
+// Matrix room sync. Only block the whole list when there's nothing at all to
+// show yet (no rooms AND no channels).
+const showRoomListSkeleton = computed(
+  () => chatStore.isRoomListLoading && channelStore.channels.length === 0,
+);
+
 // Sidebar tab slide direction
 const sidebarTabOrder: SidebarTab[] = ["contacts", "chats", "settings"];
 const tabSlideDir = ref<"left" | "right">("left");
@@ -124,10 +147,9 @@ watch(activeTab, (newVal, oldVal) => {
 });
 
 // Show skeleton until rooms appear from ANY source (Dexie cache or Matrix sync).
-// Uses computed so it re-activates on account switch (cleanup resets roomsInitialized).
-const roomsLoading = computed(() =>
-  chatStore.sortedRooms.length === 0 && !chatStore.roomsInitialized,
-);
+// Three states now live in the store (isRoomListLoading / isRoomListLoadingSlow /
+// isRoomListAuthoritativeEmpty): the 8s degrade watchdog switches the skeleton's
+// placeholder text instead of revealing a premature "no dialogs" empty state.
 
 // Auto-switch away from "invites" tab when no invites remain
 watch(
@@ -295,7 +317,7 @@ const walletStore = useWalletStore();
         <template v-else>
           <FolderTabs v-model="activeFilter" :scroll-progress="tabProgress" />
           <div class="relative flex-1 overflow-hidden">
-            <RoomListSkeleton v-if="roomsLoading" :first-load="true" />
+            <RoomListSkeleton v-if="showRoomListSkeleton" :first-load="true" :slow="chatStore.isRoomListLoadingSlow" />
             <SwipeableTabs
               v-else
               v-model="activeFilter"

@@ -155,9 +155,11 @@ export function initChatDb(
     if (existing) clearTimeout(existing);
     debouncedRetryTimers.set(roomId, setTimeout(() => {
       debouncedRetryTimers.delete(roomId);
-      // Recover persisted "[encrypted]" messages (queue may have drifted/died,
-      // e.g. after the 502 key-outage) AND retry any live queue jobs.
-      decryptionWorker.recoverStuckMessages(roomId).catch(() => {});
+      // Recover ONLY the room's newest persisted "[encrypted]" message (queue
+      // may have drifted/died, e.g. after the 502 key-outage) so the sidebar
+      // preview refreshes on key arrival — the rest of the history decrypts
+      // lazily as bubbles scroll into view. Also retry any live queue jobs.
+      decryptionWorker.recoverLatestStuckMessages(roomId).catch(() => {});
       decryptionWorker.retryForRoom(roomId);
     }, 500));
   };
@@ -222,11 +224,13 @@ export function initChatDb(
       })
       .catch(() => {});
 
-    // Re-enqueue messages stranded as "[encrypted]" in a previous session whose
-    // ciphertext is still on the row (e.g. failed during the 502 key-outage) but
-    // whose queue job died/was pruned. Self-limiting: recovered rows flip to "ok".
-    decryptionWorker.recoverAllStuckMessages().then((count) => {
-      if (count > 0) console.info(`[local-db] Re-queued ${count} stuck encrypted message(s) for decryption`);
+    // Re-enqueue the NEWEST message stranded as "[encrypted]" in each room from
+    // a previous session (ciphertext still on the row, e.g. failed during the
+    // 502 key-outage). Only the latest per room is recovered here so the sidebar
+    // previews refresh without eagerly decrypting every room's full backlog on
+    // boot — older messages decrypt on demand when scrolled into view.
+    decryptionWorker.recoverLatestStuckMessages().then((count) => {
+      if (count > 0) console.info(`[local-db] Re-queued ${count} latest stuck encrypted message(s) for decryption`);
     }).catch(() => {});
 
     // Post-migration: re-fetch and enqueue cross-device messages marked by v5 migration.

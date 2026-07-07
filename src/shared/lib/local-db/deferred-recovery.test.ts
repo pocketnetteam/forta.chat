@@ -34,7 +34,7 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
     processQueue: ReturnType<typeof vi.spyOn>;
     recoverStuckMedia: ReturnType<typeof vi.spyOn>;
     cleanupCancelledUploads: ReturnType<typeof vi.spyOn>;
-    recoverAllStuckMessages: ReturnType<typeof vi.spyOn>;
+    recoverLatestStuckMessages: ReturnType<typeof vi.spyOn>;
     recoverOrphanedProcessing: ReturnType<typeof vi.spyOn>;
     tick: ReturnType<typeof vi.spyOn>;
     gcTombstones: ReturnType<typeof vi.spyOn>;
@@ -52,7 +52,7 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
       processQueue: vi.spyOn(SyncEngine.prototype, "processQueue").mockResolvedValue(undefined as never),
       recoverStuckMedia: vi.spyOn(MessageRepository.prototype, "recoverStuckMedia").mockResolvedValue(0 as never),
       cleanupCancelledUploads: vi.spyOn(MessageRepository.prototype, "cleanupCancelledUploads").mockResolvedValue(0 as never),
-      recoverAllStuckMessages: vi.spyOn(DecryptionWorker.prototype, "recoverAllStuckMessages").mockResolvedValue(0 as never),
+      recoverLatestStuckMessages: vi.spyOn(DecryptionWorker.prototype, "recoverLatestStuckMessages").mockResolvedValue(0 as never),
       // WEE-93: cheap indexed reset that runs BEFORE the first tick — mocked so
       // the recoverOrphanedProcessing → tick chain resolves in microtasks
       // under fake timers (real Dexie ops don't settle here).
@@ -85,7 +85,7 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
     expect(spies.recoverStrandedOps).not.toHaveBeenCalled();
     expect(spies.recoverStuckMedia).not.toHaveBeenCalled();
     expect(spies.cleanupCancelledUploads).not.toHaveBeenCalled();
-    expect(spies.recoverAllStuckMessages).not.toHaveBeenCalled();
+    expect(spies.recoverLatestStuckMessages).not.toHaveBeenCalled();
     expect(spies.gcTombstones).not.toHaveBeenCalled();
     expect(spies.gcSearchCache).not.toHaveBeenCalled();
   });
@@ -99,7 +99,7 @@ describe("initChatDb deferred recovery (WEE-97 item 1)", () => {
     expect(spies.recoverStrandedOps).toHaveBeenCalledTimes(1);
     expect(spies.recoverStuckMedia).toHaveBeenCalledTimes(1);
     expect(spies.cleanupCancelledUploads).toHaveBeenCalledTimes(1);
-    expect(spies.recoverAllStuckMessages).toHaveBeenCalledTimes(1);
+    expect(spies.recoverLatestStuckMessages).toHaveBeenCalledTimes(1);
     expect(spies.gcTombstones).toHaveBeenCalledTimes(1);
     expect(spies.gcSearchCache).toHaveBeenCalledTimes(1);
     // recoverStrandedOps re-kicks the queue → second processQueue call

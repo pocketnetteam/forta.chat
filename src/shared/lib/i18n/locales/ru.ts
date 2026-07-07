@@ -20,6 +20,8 @@ export const ru: Record<TranslationKey, string> = {
   // ── Contact list ──
   "contactList.loadingChats": "Загружаем ваши чаты и контакты",
   "contactList.loadingChatsHint": "При первом входе это может занять некоторое время",
+  "contactList.loadingChatsSlow": "Загрузка занимает больше времени, чем обычно…",
+  "contactList.loadingChatsSlowHint": "Продолжаем синхронизацию с сервером",
   "contactList.noConversations": "Диалогов пока нет",
   "contactList.inviteToChat": "Приглашение в чат",
   "contactList.noMessages": "Нет сообщений",

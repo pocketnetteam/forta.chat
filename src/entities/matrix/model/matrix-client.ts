@@ -292,7 +292,7 @@ export class MatrixClientService {
             // followed by any other event (typing, read receipt promoted
             // to timeline on some servers, or a retry hangup) would
             // disappear from our /sync, and the Matrix SDK would never
-            // fire Call.incoming. Raise to 20 so a realistic burst of
+            // fire Call.incoming. Raise to 4 so a realistic burst of
             // new events still fits without losing the call invite.
             limit: 20,
             lazy_load_members: true,
@@ -341,7 +341,7 @@ export class MatrixClientService {
     await userClient.startClient({
       pollTimeout: 60000,
       resolveInvitesToProfiles: false,
-      initialSyncLimit: 20,
+      initialSyncLimit: 4,
       disablePresence: true,
       lazyLoadMembers: true,
       ...(syncFilter ? { filter: syncFilter } : {}),

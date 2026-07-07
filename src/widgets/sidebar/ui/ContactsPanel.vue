@@ -287,8 +287,9 @@ const toggleSearch = () => {
 
     <!-- List -->
     <div v-if="!addMode" class="flex-1 overflow-hidden">
-      <!-- Skeleton while rooms haven't loaded yet -->
-      <div v-if="contacts.length === 0 && !chatStore.roomsInitialized" class="space-y-1 p-2">
+      <!-- Skeleton while rooms haven't loaded yet (keeps spinning through the
+           slow-load window instead of prematurely showing "no contacts"). -->
+      <div v-if="contacts.length === 0 && chatStore.isRoomListLoading" class="space-y-1 p-2">
         <div v-for="i in 5" :key="i" class="flex items-center gap-3 px-4 py-2.5">
           <div class="h-10 w-10 shrink-0 animate-pulse rounded-full bg-neutral-grad-2" />
           <div class="h-4 w-24 animate-pulse rounded bg-neutral-grad-2" />

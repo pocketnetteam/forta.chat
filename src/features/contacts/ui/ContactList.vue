@@ -836,11 +836,14 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
 <template>
   <div class="flex flex-col">
     <!-- Empty state. A separate skeleton for "initial load" lives in ChatSidebar and is
-         keyed off `sortedRooms.length === 0 && !roomsInitialized`. Showing another skeleton
-         here based on isSyncing caused visible flicker on every WebSocket reconnect
-         (isSyncing flips between RECONNECTING and idle). -->
+         keyed off `chatStore.isRoomListLoading`. Showing another skeleton here based on
+         isSyncing caused visible flicker on every WebSocket reconnect (isSyncing flips
+         between RECONNECTING and idle).
+         The "no conversations" hint is authoritative only when the whole list is empty
+         after a real SYNCING sync (isRoomListAuthoritativeEmpty) OR when this specific
+         tab is empty while other tabs have rooms (sortedRooms.length > 0). -->
     <div
-      v-if="filteredRooms.length === 0 && chatStore.roomsInitialized"
+      v-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
       class="flex flex-col items-center gap-3 px-6 py-12 text-center"
     >
       <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">

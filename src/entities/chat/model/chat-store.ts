@@ -29,6 +29,7 @@ import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
 import { runInBatches } from "@/shared/lib/run-in-batches";
 import { isCryptoWorkerSupported } from "@/shared/lib/crypto-worker/bridge";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
+import { createBurstCoalescer } from "@/shared/lib/burst-coalescer";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
 import { tRaw } from "@/shared/lib/i18n";
@@ -517,8 +518,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (initialSyncStatus.value !== "loading") return;
       initialSyncStatus.value = "degraded";
       // Release every skeleton/preloader that keys off roomsInitialized so the
-      // cached room list (or the empty-state hint) becomes visible. A later
-      // PREPARED sync still runs a full refresh and upgrades back to "ready".
+      // cached room list becomes visible. When the cache is still empty the
+      // room-list keeps a "taking longer than usual" placeholder (see
+      // isRoomListLoadingSlow) instead of flashing the "no dialogs" empty
+      // state — the authoritative empty is gated on a real SYNCING sync
+      // (isRoomListAuthoritativeEmpty). A later PREPARED sync still runs a full
+      // refresh and upgrades back to "ready".
       roomsInitialized.value = true;
       // WEE-97: release deferred boot work (recovery scans, Tor, telemetry)
       signalChatsInteractive();
@@ -1605,7 +1610,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  Call this before direct `_sortedRoomsRef.value` assignments
    *  (fallback recompute, fullRebuildSortedRoomsAsync, cleanup) so stale
    *  patches don't later overwrite the freshly-built state. */
-  const cancelPendingPatches = () => sortedRoomsPatcher.cancel();
+  const cancelPendingPatches = () => {
+    sortedRoomsPatcher.cancel();
+    // Drop any pending coalesced deltas too — the caller is about to rebuild
+    // sortedRooms from dexieRoomMap, which already reflects those deltas.
+    sidebarDeltaCoalescer.cancel();
+  };
 
   const patchSortedRooms = (changes: RoomChange[]) => {
     sortedRoomsPatcher.schedule(changes);
@@ -1774,6 +1784,33 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   // ---------------------------------------------------------------------------
+  // Burst-coalesced sidebar re-sort for backlog catch-up
+  //
+  // WHY: when a room is opened after being away, its backlog is decrypted and
+  // written one event at a time (~1 per EventWriter flush window). Each write
+  // surfaces as a Dexie room delta, and rAF coalescing can't merge them because
+  // they land in separate frames — so the chat list re-sorts once *per message*
+  // ("chats jumping around" until the backlog finishes). This coalescer waits
+  // for the delta stream to go quiet, then applies the whole burst as a single
+  // re-sort (the sort key only cares about the newest message per room anyway).
+  // Interactive/optimistic patches (unread-clear on open, sends) bypass this and
+  // stay instant — they call patchSortedRooms directly, not via applyDexieDeltas.
+  //
+  // Trade-off: a live single message's sidebar preview/reorder is delayed by up
+  // to SIDEBAR_DELTA_SETTLE_MS. The open room's own message list is unaffected
+  // (it renders from the in-memory addMessage path, not from these deltas).
+  // ---------------------------------------------------------------------------
+  const SIDEBAR_DELTA_SETTLE_MS = 220;
+  const SIDEBAR_DELTA_MAX_WAIT_MS = 1500;
+  const sidebarDeltaCoalescer = createBurstCoalescer<RoomChange>(
+    (batch) => {
+      if (batch.length > 100) scheduleFullSortedRebuild();
+      else patchSortedRooms(batch);
+    },
+    { settleMs: SIDEBAR_DELTA_SETTLE_MS, maxWaitMs: SIDEBAR_DELTA_MAX_WAIT_MS },
+  );
+
+  // ---------------------------------------------------------------------------
   // Delta-based Dexie room tracking
   // ---------------------------------------------------------------------------
 
@@ -1854,10 +1891,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     dexieRooms.value = Array.from(dexieRoomMap.values());
+    // Coalesce the delta stream so a backlog catch-up collapses into a single
+    // sidebar re-sort once it settles, instead of re-sorting per message.
+    // dexieRoomMap (ground truth) is already updated above, so deferring the
+    // visible re-sort never loses data.
     if (relevantChanges.length > 100) {
+      // A single large batch is already "one step" — apply without extra delay.
+      sidebarDeltaCoalescer.cancel();
       scheduleFullSortedRebuild();
     } else {
-      patchSortedRooms(relevantChanges);
+      sidebarDeltaCoalescer.push(relevantChanges);
     }
 
     // Check if any changed rooms just got their preview — stop polling for them
@@ -1918,6 +1961,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   );
 
   const sortedRooms = computed(() => _sortedRoomsRef.value);
+
+  // ── Room-list first-load states ──────────────────────────────────────────
+  // Split the single roomsInitialized flag into three UI states so the 8s
+  // degrade watchdog switches the placeholder text instead of revealing a
+  // premature "no dialogs" empty state (see startInitialSyncWatch).
+  //
+  // The list is authoritatively empty ONLY once the SDK reached steady-state
+  // incremental sync ("SYNCING"). At "PREPARED" the SDK may not have
+  // materialized all rooms into memory yet (slow WebView / large account) —
+  // the same reason runRoomCleanup waits for "SYNCING" before pruning.
+  const isRoomListAuthoritativeEmpty = computed(() =>
+    sortedRooms.value.length === 0
+    && initialSyncStatus.value === "ready"
+    && syncState.value === "SYNCING",
+  );
+  // Still loading the first room snapshot → show skeleton.
+  const isRoomListLoading = computed(() =>
+    sortedRooms.value.length === 0 && !isRoomListAuthoritativeEmpty.value,
+  );
+  // Loading is taking longer than usual (watchdog degraded, cache still empty)
+  // → show the same skeleton with a "taking longer" placeholder text.
+  const isRoomListLoadingSlow = computed(() =>
+    isRoomListLoading.value && initialSyncStatus.value === "degraded",
+  );
 
   const totalUnread = computed(() => {
     void _dexieRoomMapVersion.value;
@@ -6034,7 +6101,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       .catch(e => {
         console.warn("[chat-store] EventWriter.writeMessageBuffered failed:", e);
       });
-    if (isEncrypted && chatDbKitRef.value?.decryptionWorker) {
+    // Only enqueue for background retry once we're past the initial catch-up
+    // sync. When returning after being away, the initial sync replays the whole
+    // accumulated backlog through here — enqueuing every event would drag the
+    // entire history through the crypto worker (wasted work + the sidebar
+    // preview churn users saw as messages resolving 5 -> 4 -> 3 -> 2 -> 1).
+    // During catch-up the sidebar preview is recovered latest-only
+    // (recoverLatestStuckMessages + decryptRoomPreviews) and off-screen history
+    // decrypts lazily when scrolled into view. Live messages (post-ready) are
+    // the room's newest, so retrying them keeps the preview fresh.
+    const isInitialCatchUp = initialSyncStatus.value === "loading";
+    if (isEncrypted && !isInitialCatchUp && chatDbKitRef.value?.decryptionWorker) {
       chatDbKitRef.value.decryptionWorker.enqueue(
         raw.event_id as string,
         roomId,
@@ -7219,6 +7296,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     removeRoom,
     roomsInitialized,
     initialSyncStatus,
+    isRoomListAuthoritativeEmpty,
+    isRoomListLoading,
+    isRoomListLoadingSlow,
     startInitialSyncWatch,
     namesReady,
     syncState,
