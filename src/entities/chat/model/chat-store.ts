@@ -1985,6 +1985,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const isRoomListLoadingSlow = computed(() =>
     isRoomListLoading.value && initialSyncStatus.value === "degraded",
   );
+  // First sync stalled (8s watchdog) or Matrix sync errored — offer manual retry.
+  // RECONNECTING is intentionally excluded (may self-heal without user action).
+  const isRoomListStuck = computed(() =>
+    sortedRooms.value.length === 0
+    && !isRoomListAuthoritativeEmpty.value
+    && (
+      initialSyncStatus.value === "degraded"
+      || syncState.value === "ERROR"
+      || syncState.value === "STOPPED"
+    ),
+  );
 
   const totalUnread = computed(() => {
     void _dexieRoomMapVersion.value;
@@ -7299,6 +7310,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     isRoomListAuthoritativeEmpty,
     isRoomListLoading,
     isRoomListLoadingSlow,
+    isRoomListStuck,
     startInitialSyncWatch,
     namesReady,
     syncState,

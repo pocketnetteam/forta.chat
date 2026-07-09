@@ -26,6 +26,7 @@ import { getDraft } from "@/shared/lib/drafts";
 import { useSelectionStore } from "@/features/selection";
 import RenameContactDialog from "@/features/chat-info/ui/RenameContactDialog.vue";
 import { hapticImpact } from "@/shared/lib/haptics";
+import { RoomListSkeleton } from "@/shared/ui/skeleton";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
@@ -831,10 +832,45 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
   if (suppressContextMenu || selectionStore.isSelectionMode) return;
   ctxMenu.value = { show: true, x: e.clientX, y: e.clientY, roomId: room.id };
 };
+
+/** Manual retry when the first room sync stalled or Matrix errored. */
+const retryRoomListSync = () => {
+  if (!authStore.matrixReady) return;
+  chatStore.refreshRoomsNow();
+  chatStore.refreshRooms("PREPARED");
+};
 </script>
 
 <template>
   <div class="flex flex-col">
+    <!-- Stuck: first sync watchdog fired or Matrix sync errored. -->
+    <div
+      v-if="filteredRooms.length === 0 && chatStore.isRoomListStuck"
+      class="flex flex-col items-center gap-3 px-6 py-12 text-center"
+    >
+      <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-text-on-main-bg-color">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      </div>
+      <p class="text-sm font-medium text-text-color">{{ t("contactList.syncStuck") }}</p>
+      <p class="text-xs text-text-on-main-bg-color/60">{{ t("contactList.syncStuckHint") }}</p>
+      <button
+        class="mt-1 rounded-lg bg-color-bg-ac px-4 py-2.5 text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac-1 disabled:cursor-not-allowed disabled:opacity-50"
+        :disabled="!authStore.matrixReady"
+        @click="retryRoomListSync"
+      >
+        {{ t("contactList.syncRetry") }}
+      </button>
+    </div>
+
+    <!-- Loading: rooms not in store yet (channels may already be hydrated). -->
+    <RoomListSkeleton
+      v-else-if="filteredRooms.length === 0 && chatStore.isRoomListLoading"
+      :first-load="true"
+      :slow="chatStore.isRoomListLoadingSlow"
+    />
+
     <!-- Empty state. A separate skeleton for "initial load" lives in ChatSidebar and is
          keyed off `chatStore.isRoomListLoading`. Showing another skeleton here based on
          isSyncing caused visible flicker on every WebSocket reconnect (isSyncing flips
@@ -843,7 +879,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
          after a real SYNCING sync (isRoomListAuthoritativeEmpty) OR when this specific
          tab is empty while other tabs have rooms (sortedRooms.length > 0). -->
     <div
-      v-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
+      v-else-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
       class="flex flex-col items-center gap-3 px-6 py-12 text-center"
     >
       <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">

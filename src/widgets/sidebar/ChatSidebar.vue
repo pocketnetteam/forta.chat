@@ -129,10 +129,11 @@ const visibleTabValues = computed(() => {
   return tabs;
 });
 
-// The room-list skeleton must not hide channels that are already hydrated from
-// Dexie: channels are a separate local-first pipeline and shouldn't wait on the
-// Matrix room sync. Only block the whole list when there's nothing at all to
-// show yet (no rooms AND no channels).
+// The room-list skeleton covers the whole tab area only when there is nothing
+// at all to show yet (no rooms AND no channels). When channels are already
+// hydrated from Dexie but Matrix room sync is still in flight, the All tab
+// must keep showing channels — so the full-area skeleton stays off and
+// per-tab loading/stuck placeholders in ContactList take over (WEE-24).
 const showRoomListSkeleton = computed(
   () => chatStore.isRoomListLoading && channelStore.channels.length === 0,
 );
