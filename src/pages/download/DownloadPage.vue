@@ -8,7 +8,7 @@ const { t } = useI18n();
 const localeStore = useLocaleStore();
 const currentYear = new Date().getFullYear();
 
-const apkUrl = ref(downloadLinks.androidApk);
+const apkUrl = ref<string>(downloadLinks.androidApk);
 const latestVersion = ref("");
 
 onMounted(async () => {

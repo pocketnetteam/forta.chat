@@ -3,6 +3,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness, waitTicks } from "./sync-engine-test-helpers";
 
 // --- Module mocks ------------------------------------------------------------
 
@@ -115,19 +116,6 @@ async function seedOp(
   } as PendingOperation);
 }
 
-function waitTicks(n = 1): Promise<void> {
-  // Let the event loop drain: each await yields one microtask tick,
-  // and setTimeout(0) yields one macrotask tick.
-  return new Promise((resolve) => {
-    let remaining = n;
-    function next() {
-      if (remaining-- <= 0) resolve();
-      else setTimeout(next, 0);
-    }
-    next();
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -142,8 +130,7 @@ describe("SyncEngine — non-blocking backoff (head-of-line isolation)", () => {
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("does not block subsequent ops for 30s when first op fails", async () => {
@@ -226,8 +213,7 @@ describe("SyncEngine — setOnline(true) retries failed ops", () => {
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("resets failed ops to pending when connection is restored", async () => {
@@ -265,14 +251,18 @@ describe("SyncEngine — transactional op claim", () => {
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("two independent engines on same DB must not both execute the same op", async () => {
+    h.getRoomCrypto.mockResolvedValue({
+      canBeEncrypt: () => true,
+      encryptEvent: async (content: string) => ({ body: content, msgtype: "m.text" }),
+    } as never);
+
     // Slow send so both concurrent claims race on the same record.
     mockMatrix.sendEncryptedText.mockImplementation(async () => {
-      await new Promise((r) => setTimeout(r, 20));
+      await new Promise((r) => setTimeout(r, 50));
       return "$ok";
     });
 
@@ -293,9 +283,12 @@ describe("SyncEngine — transactional op claim", () => {
     await Promise.all([a, b]);
 
     // Wait until all scheduled ticks finish.
-    await waitTicks(5);
+    await waitTicks(10);
 
-    expect(mockMatrix.sendEncryptedText).toHaveBeenCalledTimes(1);
+    await vi.waitFor(
+      () => expect(mockMatrix.sendEncryptedText).toHaveBeenCalledTimes(1),
+      { timeout: 2000, interval: 20 },
+    );
     // engineB lives outside the harness; dispose it so its watchdog interval
     // stops before afterEach closes the DB.
     engineB.dispose();
@@ -312,8 +305,7 @@ describe("SyncEngine — marks message failed after maxRetries", () => {
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("respects maxRetries and marks the message failed", async () => {

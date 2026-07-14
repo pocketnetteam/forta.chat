@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onMaximized: (cb) => ipcRenderer.on("win:maximized", cb),
   onUnmaximized: (cb) => ipcRenderer.on("win:unmaximized", cb),
   torSetMode: (mode) => ipcRenderer.invoke("tor:set-mode", mode),
+  torConfigure: (opts) => ipcRenderer.invoke("tor:configure", opts),
   torGetStatus: () => ipcRenderer.invoke("tor:get-status"),
   onTorStatus: (cb) => ipcRenderer.on("tor:status-changed", (_e, data) => cb(data)),
   saveFile: (fileName, buffer) => ipcRenderer.invoke("file:save", fileName, buffer),

@@ -5,6 +5,7 @@ import { SyncEngine } from "../sync-engine";
 import { MessageRepository } from "../message-repository";
 import { RoomRepository } from "../room-repository";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 /**
  * Regression coverage for WEE-64: the chat-list preview must reflect the real
@@ -86,7 +87,10 @@ function makeHarness(name: string): Harness {
   const db = new TestDb(name);
   const messages = new MessageRepository(db as never);
   const rooms = new RoomRepository(db as never);
-  const getRoomCrypto = vi.fn(async () => undefined);
+  const getRoomCrypto = vi.fn(async () => ({
+    canBeEncrypt: () => true,
+    encryptEvent: async (content: string) => ({ body: content, msgtype: "m.text" }),
+  })) as never;
   const engine = new SyncEngine(db as never, messages as never, rooms as never, getRoomCrypto);
   return { db, engine, messages, rooms };
 }
@@ -153,10 +157,7 @@ describe("SyncEngine — WEE-64: chat-list preview reflects failed/retried send"
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("markMessageFailed sets room.lastMessageLocalStatus='failed' for the last message", async () => {
@@ -174,13 +175,23 @@ describe("SyncEngine — WEE-64: chat-list preview reflects failed/retried send"
     });
 
     await seedOp(h.db, { clientId: msg.clientId, maxRetries: 1 });
-    h.engine.processQueue();
+    await h.engine.processQueue();
     await waitOpFailed(h.db, msg.clientId);
 
-    const message = await h.messages.getByClientId(msg.clientId);
-    const room = await h.db.rooms.get(ROOM_ID);
-    expect(message?.status).toBe("failed");
-    expect(room?.lastMessageLocalStatus).toBe("failed");
+    await vi.waitFor(
+      async () => {
+        const message = await h.messages.getByClientId(msg.clientId);
+        expect(message?.status).toBe("failed");
+      },
+      { timeout: 3000, interval: 20 },
+    );
+    await vi.waitFor(
+      async () => {
+        const room = await h.db.rooms.get(ROOM_ID);
+        expect(room?.lastMessageLocalStatus).toBe("failed");
+      },
+      { timeout: 3000, interval: 20 },
+    );
   });
 
   it("does NOT touch room status when the failed message is not the room's last", async () => {
@@ -202,7 +213,7 @@ describe("SyncEngine — WEE-64: chat-list preview reflects failed/retried send"
     });
 
     await seedOp(h.db, { clientId: stale.clientId, maxRetries: 1 });
-    h.engine.processQueue();
+    await h.engine.processQueue();
     await waitOpFailed(h.db, stale.clientId);
 
     const message = await h.messages.getByClientId(stale.clientId);
@@ -231,7 +242,7 @@ describe("SyncEngine — WEE-64: chat-list preview reflects failed/retried send"
       payload: { eventId: "$evt", content: "edited" },
       maxRetries: 1,
     });
-    h.engine.processQueue();
+    await h.engine.processQueue();
     await waitOpFailed(h.db, "edit_cli");
 
     const room = await h.db.rooms.get(ROOM_ID);

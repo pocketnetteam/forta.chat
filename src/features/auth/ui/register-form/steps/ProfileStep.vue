@@ -206,7 +206,7 @@ const handleSubmit = async () => {
             :disabled="loading"
           />
           <div v-if="nameChecking" class="absolute right-3 top-1/2 -translate-y-1/2">
-            <Spinner size="xs" />
+            <Spinner size="sm" />
           </div>
         </div>
         <p v-if="nameError" class="mt-1 text-xs text-color-bad">{{ nameError }}</p>

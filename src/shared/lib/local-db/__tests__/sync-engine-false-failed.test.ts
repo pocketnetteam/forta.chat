@@ -3,6 +3,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 /**
  * Regression coverage for WEE-40: successfully-delivered messages must never
@@ -160,14 +161,7 @@ describe("SyncEngine — WEE-40: false-failed status on delivered messages", () 
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    // dispose clears scheduled timers but in-flight microtasks (the catch
-    // block of processTick) can still race against db.delete() and raise
-    // DexieClosedError. Yield a couple of macrotask ticks so any pending
-    // .catch settles before tearing down the database.
-    await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("does not flip a message to 'failed' when /sync echo already confirmed it", async () => {

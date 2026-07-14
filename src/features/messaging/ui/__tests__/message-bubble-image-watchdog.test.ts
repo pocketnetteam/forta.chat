@@ -77,10 +77,12 @@ describe("MessageBubble — image spinner watchdog (WEE-90 H3)", () => {
   });
 
   it("resets the watchdog when the bubble is recycled to a new message", () => {
-    const source = getSource();
+    const source = getSource().replace(/\r\n/g, "\n");
     // Walk the dedicated id-watch that resets the watchdog state.
-    const idx = source.indexOf("imageLoadTimedOut.value = false;\n    clearImageLoadTimer();\n    syncImageLoadWatchdog();");
-    expect(idx, "id-watch must reset + re-arm the image watchdog").toBeGreaterThan(-1);
+    const idx = source.indexOf("watch(\n  () => props.message.id,\n  () => {\n    imageLoadTimedOut.value = false;");
+    const idxAlt = source.indexOf("imageLoadTimedOut.value = false;\n    clearImageLoadTimer();\n    syncImageLoadWatchdog();");
+    const resolvedIdx = idx >= 0 ? idx : idxAlt;
+    expect(resolvedIdx, "id-watch must reset + re-arm the image watchdog").toBeGreaterThan(-1);
   });
 
   it("clears the load timer on unmount to avoid late writes to a dead ref", () => {

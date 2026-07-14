@@ -21,7 +21,7 @@ vi.mock("@/entities/matrix", () => ({
 import { useChatStore } from "../chat-store";
 
 function makeKit() {
-  const bulkSyncRooms = vi.fn(async () => {});
+  const bulkSyncRooms = vi.fn<(rooms: unknown[]) => Promise<void>>(async () => {});
   const kit = {
     rooms: {
       bulkSyncRooms,

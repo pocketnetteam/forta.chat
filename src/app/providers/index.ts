@@ -7,10 +7,10 @@ import { setupAssets } from "./assets";
 import { setupChatScripts } from "./chat-scripts";
 import { setupRouter } from "./router";
 import { setupInitialTheme } from "./theme";
-import { initTransport } from "@/shared/lib/transport/init-transport";
+import { initTransport, initNativeTransport } from "@/shared/lib/transport/init-transport";
 import { useTorStore } from "@/entities/tor";
 import { useLocaleStore } from "@/entities/locale";
-import { isElectron, isNative } from "@/shared/lib/platform";
+import { isElectron, isNative, isAndroid } from "@/shared/lib/platform";
 import { bootStatus } from "@/app/model/boot-status";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import { whenChatsInteractive } from "@/shared/lib/boot-signals";
@@ -39,6 +39,11 @@ export const setupProviders = async (app: App) => {
   }
 
   if (isNative) {
+    // Register Service Worker transport proxy on Android (PocketNet fetch → Tor)
+    if (isAndroid) {
+      initNativeTransport();
+    }
+
     // Configure status bar for proper safe area insets
     const { StatusBar, Style } = await import('@capacitor/status-bar');
     const { useThemeStore } = await import('@/entities/theme');
@@ -103,7 +108,7 @@ export const setupProviders = async (app: App) => {
     if (torStore.isEnabled) {
       whenChatsInteractive(TOR_DEFER_FALLBACK_MS).then(async () => {
         const { torService } = await import('@/shared/lib/tor');
-        torService.initBackground();
+        torService.initBackground(torStore.mode);
 
         // Once the daemon is bootstrapped, route the live Matrix session
         // through the local reverse proxy. The proxy flag is consulted
