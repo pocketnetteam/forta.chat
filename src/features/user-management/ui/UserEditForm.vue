@@ -4,7 +4,7 @@ import { useUserStore } from "@/entities/user/model";
 import { useLocaleStore } from "@/entities/locale";
 import type { Locale } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
-import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
+import { fileToAvatarBase64, uploadImage } from "@/shared/lib/upload-image";
 import { useToast } from "@/shared/lib/use-toast";
 
 const authStore = useAuthStore();
@@ -173,7 +173,8 @@ const handleAvatarChange = async (e: Event) => {
   avatarError.value = "";
   avatarRetrying.value = false;
   try {
-    const base64 = await fileToBase64(file);
+    // Always 200×200 before CDN upload — keeps profile avatars tiny and consistent.
+    const base64 = await fileToAvatarBase64(file);
     avatarUrl.value = base64; // local preview
     avatarUploading.value = true;
     const url = await uploadImage(base64, {
