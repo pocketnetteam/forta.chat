@@ -372,13 +372,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             const rawProfileMap = new Map<string, Record<string, unknown>>();
             for (const rawAddr of rawAddresses) {
-              var p = appInitializer.getUserData(rawAddr);
+              const sdkRow = appInitializer.getUserData(rawAddr) as
+                | (Record<string, unknown> & { export?: (strip?: boolean) => Record<string, unknown> })
+                | null;
 
-              if (p && (p as any).address) {
-
-                p = p.export(true)
-
-                rawProfileMap.set((p as any).address, p);
+              if (sdkRow && typeof sdkRow.address === "string") {
+                const exported = typeof sdkRow.export === "function"
+                  ? sdkRow.export(true)
+                  : sdkRow;
+                rawProfileMap.set(sdkRow.address, exported);
               }
             }
 

@@ -3,6 +3,7 @@ import "fake-indexeddb/auto";
 import { initChatDb, closeChatDb } from "./index";
 import { ChatDatabase, type PendingOperation } from "./schema";
 import { SyncEngine } from "./sync-engine";
+import { disposeSyncEngineHarness } from "./__tests__/sync-engine-test-helpers";
 import { MessageRepository } from "./message-repository";
 import { RoomRepository } from "./room-repository";
 import { SearchCacheRepository } from "./search-cache-repository";
@@ -182,8 +183,7 @@ describe("SyncEngine.recoverStrandedOps with snapshot whitelist (WEE-97 H1)", ()
   });
 
   afterEach(async () => {
-    engine.dispose();
-    await db.delete();
+    await disposeSyncEngineHarness({ engine, db });
   });
 
   it("resets only snapshot ops; ops claimed after the snapshot stay untouched", async () => {

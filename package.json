@@ -8,7 +8,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --host",
-    "build": "vue-tsc --noEmit && vite build && node scripts/minify-public-js.mjs",
+    "build": "node scripts/sync-vendor-assets.mjs && vue-tsc --noEmit && vite build && node scripts/minify-public-js.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -19,10 +19,10 @@
     "electron:build:mac": "vite build && electron-builder --config electron-builder.json --mac",
     "electron:build:linux": "vite build && electron-builder --config electron-builder.json --linux",
     "cap:prepare": "node scripts/ensure-android-sdk.mjs",
-    "cap:build": "npm run cap:prepare && vite build && npx cap sync android",
+    "cap:build": "npm run cap:prepare && node scripts/sync-vendor-assets.mjs && vite build && npx cap sync android",
     "cap:open": "npx cap open android",
     "cap:run": "npm run cap:build && npx cap run android",
-    "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\""
+    "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\" && node scripts/sync-vendor-assets.mjs"
   },
   "dependencies": {
     "@capacitor-community/file-opener": "^8.0.0",
@@ -82,6 +82,7 @@
     "cross-env": "^10.1.0",
     "electron": "^40.6.0",
     "electron-builder": "^26.8.1",
+    "emoji-assets": "6.6.0",
     "electron-squirrel-startup": "^1.0.1",
     "fake-indexeddb": "^6.2.5",
     "happy-dom": "^20.6.2",

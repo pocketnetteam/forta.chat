@@ -18,6 +18,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 // --- Matrix mock -------------------------------------------------------------
 
@@ -148,9 +149,7 @@ describe("SyncEngine — per-room queues (WEE-94)", () => {
   });
 
   afterEach(async () => {
-    h.engine.dispose();
-    await waitTicks(2); // let spawned workers observe `disposed` before db teardown
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("A1: a hung send in room A does not delay a send in room B", async () => {
@@ -446,10 +445,8 @@ describe("SyncEngine — watchdog releases expired 'syncing' claims (WEE-94)", (
   });
 
   afterEach(async () => {
-    h?.engine.dispose();
+    if (h) await disposeSyncEngineHarness(h);
     vi.useRealTimers();
-    await waitTicks(2);
-    await h?.db.delete();
   });
 
   it("an expired claim (crashed tab) unblocks its room on the next watchdog tick", async () => {

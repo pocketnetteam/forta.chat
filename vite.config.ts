@@ -12,6 +12,8 @@ export default defineConfig({
     environment: "happy-dom",
     include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
     setupFiles: ["./src/test-setup.ts"],
+    // Prevent cross-file mock/timer pollution (call-service, sync-engine races).
+    fileParallelism: false,
   },
   plugins: [
     vue(),

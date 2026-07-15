@@ -150,11 +150,20 @@ vi.mock("@/entities/chat/lib/use-resolved-room-name", () => ({
   }),
 }));
 
-vi.mock("@/shared/lib/local-db", () => ({
-  getChatDb: () => ({
-    listened: { isListened: vi.fn(() => Promise.resolve(false)) },
-  }),
-}));
+vi.mock("@/shared/lib/local-db", async () => {
+  const actual = await vi.importActual<typeof import("@/shared/lib/local-db")>("@/shared/lib/local-db");
+  return {
+    ...actual,
+    getChatDb: () => ({
+      listened: { isListened: vi.fn(() => Promise.resolve(false)) },
+      callProviders: { toArray: vi.fn(() => Promise.resolve([])) },
+    }),
+    isChatDbReady: () => false,
+    useLiveQuery: <T>(_query: () => Promise<T[]> | T[] | undefined, _defaultValue?: T[]) => ({
+      data: ref([] as T[]),
+    }),
+  };
+});
 
 vi.mock("@/shared/lib/matrix/functions", () => ({
   hexEncode: (s: string) => s,

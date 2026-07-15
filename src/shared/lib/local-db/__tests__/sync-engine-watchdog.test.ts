@@ -13,6 +13,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 // --- Matrix mock -------------------------------------------------------------
 
@@ -142,8 +143,7 @@ describe("SyncEngine — watchdog forces online when queue stuck", () => {
   });
 
   afterEach(async () => {
-    h?.engine.dispose();
-    await h?.db.delete();
+    if (h) await disposeSyncEngineHarness(h);
     vi.useRealTimers();
     if (originalOnLine) {
       Object.defineProperty(globalThis.navigator, "onLine", originalOnLine);

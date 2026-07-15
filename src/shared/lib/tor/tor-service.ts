@@ -1,10 +1,11 @@
 import { ref, readonly } from 'vue';
 import { registerPlugin } from '@capacitor/core';
 import { isNative } from '@/shared/lib/platform';
+import type { TorMode } from '@/entities/tor/model/types';
 
 interface TorNativePlugin {
   startDaemon(options?: {
-    mode?: 'always' | 'auto' | 'never';
+    mode?: 'always' | 'auto' | 'never' | 'neveruse';
     bridgeType?: string;
     bridges?: string[];
   }): Promise<{ socksPort: number; proxyPort: number; mode: string }>;
@@ -17,6 +18,12 @@ interface TorNativePlugin {
   }): Promise<void>;
   verifyTor(): Promise<{ isTor: boolean; ip: string; error?: string }>;
   clearTorCache(): Promise<void>;
+  isUseWithTor(options: { url: string }): Promise<{ redirect: boolean }>;
+  getSettings(): Promise<{
+    mode: string;
+    bridgeType: string;
+    isReady: boolean;
+  }>;
   addListener(
     event: 'bootstrapProgress',
     cb: (data: { progress: number }) => void,
@@ -29,12 +36,19 @@ interface TorNativePlugin {
 
 const TorNative = registerPlugin<TorNativePlugin>('Tor');
 
+function toNativeMode(mode: TorMode | 'never'): 'always' | 'auto' | 'never' | 'neveruse' {
+  if (mode === 'neveruse' || mode === 'never') return 'neveruse';
+  return mode;
+}
+
 class TorService {
   private _ready = ref(false);
   private _progress = ref(0);
   private _state = ref<string>('STOPPED');
   private _proxyPort = ref(0);
   private _initFailed = ref(false);
+  private _mode = ref<TorMode>('neveruse');
+  private _bridgeType = ref('NONE');
   private _initPromise: Promise<void> | null = null;
   private _listenersRegistered = false;
 
@@ -42,6 +56,8 @@ class TorService {
   readonly progress = readonly(this._progress);
   readonly state = readonly(this._state);
   readonly initFailed = readonly(this._initFailed);
+  readonly mode = readonly(this._mode);
+  readonly bridgeType = readonly(this._bridgeType);
 
   get matrixBaseUrl(): string {
     if (!isNative || !this._ready.value || this._proxyPort.value === 0) {
@@ -63,20 +79,23 @@ class TorService {
     });
   }
 
-  async init(mode: 'always' | 'auto' | 'never' = 'always'): Promise<void> {
+  async init(mode: TorMode = 'always'): Promise<void> {
     if (!isNative) {
       this._ready.value = true;
       return;
     }
 
+    this._mode.value = mode;
     await this._registerListeners();
 
-    if (mode === 'never') {
-      this._ready.value = true;
+    if (mode === 'neveruse') {
+      await TorNative.stopDaemon();
+      this._ready.value = false;
+      this._proxyPort.value = 0;
       return;
     }
 
-    const result = await TorNative.startDaemon({ mode });
+    const result = await TorNative.startDaemon({ mode: toNativeMode(mode) });
     this._proxyPort.value = result.proxyPort;
     this._ready.value = true;
   }
@@ -86,14 +105,15 @@ class TorService {
    * Sets isReady=true when bootstrap completes.
    * Sets initFailed=true if Tor cannot start within time limits.
    */
-  initBackground(): void {
+  initBackground(mode: TorMode = 'auto'): void {
     if (!isNative) {
       this._ready.value = true;
       return;
     }
 
+    this._mode.value = mode;
     this._initFailed.value = false;
-    this._initPromise = this._startWithStallDetection()
+    this._initPromise = this._startWithStallDetection(mode)
       .then(() => {
         console.log('[TOR] Background init succeeded');
       })
@@ -103,13 +123,13 @@ class TorService {
       });
   }
 
-  private async _startWithStallDetection(): Promise<void> {
+  private async _startWithStallDetection(mode: TorMode): Promise<void> {
     const MAX_WAIT = 90_000;
     const STALL_TIMEOUT = 20_000;
 
     await this._registerListeners();
 
-    const startPromise = TorNative.startDaemon({ mode: 'always' })
+    const startPromise = TorNative.startDaemon({ mode: toNativeMode(mode) })
       .then((result) => {
         this._proxyPort.value = result.proxyPort;
         this._ready.value = true;
@@ -162,6 +182,12 @@ class TorService {
     await TorNative.stopDaemon();
     this._ready.value = false;
     this._proxyPort.value = 0;
+    this._mode.value = 'neveruse';
+  }
+
+  async ensureListeners(): Promise<void> {
+    if (!isNative) return;
+    await this._registerListeners();
   }
 
   async reconfigure(options: {
@@ -170,7 +196,61 @@ class TorService {
     bridges?: string[];
   }): Promise<void> {
     if (!isNative) return;
-    await TorNative.configure(options);
+
+    const mode = options.mode as TorMode;
+    this._mode.value = mode;
+    if (options.bridgeType) {
+      this._bridgeType.value = options.bridgeType;
+    }
+
+    if (mode === 'neveruse') {
+      await TorNative.configure({ mode: 'neveruse', bridgeType: options.bridgeType });
+      this._ready.value = false;
+      this._proxyPort.value = 0;
+      return;
+    }
+
+    await TorNative.configure({
+      mode: toNativeMode(mode),
+      bridgeType: options.bridgeType ?? this._bridgeType.value,
+      bridges: options.bridges,
+    });
+  }
+
+  async isUseWithTor(url: string): Promise<boolean> {
+    if (!isNative || this._mode.value === 'neveruse') {
+      return false;
+    }
+
+    try {
+      const result = await TorNative.isUseWithTor({ url });
+      return result.redirect;
+    } catch {
+      return false;
+    }
+  }
+
+  async getSettings(): Promise<{
+    mode: TorMode;
+    bridgeType: string;
+    isReady: boolean;
+  }> {
+    if (!isNative) {
+      return { mode: 'neveruse', bridgeType: 'NONE', isReady: false };
+    }
+
+    const settings = await TorNative.getSettings();
+    const mode = (settings.mode === 'neveruse' || settings.mode === 'never'
+      ? 'neveruse'
+      : settings.mode === 'auto'
+        ? 'auto'
+        : 'always') as TorMode;
+
+    this._mode.value = mode;
+    this._bridgeType.value = settings.bridgeType;
+    this._ready.value = settings.isReady;
+
+    return { mode, bridgeType: settings.bridgeType, isReady: settings.isReady };
   }
 
   async verify(): Promise<{ isTor: boolean; ip: string }> {

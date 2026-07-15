@@ -92,10 +92,10 @@ function captureAspect() {
   }
 }
 
-const adaptiveStyle = computed<Record<string, string>>(() => {
+const adaptiveStyle = computed(() => {
   // Cover mode (local PiP) — keep full-fill behaviour, no aspect override.
-  if (props.objectFit !== "contain") return {};
-  if (videoAspect.value === null) return {};
+  if (props.objectFit !== "contain") return {} as Record<string, string>;
+  if (videoAspect.value === null) return {} as Record<string, string>;
   return {
     aspectRatio: String(videoAspect.value),
     maxWidth: "100%",

@@ -3,6 +3,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "./sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "./schema";
+import { disposeSyncEngineHarness } from "./__tests__/sync-engine-test-helpers";
 
 class TestDb extends Dexie {
   rooms!: import("dexie").Table<LocalRoom, string>;
@@ -56,8 +57,17 @@ describe("SyncEngine.getQueueHealth", () => {
   });
 
   afterEach(async () => {
-    engine?.dispose();
-    await db.delete();
+    if (engine) {
+      await disposeSyncEngineHarness({ engine, db });
+      engine = null;
+    } else {
+      try {
+        await db.close();
+      } catch {
+        // already closed
+      }
+      await db.delete();
+    }
   });
 
   it("returns zero counts when the queue is empty", async () => {

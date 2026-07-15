@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# JoyPixels PNGs copied from emoji-assets on postinstall/build
+public/js/vendor/joypixels/png/
+
 # Electron build output
 release/
 *.app/

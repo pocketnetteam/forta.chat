@@ -14,6 +14,7 @@ import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back
 import BottomTabBar from "./ui/BottomTabBar.vue";
 import ContactsPanel from "./ui/ContactsPanel.vue";
 import SettingsPanel from "./ui/SettingsPanel.vue";
+import TorShieldIndicator from "./ui/TorShieldIndicator.vue";
 import { useSidebarTab } from "./model/use-sidebar-tab";
 import type { SidebarTab } from "./model/use-sidebar-tab";
 import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions";
@@ -222,6 +223,8 @@ const walletStore = useWalletStore();
             class="flex h-14 shrink-0 items-center gap-3 border-b border-neutral-grad-0 px-3"
           >
             <ConnectionStatusHeader />
+
+            <TorShieldIndicator />
 
             <!-- PKOIN Wallet -->
             <button

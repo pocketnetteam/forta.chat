@@ -424,8 +424,7 @@ describe("useVideoStatePreservation", () => {
     // Simulate WebView reflow: currentTime briefly zeroed AND readyState drops
     // below HAVE_CURRENT_DATA — the signature of a transient reset, not a
     // user-initiated seek.
-    el.currentTime = 0;
-    el.readyState = 0;
+    Object.assign(el, { currentTime: 0, readyState: 0 });
     window.dispatchEvent(new Event("orientationchange"));
 
     // Re-mount a fresh element with the same id and verify 42 (not 0) was preserved.
@@ -451,9 +450,7 @@ describe("useVideoStatePreservation", () => {
     // User scrubs to start AND pauses. Element keeps HAVE_ENOUGH_DATA so this
     // is a real interaction, not a WebView reflow zero-out. The cache MUST
     // update with paused=true even though currentTime is 0.
-    el.currentTime = 0;
-    el.paused = true;
-    el.readyState = 4;
+    Object.assign(el, { currentTime: 0, paused: true, readyState: 4 });
     window.dispatchEvent(new Event("orientationchange"));
 
     // Re-mount and verify the rewound + paused state survived.

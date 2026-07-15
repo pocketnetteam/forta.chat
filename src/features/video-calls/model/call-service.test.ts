@@ -248,6 +248,7 @@ vi.mock('./call-tab-lock', () => ({
 
 describe('call-service permission flow', () => {
   beforeEach(async () => {
+    vi.useRealTimers();
     vi.clearAllMocks();
     // Reset shared mock store state
     mockCallStore.isInCall = false;
@@ -1321,6 +1322,7 @@ describe('call-service permission flow', () => {
 // ---------------------------------------------------------------------------
 describe('local media release on call teardown (WEE-89)', () => {
   beforeEach(async () => {
+    vi.useRealTimers();
     vi.clearAllMocks();
     mockCallStore.isInCall = false;
     mockCallStore.activeCall = null;

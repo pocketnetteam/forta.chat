@@ -5,6 +5,7 @@ import { SyncEngine } from "../sync-engine";
 import { MessageRepository } from "../message-repository";
 import { RoomRepository } from "../room-repository";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness, waitTicks } from "./sync-engine-test-helpers";
 
 /**
  * Regression coverage for WEE-85 Part A: sending while the Matrix client is
@@ -123,17 +124,6 @@ async function seedOp(db: TestDb, clientId: string): Promise<number> {
   } as PendingOperation)) as number;
 }
 
-function waitTicks(n = 1): Promise<void> {
-  return new Promise((resolve) => {
-    let remaining = n;
-    function next(): void {
-      if (remaining-- <= 0) resolve();
-      else setTimeout(next, 0);
-    }
-    next();
-  });
-}
-
 describe("SyncEngine — WEE-85: queue while Matrix not ready", () => {
   let h: Harness;
 
@@ -146,12 +136,8 @@ describe("SyncEngine — WEE-85: queue while Matrix not ready", () => {
   });
 
   afterEach(async () => {
-    // Strip the "not ready" override FIRST so the shared mock can never gate a
-    // sibling suite's ops, even if teardown below throws.
     setNotReady(false);
-    h.engine.dispose();
-    await new Promise((r) => setTimeout(r, 0));
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("holds the op as pending without sending or burning a retry while not ready", async () => {

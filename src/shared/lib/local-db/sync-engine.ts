@@ -37,6 +37,18 @@ const SEND_OPS: ReadonlySet<PendingOperation["type"]> = new Set([
   "send_poll",
 ]);
 
+/** Dexie throws this when tests (or logout) close the DB while async engine
+ *  bookkeeping is still in flight. Swallowing it avoids vitest unhandled
+ *  rejections without masking real transport failures. */
+function isDbClosedError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (e.name === "DatabaseClosedError") return true;
+  if (e.message.includes("Database has been closed")) return true;
+  const inner = (e as { inner?: Error }).inner;
+  return inner?.name === "DatabaseClosedError"
+    || (inner?.message?.includes("Database has been closed") ?? false);
+}
+
 /** Watchdog tick interval. The watchdog is a safety net for cases where the
  *  connectivity layer fails to deliver a "back online" signal — most commonly
  *  Android WebView after device sleep+wake, where `window.online` may never
@@ -418,26 +430,32 @@ export class SyncEngine {
    *     wake-up timer was cleared; kick a fresh tick.
    */
   private async watchdogCheck(): Promise<void> {
-    await this.releaseExpiredClaims();
+    if (this.disposed) return;
+    try {
+      await this.releaseExpiredClaims();
 
-    const pending = await this.db.pendingOps
-      .where("status")
-      .anyOf(["pending", "syncing"])
-      .count();
-    if (pending === 0) return;
+      const pending = await this.db.pendingOps
+        .where("status")
+        .anyOf(["pending", "syncing"])
+        .count();
+      if (pending === 0) return;
 
-    if (!this.online) {
-      if (typeof navigator !== "undefined" && navigator.onLine) {
-        console.info(
-          `[SyncEngine] watchdog: ${pending} ops stuck while navigator.onLine=true, forcing setOnline(true)`,
-        );
-        this.setOnline(true);
+      if (!this.online) {
+        if (typeof navigator !== "undefined" && navigator.onLine) {
+          console.info(
+            `[SyncEngine] watchdog: ${pending} ops stuck while navigator.onLine=true, forcing setOnline(true)`,
+          );
+          this.setOnline(true);
+        }
+        return;
       }
-      return;
-    }
 
-    if (!this.scheduled && !this.processing) {
-      this.kickScheduler(0);
+      if (!this.scheduled && !this.processing) {
+        this.kickScheduler(0);
+      }
+    } catch (e) {
+      if (this.disposed || isDbClosedError(e)) return;
+      console.warn("[SyncEngine] watchdog tick failed:", e);
     }
   }
 
@@ -449,26 +467,38 @@ export class SyncEngine {
    *  in flight even if (pathologically) past the lease. Retries are NOT
    *  incremented — recovery is not a transport failure. */
   private async releaseExpiredClaims(): Promise<void> {
+    if (this.disposed) return;
     const cutoff = Date.now() - SYNCING_LEASE_MS;
-    const expired = await this.db.pendingOps
-      .where("status")
-      .equals("syncing")
-      .filter(
-        (op) =>
-          !this.activeRooms.has(op.roomId) &&
-          (op.lastAttemptAt ?? op.createdAt ?? 0) <= cutoff,
-      )
-      .toArray();
+    let expired: PendingOperation[];
+    try {
+      expired = await this.db.pendingOps
+        .where("status")
+        .equals("syncing")
+        .filter(
+          (op) =>
+            !this.activeRooms.has(op.roomId) &&
+            (op.lastAttemptAt ?? op.createdAt ?? 0) <= cutoff,
+        )
+        .toArray();
+    } catch (e) {
+      if (this.disposed || isDbClosedError(e)) return;
+      throw e;
+    }
     if (expired.length === 0) return;
 
     console.info(
       `[SyncEngine] watchdog: releasing ${expired.length} expired "syncing" claim(s)`,
     );
     for (const op of expired) {
-      await this.db.pendingOps.update(op.id!, {
-        status: "pending",
-        nextAttemptAt: Date.now(),
-      });
+      try {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now(),
+        });
+      } catch (e) {
+        if (this.disposed || isDbClosedError(e)) return;
+        throw e;
+      }
     }
   }
 
@@ -571,7 +601,7 @@ export class SyncEngine {
     try {
       await this.processClaimedOp(op);
     } catch (e) {
-      if (this.disposed) return;
+      if (this.disposed || isDbClosedError(e)) return;
       console.warn("[SyncEngine] op bookkeeping failed, releasing claim:", e);
       try {
         await this.db.pendingOps.update(op.id!, {
@@ -604,10 +634,15 @@ export class SyncEngine {
     // when Matrix becomes ready.
     if (!this.isMatrixReady()) {
       if (this.disposed) return;
-      await this.db.pendingOps.update(op.id!, {
-        status: "pending",
-        nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
-      });
+      try {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
+        });
+      } catch (e) {
+        if (this.disposed || isDbClosedError(e)) return;
+        throw e;
+      }
       return;
     }
 
@@ -622,43 +657,48 @@ export class SyncEngine {
     } catch (e) {
       if (this.disposed) return;
 
-      // Race guard: Matrix may have accepted the event server-side even
-      // though the SDK threw (read timeout, CORS race, etc.). When the
-      // server-side `/sync` echo arrives via EventWriter → upsertFromServer
-      // the local message picks up its eventId and flips to "synced"
-      // before this catch runs. In that case the queued op is already
-      // satisfied — drop it without flagging the message as failed,
-      // otherwise the user sees a red retry indicator on a message the
-      // peer actually received (WEE-40).
-      if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
-        await this.db.pendingOps.delete(op.id!);
-        this.onChange?.(op.roomId);
-        return;
-      }
+      try {
+        // Race guard: Matrix may have accepted the event server-side even
+        // though the SDK threw (read timeout, CORS race, etc.). When the
+        // server-side `/sync` echo arrives via EventWriter → upsertFromServer
+        // the local message picks up its eventId and flips to "synced"
+        // before this catch runs. In that case the queued op is already
+        // satisfied — drop it without flagging the message as failed,
+        // otherwise the user sees a red retry indicator on a message the
+        // peer actually received (WEE-40).
+        if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
+          await this.db.pendingOps.delete(op.id!);
+          this.onChange?.(op.roomId);
+          return;
+        }
 
-      const retries = op.retries + 1;
-      if (retries >= op.maxRetries) {
-        await this.db.pendingOps.update(op.id!, {
-          status: "failed",
-          retries,
-          errorMessage: String(e),
-          lastAttemptAt: Date.now(),
-        });
-        await this.markMessageFailed(op);
-        this.onChange?.(op.roomId);
-      } else {
-        const delay = computeBackoff(retries);
-        await this.db.pendingOps.update(op.id!, {
-          status: "pending",
-          retries,
-          lastAttemptAt: Date.now(),
-          nextAttemptAt: Date.now() + delay,
-        });
-        // We don't `await sleep(delay)` here — ops in other rooms must
-        // proceed immediately. The delay is tracked via nextAttemptAt in the
-        // DB; the post-completion kick recomputes the wake-up timer. Note
-        // that within THIS room the retrying op stays the head, so later
-        // messages in the room wait for it — FIFO order is a hard invariant.
+        const retries = op.retries + 1;
+        if (retries >= op.maxRetries) {
+          await this.db.pendingOps.update(op.id!, {
+            status: "failed",
+            retries,
+            errorMessage: String(e),
+            lastAttemptAt: Date.now(),
+          });
+          await this.markMessageFailed(op);
+          this.onChange?.(op.roomId);
+        } else {
+          const delay = computeBackoff(retries);
+          await this.db.pendingOps.update(op.id!, {
+            status: "pending",
+            retries,
+            lastAttemptAt: Date.now(),
+            nextAttemptAt: Date.now() + delay,
+          });
+          // We don't `await sleep(delay)` here — ops in other rooms must
+          // proceed immediately. The delay is tracked via nextAttemptAt in the
+          // DB; the post-completion kick recomputes the wake-up timer. Note
+          // that within THIS room the retrying op stays the head, so later
+          // messages in the room wait for it — FIFO order is a hard invariant.
+        }
+      } catch (bookkeepingErr) {
+        if (this.disposed || isDbClosedError(bookkeepingErr)) return;
+        throw bookkeepingErr;
       }
     }
   }

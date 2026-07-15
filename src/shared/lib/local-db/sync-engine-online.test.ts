@@ -3,6 +3,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "./sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "./schema";
+import { disposeSyncEngineHarness } from "./__tests__/sync-engine-test-helpers";
 
 // Minimal in-memory DB shape used by SyncEngine in this test.
 class TestDb extends Dexie {
@@ -40,11 +41,17 @@ describe("SyncEngine.setOnline — retryAllFailed on transition to online", () =
   });
 
   afterEach(async () => {
-    // Dispose first so the watchdog interval stops touching the DB before we
-    // close it — otherwise vitest surfaces a stray DatabaseClosedError from a
-    // tick scheduled after teardown.
-    engine?.dispose();
-    await db.delete();
+    if (engine) {
+      await disposeSyncEngineHarness({ engine, db });
+      engine = null;
+    } else {
+      try {
+        await db.close();
+      } catch {
+        // already closed
+      }
+      await db.delete();
+    }
   });
 
   it("re-arms failed ops back to pending when the app comes online", async () => {
