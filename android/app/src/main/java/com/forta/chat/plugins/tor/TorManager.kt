@@ -15,6 +15,8 @@ class TorManager(private val config: ConfigurationManager) {
     private val lock = ReentrantLock()
     private val state = AtomicReference(TorState.STOPPED)
     private val bootstrapPercent = AtomicInteger(0)
+    private var currentMode: TorMode = TorMode.NEVER
+    private var currentBridgeType: BridgeType = BridgeType.NONE
 
     private val torRunner = ProcessRunner(tag = "Tor")
     private val proxyRunner = ProcessRunner(tag = "ReverseProxy")
@@ -27,6 +29,8 @@ class TorManager(private val config: ConfigurationManager) {
     val currentState: TorState get() = state.get()
     val currentBootstrap: Int get() = bootstrapPercent.get()
     val isReady: Boolean get() = state.get() == TorState.RUNNING
+    val mode: TorMode get() = currentMode
+    val bridgeType: BridgeType get() = currentBridgeType
 
     fun startTor(
         mode: TorMode = TorMode.ALWAYS,
@@ -41,6 +45,8 @@ class TorManager(private val config: ConfigurationManager) {
                 Log.w(TAG, "Tor already ${state.get()}, ignoring start")
                 return
             }
+            currentMode = mode
+            currentBridgeType = bridgeType
             setState(TorState.STARTING)
             bootstrapPercent.set(0)
         }
@@ -147,6 +153,7 @@ class TorManager(private val config: ConfigurationManager) {
 
         setState(TorState.STOPPED)
         bootstrapPercent.set(0)
+        currentMode = TorMode.NEVER
     }
 
     fun restartTor(

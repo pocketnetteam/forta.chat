@@ -46,7 +46,7 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
   it("returns Pocketnet displayname when no alias is set", () => {
     const auth = useAuthStore();
-    auth.$patch({ address: "PMyAddr" });
+    auth.$patch({ activeAddress: "PMyAddr" });
     const user = useUserStore();
     const peer = "PPeerAddr";
     user.users[peer] = { name: "Peer Pocketnet Name" } as any;
@@ -58,7 +58,7 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
   it("returns local alias when set, overriding Pocketnet displayname", () => {
     const auth = useAuthStore();
-    auth.$patch({ address: "PMyAddr" });
+    auth.$patch({ activeAddress: "PMyAddr" });
     const user = useUserStore();
     const chat = useChatStore();
     const peer = "PPeerAddr";
@@ -72,7 +72,7 @@ describe("useResolvedRoomName — local alias priority (Session 51)", () => {
 
   it("falls back to Pocketnet after alias is cleared", async () => {
     const auth = useAuthStore();
-    auth.$patch({ address: "PMyAddr" });
+    auth.$patch({ activeAddress: "PMyAddr" });
     const user = useUserStore();
     const chat = useChatStore();
     const peer = "PPeerAddr";
@@ -96,7 +96,7 @@ describe("useResolvedRoomName — Matrix display name fallback", () => {
 
   it("returns Matrix display name when Pocketnet profile is missing", () => {
     const auth = useAuthStore();
-    auth.$patch({ address: "PMyAddr" });
+    auth.$patch({ activeAddress: "PMyAddr" });
     const chat = useChatStore();
     const peer = "PPeerAddr1234567890123456789012";
     vi.spyOn(chat, "getDisplayName").mockImplementation((addr) =>
@@ -113,7 +113,7 @@ describe("useResolvedRoomName — Matrix display name fallback", () => {
 
   it("returns empty string instead of raw address when no profile data exists", () => {
     const auth = useAuthStore();
-    auth.$patch({ address: "PMyAddr" });
+    auth.$patch({ activeAddress: "PMyAddr" });
     const peer = "PPeerAddr1234567890123456789012";
 
     const room = {

@@ -7,7 +7,7 @@ import { AccountList, AddAccountModal } from "@/features/account-switcher";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative, isAndroid } from "@/shared/lib/platform";
+import { isNative, isAndroid, hasTor } from "@/shared/lib/platform";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import {
@@ -34,14 +34,19 @@ const router = useRouter();
 const { openSettingsContent } = useSidebarTab();
 const walletStore = useWalletStore();
 
-const isElectron = !!(window as any).electronAPI?.isElectron;
-const showTor = isElectron || isNative;
-const showDisableWarning = ref(false);
-
+const showTor = hasTor;
 
 const { t } = useI18n();
 
-// Tor inline status — shows as a compact badge next to the label
+const torModeLabel = computed(() => {
+  switch (torStore.mode) {
+    case "auto": return t("tor.modeAuto");
+    case "always": return t("tor.modeAlways");
+    default: return t("tor.modeNever");
+  }
+});
+
+// Tor inline status — compact badge in settings list
 const torStatusInfo = computed(() => {
   if (!torStore.isEnabled) return null;
   const r = torStore.verifyResult;
@@ -67,19 +72,6 @@ const currentUser = computed(() =>
   authStore.address ? userStore.getUser(authStore.address) : undefined,
 );
 
-
-const handleTorToggle = () => {
-  if (torStore.isEnabled) {
-    showDisableWarning.value = true;
-  } else {
-    torStore.toggle();
-  }
-};
-
-const confirmDisableTor = () => {
-  showDisableWarning.value = false;
-  torStore.toggle();
-};
 
 // --- App version ---
 const appVersion = ref("");
@@ -401,10 +393,11 @@ const handleLogout = () => {
           />
         </div>
 
-        <!-- Tor Proxy -->
-        <div
+        <!-- Networking / Tor -->
+        <button
           v-if="showTor"
-          class="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('networking')"
         >
           <svg
             width="20"
@@ -417,32 +410,28 @@ const handleLogout = () => {
           >
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
           </svg>
-          <span class="text-sm text-text-color">{{ t("settings.torProxy") }}</span>
-          <!-- Inline status badge -->
+          <span class="text-sm text-text-color">{{ t("tor.networking") }}</span>
           <span
             v-if="torStatusInfo"
             class="flex items-center gap-1 text-xs"
             :class="[torStatusInfo.color, torStatusInfo.pulse ? 'animate-pulse' : '']"
           >
             <span>{{ torStatusInfo.text }}</span>
-            <!-- Small refresh icon right after text -->
-            <button
-              v-if="torStatusInfo.showRefresh"
-              class="inline-flex p-0.5 opacity-50 transition-opacity hover:opacity-100"
-              @click.stop="torStore.verify()"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
-            </button>
           </span>
+          <span v-else class="text-xs text-text-on-main-bg-color">{{ torModeLabel }}</span>
           <span class="flex-1" />
-          <Toggle
-            :model-value="torStore.isEnabled"
-            @update:model-value="handleTorToggle()"
-          />
-        </div>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
 
         <!-- PKOIN Wallet Balance -->
         <div
@@ -643,35 +632,6 @@ const handleLogout = () => {
         </button>
       </div>
     </div>
-
-    <!-- Tor disable warning dialog -->
-    <Teleport to="body">
-      <div
-        v-if="showDisableWarning"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-        @click.self="showDisableWarning = false"
-      >
-        <div class="mx-4 max-w-sm rounded-xl bg-background-secondary-theme p-6 shadow-xl">
-          <p class="mb-4 text-sm text-text-color">
-            {{ t('tor.disableWarning') }}
-          </p>
-          <div class="flex justify-end gap-3">
-            <button
-              class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-              @click="showDisableWarning = false"
-            >
-              {{ t('common.cancel') }}
-            </button>
-            <button
-              class="rounded-lg bg-color-bad px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-80"
-              @click="confirmDisableTor()"
-            >
-              {{ t('settings.torProxy') }} Off
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
 
     <AddAccountModal
       :show="showAddModal"

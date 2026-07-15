@@ -701,6 +701,23 @@ export class MatrixClientService {
     return (res as { event_id: string }).event_id;
   }
 
+  /** Matrix media upload endpoint for native TorFile streaming uploads. */
+  getMediaUploadEndpoint(fileName?: string): { url: string; authorization: string } {
+    if (!this.client) throw new Error("Client not initialized");
+    const accessToken = this.client.credentials?.accessToken;
+    if (!accessToken) throw new Error("No access token");
+
+    const url = new URL(`${this.baseUrl}/_matrix/media/v3/upload`);
+    if (fileName) {
+      url.searchParams.set("filename", fileName);
+    }
+
+    return {
+      url: url.toString(),
+      authorization: `Bearer ${accessToken}`,
+    };
+  }
+
   /** Upload content to Matrix server.
    *  @param progressHandler — optional callback receiving { loaded, total }
    *  @param signal — optional AbortSignal to cancel the upload */
@@ -710,6 +727,22 @@ export class MatrixClientService {
     signal?: AbortSignal,
   ): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
+
+    const { shouldUseNativeTorUpload, uploadMediaViaTorFile } = await import(
+      "@/shared/lib/file-transfer/tor-media-transfer"
+    );
+
+    if (shouldUseNativeTorUpload(file.size)) {
+      const contentUri = await uploadMediaViaTorFile({
+        blob: file,
+        mimeType: file.type || "application/octet-stream",
+        getUploadEndpoint: () => this.getMediaUploadEndpoint(),
+        onProgress: progressHandler,
+        signal,
+      });
+      return this.client.mxcUrlToHttp(contentUri) ?? contentUri;
+    }
+
     const opts: Record<string, unknown> = {};
     if (progressHandler) {
       opts.progressHandler = progressHandler;

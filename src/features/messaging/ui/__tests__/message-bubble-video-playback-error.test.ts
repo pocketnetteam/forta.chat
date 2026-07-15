@@ -120,16 +120,18 @@ describe("MessageBubble — video playback state machine (WEE-21)", () => {
   });
 
   it("resets playback error when the bubble is recycled to a new message", () => {
-    const source = getSource();
+    const source = getSource().replace(/\r\n/g, "\n");
     // The existing watch on props.message.id (added for WEE-32) must also
     // clear the playback error — otherwise a recycled bubble inherits the
     // previous video's failure overlay. Walk to the closing `},\n);` of
     // the watch call so inner `revokePoster();` does not truncate the block.
     const watchStart = source.indexOf("watch(\n  () => props.message.id,");
-    expect(watchStart, "watch on message.id must exist").toBeGreaterThan(-1);
-    const closing = source.indexOf("\n);", watchStart);
-    expect(closing, "watch call must close with \\n);").toBeGreaterThan(watchStart);
-    const block = source.slice(watchStart, closing + 3);
+    const watchStartAlt = source.indexOf("watch(() => props.message.id");
+    const resolvedWatchStart = watchStart >= 0 ? watchStart : watchStartAlt;
+    expect(resolvedWatchStart, "watch on message.id must exist").toBeGreaterThan(-1);
+    const closing = source.indexOf("\n);", resolvedWatchStart);
+    expect(closing, "watch call must close with \\n);").toBeGreaterThan(resolvedWatchStart);
+    const block = source.slice(resolvedWatchStart, closing + 3);
     expect(block).toMatch(/videoPlaybackError\.value\s*=\s*null/);
   });
 

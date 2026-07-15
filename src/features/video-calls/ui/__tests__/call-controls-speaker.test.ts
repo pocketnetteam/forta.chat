@@ -18,6 +18,13 @@ import type { CallInfo, CallType } from "@/entities/call/model/types";
  * straight to `nativeCallBridge.setAudioDevice({ type })` (A1).
  */
 
+vi.mock("@/shared/lib/native-webrtc", () => ({
+  installNativeWebRTCProxy: vi.fn(),
+  NativeWebRTC: new Proxy({}, {
+    get: () => vi.fn().mockResolvedValue({}),
+  }),
+}));
+
 // Mutable platform flag — flipped per test before mount.
 const platformMock = { isNative: true };
 vi.mock("@/shared/lib/platform", () => ({

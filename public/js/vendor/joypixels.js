@@ -26390,10 +26390,7 @@
   ns.emojiVersion = "6.6"; // you can [optionally] modify this to load alternate emoji versions. see readme for backwards compatibility and version options
   ns.emojiSize = "32";
   ns.blacklistChars = "";
-  ns.imagePathPNG =
-    "https://cdn.jsdelivr.net/joypixels/assets/" +
-    ns.emojiVersion +
-    "/png/unicode/";
+  ns.imagePathPNG = "/js/vendor/joypixels/png/";
   ns.defaultPathPNG = ns.imagePathPNG;
   ns.fileExtension = ".png";
   ns.imageTitleTag = true; // set to false to remove title attribute from img tag

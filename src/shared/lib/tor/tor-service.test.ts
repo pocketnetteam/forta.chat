@@ -8,6 +8,12 @@ vi.mock('@/shared/lib/platform', () => ({
 // Mock Capacitor
 const mockStartDaemon = vi.fn();
 const mockAddListener = vi.fn().mockResolvedValue({ remove: vi.fn() });
+const mockIsUseWithTor = vi.fn().mockResolvedValue({ redirect: false });
+const mockGetSettings = vi.fn().mockResolvedValue({
+  mode: 'auto',
+  bridgeType: 'NONE',
+  isReady: true,
+});
 
 vi.mock('@capacitor/core', () => ({
   registerPlugin: () => ({
@@ -17,6 +23,8 @@ vi.mock('@capacitor/core', () => ({
     configure: vi.fn(),
     verifyTor: vi.fn(),
     clearTorCache: vi.fn().mockResolvedValue(undefined),
+    isUseWithTor: mockIsUseWithTor,
+    getSettings: mockGetSettings,
     addListener: mockAddListener,
   }),
 }));
@@ -52,5 +60,19 @@ describe('TorService (non-native)', () => {
   it('matrixBaseUrl returns empty string on non-native', async () => {
     const { torService } = await import('./tor-service');
     expect(torService.matrixBaseUrl).toBe('');
+  });
+
+  it('isUseWithTor returns false on non-native', async () => {
+    const { torService } = await import('./tor-service');
+    await expect(torService.isUseWithTor('https://example.com')).resolves.toBe(false);
+  });
+
+  it('getSettings returns neveruse defaults on non-native', async () => {
+    const { torService } = await import('./tor-service');
+    await expect(torService.getSettings()).resolves.toEqual({
+      mode: 'neveruse',
+      bridgeType: 'NONE',
+      isReady: false,
+    });
   });
 });

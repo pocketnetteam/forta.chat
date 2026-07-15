@@ -28,7 +28,7 @@ describe("decrypt graceful degradation", () => {
   it("decryptEvent should check for missing body entries", () => {
     const source = getSource();
     const start = source.indexOf("async decryptEvent(event");
-    const section = source.slice(start, start + 4000);
+    const section = source.slice(start, start + 8000);
     expect(section).toContain("no encrypted payload for");
   });
 

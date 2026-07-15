@@ -11,6 +11,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 // --- Mocks -------------------------------------------------------------------
 
@@ -181,10 +182,7 @@ describe("SyncEngine txnId propagation (regression)", () => {
   });
 
   afterEach(async () => {
-    // Stop the watchdog interval before the DB closes so any pending tick
-    // doesn't surface as an unhandled DatabaseClosedError after teardown.
-    h.engine.dispose();
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("syncSendFile passes op.clientId as the Matrix txnId", async () => {

@@ -23,6 +23,10 @@ import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache
 import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
 import { MessageType, MessageStatus } from "@/entities/chat";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
+import {
+  downloadMediaViaTorFile,
+  shouldUseNativeTorDownload,
+} from "@/shared/lib/file-transfer/tor-media-transfer";
 
 /** Classify a message into the Settings → Storage tab buckets.
  *  - `media` = photos + videos + video circles
@@ -558,15 +562,20 @@ async function downloadAndDecrypt(
       // and for non-primary hosts.
       const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt));
       const fetchUrl = appendCacheBust(hostUrl, attempt);
-      const response = await fetchWithTimeout(fetchUrl, signal);
-      if (!response.ok) {
-        const err = new Error(`Download failed: ${response.status}`);
-        // Mark non-retriable codes so the catch block below can throw immediately
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (err as any).status = response.status;
-        throw err;
+      let blob: Blob;
+      if (shouldUseNativeTorDownload()) {
+        blob = await downloadMediaViaTorFile(fetchUrl);
+      } else {
+        const response = await fetchWithTimeout(fetchUrl, signal);
+        if (!response.ok) {
+          const err = new Error(`Download failed: ${response.status}`);
+          // Mark non-retriable codes so the catch block below can throw immediately
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (err as any).status = response.status;
+          throw err;
+        }
+        blob = await response.blob();
       }
-      let blob = await response.blob();
 
       // If the file has secrets, we need to decrypt it.
       // Race against Matrix sync: if the user opens an E2E chat right after

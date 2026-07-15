@@ -306,7 +306,8 @@ export function useAudioPlayback() {
       // rejection that follows is the watchdog's own abort (pause +
       // removeAttribute("src") + load()). Don't open a duplicate bug-report
       // modal in that case — the user already sees the retry UI.
-      if (state.value !== "failed") {
+      const playbackState = state.value as PlaybackState;
+      if (playbackState !== "failed") {
         useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
         state.value = "failed";
       }
