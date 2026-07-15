@@ -3,7 +3,7 @@ import { useAuthStore } from "@/entities/auth";
 import { useI18n } from "@/shared/lib/i18n";
 import { useLocaleStore } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
-import { fileToBase64, uploadImage } from "@/shared/lib/upload-image";
+import { fileToAvatarBase64, uploadImage } from "@/shared/lib/upload-image";
 import { isNative } from "@/shared/lib/platform";
 import { validateUsername, USERNAME_MAX_LENGTH } from "./username-validation";
 
@@ -106,7 +106,8 @@ const handleAvatarChange = async (e: Event) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
   try {
-    const base64 = await fileToBase64(file);
+    // Always 200×200 before CDN upload — same path as post-reg profile edit.
+    const base64 = await fileToAvatarBase64(file);
     avatarPreview.value = base64;
     avatarUploading.value = true;
     avatarUrl.value = await uploadImage(base64);

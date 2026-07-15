@@ -42,7 +42,7 @@ vi.mock("@/shared/lib/i18n", () => ({
 }));
 
 vi.mock("@/shared/lib/upload-image", () => ({
-  fileToBase64: vi.fn(async () => "data:image/png;base64,AAAA"),
+  fileToAvatarBase64: vi.fn(async () => "data:image/png;base64,AAAA"),
   uploadImage: vi.fn(async () => "https://cdn.example/avatar.png"),
 }));
 
@@ -167,12 +167,12 @@ describe("UserEditForm — reactive form sync and hasChanges", () => {
     expect(wrapper.find("button[type='submit']").attributes("disabled")).toBeUndefined();
 
     // Simulate avatar upload start via hanging uploadImage
-    const { fileToBase64, uploadImage } = await import("@/shared/lib/upload-image");
+    const { fileToAvatarBase64, uploadImage } = await import("@/shared/lib/upload-image");
     let resolveUpload: (v: string) => void = () => {};
     (uploadImage as ReturnType<typeof vi.fn>).mockImplementationOnce(
       () => new Promise<string>((resolve) => { resolveUpload = resolve; })
     );
-    (fileToBase64 as ReturnType<typeof vi.fn>).mockResolvedValueOnce("data:image/png;base64,AAAA");
+    (fileToAvatarBase64 as ReturnType<typeof vi.fn>).mockResolvedValueOnce("data:image/png;base64,AAAA");
 
     // Dispatch file change event directly on the hidden input
     const fileInput = wrapper.find("input[type='file']");
@@ -201,11 +201,11 @@ describe("UserEditForm — reactive form sync and hasChanges", () => {
 
     // Force avatar to remain base64 by making uploadImage hang forever, then
     // try to click Save — save must NOT call editUserData with base64 URL
-    const { fileToBase64, uploadImage } = await import("@/shared/lib/upload-image");
+    const { fileToAvatarBase64, uploadImage } = await import("@/shared/lib/upload-image");
     (uploadImage as ReturnType<typeof vi.fn>).mockImplementationOnce(
       () => new Promise<string>(() => {})
     );
-    (fileToBase64 as ReturnType<typeof vi.fn>).mockResolvedValueOnce("data:image/png;base64,AAAA");
+    (fileToAvatarBase64 as ReturnType<typeof vi.fn>).mockResolvedValueOnce("data:image/png;base64,AAAA");
 
     const fileInput = wrapper.find("input[type='file']");
     const file = new File(["x"], "a.png", { type: "image/png" });

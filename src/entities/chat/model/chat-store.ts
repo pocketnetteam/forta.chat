@@ -4109,7 +4109,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return false;
       }
 
-      const mxcUrl = await matrixService.uploadContentMxc(file);
+      const { resizeAvatarImage } = await import("@/shared/lib/upload-image");
+      const avatar = await resizeAvatarImage(file);
+      const mxcUrl = await matrixService.uploadContentMxc(avatar);
       await matrixService.sendStateEvent(roomId, "m.room.avatar", { url: mxcUrl }, "");
       const httpUrl = matrixService.mxcToHttp(mxcUrl);
       const room = getRoomById(roomId);

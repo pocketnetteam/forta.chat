@@ -1,7 +1,7 @@
 {
   "name": "forta-chat",
   "private": true,
-  "version": "1.10.46",
+  "version": "1.11.0",
   "description": "Forta Chat — Decentralized Messenger",
   "author": "Forta",
   "type": "module",

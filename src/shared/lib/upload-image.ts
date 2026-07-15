@@ -3,6 +3,11 @@ const IMAGE_BASE_URL = "https://pocketnet.app:8092/i/";
 const API_KEY = "c61540b5ceecd05092799f936e277552";
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
+/** Fixed output size for profile / room / group avatars (square, px). */
+export const AVATAR_SIZE = 200;
+/** JPEG quality for the fixed-size avatar encode. */
+const AVATAR_JPEG_QUALITY = 0.85;
+
 /** Max dimension on first compression attempt (longest side in px). */
 const COMPRESS_MAX_SIDE_PRIMARY = 2048;
 /** Fallback max dimension if quality=0.5 still exceeds limit. */
@@ -107,8 +112,71 @@ export async function compressImageToLimit(
   }
 }
 
+/** Center-crop to a square and resize to `size`×`size` (default
+ *  {@link AVATAR_SIZE}). Always re-encodes as JPEG — used for user / room /
+ *  group avatars so CDN and Matrix uploads stay tiny and consistent. General
+ *  photo uploads must NOT use this path. */
+export async function resizeAvatarImage(
+  file: File | Blob,
+  size: number = AVATAR_SIZE,
+): Promise<File> {
+  const originalName = file instanceof File ? file.name : "avatar.jpg";
+  const src = URL.createObjectURL(file);
+  try {
+    const { img, w: origW, h: origH } = await loadImage(src);
+    if (origW < 1 || origH < 1) {
+      throw new ImageUploadError("Image has invalid dimensions");
+    }
+
+    const side = Math.min(origW, origH);
+    const sx = Math.floor((origW - side) / 2);
+    const sy = Math.floor((origH - side) / 2);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new ImageUploadError("Canvas 2D context unavailable");
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => {
+          if (!b) {
+            reject(new ImageUploadError("Canvas produced empty blob"));
+            return;
+          }
+          resolve(b);
+        },
+        "image/jpeg",
+        AVATAR_JPEG_QUALITY,
+      );
+    });
+
+    return new File([blob], originalName.replace(/\.\w+$/, "") + ".jpg", {
+      type: "image/jpeg",
+    });
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new ImageUploadError("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 /** Convert a File to a base64 data URL string. Oversized images are auto-
- *  compressed via `compressImageToLimit` instead of being rejected. */
+ *  compressed via `compressImageToLimit` instead of being rejected.
+ *  Prefer {@link fileToAvatarBase64} for avatar uploads. */
 export async function fileToBase64(file: File): Promise<string> {
   if (!file.type.startsWith("image/")) {
     throw new ImageUploadError("File is not an image");
@@ -118,12 +186,18 @@ export async function fileToBase64(file: File): Promise<string> {
     ? await compressImageToLimit(file, MAX_FILE_SIZE)
     : file;
 
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new ImageUploadError("Failed to read file"));
-    reader.readAsDataURL(processed);
-  });
+  return readFileAsDataUrl(processed);
+}
+
+/** Avatar-only: center-crop + resize to {@link AVATAR_SIZE}, then base64.
+ *  Registration and profile-edit flows must use this instead of
+ *  {@link fileToBase64} so every avatar lands as 200×200 on the CDN. */
+export async function fileToAvatarBase64(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new ImageUploadError("File is not an image");
+  }
+  const resized = await resizeAvatarImage(file, AVATAR_SIZE);
+  return readFileAsDataUrl(resized);
 }
 
 /** Retry policy for transient upload failures. The image server occasionally
