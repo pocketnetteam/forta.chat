@@ -3,7 +3,7 @@ import Modal from "@/shared/ui/modal/Modal.vue";
 import { useAuthStore } from "@/entities/auth";
 import { useNativeShare } from "@/shared/lib/composables/use-native-share";
 import { isNative } from "@/shared/lib/platform";
-import { APP_PUBLIC_URL } from "@/shared/config";
+import { buildInviteUrl } from "@/shared/lib/invite-link";
 
 const props = defineProps<{ show: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -17,9 +17,7 @@ const { share } = useNativeShare({
 
 const copied = ref(false);
 
-const inviteLink = computed(() => {
-  return `${APP_PUBLIC_URL}/#/invite?ref=${authStore.address}`;
-});
+const inviteLink = computed(() => buildInviteUrl(authStore.address ?? ""));
 
 const copyLink = async () => {
   try {

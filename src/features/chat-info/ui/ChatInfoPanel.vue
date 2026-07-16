@@ -4,15 +4,18 @@ import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import { useAuthStore } from "@/entities/auth";
 import { hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { MATRIX_SERVER, APP_PUBLIC_URL } from "@/shared/config";
+import { MATRIX_SERVER } from "@/shared/config";
+import { buildJoinUrl } from "@/shared/lib/invite-link";
 import { useContacts } from "@/features/contacts/model/use-contacts";
 import { matrixIdToAddress, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import ContextMenu from "@/shared/ui/context-menu/ContextMenu.vue";
 import type { ContextMenuItem } from "@/shared/ui/context-menu/ContextMenu.vue";
 import Toggle from "@/shared/ui/toggle/Toggle.vue";
 import ChatInfoGallery from "./ChatInfoGallery.vue";
+import RenameContactDialog from "./RenameContactDialog.vue";
+import { shouldShowPeerRenamePencil } from "../lib/should-show-rename-pencil";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { openBastyonProfile } from "@/shared/lib/open-profile-url";
 import { copyToClipboard, shareLink } from "@/shared/lib/share-link";
@@ -33,7 +36,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const chatStore = useChatStore();
 const authStore = useAuthStore();
-const callService = useCallService();
+const callLauncher = useCallLauncher();
 const room = computed(() => chatStore.activeRoom);
 const { resolve: resolveRoomName } = useResolvedRoomName();
 const roomDisplayName = computed(() => resolveRoomName(room.value));
@@ -86,14 +89,16 @@ const roomShareable = computed(() => {
   return chatStore.isRoomShareableByLink(room.value.id);
 });
 
-// Path-based URL (NOT hash-based) — AndroidManifest pathPrefix="/join"
-// matches path, not fragment. Using a hash URL means the Android App Link
-// intent-filter never fires and the link opens in the browser.
+// Bare-path join URL via the shared builder so Android App Links match the
+// /join intent-filter (WEE-104). A browser without the app is caught by the
+// static shim public/join/index.html, which bounces to the SPA hash route —
+// no 404 (the old WEE-27 blocker). Native deep-linking also accepts forta://
+// and legacy hash links via parse-invite-url.ts — see invite-link.ts.
 const inviteLink = computed(() => {
   // eslint-disable-next-line @typescript-eslint/no-unused-expressions
   stateMarker.value;
   if (!room.value) return "";
-  return `${APP_PUBLIC_URL}/join?room=${encodeURIComponent(room.value.id)}`;
+  return buildJoinUrl(room.value.id);
 });
 
 // Subscribe to RoomState.events so toggles by *other* admins appear
@@ -284,6 +289,11 @@ const handleAddMember = async (address: string) => {
   if (ok) {
     showAddMember.value = false;
     addSearchQuery.value = "";
+  } else {
+    // Surface failure to user — server-side rejection (insufficient power
+    // level, banned target, network) was silently swallowed before, which
+    // made the button appear broken to non-admin members.
+    showToast(t("info.addMemberFailed"), "error");
   }
 };
 
@@ -399,9 +409,11 @@ const handleClearHistory = () => {
 };
 
 // ── Call initiation ──
-const startCall = (type: "voice" | "video") => {
+const startCall = (type: "voice" | "video", event?: MouseEvent) => {
   if (!room.value) return;
-  callService.startCall(room.value.id, type);
+  // Groups get external-only options; DMs keep native Forta in the picker (WEE-57)
+  const anchor = event ? { x: event.clientX, y: event.clientY } : undefined;
+  void callLauncher.launch(room.value.id, type, !room.value.isGroup, anchor);
   emit("close");
 };
 
@@ -422,6 +434,7 @@ const BROOM_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" 
 const BAN_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>';
 const LOGOUT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>';
 const TRASH_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+const RENAME_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 
 const moreMenuItems = computed<ContextMenuItem[]>(() => {
   const items: ContextMenuItem[] = [];
@@ -433,6 +446,14 @@ const moreMenuItems = computed<ContextMenuItem[]>(() => {
   });
   if (!room.value?.isGroup) {
     items.push({ label: t("chatInfo.videoCall"), icon: VIDEO_ICON, action: "videoCall" });
+    // Rename contact lives here for DMs — keeps the main panel uncluttered.
+    if (peerAddress.value && peerAddress.value !== myAddress.value) {
+      items.push({
+        label: chatStore.hasLocalAlias(peerAddress.value) ? t("contact.editAlias") : t("contact.addAlias"),
+        icon: RENAME_ICON,
+        action: "rename",
+      });
+    }
   }
   items.push({ label: t("chatInfo.clearHistory"), icon: BROOM_ICON, action: "clearHistory" });
   if (!room.value?.isGroup) {
@@ -453,6 +474,7 @@ const handleMoreAction = (action: string) => {
     case "search": emit("close"); emit("openSearch"); break;
     case "toggleMute": toggleMute(); break;
     case "videoCall": startCall("video"); break;
+    case "rename": if (peerAddress.value) openRenameDialog(peerAddress.value); break;
     case "clearHistory": confirmAction.value = "clear"; break;
     case "block": confirmAction.value = "block"; break;
     case "deleteChat": confirmAction.value = "delete"; break;
@@ -490,6 +512,34 @@ const copyAddress = async () => {
   await navigator.clipboard.writeText(peerAddress.value);
   copiedAddress.value = true;
   setTimeout(() => copiedAddress.value = false, 2000);
+};
+
+// ── Local contact alias (Session 51) ──
+// Address can be either a raw Bastyon address (DM peer) or a hex-encoded
+// member ID (group member). chatStore.setContactAlias accepts both forms.
+const renameTarget = ref<string | null>(null);
+const myAddress = computed(() => authStore.address ?? "");
+
+const showPeerRenamePencil = computed(() =>
+  shouldShowPeerRenamePencil(room.value?.isGroup ?? false, peerAddress.value, myAddress.value),
+);
+
+const openRenameDialog = (address: string) => {
+  if (!address) return;
+  // Never let the user "rename themselves" via this flow — that lives in
+  // Profile and goes through Pocketnet/Matrix displayname.
+  const raw = /^[a-f0-9]+$/i.test(address) ? hexDecode(address) : address;
+  if (raw === myAddress.value) return;
+  renameTarget.value = address;
+};
+const closeRenameDialog = () => { renameTarget.value = null; };
+const handleAliasSave = async (alias: string) => {
+  if (renameTarget.value) await chatStore.setContactAlias(renameTarget.value, alias);
+  renameTarget.value = null;
+};
+const handleAliasRemove = async () => {
+  if (renameTarget.value) await chatStore.setContactAlias(renameTarget.value, null);
+  renameTarget.value = null;
 };
 
 // ── Media preview (last 4 thumbnails) ──
@@ -578,8 +628,23 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 />
               </div>
               <div class="text-center">
-                <h2 v-if="isUnresolvedName(roomDisplayName)" class="mx-auto h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
-                <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
+                <div class="flex items-center justify-center gap-2">
+                  <h2 v-if="isUnresolvedName(roomDisplayName)" class="h-5 w-32 animate-pulse rounded bg-neutral-grad-2" />
+                  <h2 v-else class="text-lg font-semibold text-text-color">{{ roomDisplayName }}</h2>
+                  <button
+                    v-if="showPeerRenamePencil && peerAddress"
+                    data-test="rename-peer-btn"
+                    class="shrink-0 rounded p-1 text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-2/40 hover:text-text-color"
+                    :title="chatStore.hasLocalAlias(peerAddress) ? t('contact.editAlias') : t('contact.addAlias')"
+                    :aria-label="chatStore.hasLocalAlias(peerAddress) ? t('contact.editAlias') : t('contact.addAlias')"
+                    @click="openRenameDialog(peerAddress)"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                    </svg>
+                  </button>
+                </div>
                 <p class="text-sm text-text-on-main-bg-color">
                   {{ room.isGroup ? t("info.members", { count: chatStore.getRoomMemberCount(room.id) }) : t("info.directMessage") }}
                 </p>
@@ -638,7 +703,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               </button>
 
               <!-- Call button (1:1 only) -->
-              <button v-if="!room.isGroup" class="flex flex-col items-center gap-1" @click="startCall('voice')">
+              <button v-if="!room.isGroup" class="flex flex-col items-center gap-1" @click="startCall('voice', $event)">
                 <div class="flex h-10 w-10 items-center justify-center rounded-full bg-color-bg-ac/10 text-color-bg-ac transition-colors hover:bg-color-bg-ac/20">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
@@ -749,6 +814,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   {{ t("chatInfo.viewProfile") }}
                 </button>
               </div>
+              <!-- Rename contact (local alias) lives in the 3-dot More menu — see moreMenuItems. -->
             </div>
 
             <!-- Notifications toggle -->
@@ -802,9 +868,14 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 <span class="text-xs font-medium uppercase text-text-on-main-bg-color">
                   {{ t("chatInfo.members") }} ({{ chatStore.getRoomMemberCount(room.id) }})
                 </span>
-                <!-- Add member button (admin only) -->
+                <!-- Add member button — always visible for groups.
+                     Server-side power-level check is the ultimate gate;
+                     hiding the button client-side hid the action from
+                     legacy bastyon-chat admins whose power_levels.users
+                     map was keyed under a different Matrix domain
+                     (isAdmin computed evaluated to false). Errors from
+                     the server are surfaced via toast in handleAddMember. -->
                 <button
-                  v-if="isAdmin"
                   class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-color-bg-ac transition-colors hover:bg-neutral-grad-0"
                   @click="showAddMember = !showAddMember"
                 >
@@ -855,7 +926,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                 <div
                   v-for="member in room.members"
                   :key="`join-${member}`"
-                  class="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors"
+                  class="group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors"
                   :class="isAdmin && member !== myHexId ? 'cursor-pointer hover:bg-neutral-grad-0' : ''"
                   @click="(e: MouseEvent) => openMemberMenu(e, member)"
                 >
@@ -863,6 +934,18 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   <span class="min-w-0 flex-1 truncate text-sm text-text-color">
                     {{ chatStore.getDisplayName(member) }}
                   </span>
+                  <button
+                    v-if="member !== myHexId"
+                    class="rename-member-btn shrink-0 rounded p-1 text-text-on-main-bg-color transition-opacity hover:bg-neutral-grad-2/40 hover:text-text-color"
+                    :title="chatStore.hasLocalAlias(member) ? t('contact.editAlias') : t('contact.addAlias')"
+                    :aria-label="chatStore.hasLocalAlias(member) ? t('contact.editAlias') : t('contact.addAlias')"
+                    @click.stop="openRenameDialog(member)"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                    </svg>
+                  </button>
                   <span
                     v-if="chatStore.isMemberMuted(room.id, member)"
                     class="shrink-0 rounded bg-neutral-grad-2/30 px-1.5 py-0.5 text-[10px] font-medium text-text-on-main-bg-color"
@@ -1099,6 +1182,27 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
         </div>
       </div>
     </transition>
+
+    <!-- Rename contact dialog (Session 51) — local alias for DM peer or
+         group member. Overlays the whole info panel. -->
+    <RenameContactDialog
+      v-if="renameTarget"
+      :address="renameTarget"
+      :current-alias="chatStore.getLocalAlias(renameTarget)"
+      @save="handleAliasSave"
+      @remove="handleAliasRemove"
+      @close="closeRenameDialog"
+    />
+
+    <!-- WEE-57: external call-provider picker -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      :x="callLauncher.pickerAnchor.value.x"
+      :y="callLauncher.pickerAnchor.value.y"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
+    />
   </Teleport>
 </template>
 
@@ -1122,5 +1226,24 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
 .panel-slide-enter-from,
 .panel-slide-leave-to {
   transform: translateX(100%);
+}
+
+/* Per-member rename button:
+ *  - Pointer:fine (mouse) — hover-reveal so the row stays uncluttered.
+ *  - Pointer:coarse (touch / Android) — always visible at low opacity so it
+ *    remains tappable. Hover doesn't work reliably on touch WebViews. */
+.rename-member-btn {
+  opacity: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .group:hover .rename-member-btn,
+  .rename-member-btn:focus-visible {
+    opacity: 1;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .rename-member-btn {
+    opacity: 0.6;
+  }
 }
 </style>

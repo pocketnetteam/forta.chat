@@ -1,3 +1,10 @@
+<script lang="ts">
+// Per-instance counter so simultaneous MediaViewers (e.g. MessageList +
+// ChatInfoGallery) don't share a back-handler slot. Lives outside
+// `<script setup>` so it stays module-scoped across mounts.
+let mediaViewerInstanceCounter = 0;
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import type { Message } from "@/entities/chat";
@@ -5,6 +12,8 @@ import { useChatStore, MessageType } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
+import { touchDistance, nextScale, MIN_SCALE } from "../model/pinch-zoom";
+import { useToast } from "@/shared/lib/use-toast";
 
 interface Props {
   show: boolean;
@@ -14,12 +23,28 @@ interface Props {
 const props = defineProps<Props>();
 const emit = defineEmits<{ close: [] }>();
 
+const { t } = useI18n();
+const { toast } = useToast();
 const chatStore = useChatStore();
-const { getState, download } = useFileDownload();
+const { getState, download, saveFile } = useFileDownload();
 
-// Android back: close media viewer (highest overlay priority)
-useAndroidBackHandler("media-viewer", 100, () => {
+// Per-instance id so two MediaViewers mounted at once (e.g. MessageList +
+// ChatInfoGallery on the same chat screen) don't share a handler slot and
+// silently overwrite each other — when the slot collapsed, the back-press
+// fell through to the router and kicked the user out of the chat instead of
+// closing the viewer (forta-bugs#805).
+const backHandlerId = `media-viewer-${++mediaViewerInstanceCounter}`;
+
+// Android back: first exit native <video> fullscreen if active, then close
+// the viewer. Without the fullscreen check, tapping back while a video is
+// playing fullscreen (WebView native control) closed the viewer + chat in
+// one go on some Android versions.
+useAndroidBackHandler(backHandlerId, 100, () => {
   if (!props.show) return false;
+  if (typeof document !== "undefined" && document.fullscreenElement) {
+    document.exitFullscreen?.().catch(() => {});
+    return true;
+  }
   emit("close");
   return true;
 });
@@ -28,6 +53,11 @@ const currentIndex = ref(0);
 const scale = ref(1);
 const translateX = ref(0);
 const translateY = ref(0);
+// In-flight guard: while a save is running, ignore further taps on the same
+// button. Without this, a fast multi-tap on Android (where the toast is
+// delayed by base64 + native MediaStore.insert) creates one duplicate per
+// extra tap — forta-bugs#758, WEE-25.
+const saving = ref(false);
 
 const mediaMessages = computed(() => chatStore.activeMediaMessages);
 
@@ -75,20 +105,56 @@ const goPrev = () => {
   }
 };
 
-// Swipe navigation
+// Swipe navigation + pinch-to-zoom + pan-when-zoomed. Two-finger gestures
+// take priority; one-finger drag is interpreted as pan while zoomed and as
+// swipe (prev/next/dismiss) at 1x.
 let touchStartX = 0;
 let touchStartY = 0;
 let touchDeltaX = 0;
+let pinchLastDistance = 0;
+let panStartX = 0;
+let panStartY = 0;
 
 const onTouchstart = (e: TouchEvent) => {
-  if (scale.value > 1) return; // Don't swipe when zoomed
+  if (e.touches.length === 2) {
+    pinchLastDistance = touchDistance(
+      [e.touches[0].clientX, e.touches[0].clientY],
+      [e.touches[1].clientX, e.touches[1].clientY],
+    );
+    touchDeltaX = 0;
+    return;
+  }
   touchStartX = e.touches[0].clientX;
   touchStartY = e.touches[0].clientY;
   touchDeltaX = 0;
+  if (scale.value > 1) {
+    // Anchor pan to the current translate so subsequent deltas are relative
+    // to where the finger first touched, not to (0,0) every frame.
+    panStartX = translateX.value;
+    panStartY = translateY.value;
+  }
 };
 
 const onTouchmove = (e: TouchEvent) => {
-  if (scale.value > 1) return;
+  if (e.touches.length === 2) {
+    const d = touchDistance(
+      [e.touches[0].clientX, e.touches[0].clientY],
+      [e.touches[1].clientX, e.touches[1].clientY],
+    );
+    scale.value = nextScale(scale.value, pinchLastDistance, d);
+    pinchLastDistance = d;
+    return;
+  }
+  if (scale.value > 1) {
+    // Divide by scale so 1 finger-pixel of drag corresponds to 1 screen-pixel
+    // of movement, regardless of zoom level — without this the photo races
+    // away from the finger at 4x zoom.
+    const dx = e.touches[0].clientX - touchStartX;
+    const dy = e.touches[0].clientY - touchStartY;
+    translateX.value = panStartX + dx / scale.value;
+    translateY.value = panStartY + dy / scale.value;
+    return;
+  }
   touchDeltaX = e.touches[0].clientX - touchStartX;
   const deltaY = e.touches[0].clientY - touchStartY;
 
@@ -99,7 +165,27 @@ const onTouchmove = (e: TouchEvent) => {
   }
 };
 
-const onTouchend = () => {
+const onTouchend = (e: TouchEvent) => {
+  // Reset pinch tracker once one finger lifts so the next two-finger touch
+  // starts fresh instead of inheriting the previous distance.
+  if (e.touches.length < 2) pinchLastDistance = 0;
+  // 2→1 finger transition: pinch just ended but one finger is still down.
+  // Re-seed both the swipe anchor and the pan anchor so the remaining
+  // finger doesn't drag from stale pre-pinch coordinates.
+  if (e.touches.length === 1) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchDeltaX = 0;
+    if (scale.value > 1) {
+      panStartX = translateX.value;
+      panStartY = translateY.value;
+    }
+    return;
+  }
+  // Snap back to 1x if a tiny over-pinch left a barely-visible scale change.
+  if (scale.value < MIN_SCALE + 0.05 && scale.value !== MIN_SCALE) {
+    resetTransform();
+  }
   if (scale.value > 1) return;
   if (touchDeltaX > 60) goPrev();
   else if (touchDeltaX < -60) goNext();
@@ -133,6 +219,25 @@ watch(currentMessage, async (msg) => {
     await download(msg);
   }
 });
+
+const handleSaveCurrent = async () => {
+  if (saving.value) return;
+  const msg = currentMessage.value;
+  const url = currentUrl.value;
+  if (!msg || !msg.fileInfo || !url) return;
+  const mime = msg.fileInfo.type || "";
+  const isMedia = mime.startsWith("image/") || mime.startsWith("video/");
+  saving.value = true;
+  try {
+    await saveFile(url, msg.fileInfo.name, mime);
+    toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
+  } catch (e) {
+    console.error("[MediaViewer] save failed:", e);
+    toast(t("media.saveFailed"), "error");
+  } finally {
+    saving.value = false;
+  }
+};
 </script>
 
 <template>
@@ -157,7 +262,20 @@ watch(currentMessage, async (msg) => {
           <span class="text-sm text-white/60">
             {{ currentIndex + 1 }} / {{ mediaMessages.length }}
           </span>
-          <div class="w-6" />
+          <button
+            data-testid="media-save"
+            class="text-white/80 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            :disabled="!currentUrl || saving"
+            :title="t('media.save')"
+            :aria-label="t('media.save')"
+            @click="handleSaveCurrent"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
         </div>
 
         <!-- Media content -->
@@ -166,7 +284,7 @@ watch(currentMessage, async (msg) => {
             v-if="currentUrl && currentMessage.type === 'image'"
             :src="currentUrl"
             :alt="currentMessage.fileInfo?.name"
-            class="max-h-full max-w-full object-contain transition-transform duration-200"
+            class="max-h-full max-w-full object-contain"
             :style="{ transform: `scale(${scale}) translate(${translateX}px, ${translateY}px)` }"
             draggable="false"
           />

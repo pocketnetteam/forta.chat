@@ -3,6 +3,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "./sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "./schema";
+import { disposeSyncEngineHarness } from "./__tests__/sync-engine-test-helpers";
 
 // Minimal in-memory DB shape used by SyncEngine in this test.
 class TestDb extends Dexie {
@@ -32,13 +33,25 @@ vi.mock("@/entities/matrix", () => ({
 
 describe("SyncEngine.setOnline — retryAllFailed on transition to online", () => {
   let db: TestDb;
+  let engine: SyncEngine | null = null;
 
   beforeEach(() => {
     db = new TestDb();
+    engine = null;
   });
 
   afterEach(async () => {
-    await db.delete();
+    if (engine) {
+      await disposeSyncEngineHarness({ engine, db });
+      engine = null;
+    } else {
+      try {
+        await db.close();
+      } catch {
+        // already closed
+      }
+      await db.delete();
+    }
   });
 
   it("re-arms failed ops back to pending when the app comes online", async () => {
@@ -77,9 +90,10 @@ describe("SyncEngine.setOnline — retryAllFailed on transition to online", () =
     };
     const roomRepo = {
       updateRoom: vi.fn(),
+      syncLastMessageLocalStatus: vi.fn(),
     };
 
-    const engine = new SyncEngine(
+    engine = new SyncEngine(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       db as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

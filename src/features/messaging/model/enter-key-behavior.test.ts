@@ -1,3 +1,4 @@
+import { describe, it, expect } from "vitest";
 import { shouldSendOnEnter, type EnterKeyContext } from "./enter-key-behavior";
 
 function ctx(overrides: Partial<EnterKeyContext> = {}): EnterKeyContext {

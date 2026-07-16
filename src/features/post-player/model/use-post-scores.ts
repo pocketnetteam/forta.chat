@@ -1,8 +1,13 @@
 import { useAuthStore } from "@/entities/auth";
-import type { PostScore } from "@/app/providers/initializers";
+import type { BastyonPostData } from "@/app/providers/initializers";
 
-// Shared state per txid so PostCard and PostPlayerModal stay in sync
-const scoresCache = new Map<string, { scores: Ref<PostScore[]>; myScore: Ref<number | null> }>();
+// Shared state per txid so PostCard and PostPlayerModal stay in sync.
+// The average/vote-count come from the getprofilefeed aggregate
+// (scoreSum/scoreCnt); only the current user's vote needs a network request.
+const scoresCache = new Map<
+  string,
+  { myScore: Ref<number | null>; scoreSum: Ref<number>; scoreCnt: Ref<number>; seeded: Ref<boolean> }
+>();
 
 export function usePostScores(txid: string) {
   const authStore = useAuthStore();
@@ -10,47 +15,42 @@ export function usePostScores(txid: string) {
   // Reuse existing reactive state for this txid, or create new
   if (!scoresCache.has(txid)) {
     scoresCache.set(txid, {
-      scores: ref<PostScore[]>([]),
       myScore: ref<number | null>(null),
+      scoreSum: ref(0),
+      scoreCnt: ref(0),
+      seeded: ref(false),
     });
   }
   const cached = scoresCache.get(txid)!;
-  const scores = cached.scores;
   const myScore = cached.myScore;
+  const scoreSum = cached.scoreSum;
+  const scoreCnt = cached.scoreCnt;
 
   const loading = ref(false);
   const submitting = ref(false);
 
-  const averageScore = computed(() => {
-    if (scores.value.length === 0) return 0;
-    const sum = scores.value.reduce((acc, s) => acc + s.value, 0);
-    return sum / scores.value.length;
-  });
-
-  const totalVotes = computed(() => scores.value.length);
+  const averageScore = computed(() => (scoreCnt.value > 0 ? scoreSum.value / scoreCnt.value : 0));
+  const totalVotes = computed(() => scoreCnt.value);
   const hasVoted = computed(() => myScore.value !== null && myScore.value > 0);
 
+  /** Seed the aggregate once from the feed-provided post (scoreSum/scoreCnt). */
+  const seedFromPost = (post?: BastyonPostData | null) => {
+    if (cached.seeded.value || !post) return;
+    scoreSum.value = Number(post.scoreSum ?? 0);
+    scoreCnt.value = Number(post.scoreCnt ?? 0);
+    if (post.myVal != null) myScore.value = Number(post.myVal);
+    cached.seeded.value = true;
+  };
+
   const load = async () => {
+    // Aggregate is already known from the feed — no getpostscores request.
+    seedFromPost(authStore.getCachedPost(txid));
+
     loading.value = true;
     try {
-      const [scoresData, myVal] = await Promise.all([
-        authStore.loadPostScores(txid),
-        authStore.loadMyPostScore(txid),
-      ]);
-      // Don't overwrite optimistic vote with stale blockchain data
-      if (hasVoted.value) {
-        // Merge: use server scores but keep our optimistic vote appended
-        const myVoteValue = myScore.value!;
-        const alreadyInServer = scoresData.some(
-          (s) => s.address === authStore.address && s.value === myVoteValue,
-        );
-        scores.value = alreadyInServer
-          ? scoresData
-          : [...scoresData, { address: authStore.address!, value: myVoteValue, posttxid: txid }];
-      } else {
-        scores.value = scoresData;
-        myScore.value = myVal;
-      }
+      const myVal = await authStore.loadMyPostScore(txid);
+      // Don't overwrite an optimistic vote with a null/absent server value.
+      if (myVal != null) myScore.value = myVal;
     } finally {
       loading.value = false;
     }
@@ -61,7 +61,8 @@ export function usePostScores(txid: string) {
 
     // Optimistic update — show rating immediately, blockchain confirms later
     myScore.value = value;
-    scores.value = [...scores.value, { address: authStore.address!, value, posttxid: txid }];
+    scoreSum.value += value;
+    scoreCnt.value += 1;
 
     // Fire-and-forget — don't revert on error (blockchain will catch up)
     console.log("[postScores] submitting vote:", txid, value);
@@ -72,5 +73,5 @@ export function usePostScores(txid: string) {
     return true;
   };
 
-  return { scores, myScore, averageScore, totalVotes, hasVoted, loading, submitting, load, submitVote };
+  return { myScore, averageScore, totalVotes, hasVoted, loading, submitting, load, submitVote, seedFromPost };
 }

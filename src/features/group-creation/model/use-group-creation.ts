@@ -5,6 +5,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import { waitForRoomInSdk } from "@/entities/matrix/model/matrix-room-sync";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MATRIX_SERVER } from "@/shared/config";
+import { resizeAvatarImage } from "@/shared/lib/upload-image";
 
 export interface SelectedMember {
   address: string;
@@ -75,10 +76,11 @@ export function useGroupCreation() {
         (m) => `@${hexEncode(m.address).toLowerCase()}:${MATRIX_SERVER}`,
       );
 
-      // Upload avatar if provided
+      // Upload avatar if provided (always 200×200 before Matrix upload)
       let mxcUrl: string | undefined;
       if (groupAvatarFile.value) {
-        mxcUrl = await matrixService.uploadContentMxc(groupAvatarFile.value);
+        const avatar = await resizeAvatarImage(groupAvatarFile.value);
+        mxcUrl = await matrixService.uploadContentMxc(avatar);
       }
 
       // Build initial_state

@@ -91,7 +91,7 @@ const handleAvatarChange = (e: Event) => {
           </svg>
         </button>
 
-        <span class="flex-1 text-base font-semibold text-text-color">New Group</span>
+        <span class="flex-1 text-base font-semibold text-text-color">{{ t("group.newGroup") }}</span>
 
         <button
           class="rounded-lg px-4 py-1.5 text-sm font-medium transition-colors"
@@ -101,7 +101,7 @@ const handleAvatarChange = (e: Event) => {
           :disabled="selectedMembers.size === 0"
           @click="handleNext"
         >
-          Next
+          {{ t("group.next") }}
         </button>
       </div>
 
@@ -143,11 +143,11 @@ const handleAvatarChange = (e: Event) => {
         </div>
 
         <div v-else-if="searchResults.length === 0 && searchQuery" class="p-8 text-center text-sm text-text-on-main-bg-color">
-          No users found
+          {{ t("group.noUsersFound") }}
         </div>
 
         <div v-else-if="searchResults.length === 0 && !searchQuery" class="p-8 text-center text-sm text-text-on-main-bg-color">
-          Search for users to add to the group
+          {{ t("group.searchToAdd") }}
         </div>
 
         <button
@@ -189,7 +189,7 @@ const handleAvatarChange = (e: Event) => {
           </svg>
         </button>
 
-        <span class="flex-1 text-base font-semibold text-text-color">New Group</span>
+        <span class="flex-1 text-base font-semibold text-text-color">{{ t("group.newGroup") }}</span>
 
         <button
           class="rounded-lg px-4 py-1.5 text-sm font-medium transition-colors"
@@ -199,7 +199,7 @@ const handleAvatarChange = (e: Event) => {
           :disabled="!groupName.trim() || isCreating"
           @click="handleCreate"
         >
-          {{ isCreating ? "Creating..." : "Create" }}
+          {{ isCreating ? t("group.creating") : t("group.create") }}
         </button>
       </div>
 
@@ -249,7 +249,7 @@ const handleAvatarChange = (e: Event) => {
 
         <!-- Member count -->
         <div class="px-4 pb-2 text-sm text-text-on-main-bg-color">
-          {{ selectedMembers.size }} member{{ selectedMembers.size !== 1 ? "s" : "" }}
+          {{ t("group.memberCount", { count: selectedMembers.size }) }}
         </div>
 
         <!-- Member preview list -->

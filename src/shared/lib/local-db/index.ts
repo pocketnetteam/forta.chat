@@ -16,7 +16,14 @@ export type {
   DecryptionJob,
   ListenedMessage,
   SearchCacheRow,
+  LocalChannel,
+  ChannelLastContent,
+  MediaCacheIndexEntry,
+  MediaCacheBlobRow,
+  MediaCacheCategory,
+  CallProvider,
 } from "./schema";
+export { CallProvidersRepository } from "./call-providers-repository";
 export { DecryptionWorker } from "./decryption-worker";
 export { ListenedRepository } from "./listened-repository";
 export { SearchCacheRepository } from "./search-cache-repository";
@@ -31,6 +38,7 @@ export {
 } from "./timeline-sort";
 export { RoomRepository } from "./room-repository";
 export type { RoomChange } from "./room-repository";
+export { ChannelRepository } from "./channel-repository";
 export { UserRepository } from "./user-repository";
 export { SyncEngine } from "./sync-engine";
 export { EventWriter } from "./event-writer";
@@ -51,19 +59,24 @@ export type { BufferedWrite, WriteBufferOptions } from "./write-buffer";
 import { ChatDatabase } from "./schema";
 import { MessageRepository } from "./message-repository";
 import { RoomRepository } from "./room-repository";
+import { ChannelRepository } from "./channel-repository";
 import { UserRepository } from "./user-repository";
+import { CallProvidersRepository } from "./call-providers-repository";
 import { SyncEngine } from "./sync-engine";
 import { EventWriter } from "./event-writer";
 import { DecryptionWorker } from "./decryption-worker";
 import { ListenedRepository } from "./listened-repository";
 import { SearchCacheRepository } from "./search-cache-repository";
+import { whenChatsInteractive } from "@/shared/lib/boot-signals";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 
 export interface ChatDbKit {
   db: ChatDatabase;
   messages: MessageRepository;
   rooms: RoomRepository;
+  channels: ChannelRepository;
   users: UserRepository;
+  callProviders: CallProvidersRepository;
   syncEngine: SyncEngine;
   eventWriter: EventWriter;
   decryptionWorker: DecryptionWorker;
@@ -71,12 +84,24 @@ export interface ChatDbKit {
   searchCache: SearchCacheRepository;
   /** Debounced retry for a room — wire to key-arrival callbacks */
   retryRoomDecryption?: (roomId: string) => void;
+  /**
+   * Run the deferred recovery table scans (stranded ops, stuck media,
+   * stuck encrypted messages, cross-device heal, GC). Idempotent — fires
+   * automatically once the chat list is interactive (WEE-97), exposed for
+   * tests and manual triggering.
+   */
+  runDeferredRecovery?: () => void;
   /** Cleanup event listeners. Called on user switch / logout. */
   dispose?: () => void;
 }
 
 let currentKit: ChatDbKit | null = null;
 let currentUserId: string | null = null;
+
+/** WEE-97: max wait before deferred recovery scans run unconditionally. */
+const DEFERRED_RECOVERY_FALLBACK_MS = 30_000;
+/** WEE-97: settle delay after chats-interactive before recovery scans start. */
+const DEFERRED_RECOVERY_SETTLE_MS = 1_000;
 
 /**
  * Initialize (or re-initialize) the local-first chat database for a user.
@@ -110,7 +135,9 @@ export function initChatDb(
   const db = new ChatDatabase(userId);
   const messages = new MessageRepository(db);
   const rooms = new RoomRepository(db);
+  const channels = new ChannelRepository(db);
   const users = new UserRepository(db);
+  const callProviders = new CallProvidersRepository(db);
   const listened = new ListenedRepository(db);
   const searchCache = new SearchCacheRepository(db);
   const syncEngine = new SyncEngine(db, messages, rooms, getRoomCrypto, onChange);
@@ -128,6 +155,11 @@ export function initChatDb(
     if (existing) clearTimeout(existing);
     debouncedRetryTimers.set(roomId, setTimeout(() => {
       debouncedRetryTimers.delete(roomId);
+      // Recover ONLY the room's newest persisted "[encrypted]" message (queue
+      // may have drifted/died, e.g. after the 502 key-outage) so the sidebar
+      // preview refreshes on key arrival — the rest of the history decrypts
+      // lazily as bubbles scroll into view. Also retry any live queue jobs.
+      decryptionWorker.recoverLatestStuckMessages(roomId).catch(() => {});
       decryptionWorker.retryForRoom(roomId);
     }, 500));
   };
@@ -137,51 +169,123 @@ export function initChatDb(
   window.addEventListener("online", onOnline);
 
   // Cleanup function for user switch / logout
+  let disposed = false;
   const disposeRetryTriggers = () => {
+    disposed = true;
     window.removeEventListener("online", onOnline);
     for (const timer of debouncedRetryTimers.values()) clearTimeout(timer);
     debouncedRetryTimers.clear();
     decryptionWorker.dispose();
   };
 
-  // Recover operations stranded in "syncing" state after app crash, then start queue
-  syncEngine.recoverStrandedOps().then(() => syncEngine.processQueue()).catch(() => {});
+  // Snapshot genuinely stranded "syncing" ops BEFORE the queue starts —
+  // indexed lookup, a few rows. The deferred recoverStrandedOps below resets
+  // only these ids, so it can never clobber an op the live queue has since
+  // claimed (SyncEngine ordering contract).
+  const strandedOpIdsPromise = syncEngine.snapshotStrandedOpIds().catch(() => [] as number[]);
 
-  // Recover media uploads stuck in "pending" from a previous session (fire-and-forget IIFEs lost on reload/crash)
-  messages.recoverStuckMedia().then((count) => {
-    if (count > 0) console.info(`[local-db] Recovered ${count} stuck media upload(s) → marked as failed`);
-  }).catch(() => {});
-
-  messages.cleanupCancelledUploads()
-    .then((count) => {
-      if (count > 0) console.info(`[local-db] Cleaned up ${count} cancelled upload(s)`);
-    })
+  // Start the outbound queue and pending decryption jobs immediately — both
+  // are needed for live messaging. Heavy recovery table scans are deferred
+  // below (WEE-97) so they don't compete with the first fullRoomRefresh.
+  strandedOpIdsPromise.then(() => syncEngine.processQueue()).catch(() => {});
+  // WEE-93: first re-queue jobs stranded in "processing" by a session that
+  // died mid-tick (cheap indexed modify — NOT a table scan, safe before the
+  // deferred recovery block), then start the decryption worker.
+  decryptionWorker.recoverOrphanedProcessing()
+    .catch(() => {})
+    .then(() => decryptionWorker.tick())
     .catch(() => {});
 
-  // Start processing any pending decryption jobs from previous session
-  decryptionWorker.tick().catch(() => {});
+  // WEE-97: recovery/GC sweeps are full-table scans that used to run on every
+  // login BEFORE the chat list was interactive, competing with fullRoomRefresh
+  // writes. Deferred until the chats-interactive signal (or its fallback
+  // timeout — recovery is guaranteed to run even if boot never completes).
+  let deferredRecoveryRan = false;
+  const runDeferredRecovery = () => {
+    if (deferredRecoveryRan || disposed) return;
+    deferredRecoveryRan = true;
 
-  // Post-migration: re-fetch and enqueue cross-device messages marked by v5 migration.
-  // These have content="[encrypted]", decryptionStatus="pending", but no encryptedBody.
-  // We need to fetch the raw event from the server to enable DecryptionWorker to process them.
-  healCrossDeviceMessages(db, messages, decryptionWorker, getRoomCrypto).catch((e) => {
-    console.warn("[local-db] Cross-device heal sweep failed:", e);
+    // Recover operations stranded in "syncing" state after app crash, then
+    // re-kick the queue. Scoped to the startup snapshot so ops claimed by
+    // this session's already-running processQueue are never reset mid-flight.
+    strandedOpIdsPromise
+      .then((ids) => syncEngine.recoverStrandedOps(ids))
+      .then(() => syncEngine.processQueue())
+      .catch(() => {});
+
+    // Recover media uploads stuck in "pending" from a previous session (fire-and-forget IIFEs lost on reload/crash)
+    messages.recoverStuckMedia().then((count) => {
+      if (count > 0) console.info(`[local-db] Recovered ${count} stuck media upload(s) → marked as failed`);
+    }).catch(() => {});
+
+    messages.cleanupCancelledUploads()
+      .then((count) => {
+        if (count > 0) console.info(`[local-db] Cleaned up ${count} cancelled upload(s)`);
+      })
+      .catch(() => {});
+
+    // Re-enqueue the NEWEST message stranded as "[encrypted]" in each room from
+    // a previous session (ciphertext still on the row, e.g. failed during the
+    // 502 key-outage). Only the latest per room is recovered here so the sidebar
+    // previews refresh without eagerly decrypting every room's full backlog on
+    // boot — older messages decrypt on demand when scrolled into view.
+    decryptionWorker.recoverLatestStuckMessages().then((count) => {
+      if (count > 0) console.info(`[local-db] Re-queued ${count} latest stuck encrypted message(s) for decryption`);
+    }).catch(() => {});
+
+    // Post-migration: re-fetch and enqueue cross-device messages marked by v5 migration.
+    // These have content="[encrypted]", decryptionStatus="pending", but no encryptedBody.
+    // We need to fetch the raw event from the server to enable DecryptionWorker to process them.
+    healCrossDeviceMessages(db, messages, decryptionWorker, getRoomCrypto).catch((e) => {
+      console.warn("[local-db] Cross-device heal sweep failed:", e);
+    });
+
+    // Garbage-collect tombstoned rooms older than 30 days (non-blocking)
+    rooms.garbageCollectTombstones().catch((e) => {
+      console.warn("[local-db] Tombstone GC failed:", e);
+    });
+
+    // GC expired search-cache entries (non-blocking)
+    searchCache.garbageCollect().catch((e) => {
+      console.warn("[local-db] SearchCache GC failed:", e);
+    });
+  };
+
+  // Auto-trigger: chats interactive, or 30s fallback (login stuck / boot error).
+  // The extra 1s lets the first fullRoomRefresh write burst settle so the
+  // recovery scans don't contend with it on the Dexie connection.
+  whenChatsInteractive(DEFERRED_RECOVERY_FALLBACK_MS).then(() => {
+    setTimeout(runDeferredRecovery, DEFERRED_RECOVERY_SETTLE_MS);
   });
 
-  // Garbage-collect tombstoned rooms older than 30 days (non-blocking)
-  rooms.garbageCollectTombstones().catch((e) => {
-    console.warn("[local-db] Tombstone GC failed:", e);
-  });
-
-  // GC expired search-cache entries (non-blocking)
-  searchCache.garbageCollect().catch((e) => {
-    console.warn("[local-db] SearchCache GC failed:", e);
-  });
-
-  currentKit = { db, messages, rooms, users, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, dispose: disposeRetryTriggers };
+  currentKit = { db, messages, rooms, channels, users, callProviders, syncEngine, eventWriter, decryptionWorker, listened, searchCache, retryRoomDecryption: retryRoomDebounced, runDeferredRecovery, dispose: disposeRetryTriggers };
   currentUserId = userId;
 
   return currentKit;
+}
+
+/**
+ * Read a user's local contact aliases straight from Dexie, WITHOUT spinning up
+ * the full ChatDbKit (no SyncEngine, no decryption worker, no recovery scans,
+ * no network). Used to hydrate chat-store.localAliases at cold boot / offline
+ * BEFORE Matrix init, so locally renamed contacts render their alias from the
+ * first frame even with zero connectivity (WEE-102).
+ *
+ * Reuses the live kit's connection when one is already open for this user;
+ * otherwise opens a short-lived connection and closes it after the read.
+ */
+export async function readUserAliases(
+  userId: string,
+): Promise<Record<string, { alias: string; updatedAt: number }>> {
+  if (currentKit && currentUserId === userId) {
+    return currentKit.users.getAllAliases();
+  }
+  const db = new ChatDatabase(userId);
+  try {
+    return await new UserRepository(db).getAllAliases();
+  } finally {
+    db.close();
+  }
 }
 
 /**
@@ -209,7 +313,9 @@ export function isChatDbReady(): boolean {
  */
 export function closeChatDb(): void {
   if (currentKit) {
-    currentKit.decryptionWorker.dispose();
+    // dispose() also stops the decryption worker and cancels any deferred
+    // recovery still waiting on the chats-interactive signal (WEE-97).
+    currentKit.dispose?.();
     currentKit.db.close();
     currentKit = null;
     currentUserId = null;
@@ -222,7 +328,7 @@ export function closeChatDb(): void {
  */
 export async function deleteChatDb(): Promise<void> {
   if (currentKit) {
-    currentKit.decryptionWorker.dispose();
+    currentKit.dispose?.();
     await currentKit.db.delete();
     currentKit = null;
     currentUserId = null;

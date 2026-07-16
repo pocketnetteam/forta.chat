@@ -36,9 +36,11 @@ object InviteThrottleGuard {
      * Returns true when the invite is older than `min(lifetime, MAX)`.
      *
      * @param sentTimeMs proxy for `event.origin_server_ts`. On the FCM
-     *   path use `RemoteMessage.sentTime`. Defensive: a non-positive
-     *   value is treated as expired so we never let a malformed invite
-     *   through.
+     *   path use `RemoteMessage.sentTime`. A non-positive value usually
+     *   means the timestamp was lost in transit — Huawei HMS-stub builds
+     *   pass 0, and FCM collapse_key dedup discards origin time on the
+     *   second delivery — so we treat it as live (Session 41). Otherwise
+     *   the user silently misses the call.
      * @param nowMs current wall clock. Production callers pass
      *   `System.currentTimeMillis()`; tests pass a fixed value.
      * @param lifetimeMs `event.content.lifetime`. Pass `null` to use
@@ -49,7 +51,7 @@ object InviteThrottleGuard {
         nowMs: Long,
         lifetimeMs: Long? = null,
     ): Boolean {
-        if (sentTimeMs <= 0L) return true
+        if (sentTimeMs <= 0L) return false
         val rawLifetime = lifetimeMs?.takeIf { it > 0L } ?: DEFAULT_INVITE_LIFETIME_MS
         val effective = rawLifetime.coerceAtMost(MAX_INVITE_LIFETIME_MS)
         val age = nowMs - sentTimeMs

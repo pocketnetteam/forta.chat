@@ -3,6 +3,11 @@ const IMAGE_BASE_URL = "https://pocketnet.app:8092/i/";
 const API_KEY = "c61540b5ceecd05092799f936e277552";
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
+/** Fixed output size for profile / room / group avatars (square, px). */
+export const AVATAR_SIZE = 200;
+/** JPEG quality for the fixed-size avatar encode. */
+const AVATAR_JPEG_QUALITY = 0.85;
+
 /** Max dimension on first compression attempt (longest side in px). */
 const COMPRESS_MAX_SIDE_PRIMARY = 2048;
 /** Fallback max dimension if quality=0.5 still exceeds limit. */
@@ -107,8 +112,71 @@ export async function compressImageToLimit(
   }
 }
 
+/** Center-crop to a square and resize to `size`×`size` (default
+ *  {@link AVATAR_SIZE}). Always re-encodes as JPEG — used for user / room /
+ *  group avatars so CDN and Matrix uploads stay tiny and consistent. General
+ *  photo uploads must NOT use this path. */
+export async function resizeAvatarImage(
+  file: File | Blob,
+  size: number = AVATAR_SIZE,
+): Promise<File> {
+  const originalName = file instanceof File ? file.name : "avatar.jpg";
+  const src = URL.createObjectURL(file);
+  try {
+    const { img, w: origW, h: origH } = await loadImage(src);
+    if (origW < 1 || origH < 1) {
+      throw new ImageUploadError("Image has invalid dimensions");
+    }
+
+    const side = Math.min(origW, origH);
+    const sx = Math.floor((origW - side) / 2);
+    const sy = Math.floor((origH - side) / 2);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new ImageUploadError("Canvas 2D context unavailable");
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => {
+          if (!b) {
+            reject(new ImageUploadError("Canvas produced empty blob"));
+            return;
+          }
+          resolve(b);
+        },
+        "image/jpeg",
+        AVATAR_JPEG_QUALITY,
+      );
+    });
+
+    return new File([blob], originalName.replace(/\.\w+$/, "") + ".jpg", {
+      type: "image/jpeg",
+    });
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new ImageUploadError("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 /** Convert a File to a base64 data URL string. Oversized images are auto-
- *  compressed via `compressImageToLimit` instead of being rejected. */
+ *  compressed via `compressImageToLimit` instead of being rejected.
+ *  Prefer {@link fileToAvatarBase64} for avatar uploads. */
 export async function fileToBase64(file: File): Promise<string> {
   if (!file.type.startsWith("image/")) {
     throw new ImageUploadError("File is not an image");
@@ -118,42 +186,84 @@ export async function fileToBase64(file: File): Promise<string> {
     ? await compressImageToLimit(file, MAX_FILE_SIZE)
     : file;
 
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new ImageUploadError("Failed to read file"));
-    reader.readAsDataURL(processed);
-  });
+  return readFileAsDataUrl(processed);
 }
 
-/** Upload a base64 data URL to Bastyon's image server (up1 endpoint).
- *  Matches the SDK's ImageUploader 'up1' path:
- *  - sends `file` = raw base64 (without data:image prefix)
- *  - sends `api_key`
- *  - response: `{ success: true, data: { ident: "..." } }`
- *  Returns the full image URL. */
-export async function uploadImage(base64DataUrl: string): Promise<string> {
-  // Strip the data URL prefix — server expects raw base64 in 'file' field
-  const rawBase64 = base64DataUrl.includes(",")
-    ? base64DataUrl.split(",")[1]
-    : base64DataUrl;
+/** Avatar-only: center-crop + resize to {@link AVATAR_SIZE}, then base64.
+ *  Registration and profile-edit flows must use this instead of
+ *  {@link fileToBase64} so every avatar lands as 200×200 on the CDN. */
+export async function fileToAvatarBase64(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new ImageUploadError("File is not an image");
+  }
+  const resized = await resizeAvatarImage(file, AVATAR_SIZE);
+  return readFileAsDataUrl(resized);
+}
 
+/** Retry policy for transient upload failures. The image server occasionally
+ *  drops connections on flaky mobile networks (forta-bugs#803, #747) — a
+ *  one-shot fetch surfaces as "Failed to fetch" and leaves the avatar half-
+ *  applied. Retry only on transport errors and 5xx; 4xx is the user's
+ *  problem (auth, payload size) and shouldn't be retried. */
+const UPLOAD_MAX_ATTEMPTS = 3;
+const UPLOAD_RETRY_DELAYS_MS = [500, 1500];
+
+function isRetriableUploadError(err: unknown, status?: number): boolean {
+  if (typeof status === "number") return status >= 500 && status < 600;
+  if (err instanceof ImageUploadError) return false;
+  if (err instanceof TypeError) return true; // browser "Failed to fetch"
+  if (err instanceof DOMException && err.name === "AbortError") return false;
+  return err instanceof Error;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface UploadImageOptions {
+  /** Called before each retry with the attempt index (1-based) and last error. */
+  onRetry?: (attempt: number, error: unknown) => void;
+}
+
+async function uploadImageOnce(rawBase64: string): Promise<string> {
   const body = new URLSearchParams({
     file: rawBase64,
     api_key: API_KEY,
   });
 
-  const res = await fetch(UPLOAD_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
-  if (!res.ok) {
-    throw new ImageUploadError(`Upload failed: ${res.status}`);
+  let res: Response;
+  try {
+    res = await fetch(UPLOAD_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+  } catch (err) {
+    // Tag the error so the retry loop can distinguish network failure from
+    // a thrown ImageUploadError (which is permanent).
+    if (err instanceof TypeError) throw err;
+    throw new ImageUploadError(err instanceof Error ? err.message : "Network error");
   }
 
-  const json = await res.json();
+  if (!res.ok) {
+    // Carry status on the error so the retry loop can decide 5xx vs 4xx.
+    const e = new ImageUploadError(`Upload failed: ${res.status}`) as ImageUploadError & { status?: number };
+    e.status = res.status;
+    throw e;
+  }
+
+  // Parse failures are a server contract violation, not a transient network
+  // glitch — wrap so the retry loop treats them as permanent. Without this,
+  // a malformed-JSON body would raise SyntaxError and be retried 3× via
+  // the catch-all `err instanceof Error` branch.
+  let json: { success?: boolean; error?: string; data?: { ident?: string } };
+  try {
+    json = await res.json();
+  } catch (err) {
+    throw new ImageUploadError(
+      `Upload response malformed: ${err instanceof Error ? err.message : "unknown"}`,
+    );
+  }
   if (!json.success) {
     throw new ImageUploadError(json.error || "Upload failed");
   }
@@ -165,4 +275,41 @@ export async function uploadImage(base64DataUrl: string): Promise<string> {
   }
 
   throw new ImageUploadError("No image identifier in upload response");
+}
+
+/** Upload a base64 data URL to Bastyon's image server (up1 endpoint).
+ *  Matches the SDK's ImageUploader 'up1' path:
+ *  - sends `file` = raw base64 (without data:image prefix)
+ *  - sends `api_key`
+ *  - response: `{ success: true, data: { ident: "..." } }`
+ *  Returns the full image URL.
+ *
+ *  Retries transient network failures (fetch TypeError / HTTP 5xx) up to
+ *  3 attempts with exponential backoff. 4xx and parse errors fail immediately. */
+export async function uploadImage(
+  base64DataUrl: string,
+  options: UploadImageOptions = {},
+): Promise<string> {
+  // Strip the data URL prefix — server expects raw base64 in 'file' field
+  const rawBase64 = base64DataUrl.includes(",")
+    ? base64DataUrl.split(",")[1]
+    : base64DataUrl;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await uploadImageOnce(rawBase64);
+    } catch (err) {
+      lastError = err;
+      const status = (err as { status?: number } | null)?.status;
+      const retriable = isRetriableUploadError(err, status);
+      if (!retriable || attempt === UPLOAD_MAX_ATTEMPTS) break;
+      options.onRetry?.(attempt, err);
+      await sleep(UPLOAD_RETRY_DELAYS_MS[attempt - 1] ?? 2000);
+    }
+  }
+  if (lastError instanceof ImageUploadError) throw lastError;
+  throw new ImageUploadError(
+    lastError instanceof Error ? lastError.message : "Upload failed",
+  );
 }

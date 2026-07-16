@@ -2,6 +2,7 @@ import { registerPlugin } from '@capacitor/core';
 import { isNative } from '@/shared/lib/platform';
 import { NativeWebRTC } from '@/shared/lib/native-webrtc/native-webrtc-bridge';
 import { isInviteEventExpired } from './invite-ttl';
+import { withRetry } from './with-retry';
 
 /**
  * Shape returned by `NativeCall.probeAudioAvailability`. See
@@ -40,8 +41,32 @@ export interface InviteThrottleSnapshot {
   records: InviteThrottleRecord[];
 }
 
+/** Native AudioRouter device identifiers (see `CallPlugin.setAudioDevice`). */
+export type NativeAudioDeviceType = 'speaker' | 'earpiece' | 'bluetooth' | 'wired_headset';
+
+/** Snapshot of the native AudioRouter routing state. */
+export interface NativeAudioDevicesState {
+  /** Active device type, lowercased (e.g. 'speaker'). Empty when unknown. */
+  active: string;
+  devices: Array<{ type: string; name: string }>;
+}
+
 interface NativeCallNativePlugin {
   reportIncomingCall(options: {
+    callId: string;
+    callerName: string;
+    roomId: string;
+    hasVideo: boolean;
+  }): Promise<void>;
+  /**
+   * WEE-31: idempotent ringer-surface ensurer. Launches the native
+   * IncomingCallActivity ONLY IF neither the activity nor the Telecom
+   * CallConnection is already showing. Use this from `handleIncomingCall`
+   * on the isNative path so that, when Matrix /sync delivers the invite
+   * before FCM does (typical when the app is in the foreground), the user
+   * still sees a ringer instead of nothing.
+   */
+  ensureIncomingCallVisible(options: {
     callId: string;
     callerName: string;
     roomId: string;
@@ -83,7 +108,7 @@ interface NativeCallNativePlugin {
     active: string;
     devices: Array<{ type: string; name: string }>;
   }>;
-  setAudioDevice(options: { type: string }): Promise<void>;
+  setAudioDevice(options: { type: NativeAudioDeviceType }): Promise<void>;
   startAudioRouting(options: { callType: string }): Promise<void>;
   stopAudioRouting(): Promise<void>;
   /**
@@ -221,6 +246,16 @@ export async function consumePendingRejectCallId(
 
 class NativeCallBridge {
   private callService: any = null;
+  /**
+   * WEE-16: signal aborted by stop/forceStop so any in-flight
+   * `startAudioRouting` retry bails immediately. Without this, a user
+   * who hangs up during the retry backoff would see the retry resume
+   * after AudioRouter.stop() ran — leaving the device stuck in
+   * MODE_IN_COMMUNICATION until the Session 54 orphan watchdog (~5 min).
+   * Recreated on each `startAudioRouting` call so each call cycle has
+   * its own cancellation token.
+   */
+  private audioRoutingAbort: AbortController | null = null;
 
   async wire(callService: { answerCall: () => void; rejectCall: () => void; hangup: () => void }): Promise<void> {
     if (!isNative) return;
@@ -501,6 +536,52 @@ class NativeCallBridge {
     await NativeCall.reportIncomingCall(options);
   }
 
+  /**
+   * WEE-31: launch the native ringer surface only if one isn't already
+   * showing. Use this from `handleIncomingCall` on isNative so that
+   * sync-first deliveries (app in foreground → Matrix /sync wins the
+   * race against FCM) still get a ringer. Older native builds that
+   * don't ship `ensureIncomingCallVisible` are handled by falling
+   * back to {@link reportIncomingCall}.
+   */
+  async ensureIncomingCallVisible(options: {
+    callId: string;
+    callerName: string;
+    roomId: string;
+    hasVideo: boolean;
+  }): Promise<void> {
+    if (!isNative) return;
+    try {
+      const plugin = NativeCall as Partial<NativeCallNativePlugin>;
+      if (typeof plugin.ensureIncomingCallVisible === 'function') {
+        await plugin.ensureIncomingCallVisible(options);
+        return;
+      }
+    } catch (e) {
+      console.warn('[NativeCallBridge] ensureIncomingCallVisible failed, falling back:', e);
+    }
+    // Older native build — best-effort fall back to reportIncomingCall.
+    // It's not perfectly idempotent (it can stack a second Telecom call
+    // if one is already up), so on the cold-start-from-push path it can
+    // raise a *second* answer dialog on top of the IncomingCallActivity the
+    // FCM handler already launched — exactly the duplicate-ringer bug in
+    // forta-bugs#832 / #893 (WEE-63). Guard it: if the SDK already tracks
+    // this callId, the push path has (or is about to) surface a ringer, so
+    // skip the non-idempotent fallback rather than stack a duplicate.
+    if (await this.sdkHasCall(options.callId)) {
+      console.warn(
+        '[NativeCallBridge] skipping non-idempotent reportIncomingCall fallback — SDK already has call:',
+        options.callId,
+      );
+      return;
+    }
+    try {
+      await NativeCall.reportIncomingCall(options);
+    } catch (e) {
+      console.warn('[NativeCallBridge] fallback reportIncomingCall failed:', e);
+    }
+  }
+
   async reportOutgoingCall(options: {
     callId: string;
     callerName: string;
@@ -589,13 +670,119 @@ class NativeCallBridge {
    * Wires MODE_IN_COMMUNICATION, setCommunicationDevice (API 31+),
    * AudioDeviceCallback for BT hot-swap, and OEM delayed re-apply
    * (Xiaomi/Realme/XOS reset audio mode ~500 ms after init).
+   *
+   * WEE-16: the bridge used to swallow transient failures with a single
+   * `console.warn`. On Android the underlying `audioManager.mode` setter
+   * can throw a transient `SecurityException` / `IllegalStateException`
+   * immediately after `call.answer()` if the call foreground service
+   * has not yet bound — leaving the device in MODE_NORMAL for the rest
+   * of the conversation and the peer hearing silence. We now retry on
+   * a short backoff so a single transient hiccup does not silently kill
+   * audio for the whole call.
    */
   async startAudioRouting(options: { callType: string }): Promise<void> {
     if (!isNative) return;
+    // Abort any in-flight retry from a previous call cycle so we don't
+    // double-arm AudioRouter. Then create a fresh controller scoped to
+    // this call cycle; `stopAudioRouting`/`forceStopAudio` will abort it.
+    this.audioRoutingAbort?.abort();
+    const controller = new AbortController();
+    this.audioRoutingAbort = controller;
+    const result = await withRetry(
+      () => NativeCall.startAudioRouting(options),
+      {
+        delaysMs: [150, 400, 800],
+        label: 'startAudioRouting',
+        signal: controller.signal,
+      },
+    );
+    if (result.outcome === 'failure') {
+      console.warn(
+        '[NativeCallBridge] startAudioRouting failed after',
+        result.attempts,
+        'attempts:',
+        result.error,
+      );
+    } else if (result.outcome === 'aborted') {
+      console.warn(
+        '[NativeCallBridge] startAudioRouting aborted after',
+        result.attempts,
+        'attempts (hangup during backoff)',
+      );
+    } else if (result.attempts > 1) {
+      console.warn(
+        '[NativeCallBridge] startAudioRouting recovered on attempt',
+        result.attempts,
+      );
+    }
+  }
+
+  /**
+   * WEE-60: route in-call audio to a specific output through the native
+   * AudioRouter. `type` is one of 'speaker' | 'earpiece' | 'bluetooth' |
+   * 'wired_headset' (see `CallPlugin.setAudioDevice` → `AudioRouter.setDevice`).
+   *
+   * No-op on web: the WebView has no AudioManager, and web output selection is
+   * handled by `setSinkId` on the remote element in CallWindow. Surfaced here so
+   * the Vue speaker toggle has a typed entry point instead of reaching into the
+   * raw Capacitor plugin.
+   */
+  async setAudioDevice(options: { type: NativeAudioDeviceType }): Promise<void> {
+    if (!isNative) return;
     try {
-      await NativeCall.startAudioRouting(options);
+      await NativeCall.setAudioDevice(options);
     } catch (e) {
-      console.warn('[NativeCallBridge] startAudioRouting failed:', e);
+      console.warn('[NativeCallBridge] setAudioDevice failed:', e);
+    }
+  }
+
+  /**
+   * WEE-60: read the native AudioRouter's current routing snapshot. Used to
+   * seed the in-call speaker-toggle state on mount so it reflects the real
+   * output (the call may have opened on speaker for video, or BT may already
+   * be connected). Safe default on web / older native builds.
+   */
+  async getAudioDevices(): Promise<NativeAudioDevicesState> {
+    if (!isNative) return { active: '', devices: [] };
+    try {
+      const res = await NativeCall.getAudioDevices();
+      return {
+        active: typeof res?.active === 'string' ? res.active : '',
+        devices: Array.isArray(res?.devices) ? res.devices : [],
+      };
+    } catch (e) {
+      console.warn('[NativeCallBridge] getAudioDevices unavailable:', e);
+      return { active: '', devices: [] };
+    }
+  }
+
+  /**
+   * WEE-60: subscribe to native AudioRouter routing changes (BT/wired hot-swap,
+   * OEM auto-routing). Keeps the speaker toggle in sync with the actual output
+   * instead of drifting after minimize/restore or a headset connect. Returns an
+   * unsubscribe function; no-op on web / older native builds.
+   */
+  async onAudioDevicesChanged(
+    cb: (state: NativeAudioDevicesState) => void,
+  ): Promise<() => void> {
+    if (!isNative) return () => {};
+    try {
+      const handle = await NativeCall.addListener('audioDevicesChanged', (data) => {
+        cb({
+          active: typeof data?.active === 'string' ? data.active : '',
+          devices: Array.isArray(data?.devices) ? data.devices : [],
+        });
+      });
+      return () => {
+        try {
+          handle.remove();
+        } catch {
+          /* listener already detached */
+        }
+      };
+    } catch (e) {
+      console.warn('[NativeCallBridge] onAudioDevicesChanged unavailable:', e);
+      return () => {};
     }
   }
 
@@ -607,6 +794,11 @@ class NativeCallBridge {
    */
   async stopAudioRouting(): Promise<void> {
     if (!isNative) return;
+    // WEE-16: abort any pending startAudioRouting retry before tearing
+    // down. Otherwise a retry scheduled during a transient failure can
+    // fire AudioRouter.start() right after we stopped it.
+    this.audioRoutingAbort?.abort();
+    this.audioRoutingAbort = null;
     try {
       await NativeCall.stopAudioRouting();
     } catch (e) {
@@ -625,6 +817,10 @@ class NativeCallBridge {
    */
   async forceStopAudio(): Promise<void> {
     if (!isNative) return;
+    // WEE-16: same abort wiring as stopAudioRouting — the brute reset
+    // path must also kill in-flight retries.
+    this.audioRoutingAbort?.abort();
+    this.audioRoutingAbort = null;
     try {
       await NativeCall.forceStopAudio();
     } catch (e) {

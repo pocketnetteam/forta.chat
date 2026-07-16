@@ -133,7 +133,10 @@ onUnmounted(() => {
 
         <!-- Content -->
         <div class="flex-1 overflow-y-auto">
-          <VideoPlayer v-if="videoInfo" :url="post.url" />
+          <!-- autoplay: the modal itself was opened by a deliberate tap on the
+               post/video, so starting playback here keeps it a single-tap
+               flow (WEE-82 / forta-bugs#963). -->
+          <VideoPlayer v-if="videoInfo" :url="post.url" autoplay />
           <div v-else-if="images.length" class="max-h-80 overflow-hidden">
             <img :src="images[0]" alt="" class="w-full object-cover" loading="lazy" />
           </div>

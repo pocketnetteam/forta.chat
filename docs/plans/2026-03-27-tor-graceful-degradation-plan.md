@@ -2,6 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Status**: ✅ Реализовано — `torService.initBackground()`, defer до interactive UI, toast при failure. Актуальная сводка: [`docs/plans/tor/forta-chat-tor-integration-plan.md`](./tor/forta-chat-tor-integration-plan.md)
+
 **Goal:** Make Tor init non-blocking so users can always enter the app, even when Tor fails to bootstrap.
 
 **Architecture:** Tor init runs as a best-effort background task during boot. If it doesn't complete within 90s (or stalls for 20s), the app continues without Tor. A toast notifies the user. When Tor eventually connects, traffic switches automatically.

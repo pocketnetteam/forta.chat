@@ -126,6 +126,35 @@ describe("PollCard", () => {
     expect(buttons[1].attributes("aria-pressed")).toBe("false");
   });
 
+  it("dedupes duplicated voters in the tally (WEE-52 — defence in depth)", () => {
+    // Stale Dexie rows from before EventWriter dedup landed could persist
+    // the same voter twice in pollInfo.votes — the rendered "5 votes" then
+    // double-counted into "8 votes" once the new MSC3381 last-vote-wins logic
+    // wrote a corrective response. Renderer dedups defensively so old rows
+    // surface correctly after the upgrade.
+    const msg = makePollMessage({
+      pollInfo: {
+        question: "Q",
+        options: [
+          { id: "opt-0", text: "A" },
+          { id: "opt-1", text: "B" },
+        ],
+        // Voter "PAlice" duplicated three times on "opt-0",
+        // and also (incorrectly) present on "opt-1".
+        votes: {
+          "opt-0": ["PAlice", "PAlice", "PAlice", "PBob"],
+          "opt-1": ["PAlice", "PCarol"],
+        },
+      },
+    });
+    const wrapper = mount(PollCard, {
+      props: { message: msg, isOwn: false },
+    });
+
+    // Total unique voters: Alice, Bob, Carol → 3
+    expect(wrapper.text()).toContain("3 vote");
+  });
+
   it("emits end when poll owner clicks End poll", async () => {
     const wrapper = mount(PollCard, {
       props: { message: makePollMessage(), isOwn: true },

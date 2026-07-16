@@ -103,6 +103,39 @@ class CallPlugin : Plugin() {
         })
     }
 
+    /**
+     * WEE-31: idempotent ringer-surface ensurer.
+     *
+     * Background: `handleIncomingCall` on Capacitor relies on the FCM push
+     * handler (FortaFirebaseMessagingService) to have launched
+     * IncomingCallActivity already. But when the app is in the foreground,
+     * Matrix /sync delivers `m.call.invite` *before* FCM does, so the push
+     * handler never fires and no ringer surface is shown — the user hears
+     * nothing and the caller is stuck on "connecting" until their timeout.
+     *
+     * This plugin method checks whether either the full-screen activity or
+     * the Telecom CallConnection is already up. If neither is, it goes
+     * through the normal `reportIncomingCall` path (Telecom add → fallback
+     * direct activity launch) so the user actually sees the call.
+     *
+     * Safe to call unconditionally from JS — it's a no-op when a ringer is
+     * already present.
+     */
+    @PluginMethod
+    fun ensureIncomingCallVisible(call: PluginCall) {
+        val alreadyVisible = IncomingCallActivity.currentInstance != null ||
+            CallConnectionService.currentConnection != null
+        if (alreadyVisible) {
+            Log.d(TAG, "ensureIncomingCallVisible: ringer already up, skip")
+            call.resolve()
+            return
+        }
+        Log.d(TAG, "ensureIncomingCallVisible: no ringer present, launching")
+        // Delegate to the existing reportIncomingCall path so we share the
+        // Telecom-add + activity-launch fallback chain.
+        reportIncomingCall(call)
+    }
+
     @PluginMethod
     fun reportIncomingCall(call: PluginCall) {
         val callId = call.getString("callId") ?: ""
@@ -126,14 +159,31 @@ class CallPlugin : Plugin() {
 
             telecomManager.addNewIncomingCall(handle, extras)
             call.resolve()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to report incoming call", e)
-            val intent = Intent(context, IncomingCallActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                putExtra("callId", callId)
-                putExtra("callerName", callerName)
+        } catch (e: Throwable) {
+            // WEE-31 (H1): addNewIncomingCall throws SecurityException on
+            // mobile-only devices where the PhoneAccount registration was
+            // rejected, and IllegalArgumentException on Telecom-restricted
+            // tablets. Both used to bubble out of this @PluginMethod and
+            // process-kill the callee. Fall back to a direct activity
+            // launch — same UX, no Telecom integration. roomId / hasVideo
+            // must be forwarded so accept() can resolve the Matrix room.
+            Log.e(TAG, "[callee-crash-guard] Failed to report incoming call via Telecom, falling back", e)
+            try {
+                val intent = Intent(context, IncomingCallActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    putExtra("callId", callId)
+                    putExtra("callerName", callerName)
+                    putExtra("roomId", roomId)
+                    putExtra("hasVideo", hasVideo)
+                }
+                context.startActivity(intent)
+            } catch (e2: Throwable) {
+                // Android 12+ background-start restriction may also block
+                // the direct startActivity. The FCM service still posted a
+                // ringer notification — the user can tap the heads-up to
+                // get the same UI through a foreground PendingIntent path.
+                Log.e(TAG, "[callee-crash-guard] Direct IncomingCallActivity launch also blocked", e2)
             }
-            context.startActivity(intent)
             call.resolve()
         }
     }
@@ -394,6 +444,18 @@ class CallPlugin : Plugin() {
     fun startAudioRouting(call: PluginCall) {
         val callType = call.getString("callType") ?: "voice"
         audioRouter?.start(callType)
+
+        // Session 31 (#644): bind MainActivity's hardware volume keys to
+        // STREAM_VOICE_CALL for the duration of the call. CallActivity sets
+        // its own volumeControlStream in onCreate(), but the user can navigate
+        // back to the Vue/MainActivity surface (e.g. minimised call window)
+        // and still expect the volume rocker to control the call. Per-Activity
+        // setting, applied on the UI thread.
+        bridge?.activity?.let { activity ->
+            activity.runOnUiThread {
+                activity.volumeControlStream = AudioManager.STREAM_VOICE_CALL
+            }
+        }
         call.resolve()
     }
 
@@ -410,6 +472,20 @@ class CallPlugin : Plugin() {
             } catch (e: Exception) {
                 Log.e(TAG, "stopAudioRouting threw", e)
             }
+
+            // Session 31 (#644): restore the activity's volume rocker AFTER
+            // AudioRouter.stop() has flipped the system back to MODE_NORMAL.
+            // Done in this order so a volume-key press during the teardown
+            // window still lands on STREAM_VOICE_CALL while the call is
+            // technically alive — flipping it earlier would lose the binding
+            // mid-call. Posted to the UI thread because volumeControlStream
+            // must be touched there.
+            bridge?.activity?.let { activity ->
+                activity.runOnUiThread {
+                    activity.volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+                }
+            }
+
             call.resolve()
         }
     }
@@ -432,6 +508,17 @@ class CallPlugin : Plugin() {
             } catch (e: Exception) {
                 Log.e(TAG, "forceStopAudio threw", e)
             }
+
+            // Session 31 (#644): unbind the activity's volume rocker after
+            // the brute-force audio reset. Same ordering as stopAudioRouting:
+            // restore happens once the system is back to MODE_NORMAL so a
+            // racing volume-key press never lands on a half-torn-down state.
+            bridge?.activity?.let { activity ->
+                activity.runOnUiThread {
+                    activity.volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+                }
+            }
+
             call.resolve()
         }
     }

@@ -23,6 +23,12 @@ allprojects {
         google()
         mavenCentral()
     }
+    // Capacitor 8 targets Java 21; use toolchain so local JDK 17 still works (foojay in settings.gradle).
+    tasks.withType(JavaCompile).configureEach {
+        javaCompiler = javaToolchains.compilerFor {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
 }
 
 task clean(type: Delete) {

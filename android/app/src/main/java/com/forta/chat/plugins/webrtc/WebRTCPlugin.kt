@@ -42,8 +42,16 @@ class WebRTCPlugin : Plugin() {
     }
 
     override fun load() {
+        // WEE-47 (#834): construct the manager but DO NOT call initialize().
+        // initialize() builds PeerConnectionFactory + JavaAudioDeviceModule,
+        // and the ADM eagerly probes the VOICE_COMMUNICATION mic session on
+        // Android 14+ / vivo OS 16 — claiming the input exclusively even
+        // before any call exists, so other messengers (WhatsApp/Telegram)
+        // cannot record audio after a cold-start of Forta. The factory is
+        // not needed until the SDK actually creates the first peer
+        // connection or local media stream; [ensureInitialized] guarantees
+        // it is set up exactly once on the first call-time entry point.
         manager = NativeWebRTCManager(context)
-        manager?.initialize()
 
         // Wire CallActivity native hangup → JS event
         com.forta.chat.plugins.calls.CallActivity.onNativeHangup = {
@@ -66,7 +74,27 @@ class WebRTCPlugin : Plugin() {
             })
         }
 
-        Log.d(TAG, "WebRTCPlugin loaded, manager initialized")
+        Log.d(TAG, "WebRTCPlugin loaded (manager constructed, init deferred)")
+    }
+
+    /**
+     * WEE-47 (#834): lazy factory init.
+     *
+     * Returns the manager with [NativeWebRTCManager.initialize] guaranteed
+     * to have run at least once. Called from the plugin methods that are
+     * the first entry points into call setup — `createPeerConnection` and
+     * `startLocalMedia`. `initialize()` itself is idempotent, so the cost
+     * on the hot path is a single `isInitialized` boolean check.
+     *
+     * Deferring init keeps `JavaAudioDeviceModule` out of the cold-start
+     * critical path; the ADM does not probe the VOICE_COMMUNICATION mic
+     * session until the first call actually exists, which is the contract
+     * the user expects (other apps' mic remains free on idle).
+     */
+    private fun ensureInitialized(): NativeWebRTCManager? {
+        val mgr = manager ?: return null
+        mgr.initialize()
+        return mgr
     }
 
     /**
@@ -95,7 +123,10 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun createPeerConnection(call: PluginCall) {
-        val mgr = manager ?: run {
+        // WEE-47: lazily build the PeerConnectionFactory on the first call-time
+        // entry point. Pre-load init eagerly grabbed the VOICE_COMMUNICATION
+        // mic session on Android 14+ / vivo OS 16, blocking other messengers.
+        val mgr = ensureInitialized() ?: run {
             call.reject("Manager not initialized")
             return
         }
@@ -319,7 +350,10 @@ class WebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun startLocalMedia(call: PluginCall) {
-        val mgr = manager ?: run {
+        // WEE-47: same lazy-init guard as createPeerConnection — covers the
+        // path where startLocalMedia races createPeerConnection (the SDK
+        // may fire either first depending on glare detection).
+        val mgr = ensureInitialized() ?: run {
             call.reject("Manager not initialized")
             return
         }

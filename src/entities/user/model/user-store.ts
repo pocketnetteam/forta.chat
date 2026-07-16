@@ -4,13 +4,17 @@ import { createAppInitializer } from "@/app/providers/initializers/app-initializ
 import { ProfileLoader, PROFILE_LOADER_BATCH_ACTIVE } from "@/shared/lib/profile-loader";
 import { PromisePool } from "@/shared/lib/promise-pool";
 
+import { mergeUserUpdate } from "./merge-user-update";
 import type { User } from "./types";
 
 const NAMESPACE = "user";
 const LS_KEY = "bastyon-chat-users";
 
-/** How long a cached profile stays fresh (6 hours) */
-const USER_TTL_MS = 6 * 60 * 60 * 1000;
+/** How long a cached profile stays fresh before a *background* revalidation is
+ *  scheduled (7 days). Peer profiles rarely change, so we revalidate lazily —
+ *  the SDK's `userInfoLight` store (~14d TTL) usually satisfies the refetch
+ *  from its own IndexedDB cache without hitting the network. */
+const USER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Shared app initializer instance for loading user profiles on demand */
 let _appInit: ReturnType<typeof createAppInitializer> | null = null;
@@ -115,17 +119,20 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        const userData = await appInit.loadUserData([address]);
+        // Peer profiles use the LIGHT store (userInfoLight): lighter RPC
+        // payload and a long-lived SDK cache (~14d) vs the 10-minute
+        // userInfoFull store reserved for the logged-in account.
+        await appInit.loadUsersInfo([address]);
+        const userData = appInit.getUserData(address);
         if (userData) {
-          users.value[address] = {
+          users.value[address] = mergeUserUpdate(users.value[address], {
             address,
             name: userData.name ?? "",
             about: userData.about ?? "",
             image: userData.image ?? "",
             site: userData.site ?? "",
             language: userData.language ?? "",
-            cachedAt: Date.now(),
-          };
+          });
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
@@ -171,20 +178,21 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        await appInit.loadUsersBatch(uncached);
+        // LIGHT store: peer profiles are cached long-term in the SDK
+        // (userInfoLight), unlike the logged-in account (userInfoFull, 10min).
+        await appInit.loadUsersInfo(uncached);
         let updated = false;
         for (const addr of uncached) {
           const userData = appInit.getUserData(addr);
           if (userData) {
-            users.value[addr] = {
+            users.value[addr] = mergeUserUpdate(users.value[addr], {
               address: addr,
               name: userData.name ?? "",
               about: userData.about ?? "",
               image: userData.image ?? "",
               site: userData.site ?? "",
               language: userData.language ?? "",
-              cachedAt: Date.now(),
-            };
+            });
             updated = true;
           }
         }
@@ -192,8 +200,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
-      } catch {
-        // Silently fail
+      } catch (e) {
+        console.warn("[UserStore] loadUsersBatch failed:", e);
       }
     });
   };
@@ -201,7 +209,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   /** Max stale addresses to revalidate in one cycle.
    *  Stale profiles already have names visible in UI — revalidation is cosmetic.
    *  Cap prevents network saturation when 500+ profiles expire simultaneously
-   *  (e.g. app reopened after 6+ hours). Excess addresses are silently dropped
+   *  (e.g. app reopened after the TTL elapsed). Excess addresses are silently dropped
    *  and will be picked up by the periodic refreshStaleUsers cycle. */
   const REVALIDATE_CAP = 50;
 
@@ -214,7 +222,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   function _scheduleBackgroundRevalidation(addresses: string[]) {
     for (const a of addresses) {
       // Hard cap: drop excess stale addresses (UI already shows cached name).
-      // refreshStaleUsers will catch them in the next 6h cycle.
+      // refreshStaleUsers will catch them in the next refresh cycle.
       if (_revalidateQueue.size >= REVALIDATE_CAP) break;
       _revalidateQueue.add(a);
     }
@@ -233,20 +241,19 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         try {
           const appInit = getAppInit();
           await appInit.initApi();
-          await appInit.loadUsersBatch(chunk);
+          await appInit.loadUsersInfo(chunk);
           let updated = false;
           for (const addr of chunk) {
             const userData = appInit.getUserData(addr);
             if (userData) {
-              users.value[addr] = {
+              users.value[addr] = mergeUserUpdate(users.value[addr], {
                 address: addr,
                 name: userData.name ?? "",
                 about: userData.about ?? "",
                 image: userData.image ?? "",
                 site: userData.site ?? "",
                 language: userData.language ?? "",
-                cachedAt: Date.now(),
-              };
+              });
               updated = true;
             }
           }
@@ -254,7 +261,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
             debouncedTrigger();
             debouncedCacheUsers(users.value);
           }
-        } catch {
+        } catch (e) {
+          console.warn("[UserStore] background profile revalidation failed:", e);
           // Network issue — stale profiles remain visible, retry on next cycle
         }
         if (i + BATCH < batch.length) {
@@ -295,20 +303,19 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        await appInit.loadUsersBatch(batch);
+        await appInit.loadUsersInfo(batch);
         let updated = false;
         for (const addr of batch) {
           const userData = appInit.getUserData(addr);
           if (userData) {
-            users.value[addr] = {
+            users.value[addr] = mergeUserUpdate(users.value[addr], {
               address: addr,
               name: userData.name ?? "",
               about: userData.about ?? "",
               image: userData.image ?? "",
               site: userData.site ?? "",
               language: userData.language ?? "",
-              cachedAt: now,
-            };
+            }, now);
             updated = true;
           }
         }
@@ -316,7 +323,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
-      } catch {
+      } catch (e) {
+        console.warn("[UserStore] refreshStaleUsers failed:", e);
         // Network issue — skip, will retry next cycle
       }
       // Yield between batches so we don't block anything
@@ -332,7 +340,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     // Initial refresh after 30s to let the app settle
     setTimeout(() => {
       refreshStaleUsers();
-      // Then repeat every 6 hours
+      // Then repeat on the profile TTL cadence (USER_TTL_MS)
       _refreshTimer = setInterval(refreshStaleUsers, USER_TTL_MS);
     }, 30_000);
   };

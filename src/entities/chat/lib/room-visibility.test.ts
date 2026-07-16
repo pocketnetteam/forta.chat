@@ -62,17 +62,31 @@ describe("filterRoomsForTab", () => {
 
   const all: ChatRoom[] = [joined1, joined2, joinedEmpty, invite1, inviteEmpty];
 
-  it('"all" tab hides invites and empty rooms', () => {
+  // WEE-59: pending invites must surface in the "all" tab alongside joined rooms
+  // so the user does not miss them. Only empty placeholder rooms stay hidden.
+  it('"all" tab shows joined rooms AND pending invites, hides only empty placeholders', () => {
     const filtered = filterRoomsForTab(all, "all");
-    expect(filtered.map(r => r.id)).toEqual(["!j1:s", "!j2:s"]);
+    expect(filtered.map(r => r.id)).toEqual(["!j1:s", "!j2:s", "!i1:s"]);
   });
 
-  it('"personal" tab hides groups, invites, and empty rooms', () => {
+  it('"all" tab still drops un-hydrated empty invites (no blank stripes)', () => {
+    const filtered = filterRoomsForTab(all, "all");
+    expect(filtered.map(r => r.id)).not.toContain("!ie:s");
+  });
+
+  it('"all" tab shows both DM and group invites (WEE-59 A6)', () => {
+    const dmInvite = makeRoom({ id: "!dm:s", membership: "invite", isGroup: false, name: "DM Invite", lastMessage: undefined, updatedAt: 1000 });
+    const groupInvite = makeRoom({ id: "!gi:s", membership: "invite", isGroup: true, name: "Group Invite", lastMessage: undefined, updatedAt: 2000 });
+    const filtered = filterRoomsForTab([joined1, dmInvite, groupInvite], "all");
+    expect(filtered.map(r => r.id)).toEqual(["!j1:s", "!dm:s", "!gi:s"]);
+  });
+
+  it('"personal" tab keeps joined membership only (invites live in "all" + Invites tab)', () => {
     const filtered = filterRoomsForTab(all, "personal");
     expect(filtered.map(r => r.id)).toEqual(["!j1:s"]);
   });
 
-  it('"groups" tab hides non-groups, invites, and empty rooms', () => {
+  it('"groups" tab keeps joined groups only (invites excluded)', () => {
     const filtered = filterRoomsForTab(all, "groups");
     expect(filtered.map(r => r.id)).toEqual(["!j2:s"]);
   });

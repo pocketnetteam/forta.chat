@@ -5,6 +5,7 @@ const swBroadcaster = new Broadcaster('ServiceWorker');
 
 const swArgs = new URL(location).searchParams;
 const isElectron = (swArgs.get('platform') === 'electron');
+const isCapacitor = (swArgs.get('platform') === 'capacitor');
 
 let nodeFetch = (...args) => fetch(...args);
 
@@ -33,7 +34,15 @@ function onFetch(event) {
     return;
   }
 
-  async function torAnswer() {
+  if (isCapacitor && request.destination === 'document') {
+    return;
+  }
+
+  if (isCapacitor && request.url.includes('https://localhost')) {
+    return;
+  }
+
+  async function torAnswerElectron() {
     if (!nodeFetch) {
       return;
     }
@@ -83,10 +92,77 @@ function onFetch(event) {
     }
   }
 
+  async function torAnswerCapacitor() {
+    const isTorRequest = await swBroadcaster.invoke('AltTransportActive', request.url);
+
+    if (!isTorRequest) {
+      return;
+    }
+
+    const proxyURL = `http://127.0.0.1:8181/${encodeURIComponent(request.url)}`;
+    const fetchInit = {
+      method: request.method,
+      headers: request.headers,
+      redirect: request.redirect,
+      credentials: 'omit',
+      mode: 'cors',
+    };
+
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      fetchInit.body = request.body;
+    }
+
+    return fetch(proxyURL, fetchInit)
+      .then(async (response) => {
+        const responseClone = response.clone();
+        const responseBuffer = await responseClone.arrayBuffer();
+
+        networkTotalStats.torSuccessCount++;
+        networkTotalStats.totalTorBytes += responseBuffer.byteLength;
+
+        swBroadcaster.send('network-stats', {
+          status: 'success',
+          url: request.url,
+          torUsed: true,
+          bytesLength: responseBuffer.byteLength,
+          totalStats: networkTotalStats,
+        });
+
+        return response;
+      })
+      .catch((err) => {
+        networkTotalStats.torFailCount++;
+
+        swBroadcaster.send('network-stats', {
+          status: 'failed',
+          reason: err,
+          url: request.url,
+          torUsed: true,
+          totalStats: networkTotalStats,
+        });
+
+        throw err;
+      });
+  }
+
   const handle = () => new Promise(async (resolve, reject) => {
     if (isElectron) {
       try {
-        const torResponse = await torAnswer();
+        const torResponse = await torAnswerElectron();
+
+        if (torResponse) {
+          resolve(torResponse);
+          return;
+        }
+      } catch (err) {
+        reject(err);
+        return;
+      }
+    }
+
+    if (isCapacitor) {
+      try {
+        const torResponse = await torAnswerCapacitor();
 
         if (torResponse) {
           resolve(torResponse);

@@ -1,9 +1,21 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+def hasGoogleServices = {
+    try {
+        def servicesJSON = file('google-services.json')
+        return servicesJSON.exists() && servicesJSON.text?.trim()
+    } catch (Exception ignored) {
+        return false
+    }
+}()
+
 android {
     namespace = "com.forta.chat"
     compileSdk = rootProject.ext.compileSdkVersion
+    buildFeatures {
+        buildConfig = true
+    }
     defaultConfig {
         applicationId "com.forta.chat"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -11,6 +23,7 @@ android {
         versionCode 1
         versionName "1.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "boolean", "FIREBASE_ENABLED", "${hasGoogleServices}"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
@@ -42,6 +55,13 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+    kotlinOptions {
+        jvmTarget = '21'
     }
 }
 
@@ -77,8 +97,7 @@ dependencies {
 apply from: 'capacitor.build.gradle'
 
 try {
-    def servicesJSON = file('google-services.json')
-    if (servicesJSON.text) {
+    if (hasGoogleServices) {
         apply plugin: 'com.google.gms.google-services'
     }
 } catch(Exception e) {

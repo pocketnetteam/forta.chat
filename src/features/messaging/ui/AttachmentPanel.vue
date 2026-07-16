@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { BottomSheet } from "@/shared/ui/bottom-sheet";
 
+const { t } = useI18n();
 const isMobile = useMobile();
 
 interface Props {
@@ -38,7 +39,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
 
 <template>
   <!-- Mobile: BottomSheet -->
-  <BottomSheet v-if="isMobile" :show="props.show" aria-label="Attachments" @close="emit('close')">
+  <BottomSheet v-if="isMobile" :show="props.show" :aria-label="t('attachment.panelLabel')" @close="emit('close')">
     <button
       class="flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-base text-text-color transition-colors active:bg-neutral-grad-0"
       @click="selectPhoto"
@@ -48,7 +49,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
         <circle cx="8.5" cy="8.5" r="1.5" />
         <polyline points="21 15 16 10 5 21" />
       </svg>
-      Photo or Video
+      {{ t("attachment.photoOrVideo") }}
     </button>
     <button
       class="flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-base text-text-color transition-colors active:bg-neutral-grad-0"
@@ -58,7 +59,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
         <polyline points="14 2 14 8 20 8" />
       </svg>
-      File
+      {{ t("attachment.file") }}
     </button>
     <button
       class="flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-base text-text-color transition-colors active:bg-neutral-grad-0"
@@ -69,7 +70,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
         <rect x="3" y="10" width="13" height="4" rx="1" />
         <rect x="3" y="16" width="10" height="4" rx="1" />
       </svg>
-      Poll
+      {{ t("attachment.poll") }}
     </button>
     <button
       v-if="props.showDonate"
@@ -88,6 +89,8 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
     <transition name="attach-popup">
       <div v-if="props.show" class="fixed inset-0 z-50" @click.self="emit('close')">
         <div
+          role="menu"
+          :aria-label="t('attachment.panelLabel')"
           class="fixed z-50 w-[200px] overflow-hidden rounded-xl border border-neutral-grad-0 bg-background-total-theme shadow-xl"
           :style="panelStyle"
         >
@@ -100,7 +103,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
               <circle cx="8.5" cy="8.5" r="1.5" />
               <polyline points="21 15 16 10 5 21" />
             </svg>
-            Photo or Video
+            {{ t("attachment.photoOrVideo") }}
           </button>
           <button
             class="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
@@ -110,7 +113,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <polyline points="14 2 14 8 20 8" />
             </svg>
-            File
+            {{ t("attachment.file") }}
           </button>
           <button
             class="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-text-color transition-colors hover:bg-neutral-grad-0"
@@ -121,7 +124,7 @@ const selectDonate = () => { emit("selectDonate"); emit("close"); };
               <rect x="3" y="10" width="13" height="4" rx="1" />
               <rect x="3" y="16" width="10" height="4" rx="1" />
             </svg>
-            Poll
+            {{ t("attachment.poll") }}
           </button>
           <button
             v-if="props.showDonate"

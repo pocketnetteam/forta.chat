@@ -3,7 +3,7 @@ import { useChatStore, MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
 import { useFileDownload } from "@/features/messaging/model/use-file-download";
-import { getChatDb } from "@/shared/lib/local-db";
+import { getChatDb, isChatDbReady, useLiveQuery, type CallProvider } from "@/shared/lib/local-db";
 import { ChannelView } from "@/features/channels";
 import { useChannelStore } from "@/entities/channel";
 import { MessageList, MessageInput } from "@/features/messaging";
@@ -16,7 +16,7 @@ import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
 
-import { useCallService } from "@/features/video-calls/model/call-service";
+import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
 import type { CallType } from "@/entities/call";
 import { useWalletStore } from "@/features/wallet";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
@@ -241,7 +241,6 @@ const pasteDrop = usePasteDrop({
 pasteDrop.setupDragListeners(chatWindowRef);
 
 
-const callService = useCallService();
 const walletStore = useWalletStore();
 const showDonateModal = ref(false);
 
@@ -298,9 +297,34 @@ const otherMemberName = computed(() =>
   otherMemberAddress.value ? chatStore.getDisplayName(otherMemberAddress.value) : "",
 );
 
-const startCallFromHeader = (type: CallType) => {
+// WEE-57: route header calls through the launcher so configured external
+// meeting links can be offered alongside (DM) or instead of (group) the
+// native call. A menu appears only when there's a real choice.
+const callLauncher = useCallLauncher();
+
+// Reactive count of configured providers — drives whether a group chat shows
+// a call button at all (groups have no native call button of their own).
+const { data: callProviders } = useLiveQuery<CallProvider[]>(
+  () => (isChatDbReady() ? getChatDb().callProviders.toArray() : Promise.resolve([])),
+  undefined,
+  [],
+);
+const hasCallProviders = computed(() => (callProviders.value?.length ?? 0) > 0);
+
+// Show the call button in DMs always (native fallback), and in groups only
+// when there is at least one external link to offer.
+const showHeaderCallButton = computed(() => {
+  const room = chatStore.activeRoom;
+  if (!room) return false;
+  return room.isGroup ? hasCallProviders.value : true;
+});
+
+const startCallFromHeader = (type: CallType, event?: MouseEvent) => {
   const roomId = chatStore.activeRoomId;
-  if (roomId) callService.startCall(roomId, type);
+  if (!roomId) return;
+  const isDm = !(chatStore.activeRoom?.isGroup ?? false);
+  const anchor = event ? { x: event.clientX, y: event.clientY } : undefined;
+  void callLauncher.launch(roomId, type, isDm, anchor);
 };
 
 const handleScrollToMessage = (messageId: string) => {
@@ -310,7 +334,9 @@ const handleScrollToMessage = (messageId: string) => {
 // Auto-open ForwardPicker when "forward" is selected from context menu (not on draft restore)
 watch(() => chatStore.forwardPickerRequested, (v) => {
   if (v) {
-    showForwardPicker.value = true;
+    // Defensive no-op guard (WEE-100): re-setting `true` doesn't trigger
+    // reactivity anyway, but makes "repeated taps don't reopen" explicit.
+    if (!showForwardPicker.value) showForwardPicker.value = true;
     chatStore.forwardPickerRequested = false;
   }
 });
@@ -510,13 +536,17 @@ onUnmounted(() => {
           </svg>
         </button>
 
-        <!-- Voice call button (1:1 only) -->
+        <!-- Call button. In a DM it's always present (native fallback + any
+             external links); in a group it appears only when external meeting
+             links are configured (groups have no native call button). A menu
+             opens only when there's more than one option. (WEE-57) -->
         <button
-          v-if="!chatStore.activeRoom.isGroup"
+          v-if="showHeaderCallButton"
+          data-test="call-button"
           class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
           :title="t('call.voiceCall')"
           :aria-label="t('call.voiceCall')"
-          @click="startCallFromHeader('voice')"
+          @click="startCallFromHeader('voice', $event)"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" />
@@ -685,6 +715,16 @@ onUnmounted(() => {
     <ForwardPicker
       :show="showForwardPicker"
       @close="showForwardPicker = false"
+    />
+
+    <!-- WEE-57: external call-provider picker (sheet on touch, menu on desktop) -->
+    <CallProviderPicker
+      :show="callLauncher.pickerOpen.value"
+      :options="callLauncher.pickerOptions.value"
+      :x="callLauncher.pickerAnchor.value.x"
+      :y="callLauncher.pickerAnchor.value.y"
+      @pick="callLauncher.pick"
+      @close="callLauncher.closePicker"
     />
 
     <ChatInfoPanel :show="showInfoPanel" @close="showInfoPanel = false" @open-search="showSearch = true" @go-to-message="(id) => { showInfoPanel = false; messageListRef?.scrollToMessage(id); }" />

@@ -57,8 +57,10 @@ describe("cleanupStaleRooms", () => {
     expect(ctx._deletedIds).toEqual(["!left:s"]);
   });
 
-  it("removes orphaned rooms not in SDK", async () => {
-    const rooms = [makeLocalRoom({ id: "!orphan:s" })];
+  it("removes orphaned rooms not in SDK (synced long ago — genuinely gone)", async () => {
+    // WEE-61: only an orphan synced outside the safety window is removed.
+    // Fresh-synced rooms are protected (see room-cleanup-guard.test.ts).
+    const rooms = [makeLocalRoom({ id: "!orphan:s", syncedAt: FOUR_DAYS_AGO })];
     const sdkRoomIds = new Set<string>(); // empty — room not in SDK
     const ctx = makeContext(rooms, sdkRoomIds) as CleanupContext & { _deletedIds: string[] };
 
@@ -112,7 +114,7 @@ describe("cleanupStaleRooms", () => {
     const rooms = [
       makeLocalRoom({ id: "!keep:s", membership: "join" }),
       makeLocalRoom({ id: "!left:s", membership: "leave" }),
-      makeLocalRoom({ id: "!orphan:s", membership: "join" }),
+      makeLocalRoom({ id: "!orphan:s", membership: "join", syncedAt: FOUR_DAYS_AGO }),
       makeLocalRoom({ id: "!stale-stream:s", membership: "join", lastMessageTimestamp: FOUR_DAYS_AGO }),
       makeLocalRoom({ id: "!fresh-stream:s", membership: "join", lastMessageTimestamp: ONE_HOUR_AGO }),
     ];

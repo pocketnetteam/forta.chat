@@ -12,10 +12,14 @@ export const en = {
   "contacts.searchPlaceholder": "Search contacts...",
   "contacts.noFound": "No contacts found",
   "contacts.noYet": "No contacts yet",
+  "contacts.addContact": "Add contact",
+  "contacts.addPlaceholder": "Search by name or address...",
 
   // ── Contact list ──
   "contactList.loadingChats": "Loading your chats and contacts",
   "contactList.loadingChatsHint": "This may take a moment on the first launch",
+  "contactList.loadingChatsSlow": "Loading is taking longer than usual…",
+  "contactList.loadingChatsSlowHint": "Still syncing with the server",
   "contactList.noConversations": "No conversations yet",
   "contactList.inviteToChat": "Invitation to chat",
   "contactList.noMessages": "No messages",
@@ -34,8 +38,20 @@ export const en = {
   "contactList.delete": "Delete",
   "contactList.deleteChat": "Delete chat?",
   "contactList.deleteChatConfirm": "Do you really want to leave and delete this chat?",
+  "contactList.deleteDmConfirm": "Clear just the message history, or delete the chat entirely? The contact stays if you only clear history.",
+  "contactList.clearHistory": "Clear history",
+  "contactList.deleteAndLeave": "Delete and leave",
   "contactList.cancel": "Cancel",
   "contactList.draft": "Draft",
+
+  // ── Contact alias (local "rename contact") ──
+  "contact.renameTitle": "Rename contact",
+  "contact.addAlias": "Add name",
+  "contact.editAlias": "Edit name",
+  "contact.removeAlias": "Remove",
+  "contact.aliasPlaceholder": "e.g. Uncle Pete",
+  "contact.aliasHint": "Visible only to you. Syncs across your devices.",
+  "contact.save": "Save",
 
   // ── Contact search ──
   "contactSearch.placeholder": "Search chats or users...",
@@ -61,6 +77,8 @@ export const en = {
   "tabs.channels": "Channels",
 
   // ── Channels ──
+  "channels.repostPreview": "Repost",
+  "channels.postPreview": "Post",
   "channels.noChannels": "No channel subscriptions",
   "channels.noChannelsHint": "Subscribe to channels on Bastyon to see them here",
   "channels.noPosts": "No posts in this channel yet",
@@ -76,6 +94,7 @@ export const en = {
   "settings.title": "Settings",
   "settings.myProfile": "My Profile",
   "settings.appearance": "Appearance",
+  "settings.storage": "Storage",
   "settings.darkMode": "Dark Mode",
   "settings.torProxy": "Tor Proxy",
   "settings.torFailed": "Tor failed to start. Try toggling off and on again.",
@@ -88,6 +107,19 @@ export const en = {
   "settings.enabled": "Enabled",
   "settings.privacy": "Privacy",
   "settings.about": "About",
+  // ── Notification settings (WEE-75) ──
+  "notificationsSettings.soundTitle": "Message sound",
+  "notificationsSettings.soundDesc": "How new-message notifications alert you.",
+  "notificationsSettings.soundOnHint": "New messages now play a notification sound out of the box.",
+  "notificationsSettings.manageTitle": "Sound & vibration",
+  "notificationsSettings.manageDesc": "Sound, vibration and importance for each notification type are managed in your system settings.",
+  "notificationsSettings.openSystem": "Open notification settings",
+  "notificationsSettings.vendorTitle": "Not hearing notifications?",
+  "notificationsSettings.vendorHint": "Your device manufacturer can silence app notifications even when sound is on. Open the system notification settings and make sure sound is allowed for Forta Chat (check your security/battery app too).",
+  "notificationsSettings.webNote": "Notification sound settings are available in the mobile app.",
+  "interop.bastyonWarning.title": "Bastyon is installed",
+  "interop.bastyonWarning.body": "Forta and Bastyon share the same account and notifications. Running both can cause duplicate call rings and notifications — for the smoothest experience, use one app or disable call notifications in the other.",
+  "interop.bastyonWarning.dismiss": "Got it",
   "about.loading": "Loading...",
   "about.version": "Version",
   "about.webviewVersion": "WebView Version",
@@ -211,6 +243,7 @@ export const en = {
   "chat.typingMany": "{name} and {count} more are typing...",
   "chat.members": "{count} members",
   "chat.copiedToClipboard": "Copied to clipboard",
+  "chat.copyFailed": "Couldn't copy",
   "chat.updatingMessages": "Updating messages…",
   "chat.returnToLatest": "Return to latest",
 
@@ -219,6 +252,9 @@ export const en = {
   "titleBar.minimize": "Minimize",
   "titleBar.maximize": "Maximize",
   "titleBar.close": "Close",
+
+  // ── Web notifications (WEE-48) ──
+  "notifications.newMessage": "New message",
 
   // ── User edit form ──
   "profile.name": "Name",
@@ -232,6 +268,7 @@ export const en = {
   "profile.saved": "Saved",
   "profile.saving": "Saving...",
   "profile.avatarUploading": "Uploading...",
+  "profile.avatarRetrying": "Connection unstable — retrying...",
   "profile.avatarError": "Failed to upload avatar",
   "profile.saveFailed": "Failed to save profile. Check your connection and try again.",
 
@@ -248,9 +285,16 @@ export const en = {
   "message.poll": "Poll",
   "message.transfer": "Transfer",
   "message.deleted": "This message was deleted",
+  "message.encryptedNotice": "Encrypted message",
+  "message.retryDecrypt": "Try to decrypt",
+  "message.encryptedPreview": "🔒 Encrypted message",
   "message.retry": "Retry",
   "message.failedToLoadImage": "Failed to load image",
   "message.tapToRetry": "Tap to retry",
+  "message.heicNotSupported": "HEIC image — open in gallery to view",
+  "message.videoUnsupportedFormat": "Video format not supported",
+  "message.videoLoadFailed": "Failed to load video",
+  "message.videoDownload": "Download",
 
   // ── Message context menu ──
   "contextMenu.reply": "Reply",
@@ -278,12 +322,14 @@ export const en = {
   "messageList.cancel": "Cancel",
 
   // ── Attachment panel ──
+  "attachment.panelLabel": "Attachments",
   "attachment.photoOrVideo": "Photo or Video",
   "attachment.file": "File",
   "attachment.poll": "Poll",
 
   // ── Message bubble ──
   "message.forwardedFrom": "Forwarded from {name}",
+  "message.edited": "edited",
 
   // ── Voice recorder ──
   "voice.slideToCancel": "< Slide to cancel",
@@ -324,6 +370,7 @@ export const en = {
   "forward.cancelConfirm.cancel": "Cancel forwarding",
   "forward.resultSuccess": "Forwarded: {count}",
   "forward.resultSummary": "Forwarded {succeeded} of {total}",
+  "forward.mediaFailed": "Couldn't forward media — original unavailable or not decrypted",
   "forward.bulkTitle": "Forward {count} messages",
   "forward.bulkFrom": "From: {names}",
   "forward.bulkCancelConfirm.title": "{count} messages",
@@ -338,6 +385,10 @@ export const en = {
   "media.addCaption": "Add a caption...",
   "media.captionBelow": "Caption below",
   "media.captionAbove": "Caption above",
+  "media.save": "Save",
+  "media.savedToGallery": "Saved to gallery",
+  "media.savedToDownloads": "Saved to Downloads",
+  "media.saveFailed": "Failed to save file",
 
   // ── Drop overlay ──
   "drop.title": "Drop files here to send",
@@ -374,6 +425,7 @@ export const en = {
   "info.add": "Add",
   "info.searchToAdd": "Search users to add...",
   "info.noUsersFound": "No users found",
+  "info.addMemberFailed": "Failed to add member. You may lack permission or the user is blocked.",
   "info.admin": "admin",
   "info.adminLabel": "Admin",
   "info.leaveGroup": "Leave group",
@@ -491,6 +543,7 @@ export const en = {
   "call.outgoing": "Outgoing call",
   "call.incomingCall": "Incoming call",
   "call.missed": "Missed",
+  "call.callBack": "Call back",
   "call.voiceCallSystem": "Voice call",
   "call.videoCallSystem": "Video call",
   "call.missedVoiceCall": "Missed voice call",
@@ -498,7 +551,11 @@ export const en = {
   "call.microphone": "Microphone",
   "call.camera": "Camera",
   "call.speaker": "Speaker",
+  "call.speakerOn": "Speaker on",
+  "call.speakerOff": "Speaker off",
   "call.devices": "Devices",
+  "call.deviceLabel.earpiece": "Earpiece",
+  "call.deviceLabel.speakerphone": "Speakerphone",
   "call.peerCameraOff": "Camera is off",
   "call.you": "You",
   "call.screen": "screen",
@@ -515,6 +572,37 @@ export const en = {
   "call.warning.noOutboundAudio": "No outgoing audio — check your microphone.",
   "call.error.connectionLost": "Call connection lost.",
   "call.error.legacyWebView": "Your device's browser engine is too old for stable calls. Update Android System WebView from the Play Store.",
+
+  // ── External call providers (WEE-57) ──
+  "call.fortaNative": "Forta (built-in)",
+  "call.picker.title": "Choose a call method",
+  "call.join": "Join",
+  "call.linkSubtitle": "Meeting link",
+  "settings.callProviders.title": "Call methods",
+  "settings.callProviders.how.title": "How it works",
+  "settings.callProviders.how.intro": "Add your own meeting links — a personal Zoom room, Google Meet or Jitsi. Then, when you call, you can send a link into the chat instead of placing a built-in Forta call.",
+  "settings.callProviders.how.step1": "Add one or more methods below (a name + a link).",
+  "settings.callProviders.how.step2": "In a chat, tap the call button. With several methods you'll get a chooser; in a DM the built-in Forta call stays in it too.",
+  "settings.callProviders.how.step3": "The other person gets a card with a “Join” button, and you (the host) open the meeting right away — if enabled below.",
+  "settings.callProviders.privacy": "Links are stored on this device only and are never sent to the server.",
+  "settings.callProviders.behaviour": "Behaviour",
+  "settings.callProviders.autoOpen": "Open the meeting immediately when calling",
+  "settings.callProviders.autoOpenHint": "When you start a link call, it opens in your browser right away (you're the host). Turn off to only send the link to the chat and join via the card.",
+  "settings.callProviders.yourMethods": "Your methods",
+  "settings.callProviders.empty": "No methods configured. Add a meeting link — it'll appear in the call menu.",
+  "settings.callProviders.add": "Add method",
+  "settings.callProviders.edit": "Edit",
+  "settings.callProviders.delete": "Delete",
+  "settings.callProviders.label": "Name",
+  "settings.callProviders.labelPlaceholder": "Personal Zoom",
+  "settings.callProviders.url": "Link",
+  "settings.callProviders.urlPlaceholder": "https://zoom.us/j/1234567890",
+  "settings.callProviders.save": "Save",
+  "settings.callProviders.cancel": "Cancel",
+  "settings.callProviders.addTitle": "New call method",
+  "settings.callProviders.editTitle": "Edit call method",
+  "settings.callProviders.invalidUrl": "Enter a valid link (https://…)",
+  "settings.callProviders.labelRequired": "Enter a name for this method",
 
   // ── Auth / Login ──
   "auth.signIn": "Sign In",
@@ -537,6 +625,18 @@ export const en = {
   "welcome.getStarted": "Get Started",
 
   // ── Tor status ──
+  "tor.networking": "Networking",
+  "tor.useTor": "Use Tor",
+  "tor.useSnowflake": "Use Snowflake",
+  "tor.useSnowflakeHint": "Helps connect in regions where Tor is blocked. Requires working Snowflake proxies.",
+  "tor.modeNever": "Never",
+  "tor.modeAuto": "Auto",
+  "tor.modeAlways": "Always",
+  "tor.modeNeverHint": "All traffic goes directly — no Tor routing.",
+  "tor.modeAutoHint": "Uses Tor only when a host is unreachable directly.",
+  "tor.modeAlwaysHint": "Routes all traffic through Tor (except whitelisted CDNs).",
+  "tor.status": "Status",
+  "tor.statusHint": "Current Tor connection state and exit IP.",
   "tor.connected": "Connected",
   "tor.connecting": "Connecting...",
   "tor.error": "Error",
@@ -548,6 +648,16 @@ export const en = {
   "tor.verifyFailed": "Verification failed",
   "tor.disableWarning": "Disabling Tor will expose your real IP address. Your traffic will no longer be anonymous. Continue?",
   "tor.initFailed": "Secure connection unavailable. You can enable Tor in Settings.",
+  "tor.shieldDisabled": "Tor network state — disabled",
+  "tor.shieldLoading": "Tor network state — loading",
+  "tor.shieldStarting": "Tor module is starting",
+  "tor.shieldRunning": "Tor module is working",
+  "tor.stats": "Networking statistics",
+  "tor.statsHint": "Traffic routed through Tor vs direct connection.",
+  "tor.statCurrentDirect": "Current, direct",
+  "tor.statCurrentTor": "Current, Tor",
+  "tor.statTotalDirect": "Total, direct",
+  "tor.statTotalTor": "Total, Tor",
 
   // ── Wallet / PKOIN transfer ──
   "wallet.sendPkoin": "Send PKOIN",
@@ -560,6 +670,10 @@ export const en = {
   "wallet.balance": "Balance",
   "wallet.insufficientBalance": "Insufficient balance",
   "wallet.transactionError": "Transaction failed",
+  "wallet.operationFailed": "Operation failed. Please try again.",
+  "wallet.networkBusy": "The network is busy right now. Please try again in a moment.",
+  "wallet.retry": "Retry",
+  "wallet.fundsFragmented": "Your funds are split across too many small payments to send at once. Try a smaller amount.",
   "wallet.senderPaysFees": "Sender pays fees",
   "wallet.receiverPaysFees": "Receiver pays fees",
   "wallet.sent": "Sent {amount} PKOIN",
@@ -570,6 +684,8 @@ export const en = {
   // ── Post embeds ──
   "post.loading": "Loading post...",
   "post.notFound": "Post not found",
+  "post.openOriginal": "Open in Bastyon",
+  "post.retry": "Retry",
   "post.readMore": "Read more",
   "post.video": "Video",
   "post.article": "Article",
@@ -636,6 +752,7 @@ export const en = {
   "share.linkCopied": "Link copied to clipboard",
   "share.copyFailed": "Failed to copy link",
   "share.nativeShare": "Share via...",
+  "share.sendFailed": "Failed to send file",
 
   // ── Share group link ──
   "shareGroup.inviteLink": "Invite Link",
@@ -690,6 +807,8 @@ export const en = {
   "system.updatedRoom": "{sender} updated the room",
   "system.changedName": "{sender} changed the room name to \"{name}\"",
   "system.changedPermissions": "{sender} changed room permissions",
+  "system.markedModerator": "{sender} marked {target} as moderator",
+  "system.unmarkedModerator": "{sender} unmarked {target} as moderator",
   "system.changedPhoto": "{sender} changed the room photo",
   "system.setDescription": "{sender} set the room description",
   "system.clearedDescription": "{sender} cleared the room description",
@@ -707,7 +826,7 @@ export const en = {
   "common.loading": "Loading...",
   "common.unknownUser": "User",
   "common.encryptedChat": "Chat",
-  "message.notDecrypted": "Message not decrypted",
+  "message.notDecrypted": "Couldn't decrypt — ask the sender to resend or update the app",
 
   // ── Sync status ──
   "sync.offline": "Waiting for network...",
@@ -724,6 +843,10 @@ export const en = {
   "push.unknownSender": "Unknown",
   "push.file": "📎 File",
 
+  // ── Relative date labels (sidebar / chat list) ──
+  "date.today": "Today",
+  "date.yesterday": "Yesterday",
+
   // ── Notification channels ──
   "channel.messages": "Messages",
   "channel.messagesDesc": "Chat message notifications",
@@ -738,6 +861,8 @@ export const en = {
   "boot.syncingMessages": "Syncing messages…",
   "boot.loading": "Loading Forta Chat…",
   "boot.failed": "Failed to start Forta Chat",
+  "boot.matrixUnreachable": "Couldn't reach the chat server",
+  "boot.matrixUnreachableHint": "Check your connection and try again. If the problem persists, the server may be temporarily unavailable.",
   "boot.retry": "Retry",
   "boot.clearing": "Clearing…",
   "boot.clearCache": "Clear cache & retry",
@@ -757,7 +882,7 @@ export const en = {
   "register.registrationFailed": "Registration failed",
   "register.captchaLoadFailed": "Failed to load captcha",
   "register.nameTaken": "This name is already taken",
-  "register.nameInvalidChars": "Name contains invalid characters. Allowed: letters, digits, spaces, . - _ @ # &",
+  "register.nameInvalidChars": "Name can only contain latin letters, digits, dot and underscore",
   "register.nameTooLong": "Name must be {max} characters or less",
   "register.nameReserved": "Name cannot contain \"{name}\"",
   "register.usernameRejected": "Username unavailable",
@@ -848,6 +973,67 @@ export const en = {
   "errors.mediaUnavailable": "Media unavailable. Please try again later.",
   "errors.networkBlocked": "Server unreachable. Try enabling Tor or a VPN.",
   "errors.cryptoNotReady": "Encryption keys are still loading. Please wait.",
+  "errors.missingUrl": "File is corrupted or never arrived. Ask the sender to resend.",
+
+  // ── Send errors (WEE-20) ──
+  "errors.send.permissionDenied": "No access to files. Grant access in app settings.",
+  "errors.send.micDenied": "No access to the microphone. Grant access in app settings.",
+  "errors.send.pickerCancelled": "No file selected.",
+  "errors.send.fileTooLarge": "File too large (max 100 MB).",
+  "errors.send.dbNotReady": "Local database is not ready yet. Wait and try again.",
+  "errors.send.matrixNotReady": "Connection is not ready yet. Wait and try again.",
+  "errors.send.cryptoNotReady": "Encryption keys are still loading. Please wait.",
+  "errors.send.uploadFailed": "Failed to send. Check the connection and try again.",
+  "errors.send.queueStuck": "Send queue is stuck. Restart the app.",
+  "errors.send.unknown": "Failed to send. Please try again.",
+  "errors.send.dismiss": "Dismiss",
+  "errors.send.retry": "Retry",
+
+  // ── Storage / media cache (WEE-33) ──
+  "storage.title": "Media cache",
+  "storage.description": "Photos, videos and files load instantly from the cache instead of being re-downloaded every time you open a chat.",
+  "storage.used": "Cache size",
+  "storage.photos": "Photos",
+  "storage.videos": "Videos",
+  "storage.audio": "Audio",
+  "storage.other": "Files",
+  "storage.limitTitle": "Cache limit",
+  "storage.limitDescription": "Older items are removed automatically when the cache exceeds this size.",
+  "storage.currentLimit": "Current limit",
+  "storage.clearTitle": "Clear cache",
+  "storage.clearDescription": "Removes all locally cached media. Files will be re-downloaded on demand.",
+  "storage.clearAll": "Clear cache",
+  "storage.clearing": "Clearing…",
+  "storage.confirmTitle": "Clear media cache?",
+  "storage.confirmBody": "All cached photos, videos and files will be removed from this device. Originals stay on the server.",
+  // Tabs + per-entry actions
+  "storage.tabs.chats": "Chats",
+  "storage.tabs.media": "Media",
+  "storage.tabs.files": "Files",
+  "storage.tabs.voice": "Voice",
+  "storage.empty": "Nothing cached yet",
+  "storage.unknownChat": "Unknown chat",
+  "storage.unnamed": "Untitled",
+  "storage.voiceNote": "Voice message",
+  "storage.itemCount": "{n} items",
+  "storage.deleteFromChat": "Clear chat cache",
+  "storage.deleteEntry": "Remove from cache",
+  "storage.confirmRoomTitle": "Clear cache for {name}?",
+  "storage.confirmRoomBody": "All cached media from this chat will be removed from this device. Originals stay on the server.",
+  // Friendly labels — replace generic upload names (image.png / audio.webm / …)
+  "storage.kind.photo": "Photo",
+  "storage.kind.video": "Video",
+  "storage.kind.media": "Media",
+  "storage.kind.voice": "Voice message",
+  "storage.kind.audio": "Audio",
+  "storage.kind.file": "File",
+  // Chat detail screen
+  "storage.chatShareOfTotal": "This chat takes {pct}% of the media cache.",
+  "storage.totalForChat": "Total cached",
+  "storage.openInChat": "Open in chat",
+  "storage.openFile": "Open file",
+  "storage.previewLoading": "Loading…",
+  "storage.previewUnavailable": "Preview unavailable",
 } as const;
 
 export type TranslationKey = keyof typeof en;

@@ -1,9 +1,11 @@
 import { ref, onScopeDispose, type Ref } from "vue";
 import { useAuthStore } from "@/entities/auth";
 import type { FileInfo, Message } from "@/entities/chat";
+import { getMatrixClientService } from "@/entities/matrix";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
-import { isNative, isElectron } from "@/shared/lib/platform";
+import { isNative, isElectron, isAndroid } from "@/shared/lib/platform";
+import { sanitizeFileName } from "@/shared/lib/file-name-sanitizer";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
@@ -11,10 +13,46 @@ import {
   CryptoNotReadyError,
   isNetworkBlocked,
   MediaUnavailableError,
+  MissingUrlError,
   NetworkBlockedError,
 } from "@/shared/lib/network/typed-network-errors";
 import { waitForRoomCrypto } from "@/entities/matrix/model/wait-for-crypto";
-import { enqueueDecrypt } from "./decrypt-queue";
+import { runFileDecrypt } from "./decrypt-queue";
+import { createSemaphore } from "@/shared/lib/semaphore";
+import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
+import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
+import { MessageType, MessageStatus } from "@/entities/chat";
+import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
+import {
+  downloadMediaViaTorFile,
+  shouldUseNativeTorDownload,
+} from "@/shared/lib/file-transfer/tor-media-transfer";
+
+/** Classify a message into the Settings → Storage tab buckets.
+ *  - `media` = photos + videos + video circles
+ *  - `voice` = audio messages (Forta only ships voice notes via audio)
+ *  - `file`  = catch-all for documents, archives, anything else
+ *  We rely on MessageType primarily; mime is a secondary signal for the
+ *  rare case where senders mis-set the type (e.g. an old client uploading
+ *  audio as a generic file). */
+function classifyForCache(messageType: MessageType, mime: string | undefined): MediaCacheCategory {
+  switch (messageType) {
+    case MessageType.image:
+    case MessageType.video:
+    case MessageType.videoCircle:
+      return "media";
+    case MessageType.audio:
+      return "voice";
+    case MessageType.file: {
+      const top = (mime ?? "").split("/")[0]?.toLowerCase() ?? "";
+      if (top === "image" || top === "video") return "media";
+      if (top === "audio") return "voice";
+      return "file";
+    }
+    default:
+      return "file";
+  }
+}
 
 /** Coarse classification of a download/decrypt failure for UI branching.
  *  - `crypto` — AES-SIV / membership / decryption failure; the user should
@@ -29,6 +67,14 @@ interface FileDownloadState {
   errorKind: FileDownloadErrorKind;
   objectUrl: string | null;
   blob: Blob | null;
+}
+
+/** Options for `download()`. `forceRefetch` is the retry-after-watchdog
+ *  escape hatch: when a stuck encrypted blob never reaches loadedmetadata,
+ *  the user clicks retry and the call site sets this flag to drop the
+ *  cached objectUrl and rerun fetch + decrypt with a fresh URL. */
+export interface DownloadOpts {
+  forceRefetch?: boolean;
 }
 
 /** Errors that mean "this ciphertext cannot be decrypted with the keys we
@@ -119,7 +165,8 @@ function shouldAutoReport(messageKey: string, err: unknown): boolean {
   if (
     err instanceof CryptoNotReadyError ||
     err instanceof NetworkBlockedError ||
-    err instanceof MediaUnavailableError
+    err instanceof MediaUnavailableError ||
+    err instanceof MissingUrlError
   ) {
     return false;
   }
@@ -142,15 +189,55 @@ export function _resetBugReportDedupForTests(): void {
  *  next action they take. */
 const TYPED_ERROR_TOAST_MS = 5_000;
 
+/** Toast dedup window — keyed by (cacheKey, errorKey). Surface the same
+ *  user-facing toast at most once per window per message. Without dedup,
+ *  Vue re-renders (e.g. virtual scroller recycling, parent re-key cascades
+ *  from unrelated reactive updates like a chat-list refresh) call download()
+ *  again for already-failed media, and each failure re-fires the toast —
+ *  visible as repeated "Server unreachable" notifications during routine
+ *  navigation. */
+const TOAST_DEDUP_WINDOW_MS = 60_000;
+const TOAST_DEDUP_PRUNE_THRESHOLD = 500;
+const toastDedupMap = new Map<string, number>();
+
+function pruneToastDedup(): void {
+  if (toastDedupMap.size < TOAST_DEDUP_PRUNE_THRESHOLD) return;
+  const cutoff = Date.now() - TOAST_DEDUP_WINDOW_MS;
+  for (const [k, ts] of toastDedupMap) {
+    if (ts < cutoff) toastDedupMap.delete(k);
+  }
+}
+
+/** TEST-ONLY: clear the toast dedup map between test cases. */
+export function _resetToastDedupForTests(): void {
+  toastDedupMap.clear();
+}
+
 /** Show a localised toast when a download failure resolves to one of our
  *  typed transient errors. Silent for everything else — generic errors are
- *  still surfaced via the in-bubble retry UI and the auto-bug-report flow. */
-function surfaceTypedErrorToast(err: unknown): void {
-  let key: "errors.networkBlocked" | "errors.cryptoNotReady" | "errors.mediaUnavailable" | null = null;
+ *  still surfaced via the in-bubble retry UI and the auto-bug-report flow.
+ *  Deduped per (cacheKey, errorKey) within TOAST_DEDUP_WINDOW_MS so that
+ *  repeated re-attempts during the same network glitch do not spam the user. */
+function surfaceTypedErrorToast(err: unknown, cacheKey: string): void {
+  let key:
+    | "errors.networkBlocked"
+    | "errors.cryptoNotReady"
+    | "errors.mediaUnavailable"
+    | "errors.missingUrl"
+    | null = null;
   if (err instanceof NetworkBlockedError) key = "errors.networkBlocked";
   else if (err instanceof CryptoNotReadyError) key = "errors.cryptoNotReady";
   else if (err instanceof MediaUnavailableError) key = "errors.mediaUnavailable";
+  else if (err instanceof MissingUrlError) key = "errors.missingUrl";
   if (!key) return;
+
+  pruneToastDedup();
+  const dedupKey = `${cacheKey}:${key}`;
+  const now = Date.now();
+  const last = toastDedupMap.get(dedupKey) ?? 0;
+  if (now - last < TOAST_DEDUP_WINDOW_MS) return;
+  toastDedupMap.set(dedupKey, now);
+
   try {
     useToast().toast(tRaw(key), "error", TYPED_ERROR_TOAST_MS);
   } catch (toastErr) {
@@ -159,6 +246,91 @@ function surfaceTypedErrorToast(err: unknown): void {
     // Don't let a failed toast mask the original download error.
     console.warn("[use-file-download] toast surface failed:", toastErr);
   }
+}
+
+/** Refetch a Matrix event by id and extract a fresh FileInfo with the
+ *  server URL + secrets. Used to recover from rows where an optimistic
+ *  `blob:` URL survived a reload because confirmMediaSent never ran —
+ *  e.g. the /sync echo won the race against the queue's catch path
+ *  (WEE-40). Returns the healed FileInfo, or null when the event is
+ *  unavailable or doesn't carry a usable url.
+ *
+ *  Side effect: persists the healed FileInfo to Dexie so future renders
+ *  of the same message skip this fetch entirely. Persistence failures
+ *  are non-fatal — the caller will still get the healed FileInfo for
+ *  the current download attempt. */
+export async function tryHealStaleBlobFileInfo(
+  eventId: string,
+  roomId: string,
+  fileInfo: FileInfo,
+): Promise<FileInfo | null> {
+  try {
+    const matrix = getMatrixClientService();
+    const event = await matrix.fetchRoomEvent(roomId, eventId);
+    if (!event) return null;
+    const content = event.content as Record<string, unknown> | undefined;
+    if (!content) return null;
+    const rawUrl = typeof content.url === "string" ? content.url : undefined;
+    if (!rawUrl || rawUrl.startsWith("blob:") || rawUrl.startsWith("data:")) {
+      // Event itself carries no real server URL — sender lost it too.
+      return null;
+    }
+
+    // Secrets may live under three shapes depending on the sending client:
+    //  - `content.info.secrets`   — modern m.image / m.video / m.audio with explicit info
+    //  - `content.secrets`        — older m.file shape that emits top-level secrets
+    //  - `content.pbody.secrets`  — legacy Bastyon shape; downloadAndDecrypt
+    //                                already reads from this path (use-file-download.ts:471)
+    // Cover all three so a heal on a legacy-format encrypted attachment
+    // doesn't silently lose its keys and surface a crypto failure on next
+    // decrypt attempt.
+    let secrets: FileInfo["secrets"] | undefined;
+    const info = content.info as Record<string, unknown> | undefined;
+    const pbody = content.pbody as Record<string, unknown> | undefined;
+    if (info && info.secrets && typeof info.secrets === "object") {
+      secrets = info.secrets as FileInfo["secrets"];
+    } else if (content.secrets && typeof content.secrets === "object") {
+      secrets = content.secrets as FileInfo["secrets"];
+    } else if (pbody && pbody.secrets && typeof pbody.secrets === "object") {
+      secrets = pbody.secrets as FileInfo["secrets"];
+    }
+
+    const healed: FileInfo = {
+      ...fileInfo,
+      url: rawUrl,
+      ...(secrets ? { secrets } : {}),
+    };
+
+    if (isChatDbReady()) {
+      try {
+        await getChatDb().messages.updateFileInfo(eventId, healed);
+      } catch (persistErr) {
+        // Heal still works for this attempt — only future renders pay
+        // the refetch cost again. Don't bubble.
+        console.warn("[use-file-download] heal: persist failed:", persistErr);
+      }
+    }
+
+    return healed;
+  } catch (e) {
+    console.warn("[use-file-download] heal: fetchRoomEvent failed:", e);
+    return null;
+  }
+}
+
+/** Max concurrent media network downloads (fetch + decrypt). Opening a DM
+ *  with N photos used to fire N full-size `fetch` at once: they competed for
+ *  the channel while the serialized decrypt made the last image wait on every
+ *  prior one, and the burst froze the UI on low-end Android. A small pool lets
+ *  the visible media load a few at a time instead of all-at-once (WEE-71, H2).
+ *  Shared module-wide so the cap holds across every `useFileDownload()`
+ *  instance (feed bubbles, MediaGrid, MediaViewer). */
+const MEDIA_FETCH_CONCURRENCY = 3;
+const mediaDownloadGate = createSemaphore(MEDIA_FETCH_CONCURRENCY);
+
+/** TEST-ONLY: expose in-flight count for the concurrency-pool regression. */
+export function _mediaGateActiveForTests(): number {
+  return mediaDownloadGate.active;
 }
 
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
@@ -201,11 +373,74 @@ let cacheBustCounter = 0;
  *  we've already seen a confirmed miss, and polluting the canonical URL
  *  hurts CDN hit rates. Retries (`attempt >= 1`) get a unique `cb=` so
  *  Service Workers, browser HTTP cache, and intermediate proxies all
- *  re-resolve instead of replaying the prior failure. */
+ *  re-resolve instead of replaying the prior failure.
+ *
+ *  `blob:` and `data:` URIs are left untouched: query strings are not part of
+ *  their grammar, so appending `?cb=...` would mangle the URL and break the
+ *  fetch. Those schemes also bypass HTTP caches by construction — there is
+ *  nothing to bust. */
 export function appendCacheBust(url: string, attempt: number): string {
   if (attempt <= 0) return url;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return url;
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}cb=${Date.now()}_${++cacheBustCounter}`;
+}
+
+/** Resolve a Matrix `mxc://` URI to an HTTP download URL via the active
+ *  Matrix client. Non-mxc inputs (`https://`, `blob:`, `data:`) pass through
+ *  unchanged — those are already directly fetchable.
+ *
+ *  Returns `null` only when the input is `mxc://` and the Matrix client
+ *  cannot resolve it (no client / no baseUrl). Callers treat null as a
+ *  terminal media-unavailable failure: nothing the retry loop can do.
+ *
+ *  Called fresh on every retry attempt so transient client state changes
+ *  (homeserver baseUrl rotation, access-token refresh) take effect between
+ *  attempts. Historically the download path passed `fileInfo.url` straight
+ *  to `fetch`, and for encrypted attachments from non-Bastyon clients
+ *  (Element / Cinny / forwarded messages) that URL is `mxc://...`, which
+ *  Capacitor's WebView shim rejects with `TypeError: Failed to fetch`. That
+ *  one missing translation accounts for the largest media-failure cluster
+ *  on the bug board (forta-bugs #776 #763 #648 #513 #475 #441 #373). */
+export function resolveMediaUrl(url: string): string | null {
+  if (!url.startsWith("mxc://")) return url;
+  try {
+    return getMatrixClientService().mxcToHttp(url);
+  } catch {
+    // Matrix service not yet initialised (cold start race) — treat as a
+    // resolve miss; the outer error path surfaces MediaUnavailableError.
+    return null;
+  }
+}
+
+/** All media hosts in attempt-priority order: primary first, then mirrors.
+ *  Mirrors bastyon-chat's `[].concat([baseUrl], mirrors)` in `pingServers`. */
+const MEDIA_HOSTS = [MATRIX_SERVER, ...MATRIX_MIRRORS];
+
+/** Pick the media host for a given retry attempt, alternating
+ *  primary↔mirror(s) so a throttled/blocked primary media-repo gets bypassed
+ *  on the next try while a transient primary blip can still recover (WEE-90 H2).
+ *  attempt 0 → primary, 1 → mirror[0], 2 → primary, 3 → mirror[0]… */
+export function mediaHostForAttempt(attempt: number): string {
+  const idx = ((attempt % MEDIA_HOSTS.length) + MEDIA_HOSTS.length) % MEDIA_HOSTS.length;
+  return MEDIA_HOSTS[idx];
+}
+
+/** Rewrite a resolved media URL's host to `host`. Only our own primary
+ *  homeserver host is ever rewritten — external/CDN hosts and anything that
+ *  isn't a parseable absolute URL (e.g. `blob:`/`data:` left untouched by
+ *  resolveMediaUrl) pass through unchanged so we never point a foreign URL at
+ *  a Pocketnet mirror. */
+export function rewriteMediaHost(url: string, host: string): string {
+  if (host === MATRIX_SERVER) return url;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== MATRIX_SERVER) return url;
+    u.hostname = host;
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /** True for failures that look like a network/server issue we should label
@@ -283,7 +518,20 @@ async function downloadAndDecrypt(
   timestamp: number,
   signal?: AbortSignal,
 ): Promise<Blob> {
-  if (!fileInfo.url) throw new Error("No file URL");
+  if (!fileInfo.url) throw new MissingUrlError();
+  // Local-only schemes (blob:, data:) never reach the homeserver — they
+  // are an optimistic placeholder set by createLocal that should have
+  // been overwritten by confirmMediaSent once the upload completes. If
+  // we still see one here, the upload was aborted, crashed mid-flight,
+  // or the row predates the WEE-28 send-shape fix. fetch(blob:) on a
+  // document that no longer owns that blob throws a Security Error,
+  // which `wrapTransientError` then miscategorises as a network failure
+  // and the retry loop pointlessly burns 10s of spinner UI. Fast-fail
+  // with MissingUrlError so the UI surfaces "no usable file URL" and
+  // the user gets a meaningful state instead of an endless retry.
+  if (fileInfo.url.startsWith("blob:") || fileInfo.url.startsWith("data:")) {
+    throw new MissingUrlError();
+  }
   if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
 
   let lastError: unknown;
@@ -296,18 +544,38 @@ async function downloadAndDecrypt(
 
     try {
       // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls).
+      // Resolve mxc:// → http on every attempt so a fresh homeserver baseUrl /
+      // access-token rotation takes effect between retries. Without this,
+      // encrypted attachments from non-Bastyon clients (forta-bugs #776 #763
+      // #648 #513 #475 #441 #373) carry raw mxc:// URIs that fetch() rejects
+      // with TypeError: Failed to fetch on every attempt.
       // On retry attempts, append a cache-bust so Service Workers / CDN edges
       // don't replay the prior failure response (issues #648, #641, #637).
-      const fetchUrl = appendCacheBust(fileInfo.url, attempt);
-      const response = await fetchWithTimeout(fetchUrl, signal);
-      if (!response.ok) {
-        const err = new Error(`Download failed: ${response.status}`);
-        // Mark non-retriable codes so the catch block below can throw immediately
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (err as any).status = response.status;
-        throw err;
+      const resolvedUrl = resolveMediaUrl(fileInfo.url);
+      if (resolvedUrl === null) {
+        // Cannot translate mxc:// — Matrix client missing or unknown baseUrl.
+        // This is terminal: the retry budget will hit the same null every time.
+        throw new MediaUnavailableError(fileInfo.url);
       }
-      let blob = await response.blob();
+      // Alternate primary↔mirror across attempts so a blocked/throttled primary
+      // media-repo is bypassed on retry (WEE-90 H2). No-op for the first attempt
+      // and for non-primary hosts.
+      const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt));
+      const fetchUrl = appendCacheBust(hostUrl, attempt);
+      let blob: Blob;
+      if (shouldUseNativeTorDownload()) {
+        blob = await downloadMediaViaTorFile(fetchUrl);
+      } else {
+        const response = await fetchWithTimeout(fetchUrl, signal);
+        if (!response.ok) {
+          const err = new Error(`Download failed: ${response.status}`);
+          // Mark non-retriable codes so the catch block below can throw immediately
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (err as any).status = response.status;
+          throw err;
+        }
+        blob = await response.blob();
+      }
 
       // If the file has secrets, we need to decrypt it.
       // Race against Matrix sync: if the user opens an E2E chat right after
@@ -338,13 +606,15 @@ async function downloadAndDecrypt(
         };
 
         const decryptKey = await roomCrypto.decryptKey(event);
-        // Serialise decryption: parallel decryptFile calls on low-end
-        // Android WebViews saturate the CPU and freeze the UI.
+        // Decrypt via the crypto Web Worker when available — parallel and
+        // off the main thread (WEE-92); falls back to the legacy serial
+        // main-thread queue otherwise (#306/#370 freeze guard).
         // Pass the declared plaintext MIME so new ciphertexts (stored as
         // application/octet-stream) restore with the right type instead
         // of falling through to a generic binary fallback.
-        const decryptedFile = await enqueueDecrypt(() =>
-          roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+        const decryptedFile = await runFileDecrypt(
+          () => roomCrypto.decryptFile(blob, decryptKey, fileInfo.type),
+          { sizeBytes: blob.size },
         );
         blob = decryptedFile;
       }
@@ -367,8 +637,11 @@ async function downloadAndDecrypt(
       // the toast tells them what's going on.
       if (e instanceof CryptoNotReadyError) throw e;
       // Don't retry on permanent errors (missing URL, 4xx client errors)
+      if (e instanceof MissingUrlError) throw e;
+      // mxc:// could not be resolved to an http URL (no Matrix client, no
+      // baseUrl). Every retry will hit the same null — fast-fail.
+      if (e instanceof MediaUnavailableError) throw e;
       if (e instanceof Error) {
-        if (e.message === "No file URL") throw e;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const status = (e as any).status as number | undefined;
         if (status !== undefined && NON_RETRIABLE_STATUSES.has(status)) throw e;
@@ -385,6 +658,50 @@ async function downloadAndDecrypt(
   // message (region-block UX vs. generic media-unavailable UX) instead of
   // a bare TypeError stringified into the toast.
   throw wrapTransientError(lastError, fileInfo.url);
+}
+
+/** Resolve a decrypted Blob for a media message without touching the per-event
+ *  cache or rendering pipeline. Used by the forward path: when the user picks
+ *  «Forward» on an image/video/file message, we need the decrypted bytes so
+ *  we can wrap them in a `File` and re-upload through `sendImage`/`sendFile`
+ *  (preserving forward attribution). The download composable's public
+ *  `download()` is unsuitable because it returns an `objectUrl` and mutates
+ *  per-message UI state — forward is a one-shot byte access with no UI
+ *  side effects.
+ *
+ *  Returns null when there is no source bytes available (no fileInfo at all,
+ *  or a local blob URL whose object has already been revoked). Throws on
+ *  network/crypto failures so the caller can surface a clear toast. */
+export async function getDecryptedBlobForMessage(
+  message: Pick<Message, "fileInfo" | "roomId" | "senderId" | "timestamp">,
+  signal?: AbortSignal,
+): Promise<Blob | null> {
+  const fileInfo = message.fileInfo;
+  if (!fileInfo) return null;
+
+  // Local blob URL fast path: the original message was sent from this device
+  // and its optimistic blob is still alive. Fetching `blob:` is synchronous-ish
+  // and skips the whole download/decrypt loop.
+  if (fileInfo.url?.startsWith("blob:")) {
+    try {
+      const res = await fetch(fileInfo.url, signal ? { signal } : undefined);
+      if (res.ok) return await res.blob();
+    } catch (e) {
+      // Caller cancellation is terminal — don't fall through to a server fetch.
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
+      // Blob URL was revoked between snapshot and forward — fall through to
+      // server-side download below if there's anything to download.
+    }
+  }
+
+  // Server-side mxc URL — reuse the full retry + decrypt pipeline.
+  return await downloadAndDecrypt(
+    fileInfo,
+    message.roomId,
+    message.senderId,
+    message.timestamp,
+    signal,
+  );
 }
 
 /** Convert Blob to base64 data string (without the data:...;base64, prefix) */
@@ -428,8 +745,30 @@ function guessMime(fileName: string): string {
   return MIME_BY_EXT[ext] ?? "application/octet-stream";
 }
 
-/** Write file to device cache and open with system viewer (Android/iOS). */
-async function saveFileNative(objectUrl: string, fileName: string, mimeType?: string) {
+/** Save media to the Android gallery / Downloads folder via the native
+ *  SaveMediaPlugin (MediaStore.insert). Session 58 replaces the prior
+ *  FileOpener + Share fallback path that silently degraded to a Share
+ *  dialog on Android 14+ scoped storage. */
+async function saveFileAndroid(objectUrl: string, fileName: string, mimeType: string) {
+  const { registerPlugin } = await import("@capacitor/core");
+  const SaveMedia = registerPlugin<{
+    save(opts: { base64: string; fileName: string; mimeType: string }): Promise<{ uri: string; path: string }>;
+  }>("SaveMedia");
+
+  const response = await fetch(objectUrl);
+  const blob = await response.blob();
+  const base64 = await blobToBase64(blob);
+
+  // Defence against path traversal / control chars in sender-supplied
+  // file names — `fileName` ultimately comes from a Matrix event.
+  await SaveMedia.save({ base64, fileName: sanitizeFileName(fileName), mimeType });
+}
+
+/** iOS save path — write to Documents and hand off to the system viewer
+ *  / Share Sheet. iOS UX expects a Share Sheet, so the legacy pipeline
+ *  remains intentional here. Android takes a different path via
+ *  `saveFileAndroid`. */
+async function saveFileIOS(objectUrl: string, fileName: string, mimeType?: string) {
   const { Filesystem, Directory } = await import("@capacitor/filesystem");
   const { FileOpener } = await import("@capacitor-community/file-opener");
 
@@ -437,13 +776,17 @@ async function saveFileNative(objectUrl: string, fileName: string, mimeType?: st
   const blob = await response.blob();
   const base64 = await blobToBase64(blob);
 
+  // Defence against path traversal / control chars in sender-supplied
+  // file names — `fileName` ultimately comes from a Matrix event.
+  const safeName = sanitizeFileName(fileName);
+
   const result = await Filesystem.writeFile({
-    path: fileName,
+    path: safeName,
     data: base64,
     directory: Directory.Cache,
   });
 
-  const contentType = mimeType || guessMime(fileName);
+  const contentType = mimeType || guessMime(safeName);
 
   try {
     await FileOpener.open({
@@ -453,13 +796,22 @@ async function saveFileNative(objectUrl: string, fileName: string, mimeType?: st
     });
   } catch (openError) {
     console.warn("[saveFile] native open failed, trying share:", openError);
-    // Fallback: offer system share sheet
     const { Share } = await import("@capacitor/share");
     await Share.share({
-      title: fileName,
+      title: safeName,
       url: result.uri,
-      dialogTitle: fileName,
+      dialogTitle: safeName,
     });
+  }
+}
+
+/** Route to the platform-specific native save path. */
+async function saveFileNative(objectUrl: string, fileName: string, mimeType?: string) {
+  const resolvedMime = mimeType || guessMime(fileName);
+  if (isAndroid) {
+    await saveFileAndroid(objectUrl, fileName, resolvedMime);
+  } else {
+    await saveFileIOS(objectUrl, fileName, resolvedMime);
   }
 }
 
@@ -488,19 +840,75 @@ export function useFileDownload() {
   /** Download (and decrypt if needed) a file message.
    *  @param signal — optional AbortSignal. Callers that want the download
    *                  to stop when their scope unmounts (e.g. MediaGrid on
-   *                  chat switch) should pass `onScopeDispose`-tied signal. */
-  const download = async (message: Message, signal?: AbortSignal) => {
+   *                  chat switch) should pass `onScopeDispose`-tied signal.
+   *  @param opts.forceRefetch — when true, drops the cached objectUrl,
+   *                  revokes the prior blob URL, and re-runs the full
+   *                  fetch + decrypt pipeline. Used by the voice-message
+   *                  retry button after a watchdog timeout (Session 44). */
+  const download = async (
+    message: Message,
+    signal?: AbortSignal,
+    opts: DownloadOpts = {},
+  ) => {
     if (!message.fileInfo) return null;
 
     // Use _key (stable clientId) if available, otherwise fall back to id.
     // This prevents cache misses when id flips from clientId to eventId after send confirmation.
     const cacheKey = message._key || message.id;
 
+    // forceRefetch — drop the prior cache entry and revoke the old blob URL
+    // before re-running the pipeline. Without revoking, the previous
+    // objectUrl would leak (no one else holds a reference to it). Also
+    // invalidate the persistent media cache so the retry actually re-fetches
+    // from the network instead of returning the same stale bytes.
+    if (opts.forceRefetch) {
+      const previousUrl = cache.get(cacheKey);
+      if (previousUrl) {
+        try { URL.revokeObjectURL(previousUrl); } catch { /* ignore */ }
+      }
+      cache.delete(cacheKey);
+      const mxc = message.fileInfo.url;
+      if (mxc) {
+        getMediaCache()?.delete(mxc).catch(() => { /* non-fatal */ });
+      }
+      const existingState = states.value[cacheKey];
+      if (existingState) {
+        existingState.objectUrl = null;
+        existingState.blob = null;
+        existingState.error = null;
+        existingState.errorKind = null;
+      }
+    }
+
     // Already cached
     if (cache.has(cacheKey)) {
       const state = getState(cacheKey);
       state.objectUrl = cache.get(cacheKey)!;
       return state.objectUrl;
+    }
+
+    // Optimistic-upload fast path: the message is still going through the
+    // outbound queue (status=sending), `localBlobUrl` is alive, and
+    // `mappers.ts` has surfaced it as fileInfo.url. Running the full
+    // server-fetch pipeline here would fast-fail in downloadAndDecrypt's
+    // blob:/data: guard (defence against WEE-28 dead blob remnants), which
+    // pops a misleading "Файл повреждён или не пришёл с источника" toast
+    // and a momentary red retry overlay while the sender's own upload is
+    // still in flight. Bypass the pipeline: use the blob URL as-is, do not
+    // pollute the long-lived `cache` (the blob is revoked ~5s after
+    // confirmMediaSent), and let the watch-on-id re-trigger download once
+    // the row flips to status=sent with a real mxc URL.
+    const fileUrl = message.fileInfo.url;
+    if (
+      fileUrl?.startsWith("blob:") &&
+      message.status === MessageStatus.sending
+    ) {
+      const state = getState(cacheKey);
+      state.objectUrl = fileUrl;
+      state.loading = false;
+      state.error = null;
+      state.errorKind = null;
+      return fileUrl;
     }
 
     const state = getState(cacheKey);
@@ -510,21 +918,105 @@ export function useFileDownload() {
     state.error = null;
     state.errorKind = null;
 
-    try {
-      const blob = await downloadAndDecrypt(
-        message.fileInfo,
+    // Lazy heal: a row whose fileInfo.url is still blob:/data: after the
+    // page reload almost always means confirmMediaSent never ran on the
+    // sender side (race with /sync echo, queue catch-path dropped the op,
+    // etc.). The event itself does have a real mxc URL on the server —
+    // refetch it and patch the row before falling through to
+    // downloadAndDecrypt, which would otherwise fast-fail with
+    // MissingUrlError and show a misleading "файл повреждён" toast on a
+    // message the peer actually received (WEE-40).
+    let effectiveFileInfo = message.fileInfo;
+    const looksOptimisticAndStale =
+      effectiveFileInfo.url !== undefined &&
+      (effectiveFileInfo.url.startsWith("blob:") || effectiveFileInfo.url.startsWith("data:")) &&
+      message.status !== MessageStatus.sending &&
+      // `id` flips from clientId to eventId in localToMessage on
+      // confirmSent; `_key` always holds clientId. They differ exactly
+      // when a server eventId is known — the only case where heal can
+      // hope to succeed.
+      message._key !== undefined &&
+      message.id !== message._key;
+    if (looksOptimisticAndStale) {
+      const healed = await tryHealStaleBlobFileInfo(
+        message.id,
         message.roomId,
-        message.senderId,
-        message.timestamp,
-        signal,
+        effectiveFileInfo,
       );
-      const mimeType = message.fileInfo.type || "application/octet-stream";
+      if (healed) effectiveFileInfo = healed;
+    }
+
+    // Fast path: persistent media cache hit (Telegram/WhatsApp-style).
+    // Cacheable when the source is a remote URL we can stably key by —
+    // any `mxc://` or `http(s)://`. Local schemes (`blob:` / `data:`) are
+    // already local bytes the seedLocalUrl path or direct fetch handles
+    // for free, so caching them gains nothing and pollutes the index.
+    // Cache lookup failures are swallowed: a missing cache layer just falls
+    // through to the network path with no user-visible difference.
+    const mxc = effectiveFileInfo.url;
+    const isCacheableUrl = !!mxc &&
+      (mxc.startsWith("mxc://") || mxc.startsWith("http://") || mxc.startsWith("https://"));
+    const mediaCache = getMediaCache();
+    if (mediaCache && isCacheableUrl) {
+      try {
+        const cachedBlob = await mediaCache.get(mxc);
+        if (cachedBlob) {
+          const mimeType = effectiveFileInfo.type || cachedBlob.type || "application/octet-stream";
+          const typedBlob = cachedBlob.type === mimeType
+            ? cachedBlob
+            : new Blob([cachedBlob], { type: mimeType });
+          const url = URL.createObjectURL(typedBlob);
+          state.objectUrl = url;
+          state.blob = typedBlob;
+          state.loading = false;
+          cache.set(cacheKey, url);
+          return url;
+        }
+      } catch (cacheErr) {
+        console.warn("[use-file-download] media cache read failed:", cacheErr);
+      }
+    }
+
+    try {
+      // Concurrency-pool: cap simultaneous network downloads so a chat full of
+      // media doesn't flood the channel / freeze the UI (WEE-71, H2). The
+      // permit covers only fetch + decrypt — released before the cache-write
+      // and objectUrl plumbing so the pool turns over as fast as possible.
+      // Cache hits returned above never reach here, so they bypass the gate.
+      await mediaDownloadGate.acquire();
+      let blob: Blob;
+      try {
+        blob = await downloadAndDecrypt(
+          effectiveFileInfo,
+          message.roomId,
+          message.senderId,
+          message.timestamp,
+          signal,
+        );
+      } finally {
+        mediaDownloadGate.release();
+      }
+      const mimeType = effectiveFileInfo.type || "application/octet-stream";
       const typedBlob = new Blob([blob], { type: mimeType });
       const url = URL.createObjectURL(typedBlob);
 
       state.objectUrl = url;
       state.blob = typedBlob;
       cache.set(cacheKey, url);
+
+      // Persist decrypted bytes so the next chat-open hits the disk cache
+      // instead of re-downloading + re-decrypting. Local schemes have
+      // nothing meaningful to persist. Errors here are non-fatal: the
+      // user already has their blob URL.
+      if (mediaCache && isCacheableUrl) {
+        mediaCache.put(mxc!, typedBlob, {
+          roomId: message.roomId,
+          category: classifyForCache(message.type, mimeType),
+          fileName: effectiveFileInfo.name,
+        }).catch((err) => {
+          console.warn("[use-file-download] media cache write failed:", err);
+        });
+      }
 
       return url;
     } catch (e) {
@@ -540,8 +1032,9 @@ export function useFileDownload() {
       // Surface a localised toast for our typed transient failures so the
       // user sees a clear "what to do next" message (region/firewall vs.
       // media-gone vs. keys-still-syncing) instead of just an in-bubble
-      // retry button.
-      surfaceTypedErrorToast(e);
+      // retry button. Deduped per (cacheKey, errorKey) so background
+      // re-attempts during the same glitch do not spam.
+      surfaceTypedErrorToast(e, cacheKey);
       // Skip auto-report for crypto failures (user-actionable, not a bug) and
       // for duplicates within the dedup window. Manual reporting is still
       // available via the bug-report button in the friendly error UI.
@@ -554,12 +1047,22 @@ export function useFileDownload() {
     }
   };
 
-  /** Seed the cache with a local blob URL (e.g. for pending voice messages).
-   *  This avoids the full download+decrypt pipeline for files we already have locally. */
+  /** Seed a local blob URL (e.g. for pending voice messages) so the player can
+   *  start immediately, skipping the download+decrypt pipeline for bytes we
+   *  already hold locally.
+   *
+   *  Seeds ONLY the per-instance reactive `state` — never the long-lived module
+   *  `cache`. The optimistic blob is revoked ~5s after `confirmMediaSent`
+   *  (sync-engine.ts). If it leaked into `cache`, the post-confirm
+   *  `watch → download()` in VoiceMessage.vue would short-circuit on
+   *  `cache.has(cacheKey)` and hand the player a *dead* blob URL for the
+   *  SENDER's own voice — an eternal loading spinner (#990) or a silent, empty
+   *  `<audio>` (#986). The receiver never seeds a blob, so it decrypts the
+   *  server copy and plays fine. Keeping the seed instance-local lets the
+   *  blob→mxc transition re-download the durable server file (WEE-88). */
   const seedLocalUrl = (cacheKey: string, blobUrl: string) => {
-    if (cache.has(cacheKey)) return;
-    cache.set(cacheKey, blobUrl);
     const state = getState(cacheKey);
+    if (state.objectUrl) return;
     state.objectUrl = blobUrl;
     state.loading = false;
     state.error = null;

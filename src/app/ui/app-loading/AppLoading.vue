@@ -6,6 +6,8 @@ import { tRaw, type TranslationKey } from "@/shared/lib/i18n";
 const t = tRaw;
 const state = computed(() => bootStatus.state.value);
 const error = computed(() => bootStatus.error.value);
+const errorKind = computed(() => bootStatus.errorKind.value);
+const isMatrixUnreachable = computed(() => errorKind.value === "matrix-unreachable");
 
 const stepKeys: Record<string, TranslationKey> = {
   scripts: "boot.loadingScripts",
@@ -78,7 +80,15 @@ const clearAndRetry = async () => {
           !
         </div>
 
-        <p class="text-sm text-red-400">{{ t("boot.failed") }}</p>
+        <p class="text-sm text-red-400">
+          {{ isMatrixUnreachable ? t("boot.matrixUnreachable") : t("boot.failed") }}
+        </p>
+        <p
+          v-if="isMatrixUnreachable"
+          class="max-w-xs text-center text-xs text-white/50"
+        >
+          {{ t("boot.matrixUnreachableHint") }}
+        </p>
         <p v-if="error" class="max-w-xs text-center text-xs text-white/40">
           {{ error }}
         </p>

@@ -16,6 +16,7 @@ class TorPlugin : Plugin() {
 
     private lateinit var config: ConfigurationManager
     private lateinit var torManager: TorManager
+    private val routeDecider = TorRouteDecider()
 
     override fun load() {
         config = ConfigurationManager(context)
@@ -53,6 +54,7 @@ class TorPlugin : Plugin() {
         }
 
         if (mode == TorMode.NEVER) {
+            torManager.stopTor()
             call.resolve(JSObject().apply {
                 put("socksPort", 0)
                 put("proxyPort", 0)
@@ -120,7 +122,11 @@ class TorPlugin : Plugin() {
         }
 
         Thread {
-            torManager.restartTor(mode, bridgeType, bridges)
+            if (mode == TorMode.NEVER) {
+                torManager.stopTor()
+            } else {
+                torManager.restartTor(mode, bridgeType, bridges)
+            }
             call.resolve()
         }.start()
     }
@@ -196,6 +202,40 @@ class TorPlugin : Plugin() {
                 })
             }
         }.start()
+    }
+
+    @PluginMethod
+    fun isUseWithTor(call: PluginCall) {
+        val url = call.getString("url") ?: run {
+            call.reject("url required")
+            return
+        }
+
+        Thread {
+            val redirect = routeDecider.isUseWithTor(
+                url,
+                torManager.mode,
+                torManager.isReady,
+            )
+            call.resolve(JSObject().apply {
+                put("redirect", redirect)
+            })
+        }.start()
+    }
+
+    @PluginMethod
+    fun getSettings(call: PluginCall) {
+        call.resolve(JSObject().apply {
+            put("mode", torModeToJs(torManager.mode))
+            put("bridgeType", torManager.bridgeType.name)
+            put("isReady", torManager.isReady)
+        })
+    }
+
+    private fun torModeToJs(mode: TorMode): String = when (mode) {
+        TorMode.NEVER -> "neveruse"
+        TorMode.AUTO -> "auto"
+        TorMode.ALWAYS -> "always"
     }
 
     @PluginMethod

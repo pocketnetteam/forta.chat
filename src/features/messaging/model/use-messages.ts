@@ -1,5 +1,5 @@
 import { onScopeDispose } from "vue";
-import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime } from "@/entities/chat";
+import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime, MSC3245_VIDEO_NOTE_KEY } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
@@ -11,13 +11,16 @@ import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import { detectUrl, fetchPreview } from "./use-link-preview";
-import { invalidateDownloadCache } from "./use-file-download";
+import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import type { LocalMessageStatus } from "@/shared/lib/local-db/schema";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
+import { isServerEventId } from "./redact-target";
+import { SendError, sendDiag } from "./send-errors";
+import { reportSendError } from "./send-error-bus";
 
 /** Per-phase media pipeline timeouts. Splitting the old single 5-minute cap
  *  lets us surface phase-specific failures (e.g. crypto hang vs upload stall)
@@ -25,6 +28,11 @@ import { useToast } from "@/shared/lib/use-toast";
 const ENCRYPT_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 4 * 60 * 1000;
 const SEND_EVENT_TIMEOUT_MS = 20_000;
+
+/** Bulk forward is sequential (WEE-98) — cap each item so one hung media
+ *  download/upload can't block every later message. Covers the worst-case
+ *  media chain: download+decrypt source blob, encrypt, upload, send. */
+const FORWARD_ITEM_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Max file size for uploads (100 MB — typical Matrix homeserver limit) */
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024;
@@ -77,6 +85,34 @@ function resolveMime(file: File): string {
   if (file.type) return file.type;
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   return MIME_EXT_FALLBACK[ext] ?? "application/octet-stream";
+}
+
+/** Convert HEIC/HEIF File to JPEG so Android WebView (Chromium) can render it.
+ *  iPhone cameras default to HEIC; Chromium does not support HEIC in <img>,
+ *  resulting in a broken image on the receiver side. heic2any is loaded
+ *  dynamically (~340 KB gzipped chunk) only on the first HEIC encounter.
+ *  Returns the original file when the input is not HEIC/HEIF, or when
+ *  conversion fails (fail-open: better to send the original than nothing). */
+export async function convertHeicToJpeg(file: File): Promise<File> {
+  const isHeic =
+    /image\/(heic|heif)/i.test(file.type) ||
+    /\.(heic|heif)$/i.test(file.name);
+  if (!isHeic) return file;
+
+  try {
+    const heic2any = (await import("heic2any")).default;
+    const result = await heic2any({
+      blob: file,
+      toType: "image/jpeg",
+      quality: 0.85,
+    });
+    const jpegBlob = Array.isArray(result) ? result[0] : (result as Blob);
+    const newName = file.name.replace(/\.(heic|heif)$/i, ".jpg");
+    return new File([jpegBlob], newName, { type: "image/jpeg" });
+  } catch (e) {
+    console.warn("[convertHeicToJpeg] conversion failed, sending original:", e);
+    return file; // fail-open
+  }
 }
 
 /** Track which clientIds are already being cancelled (prevent double invocation) */
@@ -165,17 +201,12 @@ export function useMessages() {
         });
         localClientId = localMsg.clientId;
 
-        // 2. Validate readiness AFTER insert — if not ready, mark as failed
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendMessage] Matrix client not ready — message saved locally as failed", {
-            roomId, clientId: localClientId,
-          });
-          await dbKit.messages.markFailed(localClientId);
-          return true; // message IS visible (as failed)
-        }
-
-        // 3. Enqueue for background sync (no linkPreview in payload — always async)
+        // 2. Enqueue for background sync. If the Matrix client isn't ready yet
+        //    (boot / re-init window) the SyncEngine holds the op as "pending"
+        //    and flushes it once the client is ready, instead of an instant
+        //    failure (WEE-85). Real failures still surface after retry
+        //    exhaustion → "failed" (incl. chat-list preview, via markFailed).
+        //    (no linkPreview in payload — always async)
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -317,45 +348,74 @@ export function useMessages() {
     });
   }
 
-  /** Send a file/image/video/audio message */
-  const sendFile = async (file: File) => {
+  /** Send a file/image/video/audio message.
+   *  Returns true if an optimistic message landed in the UI (the user sees
+   *  it, even when subsequent enqueue fails), false when the call was
+   *  silently dropped before any visible side effect (caller can then
+   *  preserve the share/forward intent or restore the input). */
+  const sendFile = async (
+    file: File,
+    options: { forwardedFrom?: { senderId: string; senderName?: string } } = {},
+  ): Promise<boolean> => {
+    sendDiag("file:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) {
+      sendDiag("file:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
 
     if (file.size > MAX_UPLOAD_SIZE) {
       console.warn(`[use-messages] File too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
-      return;
+      reportSendError(new SendError("fileTooLarge", `File too large: ${file.name}`, { fileName: file.name, kind: "file" }, false));
+      return false;
     }
 
+    // Android WebView cannot render HEIC; convertHeicToJpeg short-circuits
+    // for non-HEIC inputs, so calling it unconditionally is safe and keeps
+    // the two send paths symmetric.
+    const processedFile = await convertHeicToJpeg(file);
+
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!matrixService.isReady()) {
+      sendDiag("file:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
+      return false;
+    }
 
-    // Determine message type from MIME (with fallback for HEIC/extension-only files)
-    const mime = normalizeMime(resolveMime(file));
-    const msgType = messageTypeFromMime(mime);
+    // Determine message type from MIME (with fallback for HEIC/extension-only files).
+    // Audio MIME deliberately routes to MessageType.file: voice recordings have
+    // their own send path (sendAudio) and audio attachments coming from the
+    // gallery / file picker are *files*, not voice notes. Without this guard
+    // an MP3 picked from the gallery preview-rendered as a voice bubble with
+    // no save-to-disk affordance (forta-bugs#841 / WEE-50).
+    const mime = normalizeMime(resolveMime(processedFile));
+    const inferredType = messageTypeFromMime(mime);
+    const msgType = inferredType === MessageType.audio ? MessageType.file : inferredType;
 
-    const localBlobUrl = URL.createObjectURL(file);
+    const localBlobUrl = URL.createObjectURL(processedFile);
 
     if (!isChatDbReady()) {
       // Without Dexie we have no crash-safe queue — dropping the send is
       // safer than leaking a never-completing toast on a dead pipeline.
       console.error("[use-messages] sendFile: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "file" }));
       URL.revokeObjectURL(localBlobUrl);
-      return;
+      return false;
     }
 
     const dbKit = getChatDb();
     const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
-      content: file.name,
+      content: processedFile.name,
       type: msgType,
       fileInfo: {
-        name: file.name,
+        name: processedFile.name,
         type: mime,
-        size: file.size,
+        size: processedFile.size,
         url: localBlobUrl,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -363,10 +423,10 @@ export function useMessages() {
     // Persist blob so SyncEngine.syncSendFile can resume after a crash.
     const attachmentId = await dbKit.db.attachments.add({
       messageLocalId: localMsg.localId!,
-      fileName: file.name,
+      fileName: processedFile.name,
       mimeType: mime,
-      size: file.size,
-      localBlob: file,
+      size: processedFile.size,
+      localBlob: processedFile,
       status: "local",
     });
 
@@ -374,59 +434,91 @@ export function useMessages() {
       "send_file",
       roomId,
       {
-        fileName: file.name,
+        fileName: processedFile.name,
         mimeType: mime,
         msgtype: "m.file",
         attachmentId,
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
+    sendDiag("file:enqueued", { clientId: localMsg.clientId });
+    return true;
   };
 
-  /** Send an image message (m.image event — compatible with bastyon-chat) */
-  const sendImage = async (file: File, options: { caption?: string; captionAbove?: boolean } = {}) => {
+  /** Send an image message (m.image event — compatible with bastyon-chat).
+   *  See sendFile for the boolean return contract. */
+  const sendImage = async (
+    file: File,
+    options: {
+      caption?: string;
+      captionAbove?: boolean;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
+  ): Promise<boolean> => {
+    sendDiag("image:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) {
+      sendDiag("image:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
+
+    if (file.size > MAX_UPLOAD_SIZE) {
+      console.warn(`[use-messages] Image too large: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      reportSendError(new SendError("fileTooLarge", `Image too large: ${file.name}`, { fileName: file.name, kind: "image" }, false));
+      return false;
+    }
+
+    // HEIC must be converted before getImageDimensions — Chromium <img> cannot
+    // decode HEIC at all, so reading naturalWidth/Height on the original blob
+    // would produce zeros and corrupt the m.image event payload.
+    const processedFile = await convertHeicToJpeg(file);
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!matrixService.isReady()) {
+      sendDiag("image:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "image" }));
+      return false;
+    }
 
-    const dimensions = await getImageDimensions(file);
-    const imageMime = resolveMime(file);
-    const localBlobUrl = URL.createObjectURL(file);
+    const dimensions = await getImageDimensions(processedFile);
+    const imageMime = resolveMime(processedFile);
+    const localBlobUrl = URL.createObjectURL(processedFile);
 
     if (!isChatDbReady()) {
       console.error("[use-messages] sendImage: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "image" }));
       URL.revokeObjectURL(localBlobUrl);
-      return;
+      return false;
     }
 
     const dbKit = getChatDb();
     const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
-      content: options.caption || file.name,
+      content: options.caption || processedFile.name,
       type: MessageType.image,
       fileInfo: {
-        name: file.name,
+        name: processedFile.name,
         type: imageMime,
-        size: file.size,
+        size: processedFile.size,
         url: localBlobUrl,
         w: dimensions.w,
         h: dimensions.h,
         caption: options.caption,
         captionAbove: options.captionAbove,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
 
     const attachmentId = await dbKit.db.attachments.add({
       messageLocalId: localMsg.localId!,
-      fileName: file.name,
+      fileName: processedFile.name,
       mimeType: imageMime,
-      size: file.size,
-      localBlob: file,
+      size: processedFile.size,
+      localBlob: processedFile,
       status: "local",
     });
 
@@ -434,7 +526,7 @@ export function useMessages() {
       "send_file",
       roomId,
       {
-        fileName: file.name,
+        fileName: processedFile.name,
         mimeType: imageMime,
         msgtype: "m.image",
         attachmentId,
@@ -443,30 +535,59 @@ export function useMessages() {
           w: dimensions.w,
           h: dimensions.h,
           mimetype: imageMime,
-          size: file.size,
+          size: processedFile.size,
           ...(options.caption ? { caption: options.caption } : {}),
           ...(options.captionAbove != null ? { captionAbove: options.captionAbove } : {}),
         },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
+    sendDiag("image:enqueued", { clientId: localMsg.clientId });
+    return true;
   };
 
-  /** Send an audio/voice message (m.audio event — compatible with bastyon-chat) */
-  const sendAudio = async (file: File, options: { duration?: number; waveform?: number[] } = {}) => {
+  /** Send an audio/voice message (m.audio event — compatible with bastyon-chat).
+   *  See sendFile for the boolean return contract. */
+  const sendAudio = async (
+    file: File,
+    options: {
+      duration?: number;
+      waveform?: number[];
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
+  ): Promise<boolean> => {
+    sendDiag("audio:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) {
+      sendDiag("audio:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
+      return false;
+    }
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
+    if (!matrixService.isReady()) {
+      sendDiag("audio:matrix-not-ready");
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "audio" }));
+      return false;
+    }
 
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
 
+    // Drop non-finite / non-positive durations: a NaN or Infinity (some Android
+    // WebViews decode webm/opus with a bad duration) serializes to `null` over
+    // JSON and leaves the recipient's voice bubble at 0:00 (WEE-83). Keep a
+    // single sanitized value for both the local echo and the wire payload.
+    const durationSec =
+      typeof options.duration === "number" && Number.isFinite(options.duration) && options.duration > 0
+        ? options.duration
+        : undefined;
+
     if (!isChatDbReady()) {
       console.error("[use-messages] sendAudio: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "audio" }));
       URL.revokeObjectURL(localBlobUrl);
-      return;
+      return false;
     }
 
     const dbKit = getChatDb();
@@ -480,9 +601,14 @@ export function useMessages() {
         type: audioMime,
         size: file.size,
         url: localBlobUrl,
-        duration: options.duration,
+        duration: durationSec,
         waveform: options.waveform,
+        // Voice recordings created via VoiceRecorder are always voice messages;
+        // recipients without an MSC3245 marker (older app versions) keep the
+        // waveform-presence heuristic as a fallback.
+        isVoice: true,
       },
+      forwardedFrom: options.forwardedFrom,
       localBlobUrl,
       uploadProgress: 0,
     });
@@ -510,183 +636,67 @@ export function useMessages() {
         eventInfo: {
           mimetype: audioMime,
           size: Math.round(file.size),
-          duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+          duration: durationSec ? Math.round(durationSec * 1000) : undefined,
           waveform: intWaveform,
         },
+        // MSC3245 voice marker — canonical Matrix signal that this m.audio
+        // event is a voice recording, not a regular audio file. Lets Element /
+        // Cinny / future Forta builds tell the two apart without inspecting
+        // the waveform (forta-bugs#841 / WEE-50).
+        eventExtras: { "org.matrix.msc3245.voice": {} },
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       },
       localMsg.clientId,
     );
+    sendDiag("audio:enqueued", { clientId: localMsg.clientId });
+    return true;
   };
 
-  /** Send a video circle (video note) message — circular video like Telegram */
-  const sendVideoCircle = async (file: File, options: { duration?: number } = {}) => {
+  /** Send a video circle (video note) message — circular video like Telegram.
+   *  Routed through the crash-safe SyncEngine queue (the same path as
+   *  sendImage / sendFile / sendAudio) so a WebView kill mid-upload auto-retries
+   *  instead of silently dropping the send. Previously this ran encrypt→upload
+   *  →send inline in a fire-and-forget IIFE with no PendingOperation, which is
+   *  why "photo ok, video hangs / next send stuck" (WEE-62 / forta-bugs#852,
+   *  #718). See sendFile for the boolean return contract. */
+  const sendVideoCircle = async (
+    file: File,
+    options: {
+      duration?: number;
+      forwardedFrom?: { senderId: string; senderName?: string };
+    } = {},
+  ): Promise<boolean> => {
+    sendDiag("videoCircle:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !file) return;
+    if (!roomId || !file) return false;
 
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
-
-    const localBlobUrl = URL.createObjectURL(file);
-
-    // Dexie-first path
-    if (isChatDbReady()) {
-      try {
-        const dbKit = getChatDb();
-        const localMsg = await dbKit.messages.createLocal({
-          roomId,
-          senderId: authStore.address ?? "",
-          content: "Video message",
-          type: MessageType.videoCircle,
-          fileInfo: {
-            name: file.name,
-            type: file.type,
-            size: file.size,
-            url: localBlobUrl,
-            w: 480,
-            h: 480,
-            duration: options.duration,
-            videoNote: true,
-          },
-          localBlobUrl,
-          uploadProgress: 0,
-        });
-
-        // Async upload pipeline (with abort support)
-        (async () => {
-          const controller = registerUploadAbort(localMsg.clientId);
-          const { signal } = controller;
-
-          try {
-            const checkAbort = () => {
-              if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
-            };
-
-            const videoMime = resolveMime(file);
-
-            // Phase 1: Encrypt
-            checkAbort();
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
-              .modify({ uploadPhase: "encrypting" });
-
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-
-            let fileToUpload: Blob = file;
-            let secrets: Record<string, unknown> | undefined;
-
-            if (roomCrypto?.canBeEncrypt()) {
-              const encrypted = await withTimeout(
-                roomCrypto.encryptFile(file),
-                ENCRYPT_TIMEOUT_MS,
-                "Video circle encrypt",
-              );
-              secrets = encrypted.secrets;
-              fileToUpload = encrypted.file;
-            }
-
-            // Phase 2: Upload
-            checkAbort();
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
-              .modify({ uploadPhase: "uploading" });
-
-            const onProgress = makeThrottledProgress((percent) => {
-              dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
-            });
-            const url = await withTimeout(
-              matrixService.uploadContent(fileToUpload, onProgress, signal),
-              UPLOAD_TIMEOUT_MS,
-              "Video circle upload",
-            );
-
-            // Phase 3: Send event
-            checkAbort();
-            await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
-              .modify({ uploadPhase: "sending_event", uploadProgress: 100 });
-
-            const content: Record<string, unknown> = {
-              body: "Video message",
-              msgtype: "m.video",
-              url,
-              info: {
-                mimetype: videoMime,
-                size: Math.round(file.size),
-                w: 480,
-                h: 480,
-                duration: options.duration ? Math.round(options.duration * 1000) : undefined,
-                videoNote: true,
-                ...(secrets ? { secrets } : {}),
-              },
-            };
-
-            const serverEventId = await withTimeout(
-              matrixService.sendEncryptedText(roomId, content, localMsg.clientId),
-              SEND_EVENT_TIMEOUT_MS,
-              "Video circle send event",
-            );
-
-            const serverFileInfo: FileInfo = {
-              name: file.name,
-              type: videoMime,
-              size: file.size,
-              url,
-              w: 480,
-              h: 480,
-              duration: options.duration,
-              videoNote: true,
-              ...(secrets ? { secrets: secrets as FileInfo["secrets"] } : {}),
-            };
-            await dbKit.messages.confirmMediaSent(localMsg.clientId, serverEventId, serverFileInfo, roomId);
-
-            invalidateDownloadCache(localMsg.clientId);
-            setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
-          } catch (e) {
-            if (e instanceof DOMException && e.name === "AbortError") {
-              await handleUploadCancelled(dbKit, localMsg.clientId, localBlobUrl);
-            } else {
-              console.error("Failed to send video circle (Dexie path):", e);
-              const current = await dbKit.messages.getByClientId(localMsg.clientId);
-              if (current && current.status !== "synced") {
-                await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
-                  status: "failed" as LocalMessageStatus,
-                  uploadProgress: undefined,
-                  uploadPhase: undefined,
-                });
-              }
-            }
-          } finally {
-            unregisterUploadAbort(localMsg.clientId);
-          }
-        })();
-
-        return;
-      } catch (e) {
-        console.warn("[use-messages] Dexie sendVideoCircle failed, falling back to legacy:", e);
-      }
+    if (!matrixService.isReady()) {
+      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
+      return false;
     }
 
-    // Legacy path
-    sendVideoCircleLegacy(file, roomId, localBlobUrl, options, matrixService);
-  };
+    const videoMime = resolveMime(file);
+    const localBlobUrl = URL.createObjectURL(file);
 
-  /** Legacy sendVideoCircle — fallback when Dexie is not ready */
-  const sendVideoCircleLegacy = async (
-    file: File,
-    roomId: string,
-    localBlobUrl: string,
-    options: { duration?: number },
-    matrixService: ReturnType<typeof getMatrixClientService>,
-  ) => {
-    const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const message: Message = {
-      id: tempId,
+    if (!isChatDbReady()) {
+      // Without Dexie there is no crash-safe queue — dropping the send is
+      // safer than leaking a never-completing spinner on a dead pipeline.
+      console.error("[use-messages] sendVideoCircle: chat DB not ready");
+      reportSendError(new SendError("dbNotReady", "Local database not ready", { fileName: file.name, kind: "file" }));
+      URL.revokeObjectURL(localBlobUrl);
+      return false;
+    }
+
+    const dbKit = getChatDb();
+    const localMsg = await dbKit.messages.createLocal({
       roomId,
       senderId: authStore.address ?? "",
       content: "Video message",
-      timestamp: Date.now(),
-      status: MessageStatus.sending,
       type: MessageType.videoCircle,
       fileInfo: {
         name: file.name,
-        type: file.type,
+        type: videoMime,
         size: file.size,
         url: localBlobUrl,
         w: 480,
@@ -694,48 +704,49 @@ export function useMessages() {
         duration: options.duration,
         videoNote: true,
       },
-    };
-    chatStore.addMessage(roomId, message);
+      forwardedFrom: options.forwardedFrom,
+      localBlobUrl,
+      uploadProgress: 0,
+    });
 
-    try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+    // Persist the blob so SyncEngine.syncSendFile can resume after a crash.
+    const attachmentId = await dbKit.db.attachments.add({
+      messageLocalId: localMsg.localId!,
+      fileName: file.name,
+      mimeType: videoMime,
+      size: file.size,
+      localBlob: file,
+      status: "local",
+    });
 
-      let fileToUpload: Blob = file;
-      let secrets: Record<string, unknown> | undefined;
-
-      if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await roomCrypto.encryptFile(file);
-        secrets = encrypted.secrets;
-        fileToUpload = encrypted.file;
-      }
-
-      const url = await matrixService.uploadContent(fileToUpload);
-
-      const content: Record<string, unknown> = {
-        body: "Video message",
+    await dbKit.syncEngine.enqueue(
+      "send_file",
+      roomId,
+      {
+        fileName: file.name,
+        mimeType: videoMime,
         msgtype: "m.video",
-        url,
-        info: {
-          mimetype: file.type,
-          size: Math.round(file.size),
+        attachmentId,
+        body: "Video message",
+        eventInfo: {
           w: 480,
           h: 480,
+          mimetype: videoMime,
+          size: Math.round(file.size),
           duration: options.duration ? Math.round(options.duration * 1000) : undefined,
+          // Video-note markers MUST live inside content.info so the receiver's
+          // isVideoNoteInfo() heuristic classifies this as a circle — the
+          // legacy `videoNote` flag plus the canonical MSC3245 key for
+          // cross-client interop.
           videoNote: true,
-          ...(secrets ? { secrets } : {}),
+          [MSC3245_VIDEO_NOTE_KEY]: true,
         },
-      };
-
-      const serverEventId = await matrixService.sendEncryptedText(roomId, content);
-      if (serverEventId) {
-        chatStore.updateMessageIdAndStatus(roomId, tempId, serverEventId, MessageStatus.sent);
-      } else {
-        chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
-      }
-    } catch (e) {
-      console.error("Failed to send video circle:", e);
-      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
-    }
+        ...(options.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
+      },
+      localMsg.clientId,
+    );
+    sendDiag("videoCircle:enqueued", { clientId: localMsg.clientId });
+    return true;
   };
 
   const loadMessages = async (roomId: string) => {
@@ -844,17 +855,9 @@ export function useMessages() {
         localClientId = localMsg.clientId;
         chatStore.replyingTo = null;
 
-        // 2. Validate readiness AFTER insert
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendReply] Matrix client not ready — message saved locally as failed", {
-            roomId, clientId: localClientId,
-          });
-          await dbKit.messages.markFailed(localClientId);
-          return true;
-        }
-
-        // 3. Enqueue for background sync (no linkPreview — always async)
+        // 2. Enqueue for background sync. Not-ready Matrix client (boot/re-init)
+        //    → SyncEngine queues the op until ready instead of instant-fail
+        //    (WEE-85). (no linkPreview — always async)
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -953,15 +956,44 @@ export function useMessages() {
     return true;
   };
 
-  /** Send a forwarded text message with optimistic UI. Returns true if insert succeeded.
-   *  Pass forwardMeta to include sender attribution; omit to send without attribution. */
+  /** Send a forwarded message with optimistic UI. Returns true if insert succeeded.
+   *  Pass forwardMeta to include sender attribution; omit to send without attribution.
+   *
+   *  Two branches:
+   *   - text (default): content is the body, hits the legacy send_message path.
+   *   - media: when `source.type !== text` and `source.fileInfo` is present,
+   *            re-downloads the original blob and dispatches through
+   *            sendImage/sendFile/sendAudio/sendVideoCircle. This is the
+   *            internal-forward path for photos/videos/voice/files — without
+   *            it the recipient would see «Image» / «Photo» as a text body
+   *            with no attachment (issues #311, #702). */
   const sendForward = async (
     content: string,
     forwardMeta?: { senderId: string; senderName?: string },
+    source?: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+      /** Original sender's address on the source event. Needed to derive the
+       *  per-event decryption key for E2E rooms — `forwardMeta.senderId` is
+       *  only set when the user opted into «Show sender attribution». */
+      sourceSenderId: string;
+      /** Original event timestamp. Some Matrix key-rotation policies are
+       *  timestamp-sensitive, so passing the source event time (not
+       *  Date.now()) keeps decrypt correct for older messages. */
+      sourceTimestamp: number;
+    },
   ): Promise<boolean> => {
     const roomId = chatStore.activeRoomId;
-    if (!roomId || !content.trim()) return false;
+    if (!roomId) return false;
 
+    // Media branch — re-upload the original bytes through the per-type pipeline.
+    if (source && source.type !== MessageType.text && source.fileInfo) {
+      return await forwardMediaMessage(content, forwardMeta, source);
+    }
+
+    if (!content.trim()) return false;
     const trimmed = content.trim();
 
     // ── Dexie path: optimistic insert FIRST ──
@@ -980,17 +1012,8 @@ export function useMessages() {
         });
         localClientId = localMsg.clientId;
 
-        // 2. Validate Matrix readiness
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendForward] Matrix client not ready — message saved locally as failed", {
-            roomId, clientId: localClientId,
-          });
-          await dbKit.messages.markFailed(localClientId);
-          return true;
-        }
-
-        // 3. Enqueue for sync
+        // 2. Enqueue for sync. Not-ready Matrix client (boot/re-init) →
+        //    SyncEngine queues the op until ready instead of instant-fail (WEE-85).
         await dbKit.syncEngine.enqueue(
           "send_message",
           roomId,
@@ -1041,6 +1064,79 @@ export function useMessages() {
     } catch (e) {
       console.error("[sendForward] Legacy path failed:", e);
       return false;
+    }
+  };
+
+  /** Re-upload a media message into the active room as part of a forward.
+   *  Downloads the original blob (or reuses a local blob URL when the source
+   *  was sent from this device and is still cached), wraps it in a File, and
+   *  dispatches through the per-type send pipeline so the recipient gets a
+   *  real m.image / m.file / m.audio event with the attachment — not a text
+   *  body «Image» without payload (the pre-fix bug behind #311, #702). */
+  const forwardMediaMessage = async (
+    caption: string,
+    forwardMeta: { senderId: string; senderName?: string } | undefined,
+    source: {
+      type: MessageType;
+      fileInfo: FileInfo;
+      sourceMessageId: string;
+      roomId: string;
+      sourceSenderId: string;
+      sourceTimestamp: number;
+    },
+  ): Promise<boolean> => {
+    let blob: Blob | null;
+    try {
+      blob = await getDecryptedBlobForMessage({
+        fileInfo: source.fileInfo,
+        roomId: source.roomId,
+        // Pass the *source* sender + timestamp so downloadAndDecrypt builds
+        // the same event shape pcrypto used when the original was sent.
+        // Using Date.now() here was wrong — it would mismatch any timestamp-
+        // sensitive key resolution.
+        senderId: source.sourceSenderId,
+        timestamp: source.sourceTimestamp,
+      });
+    } catch (e) {
+      console.error("[sendForward] Failed to fetch source blob:", e);
+      return false;
+    }
+    if (!blob) {
+      console.error("[sendForward] forwardMedia: source blob unavailable");
+      return false;
+    }
+
+    const fileName = source.fileInfo.name || "forwarded";
+    const fileType = source.fileInfo.type || blob.type || "application/octet-stream";
+    const file = new File([blob], fileName, { type: fileType });
+    const trimmedCaption = caption.trim();
+
+    switch (source.type) {
+      case MessageType.image:
+        return await sendImage(file, {
+          caption: trimmedCaption || undefined,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.audio:
+        return await sendAudio(file, {
+          duration: source.fileInfo.duration,
+          waveform: source.fileInfo.waveform,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.videoCircle:
+        return await sendVideoCircle(file, {
+          duration: source.fileInfo.duration,
+          forwardedFrom: forwardMeta,
+        });
+      case MessageType.video:
+      case MessageType.file:
+        return await sendFile(file, { forwardedFrom: forwardMeta });
+      default:
+        console.warn(
+          "[sendForward] forwardMedia: unsupported source type, falling back to text:",
+          source.type,
+        );
+        return false;
     }
   };
 
@@ -1131,7 +1227,11 @@ export function useMessages() {
           redactedEventId: messageId,
           roomId,
         });
-        if (forEveryone) {
+        // Only redact on the server when the message actually has a server
+        // identity. A pending message is identified by its clientId, which the
+        // server has never seen — queuing a redact for it silently fails
+        // (WEE-66 / #773). Such messages are deleted locally only.
+        if (forEveryone && isServerEventId(messageId)) {
           await dbKit.syncEngine.enqueue(
             "delete_message",
             roomId,
@@ -1174,79 +1274,143 @@ export function useMessages() {
 
     // Collect source messages across all rooms (selection may span rooms in theory,
     // though the current UI path feeds us only the active room's selection).
+    // We need type + fileInfo + roomId so media forwards can re-upload through
+    // the per-type pipeline instead of collapsing into a text body «Image»
+    // without attachment (the pre-fix bug behind #311, #702).
     const idSet = new Set(sourceMessageIds);
-    const collected: Array<{ id: string; content: string; senderId: string; timestamp: number }> = [];
+    const collected: Array<{
+      id: string;
+      content: string;
+      senderId: string;
+      timestamp: number;
+      type: MessageType;
+      fileInfo?: FileInfo;
+      roomId: string;
+    }> = [];
     for (const roomMessages of Object.values(chatStore.messages)) {
       for (const m of roomMessages) {
         if (idSet.has(m.id)) {
-          collected.push({ id: m.id, content: m.content, senderId: m.senderId, timestamp: m.timestamp });
+          collected.push({
+            id: m.id,
+            content: m.content,
+            senderId: m.senderId,
+            timestamp: m.timestamp,
+            type: m.type,
+            fileInfo: m.fileInfo,
+            roomId: m.roomId,
+          });
         }
       }
     }
     // Ship in original chronological order so recipients see the conversation flow.
     collected.sort((a, b) => a.timestamp - b.timestamp);
 
-    const results = await Promise.allSettled(
-      collected.map(async (src) => {
-        const senderName = chatStore.getDisplayName(src.senderId);
-        const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
+    // Sends ONE forwarded message; throws on failure. Invoked strictly
+    // sequentially below — SyncEngine is FIFO, so enqueue order is send order,
+    // and a parallel map would race the enqueues and scramble the recipient's
+    // order (WEE-98).
+    const sendOne = async (src: (typeof collected)[number]): Promise<void> => {
+      const senderName = chatStore.getDisplayName(src.senderId);
+      const fwdMeta = withSenderInfo ? { senderId: src.senderId, senderName } : undefined;
 
-        if (isChatDbReady()) {
-          try {
-            const dbKit = getChatDb();
-            const localMsg = await dbKit.messages.createLocal({
-              roomId: targetRoomId,
-              senderId: authStore.address ?? "",
-              content: src.content,
-              type: MessageType.text,
-              forwardedFrom: fwdMeta,
-            });
-            await dbKit.syncEngine.enqueue(
-              "send_message",
-              targetRoomId,
-              fwdMeta
-                ? { content: src.content, forwardedFrom: fwdMeta }
-                : { content: src.content },
-              localMsg.clientId,
-            );
-            return;
-          } catch (e) {
-            console.warn("[use-messages] Dexie bulk forward failed, falling back:", e);
-          }
+      // Media branch — reuse the singular forwardMediaMessage path. It
+      // re-uploads the original blob via sendImage/sendFile/sendAudio so
+      // the recipient receives a real attachment, not a text body.
+      if (src.type !== MessageType.text && src.fileInfo) {
+        // forwardMediaMessage dispatches through sendImage/sendFile, which
+        // read chatStore.activeRoomId. The current UI guarantees
+        // targetRoomId === activeRoomId (ForwardPicker switches the active
+        // room before invoking forwardMessages). Surface that invariant
+        // here so a future caller that forwards into a non-active room
+        // gets a clear error instead of silently posting into the wrong
+        // chat.
+        if (targetRoomId !== chatStore.activeRoomId) {
+          throw new Error(
+            "Bulk media forward requires targetRoomId === activeRoomId " +
+              "(sendImage/sendFile read activeRoomId). Switch the active " +
+              "room before calling forwardMessages, or thread a room " +
+              "override through the per-type send functions.",
+          );
         }
+        const ok = await forwardMediaMessage(src.content, fwdMeta, {
+          type: src.type,
+          fileInfo: src.fileInfo,
+          sourceMessageId: src.id,
+          roomId: src.roomId,
+          sourceSenderId: src.senderId,
+          sourceTimestamp: src.timestamp,
+        });
+        if (!ok) throw new Error(`forwardMedia failed for ${src.id}`);
+        return;
+      }
 
-        // Legacy fallback — direct encrypted/plaintext send to target room.
-        const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
-        if (roomCrypto?.canBeEncrypt()) {
-          const encrypted = await roomCrypto.encryptEvent(src.content);
-          if (withSenderInfo) {
-            (encrypted as Record<string, unknown>).forwarded_from = {
-              sender_id: src.senderId,
-              sender_name: senderName,
-            };
-          }
-          await matrixService.sendEncryptedText(targetRoomId, encrypted);
-        } else {
-          // Defense in depth: bulk forward multiplies the leak across N
-          // target rooms — Promise.allSettled below keeps the others
-          // going so one locked room does not block the others.
-          if (roomCrypto?.requiresEncryption()) {
-            throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — bulk forward to ${targetRoomId}`);
-          }
-          const payload: Record<string, unknown> = {
-            body: src.content,
-            msgtype: "m.text",
+      if (isChatDbReady()) {
+        try {
+          const dbKit = getChatDb();
+          const localMsg = await dbKit.messages.createLocal({
+            roomId: targetRoomId,
+            senderId: authStore.address ?? "",
+            content: src.content,
+            type: MessageType.text,
+            forwardedFrom: fwdMeta,
+          });
+          await dbKit.syncEngine.enqueue(
+            "send_message",
+            targetRoomId,
+            fwdMeta
+              ? { content: src.content, forwardedFrom: fwdMeta }
+              : { content: src.content },
+            localMsg.clientId,
+          );
+          return;
+        } catch (e) {
+          console.warn("[use-messages] Dexie bulk forward failed, falling back:", e);
+        }
+      }
+
+      // Legacy fallback — direct encrypted/plaintext send to target room.
+      const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
+      if (roomCrypto?.canBeEncrypt()) {
+        const encrypted = await roomCrypto.encryptEvent(src.content);
+        if (withSenderInfo) {
+          (encrypted as Record<string, unknown>).forwarded_from = {
+            sender_id: src.senderId,
+            sender_name: senderName,
           };
-          if (withSenderInfo) {
-            payload.forwarded_from = { sender_id: src.senderId, sender_name: senderName };
-          }
-          await matrixService.sendEncryptedText(targetRoomId, payload);
         }
-      }),
-    );
+        await matrixService.sendEncryptedText(targetRoomId, encrypted);
+      } else {
+        // Defense in depth: bulk forward multiplies the leak across N
+        // target rooms — the per-item try/catch in the sequential loop
+        // keeps going so one locked room does not block the others.
+        if (roomCrypto?.requiresEncryption()) {
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — bulk forward to ${targetRoomId}`);
+        }
+        const payload: Record<string, unknown> = {
+          body: src.content,
+          msgtype: "m.text",
+        };
+        if (withSenderInfo) {
+          payload.forwarded_from = { sender_id: src.senderId, sender_name: senderName };
+        }
+        await matrixService.sendEncryptedText(targetRoomId, payload);
+      }
+    };
 
-    const succeeded = results.filter((r) => r.status === "fulfilled").length;
-    const failed = results.length - succeeded;
+    // Strictly sequential — one failure logs and moves on (same continue-on-error
+    // semantics the previous Promise.allSettled gave), but order is preserved.
+    // Per-item timeout: a hung send would otherwise block every later message.
+    let succeeded = 0;
+    let failed = 0;
+    for (const src of collected) {
+      try {
+        await withTimeout(sendOne(src), FORWARD_ITEM_TIMEOUT_MS, `bulk forward ${src.id}`);
+        succeeded++;
+      } catch (e) {
+        failed++;
+        console.error("[use-messages] bulk forward failed for", src.id, e);
+      }
+    }
     return { succeeded, failed };
   };
 
@@ -1279,7 +1443,9 @@ export function useMessages() {
               redactedEventId: id,
               roomId,
             });
-            if (forEveryone) {
+            // Pending messages (clientId, no server identity) delete locally
+            // only — a server redact for a clientId silently fails (WEE-66).
+            if (forEveryone && isServerEventId(id)) {
               await dbKit.syncEngine.enqueue(
                 "delete_message",
                 roomId,
@@ -1342,15 +1508,9 @@ export function useMessages() {
         });
         localClientId = localMsg.clientId;
 
-        // 2. Validate readiness AFTER insert — if not ready, mark as failed
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) {
-          console.error("[sendTransferMessage] Matrix client not ready — saved locally as failed");
-          await dbKit.messages.markFailed(localClientId);
-          return;
-        }
-
-        // 3. Enqueue for background sync — SyncEngine.syncSendTransfer() handles
+        // 2. Enqueue for background sync. Not-ready Matrix client (boot/re-init)
+        //    → SyncEngine queues the op until ready instead of instant-fail (WEE-85).
+        //    SyncEngine.syncSendTransfer() handles
         //    encryption and Matrix API call, then confirms via messageRepo.confirmSent()
         await dbKit.syncEngine.enqueue(
           "send_transfer",
@@ -1778,6 +1938,9 @@ export function useMessages() {
       status: "pending" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
       uploadProgress: 0,
     });
+    // WEE-64: mirror the reset onto the chat-list preview (still-last guard
+    // inside the repository) so the sidebar shows "отправляется" during retry.
+    await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
 
     // Re-run upload pipeline (with abort support)
     const controller = registerUploadAbort(localMsg.clientId);
@@ -1850,7 +2013,9 @@ export function useMessages() {
           url,
           info: {
             mimetype: fi.type, size: Math.round(fi.size),
-            duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
+            duration: typeof fi.duration === "number" && Number.isFinite(fi.duration) && fi.duration > 0
+              ? Math.round(fi.duration * 1000)
+              : undefined,
             waveform: intWaveform,
             ...(secrets ? { secrets } : {}),
           },
@@ -1864,6 +2029,7 @@ export function useMessages() {
             mimetype: fi.type, size: Math.round(fi.size), w: 480, h: 480,
             duration: fi.duration ? Math.round(fi.duration * 1000) : undefined,
             videoNote: true,
+            [MSC3245_VIDEO_NOTE_KEY]: true,
             ...(secrets ? { secrets } : {}),
           },
         };
@@ -1903,6 +2069,9 @@ export function useMessages() {
             uploadProgress: undefined,
             uploadPhase: undefined,
           });
+          // WEE-64: the media retry pipeline bypasses SyncEngine, so mirror the
+          // failed badge onto the chat-list preview (still-last guard in the repo).
+          await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
         }
       }
     } finally {
@@ -1928,11 +2097,18 @@ export function useMessages() {
 
     // Reset status to pending
     await dbKit.messages.updateStatus({ clientId: mKey }, "pending");
+    // WEE-64: mirror the reset onto the chat-list preview so the sidebar shows
+    // "отправляется" (not a stale error) while the retry is in flight. Guarded
+    // to the still-last-message case inside the repository.
+    await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
 
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) {
       console.error("[retryMessage] Matrix client still not ready", { roomId, clientId: mKey });
       await dbKit.messages.markFailed(mKey);
+      // WEE-64: this retry never reaches SyncEngine.markMessageFailed, so mirror
+      // the failed badge onto the preview here (still-last guard in the repo).
+      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
       return;
     }
 
@@ -1960,6 +2136,9 @@ export function useMessages() {
     } catch (e) {
       console.error("[retryMessage] Failed to enqueue:", e);
       await dbKit.messages.markFailed(mKey);
+      // WEE-64: enqueue failed before SyncEngine took over — keep the preview
+      // consistent with the failed message (still-last guard in the repo).
+      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
     }
   };
 

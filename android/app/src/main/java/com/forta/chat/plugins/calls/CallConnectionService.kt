@@ -53,29 +53,55 @@ class CallConnectionService : ConnectionService() {
 
         Log.d(TAG, "onCreateIncomingConnection: callId=$callId, caller=$callerName, roomId=$roomId")
 
-        // Stash the room id on the CallConnection instance so that
-        // when (and ONLY when) the user taps Answer, CallConnection.
-        // onAnswer() can populate pendingAnswerRoomId. Setting it here
-        // unconditionally was a bug: the JS-side fast-path treats
-        // pendingAnswerRoomId as "user already accepted a call in room
-        // R", so declines would then trigger the same fast-path and
-        // pop CallActivity anyway.
+        // WEE-31: Telecom contract requires us to return a Connection here.
+        // Any throw used to bubble up into the system_server bound IPC and
+        // crash the callee process. Catch anything that can throw inside
+        // the Connection bootstrap and return a failed Connection — the
+        // caller's MatrixCall will get a reject and the user will still see
+        // the push-side IncomingCallActivity ringer that was posted by FCM.
+        return try {
+            val connection = CallConnection(applicationContext, callId, roomId)
+            connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
+            connection.setAddress(
+                Uri.fromParts("sip", callerName, null),
+                TelecomManager.PRESENTATION_ALLOWED
+            )
+            connection.setInitializing()
+            connection.setRinging()
 
-        val connection = CallConnection(applicationContext, callId, roomId)
-        connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
-        connection.setAddress(
-            Uri.fromParts("sip", callerName, null),
-            TelecomManager.PRESENTATION_ALLOWED
-        )
-        connection.setInitializing()
-        connection.setRinging()
+            currentConnection = connection
 
-        currentConnection = connection
+            // Session 41: Telecom is about to post its own FSI ringer notification
+            // (CHANNEL_INCOMING_CALLS, id 9999). The FCM service already posted
+            // one on the push path (CallNotificationConfig.INCOMING_CALL_CHANNEL_ID,
+            // "call_$roomId".hashCode()) — dismiss it now so we don't ring twice
+            // from two different channels.
+            if (roomId.isNotEmpty()) {
+                runCatching {
+                    com.forta.chat.FortaFirebaseMessagingService
+                        .dismissPushCallNotification(applicationContext, roomId)
+                }
+            }
 
-        // Show native incoming call UI
-        showIncomingCallUI(callId, callerName, hasVideo)
+            // Show native incoming call UI
+            runCatching { showIncomingCallUI(callId, callerName, hasVideo) }
+                .onFailure { Log.e(TAG, "[callee-crash-guard] showIncomingCallUI failed", it) }
 
-        return connection
+            connection
+        } catch (t: Throwable) {
+            Log.e(TAG, "[callee-crash-guard] onCreateIncomingConnection failed", t)
+            // The Telecom framework requires a non-null Connection return,
+            // but it will NOT auto-destroy a failed connection. Without
+            // .destroy() the call slot stays occupied on some OEM Telecom
+            // stacks, blocking subsequent calls (MIUI, EMUI). Release it
+            // immediately — the framework still gets a Connection ref it
+            // can route the disconnect cause through.
+            val failed = Connection.createFailedConnection(
+                DisconnectCause(DisconnectCause.ERROR, "incoming-connection-init-failed")
+            )
+            runCatching { failed.destroy() }
+            failed
+        }
     }
 
     override fun onCreateOutgoingConnection(
@@ -203,12 +229,21 @@ class CallConnectionService : ConnectionService() {
             builder.setContentText(callerName)
         }
 
-        notificationManager.notify(INCOMING_CALL_NOTIFICATION_ID, builder.build())
+        // WEE-31: notify() throws SecurityException on Android 13+ if the
+        // user revoked POST_NOTIFICATIONS between channel creation and the
+        // FCM-triggered ring. Don't crash — the direct startActivity below
+        // is still attempted, and the FCM service path also posted its own
+        // notification on the push-side channel.
+        try {
+            notificationManager.notify(INCOMING_CALL_NOTIFICATION_ID, builder.build())
+        } catch (e: Throwable) {
+            Log.e(TAG, "[callee-crash-guard] notificationManager.notify failed", e)
+        }
 
         // Start activity directly for foreground case
         try {
             applicationContext.startActivity(fullScreenIntent)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "Could not start IncomingCallActivity directly", e)
         }
     }

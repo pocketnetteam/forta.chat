@@ -4,10 +4,12 @@ import { effectScope } from "vue";
 // --- Platform mock: default = web ---
 let mockIsNative = false;
 let mockIsElectron = false;
+let mockIsAndroid = false;
 
 vi.mock("@/shared/lib/platform", () => ({
   get isNative() { return mockIsNative; },
   get isElectron() { return mockIsElectron; },
+  get isAndroid() { return mockIsAndroid; },
 }));
 
 // --- Auth store mock ---
@@ -43,9 +45,33 @@ vi.mock("@capacitor/share", () => ({
   Share: { get share() { return mockShare; } },
 }));
 
+// --- Capacitor core / SaveMedia plugin mock ---
+// `registerPlugin("SaveMedia")` returns this object. The plugin's `save`
+// method must accept { base64, fileName, mimeType } and resolve — Android
+// MediaStore semantics live on the native side and are covered by
+// SaveMediaPluginTest.kt, so here we only assert the JS-side wiring.
+const mockSaveMediaSave: Mock = vi.fn(() =>
+  Promise.resolve({ uri: "content://media/external/file/42", path: "Pictures/Forta Chat/photo.jpg" }),
+);
+vi.mock("@capacitor/core", () => ({
+  registerPlugin: vi.fn(() => ({ save: mockSaveMediaSave })),
+}));
+
 // --- Matrix crypto mock ---
 vi.mock("@/shared/lib/matrix/functions", () => ({
   hexEncode: vi.fn((s: string) => s),
+}));
+
+// --- Matrix client service mock ---
+// `getMatrixClientService().mxcToHttp(mxc)` resolves an mxc:// URI to an HTTP
+// download URL. Tests can override the implementation per case via
+// `mockMxcToHttp.mockImplementation(...)` to simulate baseUrl changes between
+// retry attempts (the fresh-resolve regression for WEE-17).
+const mockMxcToHttp: Mock = vi.fn((mxc: string) =>
+  mxc.startsWith("mxc://") ? `https://homeserver.example/_matrix/media/r0/download/${mxc.slice(6)}` : null,
+);
+vi.mock("@/entities/matrix", () => ({
+  getMatrixClientService: vi.fn(() => ({ mxcToHttp: mockMxcToHttp })),
 }));
 
 // --- Bug report & i18n mocks (called on download errors) ---
@@ -80,8 +106,13 @@ global.fetch = vi.fn(() => Promise.resolve(mockFetchResponse)) as Mock;
 const {
   useFileDownload,
   revokeAllFileUrls,
+  invalidateDownloadCache,
   appendCacheBust,
   wrapTransientError,
+  mediaHostForAttempt,
+  rewriteMediaHost,
+  _resetToastDedupForTests,
+  _mediaGateActiveForTests,
 } = await import("./use-file-download");
 const { MediaUnavailableError, NetworkBlockedError } = await import(
   "@/shared/lib/network/typed-network-errors"
@@ -97,6 +128,7 @@ describe("useFileDownload", () => {
   beforeEach(() => {
     mockIsNative = false;
     mockIsElectron = false;
+    mockIsAndroid = false;
     vi.clearAllMocks();
     revokeAllFileUrls();
     // Reset window.electronAPI
@@ -104,6 +136,13 @@ describe("useFileDownload", () => {
     // Reset crypto stub so tests that do not touch encryption see no
     // pcrypto (matches the original mock default).
     setMockPcrypto(null);
+    // Reset toast dedup so repeated-failure tests start from a clean slate.
+    _resetToastDedupForTests();
+    // Restore the default mxc → http resolver so per-test overrides do not
+    // leak into subsequent cases.
+    mockMxcToHttp.mockImplementation((mxc: string) =>
+      mxc.startsWith("mxc://") ? `https://homeserver.example/_matrix/media/r0/download/${mxc.slice(6)}` : null,
+    );
   });
 
   describe("saveFile — web platform", () => {
@@ -122,9 +161,122 @@ describe("useFileDownload", () => {
     });
   });
 
-  describe("saveFile — native platform (Android/iOS)", () => {
+  // ─────────────────────────────────────────────────────────────────────
+  // saveFile — Android (Session 58 SaveMediaPlugin path)
+  // Replaces the prior FileOpener + Share fallback. On Android 14+
+  // scoped storage that path silently degraded to a Share dialog when
+  // FileOpener could not get a content:// for the cache file
+  // (forta-bugs#734). SaveMedia.save writes via MediaStore so the file
+  // lands in Pictures/Forta Chat or Download/Forta Chat — viewable in
+  // the Gallery / Files app, no Share dialog.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("saveFile — Android (SaveMediaPlugin)", () => {
     beforeEach(() => {
       mockIsNative = true;
+      mockIsAndroid = true;
+    });
+
+    it("calls SaveMedia.save with base64 + fileName + mimeType", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "photo.jpg", "image/jpeg");
+
+        expect(mockSaveMediaSave).toHaveBeenCalledTimes(1);
+        const args = mockSaveMediaSave.mock.calls[0][0];
+        expect(args).toEqual(
+          expect.objectContaining({
+            base64: expect.any(String),
+            fileName: "photo.jpg",
+            mimeType: "image/jpeg",
+          }),
+        );
+        expect(args.base64.length).toBeGreaterThan(0);
+      });
+      scope.stop();
+    });
+
+    it("falls back to guessed MIME when caller does not provide one", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "document.xlsx");
+
+        expect(mockSaveMediaSave).toHaveBeenCalledWith(
+          expect.objectContaining({
+            fileName: "document.xlsx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+        );
+      });
+      scope.stop();
+    });
+
+    it("propagates errors so the caller can surface a toast", async () => {
+      mockSaveMediaSave.mockRejectedValueOnce(new Error("MediaStore insert failed"));
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await expect(
+          saveFile("blob:http://localhost/abc", "photo.jpg", "image/jpeg"),
+        ).rejects.toThrow(/MediaStore insert failed/);
+
+        // Regression for forta-bugs#734: on Android, a failed save MUST
+        // bubble to the caller — never silently degrade to a Share dialog
+        // the way the prior FileOpener+Share fallback did.
+        expect(mockFileOpenerOpen).not.toHaveBeenCalled();
+        expect(mockShare).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("sanitizes path-traversal attempts in fileName before sending to native (security)", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile(
+          "blob:http://localhost/abc",
+          "../../etc/passwd.jpg",
+          "image/jpeg",
+        );
+
+        const args = mockSaveMediaSave.mock.calls[0][0];
+        expect(args.fileName).not.toContain("..");
+        expect(args.fileName).not.toContain("/");
+        expect(args.fileName).toBe("etc_passwd.jpg");
+      });
+      scope.stop();
+    });
+
+    it("does NOT call the legacy FileOpener or Share fallback (regression — forta-bugs#734)", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "doc.pdf", "application/pdf");
+
+        expect(mockFileOpenerOpen).not.toHaveBeenCalled();
+        expect(mockShare).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // saveFile — iOS (legacy FileOpener + Share fallback)
+  // iOS UX expects a Share Sheet for documents, so the legacy pipeline
+  // remains intentional. Session 58 only changes Android behavior.
+  // ─────────────────────────────────────────────────────────────────────
+  describe("saveFile — iOS (legacy FileOpener pipeline)", () => {
+    beforeEach(() => {
+      mockIsNative = true;
+      mockIsAndroid = false;
     });
 
     it("writes file to cache and opens with FileOpener", async () => {
@@ -195,6 +347,18 @@ describe("useFileDownload", () => {
             contentType: "application/octet-stream",
           }),
         );
+      });
+      scope.stop();
+    });
+
+    it("does NOT call SaveMediaPlugin on iOS", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { saveFile } = useFileDownload();
+
+        await saveFile("blob:http://localhost/abc", "report.pdf", "application/pdf");
+
+        expect(mockSaveMediaSave).not.toHaveBeenCalled();
       });
       scope.stop();
     });
@@ -311,6 +475,148 @@ describe("useFileDownload", () => {
       expect(withQuery).toMatch(/^https:\/\/example\.com\/file\.pdf\?token=abc&cb=/);
     });
 
+    it("fast-fails blob:/data: URLs with MissingUrlError instead of attempting fetch (WEE-28 defense)", async () => {
+      // If an optimistic local blob URL leaks into fileInfo.url because
+      // confirmMediaSent never ran, fetch(blob:...) throws a Security Error
+      // that the outer wrapTransientError miscategorises as a network
+      // failure — the retry loop then burns ~10s of spinner UI for nothing.
+      // Surface MissingUrlError immediately so the UI shows a meaningful
+      // "no usable file URL" state and the user can act on it.
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_blob",
+          _key: "client_blob",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "stuck.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "stuck.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "blob:http://localhost:5173/ffc1e2c2-8585-46ea-9244-be66a1e04db8",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(message);
+
+        // Must not have made any network attempt against the dead blob URL.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // download() returns null/undefined on error; the typed error landed
+        // in the per-message download state for the UI to surface.
+        expect(result).toBeFalsy();
+      });
+      scope.stop();
+    });
+
+    it("short-circuits and reuses the live blob URL while the upload is still in flight (no toast, no overlay)", async () => {
+      // Optimistic outbound media: the row is status="sending", localBlobUrl
+      // is alive, mappers.ts surfaces it as fileInfo.url. The previous
+      // behaviour fell through to the WEE-28 fast-fail and produced a
+      // misleading "Файл повреждён или не пришёл с источника" toast plus a
+      // momentary retry overlay until confirmMediaSent flipped the row.
+      // After the fix, download() must return the blob URL as-is, with no
+      // fetch, no toast, no error state.
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      mockToast.mockClear();
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const blobUrl = "blob:http://localhost:5173/optimistic-photo";
+        const message = {
+          id: "client_inflight",
+          _key: "client_inflight",
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "photo.jpg",
+          timestamp: Date.now(),
+          // MessageStatus.sending is the canonical "upload in flight" signal.
+          status: "sending",
+          type: "image",
+          uploadProgress: 42,
+          fileInfo: {
+            name: "photo.jpg",
+            type: "image/jpeg",
+            size: 2048,
+            url: blobUrl,
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(message);
+
+        expect(result).toBe(blobUrl);
+        // Network must not be touched — the blob is local.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // No error toast must fire while the upload is still in flight.
+        expect(mockToast).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("still fast-fails blob: URLs for non-sending status (WEE-28 dead-blob defense intact)", async () => {
+      // Guard parity: a row that survived a crashed upload comes back from
+      // Dexie with status="failed" (or "sent" if echo confirmed it) and a
+      // dead blob: URL. The short-circuit must NOT swallow that case —
+      // downloadAndDecrypt still has to throw MissingUrlError so the user
+      // sees an actionable "no usable file URL" state instead of a stuck
+      // <img> with a 404 from the browser.
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_dead_blob",
+          _key: "client_dead_blob",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "stuck.pdf",
+          timestamp: Date.now(),
+          status: "failed",
+          type: "file",
+          fileInfo: {
+            name: "stuck.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "blob:http://localhost:5173/dead-blob",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(message);
+
+        // No fetch — the WEE-28 guard short-circuits before the network.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // Returns null/undefined (download() reports errors via state, not throw).
+        expect(result).toBeFalsy();
+      });
+      scope.stop();
+    });
+
+    it("does NOT mangle blob:/data: URLs with cache-bust (those schemes do not accept query strings)", () => {
+      // Regression safety net for WEE-17 review: appending `?cb=` to a blob:
+      // URL breaks the URL grammar and the next fetch would fail spuriously.
+      // blob: / data: have no HTTP cache layer to bust anyway.
+      expect(appendCacheBust("blob:http://localhost/abc-123", 1)).toBe(
+        "blob:http://localhost/abc-123",
+      );
+      expect(appendCacheBust("data:image/png;base64,iVBORw0KGgo=", 2)).toBe(
+        "data:image/png;base64,iVBORw0KGgo=",
+      );
+    });
+
     it("retry attempts produce distinct cache-bust values", () => {
       const a = appendCacheBust("https://example.com/file.pdf", 1);
       const b = appendCacheBust("https://example.com/file.pdf", 2);
@@ -421,6 +727,49 @@ describe("useFileDownload", () => {
       });
       scope.stop();
     }, 30_000);
+
+    it("does NOT re-surface the same toast on repeated failures for the same message (Session 51 follow-up)", async () => {
+      // Regression: a user reported the 'Server unreachable. Try enabling
+      // Tor or a VPN.' toast firing every time they saved or removed a
+      // contact alias. Root cause: re-renders (virtual scroller recycling,
+      // parent reactivity cascades) triggered MessageBubble.onMounted /
+      // watch(message.id), which re-invoked download() on already-failed
+      // media. Each retry surfaced a fresh toast. Dedup window of 60 s
+      // collapses these into one user-visible notification.
+      (global.fetch as Mock).mockRejectedValue(new TypeError("Failed to fetch"));
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_dedup_blocked",
+          _key: "client_dedup_blocked",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "https://example.com/dedup.pdf",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+        await download(message);
+        await download(message);
+
+        const networkBlockedToasts = mockToast.mock.calls.filter(
+          (call: unknown[]) => call[0] === "errors.networkBlocked",
+        );
+        expect(networkBlockedToasts.length).toBe(1);
+      });
+      scope.stop();
+    }, 60_000);
 
     it("after retry exhaustion, exposes errorKind='network' to the UI", async () => {
       (global.fetch as Mock).mockRejectedValue(new TypeError("Failed to fetch"));
@@ -554,6 +903,223 @@ describe("useFileDownload", () => {
       scope.stop();
     }, 30_000);
 
+    // ─────────────────────────────────────────────────────────────────────
+    // WEE-17: mxc:// → http resolve before fetch
+    //
+    // Matrix encrypted attachments arrive with `fileInfo.url = "mxc://..."`
+    // (parseFileInfo preserves the canonical Matrix URI). `fetch("mxc://...")`
+    // throws `TypeError: Failed to fetch` immediately in Capacitor's WebView
+    // shim, and cache-bust alone cannot rescue it — every retry attempt would
+    // fetch the same un-resolvable scheme.
+    //
+    // Closes forta-bugs#776 #763 #648 #513 #475 #441 #373 — the largest media
+    // failure cluster on the bug board.
+    // ─────────────────────────────────────────────────────────────────────
+    it("resolves mxc:// URLs to http via matrixService.mxcToHttp before fetch (WEE-17)", async () => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_mxc",
+          _key: "client_mxc",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "photo.jpg",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "image",
+          fileInfo: {
+            name: "photo.jpg",
+            type: "image/jpeg",
+            size: 1024,
+            url: "mxc://matrix.bastyon.com/abc123",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // The Matrix client must have been consulted to translate mxc → http.
+        expect(mockMxcToHttp).toHaveBeenCalledWith("mxc://matrix.bastyon.com/abc123");
+        // fetch must NOT have been called with the raw mxc:// URI (that would
+        // throw TypeError: Failed to fetch on every retry).
+        const [firstUrl] = (global.fetch as Mock).mock.calls[0];
+        expect(firstUrl).not.toMatch(/^mxc:\/\//);
+        expect(firstUrl).toBe("https://homeserver.example/_matrix/media/r0/download/matrix.bastyon.com/abc123");
+      });
+      scope.stop();
+    });
+
+    it("does NOT call mxcToHttp for http/https URLs (already resolved)", async () => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_http",
+          _key: "client_http",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "https://example.com/file.pdf",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        expect(mockMxcToHttp).not.toHaveBeenCalled();
+      });
+      scope.stop();
+    });
+
+    it("re-resolves mxc:// on every retry attempt — picks up homeserver baseUrl changes (WEE-17 H2)", async () => {
+      // First attempt fails with Failed-to-fetch (region block / stale CDN);
+      // before the second attempt, the Matrix client has reconfigured its
+      // baseUrl (e.g. failover from one media server to another). A fresh
+      // resolve must happen so the second fetch goes to the new homeserver
+      // instead of replaying the same stale URL.
+      (global.fetch as Mock)
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+        });
+
+      // Different homeserver URLs on each resolve.
+      mockMxcToHttp
+        .mockReturnValueOnce("https://old.example/_matrix/media/r0/download/server/file")
+        .mockReturnValueOnce("https://new.example/_matrix/media/r0/download/server/file");
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const message = {
+          id: "$evt_refresh",
+          _key: "client_refresh",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "mxc://server/file",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // mxcToHttp must have been consulted twice — once per attempt — so a
+        // baseUrl change between retries is picked up.
+        expect(mockMxcToHttp).toHaveBeenCalledTimes(2);
+        const calls = (global.fetch as Mock).mock.calls;
+        expect(calls[0][0]).toMatch(/^https:\/\/old\.example\//);
+        // Second attempt uses the new baseUrl (with cache-bust appended).
+        expect(calls[1][0]).toMatch(/^https:\/\/new\.example\/.+\?cb=/);
+      });
+      scope.stop();
+    }, 15_000);
+
+    it("treats mxcToHttp throwing the same as returning null (cold-start Matrix client)", async () => {
+      mockMxcToHttp.mockImplementation(() => {
+        throw new Error("Client not initialized");
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt_throw",
+          _key: "client_throw",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "mxc://server/file",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // Throw collapses to the same MediaUnavailableError fast-fail path —
+        // a throwing Matrix client should not cause an unhandled rejection.
+        expect((global.fetch as Mock).mock.calls.length).toBe(0);
+        expect(getState("client_throw").errorKind).toBe("network");
+      });
+      scope.stop();
+    });
+
+    it("throws MediaUnavailableError when mxcToHttp returns null (no Matrix client)", async () => {
+      mockMxcToHttp.mockReturnValue(null);
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt_unresolved",
+          _key: "client_unresolved",
+          roomId: "!room:server",
+          senderId: "@u:server",
+          content: "file.pdf",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "file",
+          fileInfo: {
+            name: "file.pdf",
+            type: "application/pdf",
+            size: 1024,
+            url: "mxc://server/file",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(message);
+
+        // Resolve failure is terminal — do NOT burn the retry budget on
+        // something that cannot be retried.
+        expect((global.fetch as Mock).mock.calls.length).toBe(0);
+        expect(getState("client_unresolved").errorKind).toBe("network");
+        // User sees the typed "media unavailable" toast, not a generic error.
+        expect(mockToast).toHaveBeenCalledWith(
+          "errors.mediaUnavailable",
+          "error",
+          expect.any(Number),
+        );
+      });
+      scope.stop();
+    });
+
     it("does not retry on 404 (fast-fail)", async () => {
       (global.fetch as Mock).mockResolvedValue({
         ok: false,
@@ -588,6 +1154,328 @@ describe("useFileDownload", () => {
         expect((global.fetch as Mock).mock.calls.length).toBe(1);
       });
       scope.stop();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // WEE-71 (H2): concurrency-pool — opening a DM full of photos must not fire
+  // every full-size fetch at once (channel flooding + UI freeze on low-end
+  // Android). The shared semaphore caps simultaneous network downloads to 3.
+  // -------------------------------------------------------------------------
+  describe("download — concurrency pool (WEE-71)", () => {
+    it("never runs more than 3 media downloads concurrently", async () => {
+      const originalFetch = global.fetch;
+
+      let activeFetches = 0;
+      let peakFetches = 0;
+      let releaseFetches: () => void = () => {};
+      const fetchGate = new Promise<void>((resolve) => {
+        releaseFetches = resolve;
+      });
+
+      // Each fetch parks on the shared gate so several can be in flight at once
+      // — letting us observe how many the semaphore actually admits.
+      global.fetch = vi.fn(async () => {
+        activeFetches++;
+        peakFetches = Math.max(peakFetches, activeFetches);
+        await fetchGate;
+        activeFetches--;
+        return {
+          ok: true,
+          status: 200,
+          blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" })),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+
+      const scope = effectScope();
+      try {
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+          // 6 distinct encrypted-less images — all want the network at once.
+          const downloads = Array.from({ length: 6 }, (_, i) =>
+            download({
+              id: `$evt_pool_${i}`,
+              _key: `client_pool_${i}`,
+              roomId: "!room:server",
+              senderId: "@u:server",
+              content: "photo.jpg",
+              timestamp: Date.now(),
+              status: "sent",
+              type: "image",
+              fileInfo: {
+                name: "photo.jpg",
+                type: "image/jpeg",
+                size: 1024,
+                url: `https://example.com/photo_${i}.jpg`,
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any),
+          );
+
+          // Let the admitted downloads reach their fetch() and park on the gate.
+          await new Promise((r) => setTimeout(r, 0));
+
+          // At most 3 in flight; the rest queue on the semaphore.
+          expect(_mediaGateActiveForTests()).toBeLessThanOrEqual(3);
+          expect(peakFetches).toBeLessThanOrEqual(3);
+          expect(activeFetches).toBe(3);
+
+          // Drain: release the gate, let every download complete.
+          releaseFetches();
+          await Promise.all(downloads);
+
+          // Pool fully turned over — no leaked permits, and the 6th still ran.
+          expect(_mediaGateActiveForTests()).toBe(0);
+          expect(peakFetches).toBeLessThanOrEqual(3);
+          expect((global.fetch as Mock).mock.calls.length).toBe(6);
+        });
+      } finally {
+        scope.stop();
+        global.fetch = originalFetch;
+      }
+    }, 15_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // forceRefetch — Session 44
+  // Voice-message retry button needs to bypass the per-message media cache
+  // so a stuck encrypted blob can be re-fetched + re-decrypted with a fresh
+  // objectUrl (issues #695, #671).
+  // -------------------------------------------------------------------------
+  describe("download — forceRefetch (Session 44)", () => {
+    const baseMessage = {
+      id: "$evt_force",
+      _key: "client_force",
+      roomId: "!room:server",
+      senderId: "@u:server",
+      content: "voice.ogg",
+      timestamp: Date.now(),
+      status: "sent",
+      type: "audio",
+      fileInfo: {
+        name: "voice.ogg",
+        type: "audio/ogg",
+        size: 512,
+        url: "https://example.com/voice.ogg",
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    beforeEach(() => {
+      (global.fetch as Mock).mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])])),
+      });
+    });
+
+    it("returns the cached objectUrl on a second call without forceRefetch", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+
+        const first = await download(baseMessage);
+        const callsAfterFirst = (global.fetch as Mock).mock.calls.length;
+
+        const second = await download(baseMessage);
+
+        expect(second).toBe(first);
+        // Cache hit — no extra fetch.
+        expect((global.fetch as Mock).mock.calls.length).toBe(callsAfterFirst);
+      });
+      scope.stop();
+    });
+
+    it("bypasses the cache and re-fetches when forceRefetch=true", async () => {
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+
+        await download(baseMessage);
+        const callsAfterFirst = (global.fetch as Mock).mock.calls.length;
+
+        await download(baseMessage, undefined, { forceRefetch: true });
+
+        expect((global.fetch as Mock).mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      });
+      scope.stop();
+    });
+
+    it("revokes the prior objectUrl and produces a fresh one when forceRefetch=true", async () => {
+      const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      try {
+        const scope = effectScope();
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+
+          const first = await download(baseMessage);
+          revokeSpy.mockClear();
+
+          const second = await download(baseMessage, undefined, { forceRefetch: true });
+
+          expect(revokeSpy).toHaveBeenCalledWith(first);
+          expect(second).not.toBe(first);
+        });
+        scope.stop();
+      } finally {
+        revokeSpy.mockRestore();
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // WEE-88 — sender cannot play their OWN voice (#990 spinner / #986 silent)
+  // -------------------------------------------------------------------------
+  // Root cause: seedLocalUrl used to write the optimistic blob: URL into the
+  // long-lived module `cache`. After confirmMediaSent the blob is revoked
+  // (~5s), but the cache entry survived — so the post-confirm re-download
+  // short-circuited on `cache.has()` and handed the player a DEAD blob. The
+  // receiver never seeds a blob, so it always decrypted the server copy and
+  // heard the message fine. The fix keeps the seed instance-local so the
+  // blob→mxc transition re-downloads the durable server file.
+  describe("own voice playback — sender's own message (WEE-88)", () => {
+    it("seedLocalUrl does NOT poison the long-lived cache: a confirmed own voice re-downloads from the server", async () => {
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([1, 2, 3])], { type: "audio/ogg" })),
+      });
+
+      const blobUrl = "blob:http://localhost:5173/own-voice-88";
+      const cacheKey = "client_voice_88";
+
+      // 1) Pending send: the sender's bubble seeds the local blob for instant
+      //    playback while the upload is still in flight.
+      const scope1 = effectScope();
+      await scope1.run(async () => {
+        const { seedLocalUrl, getState } = useFileDownload();
+        seedLocalUrl(cacheKey, blobUrl);
+        expect(getState(cacheKey).objectUrl).toBe(blobUrl);
+      });
+      scope1.stop();
+
+      // 2) confirmMediaSent flips the row to a real mxc URL and revokes the
+      //    blob. A fresh download() (the watch-triggered re-fetch) must hit the
+      //    server — NOT replay the dead blob from a poisoned module cache.
+      const scope2 = effectScope();
+      await scope2.run(async () => {
+        const { download } = useFileDownload();
+        const confirmed = {
+          id: "$evt_voice_88",
+          _key: cacheKey,
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "Audio",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "audio",
+          fileInfo: {
+            name: "voice.ogg",
+            type: "audio/ogg",
+            size: 4096,
+            url: "mxc://server/voice88",
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        const result = await download(confirmed);
+
+        // The server file was fetched (no short-circuit on a stale blob).
+        expect(fetchSpy).toHaveBeenCalled();
+        // The returned URL is a fresh decrypted objectUrl, never the dead blob.
+        expect(result).not.toBe(blobUrl);
+      });
+      scope2.stop();
+    });
+
+    it("invalidateDownloadCache drops the entry so the next download re-fetches the server copy", async () => {
+      const fetchSpy = global.fetch as Mock;
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob([new Uint8Array([9])], { type: "audio/ogg" })),
+      });
+
+      const scope = effectScope();
+      await scope.run(async () => {
+        const { download } = useFileDownload();
+        const msg = {
+          id: "$evt_inv_88",
+          _key: "client_inv_88",
+          roomId: "!room:server",
+          senderId: "@me:server",
+          content: "Audio",
+          timestamp: Date.now(),
+          status: "sent",
+          type: "audio",
+          fileInfo: { name: "v.ogg", type: "audio/ogg", size: 1, url: "mxc://server/inv88" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+
+        await download(msg);
+        const callsAfterFirst = fetchSpy.mock.calls.length;
+
+        // Second download hits the cache — no new network call.
+        await download(msg);
+        expect(fetchSpy.mock.calls.length).toBe(callsAfterFirst);
+
+        // After invalidation (the blob→mxc watch path), the next download must
+        // re-fetch instead of replaying the cached entry.
+        invalidateDownloadCache("client_inv_88");
+        await download(msg);
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      });
+      scope.stop();
+    });
+  });
+
+  // ── WEE-90 H2: media-server mirror fallback ───────────────────────────
+  // The old chat (bastyon-chat) survives a blocked/throttled primary media
+  // repo because `pingServers` picks a live host from `matrix` + `matrixMirrors`.
+  // Forta hits a single hardcoded host, so every retry replays the same dead
+  // URL. These cover the host-selection + URL-rewrite primitives that let the
+  // download retry loop alternate primary↔mirror.
+  describe("media-server mirror fallback (WEE-90 H2)", () => {
+    it("alternates primary↔mirror across retry attempts", () => {
+      // attempt 0 = primary; odd attempts hit the mirror; even attempts the
+      // primary — so a transient primary blip still recovers while a hard
+      // block is bypassed on the very next try.
+      expect(mediaHostForAttempt(0)).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(1)).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(2)).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(3)).toBe("matrix.2.pocketnet.app");
+    });
+
+    it("rewrites the primary homeserver host to the mirror", () => {
+      expect(
+        rewriteMediaHost(
+          "https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc",
+          "matrix.2.pocketnet.app",
+        ),
+      ).toBe("https://matrix.2.pocketnet.app/_matrix/media/v3/download/x/abc");
+    });
+
+    it("is a no-op when the target host is the primary", () => {
+      const url = "https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc";
+      expect(rewriteMediaHost(url, "matrix.pocketnet.app")).toBe(url);
+    });
+
+    it("never repoints a foreign/CDN host at a Pocketnet mirror", () => {
+      // An attachment resolved against some other host (forwarded media,
+      // Element/Cinny sender) must not be silently rerouted to our mirror.
+      const foreign = "https://cdn.example.com/media/abc";
+      expect(rewriteMediaHost(foreign, "matrix.2.pocketnet.app")).toBe(foreign);
+    });
+
+    it("leaves non-URL inputs (blob:/data:) untouched", () => {
+      expect(rewriteMediaHost("blob:http://localhost/abc", "matrix.2.pocketnet.app")).toBe(
+        "blob:http://localhost/abc",
+      );
     });
   });
 });

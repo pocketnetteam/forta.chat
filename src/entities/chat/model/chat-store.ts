@@ -2,12 +2,14 @@ import { getMatrixClientService } from "@/entities/matrix";
 import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName } from "../lib/chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
+import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
+import { getModeratorChange, isServiceRoomName, isWithinCreationBurst, isCreationBurstMemberEvent } from "../lib/system-event-filter";
 import { preservePendingRooms } from "../lib/preserve-pending-rooms";
 import {
   readJoinRule,
@@ -22,18 +24,38 @@ import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
 import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
+import { signalChatsInteractive } from "@/shared/lib/boot-signals";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
+import { runInBatches } from "@/shared/lib/run-in-batches";
+import { isCryptoWorkerSupported } from "@/shared/lib/crypto-worker/bridge";
 import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
+import { createBurstCoalescer } from "@/shared/lib/burst-coalescer";
 import { isNative } from "@/shared/lib/platform";
+import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
+import { tRaw } from "@/shared/lib/i18n";
+import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import type { RoomChange } from "@/shared/lib/local-db";
-import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus } from "@/shared/lib/local-db";
+import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus, readUserAliases } from "@/shared/lib/local-db";
 import type { ChatRoom, FileInfo, ForwardingMessage, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
+import { resolveCachedRoomsAddress } from "./cached-rooms-address";
 
 const NAMESPACE = "chat";
+
+/** A cached value is usable as a display name only if it is not a raw
+ *  identifier: a full Matrix ID (`@localpart:domain`) or a long hex blob
+ *  (≥20 chars, e.g. an undecoded hex user ID). Short hex-like usernames
+ *  ("cafe", "abc123") and handle-style names ("@nickname" without a domain)
+ *  are intentionally allowed — only unambiguous machine IDs are rejected so
+ *  they fall through to the truncated-address fallback (forta-bugs#363/#165).
+ *  Note: the local-alias branch in getDisplayName is deliberately NOT guarded
+ *  — an alias is explicit human input and must always win (Session 51). */
+function isDisplayableName(value: string): boolean {
+  return !!value && !/^@[^:]+:.+/.test(value) && !/^[a-f0-9]{20,}$/i.test(value);
+}
 
 /** Extract raw event data from a MatrixEvent object */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -212,11 +234,18 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
         previewBody = "[photo]";
         previewType = MessageType.image;
       } else if (msgtype === "m.audio") {
-        previewBody = "[voice message]";
-        previewType = MessageType.audio;
+        // In Forta `m.audio` is always a voice recording — gallery / file-picker
+        // audio (including .mp3) ships as `m.file` and previews via that branch.
+        // Gating on the MSC3245 marker / waveform here made every received voice
+        // note preview as a plain "[audio]" file (WEE-83, regression of WEE-50 /
+        // forta-bugs#841). See isVoiceAudioMessage for the full rationale.
+        const info = content.info as Record<string, unknown> | undefined;
+        const isVoice = isVoiceAudioMessage("m.audio", content, info);
+        previewBody = isVoice ? "[voice message]" : (content?.body as string) || "[audio]";
+        previewType = isVoice ? MessageType.audio : MessageType.file;
       } else if (msgtype === "m.video") {
         const info = content.info as Record<string, unknown> | undefined;
-        if (info?.videoNote) {
+        if (isVideoNoteInfo(info)) {
           previewBody = "[video message]";
           previewType = MessageType.videoCircle;
         } else {
@@ -457,8 +486,64 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const namesReady = ref(false);
   /** Current Matrix sync state — updated from onSync callback via refreshRooms */
   const syncState = ref<"PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING" | null>(null);
-  /** True during initial sync or when connection is lost */
-  const isSyncing = computed(() => !roomsInitialized.value || syncState.value === "ERROR" || syncState.value === "RECONNECTING");
+
+  // WEE-55: explicit initial-sync lifecycle. A hung post-update Matrix /sync
+  // (invalid sync_token, slow 3G, server stall) used to leave roomsInitialized
+  // false forever → infinite preloader / empty chat list / endless in-room
+  // message skeleton. "degraded" is the escape hatch: stop waiting and fall
+  // back to whatever the Dexie cache holds (or the empty-state hint).
+  const initialSyncStatus = ref<"loading" | "ready" | "degraded">("loading");
+  /** Watchdog deadline before we give up on the first sync and degrade. */
+  const INITIAL_SYNC_TIMEOUT_MS = 8000;
+  let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearInitialSyncTimer = () => {
+    if (initialSyncTimer) {
+      clearTimeout(initialSyncTimer);
+      initialSyncTimer = null;
+    }
+  };
+
+  /**
+   * Start the watchdog that escapes the "loading" state if the first Matrix
+   * sync never completes. Idempotent per login; cleared on `cleanup()` and on
+   * the first successful sync-driven refresh. Local-first: degrading unblocks
+   * the UI to render whatever Dexie already holds instead of spinning forever.
+   */
+  const startInitialSyncWatch = () => {
+    if (initialSyncStatus.value === "ready") return;
+    clearInitialSyncTimer();
+    initialSyncTimer = setTimeout(() => {
+      initialSyncTimer = null;
+      if (initialSyncStatus.value !== "loading") return;
+      initialSyncStatus.value = "degraded";
+      // Release every skeleton/preloader that keys off roomsInitialized so the
+      // cached room list becomes visible. When the cache is still empty the
+      // room-list keeps a "taking longer than usual" placeholder (see
+      // isRoomListLoadingSlow) instead of flashing the "no dialogs" empty
+      // state — the authoritative empty is gated on a real SYNCING sync
+      // (isRoomListAuthoritativeEmpty). A later PREPARED sync still runs a full
+      // refresh and upgrades back to "ready".
+      roomsInitialized.value = true;
+      // WEE-97: release deferred boot work (recovery scans, Tor, telemetry)
+      signalChatsInteractive();
+    }, INITIAL_SYNC_TIMEOUT_MS);
+  };
+
+  /** True ONLY during the genuine first-load phase (before the first sync or
+   *  the watchdog degrade). It gates the in-room message skeleton.
+   *
+   *  WEE-80 (forta-bugs#956): local-first read path must NOT depend on the
+   *  network. Previously this also flipped true on `syncState` ERROR/
+   *  RECONNECTING, so a cold-start with no connection (or a lost connection)
+   *  left empty rooms stuck on an eternal "loading" skeleton instead of
+   *  rendering the cached Dexie truth ("No messages yet"), and caused the
+   *  message skeleton to flicker on every WebSocket reconnect (same flicker
+   *  ContactList.vue already side-steps). Connection status is surfaced
+   *  separately by the sync banner (use-sync-status), not by the read path.
+   *  `initialSyncStatus` leaves "loading" via the first real sync OR the 8s
+   *  degrade watchdog, so this still bounds the genuine first-load skeleton. */
+  const isSyncing = computed(() => initialSyncStatus.value === "loading");
 
   // Cache for decrypted room previews — persists across refreshRooms() rebuilds
   const decryptedPreviewCache = new Map<string, string>();
@@ -516,6 +601,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const peerKeysStatus = reactive(new Map<string, PeerKeysStatus>());
   const DECRYPT_RETRY_DELAY = 10_000; // 10s before retrying a failed room
   const DECRYPT_MAX_RETRIES = 3;
+  // Preview decrypt parallelism (WEE-96): rooms per batch, yield between batches
+  const PREVIEW_DECRYPT_BATCH_SIZE = 5;
+  // Rooms attempted per decryptRoomPreviews pass (cap to avoid long pipelines)
+  const PREVIEW_DECRYPT_MAX_PER_CYCLE = 20;
+  // Rotation cursor so consecutive passes don't always pick the same first 20
+  // rooms — without it, retry passes that reset the failure budget would
+  // starve rooms 21+ of any attempt until the 15-min full refresh.
+  let previewCapCursor = 0;
+  // Delayed retry passes for encrypted previews after initial sync (WEE-96):
+  // covers RPC/Tor warm-up failures during the very first preview pass
+  const PREVIEW_RETRY_PASS_DELAYS_MS = [10_000, 30_000, 90_000] as const;
+  const previewRetryTimers: ReturnType<typeof setTimeout>[] = [];
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -527,34 +624,229 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // User display name cache: address → display name
   const userDisplayNames = ref<Record<string, string>>({});
 
+  /** User-set local alias cache: address → alias (Telegram-style "rename contact").
+   *  Mirrors Dexie users.localAlias. Populated by loadLocalAliases() on login
+   *  and updated optimistically by setContactAlias(). Cross-device sync is
+   *  driven by the m.bastyon.contact_aliases global account_data event. */
+  const localAliases = ref<Record<string, string>>({});
+
+  /** In-memory timestamp cache for alias entries (raw address → ms).
+   *  Mirrors Dexie users.aliasUpdatedAt so cross-device LWW conflict
+   *  resolution still works in test/dev contexts where Dexie is not wired. */
+  const aliasUpdatedAtCache = ref<Record<string, number>>({});
+
   /** Look up a user's display name; falls back to truncated address.
    *  Accepts both raw Bastyon addresses and hex-encoded IDs (from room.members).
-   *  Also checks the user store (restored from localStorage on startup) to avoid
-   *  showing raw addresses while Matrix sync is still in progress. */
+   *  Resolution order:
+   *    1. Local alias (user-set "rename contact" — Session 51) — top priority.
+   *    2. Matrix displayName cache (populated by /sync).
+   *    3. User store (synchronously restored from localStorage on boot —
+   *       available before Matrix sync, prevents raw-address flash).
+   *    4. Truncated address fallback. */
   const getDisplayName = (address: string): string => {
     if (!address) return "?";
-    // Direct lookup (raw address)
-    const cached = userDisplayNames.value[address];
-    if (cached) return cached;
     // Try hex-decoded lookup (room.members stores hex IDs, cache uses raw addresses)
     let resolvedAddr = address;
     if (/^[a-f0-9]+$/i.test(address)) {
       try {
         const decoded = hexDecode(address);
         if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) {
-          const decodedCached = userDisplayNames.value[decoded];
-          if (decodedCached) return decodedCached;
           resolvedAddr = decoded;
         }
       } catch { /* not a valid hex string */ }
     }
-    // Check user store (synchronously restored from localStorage — available before Matrix sync)
+    // 1) Local alias — top priority, overrides everything (including Matrix name).
+    //    Aliases are always keyed by raw address; `resolvedAddr` was just
+    //    normalized above, so a single lookup is enough.
+    const alias = localAliases.value[resolvedAddr];
+    if (alias) return alias;
+    // 2) Matrix displayName cache — direct (raw) lookup, then decoded.
+    //    Guard against raw identifiers (full Matrix IDs or long hex blobs)
+    //    leaking into the UI as a "name" — they must fall through to the
+    //    address fallback instead (forta-bugs#363/#165).
+    const cached = userDisplayNames.value[address];
+    if (cached && isDisplayableName(cached)) return cached;
+    if (resolvedAddr !== address) {
+      const decodedCached = userDisplayNames.value[resolvedAddr];
+      if (decodedCached && isDisplayableName(decodedCached)) return decodedCached;
+    }
+    // 3) Check user store (synchronously restored from localStorage — available before Matrix sync)
     const uStore = useUserStore();
     const userProfile = uStore.users[resolvedAddr];
-    if (userProfile?.name) return userProfile.name;
+    if (userProfile?.name && isDisplayableName(userProfile.name)) return userProfile.name;
     // Fallback: truncated address
     if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
     return address;
+  };
+
+  /** Same resolution chain as `getDisplayName` but SKIPS the local-alias
+   *  step. Use this whenever the resulting name will leave the device —
+   *  outbound `@hexId:safeName` mention payloads, forward attributions,
+   *  anything peers will see. The alias is a private "Telegram-style rename"
+   *  and must never appear in a wire format (WEE-39 follow-up: peers were
+   *  receiving the local alias inside the mention safeName, causing the
+   *  mention to render as a stranger string on their side). */
+  const getCanonicalDisplayName = (address: string): string => {
+    if (!address) return "?";
+    let resolvedAddr = address;
+    if (/^[a-f0-9]+$/i.test(address)) {
+      try {
+        const decoded = hexDecode(address);
+        if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) {
+          resolvedAddr = decoded;
+        }
+      } catch { /* not a valid hex string */ }
+    }
+    // (skip local alias on purpose — see jsdoc above)
+    const cached = userDisplayNames.value[address];
+    if (cached) return cached;
+    if (resolvedAddr !== address) {
+      const decodedCached = userDisplayNames.value[resolvedAddr];
+      if (decodedCached) return decodedCached;
+    }
+    const uStore = useUserStore();
+    const userProfile = uStore.users[resolvedAddr];
+    if (userProfile?.name) return userProfile.name;
+    if (address.length > 16) return address.slice(0, 8) + "…" + address.slice(-4);
+    return address;
+  };
+
+  /** Resolve a hex-encoded address back to the raw Bastyon form (or echo
+   *  the input if it is already raw). */
+  const resolveRawAddress = (address: string): string => {
+    if (!address) return address;
+    if (/^[a-f0-9]+$/i.test(address)) {
+      try {
+        const decoded = hexDecode(address);
+        if (decoded !== address && /^[A-Za-z0-9]+$/.test(decoded)) return decoded;
+      } catch { /* not valid hex */ }
+    }
+    return address;
+  };
+
+  /** Get the local alias for an address (or null if none).
+   *  Accepts both raw and hex-encoded address forms — keys are always raw. */
+  const getLocalAlias = (address: string): string | null => {
+    if (!address) return null;
+    const raw = resolveRawAddress(address);
+    return localAliases.value[raw] ?? null;
+  };
+
+  /** True iff a local alias is set for the address (raw or hex form). */
+  const hasLocalAlias = (address: string): boolean => getLocalAlias(address) !== null;
+
+  /** Replace the in-memory alias caches from a raw Dexie alias map.
+   *  Full replace (not a merge) on purpose: `getAllAliases()` only returns rows
+   *  that currently HAVE an alias, so an alias cleared on another device (and
+   *  LWW-synced into Dexie) is absent from `all` and must drop out of the
+   *  in-memory cache too. A merge would leave the stale alias stuck on screen.
+   *  Per-entry LWW tombstoning lives in handleAccountDataEvent, which receives
+   *  explicit cleared entries; this path is a wholesale reload from Dexie. */
+  const applyAliasMap = (all: Record<string, { alias: string; updatedAt: number }>) => {
+    const nameNext: Record<string, string> = {};
+    const tsNext: Record<string, number> = {};
+    for (const [addr, { alias, updatedAt }] of Object.entries(all)) {
+      nameNext[addr] = alias;
+      tsNext[addr] = updatedAt;
+    }
+    localAliases.value = nameNext;
+    aliasUpdatedAtCache.value = tsNext;
+  };
+
+  /** Load the alias cache from Dexie via the live kit. Called on login +
+   *  chat-db init (refreshes whatever hydrateLocalAliasesEarly seeded). */
+  const loadLocalAliases = async () => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return;
+    try {
+      applyAliasMap(await kit.users.getAllAliases());
+    } catch (e) {
+      console.warn("[chat-store] loadLocalAliases failed:", e);
+    }
+  };
+
+  /** Hydrate the alias cache directly from Dexie BEFORE Matrix/network init.
+   *  Local-first invariant (WEE-102): a user's contact renames must apply from
+   *  the first frame and fully offline, never gated behind /sync, RPC, or the
+   *  late chat-db kit that `login()` only wires after its network steps. Reads
+   *  Dexie through `readUserAliases`, which needs no SyncEngine/crypto/network. */
+  const hydrateLocalAliasesEarly = async (rawAddress: string) => {
+    if (!rawAddress) return;
+    // Already seeded (a prior hydrate, or an in-session setContactAlias that
+    // beat this boot-time read) — skip so a pre-edit Dexie snapshot can't
+    // clobber it. The live-kit loadLocalAliases() still does the full refresh.
+    if (Object.keys(localAliases.value).length > 0) return;
+    try {
+      applyAliasMap(await readUserAliases(rawAddress));
+    } catch (e) {
+      console.warn("[chat-store] hydrateLocalAliasesEarly failed:", e);
+    }
+  };
+
+  /** Set or clear a user's local alias.
+   *  Passing alias = null (or empty/whitespace) clears the alias.
+   *  Performs an optimistic UI update first, then persists to Dexie, then
+   *  best-effort syncs to Matrix account_data for cross-device propagation.
+   *  The alias is NEVER sent as Matrix room displayname \u2014 peers do not see it. */
+  const setContactAlias = async (address: string, alias: string | null): Promise<void> => {
+    if (!address) return;
+    const trimmed = alias?.trim() ? alias.trim() : null;
+    const now = Date.now();
+    const raw = resolveRawAddress(address);
+
+    // Optimistic UI \u2014 always key by raw form. Hex callsites normalize via
+    // resolveRawAddress() inside getDisplayName / getLocalAlias, so a single
+    // canonical key avoids stale entries when clearing through a different form.
+    const next = { ...localAliases.value };
+    if (trimmed) next[raw] = trimmed;
+    else delete next[raw];
+    localAliases.value = next;
+    // Mirror timestamp so LWW conflict resolution sees this write
+    aliasUpdatedAtCache.value = { ...aliasUpdatedAtCache.value, [raw]: now };
+
+    // Dexie (single source of truth \u2014 keyed by raw address)
+    const kit = chatDbKitRef.value;
+    if (kit) {
+      try {
+        await kit.users.setAlias(raw, trimmed, now);
+      } catch (e) {
+        console.warn("[chat-store] setContactAlias: Dexie write failed:", e);
+      }
+    }
+
+    // Matrix account_data (best-effort, fire-and-forget \u2014 peers do NOT see
+    // this; it only syncs to the same user's other devices via /sync).
+    //
+    // We deliberately DO NOT await the network call here. The local write is
+    // the user-facing success criterion; the server-side replication is
+    // background. Awaiting would:
+    //   - Delay the dialog close on slow networks.
+    //   - Risk a stray rejection bubbling into a region-block toast if the
+    //     homeserver is blocked / rate-limited (a transient failure here is
+    //     not a download failure and should not pester the user).
+    // A 5s timeout race guards against the SDK hanging the promise forever.
+    void (async () => {
+      try {
+        const matrix = getMatrixClientService();
+        const current = (matrix.getAccountData("m.bastyon.contact_aliases") ?? {}) as {
+          aliases?: Record<string, { name: string; updatedAt: number }>;
+        };
+        const aliases = { ...(current.aliases ?? {}) };
+        if (trimmed) aliases[raw] = { name: trimmed, updatedAt: now };
+        else delete aliases[raw];
+        await Promise.race([
+          matrix.setAccountData("m.bastyon.contact_aliases", { aliases }),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error("account_data sync timeout")), 5_000),
+          ),
+        ]);
+      } catch (e) {
+        // Swallow \u2014 the local write succeeded, other devices will catch up
+        // on their next /sync (or via a future setContactAlias call that
+        // takes hold during a more cooperative network window).
+        console.warn("[chat-store] setContactAlias: account_data sync failed (best-effort):", e);
+      }
+    })().catch(() => { /* belt-and-braces \u2014 the IIFE already swallows */ });
   };
 
   // Selection/forward state (Batch 4)
@@ -591,6 +883,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       fileInfo: message.fileInfo,
       forwardedFrom: message.forwardedFrom,
       withSenderInfo: true,
+      sourceTimestamp: message.timestamp,
     };
   };
 
@@ -804,12 +1097,98 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     persistRoomSets();
   };
 
-  const toggleMuteRoom = (roomId: string) => {
+  /** Canonical mute setter. Local state is updated optimistically (instant UI),
+   *  then the change is propagated to the Matrix homeserver as a push rule.
+   *
+   *  WEE-44 / forta-bugs#561, #817: previously mute was localStorage-only.
+   *  That left two bugs:
+   *    - #561: the homeserver kept pushing for "muted" rooms because it
+   *      never learned about the mute → users got notifications they had
+   *      already silenced.
+   *    - #817: localStorage is per-WebView; some Android launchers /
+   *      OEMs blow it away on app updates, which silently re-enabled all
+   *      notifications. Pushing rules to the server makes them survive
+   *      reinstalls and roam across devices.
+   */
+  const setRoomMute = async (roomId: string, muted: boolean): Promise<void> => {
+    // 1. Optimistic local state — UI updates immediately
     const s = new Set(mutedRoomIds.value);
-    if (s.has(roomId)) s.delete(roomId);
-    else s.add(roomId);
+    if (muted) s.add(roomId);
+    else s.delete(roomId);
     mutedRoomIds.value = s;
     persistRoomSets();
+
+    // 2. Server sync — fire-and-forget for UI snappiness. On failure we
+    //    keep the optimistic local state (better UX than yanking the
+    //    toggle back), but emit a warning so support can correlate
+    //    "muted in UI but still receiving" reports.
+    try {
+      const matrixService = getMatrixClientService();
+      const client = matrixService.client as unknown as {
+        setRoomMutePushRule?: (
+          scope: 'global' | 'device',
+          roomId: string,
+          mute: boolean,
+        ) => Promise<void> | undefined;
+      } | null;
+      if (client?.setRoomMutePushRule) {
+        await client.setRoomMutePushRule('global', roomId, muted);
+      }
+    } catch (e) {
+      console.warn('[chat-store] Failed to push mute rule to server:', { roomId, muted, e });
+    }
+  };
+
+  const toggleMuteRoom = (roomId: string): void => {
+    // Synchronous facade kept for existing callers (ContactList etc.).
+    // Server sync is intentionally fire-and-forget under the hood.
+    const willBeMuted = !mutedRoomIds.value.has(roomId);
+    setRoomMute(roomId, willBeMuted).catch(() => { /* already warned inside */ });
+  };
+
+  /** Pull authoritative mute state from Matrix push rules and merge with
+   *  the local set. Called after Matrix becomes ready.
+   *
+   *  Merge policy: we UNION the server set with the local set rather than
+   *  replacing. The race we are protecting against: between `pushService.init`
+   *  and the `getPushRules` round-trip the user may have tapped Mute on a
+   *  room — `setRoomMute` already wrote that optimistically into
+   *  `mutedRoomIds`, and the in-flight `setRoomMutePushRule` POST has not
+   *  necessarily landed before we read the rules back. A plain "server wins"
+   *  policy would clobber that optimistic write, silently un-muting a room
+   *  the user just muted. We bias toward "muted" because the failure mode is
+   *  safer: at worst the user has to tap Unmute again on the next boot if
+   *  their just-issued unmute didn't land on the server yet, but we never
+   *  silently push notifications into a room they had silenced. */
+  const syncMutedRoomsFromMatrix = async (): Promise<void> => {
+    try {
+      const matrixService = getMatrixClientService();
+      const client = matrixService.client as unknown as {
+        getPushRules?: () => Promise<{
+          global?: { room?: Array<{ rule_id: string; enabled: boolean; actions: unknown[] }> };
+        }>;
+      } | null;
+      if (!client?.getPushRules) return;
+      const rules = await client.getPushRules();
+      const roomRules = rules?.global?.room ?? [];
+      const serverMuted = new Set<string>();
+      for (const r of roomRules) {
+        if (!r?.enabled) continue;
+        // Convention used by setRoomMutePushRule: actions = ["dont_notify"]
+        // means muted. Be defensive about the action shape.
+        const isMute = Array.isArray(r.actions) && r.actions.some(
+          (a) => a === 'dont_notify' || (typeof a === 'object' && a !== null && (a as { value?: boolean }).value === false),
+        );
+        if (isMute && typeof r.rule_id === 'string') serverMuted.add(r.rule_id);
+      }
+      // Union, not replace — see merge-policy note above.
+      const merged = new Set<string>(mutedRoomIds.value);
+      for (const id of serverMuted) merged.add(id);
+      mutedRoomIds.value = merged;
+      persistRoomSets();
+    } catch (e) {
+      console.warn('[chat-store] Failed to sync mute rules from Matrix:', e);
+    }
   };
 
   /** Single writer for unreadCount across ALL update paths.
@@ -867,6 +1246,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     _setUnreadCount(roomId, serverCount, "matrix-sync");
   };
 
+  /** Unread count as it was the moment the user opened the room (WEE-95).
+   *  setActiveRoom zeroes the badge synchronously (sidebar UX / WEE-44 push-tap),
+   *  but the unread banner renders AFTER that and needs the pre-open value. */
+  let _preOpenUnread: { roomId: string; count: number } | null = null;
+
+  /** Pre-open unread count for the unread banner; undefined when the room
+   *  wasn't opened via setActiveRoom (e.g. cold-boot deep link). */
+  const getPreOpenUnreadCount = (roomId: string): number | undefined =>
+    _preOpenUnread?.roomId === roomId ? _preOpenUnread.count : undefined;
+
   const markRoomAsRead = (roomId: string) => {
     _setUnreadCount(roomId, 0, "markAsRead");
 
@@ -916,7 +1305,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   // Primary message source: Dexie liveQuery (auto-subscribes to DB changes)
-  const { data: dexieMessages, isReady: dexieMessagesReady } = useLiveQuery(
+  const { data: dexieMessages, isReady: dexieMessagesReady, reset: resetDexieMessages } = useLiveQuery(
     () => {
       if (!activeRoomId.value || !chatDbKitRef.value) return [] as import("@/shared/lib/local-db").LocalMessage[];
       const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(activeRoomId.value);
@@ -1221,7 +1610,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  Call this before direct `_sortedRoomsRef.value` assignments
    *  (fallback recompute, fullRebuildSortedRoomsAsync, cleanup) so stale
    *  patches don't later overwrite the freshly-built state. */
-  const cancelPendingPatches = () => sortedRoomsPatcher.cancel();
+  const cancelPendingPatches = () => {
+    sortedRoomsPatcher.cancel();
+    // Drop any pending coalesced deltas too — the caller is about to rebuild
+    // sortedRooms from dexieRoomMap, which already reflects those deltas.
+    sidebarDeltaCoalescer.cancel();
+  };
 
   const patchSortedRooms = (changes: RoomChange[]) => {
     sortedRoomsPatcher.schedule(changes);
@@ -1334,10 +1728,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const runRoomCleanup = async () => {
     if (!chatDbKitRef.value) return;
     const matrixService = getMatrixClientService();
+    // DATA-LOSS GUARD (WEE-61): only run orphan cleanup once the SDK has reached
+    // steady-state incremental sync ("SYNCING"). Right after "PREPARED" the SDK
+    // may not have materialized all rooms into memory yet (slow WebView / 50+
+    // rooms), so isRoomInSdk() reports false for valid rooms. If we're not there
+    // yet, skip this tick — the 30-minute interval will retry safely.
+    if (matrixService.getSyncState() !== "SYNCING") return;
     const { cleanupStaleRooms } = await import("./room-cleanup");
     await cleanupStaleRooms({
       getAllRooms: () => chatDbKitRef.value!.rooms.getAllRooms(),
-      deleteRooms: (ids) => chatDbKitRef.value!.rooms.bulkRemoveRooms(ids).catch(() => {}),
+      // Soft-delete (tombstone) instead of hard-delete: a mistaken orphan is
+      // recoverable (revived on next sync, GC'd after 30 days) — no data loss.
+      deleteRooms: (ids) => chatDbKitRef.value!.rooms.bulkTombstoneRooms(ids, "removed").catch(() => {}),
       isRoomInSdk: (id) => !!matrixService.getRoom(id),
       getRoomHistoryVisibility: (id) => {
         try {
@@ -1380,6 +1782,33 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       fullRebuildSortedRoomsAsync();
     }, 50);
   };
+
+  // ---------------------------------------------------------------------------
+  // Burst-coalesced sidebar re-sort for backlog catch-up
+  //
+  // WHY: when a room is opened after being away, its backlog is decrypted and
+  // written one event at a time (~1 per EventWriter flush window). Each write
+  // surfaces as a Dexie room delta, and rAF coalescing can't merge them because
+  // they land in separate frames — so the chat list re-sorts once *per message*
+  // ("chats jumping around" until the backlog finishes). This coalescer waits
+  // for the delta stream to go quiet, then applies the whole burst as a single
+  // re-sort (the sort key only cares about the newest message per room anyway).
+  // Interactive/optimistic patches (unread-clear on open, sends) bypass this and
+  // stay instant — they call patchSortedRooms directly, not via applyDexieDeltas.
+  //
+  // Trade-off: a live single message's sidebar preview/reorder is delayed by up
+  // to SIDEBAR_DELTA_SETTLE_MS. The open room's own message list is unaffected
+  // (it renders from the in-memory addMessage path, not from these deltas).
+  // ---------------------------------------------------------------------------
+  const SIDEBAR_DELTA_SETTLE_MS = 220;
+  const SIDEBAR_DELTA_MAX_WAIT_MS = 1500;
+  const sidebarDeltaCoalescer = createBurstCoalescer<RoomChange>(
+    (batch) => {
+      if (batch.length > 100) scheduleFullSortedRebuild();
+      else patchSortedRooms(batch);
+    },
+    { settleMs: SIDEBAR_DELTA_SETTLE_MS, maxWaitMs: SIDEBAR_DELTA_MAX_WAIT_MS },
+  );
 
   // ---------------------------------------------------------------------------
   // Delta-based Dexie room tracking
@@ -1462,10 +1891,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     dexieRooms.value = Array.from(dexieRoomMap.values());
+    // Coalesce the delta stream so a backlog catch-up collapses into a single
+    // sidebar re-sort once it settles, instead of re-sorting per message.
+    // dexieRoomMap (ground truth) is already updated above, so deferring the
+    // visible re-sort never loses data.
     if (relevantChanges.length > 100) {
+      // A single large batch is already "one step" — apply without extra delay.
+      sidebarDeltaCoalescer.cancel();
       scheduleFullSortedRebuild();
     } else {
-      patchSortedRooms(relevantChanges);
+      sidebarDeltaCoalescer.push(relevantChanges);
     }
 
     // Check if any changed rooms just got their preview — stop polling for them
@@ -1527,6 +1962,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const sortedRooms = computed(() => _sortedRoomsRef.value);
 
+  // ── Room-list first-load states ──────────────────────────────────────────
+  // Split the single roomsInitialized flag into three UI states so the 8s
+  // degrade watchdog switches the placeholder text instead of revealing a
+  // premature "no dialogs" empty state (see startInitialSyncWatch).
+  //
+  // The list is authoritatively empty ONLY once the SDK reached steady-state
+  // incremental sync ("SYNCING"). At "PREPARED" the SDK may not have
+  // materialized all rooms into memory yet (slow WebView / large account) —
+  // the same reason runRoomCleanup waits for "SYNCING" before pruning.
+  const isRoomListAuthoritativeEmpty = computed(() =>
+    sortedRooms.value.length === 0
+    && initialSyncStatus.value === "ready"
+    && syncState.value === "SYNCING",
+  );
+  // Still loading the first room snapshot → show skeleton.
+  const isRoomListLoading = computed(() =>
+    sortedRooms.value.length === 0 && !isRoomListAuthoritativeEmpty.value,
+  );
+  // Loading is taking longer than usual (watchdog degraded, cache still empty)
+  // → show the same skeleton with a "taking longer" placeholder text.
+  const isRoomListLoadingSlow = computed(() =>
+    isRoomListLoading.value && initialSyncStatus.value === "degraded",
+  );
+
   const totalUnread = computed(() => {
     void _dexieRoomMapVersion.value;
     void ignoredMatrixUserIdSet.value;
@@ -1561,6 +2020,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const setHelpers = (kit: MatrixKit, crypto: Pcrypto) => {
     matrixKitRef.value = kit;
     pcryptoRef.value = crypto;
+    // WEE-55: begin the initial-sync watchdog as soon as the Matrix client is
+    // wired up, so a stalled first /sync degrades instead of hanging the UI.
+    startInitialSyncWatch();
   };
 
 
@@ -1827,6 +2289,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       lastAttemptAt: 0,
     });
     ensureRoomsLoaded([roomId], "high");
+  };
+
+  /** Retry decryption of a single persisted "[encrypted]" message (the refresh
+   *  button on an undecrypted bubble). Resolves true on success — the liveQuery
+   *  then re-renders the bubble with the decrypted content. */
+  const retryMessageDecryption = async (eventId: string): Promise<boolean> => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return false;
+    try {
+      return await kit.decryptionWorker.decryptMessageNow(eventId);
+    } catch {
+      return false;
+    }
   };
 
   /** Background-preload messages for rooms near the active room.
@@ -2469,17 +2944,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const loadProfilesForRoomIds = (roomIds: string[]) => {
     const uStore = useUserStore();
     const addressesToLoad: string[] = [];
-    const roomsInThisBatch: string[] = [];
     for (const roomId of roomIds) {
       if (profilesRequestedForRooms.has(roomId)) continue;
+
+      const roomUncached: string[] = [];
 
       // Prefer Matrix SDK addresses (populated by updateDisplayNames)
       const sdkAddrs = matrixRoomAddresses.get(roomId);
       if (sdkAddrs && sdkAddrs.length > 0) {
-        profilesRequestedForRooms.add(roomId);
-        roomsInThisBatch.push(roomId);
         for (const addr of sdkAddrs) {
-          if (!uStore.users[addr]) addressesToLoad.push(addr);
+          if (!uStore.users[addr]) roomUncached.push(addr);
+        }
+        if (roomUncached.length === 0) {
+          profilesRequestedForRooms.add(roomId);
+        } else {
+          addressesToLoad.push(...roomUncached);
         }
         continue;
       }
@@ -2493,14 +2972,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const addr = hexDecode(hexId);
           if (addr && /^[A-Za-z0-9]+$/.test(addr)) {
             foundAddrs = true;
-            if (!uStore.users[addr]) addressesToLoad.push(addr);
+            if (!uStore.users[addr]) roomUncached.push(addr);
           }
         } catch { /* ignore invalid hex */ }
       }
-      // Only mark as requested if we found member addresses (otherwise retry later when members load)
-      if (foundAddrs) {
+      if (!foundAddrs) continue;
+      if (roomUncached.length === 0) {
         profilesRequestedForRooms.add(roomId);
-        roomsInThisBatch.push(roomId);
+      } else {
+        addressesToLoad.push(...roomUncached);
       }
     }
     if (addressesToLoad.length > 0) {
@@ -2542,9 +3022,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       incrementalRoomRefresh(kit, myUserId, changed);
     }
 
-    // Mark rooms as initialized (first sync-based refresh complete)
-    if (!roomsInitialized.value) {
-      roomsInitialized.value = true;
+    // Mark rooms as initialized (first sync-based refresh complete).
+    // WEE-55: gate the one-time post-sync side effects on initialSyncStatus
+    // rather than roomsInitialized, because the degraded watchdog may have
+    // already flipped roomsInitialized=true before the first real sync landed.
+    const firstSyncComplete = initialSyncStatus.value !== "ready";
+    if (!roomsInitialized.value) roomsInitialized.value = true;
+    // WEE-97: release deferred boot work (recovery scans, Tor, telemetry).
+    // Idempotent — safe to call on every refresh after the first.
+    signalChatsInteractive();
+    if (firstSyncComplete) {
+      initialSyncStatus.value = "ready";
+      clearInitialSyncTimer();
       // Start background preloading after rooms are built
       // Delay lets the UI render the room list and decrypt previews first
       setTimeout(() => preloadVisibleRooms(), 500);
@@ -2559,6 +3048,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Start preview polling for rooms without preview after initial load
       setTimeout(() => syncPreviewPolling(), 1500);
+
+      // Retry "[encrypted]" previews after the RPC backend warms up (WEE-96):
+      // the initial pass often runs while getusersinfo still times out.
+      // Timers are tracked so cleanup() cancels them — otherwise a re-login
+      // within 90s would stack stale passes on top of the new session's own.
+      for (const delay of PREVIEW_RETRY_PASS_DELAYS_MS) {
+        previewRetryTimers.push(setTimeout(() => retryEncryptedPreviews(), delay));
+      }
 
       // Schedule room cleanup 30s after init, then every 30 minutes
       scheduleRoomCleanup();
@@ -2618,20 +3115,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     if (toDecrypt.length === 0) return;
 
-    // Cap at 20 rooms per cycle to avoid blocking
-    const capped = toDecrypt.slice(0, 20);
+    // Cap rooms per cycle to avoid blocking; rotate the window so repeated
+    // passes (incl. fresh-budget retry passes) eventually reach every room.
+    let capped = toDecrypt;
+    if (toDecrypt.length > PREVIEW_DECRYPT_MAX_PER_CYCLE) {
+      const start = previewCapCursor % toDecrypt.length;
+      capped = [...toDecrypt.slice(start), ...toDecrypt.slice(0, start)]
+        .slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
+      previewCapCursor = (start + PREVIEW_DECRYPT_MAX_PER_CYCLE) % toDecrypt.length;
+    }
 
-    // Decrypt sequentially with yield between each room to keep UI responsive.
-    // Previously used Promise.all(batch of 5) which ran 5 heavy ECDH+pbkdf2
-    // computations without yielding — causing 370ms+ long tasks.
-    const decryptedResults: Array<{ roomId: string; body: string }> = [];
-
-    for (const { roomId, matrixRoom } of capped) {
+    /** Decrypt one room's preview. Never throws — failures are recorded in
+     *  decryptFailedRooms so the retry/backoff bookkeeping stays per-room. */
+    const decryptOnePreview = async (
+      { roomId, matrixRoom }: { roomId: string; matrixRoom: unknown },
+    ): Promise<{ roomId: string; body: string } | null> => {
       try {
         const roomCrypto = await ensureRoomCrypto(roomId);
-        if (!roomCrypto) continue;
+        if (!roomCrypto) return null;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let timelineEvents: unknown[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2649,9 +3151,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
           try {
             const decrypted = await roomCrypto.decryptEvent(raw);
-            if (decrypted.body) {
-              decryptedResults.push({ roomId, body: decrypted.body });
-            }
+            if (decrypted.body) return { roomId, body: decrypted.body };
           } catch {
             decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
           }
@@ -2660,10 +3160,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } catch {
         decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
       }
+      return null;
+    };
 
-      // Yield to main thread between each room decryption
-      await yieldToMain();
-    }
+    // Decrypt in parallel batches with a yield in between (WEE-96). Heavy
+    // crypto (ECDH + pbkdf2 + AES-SIV) runs in the crypto worker, so the main
+    // thread only awaits worker roundtrips and key-resolution RPCs — those
+    // parallelize safely. The batch size also bounds concurrent getusersinfo
+    // calls during room prepare().
+    // When the worker is unavailable (main-thread fallback on old WebViews),
+    // batch=1 keeps the old per-room yield — 5 synchronous pbkdf2 chains
+    // back-to-back would recreate the 370ms+ long tasks this code once had.
+    const batchSize = isCryptoWorkerSupported() ? PREVIEW_DECRYPT_BATCH_SIZE : 1;
+    const batched = await runInBatches(capped, batchSize, decryptOnePreview, yieldToMain);
+    const decryptedResults = batched.filter((r): r is { roomId: string; body: string } => r !== null);
 
     // Apply ALL decrypted results in one pass with a single triggerRef
     if (decryptedResults.length > 0) {
@@ -2676,6 +3186,27 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       triggerRef(rooms);
     }
+  };
+
+  /** Cold-start retry for encrypted previews (WEE-96 follow-up).
+   *  During the first ~30s the sync-driven passes can exhaust
+   *  DECRYPT_MAX_RETRIES while the Pocketnet RPC / Tor proxy is still warming
+   *  up (getusersinfo timeouts). Incremental refreshes only re-attempt rooms
+   *  that CHANGE, so quiet rooms then stay "[encrypted]" until the next
+   *  15-min full refresh (which clears the failure map) or until the chat is
+   *  opened. These early passes re-run with a fresh retry budget so previews
+   *  appear within seconds of the backend warming up instead. */
+  const retryEncryptedPreviews = () => {
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const matrixRooms = matrixService.getRooms() as any[];
+    if (!matrixRooms.length) return;
+    // Fresh budget: cold-start failures (RPC timeouts) must not count against
+    // the per-room retry cap. decryptRoomPreviews itself skips rooms whose
+    // preview is already decrypted, so a warm re-pass is a cheap O(n) scan.
+    decryptFailedRooms.clear();
+    decryptRoomPreviews(matrixRooms).then(() => debouncedCacheRooms());
   };
 
   // Pending read receipts: queued when tab is hidden, sent when visible.
@@ -2910,6 +3441,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await chatDbKitRef.value.rooms.markAsRead(roomId, timestamp);
     }
 
+    // WEE-44 / forta-bugs#764: dismiss the native Android notification (if
+    // any) for this room the moment the user reads it. The launcher badge is
+    // the count of active notifications in our messages channel, so cancelling
+    // here is what actually reverts the icon counter — without this, opening
+    // a chat just hid the unread dot in the sidebar while the system-tray
+    // notification (and badge) lingered. Fire-and-forget: failure to clear
+    // the notification must not roll back the local read commit.
+    if (isNative) {
+      import('@/shared/lib/push/push-data-plugin')
+        .then(({ PushData }) => PushData.cancelNotification({ roomId }))
+        .catch(() => { /* non-fatal */ });
+    }
+
     const lastReceiptTs = lastReadReceiptSentTs.get(roomId) ?? 0;
     if (timestamp <= lastReceiptTs) {
       // Server already has a read marker at or past this watermark position.
@@ -3016,6 +3560,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // This closes the race where buffered messages land in Dexie during the
     // re-subscription gap and would otherwise be missed until the next mutation.
     const flushPromise = chatDbKitRef.value?.eventWriter.flushWriteBuffer();
+    // WEE-95: synchronously drop the previous room's liveQuery snapshot and force
+    // a re-subscribe. useLiveQuery re-subscribes asynchronously (deps watcher) and
+    // intentionally keeps stale data, so without this reset the OLD room's messages
+    // remain in activeMessages until the new query emits — MessageList had to poll
+    // `activeMessages[0]?.roomId === roomId` every 10ms to paper over the flash.
+    if (roomId !== activeRoomId.value) {
+      resetDexieMessages([]);
+      _liveQueryGen.value++;
+    }
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
     if (flushPromise && roomId) {
@@ -3024,6 +3577,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }).catch(() => {});
     }
     if (roomId) {
+      // Recover any messages stuck as "[encrypted]" from a prior key/RPC outage
+      // (e.g. the 502 wave): re-decrypt persisted ciphertext now that keys load
+      // again. Debounced + idempotent; no-op when nothing is stuck.
+      chatDbKitRef.value?.retryRoomDecryption?.(roomId);
+
       // Load profiles only if not already loaded (removed unconditional delete
       // that caused re-fetching already-cached profiles on every room open)
       if (!profilesRequestedForRooms.has(roomId)) {
@@ -3094,6 +3652,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // useUnreadBanner can still see unread messages and show the banner.
       // The actual watermark advancement happens via useReadTracker (IntersectionObserver)
       // when the user scrolls through and actually sees the messages.
+      //
+      // WEE-95: snapshot the pre-open count FIRST — the unread banner reads it
+      // after this synchronous zeroing (MessageList's watcher runs post-flush),
+      // so without the snapshot the banner would never appear.
+      {
+        const lrPre = dexieRoomMap.get(roomId);
+        const inMemPre = getRoomById(roomId);
+        _preOpenUnread = {
+          roomId,
+          count: lrPre?.unreadCount ?? inMemPre?.unreadCount ?? 0,
+        };
+      }
       if (chatDbKitRef.value) {
         chatDbKitRef.value.eventWriter.clearUnread(roomId);
       }
@@ -3101,6 +3671,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // without waiting for the eventWriter.clearUnread → Dexie delta cycle.
       // Single writer route — diff-guards no-op when count already 0.
       _setUnreadCount(roomId, 0, "setActiveRoom");
+
+      // WEE-44 / forta-bugs#764: dismiss the native Android notification (if
+      // any) the moment the user opens the room. The launcher badge follows
+      // the count of active notifications in our messages channel, so this
+      // is what actually unsticks the icon counter. Doing it here (rather
+      // than waiting for commitReadWatermark) covers the push-tap path:
+      // setActiveRoom fires on push tap, but the read watermark only
+      // advances later when IntersectionObserver sees the messages — by
+      // which time the user has often already closed/minimised, leaving
+      // the notification (and badge) stuck.
+      if (isNative) {
+        console.info('[chat-store] setActiveRoom → cancelNotification', roomId);
+        import('@/shared/lib/push/push-data-plugin')
+          .then(({ PushData }) => PushData.cancelNotification({ roomId }))
+          .catch((e) => console.warn('[chat-store] cancelNotification failed:', e));
+      }
     }
     perfMark("setActiveRoom-end");
     perfMeasure("setActiveRoom", "setActiveRoom-start", "setActiveRoom-end");
@@ -3114,20 +3700,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const matrixRoom = matrixService.getRoom(roomId) as any;
 
-      // Room doesn't exist in Matrix SDK at all — definitely a zombie
-      if (!matrixRoom) {
-        console.warn("[chat-store] selfHeal: room not found in Matrix SDK, tombstoning", roomId);
-        tombstoneAndRedirect(roomId, "removed");
-        return;
-      }
-
-      // Room exists but membership is not "join" or "invite" — zombie
-      const membership = matrixRoom.selfMembership ?? matrixRoom.getMyMembership?.();
-      if (membership !== "join" && membership !== "invite") {
+      // WEE-84: a missing SDK room or an `undefined` self-membership is NOT proof
+      // of a zombie — matrix-js-sdk lazily materializes rooms (slow WebView / 50+
+      // rooms) and channels (world_readable broadcast) live outside the SDK. The
+      // previous logic defaulted both to a tombstone, so a freshly-opened
+      // chat/channel vanished on re-entry ("opened → wrote → left → re-entered").
+      // Only an EXPLICIT leave/ban is healed here; genuine orphans are GC'd by
+      // cleanupStaleRooms with its 24h sync safety window.
+      const membership = matrixRoom
+        ? (matrixRoom.selfMembership ?? matrixRoom.getMyMembership?.())
+        : undefined;
+      const verdict = classifyOpenedRoomHealth(!!matrixRoom, membership);
+      if (verdict.action === "tombstone") {
         console.warn("[chat-store] selfHeal: membership is", membership, "— tombstoning", roomId);
-        const reason = membership === "ban" ? "banned" as const : "left" as const;
-        tombstoneAndRedirect(roomId, reason);
-        return;
+        tombstoneAndRedirect(roomId, verdict.reason);
       }
     } catch {
       // Matrix service not ready — skip self-healing, will catch on next interaction
@@ -3268,6 +3854,43 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       rooms.value.push(room);
     }
     roomsMap.set(room.id, existing ?? room);
+
+    // Optimistic Dexie write: rooms produced by `createGroup` (and other
+    // explicit "I just created/joined this" code paths) used to live only in
+    // the in-memory Pinia state until the next Matrix /sync arrived and
+    // `fullRoomRefresh` mirrored everything to Dexie. If the user closed the
+    // app in that window, the newly created group was lost on cold-start —
+    // see WEE-24 / forta-bugs#553. `bulkSyncRooms` handles both new-insert
+    // (full defaults) and merge-with-existing semantics, so it is safe to
+    // call unconditionally here. Fire-and-forget — UI already updated.
+    if (chatDbKitRef.value) {
+      chatDbKitRef.value.rooms
+        .bulkSyncRooms([
+          {
+            id: room.id,
+            name: room.name,
+            avatar: room.avatar,
+            isGroup: room.isGroup,
+            members: room.members,
+            membership: room.membership ?? "join",
+            topic: room.topic,
+            syncedAt: Date.now(),
+            updatedAt: room.updatedAt,
+            lastMessageTimestamp: room.lastMessage?.timestamp,
+            serverUnreadCount: room.unreadCount,
+            unreadCount: room.unreadCount,
+            hasMoreHistory: true,
+            lastReadInboundTs: 0,
+            lastReadOutboundTs: 0,
+            isDeleted: false,
+            deletedAt: null,
+            deleteReason: null,
+          },
+        ])
+        .catch((e: unknown) => {
+          console.warn("[chat-store] addRoom: optimistic Dexie write failed:", e);
+        });
+    }
   };
 
   /** Helper: optimistically remove a room from runtime UI state */
@@ -3486,7 +4109,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return false;
       }
 
-      const mxcUrl = await matrixService.uploadContentMxc(file);
+      const { resizeAvatarImage } = await import("@/shared/lib/upload-image");
+      const avatar = await resizeAvatarImage(file);
+      const mxcUrl = await matrixService.uploadContentMxc(avatar);
       await matrixService.sendStateEvent(roomId, "m.room.avatar", { url: mxcUrl }, "");
       const httpUrl = matrixService.mxcToHttp(mxcUrl);
       const room = getRoomById(roomId);
@@ -4144,23 +4769,52 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** origin_server_ts of the room's m.room.create event (null if unknown).
+   *  Used to suppress the room-creation system-event burst (WEE-99). */
+  const getRoomCreationTs = (roomId: string): number | null => {
+    try {
+      const matrixRoom = getMatrixClientService().getRoom(roomId);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const createEvents = (matrixRoom as any)?.currentState?.getStateEvents?.("m.room.create");
+      const createEvent = Array.isArray(createEvents) ? createEvents[0] : createEvents;
+      const ts = createEvent?.getTs?.() ?? createEvent?.event?.origin_server_ts;
+      return typeof ts === "number" ? ts : null;
+    } catch {
+      return null;
+    }
+  };
+
   /** Build a human-readable system message for room state events.
    *  Stores a template + raw addresses in systemMeta so names can be
-   *  re-resolved at render time (avoids stale truncated addresses). */
+   *  re-resolved at render time (avoids stale truncated addresses).
+   *  Returns null for noisy room-setup events (WEE-99): initial
+   *  power_levels, service hash names, creation-burst join/invite/avatar. */
   const buildSystemMessage = (raw: Record<string, unknown>, roomId: string): Message | null => {
     const content = raw.content as Record<string, unknown>;
     const eventType = raw.type as string;
     const sender = matrixIdToAddress(raw.sender as string);
+    const eventTs = (raw.origin_server_ts as number) ?? 0;
+    // prev_content normally lives in unsigned; some servers still emit the
+    // deprecated top-level location
+    const prevContent = ((raw.unsigned as Record<string, unknown> | undefined)?.prev_content
+      ?? raw.prev_content) as Record<string, unknown> | undefined;
 
     let templateKey = "";
     let targetAddr: string | undefined;
     let extraMeta: Record<string, string> | undefined;
+    // member events collapse target===sender to "no target" ("{sender} joined");
+    // moderator templates always need {target}, even on self-demotion
+    let keepSelfTarget = false;
 
     if (eventType === "m.room.member") {
       const membership = content.membership as string;
       const stateKey = raw.state_key as string | undefined;
       targetAddr = stateKey ? matrixIdToAddress(stateKey) : sender;
       const isSelf = targetAddr === sender;
+
+      if (isCreationBurstMemberEvent(membership, isSelf, eventTs, getRoomCreationTs(roomId))) {
+        return null;
+      }
 
       if (membership === "join") {
         templateKey = isSelf ? "system.joined" : "system.added";
@@ -4175,16 +4829,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
     } else if (eventType === "m.room.name") {
       const newName = (content.name as string) || "";
-      const isHash = /^#?[0-9a-f]{20,}$/i.test(newName);
-      if (isHash || !newName) {
-        templateKey = "system.updatedRoom";
-      } else {
-        templateKey = "system.changedName";
-        extraMeta = { name: newName };
+      if (isServiceRoomName(newName)) {
+        return null;
       }
+      templateKey = "system.changedName";
+      extraMeta = { name: newName };
     } else if (eventType === "m.room.power_levels") {
-      templateKey = "system.changedPermissions";
+      if (isWithinCreationBurst(eventTs, getRoomCreationTs(roomId))) return null;
+      const change = getModeratorChange(content, prevContent);
+      if (!change) return null;
+      templateKey = change.promoted ? "system.markedModerator" : "system.unmarkedModerator";
+      targetAddr = matrixIdToAddress(change.userId);
+      keepSelfTarget = true;
     } else if (eventType === "m.room.avatar") {
+      if (isWithinCreationBurst(eventTs, getRoomCreationTs(roomId))) return null;
       templateKey = "system.changedPhoto";
     } else if (eventType === "m.room.topic") {
       const newTopic = (content.topic as string) || "";
@@ -4198,7 +4856,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // content stores a snapshot for Dexie preview (English fallback);
     // the real display text is resolved at render time via systemMeta.template + i18n
     const senderName = getDisplayName(sender) || sender.slice(0, 8) + "...";
-    const targetName = targetAddr && targetAddr !== sender
+    const hasTarget = !!targetAddr && (targetAddr !== sender || keepSelfTarget);
+    const targetName = hasTarget && targetAddr
       ? (getDisplayName(targetAddr) || targetAddr.slice(0, 8) + "...")
       : senderName;
     const fallbackText = templateKey
@@ -4206,7 +4865,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       .replace(/([A-Z])/g, " $1")
       .toLowerCase();
     const snapshotText = cleanMatrixIds(
-      `${senderName} ${fallbackText}${targetAddr && targetAddr !== sender ? ` ${targetName}` : ""}`,
+      `${senderName} ${fallbackText}${hasTarget ? ` ${targetName}` : ""}`,
     );
 
     return {
@@ -4220,7 +4879,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       systemMeta: {
         template: templateKey,
         senderAddr: sender,
-        targetAddr: targetAddr !== sender ? targetAddr : undefined,
+        targetAddr: hasTarget ? targetAddr : undefined,
         ...extraMeta && { extra: extraMeta },
       },
     };
@@ -4383,6 +5042,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } catch { /* not valid transfer JSON, continue as text */ }
     }
 
+    // Detect external call-link messages encoded as JSON (WEE-57)
+    {
+      const callLinkInfo = parseCallLinkBody(body);
+      if (callLinkInfo) {
+        return {
+          id: raw.event_id as string,
+          roomId,
+          senderId: matrixIdToAddress(raw.sender as string),
+          content: callLinkPreview(callLinkInfo),
+          timestamp: (raw.origin_server_ts as number) ?? 0,
+          status: MessageStatus.sent,
+          type: MessageType.callLink,
+          callLinkInfo,
+        };
+      }
+    }
+
     // Determine message type and parse file info
     let fileInfo: FileInfo | undefined;
 
@@ -4390,9 +5066,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       fileInfo = parseFileInfo(content, mtype);
       if (fileInfo) {
         if (mtype === "m.image") msgType = MessageType.image;
-        else if (mtype === "m.audio") msgType = MessageType.audio;
+        // m.audio carries either a voice recording (MSC3245 marker / waveform)
+        // or a regular audio file picked from gallery. The latter must render
+        // as a file-bubble with save-to-disk, not as the voice player UI
+        // (forta-bugs#841 / WEE-50).
+        else if (mtype === "m.audio") msgType = fileInfo.isVoice ? MessageType.audio : MessageType.file;
         else if (mtype === "m.video") msgType = fileInfo.videoNote ? MessageType.videoCircle : MessageType.video;
-        else msgType = messageTypeFromMime(fileInfo.type);
+        // m.file: route audio MIME (mp3, m4a, …) to MessageType.file so the
+        // receiver renders a file-bubble with save-to-disk instead of the
+        // voice player UI. Forta ships gallery picks as m.file regardless
+        // of MIME, so without this override the receiver re-introduces the
+        // forta-bugs#841 misclassification.
+        else msgType = fileInfo.type.startsWith("audio/")
+          ? MessageType.file
+          : messageTypeFromMime(fileInfo.type);
         body = fileInfo.name;
       } else {
         if (mtype === "m.image") msgType = MessageType.image;
@@ -4964,10 +5651,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       setMessages(roomId, filteredMsgs);
 
       // Dual-write: persist all parsed messages to Dexie.
-      // For the active room: awaited so data reaches IndexedDB before a potential F5.
-      // For stale rooms (user switched away): fire-and-forget to avoid blocking
-      // Dexie transactions that the active room needs.
-      const isActiveRoom = activeRoomId.value === roomId;
+      // WEE-95: fire-and-forget for ALL rooms — never block the render-critical
+      // path on a 100+ message Dexie transaction (200-800ms on slow devices,
+      // competing with background writes of other rooms). The active room's UI
+      // is fed by the liveQuery as soon as the write commits; if a refresh races
+      // the write, messages are re-fetched from Matrix on next open.
       if (chatDbKitRef.value && msgs.length > 0) {
         const parsedMessages: ParsedMessage[] = msgs
           .filter(m => m.id && !m.id.startsWith("msg_")) // Skip optimistic temp messages
@@ -5014,19 +5702,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
         };
 
-        if (isActiveRoom) {
-          // Active room: await so data is persisted before user can F5
-          try {
-            await dexieWriteWork();
-          } catch (e) {
-            console.warn("[chat-store] EventWriter.writeMessages failed:", e);
-          }
-        } else {
-          // Stale room: fire-and-forget to unblock Dexie for the active room
-          dexieWriteWork().catch(e => {
-            console.warn("[chat-store] EventWriter.writeMessages (background) failed:", e);
-          });
-        }
+        dexieWriteWork().catch(e => {
+          console.warn("[chat-store] EventWriter.writeMessages failed:", e);
+        });
       }
 
       // Load server-synced pinned messages after messages are available
@@ -5359,9 +6037,38 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /**
+   * WEE-48 / forta-bugs#437, #439, #440, #445, #498: web/electron notifier.
+   * Native (Capacitor) ships its own FCM push pipeline via WEE-11, so we
+   * skip this branch there. On web, fire a short beep + tab-title bump +
+   * optional Notification API banner only for new inbound messages in
+   * non-active, non-muted rooms — and only when the tab itself is hidden.
+   * The notifier internally gates on visibility + permission, but we still
+   * filter here to avoid the WebAudio + Notification ctor cost in the common
+   * "active room" case.
+   *
+   * System messages (member changes, room renames, pin events, …) are NOT
+   * surfaced — they ride through `dexieWriteMessage` too but the user
+   * doesn't think of them as "new messages" worth a beep.
+   */
+  const notifyInboundMessageIfBackground = (msg: Message, roomId: string): void => {
+    if (isNative) return;
+    if (msg.type === MessageType.system) return;
+    if (roomId === activeRoomId.value) return;
+    if (mutedRoomIds.value.has(roomId)) return;
+    const myAddr = useAuthStore().address ?? "";
+    if (msg.senderId && myAddr && msg.senderId === myAddr) return;
+    const room = getRoomById(roomId);
+    const title = room?.name || getDisplayName(msg.senderId) || undefined;
+    const fallbackBody = tRaw("notifications.newMessage");
+    const body = msg.content && msg.content !== "[encrypted]" ? msg.content : fallbackBody;
+    notifyNewMessage({ roomId, body, title, fallbackTitle: tRaw("titleBar.appName") });
+  };
+
   /** Dual-write: persist a parsed message to Dexie alongside the in-memory store */
   const dexieWriteMessage = (msg: Message, roomId: string, raw: Record<string, unknown>) => {
     if (!chatDbKitRef.value) return;
+    notifyInboundMessageIfBackground(msg, roomId);
     const isEncrypted = msg.content === "[encrypted]";
     const parsed: ParsedMessage = {
       eventId: raw.event_id as string,
@@ -5377,6 +6084,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       callInfo: msg.callInfo,
       pollInfo: msg.pollInfo,
       transferInfo: msg.transferInfo,
+      callLinkInfo: msg.callLinkInfo,
       linkPreview: msg.linkPreview,
       noPreview: !!(raw.content as any)?.no_preview,
       deleted: msg.deleted,
@@ -5385,31 +6093,32 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       encryptedRaw: isEncrypted ? raw : undefined,
     };
     const myAddr = useAuthStore().address ?? "";
-    const isActiveRoom = roomId === activeRoomId.value;
-    if (isActiveRoom) {
-      // Active room: write immediately for instant UI feedback
-      chatDbKitRef.value.eventWriter.writeMessage(parsed, myAddr, activeRoomId.value).then(result => {
-        // Enqueue decryption retry if message couldn't be decrypted
-        if (isEncrypted && result !== "duplicate" && chatDbKitRef.value?.decryptionWorker) {
-          chatDbKitRef.value.decryptionWorker.enqueue(
-            raw.event_id as string,
-            roomId,
-            JSON.stringify(raw),
-          ).catch(() => {});
-        }
-      }).catch(e => {
-        console.warn("[chat-store] EventWriter.writeMessage failed:", e);
+    // WEE-93: ALL rooms (active included) write through the batched buffer.
+    // The active room used to write per-event "for instant feedback", but
+    // during sync catch-up that meant one Dexie transaction per backlog event
+    // — the main reason chats were slow to catch up after reconnect. The
+    // buffer flushes by size/150ms timer, so visible latency stays bounded
+    // while a burst lands in 1-2 transactions.
+    chatDbKitRef.value.eventWriter.writeMessageBuffered(parsed, myAddr, activeRoomId.value)
+      .catch(e => {
+        console.warn("[chat-store] EventWriter.writeMessageBuffered failed:", e);
       });
-    } else {
-      // Background room: batch writes to reduce liveQuery notifications
-      chatDbKitRef.value.eventWriter.writeMessageBuffered(parsed, myAddr, activeRoomId.value);
-      if (isEncrypted && chatDbKitRef.value?.decryptionWorker) {
-        chatDbKitRef.value.decryptionWorker.enqueue(
-          raw.event_id as string,
-          roomId,
-          JSON.stringify(raw),
-        ).catch(() => {});
-      }
+    // Only enqueue for background retry once we're past the initial catch-up
+    // sync. When returning after being away, the initial sync replays the whole
+    // accumulated backlog through here — enqueuing every event would drag the
+    // entire history through the crypto worker (wasted work + the sidebar
+    // preview churn users saw as messages resolving 5 -> 4 -> 3 -> 2 -> 1).
+    // During catch-up the sidebar preview is recovered latest-only
+    // (recoverLatestStuckMessages + decryptRoomPreviews) and off-screen history
+    // decrypts lazily when scrolled into view. Live messages (post-ready) are
+    // the room's newest, so retrying them keeps the preview fresh.
+    const isInitialCatchUp = initialSyncStatus.value === "loading";
+    if (isEncrypted && !isInitialCatchUp && chatDbKitRef.value?.decryptionWorker) {
+      chatDbKitRef.value.decryptionWorker.enqueue(
+        raw.event_id as string,
+        roomId,
+        JSON.stringify(raw),
+      ).catch(() => {});
     }
   };
 
@@ -5768,6 +6477,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         } catch { /* not valid transfer JSON, continue as text */ }
       }
 
+      // Detect external call-link messages encoded as JSON (WEE-57)
+      {
+        const callLinkInfo = parseCallLinkBody(body);
+        if (callLinkInfo) {
+          const callLinkMsg: Message = {
+            id: raw.event_id as string,
+            roomId,
+            senderId: matrixIdToAddress(raw.sender as string),
+            content: callLinkPreview(callLinkInfo),
+            timestamp: (raw.origin_server_ts as number) ?? Date.now(),
+            status: MessageStatus.sent,
+            type: MessageType.callLink,
+            callLinkInfo,
+          };
+          addMessage(roomId, callLinkMsg);
+          dexieWriteMessage(callLinkMsg, roomId, raw);
+          if (roomId === activeRoomId.value) {
+            advanceInboundWatermark(roomId, callLinkMsg.timestamp);
+          }
+          return;
+        }
+      }
+
       const mtype = content.msgtype as string;
       let fileInfo: FileInfo | undefined;
 
@@ -5775,9 +6507,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         fileInfo = parseFileInfo(content, mtype);
         if (fileInfo) {
           if (mtype === "m.image") msgType = MessageType.image;
-          else if (mtype === "m.audio") msgType = MessageType.audio;
+          // See decryption-path branch above for the voice vs. audio-file split.
+          else if (mtype === "m.audio") msgType = fileInfo.isVoice ? MessageType.audio : MessageType.file;
           else if (mtype === "m.video") msgType = MessageType.video;
-          else msgType = messageTypeFromMime(fileInfo.type);
+          else msgType = fileInfo.type.startsWith("audio/")
+            ? MessageType.file
+            : messageTypeFromMime(fileInfo.type);
           body = fileInfo.name;
         } else {
           if (mtype === "m.image") msgType = MessageType.image;
@@ -6180,6 +6915,68 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Handle global per-user account_data events — cross-device sync for
+   *  contact aliases (Session 51). LWW conflict resolution by embedded
+   *  `updatedAt` timestamp: only newer-than-local entries are applied.
+   *  Tombstones (empty name + newer ts) clear the local alias.
+   *
+   *  Wired from auth/stores.ts to:
+   *    - The SDK's "accountData" event (live cross-device updates).
+   *    - A one-shot replay on login (cold-start hydration before /sync). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleAccountDataEvent = async (event: any): Promise<void> => {
+    if (event?.getType?.() !== "m.bastyon.contact_aliases") return;
+    const content = event.getContent?.() as {
+      aliases?: Record<string, { name: string; updatedAt: number }>;
+    } | null;
+    if (!content?.aliases) return;
+    const kit = chatDbKitRef.value;
+
+    const memUpdates: Record<string, string | null> = {};
+    for (const [rawIncoming, entry] of Object.entries(content.aliases)) {
+      if (!rawIncoming || !entry || typeof entry.updatedAt !== "number") continue;
+      // Defense in depth: normalize even though writers should always send
+      // raw addresses. Guards against bad payloads from older / forked clients.
+      const addr = resolveRawAddress(rawIncoming);
+      const incomingName = typeof entry.name === "string" ? entry.name.trim() : "";
+      const incomingTs = entry.updatedAt;
+
+      // LWW: take the newer of persisted-Dexie-ts and in-memory-ts. The
+      // in-memory cache covers the early-boot window before Dexie is
+      // hydrated and also test contexts where the kit is absent.
+      let dexieTs = 0;
+      if (kit) {
+        try {
+          dexieTs = await kit.users.getAliasUpdatedAt(addr);
+        } catch (e) {
+          console.warn("[chat-store] handleAccountDataEvent: getAliasUpdatedAt failed for", addr, e);
+        }
+      }
+      const memTs = aliasUpdatedAtCache.value[addr] ?? 0;
+      const existingTs = Math.max(dexieTs, memTs);
+      if (incomingTs <= existingTs) continue;
+
+      const nextValue = incomingName || null;
+      if (kit) {
+        try {
+          await kit.users.setAlias(addr, nextValue, incomingTs);
+        } catch (e) {
+          console.warn("[chat-store] handleAccountDataEvent: setAlias failed for", addr, e);
+        }
+      }
+      memUpdates[addr] = nextValue;
+      aliasUpdatedAtCache.value = { ...aliasUpdatedAtCache.value, [addr]: incomingTs };
+    }
+
+    if (Object.keys(memUpdates).length === 0) return;
+    const merged = { ...localAliases.value };
+    for (const [addr, name] of Object.entries(memUpdates)) {
+      if (name) merged[addr] = name;
+      else delete merged[addr];
+    }
+    localAliases.value = merged;
+  };
+
   /** Revive a tombstoned room (used when rejoining a previously-deleted room) */
   const clearDeletedRoom = (roomId: string) => {
     if (chatDbKitRef.value) {
@@ -6196,9 +6993,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (rooms.value.length > 0) return; // already have rooms
 
     try {
-      // Read address from localStorage without going through auth store init
-      const raw = localStorage.getItem("forta-chat:auth");
-      const address = raw ? JSON.parse(raw)?.address : null;
+      // Read address from localStorage without going through auth store init.
+      // WEE-61: the singleton `forta-chat:auth` key is removed by the
+      // multi-account migration — read `forta-chat:activeAccount` (with a
+      // legacy fallback) so the cached sidebar paints post-migration.
+      const address = resolveCachedRoomsAddress();
       if (!address) return;
 
       // Open Dexie DB directly — ChatDatabase constructor is synchronous,
@@ -6362,10 +7161,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomsInitialized.value = false;
     namesReady.value = false;
     syncState.value = null;
+    // WEE-55: reset the initial-sync lifecycle for the next login/account.
+    initialSyncStatus.value = "loading";
+    clearInitialSyncTimer();
     editingMessage.value = null;
     deletingMessage.value = null;
     deletingMessages.value = [];
     userDisplayNames.value = {};
+    localAliases.value = {};
+    aliasUpdatedAtCache.value = {};
     selectionMode.value = false;
     selectedMessageIds.value = new Set();
     forwardingMessage.value = null;
@@ -6380,6 +7184,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     decryptedPreviewCache.clear();
     changedRoomIds.clear();
     decryptFailedRooms.clear();
+    for (const timer of previewRetryTimers) clearTimeout(timer);
+    previewRetryTimers.length = 0;
     peerKeysStatus.clear();
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
@@ -6426,10 +7232,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     saveForwardDraft,
     restoreForwardDraft,
     getDisplayName,
+    getCanonicalDisplayName,
+    getLocalAlias,
+    hasLocalAlias,
+    localAliases,
+    loadLocalAliases,
+    hydrateLocalAliasesEarly,
+    setContactAlias,
     getRoomMemberCount,
     getRoomPowerLevels,
     getMemberPowerLevelById,
     getTypingUsers,
+    handleAccountDataEvent,
     handleKicked,
     handleRoomAccountData,
     handleReceiptEvent,
@@ -6476,12 +7290,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomFetchStates,
     loadingRooms,
     retryRoomFetch,
+    retryMessageDecryption,
     cyclePinnedMessage,
     refreshRooms,
     refreshRoomsNow,
     removeMessage,
     removeRoom,
     roomsInitialized,
+    initialSyncStatus,
+    isRoomListAuthoritativeEmpty,
+    isRoomListLoading,
+    isRoomListLoadingSlow,
+    startInitialSyncWatch,
     namesReady,
     syncState,
     isSyncing,
@@ -6495,6 +7315,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     inviteCount,
     setActiveRoom,
     setHelpers,
+    retryEncryptedPreviews,
     muteMember,
     setMemberPowerLevel,
     setMessages,
@@ -6505,6 +7326,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     sortedRooms,
     unbanMember,
     toggleMuteRoom,
+    setRoomMute,
+    syncMutedRoomsFromMatrix,
     togglePinRoom,
     toggleSelection,
     totalUnread,
@@ -6519,6 +7342,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getDbKit,
     dexieMessagesReady,
     dexieRoomMap,
+    getPreOpenUnreadCount,
     dexieRoomsReady,
     expandMessageWindow,
     messageWindowSize,

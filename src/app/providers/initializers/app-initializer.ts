@@ -3,6 +3,12 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import {
+  configurePocketnetNodes,
+  callPocketnetRpc,
+  unwrapRpcPayload,
+  buildNodeBaseUrls,
+} from "@/shared/lib/pocketnet";
 
 export type EditUserDataResult =
   | { success: true; action: unknown }
@@ -22,12 +28,42 @@ export interface BastyonPostData {
   scoreCnt?: number;
   myVal?: number;
   repost?: BastyonPostData;
+  /** A repost marker was present in the RPC payload but no original txid
+   *  could be extracted — UI should show a fallback link, not a bare card. */
+  repostUnresolved?: boolean;
 }
 
-export interface PostScore {
-  address: string;
-  value: number;
-  posttxid: string;
+const HEX64_RE = /^[a-f0-9]{64}$/;
+
+/** Pocketnet encodes the reblogged txid as `repost.v` (golden reference:
+ *  pocketnet `_map.js` → `txidRepost: self.repost.v`), or ships a bare txid
+ *  string; there is no `repost.txid` in the node schema (WEE-101).
+ *  Returns the matched source alongside the txid so callers read the repost's
+ *  content fields from the same payload the txid came from — never from an
+ *  unrelated object earlier in the candidate list. */
+export function extractRepostTxid(...sources: unknown[]): { txid: string; source: unknown } | null {
+  for (const source of sources) {
+    const candidate =
+      typeof source === "string"
+        ? source
+        : source && typeof source === "object"
+          ? ((source as Record<string, unknown>).v ?? (source as Record<string, unknown>).txid)
+          : undefined;
+    if (typeof candidate === "string" && HEX64_RE.test(candidate.toLowerCase())) {
+      return { txid: candidate.toLowerCase(), source };
+    }
+  }
+  return null;
+}
+
+function hasPostContent(post: BastyonPostData): boolean {
+  return !!(post.caption || post.message || post.images.length || post.url);
+}
+
+/** True when a value looks like a repost marker (object or non-empty string).
+ *  Numbers are excluded on purpose — feed fields like `r` can be ratings. */
+function isRepostMarker(value: unknown): boolean {
+  return (typeof value === "object" && value !== null) || (typeof value === "string" && value !== "");
 }
 
 export interface PostComment {
@@ -45,14 +81,39 @@ export interface PostComment {
 
 type OnLoadUserData = (userData: UserData) => void;
 
+/** Per-RPC ceiling for the blockchain-registration (step 2) proxy calls.
+ *  These hit a single pinned Pocketnet proxy (`N.pocketnet.app:8899`); when that
+ *  node is blocked/unreachable (RU ISP filtering — same root cause as WEE-13)
+ *  the SDK fetch never settles and the registration UI "spins on step 2"
+ *  indefinitely. A 15s bound converts that hang into a surfaced error so the
+ *  caller can rotate to another proxy / show retry UX (WEE-23). */
+const REGISTRATION_RPC_TIMEOUT = 15_000;
+
+/** Window for coalescing per-post getpagescores requests into one batched call. */
+const SCORE_BATCH_WINDOW_MS = 50;
+
 export class AppInitializer {
   private actions: InstanceType<typeof Actions> | null = null;
   private api: InstanceType<typeof Api> | null = null;
   private psdk: InstanceType<typeof pSDK> | null = null;
+  private pocketnetInstance: PocketnetInstanceType | null = null;
   private _available = false;
   private postCache = new Map<string, BastyonPostData>();
 
+  // Coalesce per-post getpagescores requests into a single psdk.myScore.load
+  // call (the SDK batches + caches, but only when all txids share one call).
+  private pendingScores = new Map<string, Array<(v: number | null) => void>>();
+  private scoreFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private scoreFlushUpdate = false;
+
   constructor(pocketnetInstance: PocketnetInstanceType) {
+    this.pocketnetInstance = pocketnetInstance;
+
+    // Configure the shared RPC node pool (1/2/6.pocketnet.app:8899) for the
+    // centralized failover client — done before the standalone guard so direct
+    // fetches have failover even when the SDK globals are absent.
+    configurePocketnetNodes(buildNodeBaseUrls(pocketnetInstance.options.listofproxies));
+
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
     // In standalone (Electron) mode they don't exist — run in degraded mode.
     if (typeof Api === "undefined" || typeof Actions === "undefined" || typeof pSDK === "undefined") {
@@ -83,14 +144,33 @@ export class AppInitializer {
     });
   }
 
-  /** Fetch current blockchain block height via getnodeinfo RPC */
+  /** Fetch current blockchain block height via getnodeinfo RPC.
+   *  Block height is the linchpin for Pcrypto key derivation, so a single
+   *  502 node must not zero it out: try the SDK path first, then fall back to a
+   *  direct getnodeinfo fetch that fails over across all configured nodes. */
   async getBlockHeight(): Promise<number> {
-    if (!this.api) return 0;
+    // Primary: SDK Api (has its own internal node handling).
+    if (this.api) {
+      try {
+        const info = await this.api.rpc("getnodeinfo");
+        const height = info?.height ?? 0;
+        if (height > 0) return height;
+        console.warn("[appInit] getBlockHeight via SDK returned 0 — falling back to direct node failover");
+      } catch (e) {
+        console.warn("[appInit] getBlockHeight via SDK failed — falling back to direct node failover:", e);
+      }
+    }
+
+    // Fallback: direct getnodeinfo with cross-node failover. Recovers block
+    // height (and therefore encryption) when the SDK's node is 502 and it does
+    // not rotate. Best-effort — returns 0 like before if every node is down.
     try {
-      const info = await this.api.rpc("getnodeinfo");
-      return info?.height ?? 0;
+      const envelope = await callPocketnetRpc<{ height?: number }>({
+        method: "getnodeinfo",
+      });
+      return unwrapRpcPayload(envelope).height ?? 0;
     } catch (e) {
-      console.error("[appInit] getBlockHeight error:", e);
+      console.error("[appInit] getBlockHeight error (all nodes failed):", e);
       return 0;
     }
   }
@@ -103,8 +183,14 @@ export class AppInitializer {
       await this.initApi();
       await this.waitForApiReady();
       // Use proxywithwallet() instead of proxywithwalletls() to avoid
-      // globalpreloader() which depends on jQuery ($) not available in chat app
-      const proxy = await this.api.get.proxywithwallet();
+      // globalpreloader() which depends on jQuery ($) not available in chat app.
+      // 15s bound so a blocked proxy can't hang the "preparing account" step —
+      // the caller's ProxyRotator then retries / surfaces an error (WEE-23).
+      const proxy = await withTimeout(
+        this.api.get.proxywithwallet(),
+        REGISTRATION_RPC_TIMEOUT,
+        "proxywithwallet",
+      );
       return proxy ? { id: proxy.id ?? proxy } : null;
     } catch (e) {
       console.error("[appInit] getRegistrationProxy error:", e);
@@ -118,7 +204,11 @@ export class AppInitializer {
     if (!this.api) return null;
     try {
       const payload: Record<string, unknown> = { captcha: currentCaptchaId || null };
-      const raw = await this.api.fetchauth("captcha", payload, { proxy: proxyId });
+      const raw = await withTimeout(
+        this.api.fetchauth("captcha", payload, { proxy: proxyId }),
+        REGISTRATION_RPC_TIMEOUT,
+        "getCaptcha",
+      );
       // fetchauth may return { data: { id, img, done } } or { id, img, done } directly
       const result = raw?.data ?? raw;
       return result;
@@ -133,10 +223,14 @@ export class AppInitializer {
   async solveCaptcha(proxyId: string, captchaId: string, text: string) {
     if (!this.api) return null;
     try {
-      const raw = await this.api.fetchauth(
-        "makecaptcha",
-        { captcha: captchaId, text, angles: null },
-        { proxy: proxyId }
+      const raw = await withTimeout(
+        this.api.fetchauth(
+          "makecaptcha",
+          { captcha: captchaId, text, angles: null },
+          { proxy: proxyId }
+        ),
+        REGISTRATION_RPC_TIMEOUT,
+        "solveCaptcha",
       );
       const result = raw?.data ?? raw;
       return result;
@@ -151,10 +245,14 @@ export class AppInitializer {
   async requestFreeRegistration(address: string, captchaId: string, proxyId: string) {
     if (!this.api) return null;
     try {
-      const raw = await this.api.fetchauth(
-        "free/balance",
-        { address, captcha: captchaId, key: "registration" },
-        { proxy: proxyId }
+      const raw = await withTimeout(
+        this.api.fetchauth(
+          "free/balance",
+          { address, captcha: captchaId, key: "registration" },
+          { proxy: proxyId }
+        ),
+        REGISTRATION_RPC_TIMEOUT,
+        "requestFreeRegistration",
       );
       const result = raw?.data ?? raw;
       return result;
@@ -307,7 +405,8 @@ export class AppInitializer {
   }
 
   /** Load user info for multiple addresses into full (non-light) cache.
-   *  After this call, getUs string[]): Promise<void> {
+   *  After this call, getUserData(address) will return the profile data. */
+  async loadUsersBatch(addresses: string[]): Promise<void> {
     if (!this.psdk || !addresses.length) return;
     await this.psdk.userInfo.load(addresses);
   }
@@ -352,25 +451,57 @@ export class AppInitializer {
     }
   }
 
-  /** Search Pocketnet users by text query — calls "searchusers" RPC.
-   *  Throws on transport / availability errors so callers can trigger fallback
-   *  (Matrix user_directory). The old silent-empty behaviour masked CORS failures
-   *  on web and left users looking at an empty list with no signal. */
-  async searchUsers(query: string): Promise<Array<{ address: string; name: string; image: string }>> {
-    await this.initApi();
-    if (!this._available || !this.api) {
-      throw new Error("search_service_unavailable");
-    }
-    try {
-      const data = await this.api.rpc("searchusers", [query, "users"]);
-      const results = (data as Array<Record<string, unknown>>) || [];
-      return results.map((info) => ({
+  /** Normalize a raw `searchusers` RPC record into a local user shape. */
+  private mapSearchUserRecords(
+    records: Array<Record<string, unknown>>,
+  ): Array<{ address: string; name: string; image: string }> {
+    return records
+      .map((info) => ({
         address: (info.address as string) ?? "",
         name: info.name ? decodeURI(info.name as string) : "",
         image: (info.i as string) ?? (info.image as string) ?? "",
-      })).filter(u => u.address);
+      }))
+      .filter((u) => u.address);
+  }
+
+  /** Search Pocketnet users by text query — calls the "searchusers" RPC.
+   *
+   *  WEE-65 (H3): the Bastyon SDK (`this.api`) only exists inside the Bastyon
+   *  WebView. On standalone Android / Electron `_available` is false, so the old
+   *  code threw `search_service_unavailable` and the user got an empty list with
+   *  no way to find anyone by nick. We now fall back to the centralized
+   *  cross-node RPC client ({@link callPocketnetRpc}) — the same failover path
+   *  `getBlockHeight` uses — which works without the SDK globals. The SDK path
+   *  is still tried first when available (richer, already-authenticated), then
+   *  the direct node failover covers standalone and SDK-transport failures.
+   *
+   *  Still throws only when BOTH paths fail, so callers (useContacts) can fall
+   *  through to the Matrix user_directory / local-cache tiers. */
+  async searchUsers(query: string): Promise<Array<{ address: string; name: string; image: string }>> {
+    await this.initApi();
+
+    // Primary: Bastyon SDK Api (only present inside the Bastyon WebView).
+    if (this._available && this.api) {
+      try {
+        const data = await this.api.rpc("searchusers", [query, "users"]);
+        return this.mapSearchUserRecords((data as Array<Record<string, unknown>>) || []);
+      } catch (e) {
+        console.warn("[appInit] searchUsers via SDK failed — falling back to direct node failover:", e);
+      }
+    }
+
+    // Fallback: direct searchusers with cross-node failover. Works on standalone
+    // Android / Electron (no SDK globals) and recovers from SDK-transport errors.
+    try {
+      const envelope = await callPocketnetRpc<Array<Record<string, unknown>>>({
+        method: "searchusers",
+        parameters: [query, "users"],
+      });
+      const payload = unwrapRpcPayload(envelope);
+      const records = Array.isArray(payload) ? payload : [];
+      return this.mapSearchUserRecords(records);
     } catch (e) {
-      console.error("[appInit] searchUsers error:", e);
+      console.error("[appInit] searchUsers error (all paths failed):", e);
       throw e instanceof Error ? e : new Error(String(e));
     }
   }
@@ -418,30 +549,46 @@ export class AppInitializer {
         tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
         settings: (content.s as { v?: string }) ?? (content.settings as { v?: string }) ?? {},
         time: (raw.time as number) ?? (content.time as number) ?? 0,
+        scoreSum: Number(raw.scoreSum ?? raw.score ?? content.scoreSum ?? content.score ?? 0),
+        scoreCnt: Number(raw.scoreCnt ?? raw.scnt ?? content.scoreCnt ?? content.scnt ?? 0),
+        myVal: raw.myVal != null ? Number(raw.myVal) : (content.myVal != null ? Number(content.myVal) : undefined),
       };
 
-      // Parse repost data
-      const repostRaw = raw.repost ?? raw.relayedBy ?? raw.share ?? content.repost ?? content.relayedBy;
-      if (repostRaw && typeof repostRaw === "object" && (repostRaw as any).txid) {
-        const r = repostRaw as Record<string, unknown>;
-        const rc = (r.msg ?? r.p ?? r) as Record<string, unknown>;
+      // Parse repost data — the original txid lives in `repost.v` or a bare
+      // txid string, never `repost.txid` (WEE-101)
+      const extracted = extractRepostTxid(
+        raw.repost, content.repost, content.r, raw.relayedBy, raw.share, content.relayedBy,
+      );
+      if (extracted) {
+        // Read content fields only from the payload the txid came from — an
+        // unrelated object in the candidate list must not contribute fields.
+        const repostRaw = (
+          extracted.source && typeof extracted.source === "object" ? extracted.source : {}
+        ) as Record<string, unknown>;
+        const rc = (repostRaw.msg ?? repostRaw.p ?? repostRaw) as Record<string, unknown>;
         const rImages = rc.i ?? rc.images;
         const rTags = rc.t ?? rc.tags;
         post.repost = {
-          txid: (r.txid as string) ?? "",
-          address: (r.address as string) ?? (rc.address as string) ?? "",
+          txid: extracted.txid,
+          address: (repostRaw.address as string) ?? (rc.address as string) ?? "",
           caption: tryDecode(rc.c ?? rc.caption),
           message: tryDecode(rc.m ?? rc.message),
           images: Array.isArray(rImages) ? (rImages as string[]) : [],
           url: tryDecode(rc.u ?? rc.url),
           tags: Array.isArray(rTags) ? (rTags as string[]) : [],
           settings: (rc.s as { v?: string }) ?? (rc.settings as { v?: string }) ?? {},
-          time: (r.time as number) ?? (rc.time as number) ?? 0,
+          time: (repostRaw.time as number) ?? (rc.time as number) ?? 0,
         };
-        // Cache repost separately so nested PostCard can find it
-        if (post.repost.txid && !this.postCache.has(post.repost.txid)) {
-          this.postCache.set(post.repost.txid, post.repost);
+        // Cache the repost under the original's txid only when the wrapper
+        // actually carried its content — a bare {v: txid} stub would shadow
+        // the real post and the nested PostCard would render it empty.
+        if (hasPostContent(post.repost) && !this.postCache.has(extracted.txid)) {
+          this.postCache.set(extracted.txid, post.repost);
         }
+      } else if ([raw.repost, content.repost].some(isRepostMarker)) {
+        // Only explicit repost fields count as an unresolved marker —
+        // r/relayedBy/share can hold ratings, addresses or URLs (false flags).
+        post.repostUnresolved = true;
       }
 
       this.postCache.set(txid, post);
@@ -479,16 +626,24 @@ export class AppInitializer {
       tags: Array.isArray(rawTags) ? (rawTags as string[]) : [],
       settings: (raw.s as { v?: string }) ?? (raw.settings as { v?: string }) ?? {},
       time: Number(raw.time ?? 0),
+      scoreSum: Number(raw.scoreSum ?? raw.score ?? 0),
+      scoreCnt: Number(raw.scoreCnt ?? raw.scnt ?? 0),
+      myVal: raw.myVal != null ? Number(raw.myVal) : undefined,
     };
 
-    // Parse repost (shared post) data
-    const repostRaw = raw.repost ?? raw.relayedBy ?? raw.share;
-    if (repostRaw && typeof repostRaw === "object" && (repostRaw as any).txid) {
-      const r = repostRaw as Record<string, unknown>;
+    // Parse repost (shared post) data — original txid is `repost.v` or a bare
+    // txid string, never `repost.txid` (WEE-101)
+    const extracted = extractRepostTxid(raw.repost, raw.r, raw.relayedBy, raw.share);
+    if (extracted) {
+      // Read content fields only from the payload the txid came from — an
+      // unrelated object in the candidate list must not contribute fields.
+      const r = (
+        extracted.source && typeof extracted.source === "object" ? extracted.source : {}
+      ) as Record<string, unknown>;
       const rImages = r.i ?? r.images;
       const rTags = r.t ?? r.tags;
       post.repost = {
-        txid: (r.txid as string) ?? "",
+        txid: extracted.txid,
         address: (r.address as string) ?? "",
         caption: tryDecode(r.c ?? r.caption),
         message: tryDecode(r.m ?? r.message),
@@ -498,30 +653,19 @@ export class AppInitializer {
         settings: (r.s as { v?: string }) ?? (r.settings as { v?: string }) ?? {},
         time: Number(r.time ?? 0),
       };
-      // Cache repost separately so nested PostCard can find it
-      if (post.repost.txid && !this.postCache.has(post.repost.txid)) {
-        this.postCache.set(post.repost.txid, post.repost);
+      // Cache the repost under the original's txid only when the feed item
+      // actually carried its content — a bare {v: txid} stub would shadow
+      // the real post and the nested PostCard would render it empty.
+      if (hasPostContent(post.repost) && !this.postCache.has(extracted.txid)) {
+        this.postCache.set(extracted.txid, post.repost);
       }
+    } else if (isRepostMarker(raw.repost)) {
+      // Only the explicit repost field counts as an unresolved marker —
+      // r/relayedBy/share can hold ratings, addresses or URLs (false flags).
+      post.repostUnresolved = true;
     }
 
     this.postCache.set(txid, post);
-  }
-
-  async loadPostScores(txid: string): Promise<PostScore[]> {
-    if (!this.api) return [];
-    try {
-      const data = await this.api.rpc("getpostscores", [txid]);
-      console.log("[appInit] loadPostScores raw response:", data);
-      if (!Array.isArray(data)) return [];
-      return data.map((s: any) => ({
-        address: s.address ?? "",
-        value: Number(s.value ?? 0),
-        posttxid: s.posttxid ?? txid,
-      }));
-    } catch (e) {
-      console.error("[appInit] loadPostScores error:", e);
-      return [];
-    }
   }
 
   async loadPostComments(txid: string, userAddress?: string): Promise<PostComment[]> {
@@ -580,16 +724,77 @@ export class AppInitializer {
     }
   }
 
-  async loadMyPostScore(txid: string, address: string): Promise<number | null> {
-    if (!this.api) return null;
-    try {
-      const data = await this.api.rpc("getpagescores", [[txid], address, []]);
-      if (Array.isArray(data) && data.length > 0) {
-        return Number(data[0]?.value ?? 0);
+  /** The logged-in user's Bastyon address, or "" when nobody is logged in. */
+  private currentUserAddress(): string {
+    const value = this.pocketnetInstance?.user?.address?.value;
+    return typeof value === "string" ? value : "";
+  }
+
+  /**
+   *  Fetch the current user's own score for a post.
+   *
+   *  Requests are coalesced within a short window and dispatched through the
+   *  SDK's `myScore.load`, which batches into a single `getpagescores` RPC and
+   *  caches results in IndexedDB (per-user, ~12h). The `address` param is kept
+   *  for signature compatibility — the SDK derives the address from
+   *  `POCKETNETINSTANCE.user.address.value`. */
+  loadMyPostScore(txid: string, _address?: string, update = false): Promise<number | null> {
+    if (!this.psdk || !txid) return Promise.resolve(null);
+
+    // getpagescores requires the user's address as a string second arg — skip
+    // the batch entirely when nobody is logged in (avoids a null-address RPC).
+    if (!this.currentUserAddress()) return Promise.resolve(null);
+
+    // An explicit refresh forces a cache-bypassing batch.
+    if (update) this.scoreFlushUpdate = true;
+
+    return new Promise<number | null>((resolve) => {
+      const waiters = this.pendingScores.get(txid);
+      if (waiters) {
+        waiters.push(resolve);
+      } else {
+        this.pendingScores.set(txid, [resolve]);
       }
-      return null;
-    } catch {
-      return null;
+
+      if (this.scoreFlushTimer === null) {
+        this.scoreFlushTimer = setTimeout(() => {
+          void this.flushScores();
+        }, SCORE_BATCH_WINDOW_MS);
+      }
+    });
+  }
+
+  private async flushScores(): Promise<void> {
+    this.scoreFlushTimer = null;
+    const batch = this.pendingScores;
+    const update = this.scoreFlushUpdate;
+    this.pendingScores = new Map<string, Array<(v: number | null) => void>>();
+    this.scoreFlushUpdate = false;
+
+    const txids = Array.from(batch.keys());
+    if (!txids.length) return;
+
+    const resolveAll = (fn: (txid: string) => number | null) => {
+      for (const [txid, waiters] of batch) {
+        const value = fn(txid);
+        for (const waiter of waiters) waiter(value);
+      }
+    };
+
+    if (!this.psdk) {
+      resolveAll(() => null);
+      return;
+    }
+
+    try {
+      const result = await this.psdk.myScore.load(txids, [], update);
+      resolveAll((txid) => {
+        const rec = result?.[txid];
+        return rec && rec.value != null ? Number(rec.value) : null;
+      });
+    } catch (e) {
+      console.error("[appInit] loadMyPostScore batch error:", e);
+      resolveAll(() => null);
     }
   }
 
@@ -737,9 +942,6 @@ export class AppInitializer {
     }
   }
 
-  private static readonly PROXY_URL = "https://1.pocketnet.app:8899";
-  private static readonly NODE_ID = "94.156.128.149:38081";
-
   async getSubscribesChannels(
     address: string,
     blockNumber = 0,
@@ -747,34 +949,27 @@ export class AppInitializer {
     pageSize = 20
   ): Promise<{ channels: any[]; height: number } | undefined> {
     try {
-      const response = await fetch(
-        `${AppInitializer.PROXY_URL}/rpc/getsubscribeschannels`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            method: "getsubscribeschannels",
-            parameters: [address, blockNumber, page, pageSize],
-            options: { node: AppInitializer.NODE_ID },
-          }),
-        }
-      );
-      if (!response.ok) {
-        console.error("[appInit] getSubscribesChannels HTTP error:", response.status);
+      // Centralized RPC client with node failover — node 1 returning 502 must
+      // not sink the whole request (it used to be pinned to a single node).
+      // No `options.node` pin: pinning one backend node (94.156.128.149 before
+      // WEE-13) made every gateway proxy hit the same backend, so one dead
+      // backend failed all mirrors identically. Each gateway now picks its own
+      // healthy default backend.
+      const envelope = await callPocketnetRpc<{ height?: number; channels?: unknown[] }>({
+        method: "getsubscribeschannels",
+        parameters: [address, blockNumber, page, pageSize],
+      });
+      if (envelope.error) {
+        console.error("[appInit] getSubscribesChannels RPC error:", envelope.error);
         return undefined;
       }
-      const json = await response.json();
-      if (json.error) {
-        console.error("[appInit] getSubscribesChannels RPC error:", json.error);
-        return undefined;
-      }
-      const result = json.data ?? json.result ?? json;
+      const result = unwrapRpcPayload(envelope);
       return {
         height: result.height ?? 0,
         channels: result.channels ?? [],
       };
     } catch (e) {
-      console.error("[appInit] getSubscribesChannels error:", e);
+      console.error("[appInit] getSubscribesChannels error (all nodes failed):", e);
       return undefined;
     }
   }
@@ -785,43 +980,30 @@ export class AppInitializer {
   ): Promise<any[]> {
     try {
       const opts = options ?? {};
-      const response = await fetch(
-        `${AppInitializer.PROXY_URL}/rpc/getprofilefeed`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            method: "getprofilefeed",
-            parameters: [
-              Number(opts.height ?? 0),
-              opts.startTxid ?? "",
-              opts.count ?? 10,
-              "",   // lang
-              [],   // tagsfilter
-              [],   // type
-              [],   // reserved
-              [],   // reserved
-              [],   // tagsexcluded
-              "",   // keyword
-              authorAddress,
-            ],
-            options: { node: AppInitializer.NODE_ID },
-          }),
-        }
-      );
-      if (!response.ok) {
-        console.error("[appInit] getProfileFeed HTTP error:", response.status);
+      const envelope = await callPocketnetRpc<unknown[] | { contents?: unknown[] }>({
+        method: "getprofilefeed",
+        parameters: [
+          Number(opts.height ?? 0),
+          opts.startTxid ?? "",
+          opts.count ?? 10,
+          "",   // lang
+          [],   // tagsfilter
+          [],   // type
+          [],   // reserved
+          [],   // reserved
+          [],   // tagsexcluded
+          "",   // keyword
+          authorAddress,
+        ],
+      });
+      if (envelope.error) {
+        console.error("[appInit] getProfileFeed RPC error:", envelope.error);
         return [];
       }
-      const json = await response.json();
-      if (json.error) {
-        console.error("[appInit] getProfileFeed RPC error:", json.error);
-        return [];
-      }
-      const result = json.data ?? json.result ?? json;
-      return Array.isArray(result) ? result : result?.contents ?? [];
+      const result = unwrapRpcPayload(envelope);
+      return Array.isArray(result) ? result : (result as { contents?: unknown[] })?.contents ?? [];
     } catch (e) {
-      console.error("[appInit] getProfileFeed error:", e);
+      console.error("[appInit] getProfileFeed error (all nodes failed):", e);
       return [];
     }
   }

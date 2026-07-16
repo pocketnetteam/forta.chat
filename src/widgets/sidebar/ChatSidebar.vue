@@ -5,6 +5,7 @@ import { useChannelStore } from "@/entities/channel";
 import { InviteModal } from "@/features/invite";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import { useChatStore } from "@/entities/chat";
+import { useAuthStore } from "@/entities/auth";
 import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import { SelectionBar, useSelectionStore } from "@/features/selection";
@@ -13,12 +14,15 @@ import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back
 import BottomTabBar from "./ui/BottomTabBar.vue";
 import ContactsPanel from "./ui/ContactsPanel.vue";
 import SettingsPanel from "./ui/SettingsPanel.vue";
+import TorShieldIndicator from "./ui/TorShieldIndicator.vue";
 import { useSidebarTab } from "./model/use-sidebar-tab";
 import type { SidebarTab } from "./model/use-sidebar-tab";
+import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions";
 
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
 const channelStore = useChannelStore();
+const authStore = useAuthStore();
 const selectionStore = useSelectionStore();
 const tabProgress = ref<number | undefined>(undefined);
 
@@ -30,10 +34,26 @@ useAndroidBackHandler("chat-selection", 92, () => {
   return false;
 });
 
-onMounted(() => {
+onMounted(async () => {
   chatStore.loadCachedRooms();
+  // Show persisted channel list immediately, then refresh from RPC in
+  // the background — same pattern chatStore already uses for rooms (WEE-24).
+  await channelStore.hydrateFromDexie();
   channelStore.fetchChannels(true);
 });
+
+// hydrateFromDexie() silently no-ops if the sidebar mounts before initChatDb()
+// has run (cold boot). It has no internal retry, so channels would stay hidden
+// until a manual fetch. matrixReady flips true only AFTER initChatDb(), so it's
+// a reliable "DB is ready" signal — re-run the local-first hydration then.
+watch(
+  () => authStore.matrixReady,
+  (ready) => {
+    if (!ready) return;
+    void channelStore.hydrateFromDexie();
+  },
+  { immediate: true },
+);
 
 const { t } = useI18n();
 const { activeTab, setTab } = useSidebarTab();
@@ -48,6 +68,30 @@ const searchPlaceholder = computed(() => {
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
 const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels">("all");
+
+// Android Back inside the Chats tab cascades before the app is allowed to
+// minimize (forta-bugs#877): clear an active search first, then collapse a
+// non-default filter tab back to "all". Both fire only on the Chats tab —
+// the sidebar-tab handler (ChatPage, prio 55) already returns to Chats from
+// Contacts/Settings, so a non-default filter sits just below it (prio 54),
+// with search clearing taking precedence (prio 56).
+const backState = () => ({
+  activeTab: activeTab.value,
+  searchQuery: sidebarSearchQuery.value,
+  activeFilter: activeFilter.value,
+});
+
+useAndroidBackHandler("chat-search-clear", 56, () => {
+  if (!shouldClearSearch(backState())) return false;
+  sidebarSearchQuery.value = "";
+  return true;
+});
+
+useAndroidBackHandler("chat-filter-to-all", 54, () => {
+  if (!shouldResetFilter(backState())) return false;
+  activeFilter.value = "all";
+  return true;
+});
 
 const bulkDeleteConfirm = ref(false);
 
@@ -86,6 +130,14 @@ const visibleTabValues = computed(() => {
   return tabs;
 });
 
+// The room-list skeleton must not hide channels that are already hydrated from
+// Dexie: channels are a separate local-first pipeline and shouldn't wait on the
+// Matrix room sync. Only block the whole list when there's nothing at all to
+// show yet (no rooms AND no channels).
+const showRoomListSkeleton = computed(
+  () => chatStore.isRoomListLoading && channelStore.channels.length === 0,
+);
+
 // Sidebar tab slide direction
 const sidebarTabOrder: SidebarTab[] = ["contacts", "chats", "settings"];
 const tabSlideDir = ref<"left" | "right">("left");
@@ -96,10 +148,9 @@ watch(activeTab, (newVal, oldVal) => {
 });
 
 // Show skeleton until rooms appear from ANY source (Dexie cache or Matrix sync).
-// Uses computed so it re-activates on account switch (cleanup resets roomsInitialized).
-const roomsLoading = computed(() =>
-  chatStore.sortedRooms.length === 0 && !chatStore.roomsInitialized,
-);
+// Three states now live in the store (isRoomListLoading / isRoomListLoadingSlow /
+// isRoomListAuthoritativeEmpty): the 8s degrade watchdog switches the skeleton's
+// placeholder text instead of revealing a premature "no dialogs" empty state.
 
 // Auto-switch away from "invites" tab when no invites remain
 watch(
@@ -173,6 +224,8 @@ const walletStore = useWalletStore();
           >
             <ConnectionStatusHeader />
 
+            <TorShieldIndicator />
+
             <!-- PKOIN Wallet -->
             <button
               v-if="walletStore.isAvailable"
@@ -199,7 +252,12 @@ const walletStore = useWalletStore();
               >{{ formatPkoin(walletStore.balance) }}</span>
             </button>
 
-            <!-- New Group -->
+            <!-- New Group — WEE-52 / forta-bugs#526, #851 (web), #167 cluster.
+                 Previously a pencil glyph that users repeatedly reported as
+                 unclear ("how do I create a group?"). Switched to a
+                 "users + plus" icon (Lucide user-plus) that reads as
+                 "add people / new group" at a glance. Tooltip and aria-label
+                 already declared the action; the glyph now matches. -->
             <button
               class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
               :title="t('nav.newGroup')"
@@ -207,16 +265,19 @@ const walletStore = useWalletStore();
               @click="emit('newGroup')"
             >
               <svg
-                width="18"
-                height="18"
+                width="20"
+                height="20"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
                 stroke-linecap="round"
+                stroke-linejoin="round"
               >
-                <path d="M12 20h9" />
-                <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
+                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="8.5" cy="7" r="4" />
+                <line x1="20" y1="8" x2="20" y2="14" />
+                <line x1="23" y1="11" x2="17" y2="11" />
               </svg>
             </button>
           </div>
@@ -259,7 +320,7 @@ const walletStore = useWalletStore();
         <template v-else>
           <FolderTabs v-model="activeFilter" :scroll-progress="tabProgress" />
           <div class="relative flex-1 overflow-hidden">
-            <RoomListSkeleton v-if="roomsLoading" :first-load="true" />
+            <RoomListSkeleton v-if="showRoomListSkeleton" :first-load="true" :slow="chatStore.isRoomListLoadingSlow" />
             <SwipeableTabs
               v-else
               v-model="activeFilter"

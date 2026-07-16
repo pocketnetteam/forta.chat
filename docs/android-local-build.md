@@ -58,6 +58,48 @@ cd android && ./gradlew assembleRelease && cd ..
 
 Результат: `android/app/build/outputs/apk/release/app-release.apk`
 
+## Тестовая сборка (QA)
+
+Release-подписанный тестовый APK выкладывается на сервер **вручную** через GitHub Actions:
+
+1. Откройте [Actions → Android Test APK](https://github.com/pocketnetteam/forta.chat/actions/workflows/android-test-apk.yml).
+2. Нажмите **Run workflow**, выберите ветку (обычно `master`) и подтвердите.
+3. После успешного прогона APK доступен по ссылке:
+
+**https://forta.chat/apktests/latest.apk**
+
+Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/android-test-apk.yml)
+
+| | Prod (тег `v*`) | Тест (ручной запуск) |
+|---|---|---|
+| Канал | GitHub Releases | FTP `apktests/latest.apk` |
+| Триггер | Push тега `v*` | `workflow_dispatch` в GitHub Actions |
+| `versionName` / `versionCode` | Из тега, напр. `1.10.46` → `11046` | Из `package.json` +1 patch (та же формула `versionCode`) |
+| Имя файла | `forta-chat-<version>.apk` | `latest.apk` (внутри CI: `forta-chat-test-<version>.apk`) |
+| Автообновление в приложении | Да (`releases/latest`) | Нет |
+| Подпись | Release keystore | Тот же release keystore |
+
+### Версионирование (тест → релиз)
+
+Источник версии — **`package.json`** (`version`). GitHub Releases не используется.
+
+1. В `package.json` хранится последняя выпущенная версия (сейчас совпадает с prod).
+2. **Тест:** CI берёт max(`package.json`, [`apktests/version.json`](https://forta.chat/apktests/version.json)), поднимает **patch на 1** и собирает APK.
+3. **Релиз:** после QA поднимаете `package.json` до протестированной версии, коммитите и ставите тег `v*` с тем же номером.
+4. Повторный тест до релиза снова поднимает patch (учитывается `version.json` на сервере).
+
+### Установка для тестировщиков
+
+1. Скачать [latest.apk](https://forta.chat/apktests/latest.apk) на устройство.
+2. Разрешить установку из неизвестных источников (если потребуется).
+3. Установить APK.
+
+### Важно
+
+- Тестовый APK **можно поставить поверх** production-версии (та же подпись, тот же `versionCode`-диапазон).
+- После теста: обновите `package.json` до протестированной версии и выпускайте prod с тегом `v*` с **тем же номером**.
+- Тестовая сборка **не** создаёт GitHub Release и **не** влияет на автообновление у обычных пользователей.
+
 ## Установка на устройство
 
 ```bash

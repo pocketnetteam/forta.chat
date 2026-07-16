@@ -121,11 +121,27 @@ app.whenReady().then(() => {
     }
   });
 
-  // Handle renderer requests to change Tor mode
+  // Handle renderer requests to change Tor mode (legacy)
   ipcMain.handle("tor:set-mode", async (_event, mode) => {
     const newSettings = { ...torControl.settings, enabled3: mode };
     await torControl.settingChanged(newSettings);
     return { status: torControl.state.status, info: torControl.state.info, mode };
+  });
+
+  // Full Tor configure: mode + Snowflake bridge
+  ipcMain.handle("tor:configure", async (_event, { mode, useSnowFlake2 }) => {
+    const newSettings = {
+      ...torControl.settings,
+      enabled3: mode,
+      ...(typeof useSnowFlake2 === "boolean" ? { useSnowFlake2 } : {}),
+    };
+    await torControl.settingChanged(newSettings);
+    return {
+      status: torControl.state.status,
+      info: torControl.state.info,
+      mode: newSettings.enabled3,
+      useSnowFlake2: newSettings.useSnowFlake2,
+    };
   });
 
   // Let renderer query current Tor status (avoids race on startup)
@@ -133,6 +149,7 @@ app.whenReady().then(() => {
     status: torControl.state.status,
     info: torControl.state.info,
     mode: torControl.settings.enabled3,
+    useSnowFlake2: torControl.settings.useSnowFlake2,
   }));
 
   createWindow();

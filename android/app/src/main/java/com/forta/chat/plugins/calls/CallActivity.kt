@@ -169,6 +169,15 @@ class CallActivity : Activity(), SensorEventListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Session 31 (#644 Xiaomi 12X / 14T): bind hardware volume keys to
+        // STREAM_VOICE_CALL while the in-call surface is on screen. Without
+        // this the keys default to STREAM_MUSIC and pressing volume-up/down
+        // during a VoIP call is silently ignored — the in-call audio volume
+        // can only be changed via the system slider, which most users never
+        // discover. setVolumeControlStream is per-Activity and is reset
+        // automatically when this Activity is destroyed.
+        volumeControlStream = AudioManager.STREAM_VOICE_CALL
+
         // Keep screen on, show over lock screen
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -286,8 +295,14 @@ class CallActivity : Activity(), SensorEventListener {
             }
         }
 
-        // D-10: Restore audio context when returning to active call
-        val hasActiveCall = WebRTCPlugin.manager != null
+        // D-10 / Session 54: Restore audio context only if the call is
+        // really still alive. Previously we keyed off WebRTCPlugin.manager
+        // alone, which can outlive the call lifecycle (e.g. when the
+        // foreground service was killed by the OEM but the JS-side manager
+        // reference was never cleared). In that case onResume was happily
+        // re-applying MODE_IN_COMMUNICATION on a corpse call, leaving the
+        // device's volume controls stuck on VoIP-only until reboot (#708).
+        val hasActiveCall = WebRTCPlugin.manager != null && CallForegroundService.isRunning
         if (hasActiveCall) {
             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             am.mode = AudioManager.MODE_IN_COMMUNICATION

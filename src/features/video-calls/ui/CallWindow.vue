@@ -3,6 +3,8 @@ import { useCallStore, CallStatus } from "@/entities/call";
 import { UserAvatar } from "@/entities/user";
 import { formatDuration } from "@/shared/lib/format";
 import { useCallService } from "../model/call-service";
+import { isFrontFacingStream } from "../model/camera-facing";
+import { computePipSize } from "../model/pip-size";
 import CallControls from "./CallControls.vue";
 import VideoTile from "./VideoTile.vue";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
@@ -175,6 +177,14 @@ const peerName = computed(() => callStore.activeCall?.peerName ?? "");
 const peerAddress = computed(() => callStore.activeCall?.peerAddress ?? "");
 const myAddress = computed(() => "");
 
+// Mirror the local self-view ONLY when the active camera is user-facing
+// (forta-bugs#749 / WEE-36). Reading `callStore.localStream` here keeps the
+// flag reactive when the user flips between front/back cameras via
+// `setVideoDevice`, which swaps the video track and calls `triggerRef`.
+const localCameraMirror = computed(() =>
+  isFrontFacingStream(callStore.localStream),
+);
+
 function makeTile(
   id: string,
   stream: MediaStream | null,
@@ -215,7 +225,7 @@ const allTiles = computed<TileData[]>(() => {
       callStore.videoMuted,
       callStore.audioMuted,
       false,
-      true,
+      localCameraMirror.value,
       true,
     ),
   );
@@ -321,8 +331,22 @@ watch(callContainerRef, (el, _oldEl, onCleanup) => {
   }
 });
 
-const PIP_W = computed(() => isMobile.value ? 110 : 160);
-const PIP_H = computed(() => isMobile.value ? 82 : 120);
+// Self-view PiP follows the local camera's natural aspect ratio so the user
+// sees the full frame the peer receives, not a cropped square (forta-bugs#433
+// / WEE-53). The aspect is reported by the PiP VideoTile via `@aspectchange`
+// once stream metadata is known; until then `computePipSize(null, …)` falls
+// back to the prior 4:3 box so there is no first-frame size jump.
+const localAspect = ref<number | null>(null);
+// Holds the last ratio VideoTile reported. On a stream swap (camera flip,
+// camera→screen-share) the tile does not emit a reset, so this keeps the
+// previous aspect until the new stream's metadata arrives — see the
+// `aspectchange` rationale in VideoTile.vue.
+function onLocalAspect(ratio: number) {
+  localAspect.value = ratio;
+}
+const pipSize = computed(() => computePipSize(localAspect.value, isMobile.value));
+const PIP_W = computed(() => pipSize.value.w);
+const PIP_H = computed(() => pipSize.value.h);
 const PIP_MARGIN = computed(() => isMobile.value ? 12 : 16);
 const PIP_BOTTOM_OFFSET = computed(() => isMobile.value ? 80 : 96);
 
@@ -638,11 +662,12 @@ const isAnyScreenSharing = computed(
               >
                 <VideoTile
                   :stream="callStore.screenSharing && callStore.localScreenStream ? callStore.localScreenStream : callStore.localStream"
-                  :mirror="!callStore.screenSharing"
+                  :mirror="!callStore.screenSharing && localCameraMirror"
                   :video-off="callStore.videoMuted && !callStore.screenSharing"
                   object-fit="cover"
                   muted
                   class="h-full w-full"
+                  @aspectchange="onLocalAspect"
                 />
               </div>
             </Transition>
