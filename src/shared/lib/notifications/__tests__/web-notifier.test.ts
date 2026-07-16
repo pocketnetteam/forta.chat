@@ -76,21 +76,22 @@ describe("web-notifier", () => {
     notifyNewMessage({ roomId: "!room1", body: "hi", fallbackTitle: "Forta" });
     expect(FakeAudioContext.instances).toHaveLength(0);
     expect(FakeNotification.instances).toHaveLength(0);
+    // Title is owned by useUnreadDocumentTitle — notifier must not mutate it.
     expect(document.title).toBe("Forta");
   });
 
-  it("beeps + flashes title + fires Notification when tab is hidden", () => {
+  it("beeps + fires Notification when tab is hidden, without mutating title", () => {
     notifyNewMessage({ roomId: "!room1", body: "hi", title: "Alice", fallbackTitle: "Forta" });
     expect(FakeAudioContext.instances).toHaveLength(1);
     expect(FakeAudioContext.instances[0].oscillators[0].start).toHaveBeenCalledOnce();
-    expect(document.title).toBe("(1) Forta");
+    expect(document.title).toBe("Forta");
     expect(FakeNotification.instances).toHaveLength(1);
     expect(FakeNotification.instances[0].title).toBe("Alice");
     expect(FakeNotification.instances[0].opts?.body).toBe("hi");
     expect(FakeNotification.instances[0].opts?.tag).toBe("!room1");
   });
 
-  it("throttles consecutive beeps but still bumps the unread title count", () => {
+  it("throttles consecutive beeps", () => {
     notifyNewMessage({ roomId: "!room1", body: "1", fallbackTitle: "Forta" });
     notifyNewMessage({ roomId: "!room1", body: "2", fallbackTitle: "Forta" });
     notifyNewMessage({ roomId: "!room1", body: "3", fallbackTitle: "Forta" });
@@ -98,16 +99,16 @@ describe("web-notifier", () => {
     const allOscillators = FakeAudioContext.instances.flatMap((c) => c.oscillators);
     const started = allOscillators.filter((o) => (o.start as ReturnType<typeof vi.fn>).mock.calls.length > 0);
     expect(started).toHaveLength(1);
-    expect(document.title).toBe("(3) Forta");
+    expect(document.title).toBe("Forta");
   });
 
   it("does NOT fire the OS banner when permission is not granted", () => {
     FakeNotification.permission = "denied";
     notifyNewMessage({ roomId: "!room1", body: "hi", fallbackTitle: "Forta" });
     expect(FakeNotification.instances).toHaveLength(0);
-    // …but the beep + title bump still happen because they aren't gated on permission.
+    // …but the beep still happens because it isn't gated on permission.
     expect(FakeAudioContext.instances).toHaveLength(1);
-    expect(document.title).toBe("(1) Forta");
+    expect(document.title).toBe("Forta");
   });
 
   it("requestNotificationPermission delegates to the platform API", async () => {
@@ -122,10 +123,5 @@ describe("web-notifier", () => {
     notifyNewMessage({ roomId: "!room1", body: "hi", fallbackTitle: "Forta Chat" });
     expect(FakeNotification.instances).toHaveLength(1);
     expect(FakeNotification.instances[0].title).toBe("Forta Chat");
-  });
-
-  it("caps the title prefix at 99+ to avoid runaway strings", () => {
-    for (let i = 0; i < 105; i++) notifyNewMessage({ roomId: "!room1", body: `m${i}`, fallbackTitle: "Forta" });
-    expect(document.title).toBe("(99+) Forta");
   });
 });

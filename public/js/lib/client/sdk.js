@@ -190,6 +190,12 @@ var pSDK = function ({ app, api, actions }) {
 
             if (data.___temp) return Promise.resolve()
 
+            // userInfo* stores: never persist empty-name profiles
+            if ((dbname === 'userInfoFull' || dbname === 'userInfoLight' || dbname === 'userInfoFullFB')
+                && !(data.name || data.n)) {
+                return Promise.resolve()
+            }
+
             if (dbmeta[dbname].authorized) key = key + '_' + app.user.address.value
 
             return self.db.set(dbname, p.cachetime || dbmeta[dbname].time, key, data).catch(e => {
@@ -838,9 +844,15 @@ var pSDK = function ({ app, api, actions }) {
                     data = this.cleanData(data)
 
                     return _.map(addresses, (address) => {
+                        var info = _.find(data, (row) => { return row.address == address })
+                        // Never cache empty-name profiles (pre-registration / miss).
+                        // Treat as cache miss so the next load hits the network.
+                        if (info && !(info.name || info.n)) {
+                            info = null
+                        }
                         return {
                             key: address,
-                            data: _.find(data, (info) => { return info.address == address })
+                            data: info
                         }
                     })
 

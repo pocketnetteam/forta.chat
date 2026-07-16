@@ -200,6 +200,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Public attempt counter for RegistrationStepper UI so users see real
   // progress instead of an opaque animation.
   const registrationPollAttempt = ref(0);
+  /** Active-time elapsed since poll start — drives the 10-min cancel button. */
+  const registrationPollElapsedMs = ref(0);
+  let registrationElapsedInterval: ReturnType<typeof setInterval> | null = null;
   let registrationVisibilityHandler: (() => void) | null = null;
   let registrationAppStateHandle: { remove: () => Promise<void> } | null = null;
 
@@ -217,8 +220,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   // Safety bounds for registration polling
   const REGISTRATION_POLL_TIMEOUT = 30 * 60 * 1000;  // 30 minutes total
+  const REGISTRATION_CANCEL_AFTER_MS = 10 * 60 * 1000; // 10 minutes active time → show cancel
   const RPC_CALL_TIMEOUT = 15_000;                    // 15s per RPC call
   const MAX_CONSECUTIVE_ERRORS = 5;                   // show error after 5 failures in a row
+
+  const canCancelRegistration = computed(() => {
+    if (!registrationPending.value) return false;
+    if (registrationPollElapsedMs.value < REGISTRATION_CANCEL_AFTER_MS) return false;
+    const phase = registrationPhase.value;
+    return phase === "init" || phase === "broadcasting" || phase === "confirming";
+  });
 
   // Node that processed the sendrawtransaction during registration —
   // used as fnode for getuserstate to avoid stale cache on a different node
@@ -1000,6 +1011,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     const requestAddress = address.value;
     const requestPrivateKey = privateKey.value;
 
+    // During registration the local SDK may still hold an empty profile from
+    // the first post-login getuserprofile — always hit the network.
+    const forceNetwork = registrationPending.value || !!pendingRegProfile.value;
+
     await appInitializer.initializeAndFetchUserData(
       requestAddress,
       (userData: UserData) => {
@@ -1051,7 +1066,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             language: merged.language ?? "",
           });
         }
-      }
+      },
+      forceNetwork ? { update: true } : undefined,
     );
   };
 
@@ -1353,6 +1369,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     setRegistrationPending(false);
     setPendingRegProfile(null);
+    setRegistrationPhase("init");
     likelyBastyonUser.value = false;
     stopRegistrationPoll();
     clearMnemonic();
@@ -1550,6 +1567,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         .catch(() => { /* non-fatal */ });
     }
 
+    if (registrationElapsedInterval) clearInterval(registrationElapsedInterval);
+    registrationPollElapsedMs.value = 0;
+    registrationElapsedInterval = setInterval(() => {
+      registrationPollElapsedMs.value = pollTimer?.elapsed() ?? 0;
+    }, 1000);
+
     // Set initial phase based on current state (handles reload resume)
     if (pendingRegProfile.value) {
       if (registrationPhase.value !== 'init') setRegistrationPhase('init');
@@ -1577,6 +1600,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       try {
         // Phase 1: Broadcast UserInfo once PKOIN arrives
         if (pendingRegProfile.value) {
+          // Fresh getuserprofile (update:true) — local SDK cache from login may
+          // still hold an empty pre-registration row. If the account is already
+          // on-chain, leave step 1 and finish instead of waiting for PKOIN forever.
+          const rawProfiles = await withTimeout(
+            appInitializer.loadUsersInfoRaw([address.value]),
+            RPC_CALL_TIMEOUT,
+            "getuserprofile",
+          );
+          if (rawProfiles.length > 0) {
+            console.log("[auth] getuserprofile already has account during phase 1 — completing registration");
+            setPendingRegProfile(null);
+            await onRegistrationConfirmed();
+            return;
+          }
+
           const hasUnspents = await withTimeout(
             appInitializer.checkUnspents(address.value),
             RPC_CALL_TIMEOUT,
@@ -1588,7 +1626,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             try {
               await appInitializer.syncNodeTime();
               const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
-              await appInitializer.initializeAndFetchUserData(address.value);
+              // Bypass local getuserprofile cache before broadcast.
+              await appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true });
               const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
               registrationFnode = registrationNode;
               console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
@@ -1683,6 +1722,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // Snapshot — see fetchUserInfo. Prevents a logout race from writing
         // this account's confirmed profile into a different account's slot.
         const confirmedAddress = address.value!;
+        // Always network getuserprofile — local userInfoFull may still hold the
+        // empty row cached at login before UserInfo landed on-chain.
         await appInitializer.loadUsersInfo([confirmedAddress], { update: true });
         await appInitializer.initializeAndFetchUserData(
           confirmedAddress,
@@ -1719,7 +1760,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               site: merged.site ?? "",
               language: merged.language ?? "",
             });
-          }
+          },
+          { update: true },
         );
       } catch (e) {
         console.warn("[auth] initializeAndFetchUserData failed after confirmation, continuing:", e);
@@ -1754,9 +1796,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
+    if (registrationElapsedInterval) {
+      clearInterval(registrationElapsedInterval);
+      registrationElapsedInterval = null;
+    }
     pollTimer = null;
     _registrationPollKick = null;
     registrationPollAttempt.value = 0;
+    registrationPollElapsedMs.value = 0;
     // Tear down background-pause listeners
     if (typeof document !== "undefined" && registrationVisibilityHandler) {
       document.removeEventListener("visibilitychange", registrationVisibilityHandler);
@@ -1766,6 +1813,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       registrationAppStateHandle.remove().catch(() => { /* ignore */ });
       registrationAppStateHandle = null;
     }
+  };
+
+  /** Abort an in-progress registration after the user confirms cancel.
+   *  Clears all registration LS keys, tears down the poll, and logs out
+   *  (session + Dexie + account localStorage) so RegisterPage is reachable. */
+  const cancelRegistration = async () => {
+    stopRegistrationPoll();
+    setRegistrationPending(false);
+    setPendingRegProfile(null);
+    setRegistrationPhase("init");
+    registrationErrorMessage.value = null;
+    registrationUsernameError.value = false;
+    clearRegistrationState();
+    registrationFnode = null;
+    await logout();
   };
 
   /** Retry registration after a timeout or network error.
@@ -2041,12 +2103,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
      *  Updates both the Vue ref and sessionStorage so the seed survives the
      *  next unmount too. Caller is responsible for sourcing a trusted value. */
     setRegMnemonic: (m: string) => { regMnemonic.value = m; saveMnemonic(m); },
+    cancelRegistration,
+    canCancelRegistration,
     checkUsername,
     register,
     registrationErrorMessage,
     registrationPending,
     registrationPhase,
     registrationPollAttempt,
+    registrationPollElapsedMs,
     registrationUsernameError,
     resumeRegistrationPoll,
     retryRegistration,
