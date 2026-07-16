@@ -190,6 +190,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Public attempt counter for RegistrationStepper UI so users see real
   // progress instead of an opaque animation.
   const registrationPollAttempt = ref(0);
+  /** Active-time elapsed since poll start — drives the 10-min cancel button. */
+  const registrationPollElapsedMs = ref(0);
+  let registrationElapsedInterval: ReturnType<typeof setInterval> | null = null;
   let registrationVisibilityHandler: (() => void) | null = null;
   let registrationAppStateHandle: { remove: () => Promise<void> } | null = null;
 
@@ -207,8 +210,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   // Safety bounds for registration polling
   const REGISTRATION_POLL_TIMEOUT = 30 * 60 * 1000;  // 30 minutes total
+  const REGISTRATION_CANCEL_AFTER_MS = 10 * 60 * 1000; // 10 minutes active time → show cancel
   const RPC_CALL_TIMEOUT = 15_000;                    // 15s per RPC call
   const MAX_CONSECUTIVE_ERRORS = 5;                   // show error after 5 failures in a row
+
+  const canCancelRegistration = computed(() => {
+    if (!registrationPending.value) return false;
+    if (registrationPollElapsedMs.value < REGISTRATION_CANCEL_AFTER_MS) return false;
+    const phase = registrationPhase.value;
+    return phase === "init" || phase === "broadcasting" || phase === "confirming";
+  });
 
   // Node that processed the sendrawtransaction during registration —
   // used as fnode for getuserstate to avoid stale cache on a different node
@@ -1286,6 +1297,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     setRegistrationPending(false);
     setPendingRegProfile(null);
+    setRegistrationPhase("init");
     likelyBastyonUser.value = false;
     stopRegistrationPoll();
     clearMnemonic();
@@ -1483,6 +1495,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         .catch(() => { /* non-fatal */ });
     }
 
+    if (registrationElapsedInterval) clearInterval(registrationElapsedInterval);
+    registrationPollElapsedMs.value = 0;
+    registrationElapsedInterval = setInterval(() => {
+      registrationPollElapsedMs.value = pollTimer?.elapsed() ?? 0;
+    }, 1000);
+
     // Set initial phase based on current state (handles reload resume)
     if (pendingRegProfile.value) {
       if (registrationPhase.value !== 'init') setRegistrationPhase('init');
@@ -1676,8 +1694,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
+    if (registrationElapsedInterval) {
+      clearInterval(registrationElapsedInterval);
+      registrationElapsedInterval = null;
+    }
     pollTimer = null;
     registrationPollAttempt.value = 0;
+    registrationPollElapsedMs.value = 0;
     // Tear down background-pause listeners
     if (typeof document !== "undefined" && registrationVisibilityHandler) {
       document.removeEventListener("visibilitychange", registrationVisibilityHandler);
@@ -1687,6 +1710,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       registrationAppStateHandle.remove().catch(() => { /* ignore */ });
       registrationAppStateHandle = null;
     }
+  };
+
+  /** Abort an in-progress registration after the user confirms cancel.
+   *  Clears all registration LS keys, tears down the poll, and logs out
+   *  (session + Dexie + account localStorage) so RegisterPage is reachable. */
+  const cancelRegistration = async () => {
+    stopRegistrationPoll();
+    setRegistrationPending(false);
+    setPendingRegProfile(null);
+    setRegistrationPhase("init");
+    registrationErrorMessage.value = null;
+    registrationUsernameError.value = false;
+    clearRegistrationState();
+    registrationFnode = null;
+    await logout();
   };
 
   /** Retry registration after a timeout or network error.
@@ -1959,12 +1997,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
      *  Updates both the Vue ref and sessionStorage so the seed survives the
      *  next unmount too. Caller is responsible for sourcing a trusted value. */
     setRegMnemonic: (m: string) => { regMnemonic.value = m; saveMnemonic(m); },
+    cancelRegistration,
+    canCancelRegistration,
     checkUsername,
     register,
     registrationErrorMessage,
     registrationPending,
     registrationPhase,
     registrationPollAttempt,
+    registrationPollElapsedMs,
     registrationUsernameError,
     resumeRegistrationPoll,
     retryRegistration,

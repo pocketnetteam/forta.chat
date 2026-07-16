@@ -88,6 +88,15 @@ const handleRetryUsername = async (newName: string) => {
   }
 };
 
+const handleCancelRegistration = async () => {
+  try {
+    await authStore.cancelRegistration();
+    await router.replace({ name: "RegisterPage" });
+  } catch (e) {
+    console.error("[App] cancel registration failed:", e);
+  }
+};
+
 // Pending roomId consumed from deep-link storage — the preview modal driver.
 const pendingJoinRoomId = ref<string | null>(null);
 
@@ -450,8 +459,12 @@ onUnmounted(() => {
       :phase="authStore.registrationPhase"
       :error-message="retryError"
       :error-type="registrationErrorType"
+      :poll-attempt="authStore.registrationPollAttempt"
+      :reg-address="authStore.address"
+      :show-cancel="authStore.canCancelRegistration"
       @back-to-name="handleRetryUsername"
       @retry="handleRetryRegistration"
+      @cancel="handleCancelRegistration"
     />
     <TitleBar v-if="isElectron" />
     <div class="relative min-h-0 flex-1 overflow-hidden">

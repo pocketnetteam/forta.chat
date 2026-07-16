@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "@/shared/lib/i18n";
+import Modal from "@/shared/ui/modal/Modal.vue";
 import type { RegistrationPhase } from "@/entities/auth/model/stores";
 
 const props = defineProps<{
@@ -12,16 +13,33 @@ const props = defineProps<{
   /** Pending registration address (surfaced in error UI so the user can
    *  reference it when contacting support or recovering via mnemonic). */
   regAddress?: string | null;
+  /** True after 10 min of active poll time — shows cancel button. */
+  showCancel?: boolean;
 }>();
 
 const emit = defineEmits<{
   "back-to-name": [newName: string];
   "retry": [];
+  "cancel": [];
 }>();
 
 const { t } = useI18n();
 
 const retryName = ref("");
+const showCancelConfirm = ref(false);
+
+const openCancelConfirm = () => {
+  showCancelConfirm.value = true;
+};
+
+const dismissCancelConfirm = () => {
+  showCancelConfirm.value = false;
+};
+
+const confirmCancel = () => {
+  showCancelConfirm.value = false;
+  emit("cancel");
+};
 
 // Map phase → UI step (1-indexed)
 const currentStep = computed(() => {
@@ -177,6 +195,16 @@ const handleRetry = () => {
             {{ t("register.pollAttempt", { n: pollAttempt }) }}
           </p>
 
+          <!-- Cancel registration (available after 10 min active wait) -->
+          <button
+            v-if="!isError && showCancel"
+            type="button"
+            class="mt-4 flex h-10 w-full cursor-pointer items-center justify-center rounded-xl border border-neutral-grad-1 bg-transparent text-sm font-medium text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+            @click="openCancelConfirm"
+          >
+            {{ t("register.cancelRegistration") }}
+          </button>
+
           <!-- Address reveal for user support (mnemonic-recoverable account). Only shown on error. -->
           <p
             v-if="isError && regAddress"
@@ -217,6 +245,35 @@ const handleRetry = () => {
         </div>
       </Transition>
     </div>
+
+    <Modal
+      :show="showCancelConfirm"
+      :aria-label="t('register.cancelConfirmTitle')"
+      @close="dismissCancelConfirm"
+    >
+      <h3 class="mb-2 text-base font-semibold text-text-color">
+        {{ t("register.cancelConfirmTitle") }}
+      </h3>
+      <p class="mb-5 text-[13px] leading-5 text-text-on-main-bg-color">
+        {{ t("register.cancelConfirmHint") }}
+      </p>
+      <div class="flex gap-2.5">
+        <button
+          type="button"
+          class="flex h-11 flex-1 cursor-pointer items-center justify-center rounded-xl bg-neutral-grad-0 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-1"
+          @click="dismissCancelConfirm"
+        >
+          {{ t("register.cancelConfirmDismiss") }}
+        </button>
+        <button
+          type="button"
+          class="flex h-11 flex-1 cursor-pointer items-center justify-center rounded-xl bg-color-bad text-sm font-medium text-white transition-colors hover:opacity-90"
+          @click="confirmCancel"
+        >
+          {{ t("register.cancelConfirmAction") }}
+        </button>
+      </div>
+    </Modal>
   </div>
 </template>
 
