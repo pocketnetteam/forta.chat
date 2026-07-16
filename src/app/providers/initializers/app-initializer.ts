@@ -347,6 +347,16 @@ export class AppInitializer {
     return this.api.initIf();
   }
 
+  /** Expose the underlying loaded SDK Api instance.
+   *  Used by ancillary services that need to issue arbitrary RPC calls or
+   *  reuse the proxy URL discovery (`api.get.currentwss()`) without
+   *  instantiating a second `Api` (which would double the proxy probing
+   *  on startup). Returns `null` in standalone mode (Electron without
+   *  Bastyon platform globals). */
+  getRawApi(): InstanceType<typeof Api> | null {
+    return this.api;
+  }
+
   initializeAndFetchUserData(address: string, onLoad?: OnLoadUserData) {
     if (!this._available) return Promise.resolve(null);
     return this.initApi().then(() => {

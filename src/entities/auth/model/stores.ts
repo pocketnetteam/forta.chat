@@ -2,6 +2,8 @@ import {
   createAppInitializer,
   PocketnetInstanceConfigurator
 } from "@/app/providers";
+import { PocketnetInstance } from "@/app/providers/chat-scripts/config/pocketnetinstance";
+import { blockchainWs } from "@/shared/lib/blockchain-ws";
 import { useChatStore } from "@/entities/chat";
 import { useUserStore } from "@/entities/user/model";
 import { useCallStore } from "@/entities/call/model/call-store";
@@ -136,6 +138,14 @@ let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
 // Per-room debounce timers for peer-keys recheck after member events.
 const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Trigger an immediate registration poll iteration. Set inside
+ *  `startRegistrationPoll`, cleared inside `stopRegistrationPoll`.
+ *  Called from the blockchain-ws block/transaction handlers so that an
+ *  incoming PKOIN or new block fast-forwards Phase 1/2 without waiting
+ *  for the exponential-backoff timer to fire. Best-effort: a no-op when
+ *  no poll is currently active. */
+let _registrationPollKick: (() => void) | null = null;
 
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
@@ -750,6 +760,59 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }).catch(() => {});
         }, 60_000);
 
+        // Best-effort blockchain WS — speeds up wallet refresh, registration
+        // confirmation and Pcrypto.confirmations. The 60-s polling above stays
+        // as fallback when WS cannot be established.
+        try {
+          blockchainWs.start({
+            address: address.value!,
+            deviceId: PocketnetInstance.options.device,
+            getSignature: () => window.POCKETNETINSTANCE.user.signature?.() ?? null,
+            getApi: () => appInitializer.getRawApi(),
+            getLastKnownBlock: () => pcrypto.value?.currentblock?.height ?? 0,
+            handlers: {
+              onBlock: ({ height }) => {
+                if (height > 0 && pcrypto.value) {
+                  pcrypto.value.setBlock({ height });
+                }
+                // Lazy-import to avoid circular dependency wallet → auth.
+                import("@/features/wallet/model/wallet-store")
+                  .then(({ useWalletStore }) => useWalletStore().refresh())
+                  .catch(() => { /* wallet not ready — ignore */ });
+                _registrationPollKick?.();
+              },
+              onTransaction: () => {
+                import("@/features/wallet/model/wallet-store")
+                  .then(({ useWalletStore }) => useWalletStore().refresh())
+                  .catch(() => { /* wallet not ready — ignore */ });
+                _registrationPollKick?.();
+              },
+              onUserInfo: ({ addrFrom }) => {
+                if (!addrFrom) return;
+                appInitializer
+                  .loadUsersInfo([addrFrom], { update: true })
+                  .then(() => {
+                    const fresh = appInitializer.getUserData(addrFrom);
+                    if (fresh) {
+                      useUserStore().setUser(addrFrom, {
+                        address: addrFrom,
+                        name: fresh.name ?? "",
+                        about: fresh.about ?? "",
+                        image: fresh.image ?? "",
+                        site: fresh.site ?? "",
+                        language: fresh.language ?? "",
+                        cachedAt: Date.now(),
+                      });
+                    }
+                  })
+                  .catch(() => { /* best-effort */ });
+              },
+            },
+          });
+        } catch (e) {
+          console.warn("[auth] blockchain-ws start failed (non-fatal):", e);
+        }
+
         import("@/features/video-calls/model/call-tab-lock").then(({ initCallTabLock }) => {
           initCallTabLock();
         }).catch((err) => {
@@ -1231,6 +1294,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     useCallStore().clearCall();
     useChannelStore().cleanup();
 
+    // ── 1.5. Stop best-effort blockchain WS BEFORE Matrix teardown so its
+    //         handlers can't try to refresh torn-down stores. ──
+    try { blockchainWs.stop(); } catch { /* ignore */ }
+
     // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
     matrixReady.value = false;
@@ -1593,6 +1660,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       pollInterval = Math.min(pollInterval * 2, MAX_POLL_INTERVAL);
     };
 
+    // Expose a kick that runs the next iteration immediately and resets the
+    // backoff. blockchain-ws calls this on inbound block/transaction events.
+    _registrationPollKick = () => {
+      if (registrationPollTimer) {
+        clearTimeout(registrationPollTimer);
+        registrationPollTimer = null;
+      }
+      pollInterval = 3000;
+      poll();
+    };
+
     poll();
 
     async function onRegistrationConfirmed() {
@@ -1677,6 +1755,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       registrationPollTimer = null;
     }
     pollTimer = null;
+    _registrationPollKick = null;
     registrationPollAttempt.value = 0;
     // Tear down background-pause listeners
     if (typeof document !== "undefined" && registrationVisibilityHandler) {
@@ -1865,6 +1944,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       useChatStore().cleanup();
       useChannelStore().cleanup();
       useCallStore().clearCall();
+      // Stop blockchain WS before Matrix so its handlers can't fire against
+      // torn-down stores; initMatrix() below will re-start it for the new account.
+      try { blockchainWs.stop(); } catch { /* ignore */ }
       resetMatrixClientService();
       matrixReady.value = false;
       matrixError.value = null;
