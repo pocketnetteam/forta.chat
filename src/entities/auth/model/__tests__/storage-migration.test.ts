@@ -1,9 +1,14 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { migratePerAccountKeys, migrateAll } from "../storage-migration";
-import { SessionManager } from "../session-manager";
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+  migratePerAccountKeys,
+  migrateAll,
+  purgeEmptyUserStoreProfiles,
+  purgeEmptyProfilesOnce,
+} from "../storage-migration";
 
 const SESSIONS_KEY = "forta-chat:sessions";
 const ACTIVE_KEY = "forta-chat:activeAccount";
+const EMPTY_PROFILE_PURGE_FLAG = "forta-chat:empty-profile-purge-v1";
 
 describe("storage-migration", () => {
   beforeEach(() => {
@@ -62,6 +67,53 @@ describe("storage-migration", () => {
     });
   });
 
+  describe("purgeEmptyUserStoreProfiles", () => {
+    it("removes empty-name entries and keeps named ones", () => {
+      localStorage.setItem(
+        "bastyon-chat-users",
+        JSON.stringify({
+          Pempty: { address: "Pempty", name: "", about: "" },
+          Palice: { address: "Palice", name: "Alice", about: "" },
+          Pblank: { address: "Pblank", name: "   ", about: "" },
+        }),
+      );
+
+      expect(purgeEmptyUserStoreProfiles()).toBe(2);
+      const kept = JSON.parse(localStorage.getItem("bastyon-chat-users")!);
+      expect(Object.keys(kept)).toEqual(["Palice"]);
+      expect(kept.Palice.name).toBe("Alice");
+    });
+
+    it("is a no-op when the cache is already clean", () => {
+      localStorage.setItem(
+        "bastyon-chat-users",
+        JSON.stringify({ Palice: { address: "Palice", name: "Alice" } }),
+      );
+      expect(purgeEmptyUserStoreProfiles()).toBe(0);
+    });
+  });
+
+  describe("purgeEmptyProfilesOnce", () => {
+    it("runs once then skips on subsequent calls", () => {
+      localStorage.setItem(
+        "bastyon-chat-users",
+        JSON.stringify({ Pempty: { address: "Pempty", name: "" } }),
+      );
+
+      purgeEmptyProfilesOnce();
+      expect(localStorage.getItem(EMPTY_PROFILE_PURGE_FLAG)).toBe("1");
+      expect(JSON.parse(localStorage.getItem("bastyon-chat-users")!)).toEqual({});
+
+      // Re-poison and ensure flag prevents a second purge
+      localStorage.setItem(
+        "bastyon-chat-users",
+        JSON.stringify({ Pempty: { address: "Pempty", name: "" } }),
+      );
+      purgeEmptyProfilesOnce();
+      expect(JSON.parse(localStorage.getItem("bastyon-chat-users")!).Pempty.name).toBe("");
+    });
+  });
+
   describe("migrateAll", () => {
     it("runs SessionManager.migrate() and migratePerAccountKeys for active address", () => {
       // Set up old singleton auth
@@ -106,6 +158,16 @@ describe("storage-migration", () => {
       // Per-account key should be created from global
       expect(JSON.parse(localStorage.getItem("chat_pinned_rooms:addr1")!)).toEqual(["!room1"]);
       expect(localStorage.getItem("chat_pinned_rooms")).toBeNull();
+    });
+
+    it("purges empty user-store profiles on boot", () => {
+      localStorage.setItem(
+        "bastyon-chat-users",
+        JSON.stringify({ Pempty: { address: "Pempty", name: "" } }),
+      );
+      migrateAll();
+      expect(JSON.parse(localStorage.getItem("bastyon-chat-users")!)).toEqual({});
+      expect(localStorage.getItem(EMPTY_PROFILE_PURGE_FLAG)).toBe("1");
     });
   });
 });

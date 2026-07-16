@@ -10,12 +10,12 @@
  *   - Audio beep via WebAudio (no asset, works offline, decode-free).
  *   - Visible-tab + active-room gates so the user never hears their own
  *     conversation pinging at them.
- *   - Title flash: prepend "(N) " to document.title while hidden, restore on
- *     visibility change.
  *   - Notification API: best-effort permission request, banner only when
  *     permission was already granted (we don't prompt on every message).
  *   - Throttled to one beep per ~1.5s so a burst of arrivals from a noisy
  *     room cannot turn into a buzzer.
+ *   - Tab title unread badge is owned by useUnreadDocumentTitle (totalUnread),
+ *     not by this module.
  */
 
 const BEEP_THROTTLE_MS = 1500;
@@ -36,9 +36,6 @@ interface NotifyOptions {
 
 let audioCtx: AudioContext | null = null;
 let lastBeepAt = 0;
-let originalTitle: string | null = null;
-let pendingCount = 0;
-let visibilityBound = false;
 
 const isBrowser = (): boolean => typeof window !== "undefined" && typeof document !== "undefined";
 
@@ -90,31 +87,6 @@ const playBeep = (): void => {
   }
 };
 
-const restoreTitle = (): void => {
-  if (!isBrowser() || originalTitle === null) return;
-  document.title = originalTitle;
-  originalTitle = null;
-  pendingCount = 0;
-};
-
-const bumpTitle = (): void => {
-  if (!isBrowser()) return;
-  if (originalTitle === null) originalTitle = document.title;
-  pendingCount += 1;
-  // Avoid runaway titles — cap at 99+ like the in-app badge.
-  const label = pendingCount > 99 ? "99+" : String(pendingCount);
-  document.title = `(${label}) ${originalTitle}`;
-};
-
-const bindVisibilityListener = (): void => {
-  if (!isBrowser() || visibilityBound) return;
-  visibilityBound = true;
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") restoreTitle();
-  });
-  window.addEventListener("focus", restoreTitle);
-};
-
 const fireBanner = (opts: NotifyOptions): void => {
   if (!isBrowser() || !("Notification" in window)) return;
   if (Notification.permission !== "granted") return;
@@ -128,7 +100,7 @@ const fireBanner = (opts: NotifyOptions): void => {
     });
   } catch {
     // Notification ctor throws when called from a non-user-gesture in some
-    // browsers; swallow — the beep + title flash still happened.
+    // browsers; swallow — the beep still happened.
   }
 };
 
@@ -139,10 +111,8 @@ const fireBanner = (opts: NotifyOptions): void => {
  */
 export const notifyNewMessage = (opts: NotifyOptions): void => {
   if (!isBrowser()) return;
-  bindVisibilityListener();
   if (isTabVisible()) return; // active tab — user already sees the room
   playBeep();
-  bumpTitle();
   fireBanner(opts);
 };
 
@@ -165,10 +135,4 @@ export const requestNotificationPermission = async (): Promise<NotificationPermi
 export const __resetWebNotifierForTests = (): void => {
   audioCtx = null;
   lastBeepAt = 0;
-  if (originalTitle !== null && isBrowser()) {
-    document.title = originalTitle;
-  }
-  originalTitle = null;
-  pendingCount = 0;
-  visibilityBound = false;
 };

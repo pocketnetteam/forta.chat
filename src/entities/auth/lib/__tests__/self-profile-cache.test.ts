@@ -4,6 +4,7 @@ import {
   readSelfProfile,
   writeSelfProfile,
   clearSelfProfile,
+  purgeEmptySelfProfiles,
   mergeSelfProfileWithRemote,
   SELF_PROFILE_GRACE_MS,
   type SelfProfileSnapshot,
@@ -55,6 +56,22 @@ describe("self-profile-cache (WEE-26)", () => {
       writeSelfProfile(snap);
       const restored = readSelfProfile(ADDR);
       expect(restored).toEqual(snap);
+    });
+
+    it("does not persist an empty-name snapshot", () => {
+      writeSelfProfile(makeSnapshot({ name: "" }));
+      expect(readSelfProfile(ADDR)).toBeNull();
+      writeSelfProfile(makeSnapshot({ name: "   " }));
+      expect(readSelfProfile(ADDR)).toBeNull();
+    });
+
+    it("purgeEmptySelfProfiles removes blank-name snapshots", () => {
+      localStorage.setItem(
+        `forta-chat-self-profile:${ADDR}`,
+        JSON.stringify({ address: ADDR, name: "" }),
+      );
+      expect(purgeEmptySelfProfiles()).toBe(1);
+      expect(readSelfProfile(ADDR)).toBeNull();
     });
 
     it("ignores snapshots whose stored address does not match the lookup key", () => {
