@@ -8,6 +8,11 @@ export interface LiveQueryResult<T> {
   isReady: Ref<boolean>;
   /** Last error from the query, or null if the query is healthy */
   error: Ref<Error | null>;
+  /** Intentionally drop the current snapshot (next emission overwrites it).
+   *  Stale-data-better-than-skeleton is the default across re-subscriptions;
+   *  call this only when stale data is actively wrong — e.g. on room switch
+   *  the previous room's messages must not flash in the new room (WEE-95). */
+  reset: (value: T) => void;
 }
 
 /**
@@ -36,9 +41,10 @@ export function useLiveQuery<T>(
 
   const subscribe = () => {
     subscription?.unsubscribe();
-    // Do NOT reset isReady — stale data is better than a skeleton flash.
+    // Do NOT reset isReady or data — stale data is better than a skeleton flash.
     // isReady stays true after the first emission so UI keeps showing
-    // existing messages while the new query settles.
+    // existing messages while the new query settles. Consumers that need to
+    // drop the snapshot intentionally call reset() instead.
     const observable = liveQuery(querier);
     subscription = observable.subscribe({
       next: (value: T) => {
@@ -85,5 +91,9 @@ export function useLiveQuery<T>(
     }
   });
 
-  return { data, isReady, error };
+  const reset = (value: T) => {
+    data.value = value;
+  };
+
+  return { data, isReady, error, reset };
 }

@@ -114,13 +114,62 @@ let onEndedCallback: ((messageId: string, roomId: string) => void) | null = null
 // event fires (issues #695, #671). 8s is long enough for slow Tor / 3G
 // pipelines but short enough for the user to retry without confusion.
 const LOADING_WATCHDOG_MS = 8_000;
+// Heavy encrypted blobs on slow links can still be downloading/decoding when
+// the first 8s window elapses — flipping straight to "failed" there is a false
+// negative (WEE-62 / forta-bugs#901). When the element is still making progress
+// we re-arm the window instead, bounded so a genuinely dead pipeline still
+// surfaces a retry button within ~24s.
+const MAX_WATCHDOG_REARMS = 2;
+// HTMLMediaElement readyState / networkState enum values, inlined as plain
+// numbers so the guard doesn't depend on the global existing (test stubs and
+// non-DOM contexts don't expose HTMLMediaElement).
+const READY_STATE_HAVE_METADATA = 1; // readyState ≥ 1 ⇒ metadata parsed
+const NETWORK_STATE_LOADING = 2; // networkState === 2 ⇒ actively fetching bytes
 let loadingWatchdog: ReturnType<typeof setTimeout> | null = null;
+let watchdogRearms = 0;
 
 function clearLoadingWatchdog() {
   if (loadingWatchdog !== null) {
     clearTimeout(loadingWatchdog);
     loadingWatchdog = null;
   }
+  watchdogRearms = 0;
+}
+
+/** Arm (or re-arm) the loading watchdog. When it fires, only declare the load
+ *  failed if the `<audio>` element has made NO progress — no metadata yet AND
+ *  not actively loading bytes. If it is still progressing we grant another
+ *  window (bounded by MAX_WATCHDOG_REARMS) so a slow-but-healthy decode is not
+ *  mistaken for a hang. */
+function armLoadingWatchdog(messageId: string) {
+  if (loadingWatchdog !== null) clearTimeout(loadingWatchdog);
+  loadingWatchdog = setTimeout(() => {
+    loadingWatchdog = null;
+    if (state.value !== "loading") return;
+
+    const el = audio.value;
+    const stillProgressing =
+      !!el &&
+      (el.readyState >= READY_STATE_HAVE_METADATA ||
+        el.networkState === NETWORK_STATE_LOADING);
+
+    if (stillProgressing && watchdogRearms < MAX_WATCHDOG_REARMS) {
+      watchdogRearms++;
+      armLoadingWatchdog(messageId);
+      return;
+    }
+
+    console.warn(
+      "[audio] watchdog: loading stalled (no progress), marking failed (msg=" +
+        messageId + ")",
+    );
+    state.value = "failed";
+    if (el) {
+      try { el.pause(); } catch { /* ignore */ }
+      try { el.removeAttribute("src"); } catch { /* ignore */ }
+      try { el.load(); } catch { /* ignore */ }
+    }
+  }, LOADING_WATCHDOG_MS);
 }
 
 function cleanup() {
@@ -165,7 +214,16 @@ function setupAudioListeners(el: HTMLAudioElement) {
     state.value = "failed";
   };
   el.onloadedmetadata = () => {
-    clearLoadingWatchdog();
+    // Metadata parsed — real progress. If we're still in the loading phase
+    // (decode/buffer not finished), re-arm a fresh window rather than leaving
+    // the load unguarded: a post-metadata decode hang should still surface a
+    // retry instead of spinning forever.
+    if (state.value === "loading") {
+      watchdogRearms = 0;
+      armLoadingWatchdog(currentMessageId.value ?? "");
+    } else {
+      clearLoadingWatchdog();
+    }
     // Only update if finite — Chromium reports Infinity for webm blobs
     if (Number.isFinite(el.duration) && el.duration > 0) {
       duration.value = el.duration;
@@ -216,21 +274,10 @@ export function useAudioPlayback() {
 
     // Arm a watchdog before the play() promise — if loadedmetadata / error
     // never fires (encrypted blob race, sw cache miss), flip to "failed" so
-    // the retry UI surfaces instead of an indefinite spinner.
-    loadingWatchdog = setTimeout(() => {
-      loadingWatchdog = null;
-      if (state.value === "loading") {
-        console.warn(
-          "[audio] watchdog: loading > 8s, marking failed (msg=" + info.messageId + ")",
-        );
-        state.value = "failed";
-        if (audio.value) {
-          try { audio.value.pause(); } catch { /* ignore */ }
-          try { audio.value.removeAttribute("src"); } catch { /* ignore */ }
-          try { audio.value.load(); } catch { /* ignore */ }
-        }
-      }
-    }, LOADING_WATCHDOG_MS);
+    // the retry UI surfaces instead of an indefinite spinner. The watchdog
+    // re-arms while the element keeps making progress (see armLoadingWatchdog).
+    watchdogRearms = 0;
+    armLoadingWatchdog(info.messageId);
 
     try {
       const el = new Audio();
@@ -259,7 +306,8 @@ export function useAudioPlayback() {
       // rejection that follows is the watchdog's own abort (pause +
       // removeAttribute("src") + load()). Don't open a duplicate bug-report
       // modal in that case — the user already sees the retry UI.
-      if (state.value !== "failed") {
+      const playbackState = state.value as PlaybackState;
+      if (playbackState !== "failed") {
         useBugReport().open({ context: tRaw("bugReport.ctx.audioPlayback"), error: e });
         state.value = "failed";
       }

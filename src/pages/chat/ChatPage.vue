@@ -15,7 +15,7 @@ const chatStore = useChatStore();
 const authStore = useAuthStore();
 const channelStore = useChannelStore();
 const { t } = useI18n();
-const { settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
+const { activeTab, settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
 
 const isMobile = ref(window.innerWidth < 768);
 
@@ -123,6 +123,18 @@ useAndroidBackHandler("chat-settings-content", 70, () => {
 useAndroidBackHandler("chat-back-to-sidebar", 60, () => {
   if (!isMobile.value || showSidebar.value) return false;
   onBackToSidebar();
+  return true;
+});
+
+// Telegram-like UX: first Back from Settings/Contacts returns to Chats
+// instead of minimizing the app. Lower priority than subview handler (70)
+// so subview close still wins. Only fires when no chat is open (priority 60
+// handler already returned false because showSidebar is true).
+useAndroidBackHandler("chat-tab-to-chats", 55, () => {
+  if (!isMobile.value) return false;
+  if (activeTab.value === "chats") return false;
+  if (settingsSubView.value) return false;
+  setTab("chats");
   return true;
 });
 </script>

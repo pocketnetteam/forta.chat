@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseVideoUrl } from "./video-embed";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { parseVideoUrl, fetchPeerTubeFileUrl } from "./video-embed";
 
 describe("parseVideoUrl", () => {
   // ─── YouTube ────────────────────────────────────────────────────
@@ -61,7 +61,10 @@ describe("parseVideoUrl", () => {
       type: "peertube",
       id: uuid,
       embedUrl: `https://videos.example.com/videos/embed/${uuid}`,
-      thumbUrl: `https://videos.example.com/lazy-static/previews/${uuid}.jpg`,
+      // Thumb is resolved lazily via the API (the preview UUID differs from
+      // the video UUID) — parse returns the API URL instead.
+      thumbUrl: "",
+      apiUrl: `https://videos.example.com/api/v1/videos/${uuid}`,
     });
   });
 
@@ -81,5 +84,73 @@ describe("parseVideoUrl", () => {
 
   it("returns null for YouTube-like URL with wrong ID length", () => {
     expect(parseVideoUrl("https://youtube.com/watch?v=short")).toBeNull();
+  });
+});
+
+describe("fetchPeerTubeFileUrl (WEE-82)", () => {
+  const API_URL = "https://videos.example.com/api/v1/videos/abc";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubFetch(payload: unknown, ok = true) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok,
+          json: () => Promise.resolve(payload),
+        }),
+      ),
+    );
+  }
+
+  it("picks the web-video file closest to 720p", async () => {
+    stubFetch({
+      files: [
+        { fileUrl: "https://cdn/240.mp4", resolution: { id: 240 } },
+        { fileUrl: "https://cdn/720.mp4", resolution: { id: 720 } },
+        { fileUrl: "https://cdn/1080.mp4", resolution: { id: 1080 } },
+      ],
+    });
+    await expect(fetchPeerTubeFileUrl(API_URL)).resolves.toBe("https://cdn/720.mp4");
+  });
+
+  it("falls back to streamingPlaylists files when web videos are absent", async () => {
+    stubFetch({
+      files: [],
+      streamingPlaylists: [
+        {
+          files: [{ fileUrl: "https://cdn/hls-480.mp4", resolution: { id: 480 } }],
+        },
+      ],
+    });
+    await expect(fetchPeerTubeFileUrl(API_URL)).resolves.toBe("https://cdn/hls-480.mp4");
+  });
+
+  it("returns null when no files exist (caller falls back to iframe)", async () => {
+    stubFetch({ files: [], streamingPlaylists: [] });
+    await expect(fetchPeerTubeFileUrl(API_URL)).resolves.toBeNull();
+  });
+
+  it("returns null on HTTP error", async () => {
+    stubFetch({}, false);
+    await expect(fetchPeerTubeFileUrl(API_URL)).resolves.toBeNull();
+  });
+
+  it("returns null on network failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("offline"))));
+    await expect(fetchPeerTubeFileUrl(API_URL)).resolves.toBeNull();
+  });
+
+  it("ignores entries without fileUrl", async () => {
+    stubFetch({
+      files: [
+        { resolution: { id: 720 } },
+        { fileUrl: "https://cdn/360.mp4", resolution: { id: 360 } },
+      ],
+    });
+    await expect(fetchPeerTubeFileUrl(API_URL)).resolves.toBe("https://cdn/360.mp4");
   });
 });

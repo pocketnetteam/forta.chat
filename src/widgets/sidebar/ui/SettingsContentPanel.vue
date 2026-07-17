@@ -15,7 +15,8 @@ import { SettingsSection } from "@/shared/ui/settings-section";
 import { Toggle } from "@/shared/ui/toggle";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import EmojiPicker from "@/features/messaging/ui/EmojiPicker.vue";
-import { UserEditForm } from "@/features/user-management";
+import { UserEditForm, CallProvidersSection } from "@/features/user-management";
+import { StorageSettings, NotificationSettings, TorSettingsSection } from "@/features/settings";
 import { useLiveQuery, isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import type { TelemetrySnapshot } from "@/shared/lib/telemetry";
 import { isNative, isAndroid } from "@/shared/lib/platform";
@@ -158,6 +159,10 @@ const title = computed(() => {
   switch (settingsSubView.value) {
     case "profile": return t("settings.editProfile");
     case "appearance": return t("settings.appearance");
+    case "callMethods": return t("settings.callProviders.title");
+    case "notifications": return t("settings.notifications");
+    case "storage": return t("settings.storage");
+    case "networking": return t("tor.networking");
     case "about": return t("settings.about");
     default: return "";
   }
@@ -183,6 +188,13 @@ const title = computed(() => {
     <div v-if="settingsSubView === 'profile'" class="flex-1 overflow-y-auto">
       <div class="mx-auto max-w-2xl p-6">
         <UserEditForm />
+      </div>
+    </div>
+
+    <!-- ════════ Video call methods (WEE-57) ════════ -->
+    <div v-else-if="settingsSubView === 'callMethods'" class="flex-1 overflow-y-auto pb-safe">
+      <div class="mx-auto max-w-2xl p-6">
+        <CallProvidersSection />
       </div>
     </div>
 
@@ -508,6 +520,21 @@ const title = computed(() => {
           </div>
         </div>
       </Modal>
+    </div>
+
+    <!-- ════════ Notifications (WEE-75) ════════ -->
+    <div v-else-if="settingsSubView === 'notifications'" class="flex-1 overflow-y-auto">
+      <NotificationSettings />
+    </div>
+
+    <!-- ════════ Storage ════════ -->
+    <div v-else-if="settingsSubView === 'storage'" class="flex-1 overflow-y-auto">
+      <StorageSettings />
+    </div>
+
+    <!-- ════════ Networking / Tor ════════ -->
+    <div v-else-if="settingsSubView === 'networking'" class="flex-1 overflow-y-auto">
+      <TorSettingsSection />
     </div>
 
     <!-- ════════ About ════════ -->

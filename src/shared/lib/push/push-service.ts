@@ -3,7 +3,9 @@ import { LocalNotifications } from '@capacitor/local-notifications';
 import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
 import { IOSVoIPPush } from './ios-voip-push';
+import { shouldRingForCallPush } from './call-push-dedup';
 import { tRaw } from '@/shared/lib/i18n';
+import { interopLog } from '@/shared/lib/interop';
 
 /**
  * Sygnal `app_id` per platform. Both pushers can coexist on the same Matrix
@@ -114,7 +116,7 @@ class PushService {
   private getAllSenderNames: (() => Record<string, string>) | null = null;
   /** Callback to optimistically update room preview in Dexie when push arrives.
    *  Wired from auth store after ChatDbKit is initialized. */
-  private optimisticRoomUpdate: ((roomId: string, preview: string, timestamp: number, senderId?: string) => Promise<boolean>) | null = null;
+  private optimisticRoomUpdate: ((roomId: string, preview: string, timestamp: number, senderId?: string, eventId?: string) => Promise<boolean>) | null = null;
 
   setCallHandler(handler: typeof this.onCallPush) {
     this.onCallPush = handler;
@@ -168,25 +170,81 @@ class PushService {
     }
   }
 
-  private async registerPusher(matrixClient: any, token: string): Promise<void> {
-    const payload = buildPusherPayload(token, { isIOS });
-    try {
-      await matrixClient.setPusher(payload);
-      // pusher registered
+  /** Retry budget for setPusher. With 3 attempts and exponential backoff
+   *  (1s, 2s, 4s) we cover transient network blips and short Matrix homeserver
+   *  hiccups without blocking the boot path for more than ~7 seconds. */
+  private static readonly PUSHER_REGISTER_RETRIES = 3;
 
+  /** WEE-11 / forta-bugs#686: short pause before the FAST PATH fetch so the
+   *  homeserver has time to index the event the FCM push referred to.
+   *  Cold-start pushes often arrive ahead of indexing; without the grace the
+   *  targeted fetch 404s, we fall through to the 15s timeline-wait, and the
+   *  user keeps staring at the raw Matrix ID. 500ms is well below the push
+   *  UX budget (total path stays under 1.5s) and well above measured
+   *  homeserver indexing latency. */
+  private static readonly TARGETED_FETCH_GRACE_MS = 500;
+
+  /** Sleep helper kept inline to avoid a util import for one call site. */
+  private static sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  private async registerPusher(matrixClient: any, token: string): Promise<void> {
+    // WEE-44 (H1, forta-bugs#766/#572/#356/#344/#556): the original code did
+    // `await setPusher(...)` once and swallowed the error. A single transient
+    // failure (network blip, 5xx from /_matrix/push, slow Matrix sync) left
+    // the device with a valid FCM token that the homeserver had never been
+    // told about — so no push ever arrived for that session.
+    // iOS/Android use buildPusherPayload so app_id stays platform-correct.
+    const payload = buildPusherPayload(token, { isIOS });
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= PushService.PUSHER_REGISTER_RETRIES; attempt++) {
       try {
-        const { pushers } = await matrixClient.getPushers();
-        for (const p of pushers) {
-          if (isStalePusherEntry(p, payload.app_id, token)) {
-            // remove stale pusher
-            await matrixClient.setPusher({ ...p, kind: null });
-          }
+        await matrixClient.setPusher(payload);
+        if (attempt > 1) {
+          console.info(`[PushService] Pusher registered on attempt ${attempt}`);
         }
-      } catch (pe) {
-        console.warn('[PushService] Could not clean stale pushers:', pe);
+        // Pusher is live — best-effort stale cleanup is a separate concern;
+        // its failure must not invalidate the successful registration above.
+        try {
+          const { pushers } = await matrixClient.getPushers();
+          for (const p of pushers) {
+            if (isStalePusherEntry(p, payload.app_id, token)) {
+              await matrixClient.setPusher({ ...p, kind: null });
+            }
+          }
+        } catch (pe) {
+          console.warn('[PushService] Could not clean stale pushers:', pe);
+        }
+        return;
+      } catch (e) {
+        lastError = e;
+        if (attempt < PushService.PUSHER_REGISTER_RETRIES) {
+          const delay = 1000 * 2 ** (attempt - 1); // 1s, 2s
+          console.warn(
+            `[PushService] setPusher attempt ${attempt}/${PushService.PUSHER_REGISTER_RETRIES} failed, retrying in ${delay}ms:`,
+            e,
+          );
+          await PushService.sleep(delay);
+        }
       }
-    } catch (e) {
-      console.error('[PushService] Failed to register pusher:', e);
+    }
+    // Dead-letter: all retries exhausted. Stash the token + timestamp so a
+    // later boot can re-attempt registration even if the user does not
+    // explicitly re-trigger PushNotifications.register().
+    console.error(
+      '[PushService] Pusher registration failed permanently after',
+      PushService.PUSHER_REGISTER_RETRIES,
+      'attempts:',
+      lastError,
+    );
+    try {
+      localStorage.setItem(
+        'push_pusher_dead_letter',
+        JSON.stringify({ token, at: Date.now(), error: String(lastError) }),
+      );
+    } catch {
+      /* localStorage may be unavailable in degraded WebViews — non-fatal */
     }
   }
 
@@ -242,9 +300,16 @@ class PushService {
         return;
       }
 
-      // 2. FAST PATH: targeted fetch
+      // 2. FAST PATH: targeted fetch with a short grace delay.
+      // WEE-11 / forta-bugs#686: homeserver event indexing can lag the FCM
+      // delivery by ~200-500ms — fetching the event_id immediately returns
+      // 404 and we fall through to the 15s timeline-wait path, leaving the
+      // raw-Matrix-ID title on screen. A small grace gives the homeserver
+      // time to index the event before we ask for it.
       if (eventId) {
-        const fetched = await this.tryTargetedFetch(roomId, eventId);
+        const fetched = await this.tryTargetedFetch(roomId, eventId, {
+          graceMs: PushService.TARGETED_FETCH_GRACE_MS,
+        });
         if (fetched) {
           await this.replaceNotification(roomId, eventId, fetched);
           return;
@@ -260,12 +325,25 @@ class PushService {
     }
   }
 
-  /** Extract message from a directly-fetched event */
+  /**
+   * Extract message from a directly-fetched event.
+   *
+   * `opts.graceMs` (WEE-11 / forta-bugs#686): wait this long before issuing
+   * the fetch so the homeserver has time to index the event the push
+   * referred to. Without the grace, cold-start pushes routinely 404 on the
+   * first hit and we fall through to the slow timeline-wait path, leaving
+   * the raw Matrix ID visible as the notification title for 15s.
+   */
   private async tryTargetedFetch(
     roomId: string,
     eventId: string,
+    opts: { graceMs?: number } = {},
   ): Promise<{ senderName: string; body: string } | null> {
     try {
+      const graceMs = opts.graceMs ?? 0;
+      if (graceMs > 0) {
+        await PushService.sleep(graceMs);
+      }
       const { getMatrixClientService } = await import("@/entities/matrix/model/matrix-client");
       const matrixService = getMatrixClientService();
       const raw = await matrixService.fetchRoomEvent(roomId, eventId);
@@ -429,8 +507,19 @@ class PushService {
       // Prefer the stable Matrix call_id over event_id: caller clients
       // resend m.call.invite with a new event_id each retry while keeping
       // the call_id constant. Session 41.
+      const callId = data.call_id || data.event_id || '';
+
+      // WEE-35: drop a duplicate call push (FCM retry / multi-delivery) so we
+      // don't fire the native ringer twice for one call. Push-private window —
+      // does NOT dedup against the real /sync MatrixCall (see call-push-dedup).
+      if (!shouldRingForCallPush(callId)) {
+        interopLog('push', 'duplicate call push suppressed', { callId, roomId });
+        return;
+      }
+      interopLog('push', 'call push → ring', { callId, roomId });
+
       this.onCallPush?.({
-        callId: data.call_id || data.event_id || '',
+        callId,
         callerName: data.sender_display_name || tRaw('push.unknownSender'),
         roomId,
         hasVideo: false,
@@ -456,7 +545,10 @@ class PushService {
       });
       const ts = Date.now(); // Server timestamp not available in push — use local time.
                              // EventWriter's updateLastMessage will overwrite with real ts.
-      this.optimisticRoomUpdate(roomId, preview, ts, data.sender).catch(() => {});
+      // Pass event_id so updateLastMessage can recognize "same event"
+      // and replace this optimistic placeholder when /sync delivers the
+      // real (decrypted) body — see room-repository.ts updateLastMessage.
+      this.optimisticRoomUpdate(roomId, preview, ts, data.sender, data.event_id).catch(() => {});
     }
 
     // Try to decrypt and show rich notification
@@ -552,13 +644,38 @@ class PushService {
       console.warn('[PushService] Failed to check pending intent:', e);
     }
 
-    // 4. Register for FCM
+    // 4. Register for FCM (skip when google-services.json was not bundled — crashes otherwise)
+    let fcmAvailable = true;
+    try {
+      const status = await PushData.isFcmAvailable();
+      fcmAvailable = status.available;
+    } catch (e) {
+      console.warn('[PushService] isFcmAvailable check failed, assuming FCM disabled:', e);
+      fcmAvailable = false;
+    }
+
+    if (!fcmAvailable) {
+      console.warn(
+        '[PushService] FCM not configured (no google-services.json at build time) — skipping PushNotifications.register()',
+      );
+      return;
+    }
+
     await PushNotifications.removeAllListeners();
 
     PushNotifications.addListener('registration', async ({ value: token }) => {
       // FCM token received
       this.fcmToken = token;
       await this.registerPusher(matrixClient, token);
+      // WEE-44: if a previous boot left a dead-letter for the same token,
+      // a successful registration just now means we can safely clear it.
+      try {
+        const raw = localStorage.getItem('push_pusher_dead_letter');
+        if (raw) {
+          const dl = JSON.parse(raw) as { token?: string };
+          if (dl?.token === token) localStorage.removeItem('push_pusher_dead_letter');
+        }
+      } catch { /* non-fatal */ }
       await this.syncRoomNamesToNative();
       await this.syncSenderNamesToNative();
     });

@@ -52,6 +52,20 @@ export interface NativeCallNativePlugin {
     hasVideo: boolean;
   }): Promise<void>;
   /**
+   * WEE-31: idempotent ringer-surface ensurer. Launches the native
+   * IncomingCallActivity ONLY IF neither the activity nor the Telecom
+   * CallConnection is already showing. Use this from `handleIncomingCall`
+   * on the isNative path so that, when Matrix /sync delivers the invite
+   * before FCM does (typical when the app is in the foreground), the user
+   * still sees a ringer instead of nothing.
+   */
+  ensureIncomingCallVisible(options: {
+    callId: string;
+    callerName: string;
+    roomId: string;
+    hasVideo: boolean;
+  }): Promise<void>;
+  /**
    * Check if user tapped Answer before JS was ready.
    * Returns the push-side call_id AND the room_id, because the push
    * payload's call_id is often the event_id (not Matrix's content.

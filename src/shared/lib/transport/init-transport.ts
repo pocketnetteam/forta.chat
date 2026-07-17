@@ -1,12 +1,18 @@
 /**
- * Renderer-side transport initialisation for Electron.
+ * Renderer-side transport initialisation for Electron and Capacitor Android.
  *
+ * Electron:
  * - Registers the Service Worker (requires app:// origin in prod)
  * - Bridges BroadcastChannel('ExtendedFetch') ↔ window.fetchBridge IPC
- *   so the SW can route requests through the main-process Tor proxy
- * - Handles AltTransportActive queries from the SW via
- *   BroadcastChannel('ServiceWorker')
+ * - Handles AltTransportActive via IPC
+ *
+ * Capacitor Android:
+ * - Registers SW with platform=capacitor
+ * - Handles AltTransportActive via torService.isUseWithTor()
  */
+
+import { isAndroid, isNative } from '@/shared/lib/platform';
+import { shouldRouteThroughTor } from '@/shared/lib/tor/routing';
 
 declare global {
   interface Window {
@@ -19,13 +25,8 @@ declare global {
   }
 }
 
-const WHITELIST = [
-  /\.?youtube\.com$/,
-  /\.?imgur\.com$/,
-  /\.?cdn\.jsdelivr\.net$/,
-  /\.?vimeocdn\.com$/,
-  /\.?vimeo\.com$/,
-];
+/** @deprecated Import from `@/shared/lib/tor/routing` instead. */
+export { TRANSPORT_WHITELIST, isWhitelistedHost } from '@/shared/lib/tor/routing';
 
 function initFetchRetranslator() {
   const fetchBC = new BroadcastChannel('ExtendedFetch');
@@ -52,6 +53,26 @@ function initFetchRetranslator() {
   };
 }
 
+async function handleAltTransportActive(
+  url: string,
+  resolve: (useTor: boolean) => void,
+): Promise<void> {
+  try {
+    const useTor = await shouldRouteThroughTor(url, async (targetUrl) => {
+      if (isNative && isAndroid) {
+        const { torService } = await import('@/shared/lib/tor');
+        return torService.isUseWithTor(targetUrl);
+      }
+
+      const result = await window.fetchBridge.invoke('AltTransportActive', targetUrl);
+      return !!result;
+    });
+    resolve(useTor);
+  } catch {
+    resolve(false);
+  }
+}
+
 function initAltTransportHandler() {
   const swBC = new BroadcastChannel('ServiceWorker');
 
@@ -60,20 +81,9 @@ function initAltTransportHandler() {
       const url: string = msg.data.data;
       const id: string = msg.data.id;
 
-      try {
-        const hostname = new URL(url).hostname;
-
-        if (WHITELIST.some(re => re.test(hostname))) {
-          swBC.postMessage({ name: `AltTransportActive_result[${id}]`, data: false });
-          return;
-        }
-      } catch {
-        swBC.postMessage({ name: `AltTransportActive_result[${id}]`, data: false });
-        return;
-      }
-
-      const result = await window.fetchBridge.invoke('AltTransportActive', url);
-      swBC.postMessage({ name: `AltTransportActive_result[${id}]`, data: result });
+      await handleAltTransportActive(url, (useTor) => {
+        swBC.postMessage({ name: `AltTransportActive_result[${id}]`, data: useTor });
+      });
     }
   };
 }
@@ -84,7 +94,6 @@ export async function initTransport(): Promise<void> {
     return;
   }
 
-  // SW registration only works on http(s) origins; skip on app:// protocol
   const proto = location.protocol;
   if (proto !== 'https:' && proto !== 'http:') {
     console.warn(`Service Workers not supported on ${proto} — transport proxy disabled`);
@@ -99,5 +108,33 @@ export async function initTransport(): Promise<void> {
   }
 
   initFetchRetranslator();
+  initAltTransportHandler();
+}
+
+export async function initNativeTransport(): Promise<void> {
+  if (!isNative || !isAndroid) return;
+
+  if (!('serviceWorker' in navigator)) {
+    console.warn('[Transport] Service Workers not supported — native transport disabled');
+    return;
+  }
+
+  const proto = location.protocol;
+  if (proto !== 'https:' && proto !== 'http:') {
+    console.warn(`[Transport] Service Workers not supported on ${proto} — native transport disabled`);
+    return;
+  }
+
+  const appVersion = import.meta.env.VITE_APP_VERSION ?? 'dev';
+  const swUrl = `./service-worker.js?platform=capacitor&appVersion=${encodeURIComponent(appVersion)}`;
+
+  try {
+    await navigator.serviceWorker.register(swUrl);
+    console.info('[Transport] Capacitor Service Worker registered');
+  } catch (err) {
+    console.error('[Transport] Service Worker registration failed:', err);
+    return;
+  }
+
   initAltTransportHandler();
 }

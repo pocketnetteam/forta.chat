@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
 import { useAuthStore } from "@/entities/auth";
+import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
+import type { ChannelLastContent, LocalChannel } from "@/shared/lib/local-db";
 
 import type { Channel, ChannelPost } from "./types";
 
@@ -48,6 +50,62 @@ function parseChannel(raw: Record<string, unknown>): Channel {
   };
 }
 
+function channelLastContentToPost(c: ChannelLastContent): ChannelPost {
+  return {
+    txid: c.txid,
+    type: c.type,
+    caption: c.caption,
+    message: c.message,
+    time: c.time,
+    height: c.height,
+    scoreSum: c.scoreSum,
+    scoreCnt: c.scoreCnt,
+    comments: c.comments,
+    images: c.images,
+    url: c.url,
+    tags: c.tags,
+    settings: c.settings,
+  };
+}
+
+function postToChannelLastContent(p: ChannelPost): ChannelLastContent {
+  return {
+    txid: p.txid,
+    type: p.type,
+    caption: p.caption,
+    message: p.message,
+    time: p.time,
+    height: p.height,
+    scoreSum: p.scoreSum,
+    scoreCnt: p.scoreCnt,
+    comments: p.comments,
+    images: p.images,
+    url: p.url,
+    tags: p.tags,
+    settings: p.settings,
+  };
+}
+
+function localToChannel(lc: LocalChannel): Channel {
+  return {
+    address: lc.address,
+    name: lc.name,
+    avatar: lc.avatar,
+    lastContent: lc.lastContent ? channelLastContentToPost(lc.lastContent) : null,
+  };
+}
+
+function channelToLocal(c: Channel, syncOrder: number, now: number): LocalChannel {
+  return {
+    address: c.address,
+    name: c.name,
+    avatar: c.avatar,
+    lastContent: c.lastContent ? postToChannelLastContent(c.lastContent) : null,
+    syncOrder,
+    updatedAt: now,
+  };
+}
+
 export const useChannelStore = defineStore("channel", () => {
   const channels = ref<Channel[]>([]);
   const activeChannelAddress = ref<string | null>(null);
@@ -61,6 +119,10 @@ export const useChannelStore = defineStore("channel", () => {
   const blockHeight = ref(0);
   const channelError = ref<string | null>(null);
   const postsError = ref<string | null>(null);
+  /** True once a successful Dexie hydration completed in this session.
+   *  Prevents `fetchChannels(reset=true)` from clearing the visible list
+   *  before the RPC response arrives — Dexie data stays as first-paint. */
+  const isHydrated = ref(false);
 
   const activeChannel = computed(() =>
     channels.value.find((c) => c.address === activeChannelAddress.value) ?? null
@@ -78,15 +140,74 @@ export const useChannelStore = defineStore("channel", () => {
       : false
   );
 
+  /** Cold-start render: load the persisted channel set from Dexie before the
+   *  Pocketnet RPC response arrives. Tor + slow networks can delay
+   *  `fetchChannels` by 10–20s, during which the sidebar would otherwise be
+   *  empty — users perceive that as "groups/channels disappeared" (WEE-24). */
+  async function hydrateFromDexie(): Promise<void> {
+    if (isHydrated.value) return;
+    if (!isChatDbReady()) return;
+    try {
+      const stored = await getChatDb().channels.getAll();
+      if (stored.length > 0 && channels.value.length === 0) {
+        channels.value = stored.map(localToChannel);
+      }
+      isHydrated.value = true;
+    } catch (e) {
+      console.warn("[channel-store] hydrateFromDexie failed:", e);
+    }
+  }
+
+  /** Persist the currently visible list to Dexie. `reset=true` rewrites the
+   *  full set so unsubscribed channels disappear locally too; otherwise the
+   *  newly appended page is upserted on top of existing rows. */
+  async function persistChannels(reset: boolean, freshlyAdded: Channel[]): Promise<void> {
+    if (!isChatDbReady()) return;
+    const now = Date.now();
+    try {
+      const repo = getChatDb().channels;
+      if (reset) {
+        // Mirror the in-memory list one-for-one so order is preserved.
+        await repo.replaceAll(
+          channels.value.map((c, idx) => channelToLocal(c, idx, now)),
+        );
+      } else if (freshlyAdded.length > 0) {
+        // syncOrder follows the in-memory tail; cheaper than recomputing
+        // every existing row.
+        const startIdx = channels.value.length - freshlyAdded.length;
+        await repo.bulkUpsert(
+          freshlyAdded.map((c, i) => channelToLocal(c, startIdx + i, now)),
+        );
+      }
+    } catch (e) {
+      console.warn("[channel-store] persistChannels failed:", e);
+    }
+  }
+
   async function fetchChannels(reset = false) {
     const authStore = useAuthStore();
     const addr = authStore.address;
     if (!addr) return;
 
+    // Dedupe concurrent fetches. With Dexie hydration in place, both
+    // ChatSidebar and ChannelList kick off `fetchChannels(true)` on cold-start
+    // (sidebar fires first, then the child once its `onMounted` runs) —
+    // without this guard each cold-start would burn two Pocketnet RPC calls
+    // and race two `replaceAll` Dexie writes. The `isLoadingChannels` flag is
+    // flipped back to `false` in the `finally` block, so sequential
+    // pagination still works as before.
+    if (isLoadingChannels.value) return;
+
     if (reset) {
       channelsPage.value = 0;
       hasMoreChannels.value = true;
-      channels.value = [];
+      // Do NOT clear `channels.value` here — keep the Dexie-hydrated list as
+      // the first-paint until the RPC response replaces it. Otherwise a slow
+      // network would flash an empty sidebar on every restart (WEE-24).
+      // Accepted trade-off: a channel the user unsubscribed from on another
+      // device stays visible for the in-flight window. We accept that over
+      // flashing an empty sidebar; `replaceAll` in `persistChannels` drops
+      // unsubscribed entries the moment the RPC response lands.
       blockHeight.value = 4675546;
     }
 
@@ -134,14 +255,37 @@ export const useChannelStore = defineStore("channel", () => {
         fresh.push(channel);
       }
 
-      if (reset) {
-        channels.value = fresh;
-      } else {
-        channels.value = [...channels.value, ...fresh];
+      // Guard against a transient/malformed empty response wiping a populated
+      // list. A `reset` fetch that yields ZERO channels while we already show a
+      // hydrated non-empty list is far more likely a flaky RPC (Tor hiccup,
+      // partial page, all-broken outputs) than the user genuinely unsubscribing
+      // from everything. Keep the existing list + Dexie rows instead of
+      // flashing an empty sidebar (WEE-24 follow-up). Trade-off: unsubscribing
+      // from ALL channels on another device won't reflect until a non-empty
+      // fetch reconciles — an acceptable, self-healing edge case.
+      const isSuspiciousEmptyReset =
+        reset && fresh.length === 0 && channels.value.length > 0;
+
+      if (!isSuspiciousEmptyReset) {
+        if (reset) {
+          channels.value = fresh;
+        } else {
+          channels.value = [...channels.value, ...fresh];
+        }
       }
 
       hasMoreChannels.value = pageHadFullCount;
       channelsPage.value += 1;
+
+      // Persist fresh server data so the next cold-start renders immediately.
+      // `reset` mirrors the full list (drops unsubscribed channels); pages
+      // upsert only the newly appended slice. Mark hydrated since post-fetch
+      // Dexie state is now authoritative. Skip the destructive `replaceAll([])`
+      // when we suppressed a suspicious empty reset above.
+      if (!isSuspiciousEmptyReset) {
+        await persistChannels(reset, fresh);
+      }
+      isHydrated.value = true;
     } catch (e) {
       console.error("[channel-store] fetchChannels error:", e);
       channelError.value = String(e);
@@ -228,6 +372,7 @@ export const useChannelStore = defineStore("channel", () => {
     blockHeight.value = 0;
     channelError.value = null;
     postsError.value = null;
+    isHydrated.value = false;
   };
 
   return {
@@ -243,11 +388,13 @@ export const useChannelStore = defineStore("channel", () => {
     blockHeight,
     channelError,
     postsError,
+    isHydrated,
     activeChannel,
     activePosts,
     activeHasMorePosts,
     fetchChannels,
     fetchPosts,
+    hydrateFromDexie,
     setActiveChannel,
     clearActiveChannel,
     cleanup,

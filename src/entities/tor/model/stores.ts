@@ -1,18 +1,62 @@
-import type { TorMode, TorStatus } from "./types";
+import type { TorBridgeType, TorMode, TorNetworkStats, TorRequestFlash, TorStatus } from "./types";
+import { fromNativeBridgeType, toNativeBridgeType } from "../lib/tor-settings-helpers";
+import {
+  applyNetworkStatsEvent,
+  CURRENT_STATS_RESET_MS,
+  REQUEST_FLASH_MS,
+  resetCurrentNetworkStats,
+  type NetworkStatsEvent,
+} from "../lib/network-stats";
 import { useLocalStorage } from "@/shared/lib/browser";
-import { isElectron, isNative } from "@/shared/lib/platform";
+import { hasTor, isElectron, isNative } from "@/shared/lib/platform";
+import { initNetworkStatsListener } from "@/shared/lib/transport/network-stats-listener";
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 
 const NAMESPACE = "tor";
 
+const EMPTY_NETWORK_STATS: TorNetworkStats = {
+  directBytes: 0,
+  torBytes: 0,
+  totalDirectBytes: 0,
+  totalTorBytes: 0,
+};
+
+const STATUS_POLL_INTERVAL_MS = 2000;
+
+type ElectronTorApi = {
+  onTorStatus?: (cb: (data: { status: TorStatus; info: string }) => void) => void;
+  torConfigure?: (opts: { mode: TorMode; useSnowFlake2: boolean }) => Promise<void>;
+  torSetMode?: (mode: TorMode) => Promise<void>;
+  torGetStatus?: () => Promise<{
+    status: TorStatus;
+    info: string;
+    mode?: TorMode;
+    useSnowFlake2?: boolean;
+  } | null>;
+};
+
+function getElectronApi(): ElectronTorApi | undefined {
+  return (window as { electronAPI?: ElectronTorApi }).electronAPI;
+}
+
 export const useTorStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSMode, value: lsMode } =
     useLocalStorage<TorMode>("tor_mode", "neveruse");
+  const { setLSValue: setLSBridge, value: lsBridge } =
+    useLocalStorage<TorBridgeType>("tor_bridge_type", "none");
 
   const mode = ref<TorMode>(lsMode || "neveruse");
+  const bridgeType = ref<TorBridgeType>(lsBridge || "none");
   const status = ref<TorStatus>("stopped");
   const info = ref("");
+  const networkStats = ref<TorNetworkStats>({ ...EMPTY_NETWORK_STATS });
+  const requestFlash = ref<TorRequestFlash>(null);
+
+  let currentStatsResetTimer: ReturnType<typeof setTimeout> | null = null;
+  let requestFlashTimer: ReturnType<typeof setTimeout> | null = null;
+  let statusPollTimer: ReturnType<typeof setInterval> | null = null;
+  let networkStatsCleanup: (() => void) | null = null;
 
   // Verification state. `error` is set by TorService.verify() when the
   // platform doesn't ship Tor (iOS) so callers can distinguish "verifier
@@ -20,12 +64,13 @@ export const useTorStore = defineStore(NAMESPACE, () => {
   const verifyResult = ref<{ isTor: boolean; ip: string; error?: string } | null>(null);
   const isVerifying = ref(false);
 
-  // --- Computed ---
   const isConnected = computed(() => status.value === "started");
   const isConnecting = computed(
-    () => status.value === "running" || status.value === "install"
+    () => status.value === "running" || status.value === "install",
   );
   const isEnabled = computed(() => mode.value !== "neveruse");
+  const isSnowflakeEnabled = computed(() => bridgeType.value === "snowflake");
+
   const statusLabel = computed(() => {
     switch (status.value) {
       case "started":
@@ -40,9 +85,14 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     }
   });
 
-  // --- Native helpers ---
+  const hintState = computed((): "off" | "loading" | "on" | "failed" => {
+    if (!isEnabled.value) return "off";
+    if (status.value === "failed") return "failed";
+    if (isConnecting.value || isVerifying.value) return "loading";
+    if (isConnected.value) return "on";
+    return "loading";
+  });
 
-  /** Map native TorService state strings to TorStore status */
   function mapNativeState(state: string, progress: number): TorStatus {
     switch (state) {
       case "RUNNING":
@@ -56,29 +106,70 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     }
   }
 
-  // --- Actions ---
+  async function applyNativeConfigure(newMode: TorMode, bridge: TorBridgeType): Promise<void> {
+    const { torService } = await import("@/shared/lib/tor");
+    await torService.ensureListeners();
+
+    if (newMode === "neveruse") {
+      await torService.reconfigure({
+        mode: "neveruse",
+        bridgeType: toNativeBridgeType(bridge),
+      });
+      status.value = "stopped";
+      info.value = "";
+      verifyResult.value = null;
+      return;
+    }
+
+    status.value = "running";
+    info.value = "";
+    verifyResult.value = null;
+    await torService.reconfigure({
+      mode: newMode,
+      bridgeType: toNativeBridgeType(bridge),
+    });
+  }
+
+  async function applyElectronConfigure(newMode: TorMode, bridge: TorBridgeType): Promise<void> {
+    const api = getElectronApi();
+    if (!api) return;
+
+    if (api.torConfigure) {
+      await api.torConfigure({
+        mode: newMode,
+        useSnowFlake2: bridge === "snowflake",
+      });
+    } else {
+      await api.torSetMode?.(newMode);
+    }
+  }
+
   const setMode = async (newMode: TorMode) => {
     mode.value = newMode;
     setLSMode(newMode);
 
     if (isElectron) {
-      (window as any).electronAPI?.torSetMode(newMode);
+      await applyElectronConfigure(newMode, bridgeType.value);
     } else if (isNative) {
-      const { torService } = await import("@/shared/lib/tor");
-      if (newMode === "neveruse") {
-        await torService.stop();
-        status.value = "stopped";
-        info.value = "";
-        verifyResult.value = null;
-      } else {
-        // Immediately show connecting state
-        status.value = "running";
-        info.value = "";
-        verifyResult.value = null;
-        const nativeMode = newMode === "auto" ? "auto" : "always";
-        await torService.init(nativeMode);
-      }
+      await applyNativeConfigure(newMode, bridgeType.value);
     }
+  };
+
+  const setBridgeType = async (newBridge: TorBridgeType) => {
+    bridgeType.value = newBridge;
+    setLSBridge(newBridge);
+
+    if (mode.value === "neveruse") return;
+
+    if (isElectron) {
+      await applyElectronConfigure(mode.value, newBridge);
+    } else if (isNative) {
+      await applyNativeConfigure(mode.value, newBridge);
+    }
+  };
+
+  const toggleSnowflake = async () => {
+    await setBridgeType(bridgeType.value === "snowflake" ? "none" : "snowflake");
   };
 
   const toggle = async () => {
@@ -97,12 +188,10 @@ export const useTorStore = defineStore(NAMESPACE, () => {
           verifyResult.value = result;
           return;
         }
-        // Last attempt — accept whatever we got
         if (attempt === retries - 1) {
           verifyResult.value = result;
           return;
         }
-        // Wait before retry (SOCKS may not be ready yet)
         await new Promise((r) => setTimeout(r, delayMs));
       }
     } catch {
@@ -112,19 +201,128 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  async function syncFromNative(): Promise<void> {
+    if (!isNative) return;
+    const { torService } = await import("@/shared/lib/tor");
+    const settings = await torService.getSettings();
+    mode.value = settings.mode;
+    bridgeType.value = fromNativeBridgeType(settings.bridgeType);
+    setLSMode(settings.mode);
+    setLSBridge(bridgeType.value);
+  }
+
+  async function pollNativeStatus(): Promise<void> {
+    if (!isNative) return;
+    try {
+      const { registerPlugin } = await import("@capacitor/core");
+      const TorNative = registerPlugin<{
+        getStatus(): Promise<{ progress: number; state: string }>;
+      }>("Tor");
+      const nativeStatus = await TorNative.getStatus();
+      status.value = mapNativeState(nativeStatus.state, nativeStatus.progress);
+      info.value = nativeStatus.progress > 0 && nativeStatus.progress < 100
+        ? `Bootstrapped ${nativeStatus.progress}%`
+        : "";
+    } catch {
+      // Polling is best-effort; reactive listeners remain the primary source.
+    }
+  }
+
+  async function pollElectronStatus(): Promise<void> {
+    const api = getElectronApi();
+    if (!api?.torGetStatus) return;
+    try {
+      const current = await api.torGetStatus();
+      if (current) {
+        status.value = current.status;
+        info.value = current.info || "";
+      }
+    } catch {
+      // Best-effort polling alongside onTorStatus push events.
+    }
+  }
+
+  function handleNetworkStats(event: NetworkStatsEvent): void {
+    networkStats.value = applyNetworkStatsEvent(networkStats.value, event);
+
+    if (currentStatsResetTimer) clearTimeout(currentStatsResetTimer);
+    currentStatsResetTimer = setTimeout(() => {
+      networkStats.value = resetCurrentNetworkStats(networkStats.value);
+      currentStatsResetTimer = null;
+    }, CURRENT_STATS_RESET_MS);
+
+    if (event.torUsed) {
+      requestFlash.value = event.status === "success" ? "success" : "failed";
+      if (requestFlashTimer) clearTimeout(requestFlashTimer);
+      requestFlashTimer = setTimeout(() => {
+        requestFlash.value = null;
+        requestFlashTimer = null;
+      }, REQUEST_FLASH_MS);
+    }
+  }
+
+  function startStatusPolling(): void {
+    if (!hasTor || statusPollTimer) return;
+
+    const poll = () => {
+      if (isElectron) {
+        void pollElectronStatus();
+      } else if (isNative) {
+        void pollNativeStatus();
+      }
+    };
+
+    poll();
+    statusPollTimer = setInterval(poll, STATUS_POLL_INTERVAL_MS);
+  }
+
+  function startNetworkStatsListener(): void {
+    if (!hasTor || networkStatsCleanup) return;
+    networkStatsCleanup = initNetworkStatsListener(handleNetworkStats);
+  }
+
+  function stopTorMonitoring(): void {
+    if (statusPollTimer) {
+      clearInterval(statusPollTimer);
+      statusPollTimer = null;
+    }
+    if (currentStatsResetTimer) {
+      clearTimeout(currentStatsResetTimer);
+      currentStatsResetTimer = null;
+    }
+    if (requestFlashTimer) {
+      clearTimeout(requestFlashTimer);
+      requestFlashTimer = null;
+    }
+    networkStatsCleanup?.();
+    networkStatsCleanup = null;
+  }
+
   const init = async () => {
+    if (!hasTor) return;
+
+    startNetworkStatsListener();
+    startStatusPolling();
+
     if (isElectron) {
-      const api = (window as any).electronAPI;
+      const api = getElectronApi();
       if (!api) return;
 
-      api.onTorStatus((data: { status: TorStatus; info: string }) => {
+      api.onTorStatus?.((data) => {
         status.value = data.status;
         info.value = data.info || "";
       });
 
-      await api.torSetMode(mode.value);
+      if (api.torConfigure) {
+        await api.torConfigure({
+          mode: mode.value,
+          useSnowFlake2: bridgeType.value === "snowflake",
+        });
+      } else {
+        await api.torSetMode?.(mode.value);
+      }
 
-      const current = await api.torGetStatus();
+      const current = await api.torGetStatus?.();
       if (current) {
         status.value = current.status;
         info.value = current.info || "";
@@ -132,13 +330,14 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     } else if (isNative) {
       const { torService } = await import("@/shared/lib/tor");
 
-      // Sync reactive state from torService → store
+      await syncFromNative();
+
       watch(
         () => torService.state.value,
         (state) => {
           status.value = mapNativeState(state, torService.progress.value);
         },
-        { immediate: true }
+        { immediate: true },
       );
 
       watch(
@@ -147,13 +346,11 @@ export const useTorStore = defineStore(NAMESPACE, () => {
           info.value = progress > 0 && progress < 100
             ? `Bootstrapped ${progress}%`
             : "";
-          // Re-evaluate status when progress changes
           status.value = mapNativeState(torService.state.value, progress);
         },
-        { immediate: true }
+        { immediate: true },
       );
 
-      // Auto-verify when Tor becomes connected (delay for SOCKS listener to be ready)
       watch(
         () => status.value,
         (newStatus) => {
@@ -165,24 +362,32 @@ export const useTorStore = defineStore(NAMESPACE, () => {
             }, 3000);
           }
         },
-        { immediate: true }
+        { immediate: true },
       );
     }
   };
 
   return {
     mode,
+    bridgeType,
     status,
     info,
+    networkStats,
+    requestFlash,
     isConnected,
     isConnecting,
     isEnabled,
+    isSnowflakeEnabled,
     statusLabel,
+    hintState,
     verifyResult,
     isVerifying,
     setMode,
+    setBridgeType,
+    toggleSnowflake,
     toggle,
     verify,
     init,
+    stopTorMonitoring,
   };
 });

@@ -29,3 +29,12 @@ export const useTablet = () =>
 
 /** Desktop: ≥ 1024px */
 export const useDesktop = () => useMediaQuery("(min-width: 1024px)");
+
+/** A touch phone held in landscape: short viewport (≤ 575px tall), landscape
+ *  orientation, coarse pointer. Width-based `useMobile()` misses these because
+ *  a landscape phone exceeds the 768px `md` breakpoint, which broke the message
+ *  edit layout (#829). `pointer: coarse` keeps short desktop windows out. */
+export const useLandscapePhone = () =>
+  useMediaQuery(
+    "(max-height: 575px) and (orientation: landscape) and (pointer: coarse)",
+  );

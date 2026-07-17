@@ -20,6 +20,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom, LocalAttachment } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 // --- Mocks -------------------------------------------------------------------
 
@@ -106,7 +107,7 @@ interface Harness {
     getByClientId: ReturnType<typeof vi.fn>;
     updateUploadProgress: ReturnType<typeof vi.fn>;
   };
-  roomRepo: { updateRoom: ReturnType<typeof vi.fn> };
+  roomRepo: { updateRoom: ReturnType<typeof vi.fn>; syncLastMessageLocalStatus: ReturnType<typeof vi.fn> };
   getRoomCrypto: ReturnType<typeof vi.fn>;
 }
 
@@ -125,7 +126,7 @@ function makeHarness(
     getByClientId: vi.fn(async (..._args: unknown[]) => opts.existingMsg as LocalMessage | undefined),
     updateUploadProgress: vi.fn(async () => undefined),
   };
-  const roomRepo = { updateRoom: vi.fn(async () => undefined) };
+  const roomRepo = { updateRoom: vi.fn(async () => undefined), syncLastMessageLocalStatus: vi.fn(async () => undefined) };
   const roomCrypto = encrypted
     ? {
         canBeEncrypt: () => true,
@@ -205,8 +206,7 @@ describe("SyncEngine.syncSendFile — full media pipeline", () => {
   });
 
   afterEach(async () => {
-    h?.engine.dispose();
-    await h?.db.delete();
+    if (h) await disposeSyncEngineHarness(h);
   });
 
   it("uploads via uploadContent (progress+signal path), not uploadContentMxc", async () => {
@@ -358,8 +358,7 @@ describe("SyncEngine.recoverStrandedOps — send_file crash recovery", () => {
   });
 
   afterEach(async () => {
-    h?.engine.dispose();
-    await h?.db.delete();
+    if (h) await disposeSyncEngineHarness(h);
   });
 
   it("resets a 'syncing' send_file op to 'pending' and completes on next tick", async () => {
@@ -413,8 +412,7 @@ describe("SyncEngine.cancelMediaUpload — user cancel mid-flight", () => {
   });
 
   afterEach(async () => {
-    h?.engine.dispose();
-    await h?.db.delete();
+    if (h) await disposeSyncEngineHarness(h);
   });
 
   it("aborts the in-flight upload AND removes the pending op (no auto-resume)", async () => {

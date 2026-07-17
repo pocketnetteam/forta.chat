@@ -214,7 +214,7 @@ npx vue-tsc --noEmit       # проверка типов
 npm run test               # тесты
 ```
 
-Конвенции, правила по изоляции через git worktrees, TDD, code review и прочее — в [CLAUDE.md](CLAUDE.md).
+Конвенции, TDD, code review и прочее — в [CLAUDE.md](CLAUDE.md).
 
 Коммит-сообщения: [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 

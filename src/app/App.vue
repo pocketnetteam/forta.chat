@@ -33,6 +33,8 @@ import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
 import { useIOSKeyboardCssVar } from "@/shared/lib/composables/use-ios-keyboard-css-var";
+import { useResumeRedirect } from "@/shared/lib/composables/use-resume-redirect";
+import { useUnreadDocumentTitle } from "@/shared/lib/composables/use-unread-document-title";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
@@ -53,6 +55,12 @@ const authStore = useAuthStore();
 authStore.setSyncStatusCallback(handleSdkSync);
 const chatStore = useChatStore();
 const router = useRouter();
+
+// On resume after >60s background, return to chat list (unless in a call or already there).
+useResumeRedirect();
+
+// Keep browser tab title in sync with total unread: "(N) Forta Chat" when N > 0.
+useUnreadDocumentTitle();
 
 const retryError = ref("");
 
@@ -82,6 +90,15 @@ const handleRetryUsername = async (newName: string) => {
   } catch (e) {
     retryError.value = e instanceof Error ? e.message : t("register.registrationFailed");
     console.error("[App] retry username failed:", e);
+  }
+};
+
+const handleCancelRegistration = async () => {
+  try {
+    await authStore.cancelRegistration();
+    await router.replace({ name: "RegisterPage" });
+  } catch (e) {
+    console.error("[App] cancel registration failed:", e);
   }
 };
 
@@ -175,6 +192,14 @@ const processReferral = async () => {
 };
 
 // Handle push notification tap → navigate to specific chat room
+// WEE-44 / forta-bugs#790: the tap target is unambiguously the chat itself,
+// not the room list. Two changes from the previous flow:
+//   1. setActiveRoom BEFORE the route push — so the ChatPage paints the
+//      correct room on first frame instead of briefly flashing the list
+//      view while the watcher catches up.
+//   2. router.replace (not push) when the current route is the chat list
+//      so the device "Back" button doesn't strand the user on the list
+//      they never asked to see.
 const processPushOpenRoom = (roomId: string) => {
   if (!authStore.isAuthenticated || !authStore.matrixReady) {
     // Defer until Matrix is ready
@@ -186,18 +211,32 @@ const processPushOpenRoom = (roomId: string) => {
     getMatrixClientService().client?.retryImmediately();
   }).catch(() => {});
 
+  const navigateToChat = () => {
+    chatStore.setActiveRoom(roomId);
+    const target = { name: "ChatPage" } as const;
+    // Use replace only when we're already on ChatPage — that just swaps the
+    // active room without polluting history with the previous chat. For any
+    // other origin (Settings, Profile, Welcome…) keep push so the user's
+    // navigation stack is preserved and device Back returns where they came
+    // from. Either way the route never lands on a chat-list step (#790).
+    const currentName = router.currentRoute.value.name;
+    if (currentName === "ChatPage") {
+      router.replace(target);
+    } else {
+      router.push(target);
+    }
+  };
+
   // Wait for rooms to load before navigating (on cold-start, sync may not have finished)
   if (chatStore.roomsInitialized) {
-    chatStore.setActiveRoom(roomId);
-    router.push({ name: "ChatPage" });
+    navigateToChat();
   } else {
     const unwatch = watch(
       () => chatStore.roomsInitialized,
       (ready) => {
         if (ready) {
           unwatch();
-          chatStore.setActiveRoom(roomId);
-          router.push({ name: "ChatPage" });
+          navigateToChat();
         }
       },
       { immediate: true },
@@ -390,6 +429,12 @@ onMounted(async () => {
     }
   }
 
+  // WEE-102: on reload, hydrate local contact aliases from Dexie BEFORE the
+  // (network) profile fetch + Matrix init below. Offline, fetchUserInfo can
+  // stall and initMatrix's own hydration would never run, so renamed contacts
+  // would show raw nicknames forever. Reading Dexie needs no connectivity.
+  authStore.hydrateLocalAliasesEarly().catch(() => { /* best-effort */ });
+
   try {
     await authStore.fetchUserInfo();
   } catch (e) {
@@ -424,8 +469,12 @@ onUnmounted(() => {
       :phase="authStore.registrationPhase"
       :error-message="retryError"
       :error-type="registrationErrorType"
+      :poll-attempt="authStore.registrationPollAttempt"
+      :reg-address="authStore.address"
+      :show-cancel="authStore.canCancelRegistration"
       @back-to-name="handleRetryUsername"
       @retry="handleRetryRegistration"
+      @cancel="handleCancelRegistration"
     />
     <TitleBar v-if="isElectron" />
     <div class="relative min-h-0 flex-1 overflow-hidden">

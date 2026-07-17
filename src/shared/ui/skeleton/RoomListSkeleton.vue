@@ -1,5 +1,8 @@
 <script setup lang="ts">
-const props = withDefaults(defineProps<{ firstLoad?: boolean }>(), { firstLoad: false });
+const props = withDefaults(defineProps<{ firstLoad?: boolean; slow?: boolean }>(), {
+  firstLoad: false,
+  slow: false,
+});
 const { t } = useI18n();
 </script>
 
@@ -8,8 +11,8 @@ const { t } = useI18n();
     <!-- Full loading message — only on first login (no cache) -->
     <div v-if="props.firstLoad" class="flex flex-col items-center gap-2 px-4 pt-8 pb-4 text-center">
       <div class="contain-strict h-5 w-5 animate-spin rounded-full border-2 border-neutral-grad-2 border-t-primary" />
-      <p class="text-sm font-medium text-neutral-content">{{ t('contactList.loadingChats') }}</p>
-      <p class="text-xs text-neutral-content/60">{{ t('contactList.loadingChatsHint') }}</p>
+      <p class="text-sm font-medium text-neutral-content">{{ props.slow ? t('contactList.loadingChatsSlow') : t('contactList.loadingChats') }}</p>
+      <p class="text-xs text-neutral-content/60">{{ props.slow ? t('contactList.loadingChatsSlowHint') : t('contactList.loadingChatsHint') }}</p>
     </div>
 
     <!-- Skeleton rows -->

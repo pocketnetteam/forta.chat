@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   getWebViewInfo,
   isLegacyWebView,
+  shouldWarnLegacyWebView,
   MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC,
 } from "./webview-compatibility";
 
@@ -122,5 +123,31 @@ describe("isLegacyWebView", () => {
   it("uses the documented constant for default threshold", () => {
     // Sentinel — if someone bumps the constant we want the test to scream.
     expect(MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC).toBe(100);
+  });
+});
+
+describe("shouldWarnLegacyWebView", () => {
+  it("warns when a legacy WebView drives a call on the web path", () => {
+    expect(
+      shouldWarnLegacyWebView({ isNative: false, isLegacy: true, alreadyWarned: false }),
+    ).toBe(true);
+  });
+
+  it("never warns on native (bundled libwebrtc, UA version irrelevant)", () => {
+    expect(
+      shouldWarnLegacyWebView({ isNative: true, isLegacy: true, alreadyWarned: false }),
+    ).toBe(false);
+  });
+
+  it("does not warn on a modern WebView", () => {
+    expect(
+      shouldWarnLegacyWebView({ isNative: false, isLegacy: false, alreadyWarned: false }),
+    ).toBe(false);
+  });
+
+  it("fires only once per process (one-shot guard)", () => {
+    expect(
+      shouldWarnLegacyWebView({ isNative: false, isLegacy: true, alreadyWarned: true }),
+    ).toBe(false);
   });
 });

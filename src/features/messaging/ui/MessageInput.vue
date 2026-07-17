@@ -7,20 +7,24 @@ import { getDraft, saveDraft, clearDraft } from "@/shared/lib/drafts";
 import { useMessages } from "../model/use-messages";
 import { useLinkPreview } from "../model/use-link-preview";
 import { useI18n } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { useMediaUpload } from "../model/use-media-upload";
 import { usePasteDrop } from "../model/use-paste-drop";
 import EmojiPicker from "./EmojiPicker.vue";
 import AttachmentPanel from "./AttachmentPanel.vue";
 import MediaPreview from "./MediaPreview.vue";
 import PollCreator from "./PollCreator.vue";
+import SendErrorBanner from "./SendErrorBanner.vue";
 import { useVoiceRecorder } from "../model/use-voice-recorder";
 import { useVideoCircleRecorder } from "../model/use-video-circle-recorder";
 import { useMentionAutocomplete } from "../model/use-mention-autocomplete";
 import MentionAutocomplete from "./MentionAutocomplete.vue";
-import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { useMobile, useLandscapePhone } from "@/shared/lib/composables/use-media-query";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { shouldSendOnEnter } from "../model/enter-key-behavior";
 import { isSendButtonVisible, isSendButtonDisabled } from "../model/send-button-state";
+import { insertEmojiAtCursor } from "../model/emoji-insertion";
+import { deriveInputLayout } from "../model/input-layout";
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
 import { readShareUriAsBlob } from "@/shared/lib/share-target";
@@ -28,6 +32,11 @@ import { readShareUriAsBlob } from "@/shared/lib/share-target";
 const PEER_KEYS_GRACE_MS = 2000;
 
 const isMobile = useMobile();
+const isLandscapePhone = useLandscapePhone();
+// A landscape phone must behave like mobile (#829): width-based `useMobile`
+// reports it as desktop, which kept secondary buttons open and made Enter send
+// mid-edit instead of inserting a newline.
+const isMobileLike = computed(() => isMobile.value || isLandscapePhone.value);
 
 const props = defineProps<{
   showDonate?: boolean;
@@ -38,6 +47,7 @@ const emit = defineEmits<{ donate: [] }>();
 const chatStore = useChatStore();
 const themeStore = useThemeStore();
 const { t } = useI18n();
+const { toast } = useToast();
 const { sendMessage, sendFile, sendImage, sendAudio, sendVideoCircle, sendReply, sendForward, forwardMessages, editMessage, setTyping, sendPoll, sendGif } = useMessages();
 const mediaUpload = useMediaUpload();
 const pasteDrop = usePasteDrop({
@@ -207,6 +217,13 @@ const peerKeysOk = computed(() => {
   });
 });
 
+// External share = user picked Forta from Android Share Sheet and chose this
+// room. Bypass peerKeysOk gate (Session 48 / #717 #710 #706): SyncEngine
+// retries the send with exponential backoff while peer keys propagate, and on
+// terminal failure the bubble lands as "failed" with a visible retry — both
+// are strictly better than the previous silent Send-tap-does-nothing UX.
+const isExternalShareActive = computed(() => chatStore.forwardingMessage?.isExternalShare === true);
+
 const isEditing = computed(() => !!chatStore.editingMessage);
 
 const cancelEdit = () => {
@@ -216,7 +233,7 @@ const cancelEdit = () => {
   nextTick(() => { if (textareaRef.value) textareaRef.value.style.height = "auto"; });
 };
 
-const maxTextareaHeight = computed(() => isMobile.value ? 120 : 200);
+const maxTextareaHeight = computed(() => isMobileLike.value ? 120 : 200);
 
 let resizeRaf = 0;
 const autoGrow = () => {
@@ -240,10 +257,27 @@ const autoGrowSync = () => {
 // Keep old name as alias so existing callsites work
 const autoResize = autoGrow;
 
-const showSecondaryActions = computed(() => !isMobile.value || !text.value.trim());
+// WEE-48 / forta-bugs#593, #515: on mobile portrait the input row hosts Emoji +
+// Textarea + PKOIN + Attach + Send/Record, which leaves the textarea at ~45-50%
+// while the user is mid-message. PKOIN now follows the same rule as the other
+// secondary buttons — visible when the input is idle, hidden as soon as the
+// user starts typing so the textarea reclaims the row. Donate stays reachable
+// through AttachmentPanel either way.
+const inputLayout = computed(() => deriveInputLayout({
+  isMobile: isMobile.value,
+  isLandscapePhone: isLandscapePhone.value,
+  text: text.value,
+  showDonate: !!props.showDonate,
+}));
+const showSecondaryActions = computed(() => inputLayout.value.showSecondaryActions);
+const showDonateShortcut = computed(() => inputLayout.value.showDonateShortcut);
 
 const handleSend = async () => {
-  if ((!text.value.trim() && !showForwardPreview.value && !showBulkForwardPreview.value) || !peerKeysOk.value) return;
+  if (!text.value.trim() && !showForwardPreview.value && !showBulkForwardPreview.value) return;
+  // External share bypasses peerKeysOk — the user already picked the target,
+  // SyncEngine queues the op. Without this branch the Send tap was a silent
+  // no-op for fresh DMs where peer keys haven't propagated yet (Session 48).
+  if (!isExternalShareActive.value && !peerKeysOk.value) return;
   const rawText = mention.resolveText();
   const savedText = text.value;
 
@@ -299,7 +333,12 @@ const handleSend = async () => {
             inserted = await sendFile(file);
           }
         } catch (e) {
+          // Without a visible toast the user just sees the Send tap "do
+          // nothing" — same UX surface as the silent peerKeysOk gate this
+          // session also unsticks. Surface every failure so the user can
+          // retry (Session 48 / #710 #706).
           console.error("[MessageInput] Failed to send external share file:", e);
+          toast(t("share.sendFailed"), "error");
           inserted = false;
         }
         if (inserted !== false) chatStore.cancelForward();
@@ -307,8 +346,35 @@ const handleSend = async () => {
         const forwardMeta = fwd.withSenderInfo
           ? { senderId: fwd.senderId, senderName: fwd.senderName }
           : undefined;
-        const forwardContent = rawText || fwd.content || forwardPreviewText.value;
-        inserted = await sendForward(forwardContent, forwardMeta);
+        const isMedia = fwd.type !== MessageType.text && !!fwd.fileInfo;
+        if (isMedia) {
+          // Media forward — re-upload the original blob so the recipient
+          // receives a real m.image/m.file/m.audio event instead of a text
+          // body «Image» without attachment (the pre-fix bug behind #311,
+          // #702). The caption (if user typed any) lands as the body.
+          inserted = await sendForward(rawText, forwardMeta, {
+            type: fwd.type,
+            fileInfo: fwd.fileInfo!,
+            sourceMessageId: fwd.id,
+            roomId: fwd.roomId,
+            // Pass through the source event's sender + timestamp so the
+            // decrypt path uses the right event-shape. Falls back to
+            // Date.now() / forwardMeta when ForwardingMessage is synthetic
+            // (e.g. channel-post forward — but those go through text path).
+            sourceSenderId: fwd.senderId,
+            sourceTimestamp: fwd.sourceTimestamp ?? Date.now(),
+          });
+          if (inserted === false) {
+            // sendForward returns false when the source blob is unavailable
+            // (revoked local URL, missing decryption keys, network/region
+            // block on the mxc download). Tell the user explicitly — the
+            // forward sheet just closed and they'd otherwise think it worked.
+            toast(t("forward.mediaFailed"), "error", 5000);
+          }
+        } else {
+          const forwardContent = rawText || fwd.content || forwardPreviewText.value;
+          inserted = await sendForward(forwardContent, forwardMeta);
+        }
         if (inserted !== false) chatStore.cancelForward();
       }
     } else if (chatStore.replyingTo) {
@@ -332,7 +398,7 @@ const handleSend = async () => {
 const handleKeydown = (e: KeyboardEvent) => {
   if (mention.handleKeydown(e)) return;
 
-  if (shouldSendOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.isComposing, isMobile: isMobile.value, isNative })) {
+  if (shouldSendOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.isComposing, isMobile: isMobileLike.value, isNative })) {
     e.preventDefault();
     handleSend();
   }
@@ -429,7 +495,7 @@ const replyInputPreviewText = computed(() => {
   if (reply.type === MessageType.videoCircle) return "Video message";
   if (reply.type === MessageType.audio) return "Voice message";
   if (reply.type === MessageType.file) return reply.content || "File";
-  const t = stripBastyonLinks(stripMentionAddresses(reply.content));
+  const t = stripBastyonLinks(stripMentionAddresses(reply.content, (id) => chatStore.getLocalAlias(id)));
   return (t.length > 100 ? t.slice(0, 100) + "\u2026" : t) || "...";
 });
 
@@ -464,6 +530,7 @@ const sendButtonDisabled = computed(() => isSendButtonDisabled({
   showForwardPreview: showForwardPreview.value,
   showBulkForwardPreview: showBulkForwardPreview.value,
   peerKeysOk: peerKeysOk.value,
+  isExternalShare: isExternalShareActive.value,
 }));
 
 const bulkForwardCount = computed(() => chatStore.forwardingMessages.length);
@@ -487,7 +554,7 @@ const bulkForwardPreviewText = computed(() => {
   // First message's body, clipped — gives visual continuity with singular bar.
   const first = chatStore.forwardingMessages[0];
   if (!first) return "";
-  const txt = stripBastyonLinks(stripMentionAddresses(first.content));
+  const txt = stripBastyonLinks(stripMentionAddresses(first.content, (id) => chatStore.getLocalAlias(id)));
   return (txt.length > 100 ? txt.slice(0, 100) + "\u2026" : txt) || "...";
 });
 
@@ -499,7 +566,7 @@ const forwardPreviewText = computed(() => {
   if (fwd.type === MessageType.videoCircle) return "Video message";
   if (fwd.type === MessageType.audio) return "Voice message";
   if (fwd.type === MessageType.file) return fwd.content || "File";
-  const txt = stripBastyonLinks(stripMentionAddresses(fwd.content));
+  const txt = stripBastyonLinks(stripMentionAddresses(fwd.content, (id) => chatStore.getLocalAlias(id)));
   return (txt.length > 100 ? txt.slice(0, 100) + "\u2026" : txt) || "...";
 });
 
@@ -805,14 +872,30 @@ defineExpose({
   },
 });
 
+// WEE-48 / forta-bugs#483, #489: emoji insert preserves cursor position AND
+// fires the same input-side-effects that a real keystroke would. Previously
+// `text.value = ...` skipped mention-autocomplete reset, the typing throttle,
+// and the synthetic input event downstream consumers listen for — the input
+// felt "stuck" until the user tapped outside the chat to re-arm the textarea.
+// Math lives in `emoji-insertion.ts` so the cursor preservation contract is
+// unit-tested without mounting the SFC.
 const insertEmoji = (emoji: string) => {
   const el = textareaRef.value;
+  const start = el?.selectionStart ?? text.value.length;
+  const end = el?.selectionEnd ?? text.value.length;
+  const result = insertEmojiAtCursor({ text: text.value, selectionStart: start, selectionEnd: end, emoji });
+  if (!result.changed) return;
+  text.value = result.text;
   if (el) {
-    const start = el.selectionStart ?? text.value.length;
-    const end = el.selectionEnd ?? text.value.length;
-    text.value = text.value.slice(0, start) + emoji + text.value.slice(end);
-    nextTick(() => { el.selectionStart = el.selectionEnd = start + emoji.length; el.focus({ preventScroll: true }); autoResize(); });
-  } else { text.value += emoji; }
+    nextTick(() => {
+      el.selectionStart = el.selectionEnd = result.cursor;
+      el.focus({ preventScroll: true });
+      autoResize();
+      // Re-run the @input pipeline: mention autocomplete, typing throttle,
+      // and any v-model holdouts after a programmatic mutation.
+      mention.onCursorChange();
+    });
+  }
   themeStore.addRecentEmoji(emoji);
 };
 
@@ -844,6 +927,10 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
 <template>
   <div ref="inputRootRef" class="relative border-t border-neutral-grad-0 bg-background-total-theme">
+    <!-- Send error banner (WEE-20): permission/upload/queue failures from
+         sendFile/sendImage/sendAudio + voice recorder are routed here via
+         the send-error bus so they stop disappearing silently. -->
+    <SendErrorBanner />
     <!-- Editing bar -->
     <div class="input-bar-grid" :class="{ 'input-bar-grid--open': isEditing }">
       <div class="input-bar-grid-inner">
@@ -1070,9 +1157,9 @@ const handleKitchenSelect = async (imageUrl: string) => {
           @paste="pasteDrop.handlePaste" @click="mention.onCursorChange()"
         />
 
-        <!-- PKOIN button -->
+        <!-- PKOIN button (desktop only — see showDonateShortcut) -->
         <transition name="btn-morph">
-          <button v-if="props.showDonate && showSecondaryActions"
+          <button v-if="showDonateShortcut && showSecondaryActions"
             class="btn-press flex h-10 w-10 min-h-tap min-w-tap shrink-0 items-center justify-center rounded-full text-color-txt-ac/60 transition-colors hover:text-color-txt-ac"
             :disabled="sending" :title="t('wallet.sendPkoin')" @click="emit('donate')">
             <svg width="20" height="20" viewBox="0 0 18 18" fill="currentColor">

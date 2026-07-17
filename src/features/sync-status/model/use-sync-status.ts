@@ -49,7 +49,13 @@ function clearStaleTimer() {
 }
 
 function startStaleTimer() {
-  clearStaleTimer();
+  // Anchor the cap to the FIRST active-phase entry of an episode. The old code
+  // cleared and re-armed the timer on every ERROR/RECONNECTING, so as long as
+  // errors arrived more often than the timeout the deadline was pushed out
+  // forever and the banner never cleared (WEE-105 H4). Arm once per episode; a
+  // healthy PREPARED/SYNCING clears it via clearStaleTimer, and the matrix
+  // watchdog escalates a genuinely stuck sync to a mirror failover.
+  if (staleTimer) return;
   const timeout = rawStatus.value === "error" ? ERROR_STALE_TIMEOUT : STALE_TIMEOUT;
   staleTimer = setTimeout(() => {
     staleTimer = null;

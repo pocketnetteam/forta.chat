@@ -3,8 +3,8 @@ import { loadScript } from "@/shared/lib/loadScript";
 
 const scriptsToLoad = {
   async: [
-    "https://cdn.jsdelivr.net/npm/moment-mini@2.29.4/moment.min.js",
-    "https://cdn.jsdelivr.net/npm/linkifyjs@3.0.5/dist/linkify.min.js",
+    "/js/vendor/moment.min.js",
+    "/js/vendor/linkify.min.js",
     "/js/widgets",
     "/js/buildChat",
     "/js/media",
@@ -15,7 +15,7 @@ const scriptsToLoad = {
   ],
   await: [
     // underscore must load before actions.js/satolist.js which use global `_`
-    "https://cdnjs.cloudflare.com/ajax/libs/underscore.js/1.13.7/underscore-min.js",
+    "/js/vendor/underscore-min.js",
     "/js/satolist",
     "/js/functionsfirst",
     "/js/functions",
@@ -29,7 +29,13 @@ const scriptsToLoad = {
     "/js/lib/client/resoursesdbls",
     "/js/lib/client/resoursesdb"
   ]
-};
+} as const;
+
+/** All script URLs loaded during boot — exported for regression tests (no CDN). */
+export const CHAT_SCRIPT_URLS = [
+  ...scriptsToLoad.async,
+  ...scriptsToLoad.await,
+] as const;
 
 /** Shared promise — allows starting early and awaiting later */
 let _loadPromise: Promise<void> | null = null;

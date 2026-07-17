@@ -159,8 +159,8 @@ class NativeRTCPeerConnection extends EventTarget {
       });
       if (!hasStunOrTurn) {
         iceServers.push(
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun.l.google.com:19302", username: undefined, credential: undefined },
+          { urls: "stun:stun1.l.google.com:19302", username: undefined, credential: undefined },
         );
       }
 

@@ -416,18 +416,22 @@ class TorControl {
   // -- settings change (runtime mode toggle) --------------------------------
   async settingChanged(settings) {
     const isTorStateChanged = (settings.enabled3 !== this.settings.enabled3);
+    const isBridgeChanged = (
+      typeof settings.useSnowFlake2 === 'boolean'
+      && settings.useSnowFlake2 !== this.settings.useSnowFlake2
+    );
     const wasDisabled = this.settings.enabled3 === 'neveruse';
     this.settings = { ...settings };
 
-    if (!isTorStateChanged) return;
+    if (!isTorStateChanged && !isBridgeChanged) return;
 
     try {
       if (settings.enabled3 === 'neveruse') {
-        // User turned Tor off
         await this.stop();
       } else if (wasDisabled) {
-        // User turned Tor on (auto or always) — start immediately
         await this.start();
+      } else if (isBridgeChanged || isTorStateChanged) {
+        await this.restart();
       }
     } catch (e) {
       this.state.status = 'failed';

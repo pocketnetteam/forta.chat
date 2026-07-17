@@ -2,6 +2,8 @@ import {
   createAppInitializer,
   PocketnetInstanceConfigurator
 } from "@/app/providers";
+import { PocketnetInstance } from "@/app/providers/chat-scripts/config/pocketnetinstance";
+import { blockchainWs } from "@/shared/lib/blockchain-ws";
 import { useChatStore } from "@/entities/chat";
 import { useUserStore } from "@/entities/user/model";
 import { useCallStore } from "@/entities/call/model/call-store";
@@ -16,11 +18,14 @@ import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto"
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
+import { initMediaCache, clearMediaCache, closeMediaCache } from "@/shared/lib/media-cache";
 import { clearAllDrafts } from "@/shared/lib/drafts";
 import { clearQueue } from "@/shared/lib/offline-queue";
 import { deleteLegacyCache } from "@/shared/lib/cache/chat-cache";
 import { clearAccountLocalStorage } from "@/shared/lib/clear-account-storage";
 import { isNative } from "@/shared/lib/platform";
+import { interopLog } from "@/shared/lib/interop";
+import { onConnectivityChange } from "@/shared/lib/connectivity";
 import { useLocalStorage } from "@/shared/lib/browser";
 import { convertToHexString } from "@/shared/lib/convert-to-hex-string";
 import { mergeObjects } from "@/shared/lib/merge-objects";
@@ -39,12 +44,23 @@ import {
   getAddressFromPubKey,
   PollTimer,
   ProxyRotator,
+  fetchCaptchaWithProxyFallback,
   saveMnemonic,
   loadMnemonic,
   clearMnemonic,
   syncProfileToMatrix,
+  readSelfProfile,
+  writeSelfProfile,
+  clearSelfProfile,
+  mergeSelfProfileWithRemote,
+  resolveKeyRepublishAction,
+  countCachedKeys,
+  countPublishedKeys,
+  REQUIRED_ENCRYPTION_KEYS,
 } from "../lib";
+import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { createKeyPair } from "./key-pair";
+import { generateEncryptionKeys, clearEncryptionKeysCache } from "./encryption-keys";
 
 const NAMESPACE = "auth";
 
@@ -88,24 +104,6 @@ function hexDecode(hex: string): string {
   return result;
 }
 
-/** Generate 12 BIP32 key pairs at m/33'/0'/0'/{1-12}' for Pcrypto encryption.
- *  Matches original: bitcoin.bip32.fromSeed(Buffer.from(privateKey, "hex")) */
-function generateEncryptionKeys(privateKeyHex: string) {
-  const key = Buffer.from(privateKeyHex, "hex");
-  const root = bitcoin.bip32.fromSeed(key);
-
-  const keys: Array<{ pair: unknown; public: string; private: Buffer }> = [];
-  for (let i = 1; i <= 12; i++) {
-    const child = root.derivePath(`m/33'/0'/0'/${i}'`);
-    keys.push({
-      pair: bitcoin.ECPair.fromPrivateKey(child.privateKey),
-      public: child.publicKey.toString("hex"),
-      private: child.privateKey,
-    });
-  }
-  return keys;
-}
-
 let _onSyncStatusCallback: ((state: string) => void) | null = null;
 
 /** Extract a numeric error code from various error shapes returned by the SDK/RPC layer.
@@ -129,12 +127,25 @@ function extractErrorCode(err: unknown): number | null {
 export type RegistrationPhase = 'init' | 'broadcasting' | 'confirming' | 'done' | 'error';
 
 // Store-level references for cleanup on logout
-let _onlineHandler: (() => void) | null = null;
-let _offlineHandler: (() => void) | null = null;
+//
+// _connectivityUnsub: unified subscription to onConnectivityChange (which
+// fans in @capacitor/network on native + window.online/offline on web).
+// Replaces the previous raw window.online/offline listeners — those alone
+// did not fire reliably on Android WebView after device sleep+wake, leaving
+// the SyncEngine stuck offline forever (#705, #496).
+let _connectivityUnsub: (() => void) | null = null;
 let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
 // Per-room debounce timers for peer-keys recheck after member events.
 const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Trigger an immediate registration poll iteration. Set inside
+ *  `startRegistrationPoll`, cleared inside `stopRegistrationPoll`.
+ *  Called from the blockchain-ws block/transaction handlers so that an
+ *  incoming PKOIN or new block fast-forwards Phase 1/2 without waiting
+ *  for the exponential-backoff timer to fire. Best-effort: a no-op when
+ *  no poll is currently active. */
+let _registrationPollKick: (() => void) | null = null;
 
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
@@ -175,6 +186,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSRegPending, value: LSRegPending } =
     useLocalStorage<boolean>("registration_pending", false);
   const registrationPending = ref(LSRegPending);
+
+  // WEE-35: set when login finds an EXISTING on-chain account that lacks
+  // Forta's 12 encryption keys — i.e. it was registered outside Forta, almost
+  // certainly via Bastyon. Feeds the dual-install warning (see bastyon-warning).
+  const likelyBastyonUser = ref(false);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Tracks active (non-backgrounded) time for the registration poll so
@@ -184,6 +200,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Public attempt counter for RegistrationStepper UI so users see real
   // progress instead of an opaque animation.
   const registrationPollAttempt = ref(0);
+  /** Active-time elapsed since poll start — drives the 10-min cancel button. */
+  const registrationPollElapsedMs = ref(0);
+  let registrationElapsedInterval: ReturnType<typeof setInterval> | null = null;
   let registrationVisibilityHandler: (() => void) | null = null;
   let registrationAppStateHandle: { remove: () => Promise<void> } | null = null;
 
@@ -201,8 +220,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   // Safety bounds for registration polling
   const REGISTRATION_POLL_TIMEOUT = 30 * 60 * 1000;  // 30 minutes total
+  const REGISTRATION_CANCEL_AFTER_MS = 10 * 60 * 1000; // 10 minutes active time → show cancel
   const RPC_CALL_TIMEOUT = 15_000;                    // 15s per RPC call
   const MAX_CONSECUTIVE_ERRORS = 5;                   // show error after 5 failures in a row
+
+  const canCancelRegistration = computed(() => {
+    if (!registrationPending.value) return false;
+    if (registrationPollElapsedMs.value < REGISTRATION_CANCEL_AFTER_MS) return false;
+    const phase = registrationPhase.value;
+    return phase === "init" || phase === "broadcasting" || phase === "confirming";
+  });
 
   // Node that processed the sendrawtransaction during registration —
   // used as fnode for getuserstate to avoid stale cache on a different node
@@ -254,10 +281,36 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
   const { execute: editUserData, isLoading: isEditingUserData } =
     useAsyncOperation(async (userData: UserData) => {
+      // Snapshot the active address before the RPC so a logout that happens
+      // during the broadcast cannot misroute the cache write into another
+      // account.
+      const editAddress = address.value!;
+      const merged = mergeObjects(userInfo.value!, userData);
       const result = await appInitializer.editUserData({
-        address: address.value!,
-        userData: mergeObjects(userInfo.value!, userData)
+        address: editAddress,
+        userData: merged
       });
+
+      if (result?.success === true && address.value === editAddress) {
+        // Persist the just-saved profile so it survives Pocketnet RPC
+        // returning the *pre-edit* name on the next boot — root cause of
+        // WEE-26 / forta-bugs#596, #580.
+        const prev = readSelfProfile(editAddress);
+        writeSelfProfile({
+          address: editAddress,
+          name: merged.name ?? "",
+          about: merged.about ?? "",
+          image: merged.image ?? "",
+          site: merged.site ?? "",
+          language: merged.language ?? "",
+          localEditedAt: Date.now(),
+          syncedAt: prev?.syncedAt ?? 0,
+        });
+        // Reflect the new values in in-memory userInfo immediately so the
+        // form (and any other consumer) shows the saved name without
+        // waiting for a fresh fetchUserInfo to settle.
+        setUserInfo(merged);
+      }
 
       // Best-effort Matrix profile sync — ensures peers see the user's chosen
       // nickname + avatar instead of a truncated wallet address. Pocketnet
@@ -269,6 +322,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // The helper swallows its own errors; .catch is here only so an
       // unexpected throw doesn't bubble up as an unhandled rejection.
       if (result?.success === true && matrixReady.value) {
+        // No `clearAvatar` flag: an empty `userData.image` here means the
+        // avatar simply wasn't loaded into the edit form (or Pocketnet hasn't
+        // propagated it yet), not that the user removed it. syncProfileToMatrix
+        // therefore leaves the existing Matrix avatar untouched rather than
+        // wiping it — root cause of WEE-77 / forta-bugs#954, #943, #976. A
+        // real "remove avatar" action would pass clearAvatar: true.
         void syncProfileToMatrix(getMatrixClientService(), {
           name: userData.name,
           image: userData.image,
@@ -334,13 +393,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             const rawProfileMap = new Map<string, Record<string, unknown>>();
             for (const rawAddr of rawAddresses) {
-              var p = appInitializer.getUserData(rawAddr);
+              const sdkRow = appInitializer.getUserData(rawAddr) as
+                | (Record<string, unknown> & { export?: (strip?: boolean) => Record<string, unknown> })
+                | null;
 
-              if (p && (p as any).address) {
-
-                p = p.export(true)
-
-                rawProfileMap.set((p as any).address, p);
+              if (sdkRow && typeof sdkRow.address === "string") {
+                const exported = typeof sdkRow.export === "function"
+                  ? sdkRow.export(true)
+                  : sdkRow;
+                rawProfileMap.set(sdkRow.address, exported);
               }
             }
 
@@ -394,7 +455,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           matrixKit.value?.chatIsPublic(room as Record<string, unknown>) ?? false,
         matrixId: (id: string) => matrixService.matrixId(id),
       });
-      await withTimeout(cryptoInstance.prepare(address.value ?? undefined), 10_000, "Pcrypto storage init");
+      // WEE-97 item 3: prepare() opens two IndexedDB stores (~50-150ms) —
+      // run it concurrently with the Matrix connection below instead of
+      // serializing the boot path. Safe because all Pcrypto ls/lse access is
+      // optional-chained (storage miss = cache miss), and rooms are only
+      // created after the first /sync, by which point prepare has resolved.
+      const pcryptoPreparePromise = withTimeout(
+        cryptoInstance.prepare(address.value ?? undefined),
+        10_000,
+        "Pcrypto storage init",
+      );
+      // Suppress premature unhandled-rejection (real handling happens in the
+      // Promise.all together with the Matrix connection below).
+      pcryptoPreparePromise.catch(() => {});
       pcrypto.value = cryptoInstance;
 
       // Step 7: Wire Matrix events → chat store
@@ -413,16 +486,30 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       );
       chatStore.setChatDbKit(chatDbKit);
 
-      // Wire SyncEngine connectivity (store refs for cleanup on logout)
-      if (typeof window !== "undefined") {
-        // Remove previous listeners if any (re-login without full page reload)
-        if (_onlineHandler) window.removeEventListener("online", _onlineHandler);
-        if (_offlineHandler) window.removeEventListener("offline", _offlineHandler);
-        _onlineHandler = () => chatDbKit.syncEngine.setOnline(true);
-        _offlineHandler = () => chatDbKit.syncEngine.setOnline(false);
-        window.addEventListener("online", _onlineHandler);
-        window.addEventListener("offline", _offlineHandler);
+      // WEE-33: spin up the persistent media cache so subsequent chat opens
+      // hit the disk cache instead of re-downloading every photo/video.
+      // Singleton; safe to call repeatedly across re-inits.
+      initMediaCache(chatDbKit.db);
+
+      // Contact aliases (Session 51): hydrate cache from Dexie immediately so
+      // chat list / headers do not flash raw addresses before /sync. The live
+      // account_data listener (onAccountData) takes over from there.
+      chatStore.loadLocalAliases().catch((e) => {
+        console.warn("[auth] loadLocalAliases failed:", e);
+      });
+
+      // Wire SyncEngine connectivity through the unified connectivity layer.
+      // onConnectivityChange fires on @capacitor/network transitions as well
+      // as window.online/offline, so Android WebView wake-ups and WiFi↔cellular
+      // handovers both feed the engine. Drop any prior subscription first
+      // (re-login without a full page reload).
+      if (_connectivityUnsub) {
+        _connectivityUnsub();
+        _connectivityUnsub = null;
       }
+      _connectivityUnsub = onConnectivityChange(({ connected }) => {
+        chatDbKit.syncEngine.setOnline(connected);
+      });
       chatStore.setHelpers(matrixKit.value!, cryptoInstance);
 
       // Wire Pcrypto key-load → decryption retry + peer-keys banner refresh.
@@ -475,6 +562,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           // Skip event processing before initial sync completes — events will be
           // picked up by fullRoomRefresh reconciliation. Processing them early causes
           // Dexie writes → liveQuery notifications against an incomplete room list.
+          // WEE-55: the degraded watchdog also flips roomsInitialized=true after a
+          // stalled first /sync, so events may be processed before the first full
+          // refresh. That is intentional — degraded mode favours showing live
+          // events over an infinite preloader, and the eventual PREPARED full
+          // refresh reconciles any rooms missed in the meantime.
           if (roomId && chatStore.roomsInitialized) {
             chatStore.handleTimelineEvent(event, roomId);
           }
@@ -536,6 +628,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         onRoomAccountData: (event: unknown, room: unknown) => {
           chatStore.handleRoomAccountData(event, room);
         },
+        onAccountData: (event: unknown) => {
+          // Cross-device contact-alias sync (Session 51) — and any other
+          // future global account_data hooks. Errors are swallowed inside.
+          chatStore.handleAccountDataEvent(event).catch((e) => {
+            console.warn("[auth] handleAccountDataEvent failed:", e);
+          });
+        },
         onIncomingCall: (call: unknown) => {
           try {
             const callService = useCallService();
@@ -560,12 +659,76 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       matrixError.value = "Connecting to Matrix server...";
       bootStatus.setStep("matrix");
-      await withTimeout(matrixService.init(), 45_000, "Matrix server connection");
 
-      if (matrixService.isReady()) {
+      // WEE-46: Xiaomi MIUI / Android 14+ aggressively kills the long-poll
+      // before the SDK flips ready, leaving us in a silent "Matrix not ready"
+      // state on cold start. Retry-with-backoff turns a single brittle attempt
+      // into 3 attempts (1s/2s backoff, 45s per attempt) so transient transport
+      // failures don't surface as a fatal boot error.
+      // WEE-97 item 3: await the deferred Pcrypto storage init together with
+      // the connection — both must be settled before matrixReady flips.
+      const [connectResult] = await Promise.all([
+        connectMatrixWithRetry(matrixService, {
+          attemptTimeoutMs: 45_000,
+          maxAttempts: 3,
+          baseDelayMs: 1_000,
+          maxDelayMs: 30_000,
+          onAttempt: (attempt, max) => {
+            matrixError.value =
+              attempt === 1
+                ? "Connecting to Matrix server..."
+                : `Reconnecting to Matrix server (attempt ${attempt}/${max})...`;
+          },
+          onAttemptFail: (attempt, err) => {
+            console.warn(
+              `[auth] Matrix connect attempt ${attempt} failed:`,
+              err instanceof Error ? err.message : err,
+            );
+          },
+        }),
+        pcryptoPreparePromise,
+      ]);
+
+      if (connectResult.ready) {
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+
+        // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
+        // soon as Matrix is connected, BEFORE we wait for PREPARED. The
+        // PREPARED-time sync below catches future updates, but it can lag
+        // first-message FCM pushes on cold start — leaving the Kotlin
+        // fallback chain with no cached display name and forcing it onto
+        // the (sometimes-Matrix-ID) `sender_display_name` from the push
+        // payload. Pre-warming from whatever names the getter already has
+        // (room members loaded from Dexie, prior session) closes that gap.
+        // Note: when homeserver indexing > 500ms the slow timeline-wait
+        // path in push-service.ts still kicks in — that's by design.
+        if (isNative) {
+          import('@/shared/lib/push').then(({ pushService }) => {
+            pushService.syncSenderNamesToNative();
+            pushService.syncRoomNamesToNative();
+          }).catch((e) => {
+            console.warn('[auth] push prewarm failed:', e);
+          });
+        }
+
+        // Replay any contact_aliases already in the SDK's account_data cache
+        // (Session 51). The live "accountData" listener catches future
+        // changes; this covers the cold-start window before that fires.
+        try {
+          const initialAliases = matrixService.getAccountData("m.bastyon.contact_aliases");
+          if (initialAliases) {
+            chatStore.handleAccountDataEvent({
+              getType: () => "m.bastyon.contact_aliases",
+              getContent: () => initialAliases,
+            }).catch((e) => {
+              console.warn("[auth] initial contact_aliases replay failed:", e);
+            });
+          }
+        } catch (e) {
+          console.warn("[auth] contact_aliases cold-start read failed:", e);
+        }
 
         // Cache connection info for background sync
         const client = matrixService.client;
@@ -608,6 +771,59 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }).catch(() => {});
         }, 60_000);
 
+        // Best-effort blockchain WS — speeds up wallet refresh, registration
+        // confirmation and Pcrypto.confirmations. The 60-s polling above stays
+        // as fallback when WS cannot be established.
+        try {
+          blockchainWs.start({
+            address: address.value!,
+            deviceId: PocketnetInstance.options.device,
+            getSignature: () => window.POCKETNETINSTANCE.user.signature?.() ?? null,
+            getApi: () => appInitializer.getRawApi(),
+            getLastKnownBlock: () => pcrypto.value?.currentblock?.height ?? 0,
+            handlers: {
+              onBlock: ({ height }) => {
+                if (height > 0 && pcrypto.value) {
+                  pcrypto.value.setBlock({ height });
+                }
+                // Lazy-import to avoid circular dependency wallet → auth.
+                import("@/features/wallet/model/wallet-store")
+                  .then(({ useWalletStore }) => useWalletStore().refresh())
+                  .catch(() => { /* wallet not ready — ignore */ });
+                _registrationPollKick?.();
+              },
+              onTransaction: () => {
+                import("@/features/wallet/model/wallet-store")
+                  .then(({ useWalletStore }) => useWalletStore().refresh())
+                  .catch(() => { /* wallet not ready — ignore */ });
+                _registrationPollKick?.();
+              },
+              onUserInfo: ({ addrFrom }) => {
+                if (!addrFrom) return;
+                appInitializer
+                  .loadUsersInfo([addrFrom], { update: true })
+                  .then(() => {
+                    const fresh = appInitializer.getUserData(addrFrom);
+                    if (fresh) {
+                      useUserStore().setUser(addrFrom, {
+                        address: addrFrom,
+                        name: fresh.name ?? "",
+                        about: fresh.about ?? "",
+                        image: fresh.image ?? "",
+                        site: fresh.site ?? "",
+                        language: fresh.language ?? "",
+                        cachedAt: Date.now(),
+                      });
+                    }
+                  })
+                  .catch(() => { /* best-effort */ });
+              },
+            },
+          });
+        } catch (e) {
+          console.warn("[auth] blockchain-ws start failed (non-fatal):", e);
+        }
+
         import("@/features/video-calls/model/call-tab-lock").then(({ initCallTabLock }) => {
           initCallTabLock();
         }).catch((err) => {
@@ -625,8 +841,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // Uses chatDbKit.rooms (RoomRepository) which is already initialized above.
             // The monotonic guard inside optimisticUpdateFromPush prevents stale
             // push data from overwriting newer /sync data.
-            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId) =>
-              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId),
+            pushService.setOptimisticRoomUpdater((roomId, preview, timestamp, senderId, eventId) =>
+              chatDbKit.rooms.optimisticUpdateFromPush(roomId, preview, timestamp, senderId, undefined, eventId),
             );
 
             pushService.setRoomInfoGetter((roomId) => {
@@ -665,6 +881,47 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
             console.log('[auth] Initializing push service...');
             await pushService.init(matrixService.client);
+
+            // WEE-44 / forta-bugs#561, #817: mute state is now authoritative
+            // on the Matrix server (push rules). Refresh the local mute set
+            // from the server right after push init so the user sees the
+            // same mute state across devices and across APK reinstalls —
+            // localStorage is treated as a cache, not the source of truth.
+            try {
+              await chatStore.syncMutedRoomsFromMatrix();
+            } catch (err) {
+              console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
+            }
+
+            // WEE-52 / forta-bugs#167: re-sync mute state when the app comes
+            // back to foreground. On Android, the OS can purge localStorage
+            // (per-WebView eviction under memory pressure, OEM cleanups) while
+            // the app is backgrounded. Without this listener the cache desync
+            // surfaces as "I muted the group but notifications came back after
+            // I closed the app for a while". Re-pulling push rules on resume
+            // restores the user's intent without requiring a re-login.
+            //
+            // The handle is stashed in `_appStateHandle` (declared at module
+            // top alongside other per-account cleanup refs) so logout can
+            // detach it — otherwise a re-login would stack a second listener
+            // on top of the first.
+            if (isNative) {
+              try {
+                if (_appStateHandle) {
+                  await _appStateHandle.remove().catch(() => { /* ignore */ });
+                  _appStateHandle = null;
+                }
+                const { App } = await import('@capacitor/app');
+                _appStateHandle = await App.addListener('appStateChange', ({ isActive }) => {
+                  if (!isActive) return;
+                  chatStore.syncMutedRoomsFromMatrix().catch((err) => {
+                    console.warn('[auth] resume sync mute failed:', err);
+                  });
+                });
+              } catch (err) {
+                console.warn('[auth] Failed to wire app-resume mute sync:', err);
+              }
+            }
 
             // Wire call handler after push init (needs nativeCallBridge)
             try {
@@ -718,10 +975,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // here would run with 0 rooms (sync hasn't finished) and poison the
         // IndexedDB cache with an empty array.
       } else {
-        console.error("[auth] Matrix client NOT ready, error:", matrixService.error);
-        matrixError.value = matrixService.error || "Matrix init failed";
-        if (bootStatus.state.value === 'booting') {
-          bootStatus.setError(matrixError.value);
+        const lastErr = connectResult.lastError;
+        const reason =
+          lastErr instanceof Error
+            ? lastErr.message
+            : lastErr
+              ? String(lastErr)
+              : matrixService.error || "Matrix init failed";
+        console.error(
+          `[auth] Matrix client NOT ready after ${connectResult.attempts} attempt(s):`,
+          reason,
+        );
+        matrixError.value = reason;
+        if (bootStatus.state.value === "booting") {
+          bootStatus.setError(reason, "matrix-unreachable");
         }
       }
     } catch (e) {
@@ -738,8 +1005,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
+    // Snapshot the active address so a logout + re-login that races with the
+    // RPC cannot cause us to write the first account's profile into the
+    // second account's cache slot.
+    const requestAddress = address.value;
+    const requestPrivateKey = privateKey.value;
+
+    // During registration the local SDK may still hold an empty profile from
+    // the first post-login getuserprofile — always hit the network.
+    const forceNetwork = registrationPending.value || !!pendingRegProfile.value;
+
     await appInitializer.initializeAndFetchUserData(
-      address.value,
+      requestAddress,
       (userData: UserData) => {
         // Defensive: app-initializer guards against undefined userData, but
         // this callback is reached from three flows (login, onConfirmed,
@@ -748,23 +1025,49 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // login()'s catch and surface as "Invalid private key or mnemonic"
         // on the register page after a successful registration.
         if (!userData) return;
-        setUserInfo(userData);
-        PocketnetInstanceConfigurator.setUserAddress(address.value!);
+
+        // Bail if the active account changed mid-flight — the response
+        // belongs to a logged-out session and must not touch the new one.
+        if (address.value !== requestAddress) return;
+
+        // Merge cached self-profile (last user save) into the remote snapshot
+        // so a stale Pocketnet `getuserprofile` response cannot revert the
+        // user's name within the propagation window — WEE-26 / forta-bugs#596,
+        // #580. When no cache exists or the local edit is older than the grace
+        // window, remote wins unchanged.
+        const cached = readSelfProfile(requestAddress);
+        const merged = mergeSelfProfileWithRemote(cached, userData);
+
+        setUserInfo(merged);
+        PocketnetInstanceConfigurator.setUserAddress(requestAddress);
         PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-          createKeyPair(privateKey.value!)
+          createKeyPair(requestPrivateKey)
         );
+
+        writeSelfProfile({
+          address: requestAddress,
+          name: merged.name ?? "",
+          about: merged.about ?? "",
+          image: merged.image ?? "",
+          site: merged.site ?? "",
+          language: merged.language ?? "",
+          localEditedAt: cached?.localEditedAt ?? 0,
+          syncedAt: Date.now(),
+        });
+
         // Sync own profile to userStore so Avatar components show correct name/initial
-        if (userData && userData.name) {
-          useUserStore().setUser(address.value!, {
-            address: address.value!,
-            name: userData.name ?? "",
-            about: userData.about ?? "",
-            image: userData.image ?? "",
-            site: userData.site ?? "",
-            language: userData.language ?? "",
+        if (merged.name) {
+          useUserStore().setUser(requestAddress, {
+            address: requestAddress,
+            name: merged.name ?? "",
+            about: merged.about ?? "",
+            image: merged.image ?? "",
+            site: merged.site ?? "",
+            language: merged.language ?? "",
           });
         }
-      }
+      },
+      forceNetwork ? { update: true } : undefined,
     );
   };
 
@@ -781,78 +1084,92 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Step 1: Quick check via local SDK cache
+    // Step 1: Quick check via local SDK cache.
     const userData = appInitializer.getUserData(address.value);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cachedKeys: string[] = (userData as any)?.keys ?? [];
+    const cachedKeyCount = countCachedKeys(userData);
 
-    if (cachedKeys.length >= 12) {
-      console.log("[auth] Key verification OK (cache):", cachedKeys.length, "keys");
-      return;
-    }
-
-    // Step 2: Cache may be stale/empty after login — verify via fresh SDK profile load
-    console.log("[auth] Cache shows", cachedKeys.length, "keys, verifying via RPC...");
-    try {
-      const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
-      const rawProfile = rawProfiles[0];
-      if (rawProfile) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
-        let blockchainKeys: string[] = [];
-        if (Array.isArray(rawKeys)) {
-          blockchainKeys = rawKeys.filter((k: string) => k);
-        } else if (typeof rawKeys === "string" && rawKeys) {
-          blockchainKeys = rawKeys.split(",").filter((k: string) => k);
-        }
-
-        if (blockchainKeys.length >= 12) {
-          console.log("[auth] Key verification OK (blockchain):", blockchainKeys.length, "keys");
-          return;
-        }
-        console.warn("[auth] Blockchain confirms only", blockchainKeys.length, "keys. Re-publishing...");
-      } else {
-        console.warn("[auth] No profile found on blockchain. Re-publishing...");
+    // Step 2: Cache may be stale/empty after login — verify via fresh SDK
+    // profile load, but only when the cache is short.
+    let blockchainKeyCount: number | null = null;
+    let blockchainCheckFailed = false;
+    if (cachedKeyCount < REQUIRED_ENCRYPTION_KEYS) {
+      console.log("[auth] Cache shows", cachedKeyCount, "keys, verifying via RPC...");
+      try {
+        const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+        blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
+      } catch (e) {
+        console.warn("[auth] RPC key check failed, skipping re-publish:", e);
+        blockchainCheckFailed = true;
       }
-    } catch (e) {
-      console.warn("[auth] RPC key check failed, skipping re-publish:", e);
-      // Don't block login if RPC fails — keys might be fine, cache just didn't load
-      return;
     }
 
-    // Step 3: Keys genuinely missing — re-derive and re-publish
-    const encKeys = generateEncryptionKeys(privateKey.value);
-    const encPublicKeys = encKeys.map(k => k.public);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const name = (userData as any)?.name ?? "";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const language = (userData as any)?.language ?? "en";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const about = (userData as any)?.about ?? "";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const image = (userData as any)?.image ?? "";
+    // checkUnspents only affects the republish-vs-needs-funds split; query it
+    // only when a re-publish might actually be required (cache short, RPC
+    // conclusive, and the chain itself confirms < 12 keys).
+    const mayNeedRepublish =
+      cachedKeyCount < REQUIRED_ENCRYPTION_KEYS &&
+      !blockchainCheckFailed &&
+      (blockchainKeyCount ?? 0) < REQUIRED_ENCRYPTION_KEYS;
+    const hasUnspents = mayNeedRepublish
+      ? await appInitializer.checkUnspents(address.value)
+      : false;
 
-    const hasUnspents = await appInitializer.checkUnspents(address.value);
-    if (!hasUnspents) {
-      console.warn("[auth] No PKOIN for key re-publish. Setting pending for poll.");
-      setPendingRegProfile({ name, language, about, encPublicKeys, image });
-      setRegistrationPending(true);
-      startRegistrationPoll();
-      return;
-    }
+    const action = resolveKeyRepublishAction({
+      cachedKeyCount,
+      blockchainKeyCount,
+      blockchainCheckFailed,
+      hasUnspents,
+    });
 
-    try {
-      await appInitializer.syncNodeTime();
-      const { registrationNode } = await appInitializer.registerUserProfile(address.value, { name, language, about }, encPublicKeys, image);
-      registrationFnode = registrationNode;
-      console.log("[auth] Key re-publish broadcast sent (fnode:", registrationFnode, "). Starting confirmation poll.");
-      setRegistrationPending(true);
-      startRegistrationPoll();
-    } catch (e) {
-      console.error("[auth] Key re-publish failed:", e);
-      setPendingRegProfile({ name, language, about, encPublicKeys });
-      setRegistrationPending(true);
-      startRegistrationPoll();
+    // CRITICAL (WEE-35 / forta-bugs#520): this runs on the login path for an
+    // ALREADY-AUTHENTICATED account (register()'s own auto-login is guarded out
+    // above). It must NEVER flip `registrationPending` — that mounts the
+    // full-screen RegistrationStepper ("Подготовка аккаунта / Requesting
+    // resources for registration on the network") over a valid session and
+    // hangs the user. This was the visible symptom for Bastyon-registered
+    // accounts (whose blockchain profile lacks Forta's 12 keys) and for
+    // transient empty-keys RPC responses. Re-publishing happens silently in the
+    // background; recovery when unfunded is the manual republishKeysFromUi flow.
+    switch (action.kind) {
+      case "keys-ok":
+        console.log(`[auth] Key verification OK (${action.source}):`, action.keyCount, "keys");
+        return;
+      case "rpc-failed":
+        // Inconclusive — don't block login, keys may well be fine.
+        return;
+      case "needs-funds":
+        // Existing on-chain account without Forta keys → registered elsewhere
+        // (Bastyon). Flag it for the dual-install warning (WEE-35).
+        likelyBastyonUser.value = true;
+        interopLog("auth", "existing account missing Forta keys (no PKOIN) — likely Bastyon-registered");
+        console.warn("[auth] Missing encryption keys but no PKOIN — login proceeds, publish keys later from settings");
+        return;
+      case "republish": {
+        likelyBastyonUser.value = true;
+        interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
+        const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
+        const profile = {
+          name: userData?.name ?? "",
+          language: userData?.language ?? "en",
+          about: userData?.about ?? "",
+        };
+        const image = userData?.image ?? "";
+        const republishAddress = address.value;
+        // Fire-and-forget: the broadcast is a blockchain round-trip that must
+        // not add latency to login. It can no longer hang the UI (never flips
+        // registrationPending) and failure is non-fatal — login proceeds either
+        // way and the manual republishKeysFromUi flow remains as recovery.
+        void (async () => {
+          try {
+            await appInitializer.syncNodeTime();
+            await appInitializer.registerUserProfile(republishAddress, profile, encPublicKeys, image);
+            console.log("[auth] Encryption keys re-published in background (existing-account login)");
+          } catch (e) {
+            console.error("[auth] Background key re-publish failed (login proceeds):", e);
+          }
+        })();
+        return;
+      }
     }
   };
 
@@ -941,6 +1258,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           privateKey: convertToHexString(keyPair.privateKey)
         };
         setAuthData(authData);
+
+        // WEE-102: hydrate local contact aliases from Dexie BEFORE any network
+        // step (fetchUserInfo / verifyAndRepublishKeys / initMatrix). Offline,
+        // those steps can stall and the alias hydration buried inside initMatrix
+        // would never run, leaving every renamed contact stuck on its raw
+        // nickname. Reading Dexie needs no connectivity, so it is safe and
+        // user-visible from the first frame; initMatrix's loadLocalAliases later
+        // refreshes it via the live kit.
+        useChatStore().hydrateLocalAliasesEarly(addr).catch(() => { /* best-effort */ });
+
         await fetchUserInfo();
 
         // Verify encryption keys are published; re-publish if missing
@@ -962,6 +1289,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
   );
 
+  /** WEE-102: hydrate local contact aliases from Dexie ahead of any network
+   *  step. Used by the cold-boot path (App.vue) where `fetchUserInfo()` runs —
+   *  and can stall offline — before `initMatrix()` would otherwise hydrate them.
+   *  No-op until the session address is known. Best-effort; never throws. */
+  const hydrateLocalAliasesEarly = async (): Promise<void> => {
+    if (!address.value) return;
+    await useChatStore().hydrateLocalAliasesEarly(address.value);
+  };
+
   const logout = async () => {
     const logoutAddress = activeAddress.value;
 
@@ -973,6 +1309,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     useUserStore().cleanup();
     useCallStore().clearCall();
     useChannelStore().cleanup();
+
+    // ── 1.5. Stop best-effort blockchain WS BEFORE Matrix teardown so its
+    //         handlers can't try to refresh torn-down stores. ──
+    try { blockchainWs.stop(); } catch { /* ignore */ }
 
     // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
@@ -986,22 +1326,33 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
       pcrypto.value = null;
     }
+    // WEE-97: drop memoized BIP32 key material with the rest of the session
+    clearEncryptionKeysCache();
 
-    // ── 3. Clean up window listeners & intervals ──
-    if (typeof window !== "undefined") {
-      if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-      if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-    }
+    // ── 3. Clean up listeners & intervals ──
+    if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
+    if (_appStateHandle) {
+      await _appStateHandle.remove().catch(() => { /* ignore */ });
+      _appStateHandle = null;
+    }
 
     // ── 4. Clear localStorage account data ──
     clearAllDrafts();
     clearQueue();
     clearAccountLocalStorage(logoutAddress ?? undefined);
+    // Drop self-profile snapshot (WEE-26). Routed through the cache helper
+    // so the key prefix stays a single source of truth.
+    if (logoutAddress) clearSelfProfile(logoutAddress);
 
     // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
+    // Clear the persistent media cache FIRST so we wipe Capacitor Filesystem
+    // entries before Dexie (which holds the index + web-fallback blobs) is
+    // torn down. Otherwise the Filesystem entries leak to disk under the
+    // new user's session.
+    await clearMediaCache();
     await deleteChatDb().catch(() => {});
 
     // ── 6. Delete legacy IndexedDB cache ──
@@ -1018,6 +1369,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     setRegistrationPending(false);
     setPendingRegProfile(null);
+    setRegistrationPhase("init");
+    likelyBastyonUser.value = false;
     stopRegistrationPoll();
     clearMnemonic();
 
@@ -1076,9 +1429,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const fetchCaptcha = async () => {
-    if (!regProxyId.value) throw new Error("No proxy selected");
-    const result = await appInitializer.getCaptcha(regProxyId.value, regCaptchaId.value || undefined);
-    if (!result) throw new Error("Failed to fetch captcha");
+    // Fetch with proxy fallback: a blocked/unreachable proxy (WEE-23, same
+    // root cause as WEE-13) is rotated past instead of hanging the captcha step.
+    const result = await fetchCaptchaWithProxyFallback({
+      getProxyId: () => regProxyId.value,
+      pickProxy: async () => {
+        // New proxy issues a new captcha session — drop any stale captcha id.
+        regCaptchaId.value = null;
+        const proxy = await findRegistrationProxy();
+        return proxy.id;
+      },
+      getCaptcha: (proxyId) =>
+        appInitializer.getCaptcha(proxyId, regCaptchaId.value || undefined),
+    });
     regCaptchaId.value = result.id;
     regCaptchaDone.value = false;
     return result;
@@ -1204,6 +1567,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         .catch(() => { /* non-fatal */ });
     }
 
+    if (registrationElapsedInterval) clearInterval(registrationElapsedInterval);
+    registrationPollElapsedMs.value = 0;
+    registrationElapsedInterval = setInterval(() => {
+      registrationPollElapsedMs.value = pollTimer?.elapsed() ?? 0;
+    }, 1000);
+
     // Set initial phase based on current state (handles reload resume)
     if (pendingRegProfile.value) {
       if (registrationPhase.value !== 'init') setRegistrationPhase('init');
@@ -1231,6 +1600,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       try {
         // Phase 1: Broadcast UserInfo once PKOIN arrives
         if (pendingRegProfile.value) {
+          // Fresh getuserprofile (update:true) — local SDK cache from login may
+          // still hold an empty pre-registration row. If the account is already
+          // on-chain, leave step 1 and finish instead of waiting for PKOIN forever.
+          const rawProfiles = await withTimeout(
+            appInitializer.loadUsersInfoRaw([address.value]),
+            RPC_CALL_TIMEOUT,
+            "getuserprofile",
+          );
+          if (rawProfiles.length > 0) {
+            console.log("[auth] getuserprofile already has account during phase 1 — completing registration");
+            setPendingRegProfile(null);
+            await onRegistrationConfirmed();
+            return;
+          }
+
           const hasUnspents = await withTimeout(
             appInitializer.checkUnspents(address.value),
             RPC_CALL_TIMEOUT,
@@ -1242,7 +1626,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             try {
               await appInitializer.syncNodeTime();
               const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
-              await appInitializer.initializeAndFetchUserData(address.value);
+              // Bypass local getuserprofile cache before broadcast.
+              await appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true });
               const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
               registrationFnode = registrationNode;
               console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
@@ -1314,6 +1699,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       pollInterval = Math.min(pollInterval * 2, MAX_POLL_INTERVAL);
     };
 
+    // Expose a kick that runs the next iteration immediately and resets the
+    // backoff. blockchain-ws calls this on inbound block/transaction events.
+    _registrationPollKick = () => {
+      if (registrationPollTimer) {
+        clearTimeout(registrationPollTimer);
+        registrationPollTimer = null;
+      }
+      pollInterval = 3000;
+      poll();
+    };
+
     poll();
 
     async function onRegistrationConfirmed() {
@@ -1323,26 +1719,49 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
 
       try {
-        await appInitializer.loadUsersInfo([address.value!], { update: true });
+        // Snapshot — see fetchUserInfo. Prevents a logout race from writing
+        // this account's confirmed profile into a different account's slot.
+        const confirmedAddress = address.value!;
+        // Always network getuserprofile — local userInfoFull may still hold the
+        // empty row cached at login before UserInfo landed on-chain.
+        await appInitializer.loadUsersInfo([confirmedAddress], { update: true });
         await appInitializer.initializeAndFetchUserData(
-          address.value!,
+          confirmedAddress,
           (data: UserData) => {
             // Defensive guard — see fetchUserInfo for rationale. Without
             // this, a timing quirk in psdk.userInfo.get() (cache miss right
             // after blockchain confirmation) would crash the callback and
             // abort the post-registration flow.
             if (!data) return;
-            setUserInfo(data);
-            // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
-            useUserStore().setUser(address.value!, {
-              address: address.value!,
-              name: data.name ?? "",
-              about: data.about ?? "",
-              image: data.image ?? "",
-              site: data.site ?? "",
-              language: data.language ?? "",
+            if (address.value !== confirmedAddress) return;
+            // Same merge logic as fetchUserInfo — preserves any cached
+            // self-profile (e.g. from pendingRegProfile or a prior session)
+            // when Pocketnet returns an empty/stale row right after the
+            // confirmation tx propagates (WEE-26).
+            const cached = readSelfProfile(confirmedAddress);
+            const merged = mergeSelfProfileWithRemote(cached, data);
+            setUserInfo(merged);
+            writeSelfProfile({
+              address: confirmedAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
+              localEditedAt: cached?.localEditedAt ?? 0,
+              syncedAt: Date.now(),
             });
-          }
+            // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+            useUserStore().setUser(confirmedAddress, {
+              address: confirmedAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
+            });
+          },
+          { update: true },
         );
       } catch (e) {
         console.warn("[auth] initializeAndFetchUserData failed after confirmation, continuing:", e);
@@ -1377,8 +1796,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
     }
+    if (registrationElapsedInterval) {
+      clearInterval(registrationElapsedInterval);
+      registrationElapsedInterval = null;
+    }
     pollTimer = null;
+    _registrationPollKick = null;
     registrationPollAttempt.value = 0;
+    registrationPollElapsedMs.value = 0;
     // Tear down background-pause listeners
     if (typeof document !== "undefined" && registrationVisibilityHandler) {
       document.removeEventListener("visibilitychange", registrationVisibilityHandler);
@@ -1388,6 +1813,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       registrationAppStateHandle.remove().catch(() => { /* ignore */ });
       registrationAppStateHandle = null;
     }
+  };
+
+  /** Abort an in-progress registration after the user confirms cancel.
+   *  Clears all registration LS keys, tears down the poll, and logs out
+   *  (session + Dexie + account localStorage) so RegisterPage is reachable. */
+  const cancelRegistration = async () => {
+    stopRegistrationPoll();
+    setRegistrationPending(false);
+    setPendingRegProfile(null);
+    setRegistrationPhase("init");
+    registrationErrorMessage.value = null;
+    registrationUsernameError.value = false;
+    clearRegistrationState();
+    registrationFnode = null;
+    await logout();
   };
 
   /** Retry registration after a timeout or network error.
@@ -1461,7 +1901,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */
   const loadPost = (txid: string) => appInitializer.loadPost(txid);
 
-  const loadPostScores = (txid: string) => appInitializer.loadPostScores(txid);
   const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
   const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
   const submitUpvote = (txid: string, value: number) => appInitializer.submitUpvote(txid, value, address.value!);
@@ -1567,6 +2006,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       useChatStore().cleanup();
       useChannelStore().cleanup();
       useCallStore().clearCall();
+      // Stop blockchain WS before Matrix so its handlers can't fire against
+      // torn-down stores; initMatrix() below will re-start it for the new account.
+      try { blockchainWs.stop(); } catch { /* ignore */ }
       resetMatrixClientService();
       matrixReady.value = false;
       matrixError.value = null;
@@ -1580,16 +2022,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       }
 
       // Cleanup listeners
-      if (typeof window !== "undefined") {
-        if (_onlineHandler) { window.removeEventListener("online", _onlineHandler); _onlineHandler = null; }
-        if (_offlineHandler) { window.removeEventListener("offline", _offlineHandler); _offlineHandler = null; }
-      }
+      if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
       for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
       _peerKeysRecheckTimers.clear();
 
       // Close Dexie without deleting
       closeChatDb();
+      // Drop the cache singleton too — `initMediaCache` will re-attach
+      // to the new user's Dexie after `initChatDb` runs in `initMatrix`.
+      closeMediaCache();
 
       // 3. SWAP active account
       sessionManager.setActive(targetAddress);
@@ -1631,6 +2073,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     fetchUserInfo,
     findRegistrationProxy,
     generateRegistrationKeys,
+    hydrateLocalAliasesEarly,
     cachePost,
     getCachedPost,
     getBastyonUserData,
@@ -1643,7 +2086,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     loadMyPostScore,
     loadPost,
     loadPostComments,
-    loadPostScores,
     loadUsersInfo: (addresses: string[], options?: { update?: boolean }) =>
       appInitializer.loadUsersInfo(addresses, options),
     login,
@@ -1661,12 +2103,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
      *  Updates both the Vue ref and sessionStorage so the seed survives the
      *  next unmount too. Caller is responsible for sourcing a trusted value. */
     setRegMnemonic: (m: string) => { regMnemonic.value = m; saveMnemonic(m); },
+    cancelRegistration,
+    canCancelRegistration,
     checkUsername,
     register,
     registrationErrorMessage,
     registrationPending,
     registrationPhase,
     registrationPollAttempt,
+    registrationPollElapsedMs,
     registrationUsernameError,
     resumeRegistrationPoll,
     retryRegistration,
@@ -1676,6 +2121,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     submitComment,
     submitUpvote,
     userInfo,
-    republishKeysFromUi
+    republishKeysFromUi,
+    likelyBastyonUser
   };
 });

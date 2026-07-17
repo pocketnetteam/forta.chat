@@ -196,6 +196,12 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
       }
     },
 
+    // WEE-31: CallKit already owns a single ringer surface; re-showing
+    // via reportIncomingCall is the closest idempotent equivalent.
+    async ensureIncomingCallVisible(opts) {
+      await this.reportIncomingCall(opts);
+    },
+
     async getPendingAnswer() {
       try {
         const { calls } = await IncomingCallKit.getActiveCalls();

@@ -6,6 +6,7 @@ import android.media.AudioManager
 import android.media.projection.MediaProjection
 import android.os.Build
 import android.util.Log
+import com.forta.chat.plugins.calls.VendorAudioPolicy
 import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
 
@@ -51,30 +52,24 @@ class NativeWebRTCManager(private val context: Context) {
         var onAudioError: ((type: String, message: String) -> Unit)? = null
 
         /**
-         * OEMs with broken hardware AEC/NS implementations — using HW AEC on these
-         * devices mutes the microphone or locks the audio session. Fall back to
-         * WebRTC software AEC/NS (works everywhere).
+         * Detect vendors with known broken hardware AEC/NS — using HW AEC on
+         * these devices mutes the microphone or locks the audio session, so we
+         * fall back to WebRTC software AEC/NS (works everywhere).
          *
-         * Evidence from user reports: Xiaomi/MIUI, Realme/RealmeUI, Oppo/ColorOS,
-         * Infinix/XOS, Tecno/HiOS, Huawei/EMUI, ZTE. Samsung/Pixel/OnePlus ship
-         * working HW AEC and benefit from it (lower CPU, better quality).
+         * WEE-56: the authoritative vendor list now lives in
+         * [VendorAudioPolicy] so the calls and webrtc packages share one
+         * definition (it was duplicated against AudioRouter's OEM handling)
+         * and a single JVM test locks it. Behaviour-preserving for every real
+         * (non-null manufacturer) Build value; see [VendorAudioPolicy.prefersSoftwareAudioProcessing]
+         * for the one intentional, safer null-brand edge-case change. This is the root-cause handling for
+         * the HUAWEI "video works, no audio" symptom (#874): EMUI hardware AEC
+         * mutes the capture stream. We intentionally do not force a PCMU/G.711
+         * codec fallback — that would degrade Opus quality/interop for every
+         * Huawei user (an A5 regression); software audio processing fixes the
+         * capture mute without touching codec negotiation.
          */
-        private val BROKEN_HW_AEC_VENDORS = setOf(
-            "xiaomi", "redmi", "poco",
-            "realme",
-            "oppo",
-            "infinix", "itel",
-            "tecno",
-            "huawei", "honor",
-            "zte"
-        )
-
-        /** Detect vendors with known broken hardware AEC/NS. */
-        fun hasBrokenHardwareAudioProcessing(): Boolean {
-            val vendor = Build.MANUFACTURER?.lowercase() ?: return false
-            val brand = Build.BRAND?.lowercase() ?: ""
-            return BROKEN_HW_AEC_VENDORS.any { v -> v == vendor || v == brand }
-        }
+        fun hasBrokenHardwareAudioProcessing(): Boolean =
+            VendorAudioPolicy.prefersSoftwareAudioProcessing(Build.MANUFACTURER, Build.BRAND)
     }
 
     interface Listener {
@@ -120,42 +115,63 @@ class NativeWebRTCManager(private val context: Context) {
     fun initialize() {
         if (isInitialized) return
 
-        eglBase = EglBase.create()
+        // WEE-31 (H3): the libwebrtc native libraries are linked at first
+        // use of EglBase / PeerConnectionFactory. On ancient ARMv7 builds
+        // (Android 7 devices that mis-report their ABI) and on a handful
+        // of HarmonyOS / vendor WebViews that override the linker, the JNI
+        // load throws UnsatisfiedLinkError — which used to bubble out of
+        // here and process-kill the callee "наглухо" the moment the
+        // incoming-call accept handler tried to wire up audio. Wrap the
+        // whole bootstrap in a Throwable catch so the failure surfaces as
+        // a typed UI error through CallActivity instead of a silent crash.
+        try {
+            eglBase = EglBase.create()
 
-        val initOptions = PeerConnectionFactory.InitializationOptions.builder(context)
-            .setEnableInternalTracer(false)
-            .createInitializationOptions()
-        PeerConnectionFactory.initialize(initOptions)
+            val initOptions = PeerConnectionFactory.InitializationOptions.builder(context)
+                .setEnableInternalTracer(false)
+                .createInitializationOptions()
+            PeerConnectionFactory.initialize(initOptions)
 
-        val encoderFactory = DefaultVideoEncoderFactory(
-            eglBase!!.eglBaseContext,
-            true,  // enableIntelVp8Encoder
-            true   // enableH264HighProfile
-        )
-        val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
+            val encoderFactory = DefaultVideoEncoderFactory(
+                eglBase!!.eglBaseContext,
+                true,  // enableIntelVp8Encoder
+                true   // enableH264HighProfile
+            )
+            val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
 
-        // Hardware AEC/NS is broken on Xiaomi/MIUI, Realme, Oppo, Infinix, Tecno,
-        // Huawei, ZTE — enabling it mutes the mic. Fall back to software AEC/NS
-        // (shipped with libwebrtc) on these vendors; keep HW path on Samsung/Pixel/OnePlus.
-        val useHardwareAudioProcessing = !hasBrokenHardwareAudioProcessing()
-        Log.d(
-            TAG,
-            "Audio processing: vendor=${Build.MANUFACTURER} brand=${Build.BRAND} " +
-                "hardwareAEC=$useHardwareAudioProcessing"
-        )
-        val audioDeviceModule = JavaAudioDeviceModule.builder(context)
-            .setUseHardwareAcousticEchoCanceler(useHardwareAudioProcessing)
-            .setUseHardwareNoiseSuppressor(useHardwareAudioProcessing)
-            .createAudioDeviceModule()
+            // Hardware AEC/NS is broken on Xiaomi/MIUI, Realme, Oppo, Infinix, Tecno,
+            // Huawei, ZTE — enabling it mutes the mic. Fall back to software AEC/NS
+            // (shipped with libwebrtc) on these vendors; keep HW path on Samsung/Pixel/OnePlus.
+            val useHardwareAudioProcessing = !hasBrokenHardwareAudioProcessing()
+            Log.d(
+                TAG,
+                "Audio processing: vendor=${Build.MANUFACTURER} brand=${Build.BRAND} " +
+                    "hardwareAEC=$useHardwareAudioProcessing"
+            )
+            val audioDeviceModule = JavaAudioDeviceModule.builder(context)
+                .setUseHardwareAcousticEchoCanceler(useHardwareAudioProcessing)
+                .setUseHardwareNoiseSuppressor(useHardwareAudioProcessing)
+                .createAudioDeviceModule()
 
-        factory = PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(encoderFactory)
-            .setVideoDecoderFactory(decoderFactory)
-            .setAudioDeviceModule(audioDeviceModule)
-            .createPeerConnectionFactory()
+            factory = PeerConnectionFactory.builder()
+                .setVideoEncoderFactory(encoderFactory)
+                .setVideoDecoderFactory(decoderFactory)
+                .setAudioDeviceModule(audioDeviceModule)
+                .createPeerConnectionFactory()
 
-        isInitialized = true
-        Log.d(TAG, "Initialized with HW acceleration")
+            isInitialized = true
+            Log.d(TAG, "Initialized with HW acceleration")
+        } catch (t: Throwable) {
+            // Leave isInitialized=false so a future caller can either
+            // retry or short-circuit with a typed error. Tear down any
+            // partial state — a half-initialised EglBase pins a GL
+            // context and leaks SurfaceTexture handles.
+            Log.e(TAG, "[callee-crash-guard] NativeWebRTC initialize failed", t)
+            runCatching { eglBase?.release() }
+            eglBase = null
+            factory = null
+            isInitialized = false
+        }
     }
 
     fun getEglBase(): EglBase? = eglBase

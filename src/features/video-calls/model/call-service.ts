@@ -23,7 +23,11 @@ import {
 } from "@/shared/lib/native-calls";
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall } from "./finalize-call";
-import { isLegacyWebView, MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC } from "./webview-compatibility";
+import {
+  isLegacyWebView,
+  shouldWarnLegacyWebView,
+  MIN_CHROMIUM_MAJOR_FOR_MODERN_WEBRTC,
+} from "./webview-compatibility";
 import {
   isIncomingCallSeen,
   markIncomingCallSeen,
@@ -39,7 +43,19 @@ import {
 let legacyWebViewToastShown = false;
 
 function maybeWarnLegacyWebView(): void {
-  if (legacyWebViewToastShown) return;
+  // Self-gating so call sites (call start, answer, mid-call restart skip)
+  // can fire-and-forget without each duplicating the native/legacy/one-shot
+  // policy. Native negotiates ICE through bundled libwebrtc, so the UA Chrome
+  // version is meaningless there — never warn on native.
+  if (
+    !shouldWarnLegacyWebView({
+      isNative,
+      isLegacy: isLegacyWebView(),
+      alreadyWarned: legacyWebViewToastShown,
+    })
+  ) {
+    return;
+  }
   legacyWebViewToastShown = true;
   try {
     // The shared toast surface only models info/success/error severities.
@@ -318,15 +334,70 @@ function unwireCallEvents(call: MatrixCall) {
   boundHandlers = null;
 }
 
+/**
+ * Stop every local camera/mic (and screenshare) track held by a call.
+ *
+ * WEE-89 (regression of WEE-47): matrix-js-sdk does not reliably stop the
+ * local getUserMedia tracks when a call ends on web, so the browser keeps
+ * the camera/microphone captured and the tab's recording indicator (🔴)
+ * stays lit after the call is over — a privacy problem. On mobile the held
+ * mic also blocks the next call / the system from re-acquiring it. Stop the
+ * tracks explicitly on every platform.
+ *
+ * Native audio-routing teardown stays in finalizeCall(); this only releases
+ * the getUserMedia tracks the SDK leaves behind. MediaStreamTrack.stop() is
+ * idempotent (a no-op on an already-ended track), so calling this from the
+ * overlapping teardown paths (onState→ended, onHangup, onError, rejectCall,
+ * hangup) is safe.
+ */
+function releaseLocalMedia(call: MatrixCall): void {
+  for (const stream of [call.localUsermediaStream, call.localScreensharingStream]) {
+    try {
+      stream?.getTracks().forEach((track) => track.stop());
+    } catch (e) {
+      console.warn("[call-service] releaseLocalMedia: track.stop failed:", e);
+    }
+  }
+}
+
 function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // Defensive: remove any prior handlers first
   unwireCallEvents(call);
 
   const callStore = useCallStore();
 
+  // WEE-54 / forta-bugs#866 — phantom ringback guard.
+  //
+  // Closure-local (reset per call because wireCallEvents runs once per
+  // MatrixCall) one-shot flag so the local ringback tone ("гудки") starts
+  // exactly once, and only after the SDK has actually emitted the invite
+  // to the homeserver (CallState.InviteSent). See the InviteSent branch
+  // below for the full rationale.
+  let ringbackStarted = false;
+
   const onState = ((newState: SDKCallState, _oldState: SDKCallState) => {
     const status = mapSDKState(newState, direction);
     callStore.updateStatus(status);
+
+    // WEE-54 / forta-bugs#866: start the outgoing ringback only once the
+    // invite has actually been sent to the homeserver (InviteSent), not
+    // the instant the user taps dial. Previously playDialtone() ran
+    // synchronously in startCallInner *before* placeVoiceCall(), so the
+    // ringback played during local getUserMedia + offer creation + the
+    // DTLS handshake — and even when the invite never left the device
+    // (e.g. a failed placeCall), which users perceived as "гудки when the
+    // peer was offline" (#866). Matrix 1:1 call signaling has no peer-ack
+    // receipt, so InviteSent (invite delivered to the server) is the
+    // earliest honest "we are now dialing the peer" signal we can gate on.
+    // stopAllSounds() in the connected/ended/error/hangup paths stops it.
+    if (
+      direction === "outgoing" &&
+      newState === SDKCallState.InviteSent &&
+      !ringbackStarted
+    ) {
+      ringbackStarted = true;
+      playDialtone();
+    }
 
     // Any transition out of "connecting" cancels the watchdog — either
     // we connected successfully or the SDK itself decided to end/fail.
@@ -362,6 +433,11 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       playEndTone();
       callStore.stopTimer();
       unwireCallEvents(call);
+      // WEE-89: stop local camera/mic tracks on every platform. The SDK
+      // doesn't reliably release getUserMedia on web, leaving the tab's
+      // recording indicator lit after the call. Native finalizeCall below
+      // still handles audio routing.
+      releaseLocalMedia(call);
       // Single point of native cleanup. Idempotent per callId — if
       // hangup() / rejectCall() already finalized this call, this is a
       // no-op. Steps (stopAudioRouting → reportCallEnded → dismissCallUI
@@ -397,6 +473,10 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     stopAllSounds();
     clearIncomingTimeout();
     clearConnectingWatchdog();
+    // WEE-89: release local media here too — the SDK sometimes fires Hangup
+    // before State transitions to Ended (rejected-while-ringing), so don't
+    // wait for onState→ended to stop the camera/mic tracks.
+    releaseLocalMedia(call);
     // Also tear down the native surface. Without this, when the remote
     // cancels a call we never answered, or when another of our devices
     // picks up (m.call.select_answer), the SDK fires Hangup but the
@@ -423,6 +503,9 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     clearIncomingTimeout();
     clearConnectingWatchdog();
     unwireCallEvents(call);
+    // WEE-89: a failed call may have already acquired local media; release
+    // it so the camera/mic don't stay captured after the error.
+    releaseLocalMedia(call);
     if (isNative) {
       void finalizeCall("error", call.callId);
     }
@@ -722,6 +805,42 @@ function getClient(): any {
 let toggleCameraLock = false;
 
 // ---------------------------------------------------------------------------
+// Answer-call re-entry lock (WEE-45 / forta-bugs#724)
+// ---------------------------------------------------------------------------
+
+// Synchronous re-entry guard for answerCall. The status-based guard inside
+// answerCall reads `activeCall.status` and bails if it's already
+// connecting/connected, but the first await (`ensureCallPermissions`) opens
+// a ~100-400ms window during which the status is still 'incoming' even
+// though answer is in flight. Without this sync flag, a double-tap on the
+// accept button (forta-bugs#724) passes the guard twice and invokes
+// `call.answer()` twice — the SDK then throws on the second invocation
+// (state machine wedge) or doubles the SDP exchange, leaving the caller
+// stuck on "connecting" forever.
+//
+// Module-scope is fine because there's at most one active answer attempt
+// per process (call store enforces single-call), and resetting it in
+// `finally` guarantees we never leak the lock across calls.
+let answerInProgress = false;
+
+// ---------------------------------------------------------------------------
+// Outgoing-call re-entry lock (WEE-49 / forta-bugs#460)
+// ---------------------------------------------------------------------------
+//
+// The status-based `callStore.isInCall` guard inside startCall bails when
+// an active call already exists, but the first `await` (ensureCallPermissions)
+// opens a window of several hundred milliseconds during which callStore is
+// still empty. A double-tap on the call button — or a JS event re-emit
+// from the call message timeline — passes the guard twice and creates two
+// MatrixCall objects, which the SDK then surfaces as two outgoing dialogs
+// (forta-bugs#460). The synchronous flag closes that window; resetting it
+// in `finally` keeps it from leaking across calls.
+//
+// Module-scope is safe: the store already enforces a single active call per
+// process, so there's at most one startCall in flight at any time.
+let outgoingCallInProgress = false;
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -733,7 +852,36 @@ export function useCallService() {
       console.warn("[call-service] Already in a call");
       return;
     }
+    // WEE-49 / forta-bugs#460: synchronous re-entry guard for outgoing calls.
+    // The `isInCall` check above only catches the case where a previous
+    // call already wrote `setActiveCall`; a fast double-tap (or a JS-event
+    // re-emit from the call-message timeline) can pass it twice before the
+    // first invocation reaches that write. Set the flag immediately and
+    // clear it in `finally` so a failed dial does not block a retry — and
+    // also clear it as soon as `setActiveCall` ran inside the inner flow,
+    // so a slow placeVoiceCall does not keep the lock past the actual
+    // double-tap window (`isInCall` protects re-entry after that point).
+    if (outgoingCallInProgress) {
+      console.warn("[call-service] startCall ignored — outgoing call already in progress");
+      return;
+    }
+    outgoingCallInProgress = true;
 
+    try {
+      await startCallInner(roomId, type);
+    } finally {
+      outgoingCallInProgress = false;
+    }
+  }
+
+  // Called from `startCallInner` once the call has been registered on the
+  // store; after this point `isInCall` takes over the dedup duty so we can
+  // release the synchronous lock early. Safe to call multiple times.
+  function releaseOutgoingLock(): void {
+    outgoingCallInProgress = false;
+  }
+
+  async function startCallInner(roomId: string, type: CallType) {
     const otherTabActive = await checkOtherTabHasCall();
     if (otherTabActive) {
       console.warn("[call-service] Another tab already has an active call");
@@ -741,6 +889,13 @@ export function useCallService() {
     }
 
     callStore.cancelScheduledClear();
+
+    // forta-bugs#497 / WEE-53: warn up-front when an outdated WebView is about
+    // to drive a call. Previously this only surfaced if a mid-call network
+    // change triggered the restartIce skip — but most legacy-device failures
+    // happen before any handover, so the user never saw the hint. One-shot
+    // guard + native exclusion live inside maybeWarnLegacyWebView.
+    maybeWarnLegacyWebView();
 
     // Preflight: mic (+ camera for video). Throws PermissionDeniedError
     // if the OS denied access, or if getUserMedia returns a stream with
@@ -814,6 +969,12 @@ export function useCallService() {
     callStore.setActiveCall(callInfo);
     callStore.setMatrixCall(call);
     callStore.videoMuted = type === "voice";
+    // WEE-49: hand off the dedup duty to `callStore.isInCall` now that the
+    // call is registered. The outer `finally` is a safety net but holding
+    // the sync lock through placeVoiceCall (which may take >1s on a slow
+    // network) would block legitimate dial retries after a hangup if any
+    // dialing path failed to complete cleanly.
+    releaseOutgoingLock();
     wireCallEvents(call, "outgoing");
 
     // Late-arriving profile patch — only schedule when resolvePeerInfo's
@@ -825,7 +986,12 @@ export function useCallService() {
       refreshPeerNameAsync(call.callId, peerAddress);
     }
 
-    playDialtone();
+    // WEE-54 / forta-bugs#866: the local ringback tone is NOT started here.
+    // It used to play synchronously at this point — before placeVoiceCall()
+    // even ran — so "гудки" sounded during local media setup and even when
+    // the invite never reached the server. It is now gated on the SDK's
+    // InviteSent state inside wireCallEvents() so it only plays once we are
+    // actually dialing the peer.
 
     // Register outgoing call with Android ConnectionService + launch native UI
     if (isNative) {
@@ -857,16 +1023,21 @@ export function useCallService() {
       // setCommunicationDevice, BT hot-swap, OEM delayed re-apply.
       // Must come AFTER placeCall so the call exists; graceful degradation
       // on failure (no reason to drop the call if routing fails).
+      // WEE-16: the bridge now retries with a backoff and never rejects
+      // — failures are logged inside the bridge with full attempt count.
+      // We do not await it: starting audio routing is non-blocking for
+      // the dial-tone UX.
       if (isNative) {
-        nativeCallBridge.startAudioRouting({ callType: type }).catch((e) => {
-          console.warn("[call-service] startAudioRouting failed:", e);
-        });
+        void nativeCallBridge.startAudioRouting({ callType: type });
       }
     } catch (e) {
       console.error("[call-service] Failed to place call:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.placeCall"), error: e });
       stopAllSounds();
       unwireCallEvents(call);
+      // WEE-89: placeCall may have run getUserMedia before throwing — release
+      // any acquired camera/mic tracks so they aren't left captured.
+      releaseLocalMedia(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       // H1/H7 + Session 23: native side of startAudioRouting may have
@@ -1047,15 +1218,21 @@ export function useCallService() {
 
     // Normal incoming flow — not pre-accepted.
     //
-    // On native: the FCM push handler already showed IncomingCallActivity
-    // — that's the ONLY ringer the user should see. Do NOT set the Vue
-    // activeCall state to `incoming` here because the Vue UI binds to
-    // activeCall and would render a SECOND, web-based ringer on top of
-    // the native one. We also skip reportIncomingCall, which would just
-    // ask Telecom to open yet another incoming call surface. The user's
-    // accept/decline from the native ringer will route through
-    // CallConnection's callbacks and drive rejectCall() / answerCall()
-    // from the existing bridge listeners.
+    // On native: the FCM push handler is the *primary* ringer surface,
+    // but the race below has bitten users hard (WEE-31 follow-up):
+    //   - Push handler can only fire when the FCM message arrives first.
+    //   - When the app is in the foreground, Matrix /sync wins the race
+    //     against FCM and `handleIncomingCall` fires *before* the push
+    //     handler. The push handler then no-ops (already-known callId).
+    //   - Net result: no ringer surface is shown, the user hears nothing,
+    //     the caller is stuck on "connecting" until their own SDK timeout.
+    //
+    // Solution: ask the native bridge to ensure the ringer surface is
+    // visible. `ensureIncomingCallVisible` is idempotent — it's a no-op
+    // when IncomingCallActivity or the Telecom CallConnection is already
+    // up (push-first path), and launches the activity when neither is
+    // (sync-first path). Vue activeCall stays cleared either way so we
+    // don't get a duplicate Vue ringer on top of the native one.
     //
     // On web: render the Vue incoming ringer and play our ringtone.
     if (isNative) {
@@ -1065,6 +1242,12 @@ export function useCallService() {
       // the resolved name into. The native ringer was launched by the
       // FCM handler with whatever name was in the push payload — fixing
       // that path needs a Kotlin-side updateCallerInfo bridge.
+      void nativeCallBridge.ensureIncomingCallVisible({
+        callId: matrixCall.callId,
+        callerName: peerName,
+        roomId: matrixCall.roomId ?? "",
+        hasVideo: callInfo.type === "video",
+      });
     } else {
       callStore.setActiveCall(callInfo);
       // Web ringer is showing the Vue UI — schedule the late patch so
@@ -1098,6 +1281,16 @@ export function useCallService() {
     }
     console.log("[call-service] answerCall: begin, callId=" + call.callId);
 
+    // Sync re-entry guard (WEE-45 / forta-bugs#724) — catches double-taps
+    // on the accept button before `await ensureCallPermissions` opens the
+    // status-based guard's race window. The status guard below still
+    // matters for cross-codepath races (e.g. native accept event vs Vue
+    // tap), but only this flag is observable BEFORE the first await.
+    if (answerInProgress) {
+      console.warn("[call-service] answerCall: already in progress (sync guard), bailing");
+      return;
+    }
+
     // Guard against duplicate invocations. We intentionally allow
     // multiple answerCall() call sites (user tap in UI, native accept
     // event, pre-accepted push path, wait-for-matrix poll) because any
@@ -1105,8 +1298,62 @@ export function useCallService() {
     // through this check so only the first one actually answers.
     const currentStatus = callStore.activeCall?.status;
     if (currentStatus === CallStatus.connecting || currentStatus === CallStatus.connected) {
-      console.log("[call-service] answerCall: already " + currentStatus + ", guard bails");
+      console.warn("[call-service] answerCall: already " + currentStatus + ", guard bails");
       return;
+    }
+
+    answerInProgress = true;
+
+    // forta-bugs#497 / WEE-53: same proactive legacy-WebView hint on the
+    // answer path — an outdated callee should be told why the call may drop
+    // before it connects, not only if a later network change skips restartIce.
+    maybeWarnLegacyWebView();
+
+    // Safety net per code-review: if any future edit inserts a throwing
+    // synchronous call between here and the manual releases below, the
+    // outer try/finally guarantees the lock is cleared on the way out so
+    // a single bad edit can't permanently jam future incoming calls.
+    try {
+
+    // WEE-47 (#836): on the native non-pre-accepted incoming flow,
+    // handleIncomingCall intentionally leaves callStore.activeCall null
+    // so the Vue ringer (IncomingCallModal) does not double up over the
+    // native IncomingCallActivity. When the user finally accepts from
+    // the native ringer, NativeCallBridge fires callAnswered → answerCall
+    // runs here with matrixCall set but activeCall still null. Every
+    // store mutation below (`updateStatus(connecting)`, `setActiveCall`
+    // in onState→connected, type upgrade in syncRemoteVideoMuted) is a
+    // no-op when activeCall is null, so:
+    //   - CallWindow.show stays false (callStore.activeCall?.status is
+    //     never in ringing/connecting/connected),
+    //   - the callee hears audio (native WebRTC pipeline) but sees a
+    //     bare chat without mute/speaker/hangup controls.
+    // Populate activeCall synchronously from matrixCall here — cached
+    // profile if available, raw address otherwise — and schedule the
+    // async profile refresh exactly like handleIncomingCall would have.
+    if (!callStore.activeCall) {
+      const opponentId =
+        (call.getOpponentMember?.() as { userId?: string } | undefined)?.userId ?? "";
+      const peerAddress = opponentId ? matrixIdToAddress(opponentId) : "";
+      const cached = peerAddress ? useUserStore().getUser(peerAddress) : null;
+      const peerName = cached?.name || peerAddress;
+      const seedInfo: CallInfo = {
+        callId: call.callId,
+        roomId: call.roomId ?? "",
+        peerId: opponentId,
+        peerAddress,
+        peerName,
+        type: call.type === "video" ? "video" : "voice",
+        direction: "incoming",
+        status: CallStatus.incoming,
+        startedAt: null,
+        endedAt: null,
+      };
+      callStore.setActiveCall(seedInfo);
+      callStore.videoMuted = seedInfo.type !== "video";
+      if (peerAddress && peerName === peerAddress) {
+        refreshPeerNameAsync(call.callId, peerAddress);
+      }
     }
 
     clearIncomingTimeout();
@@ -1156,10 +1403,21 @@ export function useCallService() {
       if (isNative) {
         void finalizeCall("permission-denied", call.callId);
       }
+      // Release the re-entry lock — the user may legitimately retry the
+      // same call after granting the previously-denied permission, and
+      // a future incoming call must not be silently blocked.
+      answerInProgress = false;
       return;
     }
 
     callStore.updateStatus(CallStatus.connecting);
+
+    // WEE-45: release the re-entry lock now that status === 'connecting'.
+    // The pre-existing status-based guard at the top of answerCall covers
+    // every subsequent re-entry path; holding the lock past this point
+    // would permanently jam future answers if `await call.answer(...)`
+    // below wedges (matches the watchdog test scenario for stuck SDKs).
+    answerInProgress = false;
 
     // Hint stored device IDs (lightweight, sync) — real fix is post-connect
     const client = getClient();
@@ -1177,6 +1435,10 @@ export function useCallService() {
       try {
         call.hangup(CallErrorCode.UserHangup, false);
       } catch { /* ignore */ }
+      // WEE-89: listeners are unwired above, so onHangup/onState→ended won't
+      // fire — release the media acquired in call.answer() ourselves so the
+      // camera/mic don't stay captured after a watchdog timeout.
+      releaseLocalMedia(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       if (isNative) {
@@ -1206,17 +1468,20 @@ export function useCallService() {
 
       // Activate native VoIP audio routing after answering. Graceful
       // degradation on failure — never drop the call for a routing hiccup.
+      // WEE-16: the bridge now retries with a backoff and never rejects;
+      // failures are logged inside the bridge.
       if (isNative) {
         const callType = isVideo ? "video" : "voice";
-        nativeCallBridge.startAudioRouting({ callType }).catch((e) => {
-          console.warn("[call-service] startAudioRouting failed:", e);
-        });
+        void nativeCallBridge.startAudioRouting({ callType });
       }
     } catch (e) {
       console.error("[call-service] Failed to answer call:", e);
       useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });
       clearConnectingWatchdog();
       unwireCallEvents(call);
+      // WEE-89: call.answer may have run getUserMedia before throwing —
+      // release any acquired camera/mic tracks so they aren't left captured.
+      releaseLocalMedia(call);
       callStore.updateStatus(CallStatus.failed);
       callStore.scheduleClearCall(2000);
       // H1 + H7 + Session 23: always tear down audio routing on answer
@@ -1230,20 +1495,54 @@ export function useCallService() {
         void finalizeCall("error", call.callId);
       }
     }
+    } finally {
+      // Belt-and-suspenders: the manual releases above (permission-denied
+      // and right after `updateStatus('connecting')`) already cleared the
+      // flag for the common paths, but this guarantees no exit route can
+      // leave the lock stuck — including any hypothetical sync throw
+      // between `answerInProgress = true` and the try below.
+      answerInProgress = false;
+    }
   }
 
   function rejectCall() {
     const call = callStore.matrixCall as MatrixCall | null;
-    if (!call) return;
+    console.log("[call-service] rejectCall: invoked, hasCall=" + Boolean(call));
+    if (!call) {
+      // No MatrixCall but the modal might still be up — make sure the
+      // Vue ringer disappears anyway so the user isn't stuck on the
+      // decline button. This guards the "ghost incoming" state where
+      // activeCall got set without matrixCall (e.g. an SDK race).
+      stopAllSounds();
+      clearIncomingTimeout();
+      callStore.clearCall();
+      return;
+    }
 
     clearIncomingTimeout();
     clearConnectingWatchdog();
     stopAllSounds();
 
+    // WEE-31 follow-up: previously a throw inside call.reject() — most
+    // commonly on web when the SDK call is in Fledgling state and rejects
+    // a reject() — was only logged. The modal stayed mounted because
+    // clearCall() was unreachable, leaving the user stuck on the decline
+    // button with no visible effect. Wrap the SDK call so the local
+    // teardown ALWAYS runs even when the protocol-level reject fails.
     try {
       call.reject();
+      console.log("[call-service] rejectCall: SDK call.reject resolved");
     } catch (e) {
-      console.warn("[call-service] reject error:", e);
+      console.warn("[call-service] rejectCall: SDK reject error (continuing teardown):", e);
+      // Fallback: try hangup() — on some SDK paths reject() requires the
+      // call to be in 'Ringing' state, but hangup() works from any state
+      // and produces the same observable outcome for the caller (they
+      // see m.call.hangup and stop ringing).
+      try {
+        call.hangup(CallErrorCode.UserHangup, false);
+      } catch (e2) {
+        console.warn("[call-service] rejectCall: fallback hangup also threw:", e2);
+      }
     }
 
     // Centralized native cleanup — release audio routing, dismiss UI,
@@ -1253,6 +1552,11 @@ export function useCallService() {
     if (isNative) {
       void finalizeCall("reject", call.callId);
     }
+
+    // WEE-89: a call rejected after it acquired media (e.g. answered then
+    // declined elsewhere) must release the camera/mic. No-op when rejected
+    // while still ringing (no local stream acquired yet).
+    releaseLocalMedia(call);
 
     unwireCallEvents(call);
 
@@ -1270,6 +1574,7 @@ export function useCallService() {
       });
     }
     callStore.clearCall();
+    console.log("[call-service] rejectCall: complete, callStore cleared");
   }
 
   function hangup() {
@@ -1294,6 +1599,11 @@ export function useCallService() {
     if (isNative) {
       void finalizeCall("hangup", call.callId);
     }
+
+    // WEE-89: stop local tracks immediately on user hangup so the browser's
+    // recording indicator clears without waiting for the SDK's Ended
+    // transition (which onState→ended also releases — idempotent).
+    releaseLocalMedia(call);
 
     // Fallback cleanup if SDK doesn't fire Ended event (#11)
     callStore.scheduleClearCall(3000);

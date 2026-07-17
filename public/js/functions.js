@@ -10195,12 +10195,10 @@ resizeGif = function (app) {
 			return workerScript;
 		}
 
-		const { data } = await axios.get(
-			"https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js",
-			{
-				responseType: "blob"
-			}
-		);
+		const workerPath = (window.pocketnetpublicpath || "/") + "js/vendor/gif.worker.js";
+		const { data } = await axios.get(workerPath, {
+			responseType: "blob"
+		});
 
 		const content = await data.text();
 

@@ -1,0 +1,94 @@
+name: Android Test APK
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: android-test-apk
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy-test-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build web assets
+        run: npx vite build
+        env:
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Decode google-services.json
+        run: echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 -d > android/app/google-services.json
+
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > android/app/release-keystore.jks
+
+      - name: Resolve next version
+        id: version
+        run: node scripts/resolve-next-test-apk-version.mjs
+
+      - name: Inject test version into build.gradle
+        run: node scripts/inject-android-test-version.mjs --version "${{ steps.version.outputs.version }}"
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
+        env:
+          RELEASE_STORE_FILE: release-keystore.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Prepare test APK for deploy
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_CODE="${{ steps.version.outputs.version_code }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          APK_DIR="android/app/build/outputs/apk/release"
+          mv "$APK_DIR/app-release.apk" "$APK_DIR/forta-chat-test-${VERSION}.apk"
+          mkdir -p apktests
+          cp "$APK_DIR/forta-chat-test-${VERSION}.apk" apktests/latest.apk
+          printf '{"versionName":"%s","versionCode":%s,"commit":"%s"}\n' \
+            "$VERSION" "$VERSION_CODE" "$SHORT_SHA" > apktests/version.json
+
+      - name: Deploy test APK to server via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./apktests/
+          server-dir: ${{ secrets.FTP_SERVER_DIR }}/apktests/
+          dangerous-clean-slate: false
+
+      - name: Cleanup secrets
+        if: always()
+        run: |
+          rm -f android/app/release-keystore.jks
+          rm -f android/app/google-services.json

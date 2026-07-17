@@ -16,3 +16,10 @@ export const PROXY_NODES = [
 export const RTC_WS_URL = "wss://pocketnet.app:9090";
 export const RTC_HTTP_URL = "https://pocketnet.app:9091";
 export const MATRIX_SERVER = "matrix.pocketnet.app";
+
+/** Fallback media/homeserver mirrors for `MATRIX_SERVER`. Mirrors bastyon-chat's
+ *  `matrixMirrors` (pocketnet `Bastyon.json` → `matrix.2.pocketnet.app`) and its
+ *  `pingServers` live-server pick. Media downloads alternate primary↔mirror across
+ *  retry attempts, so a throttled or region-blocked primary media-repo doesn't
+ *  leave images stuck in an eternal spinner (WEE-90 H2). */
+export const MATRIX_MIRRORS = ["matrix.2.pocketnet.app"];

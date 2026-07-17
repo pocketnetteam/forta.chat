@@ -214,7 +214,7 @@ npx vue-tsc --noEmit       # type-check
 npm run test               # tests
 ```
 
-Conventions, git-worktree isolation, TDD, code review and the rest — in [CLAUDE.md](CLAUDE.md).
+Conventions, TDD, code review and the rest — in [CLAUDE.md](CLAUDE.md).
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 

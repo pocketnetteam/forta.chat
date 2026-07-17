@@ -11,6 +11,59 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
+/** Max rooms processed concurrently (WEE-94). Outbound ops stay strictly FIFO
+ *  *within* a room (message order is a hard invariant), but a slow room —
+ *  heavy encryption, slow link, retry backoff — must not head-of-line block
+ *  sends in other rooms. 3 mirrors the `mediaDownloadGate` budget from
+ *  use-file-download: enough overlap to hide one stuck room, small enough not
+ *  to saturate CPU/network on low-end Android. */
+const MAX_CONCURRENT_ROOMS = 3;
+
+/** Re-check interval while the Matrix client is not ready (boot / re-init).
+ *  A claimed send op is released back to "pending" WITHOUT counting a retry
+ *  and re-polled at this cadence, so messages sent during the not-ready
+ *  window queue up and flush once the client is ready instead of failing
+ *  instantly or exhausting maxRetries during a slow boot (WEE-85). */
+const MATRIX_NOT_READY_RETRY_MS = 1_000;
+
+/** Outbound message-creating ops whose transport status is mirrored onto the
+ *  room's `lastMessageLocalStatus` (chat-list preview, WEE-64). Edit/reaction/
+ *  delete/vote ops mutate an existing message and must never overwrite the
+ *  preview badge. */
+const SEND_OPS: ReadonlySet<PendingOperation["type"]> = new Set([
+  "send_message",
+  "send_file",
+  "send_transfer",
+  "send_poll",
+]);
+
+/** Dexie throws this when tests (or logout) close the DB while async engine
+ *  bookkeeping is still in flight. Swallowing it avoids vitest unhandled
+ *  rejections without masking real transport failures. */
+function isDbClosedError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (e.name === "DatabaseClosedError") return true;
+  if (e.message.includes("Database has been closed")) return true;
+  const inner = (e as { inner?: Error }).inner;
+  return inner?.name === "DatabaseClosedError"
+    || (inner?.message?.includes("Database has been closed") ?? false);
+}
+
+/** Watchdog tick interval. The watchdog is a safety net for cases where the
+ *  connectivity layer fails to deliver a "back online" signal — most commonly
+ *  Android WebView after device sleep+wake, where `window.online` may never
+ *  fire even though `navigator.onLine` has already flipped to true. Once per
+ *  tick we look for stuck pending ops and resume the queue if the underlying
+ *  network is actually available. */
+const WATCHDOG_INTERVAL_MS = 30_000;
+
+/** Lease on a claimed ("syncing") op. Under per-room claims (WEE-94) a
+ *  stranded "syncing" row — crashed sibling tab, unexpected rejection —
+ *  blocks its whole room, not just itself, so the watchdog releases claims
+ *  older than this back to "pending". Must comfortably exceed the slowest
+ *  legitimate op: media encrypt (30s) + upload (4min) + send event (20s). */
+const SYNCING_LEASE_MS = 6 * 60_000;
+
 /** Per-phase media pipeline timeouts. Splitting one 5-minute cap into
  *  per-phase caps lets retries surface phase-specific failures (e.g. crypto
  *  hang vs. upload stall) instead of a generic "timed out" after 5 min. */
@@ -49,12 +102,91 @@ function computeBackoff(retries: number): number {
   return base + Math.random() * Math.min(base * 0.5, 5_000);
 }
 
+/** Short, in-attempt backoff for the upload sub-step (forta-bugs#831 /
+ *  #725 / #423 / WEE-50). Network blips on flaky Android cell links lose
+ *  the first POST to the media repo even when the rest of the pipeline is
+ *  fine; without an in-line retry the whole op fails and the user waits
+ *  out the engine-level 1-30s backoff. Three quick attempts cover the
+ *  vast majority of single-packet drops within ~6 s before falling back
+ *  to the queue-level retry logic. Delays kept in ms. */
+const UPLOAD_RETRY_DELAYS_MS = [500, 1500, 4000] as const;
+
+/** Errors that the upload retry loop must NOT swallow. Aborts are user
+ *  intent (cancelMediaUpload), and deterministic server-side failures are
+ *  retry-immune — retrying just delays the failure UX. */
+function isUploadFatal(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof Error) {
+    // Matrix media repo returns 413 (payload too large) and 4xx auth/quota
+    // failures that are not retryable. We don't have typed errors at this
+    // layer, so substring-match the bare message — same approach the
+    // download path takes. Matches only digit groups that look like an
+    // HTTP-status mention (preceded by "status" or by start-of-message /
+    // whitespace + non-digit) so a filename like `meeting_403.mp3` doesn't
+    // poison the heuristic.
+    if (/(?:status\s*|^|\s)(?:413|415|401|403)\b|too large|payload too large/i.test(err.message)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** AbortSignal-aware sleep. Resolves after `ms` or rejects immediately on
+ *  abort — the latter is important so `cancelMediaUpload` can interrupt the
+ *  backoff between attempts instead of forcing the user to wait out the
+ *  4-second tail. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Upload cancelled", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Upload cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Wrap `matrixService.uploadContent` with short in-attempt retries.
+ *  See `UPLOAD_RETRY_DELAYS_MS` for the rationale. Returns the mxc:// URL
+ *  emitted by the final successful attempt. Throws the LAST error if every
+ *  attempt fails so the engine-level retry loop can take over with its
+ *  longer backoff.
+ *
+ *  Total: 1 initial attempt + UPLOAD_RETRY_DELAYS_MS.length retries. */
+async function uploadWithRetry(
+  upload: () => Promise<string>,
+  signal: AbortSignal,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= UPLOAD_RETRY_DELAYS_MS.length; attempt++) {
+    if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+    if (attempt > 0) {
+      await sleep(UPLOAD_RETRY_DELAYS_MS[attempt - 1], signal);
+    }
+    try {
+      return await upload();
+    } catch (e) {
+      lastErr = e;
+      if (isUploadFatal(e)) throw e;
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * SyncEngine processes pending operations (outbound queue).
  *
  * Lifecycle:
  *   1. User action → MessageRepository writes to local DB + creates PendingOp
- *   2. SyncEngine.processQueue() picks up ops in FIFO order
+ *   2. SyncEngine.processQueue() picks up ops — strictly FIFO within a room,
+ *      up to MAX_CONCURRENT_ROOMS rooms in parallel (WEE-94)
  *   3. Each op: encrypt if needed → call Matrix API → update local message status
  *   4. On failure: exponential backoff + retry, or mark as "failed"
  *
@@ -62,11 +194,26 @@ function computeBackoff(retries: number): number {
  * `setOnline(true)` resumes.
  */
 export class SyncEngine {
+  /** True while the claim loop in processTick is running. Serializes claiming
+   *  (op execution itself runs concurrently per room — see `activeRooms`). */
   private processing = false;
+  /** Rooms with an op currently executing in THIS engine instance. Bounded by
+   *  MAX_CONCURRENT_ROOMS; claimDueOp skips these rooms so per-room FIFO holds. */
+  private activeRooms = new Set<string>();
+  /** A kick arrived while the claim loop was running. processTick re-runs the
+   *  loop once after it finishes so a room freed mid-loop is not stranded
+   *  until the watchdog. */
+  private rekick = false;
   private online = true;
   private scheduled = false;
   private disposed = false;
   private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Epoch ms when the pending scheduledTimer fires; lets kickScheduler pull
+   *  an existing far-future wake (retry backoff) forward for new work. */
+  private scheduledAt = 0;
+  /** Watchdog interval handle. Drains stuck queues even when no
+   *  connectivity transition signal arrives (Android WebView sleep+wake). */
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   /** AbortControllers for in-flight media uploads, keyed by clientId.
    *  Populated by syncSendFile at the start of each execution, drained in
    *  its finally block. cancelMediaUpload() signals through this map to
@@ -89,6 +236,7 @@ export class SyncEngine {
   ) {
     this.getRoomCrypto = getRoomCrypto;
     this.onChange = onChange;
+    this.startWatchdog();
   }
 
   /** Update online/offline state. Resumes queue on reconnect and
@@ -111,9 +259,9 @@ export class SyncEngine {
       // Fire-and-forget — retryAllFailed itself calls processQueue().
       // NOTE: we intentionally do NOT call recoverStrandedOps() here because
       // it has a race with an already-in-flight processQueue() (it could
-      // reset a "syncing" op that's mid-execution). recoverStrandedOps is
-      // documented as "call once at startup before processQueue()" — callers
-      // own that ordering.
+      // reset a "syncing" op that's mid-execution). Callers own that ordering:
+      // run it before processQueue(), or pass the snapshotStrandedOpIds()
+      // whitelist when deferring it past queue start (WEE-97).
       this.retryAllFailed().catch((e) => {
         console.warn("[SyncEngine] retryAllFailed on reconnect failed:", e);
         this.processQueue();
@@ -122,15 +270,43 @@ export class SyncEngine {
   }
 
   /**
+   * Snapshot the ids of ops currently stranded in "syncing" — carried over
+   * from a previous session (crash mid-send). Indexed lookup over a handful
+   * of rows, NOT a table scan.
+   *
+   * WEE-97: recovery is deferred until after the chat list is interactive,
+   * but processQueue() starts immediately and marks in-flight ops "syncing".
+   * Taking this snapshot at startup (before processQueue) lets the deferred
+   * recoverStrandedOps(onlyIds) reset only genuinely stranded ops, never an
+   * op this session has since claimed.
+   */
+  async snapshotStrandedOpIds(): Promise<number[]> {
+    const ids = await this.db.pendingOps
+      .where("status")
+      .equals("syncing")
+      .primaryKeys();
+    return ids as number[];
+  }
+
+  /**
    * Recover operations stranded in "syncing" state (e.g. after app crash mid-send).
    * Resets them back to "pending" so processQueue() will pick them up.
-   * Must be called once at startup before processQueue().
+   *
+   * Ordering contract: either call once at startup BEFORE processQueue(), or
+   * — when deferred past processQueue() start (WEE-97) — pass the `onlyIds`
+   * snapshot taken at startup via snapshotStrandedOpIds() so ops claimed by
+   * the live queue in the meantime are never reset mid-flight.
    */
-  async recoverStrandedOps(): Promise<void> {
-    const stranded = await this.db.pendingOps
+  async recoverStrandedOps(onlyIds?: number[]): Promise<void> {
+    let stranded = await this.db.pendingOps
       .where("status")
       .equals("syncing")
       .toArray();
+
+    if (onlyIds) {
+      const allow = new Set(onlyIds);
+      stranded = stranded.filter((op) => op.id != null && allow.has(op.id));
+    }
 
     if (stranded.length === 0) return;
 
@@ -153,15 +329,57 @@ export class SyncEngine {
     this.onChange = cb;
   }
 
+  /**
+   * Snapshot of the outbound queue used by the UI banner to detect stuck sends.
+   *
+   * `oldestPendingAgeMs` is `null` when the queue has no due ops. When it is
+   * large the UI can warn the user that something is wedged — e.g. crypto
+   * never resolved or media server is unreachable — instead of leaving them
+   * staring at "sending…" forever.
+   *
+   * Why exposed as a polled snapshot and not a Dexie live-query:
+   *  - The caller (status banner) is allowed to be eventually consistent;
+   *    polling once every few seconds is cheaper than a hot live-query that
+   *    fires on every progress write.
+   *  - Keeps the SyncEngine's public surface minimal — Dexie tables are
+   *    internal state.
+   */
+  async getQueueHealth(): Promise<{
+    pendingCount: number;
+    failedCount: number;
+    syncingCount: number;
+    oldestPendingAgeMs: number | null;
+  }> {
+    const [pending, failed, syncing] = await Promise.all([
+      this.db.pendingOps.where("status").equals("pending").toArray(),
+      this.db.pendingOps.where("status").equals("failed").count(),
+      this.db.pendingOps.where("status").equals("syncing").count(),
+    ]);
+    const now = Date.now();
+    let oldest: number | null = null;
+    for (const op of pending) {
+      const created = op.createdAt ?? op.lastAttemptAt ?? now;
+      const age = now - created;
+      if (oldest === null || age > oldest) oldest = age;
+    }
+    return {
+      pendingCount: pending.length,
+      failedCount: failed,
+      syncingCount: syncing,
+      oldestPendingAgeMs: oldest,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Queue processing
   // ---------------------------------------------------------------------------
 
   /**
-   * Process one op from the queue per tick, then yield to the event loop.
-   * Re-schedules itself via setTimeout until the queue is empty or a retry
-   * is not yet due. This prevents head-of-line blocking: a single failing op
-   * cannot hold the queue for its 30s backoff.
+   * Kick the claim loop. Each tick claims due ops — at most one in-flight op
+   * per room, at most MAX_CONCURRENT_ROOMS rooms in parallel (WEE-94) — and
+   * executes them concurrently. Within a room, order is strictly FIFO: only
+   * the room's head op is ever claimed, so a retrying head blocks its own
+   * room (message order is a hard invariant) but never other rooms.
    *
    * External callers use the public `processQueue()` which is a thin wrapper
    * kicking off the first tick without double-scheduling.
@@ -181,49 +399,279 @@ export class SyncEngine {
       clearTimeout(this.scheduledTimer);
       this.scheduledTimer = null;
     }
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     this.scheduled = false;
   }
 
-  /** Schedule processTick after `delayMs` unless a tick is already pending. */
+  // ---------------------------------------------------------------------------
+  // Watchdog — last-resort recovery when no connectivity signal arrives
+  // ---------------------------------------------------------------------------
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer || this.disposed) return;
+    this.watchdogTimer = setInterval(() => {
+      if (this.disposed) return;
+      this.watchdogCheck().catch((e) =>
+        console.warn("[SyncEngine] watchdog tick failed:", e),
+      );
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  /**
+   * Per-tick safety check. Three states matter:
+   *  1. No queued work — nothing to do.
+   *  2. Engine thinks it is offline but `navigator.onLine` is true — the
+   *     connectivity transition was missed (Android sleep+wake bug);
+   *     force `setOnline(true)` so retryAllFailed + processQueue run.
+   *  3. Engine is online but scheduler is idle — probably a race where a
+   *     wake-up timer was cleared; kick a fresh tick.
+   */
+  private async watchdogCheck(): Promise<void> {
+    if (this.disposed) return;
+    try {
+      await this.releaseExpiredClaims();
+
+      const pending = await this.db.pendingOps
+        .where("status")
+        .anyOf(["pending", "syncing"])
+        .count();
+      if (pending === 0) return;
+
+      if (!this.online) {
+        if (typeof navigator !== "undefined" && navigator.onLine) {
+          console.info(
+            `[SyncEngine] watchdog: ${pending} ops stuck while navigator.onLine=true, forcing setOnline(true)`,
+          );
+          this.setOnline(true);
+        }
+        return;
+      }
+
+      if (!this.scheduled && !this.processing) {
+        this.kickScheduler(0);
+      }
+    } catch (e) {
+      if (this.disposed || isDbClosedError(e)) return;
+      console.warn("[SyncEngine] watchdog tick failed:", e);
+    }
+  }
+
+  /** Release "syncing" claims whose lease expired (WEE-94 self-heal). A row
+   *  stranded by a crashed sibling tab or a failed bookkeeping write blocks
+   *  its whole room under per-room claims, and recoverStrandedOps only runs
+   *  at startup — so the watchdog sweeps expired leases each tick. Rooms
+   *  with a live worker in THIS engine are skipped: their op is legitimately
+   *  in flight even if (pathologically) past the lease. Retries are NOT
+   *  incremented — recovery is not a transport failure. */
+  private async releaseExpiredClaims(): Promise<void> {
+    if (this.disposed) return;
+    const cutoff = Date.now() - SYNCING_LEASE_MS;
+    let expired: PendingOperation[];
+    try {
+      expired = await this.db.pendingOps
+        .where("status")
+        .equals("syncing")
+        .filter(
+          (op) =>
+            !this.activeRooms.has(op.roomId) &&
+            (op.lastAttemptAt ?? op.createdAt ?? 0) <= cutoff,
+        )
+        .toArray();
+    } catch (e) {
+      if (this.disposed || isDbClosedError(e)) return;
+      throw e;
+    }
+    if (expired.length === 0) return;
+
+    console.info(
+      `[SyncEngine] watchdog: releasing ${expired.length} expired "syncing" claim(s)`,
+    );
+    for (const op of expired) {
+      try {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now(),
+        });
+      } catch (e) {
+        if (this.disposed || isDbClosedError(e)) return;
+        throw e;
+      }
+    }
+  }
+
+  /** Schedule processTick after `delayMs` unless a tick is already pending.
+   *  A kick that arrives while the claim loop itself is running is deferred
+   *  via `rekick` (not dropped) — the loop re-runs once after finishing, so
+   *  a room freed by a just-completed worker is picked up immediately. */
   private kickScheduler(delayMs: number): void {
-    if (this.disposed || this.scheduled || this.processing || !this.online) return;
+    if (this.disposed || !this.online) return;
+    if (this.processing) {
+      this.rekick = true;
+      return;
+    }
+    const fireAt = Date.now() + Math.max(0, delayMs);
+    if (this.scheduled) {
+      // A timer is already pending. Keep it if it fires soon enough;
+      // otherwise pull it forward — e.g. a fresh send enqueued while the
+      // only pending timer is a 30s backoff wake must process immediately,
+      // not wait out the backoff (or the 30s watchdog).
+      if (fireAt >= this.scheduledAt) return;
+      if (this.scheduledTimer !== null) {
+        clearTimeout(this.scheduledTimer);
+        this.scheduledTimer = null;
+      }
+    }
     this.scheduled = true;
+    this.scheduledAt = fireAt;
     this.scheduledTimer = setTimeout(() => {
       this.scheduledTimer = null;
       this.processTick();
     }, Math.max(0, delayMs));
   }
 
+  /**
+   * Claim loop (WEE-94): claim due ops from distinct rooms until either no
+   * claimable op remains or MAX_CONCURRENT_ROOMS workers are in flight.
+   * Each claimed op is executed concurrently via runClaimedOp; its completion
+   * frees the room and kicks the scheduler again.
+   */
   private async processTick(): Promise<void> {
     this.scheduled = false;
     if (this.disposed || this.processing || !this.online) return;
     this.processing = true;
 
-    let op: PendingOperation | null = null;
     let nextRetryDelay: number | null = null; // smallest remaining wait
 
     try {
-      // Claim one due pending op transactionally so concurrent engines
-      // (multi-tab) can't both pick the same record.
-      op = await this.claimDueOp();
+      while (
+        !this.disposed &&
+        this.online &&
+        this.activeRooms.size < MAX_CONCURRENT_ROOMS
+      ) {
+        // Claim the head op of a free room transactionally so concurrent
+        // engines (multi-tab) can't both pick the same record.
+        const op = await this.claimDueOp();
 
-      if (!op) {
-        // Nothing due right now — check whether an op is scheduled for later
-        // so we can set a wake-up timer and then stop this tick cleanly.
-        nextRetryDelay = await this.findNextRetryDelay();
-        return;
+        if (!op) {
+          // Nothing claimable right now — check whether an op is scheduled
+          // for later so we can set a wake-up timer in the finally block.
+          nextRetryDelay = await this.findNextRetryDelay();
+          break;
+        }
+
+        this.activeRooms.add(op.roomId);
+        // Deliberately NOT awaited — rooms run in parallel. Errors are fully
+        // handled inside runClaimedOp; the finally here only frees the slot.
+        void this.runClaimedOp(op).finally(() => {
+          this.activeRooms.delete(op.roomId);
+          // Re-check the queue: this room is free again, and the op may have
+          // scheduled a retry whose wake-up needs (re)computing.
+          this.kickScheduler(0);
+        });
       }
+    } finally {
+      this.processing = false;
+      if (this.online && !this.disposed) {
+        if (this.rekick) {
+          // A worker finished (or new work arrived) mid-loop; re-run now.
+          this.rekick = false;
+          this.kickScheduler(0);
+        } else if (nextRetryDelay !== null) {
+          // No due ops but a retry is scheduled for later. Set a single
+          // wake-up timer so that retry is actually attempted.
+          this.scheduleWake(nextRetryDelay);
+        }
+      }
+    }
+  }
+
+  /**
+   * Execute one claimed op and persist the outcome. Never rejects — a
+   * rejection escaping the spawn site's `.finally()` would surface as an
+   * unhandled promise rejection AND leave the op stuck in "syncing",
+   * blocking its whole room under per-room claims. Bookkeeping failures
+   * (Dexie closed during a logout race, quota errors) are caught here and
+   * the claim is released best-effort; the watchdog's SYNCING_LEASE_MS
+   * recovery is the backstop when even the release write fails.
+   */
+  private async runClaimedOp(op: PendingOperation): Promise<void> {
+    try {
+      await this.processClaimedOp(op);
+    } catch (e) {
+      if (this.disposed || isDbClosedError(e)) return;
+      console.warn("[SyncEngine] op bookkeeping failed, releasing claim:", e);
+      try {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now() + MIN_BACKOFF_MS,
+        });
+      } catch {
+        // DB is gone (logout/teardown race) — nothing to release; a future
+        // engine instance recovers the row via recoverStrandedOps / lease.
+      }
+    }
+  }
+
+  /**
+   * One claimed op: readiness gate → execute → persist success/failure.
+   * Runs concurrently — one in-flight instance per room, bounded by
+   * MAX_CONCURRENT_ROOMS. Transport errors are handled internally
+   * (backoff / failed); only bookkeeping failures propagate to runClaimedOp.
+   */
+  private async processClaimedOp(op: PendingOperation): Promise<void> {
+    // Matrix-readiness gate (WEE-85): during the boot / re-init window the
+    // client object isn't ready (`isReady()` false). Sending now would throw
+    // and burn a retry, so instead release the op back to "pending" WITHOUT
+    // counting a retry and reschedule a short re-poll. The op flushes once
+    // the client is ready — mirroring how `online` gates the whole loop.
+    // Real failures still surface via maxRetries once the client is ready.
+    // NOTE: recovery is intentionally poll-based (the released op's
+    // nextAttemptAt drives a re-poll via findNextRetryDelay, backed by the
+    // watchdog) — there is no `onReady` event that re-kicks the scheduler
+    // when Matrix becomes ready.
+    if (!this.isMatrixReady()) {
+      if (this.disposed) return;
+      try {
+        await this.db.pendingOps.update(op.id!, {
+          status: "pending",
+          nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
+        });
+      } catch (e) {
+        if (this.disposed || isDbClosedError(e)) return;
+        throw e;
+      }
+      return;
+    }
+
+    try {
+      await this.executeOperation(op);
+      // If dispose() was called while the send was in flight, skip writing
+      // to a DB we no longer own. The send itself already landed server-side;
+      // the next engine instance will reconcile via Matrix sync.
+      if (this.disposed) return;
+      await this.db.pendingOps.delete(op.id!);
+      this.onChange?.(op.roomId);
+    } catch (e) {
+      if (this.disposed) return;
 
       try {
-        await this.executeOperation(op);
-        // If dispose() was called while the send was in flight, skip writing
-        // to a DB we no longer own. The send itself already landed server-side;
-        // the next engine instance will reconcile via Matrix sync.
-        if (this.disposed) return;
-        await this.db.pendingOps.delete(op.id!);
-        this.onChange?.(op.roomId);
-      } catch (e) {
-        if (this.disposed) return;
+        // Race guard: Matrix may have accepted the event server-side even
+        // though the SDK threw (read timeout, CORS race, etc.). When the
+        // server-side `/sync` echo arrives via EventWriter → upsertFromServer
+        // the local message picks up its eventId and flips to "synced"
+        // before this catch runs. In that case the queued op is already
+        // satisfied — drop it without flagging the message as failed,
+        // otherwise the user sees a red retry indicator on a message the
+        // peer actually received (WEE-40).
+        if (op.clientId && (await this.isMessageAlreadyConfirmed(op.clientId))) {
+          await this.db.pendingOps.delete(op.id!);
+          this.onChange?.(op.roomId);
+          return;
+        }
+
         const retries = op.retries + 1;
         if (retries >= op.maxRetries) {
           await this.db.pendingOps.update(op.id!, {
@@ -242,49 +690,79 @@ export class SyncEngine {
             lastAttemptAt: Date.now(),
             nextAttemptAt: Date.now() + delay,
           });
-          // We don't `await sleep(delay)` here — other due ops must proceed
-          // immediately. The delay is tracked via nextAttemptAt in the DB,
-          // and a wake-up timer is scheduled in the finally block below.
+          // We don't `await sleep(delay)` here — ops in other rooms must
+          // proceed immediately. The delay is tracked via nextAttemptAt in the
+          // DB; the post-completion kick recomputes the wake-up timer. Note
+          // that within THIS room the retrying op stays the head, so later
+          // messages in the room wait for it — FIFO order is a hard invariant.
         }
-      }
-    } finally {
-      this.processing = false;
-      if (this.online) {
-        if (op) {
-          // We just processed one op. Immediately yield and check for the
-          // next due op. claimDueOp will skip any op whose nextAttemptAt is
-          // still in the future.
-          this.kickScheduler(0);
-        } else if (nextRetryDelay !== null) {
-          // Queue is empty of due ops but a retry is scheduled for later.
-          // Set a single wake-up timer so that retry is actually attempted.
-          this.scheduleWake(nextRetryDelay);
-        }
+      } catch (bookkeepingErr) {
+        if (this.disposed || isDbClosedError(bookkeepingErr)) return;
+        throw bookkeepingErr;
       }
     }
   }
 
   /**
-   * Atomically claim the next due pending op (status = "pending"
-   * and nextAttemptAt <= now). Returns null if nothing is due.
+   * Atomically claim the next claimable op (WEE-94). An op is claimable when
+   * it is the HEAD of its room's queue (first pending op of the room in
+   * creation order — FIFO within a room is a hard invariant), it is due
+   * (nextAttemptAt <= now), and its room is busy in neither this engine
+   * (`activeRooms`) nor any other tab (a "syncing" op of the same room).
+   * Returns null if nothing is claimable.
    *
-   * Uses the [status+nextAttemptAt] compound index added in v11 so this is
-   * O(log n) even with thousands of queued ops. Freshly-enqueued ops get
-   * nextAttemptAt=0 and are naturally prioritised over retry-scheduled ops
-   * (which have larger nextAttemptAt values). Within the same nextAttemptAt
-   * bucket Dexie falls back to the primary key order, which is creation
-   * order for `++id` — preserving FIFO for fresh sends.
+   * The whole select-and-mark runs in one rw-transaction on pendingOps, same
+   * as before — concurrent engines (multi-tab) can't both claim the same
+   * record, and a room claimed by another tab is excluded via its "syncing"
+   * marker row, so two tabs can't run the same room out of order either.
+   *
+   * Iteration walks the "status" index, whose entries within one status value
+   * are ordered by primary key (`++id` = creation order), and stops at the
+   * first claimable head. The realistic outbound queue is tiny (tens of ops);
+   * the previous O(log n) single-op lookup via [status+nextAttemptAt] cannot
+   * express "head per room", so a short ordered walk replaces it.
    */
   private async claimDueOp(): Promise<PendingOperation | null> {
     return this.db.transaction("rw", this.db.pendingOps, async () => {
       const now = Date.now();
-      const due = await this.db.pendingOps
-        .where("[status+nextAttemptAt]")
-        .between(["pending", -Infinity], ["pending", now], true, true)
-        .first();
-      if (!due) return null;
-      await this.db.pendingOps.update(due.id!, { status: "syncing" });
-      return { ...due, status: "syncing" };
+
+      // Rooms with an op currently in flight somewhere (this tab marks ops
+      // "syncing" too, but activeRooms is checked as well to close the gap
+      // between transaction commit and the worker registering the room).
+      const busyRooms = new Set<string>(this.activeRooms);
+      await this.db.pendingOps
+        .where("status")
+        .equals("syncing")
+        .each((op) => {
+          busyRooms.add(op.roomId);
+        });
+
+      // Walk pending ops in creation order; the first op seen for a room is
+      // that room's head. Only a due head of a free room may be claimed.
+      const seenRooms = new Set<string>();
+      let claimed: PendingOperation | null = null;
+      await this.db.pendingOps
+        .where("status")
+        .equals("pending")
+        .until(() => claimed !== null)
+        .each((op) => {
+          if (claimed || seenRooms.has(op.roomId)) return;
+          seenRooms.add(op.roomId);
+          if (busyRooms.has(op.roomId)) return;
+          if ((op.nextAttemptAt ?? 0) > now) return; // head not due → room waits
+          claimed = op;
+        });
+
+      if (!claimed) return null;
+      const head = claimed as PendingOperation;
+      // lastAttemptAt doubles as the claim lease timestamp — the watchdog
+      // releases "syncing" rows whose lease expired (SYNCING_LEASE_MS).
+      const claimedAt = Date.now();
+      await this.db.pendingOps.update(head.id!, {
+        status: "syncing",
+        lastAttemptAt: claimedAt,
+      });
+      return { ...head, status: "syncing", lastAttemptAt: claimedAt };
     });
   }
 
@@ -434,6 +912,11 @@ export class SyncEngine {
       /** Optional top-level event fields merged after msgtype — e.g.
        *  caption / captionAbove / bastyon-specific flags. */
       eventExtras?: Record<string, unknown>;
+      /** Forward attribution for the receiving side. When present the
+       *  outbound Matrix event gets a `forwarded_from` field so recipients
+       *  render «Forwarded from <name>» on top of the media bubble. Mirrors
+       *  syncSendMessage. */
+      forwardedFrom?: { senderId: string; senderName?: string };
     };
     const matrixService = getMatrixClientService();
 
@@ -485,8 +968,20 @@ export class SyncEngine {
         // fire-and-forget; progress is advisory and must not stall upload
         void this.messageRepo.updateUploadProgress(op.clientId, percent);
       });
+      // The retry loop sits *inside* the timeout so the deadline covers the
+      // whole upload phase (including in-attempt retries) rather than being
+      // reset between attempts — protects against a runaway 4×4-min loop on
+      // a flaky link.
       const url = await withTimeout(
-        matrixService.uploadContent(fileToUpload, onProgress, controller.signal),
+        uploadWithRetry(
+          () =>
+            matrixService.uploadContent(
+              fileToUpload,
+              onProgress,
+              controller.signal,
+            ),
+          controller.signal,
+        ),
         MEDIA_UPLOAD_TIMEOUT_MS,
         "Media upload",
       );
@@ -505,15 +1000,24 @@ export class SyncEngine {
       // existing viewers keep rendering. Callers that need richer metadata
       // (m.image with dimensions, m.audio with duration) pass eventInfo /
       // eventExtras which merge on top.
+      // m.file with no explicit body: embed url + secrets inside the JSON
+      // body so any client (old bastyon-chat parsers, recipients running
+      // matrix-client.ts that JSON.parses body into pbody) can recover the
+      // mxc URL even when they ignore top-level content.url. Without this
+      // forwarded/uploaded PDFs throw MissingUrlError on the sender after
+      // /sync re-parses the event (WEE-28).
+      const defaultFileBody: Record<string, unknown> = {
+        name: payload.fileName,
+        type: payload.mimeType,
+        size: attachment.size,
+      };
+      if (payload.msgtype === "m.file") {
+        defaultFileBody.url = url;
+        if (secrets) defaultFileBody.secrets = secrets;
+      }
       const content: Record<string, unknown> = {
         msgtype: payload.msgtype,
-        body:
-          payload.body ??
-          JSON.stringify({
-            name: payload.fileName,
-            type: payload.mimeType,
-            size: attachment.size,
-          }),
+        body: payload.body ?? JSON.stringify(defaultFileBody),
         url,
         ...(payload.eventExtras ?? {}),
       };
@@ -524,6 +1028,12 @@ export class SyncEngine {
         };
       } else if (secrets) {
         content.secrets = secrets;
+      }
+      if (payload.forwardedFrom) {
+        content.forwarded_from = {
+          sender_id: payload.forwardedFrom.senderId,
+          sender_name: payload.forwardedFrom.senderName,
+        };
       }
 
       const serverEventId = await withTimeout(
@@ -745,14 +1255,59 @@ export class SyncEngine {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  /** Mark the message associated with a failed operation */
+  /** Mark the message associated with a failed operation.
+   *  No-op when the message has already been confirmed (eventId present or
+   *  status already "synced") — the matrix-js-sdk error happened after the
+   *  server actually accepted the event and the /sync echo restored state.
+   *  Without this guard the watchdog/retry-exhaustion path would flip a
+   *  successfully delivered message back to "failed" and surface a false
+   *  retry indicator (WEE-40). */
   private async markMessageFailed(op: PendingOperation): Promise<void> {
-    if (op.clientId) {
-      await this.messageRepo.updateStatus(
-        { clientId: op.clientId },
-        "failed",
-      );
+    if (!op.clientId) return;
+    if (await this.isMessageAlreadyConfirmed(op.clientId)) return;
+    await this.messageRepo.updateStatus(
+      { clientId: op.clientId },
+      "failed",
+    );
+
+    // WEE-64: mirror the success-path room write (:607-610) so the chat-list
+    // preview shows the same failed badge the open chat does. Guarded twice:
+    //   (a) only outbound send-ops — an edit/reaction/delete failure must not
+    //       corrupt the preview badge of an unrelated last message;
+    //   (b) only when this message is still the room's last message
+    //       (RoomRepository.syncLastMessageLocalStatus enforces the timestamp
+    //       check) — a newer message already advanced the preview.
+    if (SEND_OPS.has(op.type)) {
+      const failedMsg = await this.messageRepo.getByClientId(op.clientId);
+      if (failedMsg) {
+        await this.roomRepo.syncLastMessageLocalStatus(
+          op.roomId,
+          failedMsg.timestamp,
+          "failed",
+        );
+      }
     }
+  }
+
+  /** Returns true when the local message row for `clientId` already has a
+   *  server eventId or has been flipped to "synced" — typically by an
+   *  upsertFromServer echo that won the race against the queue's failure
+   *  handler. Used to suppress false-failed transitions in markMessageFailed
+   *  and processTick. */
+  private async isMessageAlreadyConfirmed(clientId: string): Promise<boolean> {
+    const msg = await this.messageRepo.getByClientId(clientId);
+    if (!msg) return false;
+    return Boolean(msg.eventId) || msg.status === "synced";
+  }
+
+  /** Whether the Matrix client is ready to transport ops. Gates ONLY on an
+   *  explicit `isReady() === false`; anything else (true, or a test double that
+   *  omits `isReady` / returns undefined) is treated as ready, so the gate is a
+   *  no-op under harnesses that don't model readiness. The real service always
+   *  returns a boolean, so prod behaviour is exactly `isReady() === true`. */
+  private isMatrixReady(): boolean {
+    const svc = getMatrixClientService() as { isReady?: () => boolean };
+    return svc.isReady?.() !== false;
   }
 
   /** Enqueue a new operation. Returns the operation ID. */
@@ -798,10 +1353,26 @@ export class SyncEngine {
 
   /** Retry all failed operations */
   async retryAllFailed(): Promise<void> {
+    // Snapshot the failed ops BEFORE resetting them so we can mirror the
+    // reset onto each room's preview status (WEE-64).
+    const failedOps = await this.db.pendingOps.where("status").equals("failed").toArray();
     await this.db.pendingOps
       .where("status")
       .equals("failed")
       .modify({ status: "pending", retries: 0, errorMessage: undefined, nextAttemptAt: 0 });
+
+    // WEE-64: a failed send returning to the queue must reset its chat-list
+    // preview from "failed" back to "pending" (отправляется), symmetric to
+    // markMessageFailed — otherwise the sidebar shows a stale error while the
+    // retry is in flight. Same send-op + still-last-message guards apply.
+    for (const op of failedOps) {
+      if (!op.clientId || !SEND_OPS.has(op.type)) continue;
+      const msg = await this.messageRepo.getByClientId(op.clientId);
+      if (msg) {
+        await this.roomRepo.syncLastMessageLocalStatus(op.roomId, msg.timestamp, "pending");
+      }
+    }
+
     this.processQueue();
   }
 

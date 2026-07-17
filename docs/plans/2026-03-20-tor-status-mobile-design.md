@@ -1,6 +1,7 @@
 # Tor Status Display for Capacitor Mobile App
 
-**Date**: 2026-03-20
+**Date**: 2026-03-20  
+**Status**: ✅ Реализовано — см. актуальное состояние в [`docs/plans/tor/forta-chat-tor-integration-plan.md`](./tor/forta-chat-tor-integration-plan.md) (`TorSettingsSection.vue`, `TorShieldIndicator.vue`, `useTorStore`)
 
 ## Goal
 

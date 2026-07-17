@@ -7,7 +7,7 @@ import { AccountList, AddAccountModal } from "@/features/account-switcher";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative, isAndroid, isIOS } from "@/shared/lib/platform";
+import { isNative, isAndroid, hasTor } from "@/shared/lib/platform";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import {
@@ -17,6 +17,7 @@ import {
   useBugReportStatus,
 } from "@/features/bug-report";
 import { getLocalIssueCache } from "@/shared/lib/bug-report";
+import { BastyonInteropBanner } from "@/features/bastyon-interop";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
 // App updater Capacitor plugin (Android only)
@@ -33,17 +34,20 @@ const router = useRouter();
 const { openSettingsContent } = useSidebarTab();
 const walletStore = useWalletStore();
 
-const isElectron = !!(window as any).electronAPI?.isElectron;
-// Tor is not shipped on iOS — hide the toggle entirely so users don't
-// see a dead control. See docs/plans/ios/2026-05-12-ios-simple-tasks.md
-// Task 4.
-const showTor = (isElectron || isNative) && !isIOS;
-const showDisableWarning = ref(false);
+const showTor = hasTor;
 
 
 const { t } = useI18n();
 
-// Tor inline status — shows as a compact badge next to the label
+const torModeLabel = computed(() => {
+  switch (torStore.mode) {
+    case "auto": return t("tor.modeAuto");
+    case "always": return t("tor.modeAlways");
+    default: return t("tor.modeNever");
+  }
+});
+
+// Tor inline status — compact badge in settings list
 const torStatusInfo = computed(() => {
   if (!torStore.isEnabled) return null;
   const r = torStore.verifyResult;
@@ -69,19 +73,6 @@ const currentUser = computed(() =>
   authStore.address ? userStore.getUser(authStore.address) : undefined,
 );
 
-
-const handleTorToggle = () => {
-  if (torStore.isEnabled) {
-    showDisableWarning.value = true;
-  } else {
-    torStore.toggle();
-  }
-};
-
-const confirmDisableTor = () => {
-  showDisableWarning.value = false;
-  torStore.toggle();
-};
 
 // --- App version ---
 const appVersion = ref("");
@@ -198,6 +189,10 @@ const handleLogout = () => {
         </template>
       </div>
 
+      <!-- Dual-install warning (WEE-35) — shown when the account looks
+           Bastyon-registered and both apps can coexist on this device. -->
+      <BastyonInteropBanner />
+
       <!-- Multi-account list (shown between profile header and menu items) -->
       <div class="px-2">
         <AccountList
@@ -279,6 +274,104 @@ const handleLogout = () => {
           </svg>
         </button>
 
+        <!-- Call methods (WEE-57) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('callMethods')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.callProviders.title") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
+        <!-- Notifications (WEE-75) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('notifications')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.notifications") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
+        <!-- Storage (WEE-33) -->
+        <button
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('storage')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+            <path d="M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.storage") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
         <!-- Dark Mode -->
         <div
           class="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
@@ -301,10 +394,11 @@ const handleLogout = () => {
           />
         </div>
 
-        <!-- Tor Proxy -->
-        <div
+        <!-- Networking / Tor -->
+        <button
           v-if="showTor"
-          class="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('networking')"
         >
           <svg
             width="20"
@@ -317,32 +411,28 @@ const handleLogout = () => {
           >
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
           </svg>
-          <span class="text-sm text-text-color">{{ t("settings.torProxy") }}</span>
-          <!-- Inline status badge -->
+          <span class="text-sm text-text-color">{{ t("tor.networking") }}</span>
           <span
             v-if="torStatusInfo"
             class="flex items-center gap-1 text-xs"
             :class="[torStatusInfo.color, torStatusInfo.pulse ? 'animate-pulse' : '']"
           >
             <span>{{ torStatusInfo.text }}</span>
-            <!-- Small refresh icon right after text -->
-            <button
-              v-if="torStatusInfo.showRefresh"
-              class="inline-flex p-0.5 opacity-50 transition-opacity hover:opacity-100"
-              @click.stop="torStore.verify()"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
-            </button>
           </span>
+          <span v-else class="text-xs text-text-on-main-bg-color">{{ torModeLabel }}</span>
           <span class="flex-1" />
-          <Toggle
-            :model-value="torStore.isEnabled"
-            @update:model-value="handleTorToggle()"
-          />
-        </div>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
 
         <!-- PKOIN Wallet Balance -->
         <div
@@ -549,35 +639,6 @@ const handleLogout = () => {
         </button>
       </div>
     </div>
-
-    <!-- Tor disable warning dialog -->
-    <Teleport to="body">
-      <div
-        v-if="showDisableWarning"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-        @click.self="showDisableWarning = false"
-      >
-        <div class="mx-4 max-w-sm rounded-xl bg-background-secondary-theme p-6 shadow-xl">
-          <p class="mb-4 text-sm text-text-color">
-            {{ t('tor.disableWarning') }}
-          </p>
-          <div class="flex justify-end gap-3">
-            <button
-              class="rounded-lg px-4 py-2 text-sm text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
-              @click="showDisableWarning = false"
-            >
-              {{ t('common.cancel') }}
-            </button>
-            <button
-              class="rounded-lg bg-color-bad px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-80"
-              @click="confirmDisableTor()"
-            >
-              {{ t('settings.torProxy') }} Off
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
 
     <AddAccountModal
       :show="showAddModal"

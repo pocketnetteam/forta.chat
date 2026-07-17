@@ -2,8 +2,22 @@ import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import { useAuthStore } from "@/entities/auth";
 import { getPocketnetInstance } from "@/shared/api/sdk-bridge";
+import { fetchUnspents, type UTXO } from "../lib/utxo";
 
 const STALE_MS = 60_000;
+
+/**
+ * How long a fetched UTXO set stays usable without hitting the network again
+ * (WEE-72). Kept short so balances feel live, but long enough that a flurry of
+ * "Calculate fees" clicks does not hammer the `txunspent` endpoint.
+ */
+const UTXO_CACHE_TTL_MS = 90_000;
+
+interface UtxoCacheEntry {
+  address: string;
+  value: UTXO[];
+  updatedAt: number;
+}
 
 // Module-level Api singleton, tracks address to detect account switches
 let _api: InstanceType<typeof Api> | null = null;
@@ -44,6 +58,9 @@ export const useWalletStore = defineStore("wallet", () => {
   const status = ref<WalletStatus>("idle");
   const error = ref<string | null>(null);
   const updatedAt = ref<number | null>(null);
+
+  // --- UTXO cache (WEE-72) ---
+  let utxoCache: UtxoCacheEntry | null = null;
 
   // --- Race guard ---
   let fetchGeneration = 0;
@@ -92,12 +109,65 @@ export const useWalletStore = defineStore("wallet", () => {
     }
   }
 
+  /**
+   * Return UTXOs for the current address, served from a short-lived cache.
+   *
+   * - Fresh cache (within {@link UTXO_CACHE_TTL_MS}) is returned without any
+   *   network call, so repeated fee calculations don't re-hit `txunspent`.
+   * - On a stale/forced fetch we retry node timeouts (see `fetchUnspents`).
+   * - If a fetch fails but a valid cache exists, we fall back to the cache
+   *   instead of surfacing the error — the reference Bastyon client does the
+   *   same so a transient 408 never blocks a send.
+   * - An empty response while we hold a non-empty cache is treated as a node
+   *   glitch ("FIX NODE BUG") and the cache is kept.
+   */
+  async function getUtxos(opts: { force?: boolean } = {}): Promise<UTXO[]> {
+    const address = authStore.address;
+    if (!address) throw new Error("No user address");
+
+    const cached =
+      utxoCache && utxoCache.address === address ? utxoCache : null;
+    const isFresh =
+      cached !== null && Date.now() - cached.updatedAt < UTXO_CACHE_TTL_MS;
+
+    if (cached && isFresh && !opts.force) return cached.value;
+
+    // Guard against an account switch mid-flight: if reset() bumps the
+    // generation while we await, don't write this (now stale) result into the
+    // shared cache slot and clobber the new account's data.
+    const gen = fetchGeneration;
+    const api = await getApi(address);
+    try {
+      const utxos = await fetchUnspents(api, address);
+
+      // Node glitch: empty answer while we still hold usable UTXOs → keep cache.
+      if (utxos.length === 0 && cached && cached.value.length > 0) {
+        return cached.value;
+      }
+
+      if (gen === fetchGeneration) {
+        utxoCache = { address, value: utxos, updatedAt: Date.now() };
+      }
+      return utxos;
+    } catch (err) {
+      // Fallback to a valid cache if the fresh fetch failed (e.g. 408 timeout).
+      if (cached && cached.value.length > 0) return cached.value;
+      throw err;
+    }
+  }
+
+  /** Drop the cached UTXO set (e.g. after a successful broadcast spends them). */
+  function invalidateUtxos(): void {
+    utxoCache = null;
+  }
+
   function reset(): void {
     fetchGeneration++;
     balance.value = null;
     status.value = "idle";
     error.value = null;
     updatedAt.value = null;
+    utxoCache = null;
   }
 
   function startPolling(ms: number = STALE_MS): void {
@@ -135,6 +205,8 @@ export const useWalletStore = defineStore("wallet", () => {
     // Actions
     refresh,
     reset,
+    getUtxos,
+    invalidateUtxos,
     startPolling,
     stopPolling,
   };

@@ -459,4 +459,74 @@ describe("useAudioPlayback watchdog (Session 44)", () => {
     consoleSpy.mockRestore();
     consoleWarnSpy.mockRestore();
   });
+
+  // -------------------------------------------------------------------------
+  // Watchdog re-arm — WEE-62 / forta-bugs#901
+  // Heavy encrypted blobs on slow links can still be downloading/decoding when
+  // the first 8s window elapses. The watchdog must NOT flip to "failed" while
+  // the element keeps making progress (networkState=LOADING or metadata
+  // parsed) — that false negative is the "ошибка воспроизведения" report.
+  // -------------------------------------------------------------------------
+  it("re-arms instead of failing while the element is still fetching bytes", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockPlay.mockReturnValue(new Promise(() => {}));
+
+    void playback.play(baseInfo);
+    await Promise.resolve();
+    expect(playback.state.value).toBe("loading");
+
+    // Element is actively downloading the encrypted blob (networkState=LOADING).
+    lastAudio.networkState = 2;
+    lastAudio.readyState = 0;
+
+    // First window elapses — must NOT fail, the load is still progressing.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(playback.state.value).toBe("loading");
+
+    // Progress stalls: no metadata, network idle.
+    lastAudio.networkState = 0;
+    lastAudio.readyState = 0;
+
+    // Next window with zero progress → genuinely stuck → failed.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(playback.state.value).toBe("failed");
+
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("re-arms on loadedmetadata so a post-metadata decode hang isn't failed at 8s", async () => {
+    mockPlay.mockReturnValue(new Promise(() => {}));
+
+    void playback.play(baseInfo);
+    await Promise.resolve();
+    expect(playback.state.value).toBe("loading");
+
+    // Metadata arrives mid-load (real progress) but playback hasn't started.
+    lastAudio.readyState = 1;
+    const onloaded = lastAudio.onloadedmetadata as ((this: unknown) => void) | null;
+    onloaded?.call(lastAudio);
+
+    // The original flat 8s window would have failed here; with re-arm it does not.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(playback.state.value).toBe("loading");
+  });
+
+  it("still fails a genuinely dead pipeline within the bounded re-arm budget", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockPlay.mockReturnValue(new Promise(() => {}));
+
+    void playback.play(baseInfo);
+    await Promise.resolve();
+
+    // Element claims to be loading forever (stuck socket) — re-arms are bounded
+    // so the user still gets a retry button rather than an infinite spinner.
+    lastAudio.networkState = 2;
+    lastAudio.readyState = 0;
+
+    // 8s ×3 = initial window + MAX_WATCHDOG_REARMS(2) re-arms → failed.
+    await vi.advanceTimersByTimeAsync(8000 * 3);
+    expect(playback.state.value).toBe("failed");
+
+    consoleWarnSpy.mockRestore();
+  });
 });

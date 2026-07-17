@@ -7,15 +7,24 @@ const mockStopDaemon = vi.fn();
 const mockConfigure = vi.fn();
 const mockVerifyTor = vi.fn();
 const mockClearTorCache = vi.fn();
-const mockAddListener = vi.fn().mockResolvedValue({ remove: () => {} });
+const mockAddListener = vi.fn().mockResolvedValue({ remove: vi.fn() });
+const mockIsUseWithTor = vi.fn().mockResolvedValue({ redirect: false });
+const mockGetSettings = vi.fn().mockResolvedValue({
+  mode: 'auto',
+  bridgeType: 'NONE',
+  isReady: true,
+});
 
 vi.mock('@capacitor/core', () => ({
   registerPlugin: () => ({
     startDaemon: (...args: unknown[]) => mockStartDaemon(...args),
     stopDaemon: (...args: unknown[]) => mockStopDaemon(...args),
+    getStatus: vi.fn(),
     configure: (...args: unknown[]) => mockConfigure(...args),
     verifyTor: (...args: unknown[]) => mockVerifyTor(...args),
     clearTorCache: (...args: unknown[]) => mockClearTorCache(...args),
+    isUseWithTor: mockIsUseWithTor,
+    getSettings: mockGetSettings,
     addListener: (...args: unknown[]) => mockAddListener(...args),
   }),
 }));
@@ -141,6 +150,13 @@ describe('TorService — web/non-native branch', () => {
     expect(torService.matrixBaseUrl).toBe('');
   });
 
+  it('initBackground sets ready=true immediately on non-native', async () => {
+    const torService = await importFreshService();
+    torService.initBackground();
+    expect(torService.isReady.value).toBe(true);
+    expect(torService.initFailed.value).toBe(false);
+  });
+
   it('verify() returns the neutral empty shape (no error field)', async () => {
     const torService = await importFreshService();
     await torService.init();
@@ -148,5 +164,29 @@ describe('TorService — web/non-native branch', () => {
 
     expect(result).toEqual({ isTor: false, ip: '' });
     expect(result.error).toBeUndefined();
+  });
+
+  it('clearCache is a no-op on non-native', async () => {
+    const torService = await importFreshService();
+    await expect(torService.clearCache()).resolves.toBeUndefined();
+  });
+
+  it('initFailed starts as false', async () => {
+    const torService = await importFreshService();
+    expect(torService.initFailed.value).toBe(false);
+  });
+
+  it('isUseWithTor returns false on non-native', async () => {
+    const torService = await importFreshService();
+    await expect(torService.isUseWithTor('https://example.com')).resolves.toBe(false);
+  });
+
+  it('getSettings returns neveruse defaults on non-native', async () => {
+    const torService = await importFreshService();
+    await expect(torService.getSettings()).resolves.toEqual({
+      mode: 'neveruse',
+      bridgeType: 'NONE',
+      isReady: false,
+    });
   });
 });

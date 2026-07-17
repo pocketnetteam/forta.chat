@@ -34,7 +34,7 @@ describe("UserEditForm — source-level invariants (session 05)", () => {
     // then capture the entire function body up to its closing brace.
     const handleSaveStart = src.indexOf("handleSave = async");
     expect(handleSaveStart).toBeGreaterThan(-1);
-    const saveFn = src.slice(handleSaveStart, handleSaveStart + 2000);
+    const saveFn = src.slice(handleSaveStart, handleSaveStart + 3000);
     expect(saveFn).toMatch(/try\s*\{/);
     expect(saveFn).toMatch(/catch\s*\(/);
     // On failure, must set a user-visible error signal

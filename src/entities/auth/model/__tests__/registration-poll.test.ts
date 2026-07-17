@@ -13,13 +13,18 @@ describe("registration poll", () => {
 
   it("should use setTimeout instead of setInterval for backoff", () => {
     const source = getSource();
-    // The poll function should use setTimeout, not setInterval
+    // Poll scheduling must use setTimeout; setInterval is only for the elapsed UI ticker.
     const pollSection = source.slice(
       source.indexOf("const startRegistrationPoll"),
       source.indexOf("const stopRegistrationPoll")
     );
-    expect(pollSection).toContain("setTimeout");
-    expect(pollSection).not.toContain("setInterval");
+    expect(pollSection).toContain("setTimeout(poll");
+    const scheduleSection = pollSection.slice(
+      pollSection.indexOf("const schedulePoll"),
+      pollSection.indexOf("const schedulePoll") + 250,
+    );
+    expect(scheduleSection).toContain("setTimeout");
+    expect(scheduleSection).not.toContain("setInterval");
   });
 
   it("should use exponential backoff with 60s cap", () => {
@@ -45,11 +50,19 @@ describe("registration poll", () => {
     const source = getSource();
     const fnStart = source.indexOf("async function onRegistrationConfirmed");
     expect(fnStart).toBeGreaterThan(-1);
-    const fnSection = source.slice(fnStart, fnStart + 1200);
-    const loadIdx = fnSection.indexOf("loadUsersInfo([address.value!], { update: true })");
+    const fnSection = source.slice(fnStart, fnStart + 2800);
+    // Address may be passed either as `address.value!` directly or as a
+    // snapshot variable (`confirmedAddress`) — both are valid; the only
+    // ordering invariant is that loadUsersInfo runs before initializeAndFetchUserData.
+    const loadMatch = fnSection.match(
+      /loadUsersInfo\(\s*\[\s*(?:address\.value!|confirmedAddress)\s*\]\s*,\s*\{\s*update:\s*true\s*\}\s*\)/,
+    );
+    const loadIdx = loadMatch?.index ?? -1;
     const initIdx = fnSection.indexOf("initializeAndFetchUserData");
     expect(loadIdx).toBeGreaterThan(-1);
     expect(initIdx).toBeGreaterThan(loadIdx);
+    // Full-profile reload must also bypass local cache.
+    expect(fnSection).toContain("{ update: true }");
   });
 });
 
@@ -77,11 +90,12 @@ describe("login key verification", () => {
     const source = getSource();
     const fnStart = source.indexOf("const verifyAndRepublishKeys");
     const fnSection = source.slice(fnStart, fnStart + 2000);
-    // Should check cache first
-    expect(fnSection).toContain("cachedKeys.length >= 12");
+    // Should check the local cache first (fast path)
+    expect(fnSection).toContain("countCachedKeys");
+    expect(fnSection).toContain("REQUIRED_ENCRYPTION_KEYS");
     // Fresh profile via SDK (loadUsersInfoRaw wraps loadUsersInfo + getRawProfile)
     expect(fnSection).toContain("loadUsersInfoRaw");
-    expect(fnSection).toContain("blockchainKeys.length >= 12");
+    expect(fnSection).toContain("countPublishedKeys");
   });
 
   it("verifyAndRepublishKeys should not block login if RPC fails", () => {

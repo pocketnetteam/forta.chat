@@ -58,16 +58,58 @@ export function consumeShareData(): ExternalShareData | null {
   }
 }
 
+/** Copy a shared file into the app's private cache directory and return the
+ *  new file URI. Android 14+ revokes the content:// UriPermission grant as
+ *  soon as the calling app loses foreground — by the time the user picks a
+ *  target room and taps Send, the original URI can already be `Permission
+ *  Denied`. Copying once at `shareReceived` time freezes the bytes inside
+ *  our own sandbox so they survive both the UriPermission revoke and the
+ *  ForwardPicker hop (Session 48 / #710 #717). */
+async function copyShareToCache(file: { uri: string; name: string }): Promise<string> {
+  const { Filesystem, Directory } = await import("@capacitor/filesystem");
+  // Sanitize filename — Filesystem rejects path separators, and a leaked
+  // `..` would let a hostile sender write outside CacheDirectory.
+  const safeName =
+    file.name
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .replace(/\.{2,}/g, "_")
+      .replace(/^\.+/, "") || "shared_file";
+  const cachedName = `share-${Date.now()}-${safeName}`;
+  const read = await Filesystem.readFile({ path: file.uri });
+  // Native Filesystem.readFile always returns base64-encoded string on
+  // Android. A Blob here means we're on a web path that shouldn't be
+  // hitting this function — bail loudly so the outer try/catch falls back
+  // to the original URI instead of silently writing an empty cache file.
+  if (typeof read.data !== "string") {
+    throw new Error("share-target: expected base64 string from Filesystem.readFile, got Blob");
+  }
+  await Filesystem.writeFile({
+    path: cachedName,
+    data: read.data,
+    directory: Directory.Cache,
+  });
+  const cached = await Filesystem.getUri({ path: cachedName, directory: Directory.Cache });
+  return cached.uri;
+}
+
+let listenerRegistered = false;
+
 /** Initialize the share target listener (call once on app mount, native only).
- *  Calls `onShare` when content is received from Android Share Sheet. */
+ *  Calls `onShare` when content is received from Android Share Sheet.
+ *
+ *  Idempotent — `singleTask` launchMode can re-deliver Intents to an existing
+ *  MainActivity, so the bootstrap path may run twice in one process. Without
+ *  the guard the capgo bridge ends up with two listeners and dispatches
+ *  `onShare` twice per share. */
 export async function initShareTargetListener(
   onShare: (data: ExternalShareData) => void,
 ): Promise<void> {
-  if (!isNative) return;
+  if (!isNative || listenerRegistered) return;
+  listenerRegistered = true;
 
   const { CapacitorShareTarget } = await import("@capgo/capacitor-share-target");
 
-  await CapacitorShareTarget.addListener("shareReceived", (event) => {
+  await CapacitorShareTarget.addListener("shareReceived", async (event) => {
     const data: ExternalShareData = {};
 
     // Text / URL
@@ -78,7 +120,15 @@ export async function initShareTargetListener(
     // First file only (single-file sharing)
     if (event.files?.length) {
       const file = event.files[0];
-      data.fileUri = file.uri;
+      try {
+        data.fileUri = await copyShareToCache(file);
+      } catch (e) {
+        // Best-effort: large videos can OOM Filesystem.readFile on low-RAM
+        // devices; fall back to the original URI so the sender at least has
+        // a chance to read it before the permission revoke kicks in.
+        console.error("[share-target] cache copy failed, falling back to original URI:", e);
+        data.fileUri = file.uri;
+      }
       data.fileName = file.name;
       data.mimeType = file.mimeType;
     }
@@ -87,4 +137,12 @@ export async function initShareTargetListener(
       onShare(data);
     }
   });
+}
+
+/** Reset the idempotent guard so successive tests can re-register the
+ *  listener against a fresh capgo mock. Production code must not call this —
+ *  it bypasses the singleton protection the singleTask launchMode relies on.
+ *  @internal */
+export function __resetShareTargetListenerForTests(): void {
+  listenerRegistered = false;
 }

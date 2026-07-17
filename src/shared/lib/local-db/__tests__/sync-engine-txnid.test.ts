@@ -11,6 +11,7 @@ import Dexie from "dexie";
 import "fake-indexeddb/auto";
 import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
+import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
 // --- Mocks -------------------------------------------------------------------
 
@@ -98,7 +99,7 @@ interface Harness {
     getByClientId: ReturnType<typeof vi.fn>;
     updateUploadProgress: ReturnType<typeof vi.fn>;
   };
-  roomRepo: { updateRoom: ReturnType<typeof vi.fn> };
+  roomRepo: { updateRoom: ReturnType<typeof vi.fn>; syncLastMessageLocalStatus: ReturnType<typeof vi.fn> };
   getRoomCrypto: ReturnType<typeof vi.fn>;
 }
 
@@ -113,7 +114,7 @@ function makeHarness(name: string, opts: { encrypted: boolean }): Harness {
     getByClientId: vi.fn(async () => undefined),
     updateUploadProgress: vi.fn(async () => undefined),
   };
-  const roomRepo = { updateRoom: vi.fn(async () => undefined) };
+  const roomRepo = { updateRoom: vi.fn(async () => undefined), syncLastMessageLocalStatus: vi.fn(async () => undefined) };
   const roomCrypto = opts.encrypted
     ? {
         canBeEncrypt: () => true,
@@ -181,7 +182,7 @@ describe("SyncEngine txnId propagation (regression)", () => {
   });
 
   afterEach(async () => {
-    await h.db.delete();
+    await disposeSyncEngineHarness(h);
   });
 
   it("syncSendFile passes op.clientId as the Matrix txnId", async () => {

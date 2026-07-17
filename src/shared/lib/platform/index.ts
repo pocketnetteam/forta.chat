@@ -15,6 +15,9 @@ export const isElectron = !!(window as any).electronAPI?.isElectron;
 /** True in plain browser (no native shell). */
 export const isWeb = !isNative && !isElectron;
 
+/** Tor daemon and transport proxy are available on Android and Electron only. */
+export const hasTor = (isAndroid || isElectron) && !isIOS;
+
 /**
  * True when the user is on an Android device in a regular browser
  * (not inside the native Capacitor shell or a standalone PWA).

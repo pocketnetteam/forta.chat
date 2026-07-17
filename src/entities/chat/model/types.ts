@@ -51,6 +51,11 @@ export interface FileInfo {
   videoNote?: boolean;
   /** Thumbnail URL for video circles */
   thumbnailUrl?: string;
+  /** True when the m.audio event is a voice-message recording (MSC3245)
+   *  or carries a waveform (legacy bastyon-chat marker). When false, the
+   *  audio is a generic file that should render as a file-bubble with a
+   *  save-to-disk affordance instead of the voice-bubble player. */
+  isVoice?: boolean;
 }
 
 export interface ReplyTo {
@@ -76,6 +81,11 @@ export interface ForwardingMessage {
   withSenderInfo: boolean;
   /** True when message originates from Android Share Sheet (not internal forward) */
   isExternalShare?: boolean;
+  /** Original event timestamp — only meaningful for internal forwards of
+   *  real messages (initForward). Used by the media re-upload path to
+   *  derive the right decryption context. Omitted for synthetic
+   *  ForwardingMessages (external share, channel post share). */
+  sourceTimestamp?: number;
 }
 
 /** Open Graph metadata for URL link previews */
@@ -120,6 +130,8 @@ export interface Message {
   pollInfo?: PollInfo;
   /** Transfer metadata — present when type === transfer */
   transferInfo?: TransferInfo;
+  /** External call-link metadata — present when type === callLink (WEE-57) */
+  callLinkInfo?: CallLinkInfo;
   /** URL link preview metadata (Open Graph) */
   linkPreview?: LinkPreview;
   /** Upload progress 0-100 (only during media upload, undefined when not uploading) */
@@ -156,6 +168,22 @@ export enum MessageType {
   poll = "poll",
   transfer = "transfer",
   videoCircle = "videoCircle",
+  callLink = "callLink",
+}
+
+/**
+ * Metadata for an external call-link message (WEE-57).
+ * Travels inside the (encrypted) message body as JSON — mirrors the
+ * `_transfer` envelope pattern so it needs no new Matrix event type.
+ *
+ * Provider-agnostic by design: a meeting method is just a labelled URL
+ * (Zoom / Meet / Jitsi / anything), so there is no provider "kind".
+ */
+export interface CallLinkInfo {
+  /** The meeting URL the recipient opens */
+  url: string;
+  /** Human label shown on the card, e.g. "Личный Zoom" */
+  label: string;
 }
 
 export interface PollInfo {

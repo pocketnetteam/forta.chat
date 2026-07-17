@@ -4,14 +4,18 @@ import { createAppInitializer } from "@/app/providers/initializers/app-initializ
 import { ProfileLoader, PROFILE_LOADER_BATCH_ACTIVE } from "@/shared/lib/profile-loader";
 import { PromisePool } from "@/shared/lib/promise-pool";
 
+import { isEmptyUserProfile } from "../lib/is-empty-profile";
 import { mergeUserUpdate } from "./merge-user-update";
 import type { User } from "./types";
 
 const NAMESPACE = "user";
 const LS_KEY = "bastyon-chat-users";
 
-/** How long a cached profile stays fresh (6 hours) */
-const USER_TTL_MS = 6 * 60 * 60 * 1000;
+/** How long a cached profile stays fresh before a *background* revalidation is
+ *  scheduled (7 days). Peer profiles rarely change, so we revalidate lazily —
+ *  the SDK's `userInfoLight` store (~14d TTL) usually satisfies the refetch
+ *  from its own IndexedDB cache without hitting the network. */
+const USER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Shared app initializer instance for loading user profiles on demand */
 let _appInit: ReturnType<typeof createAppInitializer> | null = null;
@@ -35,20 +39,68 @@ function debouncedCacheUsers(usersRecord: Record<string, User>) {
   _cacheTimer = setTimeout(() => {
     _cacheTimer = null;
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(usersRecord));
+      // Never persist empty-name rows — they poison registration / peer lookups.
+      const toStore: Record<string, User> = {};
+      for (const [addr, user] of Object.entries(usersRecord)) {
+        if (!isEmptyUserProfile(user)) toStore[addr] = user;
+      }
+      localStorage.setItem(LS_KEY, JSON.stringify(toStore));
     } catch { /* quota exceeded — ignore */ }
   }, 500);
 }
 
-/** Restore users from localStorage (synchronous) */
+/** Restore users from localStorage (synchronous). Empty-name rows are dropped. */
 function readCachedUsers(): Record<string, User> {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return {};
-    return JSON.parse(raw) as Record<string, User>;
+    const parsed = JSON.parse(raw) as Record<string, User>;
+    const kept: Record<string, User> = {};
+    let removed = 0;
+    for (const [addr, user] of Object.entries(parsed)) {
+      if (isEmptyUserProfile(user)) {
+        removed++;
+        continue;
+      }
+      kept[addr] = user;
+    }
+    if (removed > 0) {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify(kept));
+      } catch { /* ignore */ }
+    }
+    return kept;
   } catch {
     return {};
   }
+}
+
+/** Apply a fetched profile only when it has a real name; never cache empties. */
+function applyFetchedProfile(address: string, usersMap: Record<string, User>, userData: {
+  name?: string;
+  about?: string;
+  image?: string;
+  site?: string;
+  language?: string;
+}): boolean {
+  const next = mergeUserUpdate(usersMap[address], {
+    address,
+    name: userData.name ?? "",
+    about: userData.about ?? "",
+    image: userData.image ?? "",
+    site: userData.site ?? "",
+    language: userData.language ?? "",
+  });
+  if (isEmptyUserProfile(next)) {
+    // Drop any previously cached empty stub for this address.
+    if (usersMap[address] && isEmptyUserProfile(usersMap[address])) {
+      delete usersMap[address];
+      return true;
+    }
+    return false;
+  }
+  usersMap[address] = next;
+  return true;
 }
 
 export const useUserStore = defineStore(NAMESPACE, () => {
@@ -77,26 +129,40 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   };
 
   const setUser = (address: string, user: User) => {
+    if (isEmptyUserProfile(user)) {
+      // Never cache an empty profile; drop a stale empty stub if present.
+      if (users.value[address]) {
+        delete users.value[address];
+        triggerRef(users);
+        debouncedCacheUsers(users.value);
+      }
+      return;
+    }
     users.value[address] = user;
     triggerRef(users); // immediate — single user updates are rare and should be instant
     debouncedCacheUsers(users.value);
   };
 
   const setUsers = (userList: User[]) => {
+    let changed = false;
     for (const user of userList) {
+      if (isEmptyUserProfile(user)) {
+        if (users.value[user.address]) {
+          delete users.value[user.address];
+          changed = true;
+        }
+        continue;
+      }
       users.value[user.address] = user;
+      changed = true;
     }
+    if (!changed) return;
     debouncedTrigger();
     debouncedCacheUsers(users.value);
   };
 
-  /** How long an empty-name profile stays before we retry (30 seconds) */
-  const EMPTY_NAME_RETRY_MS = 30_000;
-
   /** Load a single user profile. Deduplicated via PromisePool — 140 concurrent
    *  calls for the same address produce exactly 1 network request.
-   *  Re-fetches if cached profile has an empty name (e.g. fetched before
-   *  blockchain confirmation during registration).
    *  STALE-WHILE-REVALIDATE: stale profiles with a name trigger background
    *  revalidation without blocking — the UI always has data to show. */
   const loadUserIfMissing = (address: string): void => {
@@ -109,23 +175,19 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       }
       return;
     }
-    if (cached && cached.cachedAt && Date.now() - cached.cachedAt < EMPTY_NAME_RETRY_MS) return; // empty but recently tried
+    // Empty stubs are not kept in cache — always fetch.
     if (profilePool.has(address)) return;
 
     profilePool.dedupe(address, async () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        const userData = await appInit.loadUserData([address]);
-        if (userData) {
-          users.value[address] = mergeUserUpdate(users.value[address], {
-            address,
-            name: userData.name ?? "",
-            about: userData.about ?? "",
-            image: userData.image ?? "",
-            site: userData.site ?? "",
-            language: userData.language ?? "",
-          });
+        // Peer profiles use the LIGHT store (userInfoLight): lighter RPC
+        // payload and a long-lived SDK cache (~14d) vs the 10-minute
+        // userInfoFull store reserved for the logged-in account.
+        await appInit.loadUsersInfo([address]);
+        const userData = appInit.getUserData(address);
+        if (userData && applyFetchedProfile(address, users.value, userData)) {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
@@ -150,11 +212,9 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     for (const a of addresses) {
       if (!a) continue;
       const cached = users.value[a];
-      if (!cached) {
-        toLoad.push(a); // not cached at all — must fetch
-      } else if (!cached.name && (!cached.cachedAt || now - cached.cachedAt >= EMPTY_NAME_RETRY_MS)) {
-        toLoad.push(a); // empty name, stale — must fetch
-      } else if (cached.name && cached.cachedAt && now - cached.cachedAt > USER_TTL_MS) {
+      if (!cached || isEmptyUserProfile(cached)) {
+        toLoad.push(a); // not cached / empty — must fetch
+      } else if (cached.cachedAt && now - cached.cachedAt > USER_TTL_MS) {
         toRevalidate.push(a); // has data but stale — revalidate in background
       }
     }
@@ -171,19 +231,13 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        await appInit.loadUsersBatch(uncached);
+        // LIGHT store: peer profiles are cached long-term in the SDK
+        // (userInfoLight), unlike the logged-in account (userInfoFull, 10min).
+        await appInit.loadUsersInfo(uncached);
         let updated = false;
         for (const addr of uncached) {
           const userData = appInit.getUserData(addr);
-          if (userData) {
-            users.value[addr] = mergeUserUpdate(users.value[addr], {
-              address: addr,
-              name: userData.name ?? "",
-              about: userData.about ?? "",
-              image: userData.image ?? "",
-              site: userData.site ?? "",
-              language: userData.language ?? "",
-            });
+          if (userData && applyFetchedProfile(addr, users.value, userData)) {
             updated = true;
           }
         }
@@ -191,8 +245,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
-      } catch {
-        // Silently fail
+      } catch (e) {
+        console.warn("[UserStore] loadUsersBatch failed:", e);
       }
     });
   };
@@ -200,7 +254,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   /** Max stale addresses to revalidate in one cycle.
    *  Stale profiles already have names visible in UI — revalidation is cosmetic.
    *  Cap prevents network saturation when 500+ profiles expire simultaneously
-   *  (e.g. app reopened after 6+ hours). Excess addresses are silently dropped
+   *  (e.g. app reopened after the TTL elapsed). Excess addresses are silently dropped
    *  and will be picked up by the periodic refreshStaleUsers cycle. */
   const REVALIDATE_CAP = 50;
 
@@ -213,7 +267,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   function _scheduleBackgroundRevalidation(addresses: string[]) {
     for (const a of addresses) {
       // Hard cap: drop excess stale addresses (UI already shows cached name).
-      // refreshStaleUsers will catch them in the next 6h cycle.
+      // refreshStaleUsers will catch them in the next refresh cycle.
       if (_revalidateQueue.size >= REVALIDATE_CAP) break;
       _revalidateQueue.add(a);
     }
@@ -232,19 +286,11 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         try {
           const appInit = getAppInit();
           await appInit.initApi();
-          await appInit.loadUsersBatch(chunk);
+          await appInit.loadUsersInfo(chunk);
           let updated = false;
           for (const addr of chunk) {
             const userData = appInit.getUserData(addr);
-            if (userData) {
-              users.value[addr] = mergeUserUpdate(users.value[addr], {
-                address: addr,
-                name: userData.name ?? "",
-                about: userData.about ?? "",
-                image: userData.image ?? "",
-                site: userData.site ?? "",
-                language: userData.language ?? "",
-              });
+            if (userData && applyFetchedProfile(addr, users.value, userData)) {
               updated = true;
             }
           }
@@ -252,7 +298,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
             debouncedTrigger();
             debouncedCacheUsers(users.value);
           }
-        } catch {
+        } catch (e) {
+          console.warn("[UserStore] background profile revalidation failed:", e);
           // Network issue — stale profiles remain visible, retry on next cycle
         }
         if (i + BATCH < batch.length) {
@@ -293,19 +340,11 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       try {
         const appInit = getAppInit();
         await appInit.initApi();
-        await appInit.loadUsersBatch(batch);
+        await appInit.loadUsersInfo(batch);
         let updated = false;
         for (const addr of batch) {
           const userData = appInit.getUserData(addr);
-          if (userData) {
-            users.value[addr] = mergeUserUpdate(users.value[addr], {
-              address: addr,
-              name: userData.name ?? "",
-              about: userData.about ?? "",
-              image: userData.image ?? "",
-              site: userData.site ?? "",
-              language: userData.language ?? "",
-            }, now);
+          if (userData && applyFetchedProfile(addr, users.value, userData)) {
             updated = true;
           }
         }
@@ -313,7 +352,8 @@ export const useUserStore = defineStore(NAMESPACE, () => {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
         }
-      } catch {
+      } catch (e) {
+        console.warn("[UserStore] refreshStaleUsers failed:", e);
         // Network issue — skip, will retry next cycle
       }
       // Yield between batches so we don't block anything
@@ -329,7 +369,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     // Initial refresh after 30s to let the app settle
     setTimeout(() => {
       refreshStaleUsers();
-      // Then repeat every 6 hours
+      // Then repeat on the profile TTL cadence (USER_TTL_MS)
       _refreshTimer = setInterval(refreshStaleUsers, USER_TTL_MS);
     }, 30_000);
   };

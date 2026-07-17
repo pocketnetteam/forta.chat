@@ -7,12 +7,18 @@ import { setupAssets } from "./assets";
 import { setupChatScripts } from "./chat-scripts";
 import { setupRouter } from "./router";
 import { setupInitialTheme } from "./theme";
-import { initTransport } from "@/shared/lib/transport/init-transport";
+import { initTransport, initNativeTransport } from "@/shared/lib/transport/init-transport";
 import { useTorStore } from "@/entities/tor";
 import { useLocaleStore } from "@/entities/locale";
-import { isElectron, isNative } from "@/shared/lib/platform";
+import { isElectron, isNative, isAndroid } from "@/shared/lib/platform";
 import { bootStatus } from "@/app/model/boot-status";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { whenChatsInteractive } from "@/shared/lib/boot-signals";
+
+// WEE-97 item 6: fallbacks so deferred boot work still runs when the
+// chats-interactive signal never fires (user parked on the login page).
+const TOR_DEFER_FALLBACK_MS = 15_000;
+const TELEMETRY_DEFER_FALLBACK_MS = 20_000;
 
 export const setupProviders = async (app: App) => {
   setupAssets();
@@ -33,6 +39,11 @@ export const setupProviders = async (app: App) => {
   }
 
   if (isNative) {
+    // Register Service Worker transport proxy on Android (PocketNet fetch → Tor)
+    if (isAndroid) {
+      initNativeTransport();
+    }
+
     // Configure status bar for proper safe area insets
     const { StatusBar, Style } = await import('@capacitor/status-bar');
     const { useThemeStore } = await import('@/entities/theme');
@@ -78,23 +89,29 @@ export const setupProviders = async (app: App) => {
     syncStatusBar();
     watch(() => themeStore.isDarkMode, syncStatusBar);
 
-    // Collect device telemetry (non-blocking) and persist to Dexie
-    import('@/shared/lib/telemetry').then(({ collectTelemetry }) => {
-      collectTelemetry().then(async (snapshot) => {
-        const { isChatDbReady, getChatDb } = await import('@/shared/lib/local-db');
-        // Wait for DB to be ready (up to 10s)
-        for (let i = 0; i < 20 && !isChatDbReady(); i++) {
-          await new Promise(r => setTimeout(r, 500));
-        }
-        if (isChatDbReady()) {
-          const kit = getChatDb();
-          await kit.db.syncState.put({
-            key: 'device_telemetry',
-            value: JSON.stringify(snapshot),
-          });
-        }
-      }).catch((e) => console.warn('[Telemetry] Collection failed:', e));
-    }).catch((e) => console.warn('[Telemetry] Module load failed:', e));
+    // WEE-97 item 6: telemetry collection is deferred until the chat list is
+    // interactive (fallback: 20s — covers the login-page / boot-error case).
+    // It used to poll Dexie every 500ms from the very start of boot; after
+    // the signal the DB is already initialized, so the poll loop below is
+    // only exercised on the fallback path.
+    whenChatsInteractive(TELEMETRY_DEFER_FALLBACK_MS).then(() => {
+      import('@/shared/lib/telemetry').then(({ collectTelemetry }) => {
+        collectTelemetry().then(async (snapshot) => {
+          const { isChatDbReady, getChatDb } = await import('@/shared/lib/local-db');
+          // Wait for DB to be ready (up to 10s)
+          for (let i = 0; i < 20 && !isChatDbReady(); i++) {
+            await new Promise(r => setTimeout(r, 500));
+          }
+          if (isChatDbReady()) {
+            const kit = getChatDb();
+            await kit.db.syncState.put({
+              key: 'device_telemetry',
+              value: JSON.stringify(snapshot),
+            });
+          }
+        }).catch((e) => console.warn('[Telemetry] Collection failed:', e));
+      }).catch((e) => console.warn('[Telemetry] Module load failed:', e));
+    });
 
     // Wire store to native torService reactive state (always — for settings UI)
     const torStore = useTorStore();
@@ -102,28 +119,59 @@ export const setupProviders = async (app: App) => {
 
     // Only start Tor daemon if user previously opted in.
     // Default is "neveruse" (opt-in) — app boots instantly via clearnet.
+    //
+    // WEE-97 item 6: the daemon start is deferred until the chat list is
+    // interactive (fallback: 15s for the login-page case). The Matrix proxy
+    // was already best-effort — initMatrix reads torService.matrixBaseUrl
+    // once at connect time, and the daemon's 5-10s bootstrap virtually never
+    // beat it; the deferral just stops Tor from competing for CPU/IO during
+    // the critical boot path. The Settings UI keeps working: torStore.init()
+    // above wires reactive state unconditionally.
     if (torStore.isEnabled) {
-      bootStatus.setStep("tor");
-      const { torService } = await import('@/shared/lib/tor');
-      torService.initBackground();
+      whenChatsInteractive(TOR_DEFER_FALLBACK_MS).then(async () => {
+        const { torService } = await import('@/shared/lib/tor');
+        torService.initBackground(torStore.mode);
 
-      // Notify user if Tor fails to start
-      const torWatch = watch(
-        () => torService.initFailed.value,
-        (failed) => {
-          if (failed) {
-            import('@/shared/lib/use-toast').then(({ useToast }) => {
-              const { toast } = useToast();
-              toast(
-                'Secure connection unavailable. You can enable Tor in Settings.',
-                'error',
-                8000,
-              );
-            });
-            torWatch(); // stop watching
-          }
-        },
-      );
+        // Once the daemon is bootstrapped, route the live Matrix session
+        // through the local reverse proxy. The proxy flag is consulted
+        // per-request in MatrixClientService, so this takes effect on the
+        // next /sync long-poll — previously a session that connected before
+        // Tor was ready stayed clearnet forever.
+        const applyMatrixProxy = () => {
+          if (!torService.matrixBaseUrl) return false;
+          import('@/entities/matrix').then(({ getMatrixClientService }) => {
+            getMatrixClientService().setTorProxyUrl(torService.matrixBaseUrl);
+            console.info('[TOR] Matrix proxy applied to live session');
+          }).catch((e) => console.warn('[TOR] Matrix proxy re-apply failed:', e));
+          return true;
+        };
+        if (!applyMatrixProxy()) {
+          const proxyWatch = watch(
+            () => torService.isReady.value,
+            (ready) => {
+              if (ready && applyMatrixProxy()) proxyWatch();
+            },
+          );
+        }
+
+        // Notify user if Tor fails to start
+        const torWatch = watch(
+          () => torService.initFailed.value,
+          (failed) => {
+            if (failed) {
+              import('@/shared/lib/use-toast').then(({ useToast }) => {
+                const { toast } = useToast();
+                toast(
+                  'Secure connection unavailable. You can enable Tor in Settings.',
+                  'error',
+                  8000,
+                );
+              });
+              torWatch(); // stop watching
+            }
+          },
+        );
+      });
     }
   }
 

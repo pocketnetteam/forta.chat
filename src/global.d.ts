@@ -148,6 +148,15 @@ declare var Api: new (instance: PocketnetInstanceType) => {
     proxywithwalletls(): Promise<any>;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     byid(id: string): any;
+    /** Resolve the active proxy WSS endpoint. Returns either:
+     *  - `{ url, proxy }` with `url = "wss://host:port"` for a real network proxy, or
+     *  - `{ dummy, proxy }` when running against the in-process direct proxy
+     *    (Bastyon Electron only — chat app never sees this branch). */
+    currentwss(): Promise<
+      | { url: string; proxy: { current?: { key?: string }; system?: unknown } }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      | { dummy: any; proxy: any }
+    >;
   };
   wait: { ready(type: string, timeout: number): Promise<void> };
   ready: { use: boolean };
@@ -166,6 +175,13 @@ declare var pSDK: new (opts: {
   userInfo: {
     load(addresses: string[], light?: boolean, reload?: boolean): Promise<void>;
     get(address: string): UserDataSDK;
+  };
+  myScore: {
+    load(
+      shareIds: string[],
+      commentIds: string[],
+      update?: boolean,
+    ): Promise<Record<string, { posttxid?: string; cmntid?: string; value?: number | string } | undefined>>;
   };
 };
 declare var UserInfo: new () => {

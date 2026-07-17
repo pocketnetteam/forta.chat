@@ -5,6 +5,7 @@ import type {
   ReplyTo,
   PollInfo,
   TransferInfo,
+  CallLinkInfo,
   LinkPreview,
 } from "@/entities/chat/model/types";
 
@@ -115,6 +116,7 @@ export interface LocalMessage {
   callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number };
   pollInfo?: PollInfo;
   transferInfo?: TransferInfo;
+  callLinkInfo?: CallLinkInfo;   // External call-link card (WEE-57)
   linkPreview?: LinkPreview;
   deleted?: boolean;
   systemMeta?: {
@@ -150,6 +152,14 @@ export interface LocalUser {
   image?: string;                // Avatar URL
   updatedAt: number;
   syncedAt: number;              // Last fetched from server
+
+  /** User-set local nickname (Telegram-style "rename contact").
+   *  Visible only to the local user, synced across own devices via Matrix
+   *  account_data ("m.bastyon.contact_aliases"). NEVER sent as Matrix
+   *  room displayname — the peer must not see it. */
+  localAlias?: string;
+  /** Epoch-ms of the last `localAlias` change (LWW conflict resolution). */
+  aliasUpdatedAt?: number;
 }
 
 /** Queued operation for sync */
@@ -205,6 +215,74 @@ export interface SearchCacheRow {
   expiresAt: number;               // Unix ms — entry is considered stale past this
 }
 
+// ---------------------------------------------------------------------------
+// Channels (Bastyon broadcast subscriptions)
+// ---------------------------------------------------------------------------
+
+export interface ChannelLastContent {
+  txid: string;
+  type: "video" | "share" | "article";
+  caption: string;
+  message: string;
+  time: number;
+  height: number;
+  scoreSum: number;
+  scoreCnt: number;
+  comments: number;
+  images?: string[];
+  url?: string;
+  tags?: string[];
+  settings?: { v?: string };
+}
+
+/** Persisted Bastyon channel subscription. Source of truth for cold-start render
+ *  before the Pocketnet RPC `getsubscribeschannels` response arrives. */
+export interface LocalChannel {
+  address: string;                 // PK: channel author Bastyon address
+  name: string;
+  avatar: string;
+  lastContent: ChannelLastContent | null;
+  /** Preserves the order returned by Pocketnet RPC across cold-starts.
+   *  Lower = higher in the list. Backfilled per fetch page. */
+  syncOrder: number;
+  /** Timestamp of the latest RPC refresh that touched this entry. */
+  updatedAt: number;
+}
+
+/** Top-level grouping the Settings → Storage UI shows as tabs:
+ *  Media (photos + videos), Files (PDFs/archives/docs), Voice (voice
+ *  notes / audio). The category is computed from MessageType + mime at
+ *  put-time and stored on the index row so the breakdown queries can
+ *  group cheaply without re-classifying. */
+export type MediaCacheCategory = "media" | "file" | "voice";
+
+/** Persistent media cache index — Telegram/WhatsApp-style disk cache for
+ *  decrypted media blobs. The bytes themselves live in `mediaCacheBlobs`
+ *  (web) or Capacitor Filesystem (native) — this table only holds metadata
+ *  + LRU bookkeeping. PK is the original `mxc://server/id` URI so cache
+ *  lookups from `useFileDownload` are O(1) by primary key.
+ *
+ *  Added in v16: roomId / category / fileName so Settings → Storage can
+ *  render a per-chat breakdown and per-category lists like Telegram does. */
+export interface MediaCacheIndexEntry {
+  mxc: string;                     // PK: mxc:// or https:// URL
+  size: number;                    // Bytes of the cached blob
+  mime: string;                    // Content-Type (e.g. image/jpeg)
+  accessedAt: number;              // epoch-ms of last get() — LRU watermark
+  createdAt: number;               // epoch-ms of first put — sort key
+  roomId: string;                  // Matrix room ID this blob came from
+  category: MediaCacheCategory;    // Top-level grouping for the Storage UI
+  fileName?: string;               // Original filename (files/voice only)
+}
+
+/** Web-fallback storage row: the decrypted blob bytes themselves.
+ *  PK matches `MediaCacheIndexEntry.mxc`. On native (Capacitor) the blob
+ *  lives on disk and this table is unused. */
+export interface MediaCacheBlobRow {
+  mxc: string;                     // PK: mxc://server/mediaId
+  blob: Blob;                      // Decrypted plaintext bytes
+}
+
 /** Queued decryption retry job */
 export interface DecryptionJob {
   id?: number;                   // Auto PK
@@ -216,6 +294,19 @@ export interface DecryptionJob {
   nextAttemptAt: number;         // Timestamp for backoff scheduling
   lastError?: string;
   createdAt: number;
+}
+
+/**
+ * A user-configured external meeting provider (WEE-57).
+ *
+ * Privacy: these rows live ONLY in the per-user local IndexedDB
+ * (`bastyon-chat-{userId}`). They are NEVER written to Matrix account_data
+ * or the Pocketnet backend — personal meeting-room URLs stay on-device.
+ */
+export interface CallProvider {
+  id?: number;                   // Auto-incremented PK
+  label: string;                 // "Личный Zoom" — any user-chosen name
+  urlTemplate: string;           // "https://zoom.us/j/1234567890" — any meeting URL
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +324,10 @@ export class ChatDatabase extends Dexie {
   decryptionQueue!: Table<DecryptionJob>;
   listenedMessages!: Table<ListenedMessage>;
   searchCache!: Table<SearchCacheRow>;
+  channels!: Table<LocalChannel>;
+  mediaCacheIndex!: Table<MediaCacheIndexEntry>;
+  mediaCacheBlobs!: Table<MediaCacheBlobRow>;
+  callProviders!: Table<CallProvider>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -586,6 +681,113 @@ export class ChatDatabase extends Dexie {
       return tx.table("pendingOps").toCollection().modify(op => {
         if (op.nextAttemptAt === undefined) op.nextAttemptAt = 0;
       });
+    });
+
+    // Version 13: add aliasUpdatedAt index to users for fast LWW conflict
+    // resolution when applying inbound m.bastyon.contact_aliases account_data.
+    // The localAlias field itself is not indexed (read via getAllAliases scan).
+    this.version(13).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+    });
+
+    // Version 14: add channels table. Bastyon broadcast subscriptions used to
+    // live only in transient Pinia state, so a slow Pocketnet RPC response on
+    // cold-start showed an empty sidebar — users reported it as data loss
+    // (forta-bugs#736, #553, #762, #471, WEE-24). PK: channel address;
+    // syncOrder index preserves RPC list order across restarts.
+    this.version(14).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+    });
+
+    // Version 15: add persistent media cache (Telegram/WhatsApp-style).
+    // Decrypted media blobs persist across chat re-opens / app restarts so
+    // photos and videos no longer re-download on every visit (WEE-33).
+    //   - mediaCacheIndex: metadata + LRU bookkeeping, queried by accessedAt
+    //   - mediaCacheBlobs: web-fallback blob bytes (native uses Filesystem)
+    this.version(15).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      mediaCacheIndex: "mxc, accessedAt",
+      mediaCacheBlobs: "mxc",
+    });
+
+    // Version 16: enrich media cache index with roomId + category + fileName
+    // so Settings → Storage can show Telegram-style per-chat breakdown and
+    // per-category lists (WEE-33 follow-up). Old v15 rows lack these fields
+    // and there is no way to back-fill them (the source Matrix events have
+    // already been forgotten by the time the cache populated), so the
+    // migration wipes the cache. Users lose at most a few hundred MB of
+    // re-downloadable blobs; we gain a clean dataset for the new UI.
+    this.version(16).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      // New indexes:
+      //   roomId   — per-chat breakdown query (where(roomId).equals(x))
+      //   category — per-tab list (where(category).equals("media"))
+      mediaCacheIndex: "mxc, accessedAt, roomId, category",
+      mediaCacheBlobs: "mxc",
+    }).upgrade(async (tx) => {
+      // Wipe v15 rows + blobs — they don't carry the new metadata.
+      // Filesystem-backed entries on native (Capacitor `Directory.Cache`)
+      // are NOT touched here; the next `MediaCacheRepository.clearAll`
+      // (or `enforceLimit` once new puts come in) will surface them as
+      // orphans and self-heal via the storage MISS path.
+      try { await tx.table("mediaCacheIndex").clear(); } catch { /* ignore */ }
+      try { await tx.table("mediaCacheBlobs").clear(); } catch { /* ignore */ }
+      console.log("[ChatDB] Media cache v16 migration: wiped v15 index (no roomId)");
+    });
+
+    // Version 17: local-only external call providers (WEE-57). Stored here
+    // (and never in Matrix account_data) so personal meeting-room URLs stay
+    // on-device. PK-only — the list is a handful of rows, queried with a
+    // plain toArray(), so no secondary index is needed.
+    this.version(17).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      mediaCacheIndex: "mxc, accessedAt, roomId, category",
+      mediaCacheBlobs: "mxc",
+      callProviders: "++id",
     });
   }
 }

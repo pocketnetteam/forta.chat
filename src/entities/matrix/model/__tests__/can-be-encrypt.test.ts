@@ -28,14 +28,16 @@ describe("decrypt graceful degradation", () => {
   it("decryptEvent should check for missing body entries", () => {
     const source = getSource();
     const start = source.indexOf("async decryptEvent(event");
-    const section = source.slice(start, start + 4000);
+    const section = source.slice(start, start + 8000);
     expect(section).toContain("no encrypted payload for");
   });
 
   it("encryptEvent should warn when members missing keys", () => {
     const source = getSource();
     const start = source.indexOf("async encryptEvent(text");
-    const section = source.slice(start, start + 1000);
+    // 1500-char window: WEE-39 diagnostic block (cryptoDebug call + 3-line
+    // comment) sits between the function header and the warn site.
+    const section = source.slice(start, start + 1500);
     expect(section).toContain("missing encryption keys");
   });
 });

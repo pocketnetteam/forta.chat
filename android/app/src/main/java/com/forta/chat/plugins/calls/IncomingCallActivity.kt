@@ -81,7 +81,9 @@ class IncomingCallActivity : Activity() {
         // itself is now the sole ringer source. Idempotent if it was
         // never posted (no-op cancel).
         intent.getStringExtra("roomId")?.let { rId ->
-            FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+            safeStep("dismissPushFsi") {
+                FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+            }
         }
 
         // H1: action extra from notification accept/decline PendingIntents.
@@ -95,67 +97,158 @@ class IncomingCallActivity : Activity() {
             Log.d(TAG, "onCreate: auto-dispatching action=$action, skipping UI")
             // Suppress the default Activity animation because we finish
             // immediately — a visible flash of empty content is jarring.
-            overridePendingTransition(0, 0)
-            if (action == "accept") accept() else decline()
+            safeStep("overridePendingTransitionForAction") { overridePendingTransition(0, 0) }
+            try {
+                if (action == "accept") accept() else decline()
+            } catch (t: Throwable) {
+                Log.e(TAG, CallCrashGuard.marker("action=$action dispatch"), t)
+                runCatching { finish() }
+            }
             return
         }
 
-        // Show on lock screen
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-            keyguardManager.requestDismissKeyguard(this, null)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-            )
-        }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        setContentView(R.layout.activity_incoming_call)
-
-        // Apply real system bar insets instead of hardcoded 80dp margin
-        WindowInsetsHelper.setupEdgeToEdge(
-            activity = this,
-            onInsets = { _, bottom, _, _ ->
-                val buttonsContainer = findViewById<LinearLayout>(R.id.buttons_container)
-                val lp = buttonsContainer.layoutParams as LinearLayout.LayoutParams
-                lp.bottomMargin = bottom + (32 * resources.displayMetrics.density).toInt()
-                buttonsContainer.layoutParams = lp
+        // WEE-31: every step below is a known crash-point on at least one
+        // device family — OEM lockscreen overrides (Xiaomi/MIUI), missing
+        // layout resources on legacy WebViews, edge-to-edge inset access
+        // pre-Android-11, etc. Wrapping the whole body in a try/catch
+        // turns a process-death "наглухо" crash into a logged stacktrace
+        // + a graceful finish so the user can retry the call. Each
+        // critical step is also wrapped in safeStep so the exact failing
+        // step is identifiable in logcat for future investigation.
+        try {
+            // Show on lock screen
+            safeStep("setLockScreenFlags") {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    setShowWhenLocked(true)
+                    setTurnScreenOn(true)
+                    val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                    keyguardManager.requestDismissKeyguard(this, null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    window.addFlags(
+                        WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
+                    )
+                }
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
+
+            safeStep("setContentView") {
+                setContentView(R.layout.activity_incoming_call)
+            }
+
+            // Apply real system bar insets instead of hardcoded 80dp margin
+            safeStep("setupEdgeToEdge") {
+                WindowInsetsHelper.setupEdgeToEdge(
+                    activity = this,
+                    onInsets = { _, bottom, _, _ ->
+                        val buttonsContainer = findViewById<LinearLayout>(R.id.buttons_container)
+                            ?: return@setupEdgeToEdge
+                        val lp = buttonsContainer.layoutParams as? LinearLayout.LayoutParams
+                            ?: return@setupEdgeToEdge
+                        lp.bottomMargin = bottom + (32 * resources.displayMetrics.density).toInt()
+                        buttonsContainer.layoutParams = lp
+                    },
+                )
+            }
+
+            val callerName = intent.getStringExtra("callerName") ?: "Unknown"
+            val hasVideo = intent.getBooleanExtra("hasVideo", false)
+
+            // Bind views (every findViewById can be null if the inflated
+            // layout is missing the resource — vendor themes that override
+            // attribute resolution have historically nulled view bindings
+            // here without throwing in setContentView).
+            safeStep("bindViews") {
+                findViewById<TextView>(R.id.caller_name)?.text = callerName
+                findViewById<TextView>(R.id.call_type)?.text =
+                    if (hasVideo) getString(R.string.incoming_video_call) else getString(R.string.incoming_audio_call)
+                findViewById<TextView>(R.id.countdown_text)?.text = "${countdownSeconds}s"
+
+                // Avatar initials
+                val initials = callerName.take(2).uppercase()
+                findViewById<TextView>(R.id.avatar_text)?.text = initials
+
+                // Buttons
+                findViewById<ImageButton>(R.id.btn_accept)?.setOnClickListener { accept() }
+                findViewById<ImageButton>(R.id.btn_decline)?.setOnClickListener { decline() }
+            }
+
+            // Start ringtone + vibration (already internally catch'd, but
+            // wrap for symmetry with logging step names).
+            safeStep("startRingtone") { startRingtone() }
+            safeStep("startVibration") { startVibration() }
+
+            // Start pulse animation
+            safeStep("startPulseAnimation") { startPulseAnimation() }
+
+            // Start 30s auto-reject timer
+            handler.postDelayed(autoRejectRunnable, AUTO_REJECT_TIMEOUT_MS)
+            handler.postDelayed(countdownRunnable, 1000)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[callee-crash-guard] onCreate failed — finishing gracefully", t)
+            // Surface a reject to the caller so they stop ringing, then
+            // dismiss everything and finish. Without this the caller would
+            // see "ringing" for ~30-60s until their own SDK timeout fires.
+            runCatching {
+                CallConnectionService.currentConnection?.onReject()
+                CallConnectionService.dismissIncomingCallNotification(this)
+                intent.getStringExtra("roomId")?.let { rId ->
+                    FortaFirebaseMessagingService.dismissPushCallNotification(this, rId)
+                }
+                cleanup()
+                finish()
+            }
+        }
+    }
+
+    /**
+     * Run [block], log any throwable with the named step prefix, and
+     * rethrow. The outer onCreate try/catch then turns it into a graceful
+     * finish; logcat still has the exact failing step (WEE-31).
+     */
+    private inline fun safeStep(step: String, block: () -> Unit) {
+        CallCrashGuard.safeStep(
+            step = step,
+            onFailure = { failedStep, error ->
+                Log.e(TAG, CallCrashGuard.marker(failedStep), error)
+            },
+            block = block,
         )
+    }
 
-        val callerName = intent.getStringExtra("callerName") ?: "Unknown"
-        val hasVideo = intent.getBooleanExtra("hasVideo", false)
+    /**
+     * Re-dispatch action extras when the system delivers a new Intent to
+     * an already-resident instance.
+     *
+     * The notification's Accept / Decline action buttons (added in the
+     * FCM service for WEE-18) launch this Activity with
+     * launchMode="singleTop", so when the ringer is already visible the
+     * tap arrives via onNewIntent rather than a fresh onCreate. Without
+     * this override the action= extra would be silently ignored and the
+     * shade button would behave like a no-op (#751 backslide path).
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
 
-        // Bind views
-        findViewById<TextView>(R.id.caller_name).text = callerName
-        findViewById<TextView>(R.id.call_type).text =
-            if (hasVideo) getString(R.string.incoming_video_call) else getString(R.string.incoming_audio_call)
-        findViewById<TextView>(R.id.countdown_text).text = "${countdownSeconds}s"
-
-        // Avatar initials
-        val initials = callerName.take(2).uppercase()
-        findViewById<TextView>(R.id.avatar_text).text = initials
-
-        // Buttons
-        findViewById<ImageButton>(R.id.btn_accept).setOnClickListener { accept() }
-        findViewById<ImageButton>(R.id.btn_decline).setOnClickListener { decline() }
-
-        // Start ringtone + vibration
-        startRingtone()
-        startVibration()
-
-        // Start pulse animation
-        startPulseAnimation()
-
-        // Start 30s auto-reject timer
-        handler.postDelayed(autoRejectRunnable, AUTO_REJECT_TIMEOUT_MS)
-        handler.postDelayed(countdownRunnable, 1000)
+        val action = intent.getStringExtra("action")
+        if (action == "accept" || action == "decline") {
+            Log.d(TAG, "onNewIntent: dispatching action=$action on resident instance")
+            // WEE-31: mirror the onCreate action-dispatch guard. Without
+            // this, a throw inside accept()/decline() — e.g. Android 12+
+            // startActivity background-start restriction blocking the
+            // MainActivity boot — would propagate uncaught out of
+            // onNewIntent into the system Activity thread and process-
+            // kill the callee, defeating the entire crash-guard PR.
+            try {
+                if (action == "accept") accept() else decline()
+            } catch (t: Throwable) {
+                Log.e(TAG, CallCrashGuard.marker("action=$action onNewIntent dispatch"), t)
+                runCatching { finish() }
+            }
+        }
     }
 
     private fun accept() {
@@ -328,8 +421,31 @@ class IncomingCallActivity : Activity() {
         }
     }
 
+    /**
+     * WEE-54 / forta-bugs#862: bump STREAM_RING when an OEM (MIUI / HyperOS)
+     * has left it muted while the phone is in normal ringer mode, otherwise
+     * the system ringtone plays inaudibly and only the vibration is felt.
+     * Silent / vibrate ringer modes are respected (no-op) — see
+     * [CallNotificationConfig.ringVolumeToForce]. Best-effort: any failure
+     * (locked stream on hardened ROMs) is swallowed; vibration still fires.
+     */
+    private fun ensureRingerAudible() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+            val target = CallNotificationConfig.ringVolumeToForce(
+                ringerMode = am.ringerMode,
+                currentVolume = am.getStreamVolume(android.media.AudioManager.STREAM_RING),
+                maxVolume = am.getStreamMaxVolume(android.media.AudioManager.STREAM_RING),
+            ) ?: return
+            am.setStreamVolume(android.media.AudioManager.STREAM_RING, target, 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureRingerAudible failed", e)
+        }
+    }
+
     private fun startRingtone() {
         try {
+            ensureRingerAudible()
             val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ringtone = RingtoneManager.getRingtone(applicationContext, ringtoneUri)
             ringtone?.audioAttributes = AudioAttributes.Builder()

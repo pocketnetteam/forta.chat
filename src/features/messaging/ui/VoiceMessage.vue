@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from "vue";
 import type { Message } from "@/entities/chat";
 import { MessageStatus } from "@/entities/chat/model/types";
-import { useFileDownload } from "../model/use-file-download";
+import { useFileDownload, invalidateDownloadCache } from "../model/use-file-download";
 import { useAudioPlayback } from "../model/use-audio-playback";
 import { getChatDb } from "@/shared/lib/local-db";
 
@@ -53,6 +53,12 @@ watch(
   () => props.message.fileInfo?.url,
   (newUrl, oldUrl) => {
     if (newUrl && newUrl !== oldUrl && !newUrl.startsWith("blob:")) {
+      // Send just confirmed: the optimistic blob is about to be revoked
+      // (sync-engine, ~5s after confirmMediaSent). Drop any stale cache entry
+      // for this key so download() re-fetches the durable server copy instead
+      // of replaying a dead blob — otherwise the sender's own voice spins
+      // forever (#990) or plays silent (#986). (WEE-88)
+      invalidateDownloadCache(fileCacheKey.value);
       download(props.message);
     }
   },

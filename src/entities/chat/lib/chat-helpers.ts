@@ -27,6 +27,86 @@ export function normalizeMime(mime: string | undefined): string {
   return mime && mime.includes("/") ? mime : "application/octet-stream";
 }
 
+/**
+ * Matrix MSC3245 video-note metadata flag.
+ * Standard interoperable marker so other clients (Element, etc.) preserve
+ * the circular video-note rendering instead of falling back to a square video.
+ * We also keep the legacy `videoNote: true` shortcut for backwards compatibility
+ * with messages written by older builds of this app.
+ */
+export const MSC3245_VIDEO_NOTE_KEY = "org.matrix.msc3245.video_note";
+
+/**
+ * Matrix MSC3245 voice-message marker.
+ * Voice recordings carry this top-level key; regular audio files (mp3
+ * picked from gallery, podcast attachments, etc.) do not. Without it the
+ * UI treats *all* `m.audio` events as voice messages — leaving the user
+ * with a player bubble and no save-to-disk affordance for an MP3 file
+ * (forta-bugs#841 / WEE-50). We also accept the alternative `info.waveform`
+ * marker so legacy bastyon-chat voice notes (which predate MSC3245) keep
+ * rendering as voice bubbles.
+ */
+export const MSC3245_VOICE_KEY = "org.matrix.msc3245.voice";
+
+/** True when an m.video info bag is marked as a video-note (circle). */
+export function isVideoNoteInfo(info: Record<string, unknown> | undefined | null): boolean {
+  if (!info) return false;
+  return info.videoNote === true || info[MSC3245_VIDEO_NOTE_KEY] === true;
+}
+
+/** True when an `m.audio` event is a voice-message recording.
+ *
+ *  Heuristic, in priority order:
+ *    1. MSC3245 voice marker on the event content (`org.matrix.msc3245.voice`)
+ *       — the canonical Matrix-wide signal used by Element / Cinny / etc.
+ *    2. Same marker mirrored under `content.info` — some clients put it there.
+ *    3. Presence of `info.waveform` — legacy bastyon-chat voice notes
+ *       (pre-MSC3245) only carry the waveform array. Treating waveform as a
+ *       sufficient signal keeps backwards-compat without misclassifying gallery
+ *       MP3s (which never include a waveform).
+ *
+ *  Returns false for everything else — that is the file-bubble path. */
+export function isVoiceAudioContent(
+  content: Record<string, unknown> | undefined | null,
+  info: Record<string, unknown> | undefined | null,
+): boolean {
+  if (!content && !info) return false;
+  if (content && MSC3245_VOICE_KEY in content) return true;
+  if (info && MSC3245_VOICE_KEY in info) return true;
+  if (info && Array.isArray(info.waveform) && info.waveform.length > 0) return true;
+  return false;
+}
+
+/** Whether an audio attachment should render as a voice message (player +
+ *  waveform) rather than a downloadable file bubble.
+ *
+ *  Forta sends voice recordings *exclusively* as `m.audio` (see
+ *  `use-messages.ts` → `sendAudio`), while every gallery / file-picker pick —
+ *  including `.mp3` — is shipped as `m.file` regardless of MIME (see
+ *  `sendFile`, which hardcodes `msgtype: "m.file"`). So inside Forta the event
+ *  type alone is authoritative: `m.audio` ⟹ voice.
+ *
+ *  The MSC3245 marker and `info.waveform` are best-effort cross-client signals,
+ *  but they do NOT reliably survive Forta's media round-trip on the recipient
+ *  side. Gating voice rendering on them made every received voice note collapse
+ *  into an "Audio.mp3" file bubble (WEE-83 — the regression introduced by the
+ *  WEE-50 / forta-bugs#841 voice/file split). We therefore must not gate
+ *  `m.audio` on those markers.
+ *
+ *  For any *other* msgtype we fall back to the explicit positive signal: a
+ *  gallery `.mp3` (m.file + audio mime, no marker, no waveform) stays a file,
+ *  so WEE-50 / forta-bugs#841 remains fixed, while a real voice note that some
+ *  other client ships outside `m.audio` still renders as voice when it carries
+ *  the marker / waveform. */
+export function isVoiceAudioMessage(
+  msgtype: string,
+  content: Record<string, unknown> | undefined | null,
+  info: Record<string, unknown> | undefined | null,
+): boolean {
+  if (msgtype === "m.audio") return true;
+  return isVoiceAudioContent(content, info);
+}
+
 /** Determine MessageType from MIME type string */
 export function messageTypeFromMime(mime: string): MessageType {
   const m = normalizeMime(mime);
@@ -34,6 +114,40 @@ export function messageTypeFromMime(mime: string): MessageType {
   if (m.startsWith("video/")) return MessageType.video;
   if (m.startsWith("audio/")) return MessageType.audio;
   return MessageType.file;
+}
+
+/** Map MIME → file extension (used when body has no extension). */
+const MIME_EXT: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
+  "video/3gpp": "3gp",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/mp4": "m4a",
+  "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/webm": "webm",
+  "audio/aac": "aac",
+};
+
+/** Append extension from mime if filename doesn't already have one.
+ *  - alpha-first regex avoids treating "track.2024" or "v1.0" as already-
+ *    extensioned (saves "holiday.2024" as "holiday.2024.jpg" instead of
+ *    losing the .jpg)
+ *  - strips MIME parameters ("image/jpeg; charset=binary" → "image/jpeg") */
+function ensureExt(name: string, mime: string): string {
+  if (/\.[a-zA-Z][a-zA-Z0-9]{1,4}$/.test(name)) return name;
+  const cleanMime = mime.split(";")[0].trim().toLowerCase().replace(/^encrypted\//, "");
+  const ext = MIME_EXT[cleanMime] ?? "bin";
+  return `${name}.${ext}`;
 }
 
 /** Parse file metadata from raw event content.
@@ -45,27 +159,54 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   const pbody = content.pbody as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const info = content.info as any;
+  // Canonical Matrix encrypted attachments (Element, Cinny, FluffyChat, …)
+  // carry `mxc://` url under `content.file.url` alongside { iv, key, hashes }.
+  // Bastyon's own pipeline duplicates the url into pbody/info/content.url,
+  // but messages forwarded from other clients omit those copies — without a
+  // fallback the download path throws "No file URL" (Session 57, bugs #740,
+  // #739, #719, #567).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const encryptedFile = content.file as any;
+  const encryptedUrl: string | undefined = typeof encryptedFile?.url === "string" ? encryptedFile.url : undefined;
 
+  // m.file events never carry a voice recording — voice always rides on
+  // m.audio. Setting `isVoice: false` here lets the UI default-to-voice
+  // safety net (`isVoice ?? true`) keep working for legacy stored rows
+  // without misclassifying audio attachments shipped as m.file.
+  const fileIsVoice = false;
   if (msgtype === "m.file" && pbody) {
+    // SyncEngine.processFileSend (sync-engine.ts) ships m.file events with
+    // body = JSON({ name, type, size }) and the mxc URL + secrets pinned to
+    // top-level content.url / content.secrets. matrix-client unconditionally
+    // JSON.parses body into pbody, so pbody loses url/secrets — without
+    // these fallbacks every forwarded/uploaded PDF throws MissingUrlError
+    // (WEE-28). Legacy bastyon-chat puts url+secrets inside body, so
+    // pbody.* keeps priority for back-compat.
+    const topUrl = typeof content.url === "string" ? content.url : undefined;
+    const topSecrets = content.secrets as
+      | { block?: number; keys?: string; v?: number; version?: number }
+      | undefined;
+    const secrets = pbody.secrets ?? topSecrets;
     return {
       name: pbody.name ?? "file",
       type: (pbody.type ?? "").replace("encrypted/", ""),
       size: pbody.size ?? 0,
-      url: pbody.url ?? "",
-      secrets: pbody.secrets ? {
-        block: pbody.secrets.block,
-        keys: pbody.secrets.keys,
-        v: pbody.secrets.v ?? pbody.secrets.version ?? 1,
+      url: pbody.url ?? encryptedUrl ?? topUrl ?? "",
+      isVoice: fileIsVoice,
+      secrets: secrets ? {
+        block: secrets.block,
+        keys: secrets.keys,
+        v: secrets.v ?? secrets.version ?? 1,
       } : undefined,
     };
   }
 
   if (msgtype === "m.image" && info) {
     return {
-      name: (content.body as string) ?? "image",
+      name: ensureExt((content.body as string) || "image", info.mimetype ?? "image/jpeg"),
       type: info.mimetype ?? "image/jpeg",
       size: info.size ?? 0,
-      url: info.url ?? (content.url as string) ?? "",
+      url: info.url ?? encryptedUrl ?? (content.url as string) ?? "",
       w: info.w,
       h: info.h,
       caption: info.caption ?? undefined,
@@ -86,14 +227,20 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
       : undefined;
 
     return {
-      name: (content.body as string) ?? "Audio",
+      name: ensureExt((content.body as string) || "Audio", info.mimetype ?? "audio/mpeg"),
       type: info.mimetype ?? "audio/mpeg",
       size: info.size ?? 0,
-      url: info.url ?? (content.url as string) ?? "",
-      duration: typeof info.duration === "number" && info.duration > 0
+      url: info.url ?? encryptedUrl ?? (content.url as string) ?? "",
+      duration: typeof info.duration === "number" && Number.isFinite(info.duration) && info.duration > 0
         ? Math.round(info.duration / 1000)
         : undefined,
       waveform: normalizedWaveform,
+      // `m.audio` is always a voice recording in Forta (gallery/file picks ship
+      // as `m.file`), so it must render as voice even when the MSC3245 marker /
+      // waveform are lost in transit to the recipient (WEE-83, regression of
+      // WEE-50 / forta-bugs#841). Generic mp3 attachments arrive as `m.file`
+      // and keep their file bubble.
+      isVoice: isVoiceAudioMessage(msgtype, content, info),
       secrets: info.secrets ? {
         block: info.secrets.block,
         keys: info.secrets.keys,
@@ -103,16 +250,16 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
   }
 
   if (msgtype === "m.video") {
-    const url = info?.url ?? (content.url as string) ?? "";
+    const url = info?.url ?? encryptedUrl ?? (content.url as string) ?? "";
     return {
-      name: (content.body as string) ?? "Video",
+      name: ensureExt((content.body as string) || "Video", info?.mimetype ?? "video/mp4"),
       type: info?.mimetype ?? "video/mp4",
       size: info?.size ?? 0,
       url,
       w: info?.w,
       h: info?.h,
       duration: info?.duration ? Math.round(info.duration / 1000) : undefined,
-      videoNote: info?.videoNote === true ? true : undefined,
+      videoNote: isVideoNoteInfo(info) ? true : undefined,
       thumbnailUrl: info?.thumbnailUrl ?? undefined,
       secrets: info?.secrets ? {
         block: info.secrets.block,
@@ -132,6 +279,7 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
           type: (parsed.type ?? "").replace("encrypted/", ""),
           size: parsed.size ?? 0,
           url: parsed.url,
+          isVoice: fileIsVoice,
           secrets: parsed.secrets ? {
             block: parsed.secrets.block,
             keys: parsed.secrets.keys,
@@ -140,6 +288,24 @@ export function parseFileInfo(content: Record<string, unknown>, msgtype: string)
         };
       }
     } catch { /* not JSON, ignore */ }
+  }
+
+  // Canonical Matrix encrypted m.file from non-Bastyon clients: no pbody,
+  // body is a plain filename string. Construct FileInfo directly from
+  // content.file.url + info{mimetype,size}.
+  if (msgtype === "m.file" && encryptedUrl) {
+    const mime = (info?.mimetype as string | undefined) ?? "application/octet-stream";
+    return {
+      name: ensureExt((content.body as string) || "file", mime),
+      type: mime.replace("encrypted/", ""),
+      size: info?.size ?? 0,
+      url: encryptedUrl,
+      isVoice: fileIsVoice,
+      // Secrets follow Matrix EncryptedFile shape: { url, key, iv, hashes, v }.
+      // We do not surface them here because the bastyon-chat crypto pipeline
+      // reads its own pbody.secrets shape; canonical-Matrix decryption is
+      // handled by matrix-js-sdk before parseFileInfo runs.
+    };
   }
 
   return undefined;
@@ -201,11 +367,11 @@ export function isUnresolvedName(name: string): boolean {
   if (/^#?[a-f0-9]{16,}$/i.test(name)) return true; // hex hash or #hex alias
   if (/^#[a-f0-9]{6,}(:.+)?$/i.test(name)) return true; // hex-encoded room alias #hex or #hex:server
   if (/^#[a-f0-9]{6,}\u2026/i.test(name)) return true; // truncated hex with # prefix (#aefd725b…)
-  /*if (/^[a-f0-9]{8}\u2026/i.test(name)) return true; // truncated hex (8chars…)
-  if (/^[A-Za-z0-9]{8}\u2026/i.test(name)) return true; // truncated address (8chars…)*/
+  if (/^[a-f0-9]{8}\u2026/i.test(name)) return true; // truncated hex (8chars…)
+  if (/^[A-Za-z0-9]{8}\u2026/i.test(name)) return true; // truncated address (8chars…)
   if (/^@[a-f0-9]{20,}:/i.test(name)) return true; // raw Matrix ID @hexid:server
   if (/^![a-zA-Z0-9]+:/i.test(name)) return true; // Matrix room ID !abc:server
-  //if (/^[A-Za-z0-9]{20,}$/.test(name)) return true; // raw Bastyon address (base58, 20+ chars)
+  if (/^[A-Za-z0-9]{20,}$/.test(name)) return true; // raw Bastyon address (base58, 20+ chars)
   return false;
 }
 

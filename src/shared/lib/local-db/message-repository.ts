@@ -4,6 +4,62 @@ import { MessageType } from "@/entities/chat/model/types";
 import type { ReplyTo } from "@/entities/chat/model/types";
 import { sortLocalMessagesTimelineAsc } from "./timeline-sort";
 
+/** A LocalMessage URL is "optimistic-only" when it cannot survive a page
+ *  reload — blob:/data: URLs are bound to the document lifetime and
+ *  become invalid the moment the user refreshes. Empty/undefined also
+ *  qualifies: there's nothing to preserve. */
+function isOptimisticOnlyFileUrl(url: string | undefined | null): boolean {
+  if (!url) return true;
+  return url.startsWith("blob:") || url.startsWith("data:");
+}
+
+/** A server-issued media URL — survives reload, can be re-resolved across
+ *  sessions. mxc:// is the canonical Matrix shape; http(s):// is the
+ *  already-resolved form returned by mxcUrlToHttp for clients that want
+ *  to skip the resolve step. Note: localhost http URLs are technically
+ *  matched here too, but they never reach this code path — sync-engine
+ *  resolves against the homeserver's baseUrl, and only the blob-guard in
+ *  downloadAndDecrypt would block a localhost URL upstream. */
+function isServerFileUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  return (
+    url.startsWith("mxc://") ||
+    url.startsWith("http://") ||
+    url.startsWith("https://")
+  );
+}
+
+/** Decide whether an incoming /sync echo should replace the locally-stored
+ *  fileInfo. Replacement only happens when:
+ *   1. the incoming event actually carries fileInfo with a server URL, and
+ *   2. the local copy is missing fileInfo entirely OR still has the
+ *      optimistic blob:/data: URL written by createLocal — i.e. the
+ *      upload pipeline never wrote a real URL back, typically because
+ *      the /sync echo won the race against confirmMediaSent.
+ *  Returns the fileInfo to use, or `undefined` to leave the existing
+ *  copy untouched. */
+function healFileInfoFromEcho(
+  existing: LocalMessage["fileInfo"],
+  incoming: LocalMessage["fileInfo"],
+): LocalMessage["fileInfo"] | undefined {
+  if (!incoming || !isServerFileUrl(incoming.url)) return undefined;
+  if (!isOptimisticOnlyFileUrl(existing?.url)) return undefined;
+  return incoming;
+}
+
+/** A local-only phantom: a pending message the user deleted before it ever
+ *  reached the server. It has no `eventId` (never synced) and is deleted
+ *  locally, so it must vanish from the timeline without a placeholder — there
+ *  is no peer-side redaction to surface (WEE-66 #864, WEE-81). Server-redacted
+ *  messages (real `eventId` + softDeleted/deleted) are NOT phantoms and stay
+ *  visible as the «Сообщение удалено» placeholder — redaction is a Matrix
+ *  protocol event that reaches every participant, so it can't be hidden.
+ *  `eventId == null` is the loose check on purpose: it covers both `null`
+ *  (createLocal) and a missing field on older rows. */
+function isLocalOnlyPhantom(m: LocalMessage): boolean {
+  return m.eventId == null && (!!m.softDeleted || !!m.deleted);
+}
+
 export class MessageRepository {
   constructor(private db: ChatDatabase) {}
 
@@ -12,7 +68,16 @@ export class MessageRepository {
   // ---------------------------------------------------------------------------
 
   /** Load messages for a room (paginated, chronological order).
-   *  Returns up to `limit` messages with timestamp < `beforeTimestamp`. */
+   *  Returns up to `limit` messages with timestamp < `beforeTimestamp`.
+   *
+   *  WEE-81 narrows WEE-66's deletion filter: a server-redacted message
+   *  (softDeleted/deleted with a real `eventId`) is KEPT so the bubble renders
+   *  the «Сообщение удалено» placeholder — redaction reaches every participant,
+   *  so the deletion can't be hidden. The ONLY row dropped is the local-only
+   *  phantom (`eventId == null` + deleted): a pending message the user deleted
+   *  before it was ever sent, which leaves no trace for the peer either
+   *  (WEE-66 #864). Deletions are rare, so the post-index `.filter()` reads
+   *  only marginally more rows than `limit`. */
   async getMessages(
     roomId: string,
     limit = 50,
@@ -25,6 +90,7 @@ export class MessageRepository {
       .where("[roomId+timestamp]")
       .between([roomId, lower], [roomId, upper], !clearedAtTs, !beforeTimestamp)
       .reverse()
+      .filter((m) => !isLocalOnlyPhantom(m))
       .limit(limit)
       .toArray();
 
@@ -88,6 +154,7 @@ export class MessageRepository {
     forwardedFrom?: LocalMessage["forwardedFrom"];
     transferInfo?: LocalMessage["transferInfo"];
     pollInfo?: LocalMessage["pollInfo"];
+    callLinkInfo?: LocalMessage["callLinkInfo"];
     fileInfo?: LocalMessage["fileInfo"];
     linkPreview?: LocalMessage["linkPreview"];
     localBlobUrl?: string;
@@ -112,6 +179,7 @@ export class MessageRepository {
       forwardedFrom: params.forwardedFrom,
       transferInfo: params.transferInfo,
       pollInfo: params.pollInfo,
+      callLinkInfo: params.callLinkInfo,
       fileInfo: params.fileInfo,
       linkPreview: params.linkPreview,
       localBlobUrl: params.localBlobUrl,
@@ -146,6 +214,7 @@ export class MessageRepository {
     if (type === MessageType.file) return fileInfo?.name || "[file]";
     if (type === MessageType.poll) return "[poll]";
     if (type === MessageType.transfer) return `[transfer] ${transferAmount ?? 0} PKOIN`;
+    if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
 
@@ -161,6 +230,19 @@ export class MessageRepository {
     if (msg.clientId) {
       const existing = await this.getByClientId(msg.clientId);
       if (existing) {
+        // Self-heal local fileInfo when the optimistic insert wrote a
+        // blob:/data: URL (createLocal in use-messages.ts puts the local
+        // preview blob URL into fileInfo.url) and the server echo carries
+        // a real mxc:// or http(s):// URL. Without this, a race where the
+        // /sync echo arrives before confirmMediaSent — or where the
+        // send-engine's catch path drops the op early because the row is
+        // already "synced" (WEE-40 guard) — leaves a dead blob: URL in
+        // fileInfo.url forever. After reload the bubble fast-fails through
+        // downloadAndDecrypt's blob-guard and surfaces a misleading
+        // "Файл повреждён или не пришёл с источника" toast on a message
+        // that actually reached the peer.
+        const healedFileInfo = healFileInfoFromEcho(existing.fileInfo, msg.fileInfo);
+
         // If upload is still in-flight (has localBlobUrl) and hasn't failed,
         // only store eventId — let confirmMediaSent handle the final status transition.
         // If the message is already "failed", the upload pipeline is dead and we should
@@ -171,6 +253,7 @@ export class MessageRepository {
             serverTs: msg.serverTs ?? msg.timestamp,
             // Merge local-only fields that the server echo may lack
             linkPreview: existing.linkPreview ?? msg.linkPreview,
+            ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
           });
         } else {
           await this.db.messages.update(existing.localId!, {
@@ -181,6 +264,7 @@ export class MessageRepository {
             // fall back to server (parsed from url_preview in event content)
             linkPreview: existing.linkPreview ?? msg.linkPreview,
             localBlobUrl: existing.localBlobUrl ?? msg.localBlobUrl,
+            ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
           });
         }
         return "updated";
@@ -238,10 +322,16 @@ export class MessageRepository {
         if (e.status === "pending" || e.status === "syncing") {
           const incoming = messages.find((m) => m.clientId === e.clientId);
           if (incoming?.eventId && e.localId) {
+            // Self-heal: same rationale as upsertFromServer — adopt the
+            // server-side fileInfo when the optimistic local copy still
+            // has a blob:/data: URL, so reload doesn't surface a dead
+            // blob (WEE-40).
+            const healedFileInfo = healFileInfoFromEcho(e.fileInfo, incoming.fileInfo);
             await this.db.messages.update(e.localId, {
               eventId: incoming.eventId,
               status: "synced" as LocalMessageStatus,
               serverTs: incoming.serverTs ?? incoming.timestamp,
+              ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
             });
           }
         }
@@ -278,15 +368,27 @@ export class MessageRepository {
       });
   }
 
-  /** Soft-delete a message locally */
-  async softDelete(eventId: string): Promise<void> {
-    await this.db.messages
+  /** Soft-delete a message locally.
+   *
+   *  Matches by `eventId` first, falling back to `clientId` when no row was
+   *  touched. A pending message (not yet confirmed by the server) has
+   *  `eventId: null` and is identified only by its clientId — `deleteMessage`
+   *  passes `eventId ?? clientId`, so without the clientId fallback the
+   *  redaction was a silent no-op for pending messages (WEE-66 / #773, #864).
+   *  Server redactions always carry a `$eventId`, and clientIds are UUIDs, so
+   *  the two id spaces never collide. */
+  async softDelete(id: string): Promise<void> {
+    const patch = { softDeleted: true, deletedAt: Date.now() };
+    const touched = await this.db.messages
       .where("eventId")
-      .equals(eventId)
-      .modify({
-        softDeleted: true,
-        deletedAt: Date.now(),
-      });
+      .equals(id)
+      .modify(patch);
+    if (touched === 0) {
+      await this.db.messages
+        .where("clientId")
+        .equals(id)
+        .modify(patch);
+    }
   }
 
   /** Mark replyTo.deleted on all messages referencing a given eventId */
@@ -348,6 +450,23 @@ export class MessageRepository {
       .modify({ reactions });
   }
 
+  /** Overwrite the fileInfo of a message identified by eventId. Used by
+   *  the download-side lazy heal path (`use-file-download.ts`) when an
+   *  optimistic `blob:` URL has lingered in Dexie because confirmMediaSent
+   *  never ran — we refetch the event from Matrix and patch the row in
+   *  place so the next render uses a real mxc URL (WEE-40).
+   *
+   *  Also clears `localBlobUrl` so that `mappers.ts`'s
+   *  `local.localBlobUrl || local.fileInfo.url` fallback does not re-mask
+   *  the healed url with the dead blob: on the next render. Skipping this
+   *  would defeat the heal — the dead blob would resurface every reload. */
+  async updateFileInfo(eventId: string, fileInfo: LocalMessage["fileInfo"]): Promise<void> {
+    await this.db.messages
+      .where("eventId")
+      .equals(eventId)
+      .modify({ fileInfo, localBlobUrl: undefined });
+  }
+
   /** Update poll info on a message */
   async updatePollInfo(
     eventId: string,
@@ -377,12 +496,35 @@ export class MessageRepository {
     }
   }
 
-  /** Mark a pending message as failed (e.g. Matrix client not ready, enqueue error) */
+  /** Mark a pending message as failed (e.g. enqueue error).
+   *
+   *  Also mirrors the failed status onto the room's chat-list preview
+   *  (`lastMessageLocalStatus`), but only when this message is still the
+   *  room's last one — a timestamp guard symmetric to
+   *  RoomRepository.syncLastMessageLocalStatus, so a stale failure can't
+   *  overwrite the badge of a newer message. Without this the bubble shows
+   *  «не доставлено» while the sidebar preview stays «отправляется» (WEE-85,
+   *  closing the WEE-64 gap that only the SyncEngine fail-path covered).
+   *
+   *  Unlike SyncEngine.markMessageFailed this has NO already-confirmed (WEE-40)
+   *  guard — safe because its callers fire on a *synchronous* enqueue failure,
+   *  before any send is in flight, so there is no server-echo race to lose to.
+   *  Do not reuse from a post-send/async context without adding that guard. */
   async markFailed(clientId: string): Promise<void> {
-    await this.db.messages
-      .where("clientId")
-      .equals(clientId)
-      .modify({ status: "failed" as LocalMessageStatus });
+    await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
+      const msg = await this.db.messages.where("clientId").equals(clientId).first();
+      if (!msg) return;
+      await this.db.messages
+        .where("clientId")
+        .equals(clientId)
+        .modify({ status: "failed" as LocalMessageStatus });
+      const room = await this.db.rooms.get(msg.roomId);
+      if (room && room.lastMessageTimestamp === msg.timestamp) {
+        await this.db.rooms.update(msg.roomId, {
+          lastMessageLocalStatus: "failed" as LocalMessageStatus,
+        });
+      }
+    });
   }
 
   /** Update the eventId on a pending message (after server confirms) */
@@ -506,16 +648,21 @@ export class MessageRepository {
     clearedAtTs?: number,
   ): Promise<{ messages: LocalMessage[]; anchorIndex: number }> {
     const lower = clearedAtTs ?? Dexie.minKey;
+    // Drop only the local-only phantom — server-redacted messages stay so
+    // jump-to-unread renders the «Сообщение удалено» placeholder consistently
+    // with getMessages (WEE-81, narrowing WEE-66 / #864).
     const [before, after] = await Promise.all([
       this.db.messages
         .where("[roomId+timestamp]")
         .between([roomId, lower], [roomId, timestamp], !clearedAtTs, true)
         .reverse()
+        .filter((m) => !isLocalOnlyPhantom(m))
         .limit(beforeCount)
         .toArray(),
       this.db.messages
         .where("[roomId+timestamp]")
         .between([roomId, timestamp], [roomId, Dexie.maxKey], false, true)
+        .filter((m) => !isLocalOnlyPhantom(m))
         .limit(afterCount)
         .toArray(),
     ]);
@@ -538,7 +685,7 @@ export class MessageRepository {
     return this.db.messages
       .where("[roomId+timestamp]")
       .between([roomId, effectiveAfter], [roomId, Dexie.maxKey], false, true)
-      .filter(m => m.senderId !== excludeSenderId && !m.softDeleted)
+      .filter(m => m.senderId !== excludeSenderId && !m.softDeleted && !m.deleted)
       .count();
   }
 
@@ -586,6 +733,11 @@ export class MessageRepository {
     const target = await this.getByEventId(targetEventId);
     if (!target || target.roomId !== roomId) return null;
     if (clearedAtTs && target.timestamp <= clearedAtTs) return null;
+    // A server-redacted target (found by eventId) still renders as the
+    // «Сообщение удалено» placeholder, so jumping to it is valid — only a
+    // local-only phantom truly isn't in the timeline (WEE-81). Since the
+    // lookup is by eventId, the target always has one and can't be a phantom.
+    if (isLocalOnlyPhantom(target)) return null;
 
     const lower = clearedAtTs ?? Dexie.minKey;
     const [before, after] = await Promise.all([
@@ -593,11 +745,13 @@ export class MessageRepository {
         .where("[roomId+timestamp]")
         .between([roomId, lower], [roomId, target.timestamp], !clearedAtTs, false)
         .reverse()
+        .filter((m) => !isLocalOnlyPhantom(m))
         .limit(contextSize)
         .toArray(),
       this.db.messages
         .where("[roomId+timestamp]")
         .between([roomId, target.timestamp], [roomId, Dexie.maxKey], false, true)
+        .filter((m) => !isLocalOnlyPhantom(m))
         .limit(contextSize)
         .toArray(),
     ]);
@@ -608,7 +762,11 @@ export class MessageRepository {
     return { messages: all, targetIndex };
   }
 
-  /** Load messages after a given timestamp (forward pagination for detached mode). */
+  /** Load messages after a given timestamp (forward pagination for detached mode).
+   *  Mirrors `getMessages`' phantom exclusion (WEE-81): forward pagination is
+   *  rendered directly (MessageList.doLoadNewer), so a just-deleted local-only
+   *  phantom (newest timestamp, no eventId) must be dropped here too — while a
+   *  server-redacted message stays and renders its placeholder. */
   async getMessagesAfter(
     roomId: string,
     afterTimestamp: number,
@@ -619,6 +777,7 @@ export class MessageRepository {
     const msgs = await this.db.messages
       .where("[roomId+timestamp]")
       .between([roomId, effectiveAfter], [roomId, Dexie.maxKey], false, true)
+      .filter((m) => !isLocalOnlyPhantom(m))
       .limit(limit)
       .toArray();
     return sortLocalMessagesTimelineAsc(msgs);

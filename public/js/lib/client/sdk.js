@@ -74,12 +74,12 @@ var pSDK = function ({ app, api, actions }) {
         },
 
         myScore: {
-            time: 6000,
+            time: 43200,
             authorized: true
         },
 
         myScoreFB: {
-            time: 6000,
+            time: 43200,
             authorized: true
         },
 
@@ -189,6 +189,12 @@ var pSDK = function ({ app, api, actions }) {
             if(!data) return Promise.resolve()
 
             if (data.___temp) return Promise.resolve()
+
+            // userInfo* stores: never persist empty-name profiles
+            if ((dbname === 'userInfoFull' || dbname === 'userInfoLight' || dbname === 'userInfoFullFB')
+                && !(data.name || data.n)) {
+                return Promise.resolve()
+            }
 
             if (dbmeta[dbname].authorized) key = key + '_' + app.user.address.value
 
@@ -838,9 +844,15 @@ var pSDK = function ({ app, api, actions }) {
                     data = this.cleanData(data)
 
                     return _.map(addresses, (address) => {
+                        var info = _.find(data, (row) => { return row.address == address })
+                        // Never cache empty-name profiles (pre-registration / miss).
+                        // Treat as cache miss so the next load hits the network.
+                        if (info && !(info.name || info.n)) {
+                            info = null
+                        }
                         return {
                             key: address,
-                            data: _.find(data, (info) => { return info.address == address })
+                            data: info
                         }
                     })
 
@@ -2952,7 +2964,7 @@ var pSDK = function ({ app, api, actions }) {
                     return _.indexOf(commentIds, id) > -1
                 })
 
-                return api.rpc('getpagescores', [sIds, app.user.address.value, cIds]).then((data) => {
+                return api.rpc('getpagescores', [sIds, String(app.user.address.value || ''), cIds]).then((data) => {
 
                     return _.map(ids, (id) => {
                         return {
@@ -3101,7 +3113,7 @@ var pSDK = function ({ app, api, actions }) {
 
             return loadList('postScores', txids, (txids) => {
 
-                return api.rpc('getpostscores', txids).then((d) => {
+                return api.rpc('getpostscores', [txids]).then((d) => {
 
                     var g = group(d, (info) => {
                         return info.posttxid
