@@ -357,26 +357,38 @@ export class AppInitializer {
     return this.api;
   }
 
-  initializeAndFetchUserData(address: string, onLoad?: OnLoadUserData) {
+  initializeAndFetchUserData(
+    address: string,
+    onLoad?: OnLoadUserData,
+    options?: { update?: boolean },
+  ) {
     if (!this._available) return Promise.resolve(null);
     return this.initApi().then(() => {
       return this.waitForApiReady().then(canUse => {
         if (canUse) {
           this.syncNodeTime();
           this.actions!.addAccount(address);
-          return this.loadUserData([address], onLoad);
+          return this.loadUserData([address], onLoad, options);
         }
         return null;
       });
     });
   }
 
+  /**
+   * Load own profile via SDK getuserprofile into userInfoFull.
+   * Pass `{ update: true }` to bypass in-memory + IndexedDB cache and force a
+   * network request — required during registration so a pre-confirm empty
+   * cache entry cannot hide an already-published UserInfo.
+   */
   loadUserData(
     stateAddresses: string[],
-    onLoad?: OnLoadUserData
+    onLoad?: OnLoadUserData,
+    options?: { update?: boolean },
   ): Promise<UserData | null> {
     if (!this.psdk || !stateAddresses.length) return Promise.resolve(null);
-    return this.psdk.userInfo.load(stateAddresses).then(() => {
+    // Signature: load(addresses, light?, update?) — light=false keeps full profile.
+    return this.psdk.userInfo.load(stateAddresses, false, options?.update ?? false).then(() => {
       // `psdk.userInfo.get()` returns undefined for addresses without an
       // on-chain UserInfo yet (e.g. right after register(), before the
       // blockchain confirms). The `as UserData` cast hides that — callers

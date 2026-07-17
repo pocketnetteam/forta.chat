@@ -90,9 +90,12 @@ export function readSelfProfile(address: string): SelfProfileSnapshot | null {
   }
 }
 
-/** Persist (overwrite) the self-profile snapshot. */
+/** Persist (overwrite) the self-profile snapshot.
+ *  Empty-name snapshots are skipped — they would poison boot merges the same
+ *  way an empty getuserprofile row poisons the user-store cache. */
 export function writeSelfProfile(snapshot: SelfProfileSnapshot): void {
   if (!snapshot.address) return;
+  if (!String(snapshot.name ?? "").trim()) return;
   const storage = safeStorage();
   if (!storage) return;
   try {
@@ -101,6 +104,35 @@ export function writeSelfProfile(snapshot: SelfProfileSnapshot): void {
     // Quota / private-mode etc. — non-fatal; cache will simply not survive
     // this restart, falling back to remote-wins behaviour.
   }
+}
+
+/** Drop empty-name self-profile snapshots left by older builds. */
+export function purgeEmptySelfProfiles(): number {
+  const storage = safeStorage();
+  if (!storage) return 0;
+  let removed = 0;
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (!key || !key.startsWith(KEY_PREFIX)) continue;
+      const raw = storage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as { name?: unknown };
+        if (!String(parsed?.name ?? "").trim()) toRemove.push(key);
+      } catch {
+        toRemove.push(key);
+      }
+    }
+    for (const key of toRemove) {
+      storage.removeItem(key);
+      removed++;
+    }
+  } catch {
+    /* ignore */
+  }
+  return removed;
 }
 
 /** Drop the cached snapshot — typically on logout for the leaving account. */
