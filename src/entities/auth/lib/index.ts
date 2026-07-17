@@ -4,5 +4,6 @@ export * from "./registration-captcha";
 export * from "./poll-timer";
 export * from "./mnemonic-storage";
 export * from "./sync-profile-to-matrix";
+export * from "./sync-display-name-after-init";
 export * from "./self-profile-cache";
 export * from "./key-republish";

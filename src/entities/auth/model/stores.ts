@@ -49,6 +49,7 @@ import {
   loadMnemonic,
   clearMnemonic,
   syncProfileToMatrix,
+  syncDisplayNameAfterInit,
   readSelfProfile,
   writeSelfProfile,
   clearSelfProfile,
@@ -693,6 +694,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+
+        // Sync Pocketnet name → Matrix displayname when it changed since last push.
+        // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
+        if (address.value && userInfo.value?.name) {
+          void syncDisplayNameAfterInit(matrixService, {
+            userId: address.value,
+            name: userInfo.value.name,
+          });
+        }
 
         // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
         // soon as Matrix is connected, BEFORE we wait for PREPARED. The

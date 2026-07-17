@@ -12,12 +12,14 @@ const isEditingUserData = ref(false);
 const editUserDataMock = vi.fn();
 const setUserMock = vi.fn();
 const address = ref<string | undefined>("PAddrTestXXXXXXXXXXXXXXXXXXXXXXXX");
+const privateKey = ref<string | null>("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
 
 vi.mock("@/entities/auth", () => ({
   useAuthStore: () => ({
     get userInfo() { return userInfo.value; },
     get isEditingUserData() { return isEditingUserData.value; },
     get address() { return address.value; },
+    get privateKey() { return privateKey.value; },
     editUserData: editUserDataMock,
   }),
 }));
@@ -56,7 +58,10 @@ import UserEditForm from "../UserEditForm.vue";
 function makeWrapper() {
   return mount(UserEditForm, {
     global: {
-      stubs: { Spinner: { template: "<span />" } },
+      stubs: {
+        Spinner: { template: "<span />" },
+        ShowPrivateKeyDialog: { template: "<div class='show-pk-stub' />", props: ["show"] },
+      },
     },
   });
 }
@@ -65,6 +70,7 @@ function resetState() {
   userInfo.value = undefined;
   isEditingUserData.value = false;
   address.value = "PAddrTestXXXXXXXXXXXXXXXXXXXXXXXX";
+  privateKey.value = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
   editUserDataMock.mockReset();
   setUserMock.mockReset();
 }
@@ -294,5 +300,16 @@ describe("UserEditForm — reactive form sync and hasChanges", () => {
     const payload = editUserDataMock.mock.calls[0][0];
     expect(payload.name).toBe("Alice");
     expect(payload.about).toBe("old");
+  });
+
+  it("shows Show private key button when privateKey is available", () => {
+    const wrapper = makeWrapper();
+    expect(wrapper.text()).toContain("settings.showPrivateKey");
+  });
+
+  it("hides Show private key button when privateKey is null", () => {
+    privateKey.value = null;
+    const wrapper = makeWrapper();
+    expect(wrapper.text()).not.toContain("settings.showPrivateKey");
   });
 });
