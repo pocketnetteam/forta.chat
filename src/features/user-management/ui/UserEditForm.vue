@@ -6,12 +6,15 @@ import type { Locale } from "@/entities/locale";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { fileToAvatarBase64, uploadImage } from "@/shared/lib/upload-image";
 import { useToast } from "@/shared/lib/use-toast";
+import ShowPrivateKeyDialog from "./ShowPrivateKeyDialog.vue";
 
 const authStore = useAuthStore();
 const userStore = useUserStore();
 const localeStore = useLocaleStore();
 const { t } = useI18n();
 const { toast } = useToast();
+
+const showPrivateKeyDialog = ref(false);
 
 // Start empty — we sync from userInfo via watch below. Initializing from
 // authStore.userInfo at mount captures a snapshot that never updates when
@@ -335,6 +338,24 @@ watch(
           </div>
         </div>
       </div>
+
+      <!-- Show private key -->
+      <button
+        v-if="authStore.privateKey"
+        type="button"
+        class="flex w-full items-center justify-center gap-2 rounded-xl border border-neutral-grad-1 bg-background-secondary-theme px-4 py-3 text-sm font-medium text-text-color transition-colors hover:bg-neutral-grad-0"
+        @click="showPrivateKeyDialog = true"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-text-on-main-bg-color">
+          <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+        </svg>
+        {{ t("settings.showPrivateKey") }}
+      </button>
+
+      <ShowPrivateKeyDialog
+        :show="showPrivateKeyDialog"
+        @close="showPrivateKeyDialog = false"
+      />
 
       <!-- Save error (structured error from editUserData: timeout / network / rejected, or base64 guard) -->
       <p v-if="saveError" class="text-center text-xs text-color-bad">{{ saveError }}</p>

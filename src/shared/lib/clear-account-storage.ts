@@ -21,5 +21,6 @@ export function clearAccountLocalStorage(address?: string): void {
   if (address) {
     localStorage.removeItem(`chat_pinned_rooms:${address}`);
     localStorage.removeItem(`chat_muted_rooms:${address}`);
+    localStorage.removeItem(`dsname_${address}`);
   }
 }
