@@ -140,7 +140,7 @@ useAndroidBackHandler("chat-tab-to-chats", 55, () => {
 </script>
 
 <template>
-  <div class="relative flex h-full bg-background-total-theme" :class="{ 'overflow-hidden': isMobile }">
+  <div class="relative flex h-full min-h-0 overflow-hidden bg-background-total-theme">
     <!-- Desktop: show both side by side -->
     <template v-if="!isMobile">
       <ChatSidebar
@@ -150,7 +150,7 @@ useAndroidBackHandler("chat-tab-to-chats", 55, () => {
       />
       <GroupCreationPanel
         v-if="showGroupCreation"
-        class="h-full flex-1"
+        class="h-full min-w-0 flex-1"
         @created="onGroupCreated"
         @close="onCloseGroupCreation"
       />

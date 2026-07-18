@@ -5,11 +5,11 @@ import {
 } from "../sync-display-name-after-init";
 
 describe("syncDisplayNameAfterInit", () => {
-  let setDisplayName: ReturnType<typeof vi.fn>;
+  let setDisplayName: ReturnType<typeof vi.fn<(name: string) => Promise<void>>>;
   const userId = "PXtestAddress123";
 
   beforeEach(() => {
-    setDisplayName = vi.fn().mockResolvedValue(undefined);
+    setDisplayName = vi.fn<(name: string) => Promise<void>>().mockResolvedValue(undefined);
     localStorage.clear();
   });
 

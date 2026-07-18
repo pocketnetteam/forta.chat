@@ -64,6 +64,18 @@ describe("registration poll", () => {
     // Full-profile reload must also bypass local cache.
     expect(fnSection).toContain("{ update: true }");
   });
+
+  it("onRegistrationConfirmed kicks room-list sync when Matrix is already ready", () => {
+    const source = getSource();
+    const fnStart = source.indexOf("async function onRegistrationConfirmed");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnSection = source.slice(fnStart, fnStart + 4500);
+    // When matrixReady is already true, heal the empty-list skeleton instead of
+    // skipping sync entirely (post-registration hang until refresh).
+    expect(fnSection).toContain("isRoomListLoading");
+    expect(fnSection).toContain("retryImmediately");
+    expect(fnSection).toContain("refreshRoomsNow");
+  });
 });
 
 describe("login key verification", () => {

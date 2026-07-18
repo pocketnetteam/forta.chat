@@ -1797,6 +1797,24 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           console.warn("[auth] Matrix init failed after registration confirmation:", e);
           // Non-fatal: Matrix will retry on next app interaction or reload
         }
+      } else {
+        // Matrix already marked ready during login, but the empty room-list
+        // skeleton may still be waiting for SYNCING (new accounts have no Dexie
+        // cache). Kick sync + force a room refresh so ChatSidebar can settle
+        // without requiring a page reload.
+        const chatStore = useChatStore();
+        if (chatStore.isRoomListLoading) {
+          try {
+            getMatrixClientService().client?.retryImmediately?.();
+          } catch (e) {
+            console.warn("[auth] retryImmediately after registration failed:", e);
+          }
+          try {
+            chatStore.refreshRoomsNow();
+          } catch (e) {
+            console.warn("[auth] refreshRoomsNow after registration failed:", e);
+          }
+        }
       }
     }
   };
