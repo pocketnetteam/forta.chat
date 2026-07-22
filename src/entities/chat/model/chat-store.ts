@@ -495,12 +495,39 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const initialSyncStatus = ref<"loading" | "ready" | "degraded">("loading");
   /** Watchdog deadline before we give up on the first sync and degrade. */
   const INITIAL_SYNC_TIMEOUT_MS = 8000;
+  /**
+   * After ready+PREPARED with an empty room list, wait this long for rooms to
+   * materialize (large accounts / slow WebView) before accepting "no dialogs".
+   * Prevents post-registration infinite skeleton when SYNCING never arrives.
+   */
+  const PREPARED_EMPTY_GRACE_MS = 3000;
+  /**
+   * After the 8s degrade watchdog, keep the "taking longer" skeleton this long
+   * on an empty cache, then accept authoritative empty so new accounts are not
+   * stuck forever waiting for SYNCING.
+   */
+  const DEGRADED_EMPTY_ESCAPE_MS = 8000;
   let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  let preparedEmptyTimer: ReturnType<typeof setTimeout> | null = null;
+  let degradedEmptyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True once a bounded empty-list escape timer has fired (PREPARED grace or degraded escape). */
+  const roomListEmptyAccepted = ref(false);
 
   const clearInitialSyncTimer = () => {
     if (initialSyncTimer) {
       clearTimeout(initialSyncTimer);
       initialSyncTimer = null;
+    }
+  };
+
+  const clearEmptyEscapeTimers = () => {
+    if (preparedEmptyTimer) {
+      clearTimeout(preparedEmptyTimer);
+      preparedEmptyTimer = null;
+    }
+    if (degradedEmptyTimer) {
+      clearTimeout(degradedEmptyTimer);
+      degradedEmptyTimer = null;
     }
   };
 
@@ -520,10 +547,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Release every skeleton/preloader that keys off roomsInitialized so the
       // cached room list becomes visible. When the cache is still empty the
       // room-list keeps a "taking longer than usual" placeholder (see
-      // isRoomListLoadingSlow) instead of flashing the "no dialogs" empty
-      // state — the authoritative empty is gated on a real SYNCING sync
-      // (isRoomListAuthoritativeEmpty). A later PREPARED sync still runs a full
-      // refresh and upgrades back to "ready".
+      // isRoomListLoadingSlow) for DEGRADED_EMPTY_ESCAPE_MS, then accepts
+      // authoritative empty via roomListEmptyAccepted. A later PREPARED sync
+      // still runs a full refresh and upgrades back to "ready".
       roomsInitialized.value = true;
       // WEE-97: release deferred boot work (recovery scans, Tor, telemetry)
       signalChatsInteractive();
@@ -1967,14 +1993,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // degrade watchdog switches the placeholder text instead of revealing a
   // premature "no dialogs" empty state (see startInitialSyncWatch).
   //
-  // The list is authoritatively empty ONLY once the SDK reached steady-state
-  // incremental sync ("SYNCING"). At "PREPARED" the SDK may not have
-  // materialized all rooms into memory yet (slow WebView / large account) —
-  // the same reason runRoomCleanup waits for "SYNCING" before pruning.
+  // Prefer SYNCING as the steady-state signal (rooms may still materialize at
+  // PREPARED). Bounded escapes (PREPARED_EMPTY_GRACE_MS / DEGRADED_EMPTY_ESCAPE_MS)
+  // accept empty for brand-new accounts when SYNCING never arrives.
   const isRoomListAuthoritativeEmpty = computed(() =>
     sortedRooms.value.length === 0
-    && initialSyncStatus.value === "ready"
-    && syncState.value === "SYNCING",
+    && (
+      (initialSyncStatus.value === "ready" && syncState.value === "SYNCING")
+      || roomListEmptyAccepted.value
+    ),
   );
   // Still loading the first room snapshot → show skeleton.
   const isRoomListLoading = computed(() =>
@@ -1984,6 +2011,67 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // → show the same skeleton with a "taking longer" placeholder text.
   const isRoomListLoadingSlow = computed(() =>
     isRoomListLoading.value && initialSyncStatus.value === "degraded",
+  );
+
+  // Arm / cancel empty-list escape timers. Large accounts get a short grace
+  // after PREPARED; stuck sync after degrade eventually shows empty instead of
+  // hanging forever (post-registration skeleton).
+  watch(
+    [() => sortedRooms.value.length, initialSyncStatus, syncState, roomListEmptyAccepted],
+    () => {
+      if (sortedRooms.value.length > 0) {
+        clearEmptyEscapeTimers();
+        roomListEmptyAccepted.value = false;
+        return;
+      }
+
+      if (
+        (initialSyncStatus.value === "ready" && syncState.value === "SYNCING")
+        || roomListEmptyAccepted.value
+      ) {
+        clearEmptyEscapeTimers();
+        return;
+      }
+
+      if (initialSyncStatus.value === "ready" && syncState.value === "PREPARED") {
+        if (degradedEmptyTimer) {
+          clearTimeout(degradedEmptyTimer);
+          degradedEmptyTimer = null;
+        }
+        if (!preparedEmptyTimer) {
+          preparedEmptyTimer = setTimeout(() => {
+            preparedEmptyTimer = null;
+            if (
+              sortedRooms.value.length === 0
+              && initialSyncStatus.value === "ready"
+              && syncState.value === "PREPARED"
+            ) {
+              roomListEmptyAccepted.value = true;
+            }
+          }, PREPARED_EMPTY_GRACE_MS);
+        }
+        return;
+      }
+
+      if (initialSyncStatus.value === "degraded") {
+        if (preparedEmptyTimer) {
+          clearTimeout(preparedEmptyTimer);
+          preparedEmptyTimer = null;
+        }
+        if (!degradedEmptyTimer) {
+          degradedEmptyTimer = setTimeout(() => {
+            degradedEmptyTimer = null;
+            if (
+              sortedRooms.value.length === 0
+              && initialSyncStatus.value === "degraded"
+            ) {
+              roomListEmptyAccepted.value = true;
+            }
+          }, DEGRADED_EMPTY_ESCAPE_MS);
+        }
+      }
+    },
+    { flush: "sync" },
   );
 
   const totalUnread = computed(() => {
@@ -7164,6 +7252,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // WEE-55: reset the initial-sync lifecycle for the next login/account.
     initialSyncStatus.value = "loading";
     clearInitialSyncTimer();
+    roomListEmptyAccepted.value = false;
+    clearEmptyEscapeTimers();
     editingMessage.value = null;
     deletingMessage.value = null;
     deletingMessages.value = [];

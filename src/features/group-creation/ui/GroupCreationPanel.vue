@@ -77,7 +77,7 @@ const handleAvatarChange = (e: Event) => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col bg-background-total-theme">
+  <div class="flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden bg-background-total-theme">
     <!-- Step 1: Select Members -->
     <template v-if="step === 1">
       <!-- Header -->
@@ -105,8 +105,12 @@ const handleAvatarChange = (e: Event) => {
         </button>
       </div>
 
-      <!-- Selected members chips -->
-      <div v-if="selectedMembersList.length > 0" class="flex shrink-0 gap-2 overflow-x-auto border-b border-neutral-grad-0 px-3 py-2">
+      <!-- Selected members chips: min-w-0 so overflow-x-auto scrolls instead of expanding the panel -->
+      <div
+        v-if="selectedMembersList.length > 0"
+        data-testid="group-selected-chips"
+        class="member-list-scroll flex w-full min-w-0 shrink-0 gap-2 overflow-x-auto border-b border-neutral-grad-0 px-3 py-2"
+      >
         <div
           v-for="member in selectedMembersList"
           :key="member.address"
@@ -136,8 +140,8 @@ const handleAvatarChange = (e: Event) => {
         />
       </div>
 
-      <!-- User list -->
-      <div class="flex-1 overflow-y-auto">
+      <!-- User list: min-h-0 so overflow-y-auto activates inside flex column -->
+      <div class="member-list-scroll min-h-0 flex-1 overflow-y-auto" data-testid="group-member-list">
         <div v-if="isSearching" class="flex items-center justify-center p-8">
           <div class="contain-strict h-6 w-6 animate-spin rounded-full border-2 border-color-bg-ac border-t-transparent" />
         </div>
@@ -203,7 +207,7 @@ const handleAvatarChange = (e: Event) => {
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto">
+      <div class="member-list-scroll min-h-0 flex-1 overflow-y-auto">
         <!-- Avatar + Name section -->
         <div class="flex items-center gap-4 p-4">
           <!-- Avatar picker -->
@@ -269,3 +273,13 @@ const handleAvatarChange = (e: Event) => {
     </template>
   </div>
 </template>
+
+<style scoped>
+.member-list-scroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.member-list-scroll::-webkit-scrollbar {
+  display: none;
+}
+</style>
