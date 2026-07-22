@@ -4,6 +4,10 @@ import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import {
+  ensureActionBroadcast,
+  type BroadcastableAction,
+} from "@/entities/auth/lib/ensure-action-broadcast";
+import {
   configurePocketnetNodes,
   callPocketnetRpc,
   unwrapRpcPayload,
@@ -265,7 +269,11 @@ export class AppInitializer {
   /** Broadcast a UserInfo transaction for a newly registered account.
    *  Includes encryption public keys so other users can encrypt messages for this account.
    *  Returns { action, registrationNode } where registrationNode is the node that processed
-   *  the sendrawtransaction — use it as fnode for subsequent getuserstate calls. */
+   *  the sendrawtransaction — use it as fnode for subsequent getuserstate calls.
+   *
+   *  New accounts: `addActionAndSendIfCan` only queues (checkAccountReadySend requires
+   *  already-registered status). We preload unspents, force `processingWithIterations`,
+   *  and require a real txid — otherwise registration UI hangs on step 2 forever. */
   async registerUserProfile(
     address: string,
     profile: { name: string; language: string; about: string },
@@ -282,12 +290,51 @@ export class AppInitializer {
     userInfo.addresses.set([]);
     userInfo.ref.set(null);
     userInfo.keys.set(encryptionPublicKeys ?? null);
-    const action = await this.actions.addActionAndSendIfCan(userInfo, null, address);
 
-    // Extract the node that processed the transaction from the global txidnodestorage
+    // 45s ceiling: queue + force-send + proxy round-trip. Without this the
+    // registration stepper can spin on step 2 indefinitely (same class of bug
+    // as editUserData before its 30s timeout).
+    const action = await withTimeout(
+      this.broadcastUserInfoAction(address, userInfo),
+      45_000,
+      "registerUserProfile",
+    );
+
     const registrationNode = this.extractNodeFromAction(action);
     console.log("[appInit] registerUserProfile: registrationNode =", registrationNode);
     return { action, registrationNode };
+  }
+
+  /** Queue UserInfo, warm unspent cache, force broadcast for new accounts. */
+  private async broadcastUserInfoAction(
+    address: string,
+    userInfo: InstanceType<typeof UserInfo>,
+  ): Promise<BroadcastableAction> {
+    // Warm Actions unspent cache so makeTransaction does not hit
+    // actions_noinputs → requestUnspents → platform.ui.captcha (absent in chat).
+    try {
+      const account = (
+        this.actions as unknown as {
+          addAccount(addr: string): { loadUnspents?: () => Promise<unknown> };
+        }
+      ).addAccount(address);
+      if (typeof account?.loadUnspents === "function") {
+        await withTimeout(
+          account.loadUnspents(),
+          REGISTRATION_RPC_TIMEOUT,
+          "loadUnspents",
+        );
+      }
+    } catch (e) {
+      console.warn("[appInit] preload unspents before UserInfo broadcast failed:", e);
+    }
+
+    const queued = await this.actions!.addActionAndSendIfCan(
+      userInfo,
+      null,
+      address,
+    );
+    return ensureActionBroadcast(queued as BroadcastableAction);
   }
 
   /** Extract the node address from a completed action's transaction via global txidnodestorage.
