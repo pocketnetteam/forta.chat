@@ -21,6 +21,8 @@ import { effectScope } from "vue";
 vi.mock("@/shared/lib/platform", () => ({
   get isNative() { return false; },
   get isElectron() { return false; },
+  get isAndroid() { return false; },
+  getElectronAPI: () => undefined,
 }));
 
 // --- Bug report mock — STABLE singleton so we can verify call counts ---

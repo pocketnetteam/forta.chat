@@ -51,13 +51,21 @@ function hasPersistedTorSettings() {
   }
 }
 
-function initTor(ipcMain) {
+/**
+ * @param {import('electron').IpcMain} ipcMain
+ * @param {{ enabled3?: 'neveruse' | 'auto' | 'always', useSnowFlake2?: boolean }} [options]
+ */
+function initTor(ipcMain, options = {}) {
   const persisted = loadTorSettings();
   const torControl = new TorControl({
     path: path.join(app.getPath('userData'), 'tor'),
     // Opt-in default (neveruse). Persisted file wins when present.
-    enabled3: persisted?.enabled3 ?? 'neveruse',
-    useSnowFlake2: persisted?.useSnowFlake2 ?? false,
+    // Boot/smoke options override both (e.g. neveruse in CI smoke).
+    enabled3: options.enabled3 ?? persisted?.enabled3 ?? 'neveruse',
+    useSnowFlake2:
+      typeof options.useSnowFlake2 === 'boolean'
+        ? options.useSnowFlake2
+        : (persisted?.useSnowFlake2 ?? false),
   });
 
   const transports = new Transports(torControl);

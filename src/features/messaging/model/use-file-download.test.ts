@@ -10,6 +10,7 @@ vi.mock("@/shared/lib/platform", () => ({
   get isNative() { return mockIsNative; },
   get isElectron() { return mockIsElectron; },
   get isAndroid() { return mockIsAndroid; },
+  getElectronAPI: () => window.electronAPI,
 }));
 
 // --- Auth store mock ---
@@ -132,7 +133,7 @@ describe("useFileDownload", () => {
     vi.clearAllMocks();
     revokeAllFileUrls();
     // Reset window.electronAPI
-    delete (window as any).electronAPI;
+    delete window.electronAPI;
     // Reset crypto stub so tests that do not touch encryption see no
     // pcrypto (matches the original mock default).
     setMockPcrypto(null);
@@ -371,7 +372,10 @@ describe("useFileDownload", () => {
 
     it("calls electronAPI.saveFile when available", async () => {
       const mockElectronSave = vi.fn(() => Promise.resolve("/downloads/report.pdf"));
-      (window as any).electronAPI = { isElectron: true, saveFile: mockElectronSave };
+      const { createElectronApiMock } = await import(
+        "@/shared/lib/platform/create-electron-api-mock"
+      );
+      window.electronAPI = createElectronApiMock({ saveFile: mockElectronSave });
 
       const scope = effectScope();
       await scope.run(async () => {

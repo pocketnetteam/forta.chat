@@ -1,0 +1,66 @@
+name: Desktop Smoke
+
+on:
+  pull_request:
+    paths:
+      - "electron/**"
+      - "electron-builder.json"
+      - "src/**"
+      - "public/**"
+      - "index.html"
+      - "vite.config.*"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/electron-smoke.cjs"
+      - ".github/workflows/desktop-smoke.yml"
+      - ".github/workflows/desktop-release.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install Node dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Unit tests (desktop helpers)
+        run: npm run test -- src/shared/lib/platform
+
+      - name: Build web assets
+        run: npx vite build
+        env:
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
+
+      - name: Install xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Electron boot smoke
+        run: xvfb-run --auto-servernum node scripts/electron-smoke.cjs
+        env:
+          FORTA_ELECTRON_SMOKE_TIMEOUT_MS: "90000"

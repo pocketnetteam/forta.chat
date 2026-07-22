@@ -13,7 +13,7 @@ import {
   type NetworkStatsEvent,
 } from "../lib/network-stats";
 import { useLocalStorage } from "@/shared/lib/browser";
-import { hasTor, isElectron, isNative } from "@/shared/lib/platform";
+import { getElectronAPI, hasTor, isElectron, isNative } from "@/shared/lib/platform";
 import { initNetworkStatsListener } from "@/shared/lib/transport/network-stats-listener";
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
@@ -28,23 +28,6 @@ const EMPTY_NETWORK_STATS: TorNetworkStats = {
 };
 
 const STATUS_POLL_INTERVAL_MS = 2000;
-
-type ElectronTorApi = {
-  onTorStatus?: (cb: (data: { status: TorStatus; info: string }) => void) => void;
-  torConfigure?: (opts: { mode: TorMode; useSnowFlake2: boolean }) => Promise<void>;
-  torSetMode?: (mode: TorMode) => Promise<void>;
-  torGetStatus?: () => Promise<{
-    status: TorStatus;
-    info: string;
-    mode?: TorMode;
-    useSnowFlake2?: boolean;
-    settingsPersisted?: boolean;
-  } | null>;
-};
-
-function getElectronApi(): ElectronTorApi | undefined {
-  return (window as { electronAPI?: ElectronTorApi }).electronAPI;
-}
 
 function readAppLocale(): string {
   try {
@@ -144,7 +127,7 @@ export const useTorStore = defineStore(NAMESPACE, () => {
   }
 
   async function applyElectronConfigure(newMode: TorMode, bridge: TorBridgeType): Promise<void> {
-    const api = getElectronApi();
+    const api = getElectronAPI();
     if (!api) return;
 
     if (api.torConfigure) {
@@ -252,7 +235,7 @@ export const useTorStore = defineStore(NAMESPACE, () => {
   }
 
   async function syncFromElectron(): Promise<void> {
-    const api = getElectronApi();
+    const api = getElectronAPI();
     if (!api?.torGetStatus) return;
 
     const current = await api.torGetStatus();
@@ -287,8 +270,8 @@ export const useTorStore = defineStore(NAMESPACE, () => {
   }
 
   async function pollElectronStatus(): Promise<void> {
-    const api = getElectronApi();
-    if (!api?.torGetStatus) return;
+    const api = getElectronAPI();
+    if (!api) return;
     try {
       const current = await api.torGetStatus();
       if (current) {
@@ -363,10 +346,10 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     startStatusPolling();
 
     if (isElectron) {
-      const api = getElectronApi();
+      const api = getElectronAPI();
       if (!api) return;
 
-      api.onTorStatus?.((data) => {
+      api.onTorStatus((data) => {
         status.value = data.status;
         info.value = data.info || "";
       });
@@ -383,7 +366,7 @@ export const useTorStore = defineStore(NAMESPACE, () => {
         await api.torSetMode?.(mode.value);
       }
 
-      const current = await api.torGetStatus?.();
+      const current = await api.torGetStatus();
       if (current) {
         status.value = current.status;
         info.value = current.info || "";

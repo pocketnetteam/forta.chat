@@ -91,17 +91,47 @@ const fireBanner = (opts: NotifyOptions): void => {
   if (!isBrowser() || !("Notification" in window)) return;
   if (Notification.permission !== "granted") return;
   try {
-    new Notification(opts.title ?? opts.fallbackTitle, {
+    const notification = new Notification(opts.title ?? opts.fallbackTitle, {
       body: opts.body,
       // `tag` collapses multiple banners from the same room into one,
       // so a noisy chat doesn't pile up in the OS notification center.
       tag: opts.roomId,
       silent: true, // beep is ours; OS sound would double up
     });
+    notification.onclick = () => {
+      try {
+        notification.close();
+        // Focus the window (Electron main + browser tab).
+        window.focus();
+        const api = (window as Window).electronAPI;
+        api?.show?.();
+        notificationClickHandler?.(opts.roomId);
+      } catch {
+        // Click handlers must never throw into the OS notification pipeline.
+      }
+    };
   } catch {
     // Notification ctor throws when called from a non-user-gesture in some
     // browsers; swallow — the beep still happened.
   }
+};
+
+type NotificationClickHandler = (roomId: string) => void;
+let notificationClickHandler: NotificationClickHandler | null = null;
+
+/**
+ * Register a handler for OS notification banner clicks (open the room).
+ * Returns an unsubscribe function.
+ */
+export const setNotificationClickHandler = (
+  handler: NotificationClickHandler | null,
+): (() => void) => {
+  notificationClickHandler = handler;
+  return () => {
+    if (notificationClickHandler === handler) {
+      notificationClickHandler = null;
+    }
+  };
 };
 
 /**
@@ -135,4 +165,5 @@ export const requestNotificationPermission = async (): Promise<NotificationPermi
 export const __resetWebNotifierForTests = (): void => {
   audioCtx = null;
   lastBeepAt = 0;
+  notificationClickHandler = null;
 };

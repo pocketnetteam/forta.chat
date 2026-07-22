@@ -13,16 +13,14 @@
 
 import { isAndroid, isNative } from '@/shared/lib/platform';
 import { shouldRouteThroughTor } from '@/shared/lib/tor/routing';
+import type { FetchBridge } from '@/shared/types/electron';
 
-declare global {
-  interface Window {
-    fetchBridge: {
-      send: (channel: string, ...args: unknown[]) => void;
-      on: (channel: string, cb: (err: unknown, ...args: unknown[]) => void) => void;
-      invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
-    };
-    electronAPI?: { isElectron: boolean };
+function requireFetchBridge(): FetchBridge {
+  const bridge = window.fetchBridge;
+  if (!bridge) {
+    throw new Error('[Transport] fetchBridge is not available');
   }
+  return bridge;
 }
 
 /** @deprecated Import from `@/shared/lib/tor/routing` instead. */
@@ -30,25 +28,26 @@ export { TRANSPORT_WHITELIST, isWhitelistedHost } from '@/shared/lib/tor/routing
 
 function initFetchRetranslator() {
   const fetchBC = new BroadcastChannel('ExtendedFetch');
+  const fetchBridge = requireFetchBridge();
 
   fetchBC.onmessage = ({ data: msg }) => {
     if (msg.name === 'Request') {
       const rid = msg.id;
-      window.fetchBridge.send('FetchBridge:Request', rid, msg.data);
+      fetchBridge.send('FetchBridge:Request', rid, msg.data);
 
-      window.fetchBridge.on(`FetchBridge:${rid}:InitialData`, (_e, d) =>
+      fetchBridge.on(`FetchBridge:${rid}:InitialData`, (_e, d) =>
         fetchBC.postMessage({ name: 'InitialData', id: rid, data: d }));
 
-      window.fetchBridge.on(`FetchBridge:${rid}:Data`, (_e, d) =>
+      fetchBridge.on(`FetchBridge:${rid}:Data`, (_e, d) =>
         fetchBC.postMessage({ name: 'Data', id: rid, data: d }));
 
-      window.fetchBridge.on(`FetchBridge:${rid}:End`, () =>
+      fetchBridge.on(`FetchBridge:${rid}:End`, () =>
         fetchBC.postMessage({ name: 'End', id: rid }));
 
-      window.fetchBridge.on(`FetchBridge:${rid}:Error`, (_e, d) =>
+      fetchBridge.on(`FetchBridge:${rid}:Error`, (_e, d) =>
         fetchBC.postMessage({ name: 'Error', id: rid, data: d }));
     } else if (msg.name === 'Abort') {
-      window.fetchBridge.send(`FetchBridge:${msg.id}:Abort`);
+      fetchBridge.send(`FetchBridge:${msg.id}:Abort`);
     }
   };
 }
@@ -64,7 +63,7 @@ async function handleAltTransportActive(
         return torService.isUseWithTor(targetUrl);
       }
 
-      const result = await window.fetchBridge.invoke('AltTransportActive', targetUrl);
+      const result = await requireFetchBridge().invoke('AltTransportActive', targetUrl);
       return !!result;
     });
     resolve(useTor);

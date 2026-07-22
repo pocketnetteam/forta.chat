@@ -15,7 +15,7 @@
  */
 
 import { parseDeepLink, type InviteTarget, type JoinTarget } from "@/shared/lib/parse-invite-url";
-import { isNative } from "@/shared/lib/platform";
+import { getElectronAPI, isElectron, isNative } from "@/shared/lib/platform";
 
 /** A URL "looks like ours" if it targets a forta host or uses the custom
  *  scheme — i.e. something the user clearly expected to open the app, but
@@ -86,11 +86,20 @@ export function onDeepLinkOpen(url: string): void {
   dispatch(url, handlers);
 }
 
-/** Wire up the Capacitor listener. Safe to call once per app lifetime;
- *  subsequent calls are no-ops. */
+/** Wire up Capacitor / Electron deep-link listeners. Safe to call once per
+ *  app lifetime; subsequent calls are no-ops. */
 export function setupDeepLinkHandler(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
+
+  if (isElectron) {
+    const api = getElectronAPI();
+    if (!api?.onDeepLink) return;
+    api.onDeepLink((url) => {
+      onDeepLinkOpen(url);
+    });
+    return;
+  }
 
   if (!isNative) return;
 

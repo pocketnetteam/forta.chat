@@ -2,9 +2,23 @@
   "appId": "com.forta.chat",
   "productName": "Forta Chat",
   "directories": {
-    "output": "release"
+    "output": "release",
+    "buildResources": "build"
   },
-  "asar": false,
+  "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+  "publish": {
+    "provider": "github",
+    "owner": "pocketnetteam",
+    "repo": "forta.chat"
+  },
+  "forceCodeSigning": false,
+  "asar": true,
+  "protocols": [
+    {
+      "name": "Forta Chat",
+      "schemes": ["forta"]
+    }
+  ],
   "files": [
     "dist/**/*",
     "electron/**/*"
@@ -12,11 +26,15 @@
   "mac": {
     "target": ["dmg", "zip"],
     "category": "public.app-category.social-networking",
-    "icon": "public/forta-icon.png"
+    "icon": "build/icon.png",
+    "entitlements": "electron/entitlements.mac.plist",
+    "entitlementsInherit": "electron/entitlements.mac.plist",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false
   },
   "win": {
     "target": ["nsis", "zip"],
-    "icon": "public/forta-icon.png"
+    "icon": "build/icon.png"
   },
   "nsis": {
     "oneClick": false,
@@ -25,6 +43,7 @@
   "linux": {
     "target": ["AppImage", "deb"],
     "category": "Network;Chat",
-    "icon": "public/forta-icon.png"
+    "icon": "build/icons"
   }
 }
+

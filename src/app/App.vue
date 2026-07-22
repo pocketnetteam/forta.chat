@@ -17,7 +17,7 @@ import PermissionDeniedModal from "@/features/video-calls/ui/PermissionDeniedMod
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { JoinRoomPreviewModal } from "@/features/join-room";
 import { handleSdkSync } from "@/features/sync-status";
-import { isNative } from "@/shared/lib/platform";
+import { getElectronAPI, isElectron, isNative } from "@/shared/lib/platform";
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
@@ -34,7 +34,9 @@ import { useI18n } from "@/shared/lib/i18n";
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
 import { useResumeRedirect } from "@/shared/lib/composables/use-resume-redirect";
 import { useUnreadDocumentTitle } from "@/shared/lib/composables/use-unread-document-title";
+import { useElectronUnreadBadge } from "@/shared/lib/composables/use-electron-unread-badge";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
+import { setNotificationClickHandler } from "@/shared/lib/notifications/web-notifier";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
 import { PROXY_NODES } from "@/shared/config/constants";
@@ -42,7 +44,6 @@ import { PROXY_NODES } from "@/shared/config/constants";
 // Non-critical: if the request fails, images keep original URLs until next session.
 loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].port}`);
 
-const isElectron = !!(window as any).electronAPI?.isElectron;
 const { t } = useI18n();
 
 const { message: toastMessage, type: toastType, show: toastShow, close: toastClose, toast: showToast } = useToast();
@@ -60,6 +61,8 @@ useResumeRedirect();
 
 // Keep browser tab title in sync with total unread: "(N) Forta Chat" when N > 0.
 useUnreadDocumentTitle();
+// Electron: mirror totalUnread onto the dock / taskbar badge.
+useElectronUnreadBadge();
 
 const retryError = ref("");
 
@@ -382,11 +385,12 @@ onMounted(async () => {
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", handleGlobalKeydown);
 
-  // Deep-link handlers: Capacitor's appUrlOpen listener is already wired from
-  // main.ts. Now that the router is mounted, install the actual invite/join
-  // callbacks — any URLs buffered during cold-start drain here. We funnel them
-  // through the same localStorage slots that route guards use, so the single
-  // processReferral/processJoinRoom pipeline handles both deep-link sources.
+  // Deep-link handlers: Capacitor's appUrlOpen / Electron deep-link:open are
+  // already wired from main.ts. Now that the router is mounted, install the
+  // actual invite/join callbacks — any URLs buffered during cold-start drain
+  // here. We funnel them through the same localStorage slots that route
+  // guards use, so the single processReferral/processJoinRoom pipeline
+  // handles both deep-link sources.
   registerDeepLinkHandlers({
     onInvite: ({ address }) => {
       localStorage.setItem("bastyon-chat-referral", address);
@@ -406,6 +410,10 @@ onMounted(async () => {
     },
   });
 
+  // OS notification banner click → focus + open the room (web + Electron).
+  setNotificationClickHandler((roomId) => {
+    processPushOpenRoom(roomId);
+  });
   // Initialize Android hardware back button handler
   initAndroidBackListener();
 
@@ -416,9 +424,10 @@ onMounted(async () => {
   initShareTargetListener((data) => processExternalShare(data));
 
   // Mark Electron mode on <html> for CSS adjustments (drag regions, traffic light padding)
-  if ((window as any).electronAPI?.isElectron) {
+  const electronAPI = getElectronAPI();
+  if (electronAPI?.isElectron) {
     document.documentElement.classList.add("is-electron");
-    if ((window as any).electronAPI?.platform === "darwin") {
+    if (electronAPI.platform === "darwin") {
       document.documentElement.classList.add("is-electron-mac");
     }
   }
@@ -451,6 +460,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener("resize", onResize);
   window.removeEventListener("keydown", handleGlobalKeydown);
+  setNotificationClickHandler(null);
 });
 </script>
 
