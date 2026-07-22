@@ -1,7 +1,7 @@
 import { ref } from "vue";
 
 export type SidebarTab = "contacts" | "chats" | "settings";
-export type SettingsSubView = "profile" | "appearance" | "callMethods" | "notifications" | "storage" | "networking" | "about" | null;
+export type SettingsSubView = "profile" | "appearance" | "callMethods" | "notifications" | "storage" | "networking" | "desktop" | "about" | null;
 
 const activeTab = ref<SidebarTab>("chats");
 const settingsSubView = ref<SettingsSubView>(null);

@@ -634,6 +634,12 @@ export const en = {
 
   // ── Tor status ──
   "tor.networking": "Networking",
+  "desktopSettings.title": "Desktop",
+  "desktopSettings.closeToTray": "Close to tray",
+  "desktopSettings.closeToTrayDesc": "Hide Forta Chat in the system tray instead of quitting when you close the window. Quit from the tray menu to exit fully.",
+  "desktopSettings.openAtLogin": "Open at login",
+  "desktopSettings.openAtLoginDesc": "Start Forta Chat automatically when you sign in to your computer.",
+  "desktopSettings.zoomHint": "Zoom: Ctrl/Cmd + and − (reset with 0).",
   "tor.useTor": "Use Tor",
   "tor.useSnowflake": "Use Snowflake",
   "tor.useSnowflakeHint": "Helps connect in regions where Tor is blocked. Requires working Snowflake proxies.",

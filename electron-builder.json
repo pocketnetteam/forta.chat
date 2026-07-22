@@ -1,30 +1,44 @@
-{
-  "appId": "com.forta.chat",
-  "productName": "Forta Chat",
-  "directories": {
-    "output": "release"
-  },
-  "asar": false,
-  "files": [
-    "dist/**/*",
-    "electron/**/*"
-  ],
-  "mac": {
-    "target": ["dmg", "zip"],
-    "category": "public.app-category.social-networking",
-    "icon": "public/forta-icon.png"
-  },
-  "win": {
-    "target": ["nsis", "zip"],
-    "icon": "public/forta-icon.png"
-  },
-  "nsis": {
-    "oneClick": false,
-    "allowToChangeInstallationDirectory": true
-  },
-  "linux": {
-    "target": ["AppImage", "deb"],
-    "category": "Network;Chat",
-    "icon": "public/forta-icon.png"
-  }
-}
+{
+  "appId": "com.forta.chat",
+  "productName": "Forta Chat",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+  "publish": null,
+  "asar": true,
+  "protocols": [
+    {
+      "name": "Forta Chat",
+      "schemes": ["forta"]
+    }
+  ],
+  "files": [
+    "dist/**/*",
+    "electron/**/*"
+  ],
+  "mac": {
+    "target": ["dmg", "zip"],
+    "category": "public.app-category.social-networking",
+    "icon": "build/icon.png",
+    "entitlements": "electron/entitlements.mac.plist",
+    "entitlementsInherit": "electron/entitlements.mac.plist",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false
+  },
+  "win": {
+    "target": ["nsis", "zip"],
+    "icon": "build/icon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "category": "Network;Chat",
+    "icon": "build/icons"
+  }
+}
+

@@ -11,7 +11,11 @@
  *   https://www.forta.chat/invite?ref=<addr>
  *   forta://invite?ref=<addr>
  *
- * Join-room URLs follow the same pattern but carry `?room=<matrixRoomId>`.
+ * Join-room URLs follow the same pattern but carry `?room=<matrixRoomId>`,
+ * plus the desktop-friendly path form used by Electron protocol handlers:
+ *
+ *   forta://room/<matrixRoomId>
+ *   https://forta.chat/room/<matrixRoomId>
  */
 
 const INVITE_HOSTS = ["forta.chat", "www.forta.chat"];
@@ -83,11 +87,13 @@ function normalizeUrl(raw: string): NormalizedUrl | null {
 
   // Path-based routing. For `forta://invite?ref=X` the URL API puts "invite"
   // in `hostname` (no authority). Normalize that case first.
+  // `forta://room/!id:server` → hostname="room", pathname="/!id:server"
+  // — join host + path so room/<id> survives.
   let path: string;
   if (isCustomScheme) {
-    // forta://invite?ref=X → hostname="invite", pathname=""
-    // forta:///invite?ref=X → hostname="", pathname="/invite"
-    path = (url.hostname || url.pathname.replace(/^\//, "")).replace(/\/+$/, "");
+    const hostPart = url.hostname || "";
+    const pathPart = url.pathname.replace(/^\//, "").replace(/\/+$/, "");
+    path = [hostPart, pathPart].filter(Boolean).join("/");
   } else {
     path = url.pathname.replace(/^\//, "").replace(/\/+$/, "");
   }
@@ -114,12 +120,33 @@ export function parseInviteUrl(raw: string): InviteTarget | null {
 export function parseJoinUrl(raw: string): JoinTarget | null {
   const normalized = normalizeUrl(raw);
   if (!normalized) return null;
-  if (normalized.path !== "join") return null;
 
-  const room = normalized.params.get("room");
-  if (!room || !MATRIX_ROOM_ID_RE.test(room)) return null;
+  // Query form: /join?room=… or forta://join?room=…
+  if (normalized.path === "join") {
+    const room = normalized.params.get("room");
+    if (!room || !MATRIX_ROOM_ID_RE.test(room)) return null;
+    return { roomId: room };
+  }
 
-  return { roomId: room };
+  // Path form (Electron Phase 2): /room/<id> or forta://room/<id>
+  // Also accept ?id= / ?room= on a bare `room` path.
+  if (normalized.path === "room" || normalized.path.startsWith("room/")) {
+    let room =
+      normalized.params.get("room") ??
+      normalized.params.get("id") ??
+      null;
+    if (!room && normalized.path.startsWith("room/")) {
+      try {
+        room = decodeURIComponent(normalized.path.slice("room/".length));
+      } catch {
+        room = normalized.path.slice("room/".length);
+      }
+    }
+    if (!room || !MATRIX_ROOM_ID_RE.test(room)) return null;
+    return { roomId: room };
+  }
+
+  return null;
 }
 
 export function parseDeepLink(raw: string): DeepLinkTarget | null {

@@ -7,7 +7,7 @@ import { AccountList, AddAccountModal } from "@/features/account-switcher";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative, isAndroid, hasTor } from "@/shared/lib/platform";
+import { isNative, isAndroid, hasTor, isElectron } from "@/shared/lib/platform";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import {
@@ -420,6 +420,41 @@ const handleLogout = () => {
           </span>
           <span v-else class="text-xs text-text-on-main-bg-color">{{ torModeLabel }}</span>
           <span class="flex-1" />
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
+        <!-- Desktop (Electron) -->
+        <button
+          v-if="isElectron"
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('desktop')"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <rect x="2" y="3" width="20" height="14" rx="2" />
+            <path d="M8 21h8" />
+            <path d="M12 17v4" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("desktopSettings.title") }}</span>
           <svg
             width="16"
             height="16"

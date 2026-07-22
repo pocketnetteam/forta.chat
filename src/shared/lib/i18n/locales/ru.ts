@@ -636,6 +636,12 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Tor status ──
   "tor.networking": "Сеть",
+  "desktopSettings.title": "Рабочий стол",
+  "desktopSettings.closeToTray": "Сворачивать в трей",
+  "desktopSettings.closeToTrayDesc": "При закрытии окна Forta Chat остаётся в системном трее, а не завершается. Полный выход — через пункт Quit в меню трея.",
+  "desktopSettings.openAtLogin": "Запускать при входе",
+  "desktopSettings.openAtLoginDesc": "Автоматически открывать Forta Chat при входе в систему.",
+  "desktopSettings.zoomHint": "Масштаб: Ctrl/Cmd + и − (сброс — 0).",
   "tor.useTor": "Использовать Tor",
   "tor.useSnowflake": "Использовать Snowflake",
   "tor.useSnowflakeHint": "Помогает подключиться в регионах с блокировкой Tor. Требуются рабочие Snowflake-прокси.",
