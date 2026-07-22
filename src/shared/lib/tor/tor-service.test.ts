@@ -41,6 +41,14 @@ describe('TorService (non-native)', () => {
     expect(torService.initFailed.value).toBe(false);
   });
 
+  it('initBackground accepts options object on non-native', async () => {
+    const { torService } = await import('./tor-service');
+    torService.initBackground({ mode: 'always', bridgeType: 'SNOWFLAKE' });
+    expect(torService.isReady.value).toBe(true);
+    expect(torService.mode.value).toBe('always');
+    expect(torService.bridgeType.value).toBe('SNOWFLAKE');
+  });
+
   it('init sets ready=true immediately on non-native', async () => {
     const { torService } = await import('./tor-service');
     await torService.init();

@@ -118,6 +118,12 @@ interface PocketnetInstanceType {
       };
     };
     timeDifference: number;
+    /** Interactive UI hooks used by Actions SDK — stubbed in chat */
+    ui?: {
+      captcha: (...args: unknown[]) => Promise<unknown>;
+      support: (...args: unknown[]) => Promise<unknown>;
+      edituserinfo: (...args: unknown[]) => Promise<unknown>;
+    };
     whiteList: string[];
   };
   user: {

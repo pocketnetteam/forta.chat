@@ -1,27 +1,63 @@
 /**
  * Tor stack orchestrator — wires TorControl, Transports, and FetchHandler
- * together and exposes IPC handlers for the renderer.
+ * together and exposes IPC helpers for the renderer / main process.
  */
 
+const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
 const TorControl = require('./tor-control.cjs');
 const Transports = require('./transports.cjs');
 const FetchHandler = require('./fetch-handler.cjs');
+const {
+  parseTorSettingsJson,
+  serializeTorSettings,
+} = require('./settings-persist.cjs');
 
-// Snowflake bridges — disabled by default.
-// Only useful in countries that actively block Tor (Iran, Russia).
-// When enabled, Tor CANNOT connect without available Snowflake proxies,
-// so we default to direct connection and let users opt-in to bridges later.
-function shouldUseSnowflake() {
-  return false;
+function settingsFilePath() {
+  return path.join(app.getPath('userData'), 'tor-settings.json');
+}
+
+/**
+ * @returns {{ enabled3: string, useSnowFlake2: boolean } | null}
+ */
+function loadTorSettings() {
+  try {
+    const file = settingsFilePath();
+    if (!fs.existsSync(file)) return null;
+    return parseTorSettingsJson(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    console.warn('[Tor] Failed to load tor-settings.json:', e.message);
+    return null;
+  }
+}
+
+/**
+ * @param {{ enabled3?: string, useSnowFlake2?: boolean }} settings
+ */
+function saveTorSettings(settings) {
+  try {
+    fs.writeFileSync(settingsFilePath(), serializeTorSettings(settings), 'utf8');
+  } catch (e) {
+    console.warn('[Tor] Failed to save tor-settings.json:', e.message);
+  }
+}
+
+function hasPersistedTorSettings() {
+  try {
+    return fs.existsSync(settingsFilePath());
+  } catch {
+    return false;
+  }
 }
 
 function initTor(ipcMain) {
+  const persisted = loadTorSettings();
   const torControl = new TorControl({
     path: path.join(app.getPath('userData'), 'tor'),
-    enabled3: 'auto',
-    useSnowFlake2: shouldUseSnowflake(),
+    // Opt-in default (neveruse). Persisted file wins when present.
+    enabled3: persisted?.enabled3 ?? 'neveruse',
+    useSnowFlake2: persisted?.useSnowFlake2 ?? false,
   });
 
   const transports = new Transports(torControl);
@@ -39,4 +75,9 @@ function initTor(ipcMain) {
   return { transports, torControl };
 }
 
-module.exports = { initTor };
+module.exports = {
+  initTor,
+  loadTorSettings,
+  saveTorSettings,
+  hasPersistedTorSettings,
+};

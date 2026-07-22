@@ -1,7 +1,7 @@
 const { app, BrowserWindow, shell, ipcMain, protocol, net, session, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { initTor } = require("./tor/index.cjs");
+const { initTor, saveTorSettings, hasPersistedTorSettings } = require("./tor/index.cjs");
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 try {
@@ -125,6 +125,7 @@ app.whenReady().then(() => {
   ipcMain.handle("tor:set-mode", async (_event, mode) => {
     const newSettings = { ...torControl.settings, enabled3: mode };
     await torControl.settingChanged(newSettings);
+    saveTorSettings(newSettings);
     return { status: torControl.state.status, info: torControl.state.info, mode };
   });
 
@@ -136,6 +137,7 @@ app.whenReady().then(() => {
       ...(typeof useSnowFlake2 === "boolean" ? { useSnowFlake2 } : {}),
     };
     await torControl.settingChanged(newSettings);
+    saveTorSettings(newSettings);
     return {
       status: torControl.state.status,
       info: torControl.state.info,
@@ -150,6 +152,7 @@ app.whenReady().then(() => {
     info: torControl.state.info,
     mode: torControl.settings.enabled3,
     useSnowFlake2: torControl.settings.useSnowFlake2,
+    settingsPersisted: hasPersistedTorSettings(),
   }));
 
   createWindow();
