@@ -26,6 +26,10 @@ describe("createElectronApiMock (preload contract)", () => {
     expect(typeof api.setZoomFactor).toBe("function");
     expect(typeof api.getZoomFactor).toBe("function");
     expect(typeof api.onDeepLink).toBe("function");
+    expect(typeof api.getUpdateStatus).toBe("function");
+    expect(typeof api.checkForUpdates).toBe("function");
+    expect(typeof api.quitAndInstallUpdate).toBe("function");
+    expect(typeof api.onUpdateStatus).toBe("function");
   });
 
   it("allows overriding saveFile for download tests", async () => {

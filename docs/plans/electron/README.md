@@ -6,6 +6,7 @@
 |----------|------------|
 | [electron-desktop-integration-plan.md](./electron-desktop-integration-plan.md) | Основной план: baseline → packaging → UX → updates → CI |
 | [packaging-checklist.md](./packaging-checklist.md) | Чеклист сборки и релиза installers |
+| [signing-and-updates.md](./signing-and-updates.md) | Phase 3: electron-updater, GitHub publish, signing env |
 | [smoke-checklist.md](./smoke-checklist.md) | Phase 0–2: ручной smoke на Win + команды верификации |
 
 ## Статус фаз
@@ -15,9 +16,9 @@
 | 0 Baseline (типы, smoke, single-instance) | ✅ |
 | 1 Packaging hardening (icons, asar, entitlements) | ✅ (Linux AppImage — на runner) |
 | 2 Desktop UX (tray, deep links, badge, login item, zoom) | ✅ код готов; ручной smoke на Win |
-| 3 Auto-update + signing | ⏳ |
+| 3 Auto-update + signing | ✅ код готов (publish/signing — secrets + CI в фазе 4) |
 | 4 CI/CD | ⏳ |
-| 5 QA / user docs | частично (чеклисты) |
+| 5 QA / user docs | частично (чеклисты + signing-and-updates) |
 
 ## Быстрые команды
 

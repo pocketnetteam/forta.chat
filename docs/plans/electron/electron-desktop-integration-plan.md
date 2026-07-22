@@ -127,16 +127,16 @@ flowchart TB
 |---------|--------|-------|
 | TypeScript типы `window.electronAPI` | `(window as any)` | `src/shared/types/electron.d.ts` |
 | Иконки installer / tray | один `public/forta-icon.png` | `.ico` (Win), `.icns` (mac), набор PNG (Linux/tray) |
-| Code signing | нет | Win Authenticode + mac Developer ID + notarize |
-| Auto-update | нет | `electron-updater` + publish (GitHub Releases / S3) |
+| Code signing | документировано | Win Authenticode + mac Developer ID + notarize (secrets в CI) |
+| Auto-update | ✅ electron-updater + GitHub publish | E2E после первого signed release (фаза 4) |
 | CI desktop builds | нет (`.github` без electron) | matrix Win/macOS/Linux runners |
-| Deep links | нет | `forta://` / `https://forta.chat/...` → open room |
-| System tray / close-to-tray | нет | опционально, UX как у мессенджеров |
-| Single instance | нет | `requestSingleInstanceLock` |
-| `asar` | `false` | оценить `true` + unpack Tor binaries |
-| Entitlements macOS | нет | Hardened Runtime для Tor spawn + WebRTC |
+| Deep links | ✅ | `forta://` / `https://forta.chat/...` → open room |
+| System tray / close-to-tray | ✅ | опционально, UX как у мессенджеров |
+| Single instance | ✅ | `requestSingleInstanceLock` |
+| `asar` | ✅ `true` | Tor → userData |
+| Entitlements macOS | ✅ | Hardened Runtime для Tor spawn + WebRTC |
 | Desktop smoke tests | unit вокруг platform mocks | e2e / smoke checklist + CI artifact smoke |
-| Документация пользователя | нет | install / update / Troubleshoot Gatekeeper & SmartScreen |
+| Документация пользователя | частично (`signing-and-updates.md`) | install / update / Troubleshoot Gatekeeper & SmartScreen |
 
 ---
 
@@ -202,18 +202,20 @@ flowchart TB
 
 **Цель:** пользователи получают обновления без ручной переустановки.
 
-1. **Зависимости:** `electron-updater` (рядом с electron-builder 26).
-2. **Main:** `autoUpdater.checkForUpdatesAndNotify()` после `ready`; UI-события в renderer через IPC (`update:available`, `update:downloaded`).
+1. **Зависимости:** `electron-updater` (рядом с electron-builder 26). ✅
+2. **Main:** `autoUpdater.checkForUpdatesAndNotify()` после `ready`; UI-события в renderer через IPC (`update:available`, `update:downloaded`). ✅ `electron/auto-updater.cjs` + Settings UI
 3. **Publish provider** (выбрать один):
-   - GitHub Releases (проще для OSS/внутреннего)
+   - GitHub Releases (проще для OSS/внутреннего) ✅ `pocketnetteam/forta.chat`
    - Generic HTTP / S3 (если свой CDN)
 4. **Signing:**
-   - Windows: OV/EV или Azure Trusted Signing (`CSC_LINK` / Azure env)
+   - Windows: OV/EV или Azure Trusted Signing (`CSC_LINK` / Azure env) — документ: `signing-and-updates.md`
    - macOS: Developer ID Application + notarize (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`)
    - Linux: опционально GPG для `.deb`
-5. **`forceCodeSigning: true`** только на release CI job, не на PR unsigned smoke builds.
+5. **`forceCodeSigning: true`** только на release CI job, не на PR unsigned smoke builds. ✅ в конфиге `false`; CI: `-c.forceCodeSigning=true`
 
 **Критерий готовности:** установка vN → публикация vN+1 → приложение предлагает обновиться и перезапускается.
+
+> Код Phase 3 готов. Полный E2E критерий — после первого signed publish (фаза 4 / secrets).
 
 ---
 
@@ -283,6 +285,7 @@ forta.chat/
 │   ├── desktop-settings.cjs     # close-to-tray / open-at-login persistence
 │   ├── deep-links.cjs           # forta:// argv helpers
 │   ├── tray.cjs                 # system tray
+│   ├── auto-updater.cjs         # electron-updater + update:* IPC
 │   ├── tor/                     # уже есть
 │   └── entitlements.mac.plist   # фаза 1
 ├── build/
@@ -292,7 +295,8 @@ forta.chat/
 ├── docs/plans/electron/
 │   ├── README.md
 │   ├── electron-desktop-integration-plan.md   ← этот файл
-│   └── packaging-checklist.md
+│   ├── packaging-checklist.md
+│   └── signing-and-updates.md                 # фаза 3
 └── .github/workflows/
     └── desktop-release.yml      # фаза 4
 ```

@@ -27,6 +27,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("deep-link:open", listener);
     return () => ipcRenderer.removeListener("deep-link:open", listener);
   },
+  getUpdateStatus: () => ipcRenderer.invoke("update:get-status"),
+  checkForUpdates: () => ipcRenderer.invoke("update:check"),
+  quitAndInstallUpdate: () => ipcRenderer.invoke("update:quit-and-install"),
+  onUpdateStatus: (cb) => {
+    const channels = [
+      "update:checking",
+      "update:available",
+      "update:not-available",
+      "update:progress",
+      "update:downloaded",
+      "update:error",
+    ];
+    const listener = (_e, payload) => cb(payload);
+    for (const ch of channels) ipcRenderer.on(ch, listener);
+    return () => {
+      for (const ch of channels) ipcRenderer.removeListener(ch, listener);
+    };
+  },
 });
 
 // Scoped IPC bridge for Service Worker ↔ Main process fetch proxy (Tor transport)

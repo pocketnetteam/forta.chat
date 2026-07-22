@@ -20,6 +20,7 @@ const {
   registerProtocolClient,
 } = require("./deep-links.cjs");
 const { createAppTray } = require("./tray.cjs");
+const { initAutoUpdater } = require("./auto-updater.cjs");
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const wantDevTools =
@@ -370,6 +371,15 @@ function bootElectronApp() {
     });
 
     createWindow();
+
+    initAutoUpdater({
+      BrowserWindow,
+      ipcMain,
+      isDev,
+      prepareForQuit: () => {
+        isQuitting = true;
+      },
+    });
 
     app.on("activate", () => {
       // macOS: re-create window when dock icon is clicked

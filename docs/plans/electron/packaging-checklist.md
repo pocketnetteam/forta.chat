@@ -26,11 +26,14 @@ npm run electron:build:linux   # Ubuntu runner / Linux host
 
 ## Signing (release)
 
+Детали env и publish: [signing-and-updates.md](./signing-and-updates.md).
+
 ### Windows
 
 - [ ] `CSC_LINK` / `CSC_KEY_PASSWORD` (или Azure Trusted Signing env)
 - [ ] NSIS installer подписан (свойства файла → Digital Signatures)
 - [ ] SmartScreen: ожидать warning на новых OV-сертах
+- [ ] Release CI: `-c.forceCodeSigning=true` (в репо по умолчанию `false`)
 
 ### macOS
 
@@ -63,6 +66,7 @@ npm run electron:build:linux   # Ubuntu runner / Linux host
 
 ## Publish
 
-- [ ] Upload на GitHub Release / CDN
+- [ ] Upload на GitHub Release / CDN (`electron-builder --publish always` + `GH_TOKEN`)
 - [ ] Проверка download URL из `latest*.yml`
 - [ ] Пост в канал релиза + известные ограничения (unsigned / SmartScreen)
+- [ ] Smoke: vN → vN+1 auto-update (Settings → Desktop → Updates)
