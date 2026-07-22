@@ -24,7 +24,7 @@ npx electron-builder --config electron-builder.json --win --publish always
 
 ## Signing
 
-`forceCodeSigning` остаётся `false` в репозитории. На **release CI** включать явно:
+`forceCodeSigning` остаётся `false` в репозитории. На **release CI** включается автоматически, если заданы cert secrets (`MAC_CSC_*` / `WIN_CSC_*` или `CSC_*`) — см. [ci-desktop.md](./ci-desktop.md):
 
 ```bash
 npx electron-builder --config electron-builder.json --win -c.forceCodeSigning=true --publish always

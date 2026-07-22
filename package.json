@@ -18,6 +18,7 @@
     "electron:build:win": "vite build && electron-builder --config electron-builder.json --win",
     "electron:build:mac": "vite build && electron-builder --config electron-builder.json --mac",
     "electron:build:linux": "vite build && electron-builder --config electron-builder.json --linux",
+    "electron:smoke": "vite build && node scripts/electron-smoke.cjs",
     "cap:prepare": "node scripts/ensure-android-sdk.mjs",
     "cap:build": "npm run cap:prepare && node scripts/sync-vendor-assets.mjs && vite build && npx cap sync android",
     "cap:open": "npx cap open android",

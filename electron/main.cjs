@@ -21,12 +21,18 @@ const {
 } = require("./deep-links.cjs");
 const { createAppTray } = require("./tray.cjs");
 const { initAutoUpdater } = require("./auto-updater.cjs");
+const {
+  isElectronSmokeMode,
+  resolveTorModeForBoot,
+} = require("./smoke-env.cjs");
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
+const isSmoke = isElectronSmokeMode();
 const wantDevTools =
-  isDev ||
-  process.env.FORTA_DEVTOOLS === "1" ||
-  process.argv.includes("--devtools");
+  !isSmoke &&
+  (isDev ||
+    process.env.FORTA_DEVTOOLS === "1" ||
+    process.argv.includes("--devtools"));
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 try {
@@ -256,12 +262,34 @@ function bootElectronApp() {
       // macOS: hiding leaves the app in dock; fine for messenger UX.
     });
 
-    // Show when ready to avoid white flash
-    win.once("ready-to-show", () => win.show());
+    // Show when ready to avoid white flash (smoke: keep hidden for headless CI)
+    win.once("ready-to-show", () => {
+      if (!isSmoke) win.show();
+    });
 
     win.webContents.on("did-finish-load", () => {
       flushPendingDeepLink();
+      if (isSmoke) {
+        console.log("[smoke] ok");
+        isQuitting = true;
+        app.exit(0);
+      }
     });
+
+    win.webContents.on(
+      "did-fail-load",
+      (_event, errorCode, errorDescription, validatedURL) => {
+        if (!isSmoke) return;
+        console.error(
+          "[smoke] did-fail-load",
+          errorCode,
+          errorDescription,
+          validatedURL,
+        );
+        isQuitting = true;
+        app.exit(1);
+      },
+    );
 
     // Forward maximize/unmaximize events to renderer
     win.on("maximize", () => win.webContents.send("win:maximized"));
@@ -310,8 +338,12 @@ function bootElectronApp() {
       return net.fetch(`file://${filePath}`);
     });
 
-    // Initialise Tor transport stack
-    const tor = initTor(ipcMain);
+    // Initialise Tor transport stack (smoke: neveruse — no binary download)
+    const torMode = resolveTorModeForBoot();
+    const tor = initTor(
+      ipcMain,
+      torMode ? { enabled3: torMode } : undefined,
+    );
     torControl = tor.torControl;
 
     // Broadcast Tor status changes to all renderer windows
@@ -365,21 +397,25 @@ function bootElectronApp() {
       useSnowFlake2: torControl.settings.useSnowFlake2,
     }));
 
-    tray = createAppTray({
-      onShow: () => focusMainWindow(),
-      onQuit: () => quitApp(),
-    });
+    if (!isSmoke) {
+      tray = createAppTray({
+        onShow: () => focusMainWindow(),
+        onQuit: () => quitApp(),
+      });
+    }
 
     createWindow();
 
-    initAutoUpdater({
-      BrowserWindow,
-      ipcMain,
-      isDev,
-      prepareForQuit: () => {
-        isQuitting = true;
-      },
-    });
+    if (!isSmoke) {
+      initAutoUpdater({
+        BrowserWindow,
+        ipcMain,
+        isDev,
+        prepareForQuit: () => {
+          isQuitting = true;
+        },
+      });
+    }
 
     app.on("activate", () => {
       // macOS: re-create window when dock icon is clicked

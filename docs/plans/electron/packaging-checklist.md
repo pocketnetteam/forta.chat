@@ -66,7 +66,10 @@ npm run electron:build:linux   # Ubuntu runner / Linux host
 
 ## Publish
 
-- [ ] Upload на GitHub Release / CDN (`electron-builder --publish always` + `GH_TOKEN`)
+- [ ] Tag `v*` с версией = `package.json` (CI Desktop Release)
+- [ ] Upload на GitHub Release (`electron-builder --publish always` + `GH_TOKEN`) — или артефакты из Actions
 - [ ] Проверка download URL из `latest*.yml`
 - [ ] Пост в канал релиза + известные ограничения (unsigned / SmartScreen)
 - [ ] Smoke: vN → vN+1 auto-update (Settings → Desktop → Updates)
+
+CI details: [ci-desktop.md](./ci-desktop.md).

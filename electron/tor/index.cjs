@@ -17,10 +17,14 @@ function shouldUseSnowflake() {
   return false;
 }
 
-function initTor(ipcMain) {
+/**
+ * @param {import('electron').IpcMain} ipcMain
+ * @param {{ enabled3?: 'neveruse' | 'auto' | 'always' }} [options]
+ */
+function initTor(ipcMain, options = {}) {
   const torControl = new TorControl({
     path: path.join(app.getPath('userData'), 'tor'),
-    enabled3: 'auto',
+    enabled3: options.enabled3 ?? 'auto',
     useSnowFlake2: shouldUseSnowflake(),
   });
 
