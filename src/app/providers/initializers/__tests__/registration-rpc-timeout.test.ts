@@ -30,6 +30,18 @@ describe("registration RPC timeouts (WEE-23)", () => {
   guardedMethod("getCaptcha", "async getCaptcha(");
   guardedMethod("solveCaptcha", "async solveCaptcha(");
   guardedMethod("requestFreeRegistration", "async requestFreeRegistration(");
+
+  it("registerUserProfile wraps broadcast in withTimeout and forces ensureActionBroadcast", () => {
+    const src = getSource();
+    const start = src.indexOf("async registerUserProfile(");
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, start + 2500);
+    expect(body).toContain("withTimeout");
+    expect(body).toContain("registerUserProfile");
+    expect(body).toContain("ensureActionBroadcast");
+    expect(body).toContain("broadcastUserInfoAction");
+    expect(body).toContain("loadUnspents");
+  });
 });
 
 /** The store must route captcha fetches through the proxy-fallback helper so a

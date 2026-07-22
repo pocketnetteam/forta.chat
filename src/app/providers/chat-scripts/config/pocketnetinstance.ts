@@ -83,6 +83,15 @@ export const PocketnetInstance: PocketnetInstanceType = {
       }
     },
     timeDifference: 0,
+    // Bastyon Actions SDK calls platform.ui.* on interactive recovery paths
+    // (e.g. actions_noinputs → requestUnspents → ui.captcha). Chat has no
+    // Bastyon UI — reject immediately so registration cannot hang forever
+    // waiting for a captcha modal that will never render.
+    ui: {
+      captcha: () => Promise.reject(new Error("captcha_ui_unavailable")),
+      support: () => Promise.reject(new Error("support_ui_unavailable")),
+      edituserinfo: () => Promise.reject(new Error("edituserinfo_ui_unavailable")),
+    },
     whiteList: [
       "PEj7QNjKdDPqE9kMDRboKoCtp8V6vZeZPd",
       "PJ3nv2jGyW2onqZVDKJf9TmfuLGpmkSK2X",

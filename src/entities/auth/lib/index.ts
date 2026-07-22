@@ -7,3 +7,4 @@ export * from "./sync-profile-to-matrix";
 export * from "./sync-display-name-after-init";
 export * from "./self-profile-cache";
 export * from "./key-republish";
+export * from "./ensure-action-broadcast";

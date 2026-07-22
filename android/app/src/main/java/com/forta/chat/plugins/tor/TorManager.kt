@@ -32,6 +32,19 @@ class TorManager(private val config: ConfigurationManager) {
     val mode: TorMode get() = currentMode
     val bridgeType: BridgeType get() = currentBridgeType
 
+    init {
+        val saved = config.loadSettings()
+        currentMode = saved.mode
+        currentBridgeType = saved.bridgeType
+    }
+
+    /** Persist user settings without starting/stopping the daemon. */
+    fun persistSettings(mode: TorMode, bridgeType: BridgeType = currentBridgeType) {
+        currentMode = mode
+        currentBridgeType = bridgeType
+        config.saveSettings(mode, bridgeType)
+    }
+
     fun startTor(
         mode: TorMode = TorMode.ALWAYS,
         bridgeType: BridgeType = BridgeType.NONE,
@@ -45,8 +58,7 @@ class TorManager(private val config: ConfigurationManager) {
                 Log.w(TAG, "Tor already ${state.get()}, ignoring start")
                 return
             }
-            currentMode = mode
-            currentBridgeType = bridgeType
+            persistSettings(mode, bridgeType)
             setState(TorState.STARTING)
             bootstrapPercent.set(0)
         }
@@ -85,9 +97,22 @@ class TorManager(private val config: ConfigurationManager) {
             parentFile?.mkdirs()
             writeText(torrc)
         }
-        Log.i(TAG, "[BOOT] T+${elapsed()}ms torrc written")
+        Log.i(
+            TAG,
+            "[BOOT] T+${elapsed()}ms torrc written mode=$mode bridge=$bridgeType " +
+                "snowflakeBinExists=${File(config.snowflakePath).exists()}",
+        )
 
         File(config.torPath).setExecutable(true)
+        File(config.reverseProxyPath).setExecutable(true)
+        if (bridgeType == BridgeType.SNOWFLAKE) {
+            File(config.snowflakePath).setExecutable(true)
+        }
+
+        val bootstrapListener = object : ProcessRunner.OutputListener {
+            override fun onStdOutput(line: String) = handleBootstrapLine(line, ::elapsed)
+            override fun onErrOutput(line: String) = handleBootstrapLine(line, ::elapsed)
+        }
 
         torThread = Thread({
             try {
@@ -95,22 +120,7 @@ class TorManager(private val config: ConfigurationManager) {
                     binaryPath = config.torPath,
                     args = listOf("-f", config.torConfPath, "--pidfile", config.torPidPath),
                     env = mapOf("LD_LIBRARY_PATH" to config.nativeLibPath),
-                    listener = object : ProcessRunner.OutputListener {
-                        override fun onStdOutput(line: String) {
-                            val pct = ProcessRunner.parseBootstrapPercent(line)
-                            if (pct != null) {
-                                Log.i(TAG, "[BOOT] T+${elapsed()}ms Bootstrap $pct%")
-                                bootstrapPercent.set(pct)
-                                onBootstrapProgress?.invoke(pct)
-                                if (pct >= 100) {
-                                    Log.i(TAG, "[BOOT] T+${elapsed()}ms Tor ready, starting reverse proxy")
-                                    startReverseProxy()
-                                    setState(TorState.RUNNING)
-                                }
-                            }
-                        }
-                        override fun onErrOutput(line: String) {}
-                    }
+                    listener = bootstrapListener,
                 )
                 Log.d(TAG, "Tor process exited with code $exitCode")
             } catch (e: Exception) {
@@ -120,6 +130,18 @@ class TorManager(private val config: ConfigurationManager) {
                 setState(TorState.STOPPED)
             }
         }, "TorThread").also { it.isDaemon = true; it.start() }
+    }
+
+    private fun handleBootstrapLine(line: String, elapsed: () -> Long) {
+        val pct = ProcessRunner.parseBootstrapPercent(line) ?: return
+        Log.i(TAG, "[BOOT] T+${elapsed()}ms Bootstrap $pct%")
+        bootstrapPercent.set(pct)
+        onBootstrapProgress?.invoke(pct)
+        if (pct >= 100 && state.get() != TorState.RUNNING) {
+            Log.i(TAG, "[BOOT] T+${elapsed()}ms Tor ready, starting reverse proxy")
+            startReverseProxy()
+            setState(TorState.RUNNING)
+        }
     }
 
     private fun startReverseProxy() {
@@ -153,7 +175,7 @@ class TorManager(private val config: ConfigurationManager) {
 
         setState(TorState.STOPPED)
         bootstrapPercent.set(0)
-        currentMode = TorMode.NEVER
+        // Do NOT reset currentMode — user preference is persisted separately.
     }
 
     fun restartTor(

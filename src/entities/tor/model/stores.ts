@@ -1,5 +1,10 @@
 import type { TorBridgeType, TorMode, TorNetworkStats, TorRequestFlash, TorStatus } from "./types";
-import { fromNativeBridgeType, toNativeBridgeType } from "../lib/tor-settings-helpers";
+import {
+  fromNativeBridgeType,
+  resolveBridgeOnEnable,
+  shouldAutoEnableSnowflake,
+  toNativeBridgeType,
+} from "../lib/tor-settings-helpers";
 import {
   applyNetworkStatsEvent,
   CURRENT_STATS_RESET_MS,
@@ -23,6 +28,14 @@ const EMPTY_NETWORK_STATS: TorNetworkStats = {
 };
 
 const STATUS_POLL_INTERVAL_MS = 2000;
+
+function readAppLocale(): string {
+  try {
+    return document.documentElement.lang || "";
+  } catch {
+    return "";
+  }
+}
 
 export const useTorStore = defineStore(NAMESPACE, () => {
   const { setLSValue: setLSMode, value: lsMode } =
@@ -78,6 +91,8 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     switch (state) {
       case "RUNNING":
         return progress >= 100 ? "started" : "running";
+      case "STARTING":
+        return "running";
       case "STOPPED":
         return "stopped";
       case "FAILED":
@@ -115,20 +130,37 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     const api = getElectronAPI();
     if (!api) return;
 
-    await api.torConfigure({
-      mode: newMode,
-      useSnowFlake2: bridge === "snowflake",
-    });
+    if (api.torConfigure) {
+      await api.torConfigure({
+        mode: newMode,
+        useSnowFlake2: bridge === "snowflake",
+      });
+    } else {
+      await api.torSetMode?.(newMode);
+    }
   }
 
   const setMode = async (newMode: TorMode) => {
+    const previousMode = mode.value;
+    const resolvedBridge = resolveBridgeOnEnable(
+      previousMode,
+      newMode,
+      bridgeType.value,
+      readAppLocale(),
+    );
+
     mode.value = newMode;
     setLSMode(newMode);
 
+    if (resolvedBridge !== bridgeType.value) {
+      bridgeType.value = resolvedBridge;
+      setLSBridge(resolvedBridge);
+    }
+
     if (isElectron) {
-      await applyElectronConfigure(newMode, bridgeType.value);
+      await applyElectronConfigure(newMode, resolvedBridge);
     } else if (isNative) {
-      await applyNativeConfigure(newMode, bridgeType.value);
+      await applyNativeConfigure(newMode, resolvedBridge);
     }
   };
 
@@ -183,9 +215,41 @@ export const useTorStore = defineStore(NAMESPACE, () => {
     const { torService } = await import("@/shared/lib/tor");
     const settings = await torService.getSettings();
     mode.value = settings.mode;
-    bridgeType.value = fromNativeBridgeType(settings.bridgeType);
+    let bridge = fromNativeBridgeType(settings.bridgeType);
+
+    // Migrate users who enabled Tor before Snowflake was persisted correctly:
+    // in censored locales, Always/Auto with bridge=none stalls at ~10%.
+    // Only update JS state here — initBackground starts the daemon with the
+    // resolved bridge (calling reconfigure here would start Tor too early).
+    if (
+      settings.mode !== "neveruse"
+      && bridge === "none"
+      && shouldAutoEnableSnowflake(readAppLocale())
+    ) {
+      bridge = "snowflake";
+    }
+
+    bridgeType.value = bridge;
     setLSMode(settings.mode);
-    setLSBridge(bridgeType.value);
+    setLSBridge(bridge);
+  }
+
+  async function syncFromElectron(): Promise<void> {
+    const api = getElectronAPI();
+    if (!api?.torGetStatus) return;
+
+    const current = await api.torGetStatus();
+    if (!current) return;
+
+    if (current.settingsPersisted && current.mode) {
+      mode.value = current.mode;
+      setLSMode(current.mode);
+      if (typeof current.useSnowFlake2 === "boolean") {
+        const bridge: TorBridgeType = current.useSnowFlake2 ? "snowflake" : "none";
+        bridgeType.value = bridge;
+        setLSBridge(bridge);
+      }
+    }
   }
 
   async function pollNativeStatus(): Promise<void> {
@@ -290,15 +354,31 @@ export const useTorStore = defineStore(NAMESPACE, () => {
         info.value = data.info || "";
       });
 
-      await api.torConfigure({
-        mode: mode.value,
-        useSnowFlake2: bridgeType.value === "snowflake",
-      });
+      // Prefer main-process persisted settings when present; otherwise migrate LS → main.
+      await syncFromElectron();
+
+      if (api.torConfigure) {
+        await api.torConfigure({
+          mode: mode.value,
+          useSnowFlake2: bridgeType.value === "snowflake",
+        });
+      } else {
+        await api.torSetMode?.(mode.value);
+      }
 
       const current = await api.torGetStatus();
       if (current) {
         status.value = current.status;
         info.value = current.info || "";
+        if (current.mode) {
+          mode.value = current.mode;
+          setLSMode(current.mode);
+        }
+        if (typeof current.useSnowFlake2 === "boolean") {
+          const bridge: TorBridgeType = current.useSnowFlake2 ? "snowflake" : "none";
+          bridgeType.value = bridge;
+          setLSBridge(bridge);
+        }
       }
     } else if (isNative) {
       const { torService } = await import("@/shared/lib/tor");

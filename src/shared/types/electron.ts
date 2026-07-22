@@ -20,6 +20,8 @@ export interface ElectronTorStatusPayload {
 export interface ElectronTorStatusResult extends ElectronTorStatusPayload {
   mode?: ElectronTorMode;
   useSnowFlake2?: boolean;
+  /** True when main process has tor-settings.json on disk. */
+  settingsPersisted?: boolean;
 }
 
 export interface ElectronTorConfigureOpts {

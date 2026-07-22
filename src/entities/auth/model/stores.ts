@@ -1634,10 +1634,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             console.log("[auth] PKOIN received, broadcasting UserInfo...");
             setRegistrationPhase('broadcasting');
             try {
-              await appInitializer.syncNodeTime();
+              await withTimeout(
+                appInitializer.syncNodeTime(),
+                RPC_CALL_TIMEOUT,
+                "syncNodeTime",
+              );
               const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
               // Bypass local getuserprofile cache before broadcast.
-              await appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true });
+              await withTimeout(
+                appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true }),
+                RPC_CALL_TIMEOUT,
+                "initializeAndFetchUserData",
+              );
+              // registerUserProfile now forces a real send (not just queue) and
+              // throws if no txid — pendingRegProfile stays set on failure so
+              // the next poll can retry instead of hanging on confirming.
               const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
               registrationFnode = registrationNode;
               console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
@@ -1671,7 +1682,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         const actionsStatus = appInitializer.getAccountRegistrationStatus();
         console.log("[auth] Registration poll — actions:", actionsStatus, "(attempt", attempt, ")");
 
-        if (actionsStatus === 'registered') {
+        // 'undefined_status' = UserInfo action completed but status.value not
+        // flipped yet (SDK race). Treat as confirmed — otherwise we spin on
+        // step 2 until getuserstate catches up (or forever if it never does).
+        if (actionsStatus === 'registered' || actionsStatus === 'undefined_status') {
           console.log("[auth] Registration confirmed via Actions system!");
           await onRegistrationConfirmed();
           return;

@@ -21,6 +21,7 @@ class TorPlugin : Plugin() {
     override fun load() {
         config = ConfigurationManager(context)
         torManager = TorManager(config)
+        Log.i("TorPlugin", "loaded mode=${torManager.mode} bridge=${torManager.bridgeType}")
 
         torManager.onBootstrapProgress = { percent ->
             notifyListeners("bootstrapProgress", JSObject().apply {
@@ -38,7 +39,11 @@ class TorPlugin : Plugin() {
     @PluginMethod
     fun startDaemon(call: PluginCall) {
         val modeStr = call.getString("mode", "always") ?: "always"
-        val bridgeStr = call.getString("bridgeType", "NONE") ?: "NONE"
+        // Prefer explicit bridgeType; otherwise keep persisted preference.
+        // Defaulting to NONE here previously wiped Snowflake on every boot
+        // (JS initBackground only passed mode) and left bootstrap stuck at ~10%.
+        val bridgeStr = call.getString("bridgeType") ?: torManager.bridgeType.name
+        Log.i("TorPlugin", "startDaemon mode=$modeStr bridge=$bridgeStr")
         val bridges = call.getArray("bridges")
             ?.toList<String>() ?: emptyList()
 
@@ -50,10 +55,11 @@ class TorPlugin : Plugin() {
         val bridgeType = try {
             BridgeType.valueOf(bridgeStr.uppercase())
         } catch (_: Exception) {
-            BridgeType.NONE
+            torManager.bridgeType
         }
 
         if (mode == TorMode.NEVER) {
+            torManager.persistSettings(TorMode.NEVER, bridgeType)
             torManager.stopTor()
             call.resolve(JSObject().apply {
                 put("socksPort", 0)
@@ -106,7 +112,7 @@ class TorPlugin : Plugin() {
     @PluginMethod
     fun configure(call: PluginCall) {
         val modeStr = call.getString("mode") ?: "always"
-        val bridgeStr = call.getString("bridgeType") ?: "NONE"
+        val bridgeStr = call.getString("bridgeType") ?: torManager.bridgeType.name
         val bridges = call.getArray("bridges")
             ?.toList<String>() ?: emptyList()
 
@@ -118,11 +124,12 @@ class TorPlugin : Plugin() {
         val bridgeType = try {
             BridgeType.valueOf(bridgeStr.uppercase())
         } catch (_: Exception) {
-            BridgeType.NONE
+            torManager.bridgeType
         }
 
         Thread {
             if (mode == TorMode.NEVER) {
+                torManager.persistSettings(TorMode.NEVER, bridgeType)
                 torManager.stopTor()
             } else {
                 torManager.restartTor(mode, bridgeType, bridges)
