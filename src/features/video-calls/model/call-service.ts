@@ -10,7 +10,7 @@ import { playRingtone, playDialtone, playEndTone, stopAllSounds } from "./call-s
 import { checkOtherTabHasCall } from "./call-tab-lock";
 import { webrtcDiagnostics } from "./webrtc-diagnostics";
 import type { DiagnosticsWarningDetail } from "./webrtc-diagnostics";
-import { isNative } from "@/shared/lib/platform";
+import { isNative, isAndroid } from "@/shared/lib/platform";
 import { useBugReport } from "@/features/bug-report";
 import { tRaw } from "@/shared/lib/i18n";
 import { installNativeWebRTCProxy, NativeWebRTC } from "@/shared/lib/native-webrtc";
@@ -73,10 +73,20 @@ function maybeWarnLegacyWebView(): void {
 // `if (isNative)` block so the function can read it without hitting TDZ.
 let _networkChangeUnsubscribe: (() => void) | null = null;
 
-// Install native WebRTC proxy on mobile — must run before any call is placed.
+// Install native WebRTC proxy on Android only — must run before any call is placed.
 // This replaces window.RTCPeerConnection so that the Matrix SDK transparently
-// uses the native Android/iOS WebRTC engine instead of the browser's.
-if (isNative) {
+// uses the native Android WebRTC engine instead of the browser's.
+//
+// iOS deliberately uses WKWebView's built-in WebRTC stack — see
+// docs/plans/ios/2026-05-12-ios-webrtc-decision.md. The NativeWebRTCManager
+// + JS proxy exist to work around Android-specific issues (OEM HW AEC
+// deadlocks, WebView Chromium fragmentation, restartIce flakiness on old
+// Android Chrome builds, MIUI privacy shield silently rejecting AudioRecord)
+// — none of which apply to iOS, where WKWebView is a single vendor-controlled
+// engine that follows Safari's WebRTC implementation. Installing the proxy on
+// iOS would hand the SDK a no-op `NativeWebRTC` plugin (no Swift counterpart
+// exists for Plan A) and silently break call setup.
+if (isAndroid) {
   installNativeWebRTCProxy();
   // D-11: Listen for native audio errors
   NativeWebRTC.addListener("onAudioError", (data) => {

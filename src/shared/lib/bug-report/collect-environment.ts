@@ -1,4 +1,4 @@
-import { currentPlatform, isNative, isAndroid } from '@/shared/lib/platform';
+import { currentPlatform, isNative, isAndroid, isIOS } from '@/shared/lib/platform';
 import type { AppEnvironment } from './types';
 
 const appStartTime = Date.now();
@@ -68,6 +68,10 @@ export async function collectEnvironment(): Promise<AppEnvironment> {
       } catch {
         // Plugin unavailable
       }
+    } else if (isIOS) {
+      // WKWebView is pinned to the OS version on iOS; expose a label that
+      // bug-report consumers can group on without a separate plugin.
+      webViewVersion = osVersion ? `WKWebView (iOS ${osVersion})` : '';
     }
   }
 

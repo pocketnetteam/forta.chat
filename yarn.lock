@@ -119,6 +119,16 @@
   resolved "https://registry.npmjs.org/@capacitor/haptics/-/haptics-8.0.2.tgz"
   integrity sha512-c2hZzRR5Fk1tbTvhG1jhh2XBAf3EhnIerMIb2sl7Mt41Gxx1fhBJFDa0/BI1IbY4loVepyyuqNC9820/GZuoWQ==
 
+"@capacitor/ios@^8.3.3":
+  version "8.3.3"
+  resolved "https://registry.npmjs.org/@capacitor/ios/-/ios-8.3.3.tgz"
+  integrity sha512-BHlTOxarrvkaqDdlTxKwip+dQmfQSnfctizpheR7SWp/VIlR0HcPpYzWMTiVbHQLq3nLRUdeZO1wSPVGvxzAPA==
+
+"@capacitor/keyboard@^8.0.5":
+  version "8.0.5"
+  resolved "https://registry.npmjs.org/@capacitor/keyboard/-/keyboard-8.0.5.tgz"
+  integrity sha512-oFXygC4eKYA5l2MdpTR06L2M/4x6e2SLD5yS1T9+UBDKTkzyvhWKEhbYLUaTIBPpLKqlfGudJw1X73S1H9eUzQ==
+
 "@capacitor/local-notifications@^8.0.2":
   version "8.0.2"
   resolved "https://registry.npmjs.org/@capacitor/local-notifications/-/local-notifications-8.0.2.tgz"
@@ -148,6 +158,11 @@
   version "1.0.4"
   resolved "https://registry.npmjs.org/@capacitor/synapse/-/synapse-1.0.4.tgz"
   integrity sha512-/C1FUo8/OkKuAT4nCIu/34ny9siNHr9qtFezu4kxm6GY1wNFxrCFWjfYx5C1tUhVGz3fxBABegupkpjXvjCHrw==
+
+"@capgo/capacitor-incoming-call-kit@^8.2.1":
+  version "8.2.1"
+  resolved "https://registry.npmjs.org/@capgo/capacitor-incoming-call-kit/-/capacitor-incoming-call-kit-8.2.1.tgz"
+  integrity sha512-VDo21OjZ/2jjAqlJ5MTBrzDwaPPGtu2V0o3DIZT/K+f0jk0SH1at5P4EwFUwKjWRiTPTMdYa6grtJI3yjDzxuQ==
 
 "@capgo/capacitor-share-target@^8.0.25":
   version "8.0.26"

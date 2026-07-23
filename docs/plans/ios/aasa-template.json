@@ -1,0 +1,19 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["<TEAM_ID>.com.forta.chat"],
+        "components": [
+          {
+            "/": "/invite/*",
+            "comment": "Invite links — open in app"
+          },
+          {
+            "/": "/join/*",
+            "comment": "Direct join links — open in app"
+          }
+        ]
+      }
+    ]
+  }
+}

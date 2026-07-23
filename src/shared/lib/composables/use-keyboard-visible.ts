@@ -1,36 +1,92 @@
-import { ref, readonly, onScopeDispose, type Ref } from "vue";
+import {
+  computed,
+  onScopeDispose,
+  ref,
+  readonly,
+  type Ref,
+} from "vue";
 import { isNative } from "@/shared/lib/platform";
+
+/**
+ * Soft-keyboard height (in CSS px), reactive.
+ *
+ * Sources:
+ * - Native shells: `@capacitor/keyboard` events (`keyboardWillShow` /
+ *   `keyboardWillHide`). On Android, the existing `MainActivity` continues
+ *   to drive `--keyboardheight` via WindowInsetsCompat — the plugin still
+ *   fires events, so this composable works there too.
+ * - Web/Electron: `visualViewport.resize` delta against `window.innerHeight`.
+ *
+ * Returns 0 outside the keyboard. The ref is read-only by design — callers
+ * should not mutate the height. Subscriptions are attached eagerly so the
+ * composable can be invoked from either `setup` or `onMounted` of a host
+ * component; cleanup runs via `onScopeDispose`.
+ */
+export function useKeyboardHeight(): Readonly<Ref<number>> {
+  const height = ref(0);
+
+  let removeShow: (() => void) | undefined;
+  let removeHide: (() => void) | undefined;
+
+  const attachVisualViewportFallback = () => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onResize = () => {
+      height.value = Math.max(0, window.innerHeight - vv.height);
+    };
+    vv.addEventListener("resize", onResize);
+    removeShow = () => vv.removeEventListener("resize", onResize);
+  };
+
+  if (isNative) {
+    // Dynamic import keeps the plugin out of the web bundle.
+    import("@capacitor/keyboard")
+      .then(async ({ Keyboard }) => {
+        const showHandle = await Keyboard.addListener(
+          "keyboardWillShow",
+          (info: { keyboardHeight: number }) => {
+            height.value = info.keyboardHeight;
+          },
+        );
+        const hideHandle = await Keyboard.addListener(
+          "keyboardWillHide",
+          () => {
+            height.value = 0;
+          },
+        );
+        removeShow = () => showHandle.remove();
+        removeHide = () => hideHandle.remove();
+      })
+      .catch((err) => {
+        console.warn(
+          "[Keyboard] plugin unavailable, falling back to visualViewport:",
+          err,
+        );
+        attachVisualViewportFallback();
+      });
+  } else {
+    attachVisualViewportFallback();
+  }
+
+  onScopeDispose(() => {
+    removeShow?.();
+    removeHide?.();
+  });
+
+  return readonly(height);
+}
 
 /**
  * Reactive boolean indicating whether the soft keyboard is open.
  *
- * Reads `--keyboardheight` CSS variable set by native code (MainActivity.kt)
- * and re-checks on `visualViewport.resize` events. Threshold of 50dp filters
- * out nav-bar fluctuations on gesture-navigation devices.
+ * Kept for backwards compatibility with consumers that don't care about the
+ * exact height. Threshold of 50dp filters out nav-bar fluctuations on
+ * gesture-navigation devices.
  *
  * On non-native platforms always returns `false`.
  */
 export function useKeyboardVisible(): Readonly<Ref<boolean>> {
-  const isOpen = ref(false);
-
-  if (!isNative) return readonly(isOpen);
-
-  const check = () => {
-    const raw = getComputedStyle(document.documentElement).getPropertyValue(
-      "--keyboardheight",
-    );
-    isOpen.value = parseInt(raw || "0", 10) > 50;
-  };
-
-  const vv = window.visualViewport;
-  if (vv) {
-    vv.addEventListener("resize", check);
-    onScopeDispose(() => vv.removeEventListener("resize", check));
-  } else {
-    window.addEventListener("resize", check);
-    onScopeDispose(() => window.removeEventListener("resize", check));
-  }
-
-  check();
-  return readonly(isOpen);
+  if (!isNative) return readonly(ref(false));
+  const height = useKeyboardHeight();
+  return readonly(computed(() => height.value > 50));
 }

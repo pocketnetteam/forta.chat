@@ -24,6 +24,7 @@ vi.mock('@capacitor/local-notifications', () => ({
 
 vi.mock('@/shared/lib/platform', () => ({
   isNative: true,
+  isIOS: false,
 }));
 
 vi.mock('./push-data-plugin', () => ({

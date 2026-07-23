@@ -141,6 +141,27 @@ Full APK build guide (debug/release, keystore, env vars) — [docs/android-local
 
 Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
 
+### iOS (Capacitor)
+
+Requires macOS 14+, Xcode 16+, CocoaPods, and an enrolled Apple Developer account. iOS builds cannot run on Windows or Linux.
+
+```bash
+npm run cap:build:ios   # vite build + cap sync ios
+npm run cap:open:ios    # open ios/App/App.xcworkspace in Xcode
+npm run cap:run:ios     # run on simulator / connected device
+```
+
+Push notifications, calls, and Universal Links require a real device — the simulator only exercises text-chat parity.
+
+Full local-build instructions: [docs/ios-local-build.md](docs/ios-local-build.md). Multi-phase iOS port plan: [docs/plans/ios/README.md](docs/plans/ios/README.md).
+
+#### Known iOS differences
+
+- **Tor:** not shipped on iOS. The toggle is hidden in Settings and JS stubs keep the rest of the app falling back to direct HTTPS.
+- **Auto-update:** hidden — Apple App Store policy forbids in-app installation of binaries. Use TestFlight / App Store for updates.
+- **Locale:** iOS uses the system locale (`Bundle.main.preferredLocalizations`); switching language inside the app takes effect after a relaunch.
+- **WebRTC engine:** uses WKWebView's built-in WebRTC; the native WebRTC proxy is Android-only.
+
 ## Architecture
 
 The project follows **Feature-Sliced Design**:

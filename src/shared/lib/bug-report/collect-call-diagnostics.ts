@@ -5,14 +5,19 @@
  * reproduce.
  *
  * Pulls:
- *   - last 5 FCM `m.call.invite` records (delivery latency + expiry)
- *   - current AudioManager mode / speakerphone / BT SCO state
+ *   - current AudioManager mode / speakerphone / BT SCO state (both
+ *     platforms; iOS surfaces .playAndRecord-as-MODE_IN_COMMUNICATION
+ *     translation via IOSCallAudio.getStatus, see Step 6 Task 4).
+ *   - last 5 FCM `m.call.invite` records, ANDROID ONLY. iOS uses PushKit,
+ *     which is real-time and not subject to FCM data-message throttling;
+ *     the metric does not apply and we skip both the native call AND the
+ *     `inviteHistory` block in the resulting envelope.
  *
  * Always non-throwing — a diagnostic collection failure must NEVER block
  * the bug report itself.
  */
 
-import { isNative } from "@/shared/lib/platform";
+import { isAndroid, isNative } from "@/shared/lib/platform";
 import type {
   InviteThrottleRecord,
   InviteThrottleSnapshot,
@@ -23,7 +28,10 @@ export interface BugReportCallDiagnostics {
   audioMode: string;
   isSpeakerOn: boolean;
   isBtScoOn: boolean;
-  /** Last 5 FCM `m.call.invite` records, oldest first. */
+  /**
+   * Last 5 FCM `m.call.invite` records, oldest first. Always empty on
+   * iOS — see {@link collectCallDiagnostics} above for the rationale.
+   */
   inviteHistory: InviteThrottleRecord[];
   /** Convenience: how many of the recorded invites were already expired on arrival. */
   expiredInviteCount: number;
@@ -51,13 +59,20 @@ export async function collectCallDiagnostics(): Promise<BugReportCallDiagnostics
     isBtScoOn: false,
   }));
 
-  const inviteSnapshot: InviteThrottleSnapshot = await nativeCallBridge
-    .getInviteThrottleSnapshot()
-    .catch(() => ({ records: [] }));
-
-  const inviteHistory = Array.isArray(inviteSnapshot.records)
-    ? inviteSnapshot.records
-    : [];
+  // Android-only: skip the FCM throttle snapshot on iOS. PushKit
+  // delivery latency is reported separately if/when we add a
+  // BugReportVoipDiagnostics block. The bridge already short-circuits
+  // this on non-Android, but the explicit `if (!isAndroid)` here keeps
+  // the bug-report envelope shape obvious to triagers reading the JSON.
+  let inviteHistory: InviteThrottleRecord[] = [];
+  if (isAndroid) {
+    const inviteSnapshot: InviteThrottleSnapshot = await nativeCallBridge
+      .getInviteThrottleSnapshot()
+      .catch(() => ({ records: [] }));
+    inviteHistory = Array.isArray(inviteSnapshot.records)
+      ? inviteSnapshot.records
+      : [];
+  }
 
   return {
     audioMode: audioStatus.mode,

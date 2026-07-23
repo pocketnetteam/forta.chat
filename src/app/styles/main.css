@@ -75,8 +75,14 @@
  * Safe-area insets:
  * - Initial values are set inline in index.html (with env() fallbacks) so the
  *   first paint already clears the status bar on Android 15/16 edge-to-edge.
- * - Native code (Android: MainActivity.injectAllCssVars; iOS: env() native)
- *   overwrites these with exact device values on every insets change.
+ * - Android: MainActivity.injectAllCssVars overwrites these with exact device
+ *   values on every WindowInsetsCompat change.
+ * - iOS: viewport-fit=cover (set in index.html) makes WKWebView resolve
+ *   env(safe-area-inset-*) to the live notch / home-indicator insets. We do
+ *   NOT port the Android injection pipeline; the only var driven from JS on
+ *   iOS is --safe-area-inset-bottom (via useIOSKeyboardCssVar) so it can
+ *   collapse to 0 while the keyboard is up, mirroring the Android contract.
+ *   See docs/plans/ios/2026-05-12-ios-keyboard-safe-area.md Tasks 4 + 5.
  * - The fallback below only applies if the inline <style> in index.html was
  *   stripped for some reason (should never happen in production).
  */

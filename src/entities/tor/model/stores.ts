@@ -55,7 +55,10 @@ export const useTorStore = defineStore(NAMESPACE, () => {
   let statusPollTimer: ReturnType<typeof setInterval> | null = null;
   let networkStatsCleanup: (() => void) | null = null;
 
-  const verifyResult = ref<{ isTor: boolean; ip: string } | null>(null);
+  // Verification state. `error` is set by TorService.verify() when the
+  // platform doesn't ship Tor (iOS) so callers can distinguish "verifier
+  // failed" from "no Tor here".
+  const verifyResult = ref<{ isTor: boolean; ip: string; error?: string } | null>(null);
   const isVerifying = ref(false);
 
   const isConnected = computed(() => status.value === "started");

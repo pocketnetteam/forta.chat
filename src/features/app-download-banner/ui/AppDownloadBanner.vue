@@ -1,18 +1,30 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { computed, ref, onMounted } from "vue";
 import { isWeb } from "@/shared/lib/platform";
 import { useI18n } from "@/shared/lib/i18n";
+import {
+  detectBrowserPlatform,
+  resolveDownloadUrl,
+} from "../model/download-links";
 
 const DISMISS_KEY = "app-download-banner-dismissed";
-const DOWNLOAD_URL = "https://forta.chat/#/download";
 
 const { t } = useI18n();
 const visible = ref(false);
 
-const isAndroidBrowser = isWeb && /Android/i.test(navigator.userAgent);
+// Suppress the banner inside native shells — users already have the app.
+// On the web build we classify the UA so we can route iOS Safari users to
+// the App Store and Android Chrome users to the GitHub releases page.
+const browserPlatform = computed(() =>
+  isWeb ? detectBrowserPlatform(navigator.userAgent) : 'other',
+);
+const downloadUrl = computed(() => resolveDownloadUrl(browserPlatform.value));
 
 onMounted(() => {
-  if (isAndroidBrowser && !localStorage.getItem(DISMISS_KEY)) {
+  const shouldShow =
+    (browserPlatform.value === 'android' || browserPlatform.value === 'ios') &&
+    !localStorage.getItem(DISMISS_KEY);
+  if (shouldShow) {
     visible.value = true;
   }
 });
@@ -23,7 +35,7 @@ const dismiss = () => {
 };
 
 const openDownload = () => {
-  window.open(DOWNLOAD_URL, "_blank", "noopener");
+  window.open(downloadUrl.value, "_blank", "noopener");
 };
 </script>
 

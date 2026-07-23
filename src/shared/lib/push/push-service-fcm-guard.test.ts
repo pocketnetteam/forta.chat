@@ -22,6 +22,7 @@ vi.mock('@capacitor/local-notifications', () => ({
 
 vi.mock('@/shared/lib/platform', () => ({
   isNative: true,
+  isIOS: false,
 }));
 
 const isFcmAvailable = vi.fn().mockResolvedValue({ available: false });

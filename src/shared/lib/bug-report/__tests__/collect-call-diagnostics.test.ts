@@ -20,7 +20,11 @@ describe("collectCallDiagnostics", () => {
   });
 
   it("returns EMPTY_CALL_DIAGNOSTICS on non-native platforms", async () => {
-    vi.doMock("@/shared/lib/platform", () => ({ isNative: false }));
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: false,
+      isAndroid: false,
+      isIOS: false,
+    }));
     const { collectCallDiagnostics, EMPTY_CALL_DIAGNOSTICS } = await import(
       "../collect-call-diagnostics"
     );
@@ -31,8 +35,12 @@ describe("collectCallDiagnostics", () => {
     expect(mockGetInviteThrottleSnapshot).not.toHaveBeenCalled();
   });
 
-  it("merges audio status + invite history on native platforms", async () => {
-    vi.doMock("@/shared/lib/platform", () => ({ isNative: true }));
+  it("merges audio status + invite history on Android", async () => {
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: true,
+      isAndroid: true,
+      isIOS: false,
+    }));
     mockGetAudioStatus.mockResolvedValue({
       mode: "MODE_IN_COMMUNICATION",
       isSpeakerOn: true,
@@ -65,10 +73,15 @@ describe("collectCallDiagnostics", () => {
     expect(out.isBtScoOn).toBe(false);
     expect(out.inviteHistory).toHaveLength(2);
     expect(out.expiredInviteCount).toBe(1);
+    expect(mockGetInviteThrottleSnapshot).toHaveBeenCalledOnce();
   });
 
   it("falls back gracefully when native bridge throws", async () => {
-    vi.doMock("@/shared/lib/platform", () => ({ isNative: true }));
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: true,
+      isAndroid: true,
+      isIOS: false,
+    }));
     mockGetAudioStatus.mockRejectedValue(new Error("plugin not registered"));
     mockGetInviteThrottleSnapshot.mockRejectedValue(new Error("missing"));
 
@@ -83,7 +96,11 @@ describe("collectCallDiagnostics", () => {
   });
 
   it("treats malformed snapshot.records as empty array", async () => {
-    vi.doMock("@/shared/lib/platform", () => ({ isNative: true }));
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: true,
+      isAndroid: true,
+      isIOS: false,
+    }));
     mockGetAudioStatus.mockResolvedValue({
       mode: "MODE_NORMAL",
       isSpeakerOn: false,
@@ -97,5 +114,46 @@ describe("collectCallDiagnostics", () => {
 
     expect(out.inviteHistory).toEqual([]);
     expect(out.expiredInviteCount).toBe(0);
+  });
+
+  // iOS uses PushKit, not FCM data messages, so the throttle snapshot
+  // is not applicable. The collector must NOT call into the native
+  // bridge for it (a guaranteed-empty round-trip is wasted work) and
+  // the `inviteHistory` block in the envelope must stay empty. The
+  // audio-status branch must still run — IOSCallAudio.getStatus()
+  // exposes the AVAudioSession mode (Step 6 Task 4).
+  it("skips invite throttle on iOS but still collects audio status", async () => {
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: true,
+      isAndroid: false,
+      isIOS: true,
+    }));
+    mockGetAudioStatus.mockResolvedValue({
+      mode: "MODE_IN_COMMUNICATION",
+      isSpeakerOn: false,
+      isBtScoOn: true,
+    });
+    mockGetInviteThrottleSnapshot.mockResolvedValue({
+      records: [
+        {
+          receivedAtMs: 1,
+          sentAtMs: 0,
+          deliveryLatencyMs: 1,
+          expired: false,
+          callId: "should-be-ignored",
+        },
+      ],
+    });
+
+    const { collectCallDiagnostics } = await import("../collect-call-diagnostics");
+    const out = await collectCallDiagnostics();
+
+    expect(out.audioMode).toBe("MODE_IN_COMMUNICATION");
+    expect(out.isSpeakerOn).toBe(false);
+    expect(out.isBtScoOn).toBe(true);
+    expect(out.inviteHistory).toEqual([]);
+    expect(out.expiredInviteCount).toBe(0);
+    expect(mockGetAudioStatus).toHaveBeenCalledOnce();
+    expect(mockGetInviteThrottleSnapshot).not.toHaveBeenCalled();
   });
 });

@@ -775,6 +775,27 @@ let originalGetUserMedia: typeof navigator.mediaDevices.getUserMedia | undefined
  * Returns the real browser getUserMedia, bypassing the native WebRTC proxy.
  * Use this in voice/video recorders that need actual media streams,
  * not the dummy streams returned by the proxy (which are for WebRTC calls only).
+ *
+ * Platform behavior:
+ * - Android: `installNativeWebRTCProxy()` runs at call-service module load
+ *   and replaces `navigator.mediaDevices.getUserMedia` with a dummy stream
+ *   factory wired into NativeWebRTCManager. `originalGetUserMedia` captures
+ *   the pre-swap reference at module evaluation time, so voice/video
+ *   recorders that call `getRealGetUserMedia()` still get a real audio/
+ *   video track — bypassing the call-only proxy.
+ * - iOS (Plan A — WKWebView built-in WebRTC, see
+ *   docs/plans/ios/2026-05-12-ios-webrtc-decision.md): the call-service
+ *   gate is `if (isAndroid)`, so `installNativeWebRTCProxy()` is NEVER
+ *   invoked. `navigator.mediaDevices.getUserMedia` stays the WKWebView
+ *   built-in throughout the app's lifetime, and this helper returns
+ *   exactly that — same object, no extra hop. Callers do not need to
+ *   branch by platform; this function is the single safe entry point.
+ * - Web / Electron: same as iOS — the proxy never installs, so the
+ *   returned reference is the browser's `navigator.mediaDevices.getUserMedia`.
+ *
+ * Returns `undefined` only if the runtime has no `navigator.mediaDevices`
+ * at module load (very old WebView with WebRTC disabled, server-side
+ * rendering). Callers must null-check.
  */
 export function getRealGetUserMedia(): typeof navigator.mediaDevices.getUserMedia | undefined {
   return originalGetUserMedia;

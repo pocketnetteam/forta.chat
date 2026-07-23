@@ -1,7 +1,7 @@
 import type { Locale } from "@/entities/locale/model/types";
 import { useLocalStorage } from "@/shared/lib/browser";
-import { isNative } from "@/shared/lib/platform";
-import { Capacitor, registerPlugin } from "@capacitor/core";
+import { isNative, isIOS } from "@/shared/lib/platform";
+import { registerPlugin } from "@capacitor/core";
 import { defineStore } from "pinia";
 import { ref } from "vue";
 
@@ -11,7 +11,11 @@ interface AppLocalePlugin {
   setLocale(options: { locale: string }): Promise<void>;
 }
 
-const AppLocale = isNative
+// iOS resolves the app language from Bundle.main.preferredLocalizations, which
+// reflects the system Settings → General → Language & Region. We do not ship
+// an AppLocale plugin on iOS; in-app language changes take effect after a
+// relaunch. See docs/plans/ios/2026-05-12-ios-simple-tasks.md Task 5.
+const AppLocale = isNative && !isIOS
   ? registerPlugin<AppLocalePlugin>("AppLocale")
   : null;
 
@@ -30,7 +34,9 @@ export const useLocaleStore = defineStore(NAMESPACE, () => {
     locale.value = _locale;
     setLSLocale(_locale);
     document.documentElement.lang = _locale;
-    // Sync locale to Android native layer
+    // Sync locale to Android native layer. On iOS this is null and the
+    // optional chain short-circuits — the WebView still updates immediately
+    // via the persisted locale; the iOS native layer follows system settings.
     AppLocale?.setLocale({ locale: _locale }).catch(() => {});
   };
 

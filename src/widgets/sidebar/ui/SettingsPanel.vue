@@ -36,6 +36,7 @@ const walletStore = useWalletStore();
 
 const showTor = hasTor;
 
+
 const { t } = useI18n();
 
 const torModeLabel = computed(() => {
@@ -498,7 +499,13 @@ const handleLogout = () => {
           >—</span>
         </div>
 
-        <!-- Check for updates (Android only) -->
+        <!--
+          Auto-update is Android-only: Apple App Store policy forbids in-app
+          installation of binaries outside the Store. iOS users must update
+          via the App Store, which surfaces an update prompt automatically
+          when a newer build is published. See
+          docs/plans/ios/2026-05-12-ios-simple-tasks.md Task 6.
+        -->
         <button
           v-if="isAndroid"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"

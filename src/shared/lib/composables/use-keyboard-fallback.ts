@@ -1,5 +1,5 @@
 import { onScopeDispose } from "vue";
-import { isNative } from "@/shared/lib/platform";
+import { isAndroid, isNative } from "@/shared/lib/platform";
 
 /**
  * Android keyboard handling for Capacitor WebView.
@@ -13,10 +13,14 @@ import { isNative } from "@/shared/lib/platform";
  * (Chrome 61+, covers WebView 114+) to catch OEM firmware anomalies
  * where `WindowInsetsCompat` reports incorrect IME heights.
  *
+ * On iOS we drive --app-bottom-inset directly from @capacitor/keyboard
+ * events via `useIOSKeyboardCssVar` — that path is authoritative, so
+ * this fallback must not run there.
+ *
  * Call once in the root component (App.vue) `onMounted`.
  */
 export function useKeyboardFallback(): void {
-  if (!isNative) return;
+  if (!isNative || !isAndroid) return;
 
   const vv = window.visualViewport;
   if (!vv) return;
