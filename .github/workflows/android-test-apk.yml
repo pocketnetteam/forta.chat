@@ -56,28 +56,31 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build release APK
+      - name: Build release APK and AAB
         working-directory: android
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease bundleRelease
         env:
           RELEASE_STORE_FILE: release-keystore.jks
           RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
-      - name: Prepare test APK for deploy
+      - name: Prepare test APK and AAB for deploy
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           VERSION_CODE="${{ steps.version.outputs.version_code }}"
           SHORT_SHA="${GITHUB_SHA::7}"
           APK_DIR="android/app/build/outputs/apk/release"
+          AAB_DIR="android/app/build/outputs/bundle/release"
           mv "$APK_DIR/app-release.apk" "$APK_DIR/forta-chat-test-${VERSION}.apk"
+          mv "$AAB_DIR/app-release.aab" "$AAB_DIR/forta-chat-test-${VERSION}.aab"
           mkdir -p apktests
           cp "$APK_DIR/forta-chat-test-${VERSION}.apk" apktests/latest.apk
-          printf '{"versionName":"%s","versionCode":%s,"commit":"%s"}\n' \
+          cp "$AAB_DIR/forta-chat-test-${VERSION}.aab" apktests/latest.aab
+          printf '{"versionName":"%s","versionCode":%s,"commit":"%s","apk":"latest.apk","aab":"latest.aab"}\n' \
             "$VERSION" "$VERSION_CODE" "$SHORT_SHA" > apktests/version.json
 
-      - name: Deploy test APK to server via FTP
+      - name: Deploy test APK and AAB to server via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}

@@ -20,6 +20,7 @@ android/local.properties
 android/capacitor-cordova-android-plugins/build/
 android/capacitor-filesystem/build/
 *.apk
+*.aab
 *.jks
 *.keystore
 google-services.json
