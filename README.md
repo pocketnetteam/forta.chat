@@ -115,6 +115,8 @@ npm run test:watch  # watch mode
 
 ### Electron (desktop)
 
+Планы и чеклисты: [docs/plans/electron/](docs/plans/electron/README.md).
+
 ```bash
 npm run electron:dev              # dev (vite + electron together)
 npm run electron:preview          # preview built bundle in Electron
@@ -125,6 +127,7 @@ npm run electron:build:linux      # Linux
 ```
 
 Build config — [electron-builder.json](electron-builder.json), main process — [electron/main.cjs](electron/main.cjs).
+Smoke — [docs/plans/electron/smoke-checklist.md](docs/plans/electron/smoke-checklist.md).
 
 ### Android (Capacitor)
 

@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
+import { makeRoom } from "@/test-utils";
 
 const mockMatrixService = {
   isReady: vi.fn(() => true),
@@ -192,6 +193,20 @@ describe("chat-store room-list first-load states", () => {
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
   });
 
+  it("accepts authoritative empty after degraded escape window", () => {
+    store.startInitialSyncWatch();
+    vi.advanceTimersByTime(8000);
+    expect(store.isRoomListLoadingSlow).toBe(true);
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+
+    // DEGRADED_EMPTY_ESCAPE_MS = 8000
+    vi.advanceTimersByTime(8000);
+
+    expect(store.isRoomListAuthoritativeEmpty).toBe(true);
+    expect(store.isRoomListLoading).toBe(false);
+    expect(store.isRoomListLoadingSlow).toBe(false);
+  });
+
   it("does NOT show authoritative empty at PREPARED with an empty snapshot", () => {
     store.setHelpers(mockMatrixService.kit as never, {} as never);
     store.refreshRooms("PREPARED");
@@ -203,6 +218,22 @@ describe("chat-store room-list first-load states", () => {
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
     expect(store.isRoomListLoading).toBe(true);
     expect(store.isRoomListLoadingSlow).toBe(false);
+  });
+
+  it("accepts authoritative empty after PREPARED empty grace", () => {
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
+    store.refreshRooms("PREPARED");
+    vi.advanceTimersByTime(150);
+
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+    expect(store.isRoomListLoading).toBe(true);
+
+    // PREPARED_EMPTY_GRACE_MS = 3000
+    vi.advanceTimersByTime(3000);
+
+    expect(store.syncState).toBe("PREPARED");
+    expect(store.isRoomListAuthoritativeEmpty).toBe(true);
+    expect(store.isRoomListLoading).toBe(false);
   });
 
   it("shows authoritative empty only once sync reaches steady-state SYNCING", () => {
@@ -219,5 +250,24 @@ describe("chat-store room-list first-load states", () => {
     expect(store.isRoomListAuthoritativeEmpty).toBe(true);
     expect(store.isRoomListLoading).toBe(false);
     expect(store.isRoomListLoadingSlow).toBe(false);
+  });
+
+  it("cancels PREPARED empty escape when rooms appear before grace elapses", () => {
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
+    store.refreshRooms("PREPARED");
+    vi.advanceTimersByTime(150);
+    expect(store.isRoomListLoading).toBe(true);
+
+    // rooms is a shallowRef — pin change forces sortedRooms recompute after addRoom.
+    store.addRoom(makeRoom({ id: "!r1:s" }));
+    store.togglePinRoom("!r1:s");
+    expect(store.sortedRooms.length).toBeGreaterThan(0);
+    expect(store.isRoomListLoading).toBe(false);
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+
+    // Grace would have fired — must NOT flip to empty now that rooms exist.
+    vi.advanceTimersByTime(3000);
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+    expect(store.sortedRooms.length).toBeGreaterThan(0);
   });
 });

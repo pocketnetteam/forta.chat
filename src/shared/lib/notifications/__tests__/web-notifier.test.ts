@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   notifyNewMessage,
   requestNotificationPermission,
+  setNotificationClickHandler,
   __resetWebNotifierForTests,
 } from "../web-notifier";
 
@@ -36,10 +37,12 @@ class FakeAudioContext {
 class FakeNotification {
   static permission: NotificationPermission = "granted";
   static requestPermission = vi.fn(async () => FakeNotification.permission);
-  static instances: { title: string; opts?: NotificationOptions }[] = [];
+  static instances: FakeNotification[] = [];
+  onclick: ((this: Notification, ev: Event) => void) | null = null;
   constructor(public title: string, public opts?: NotificationOptions) {
-    FakeNotification.instances.push({ title, opts });
+    FakeNotification.instances.push(this);
   }
+  close = vi.fn();
 }
 
 describe("web-notifier", () => {
@@ -89,6 +92,29 @@ describe("web-notifier", () => {
     expect(FakeNotification.instances[0].title).toBe("Alice");
     expect(FakeNotification.instances[0].opts?.body).toBe("hi");
     expect(FakeNotification.instances[0].opts?.tag).toBe("!room1");
+  });
+
+  it("invokes notification click handler with roomId and focuses window", async () => {
+    const { createElectronApiMock } = await import(
+      "@/shared/lib/platform/create-electron-api-mock"
+    );
+    const onClick = vi.fn();
+    const show = vi.fn();
+    window.electronAPI = createElectronApiMock({ show });
+    setNotificationClickHandler(onClick);
+    const focus = vi.spyOn(window, "focus").mockImplementation(() => undefined);
+
+    notifyNewMessage({ roomId: "!room1", body: "hi", title: "Alice", fallbackTitle: "Forta" });
+    FakeNotification.instances[0].onclick?.call(
+      FakeNotification.instances[0] as unknown as Notification,
+      new Event("click"),
+    );
+
+    expect(onClick).toHaveBeenCalledWith("!room1");
+    expect(show).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalled();
+    focus.mockRestore();
+    delete window.electronAPI;
   });
 
   it("throttles consecutive beeps", () => {

@@ -35,7 +35,7 @@ export const setupProviders = async (app: App) => {
   // Register Service Worker transport proxy in Electron
   if (isElectron) {
     initTransport();
-    useTorStore().init();
+    await useTorStore().init();
   }
 
   if (isNative) {
@@ -113,24 +113,29 @@ export const setupProviders = async (app: App) => {
       }).catch((e) => console.warn('[Telemetry] Module load failed:', e));
     });
 
-    // Wire store to native torService reactive state (always — for settings UI)
+    // Wire store to native torService reactive state (always — for settings UI).
+    // Must await so syncFromNative restores persisted mode before isEnabled check.
     const torStore = useTorStore();
-    torStore.init();
+    await torStore.init();
 
-    // Only start Tor daemon if user previously opted in.
-    // Default is "neveruse" (opt-in) — app boots instantly via clearnet.
-    //
-    // WEE-97 item 6: the daemon start is deferred until the chat list is
-    // interactive (fallback: 15s for the login-page case). The Matrix proxy
-    // was already best-effort — initMatrix reads torService.matrixBaseUrl
-    // once at connect time, and the daemon's 5-10s bootstrap virtually never
-    // beat it; the deferral just stops Tor from competing for CPU/IO during
-    // the critical boot path. The Settings UI keeps working: torStore.init()
-    // above wires reactive state unconditionally.
+    // Start Tor as soon as settings say so. Deferral competed with censorship
+    // bootstraps and made "stuck at 10%" look like a cold-start bug; Always/Auto
+    // users need the daemon hunting Snowflake proxies immediately.
     if (torStore.isEnabled) {
-      whenChatsInteractive(TOR_DEFER_FALLBACK_MS).then(async () => {
-        const { torService } = await import('@/shared/lib/tor');
-        torService.initBackground(torStore.mode);
+      const { torService } = await import('@/shared/lib/tor');
+      const { toNativeBridgeType } = await import('@/entities/tor');
+      console.info(
+        '[TOR] Scheduling daemon start mode=',
+        torStore.mode,
+        'bridge=',
+        torStore.bridgeType,
+      );
+      // Short defer so first paint isn't blocked by ProcessBuilder spawn.
+      whenChatsInteractive(2_000).then(async () => {
+        torService.initBackground({
+          mode: torStore.mode,
+          bridgeType: toNativeBridgeType(torStore.bridgeType),
+        });
 
         // Once the daemon is bootstrapped, route the live Matrix session
         // through the local reverse proxy. The proxy flag is consulted

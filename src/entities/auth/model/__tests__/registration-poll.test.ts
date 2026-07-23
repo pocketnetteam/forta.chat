@@ -37,6 +37,32 @@ describe("registration poll", () => {
     expect(pollSection).toContain("60000");
   });
 
+  it("broadcast path wraps sync/init in withTimeout and keeps pending profile until send succeeds", () => {
+    const source = getSource();
+    const pollSection = source.slice(
+      source.indexOf("const startRegistrationPoll"),
+      source.indexOf("const stopRegistrationPoll"),
+    );
+    expect(pollSection).toContain('"syncNodeTime"');
+    expect(pollSection).toContain('"initializeAndFetchUserData"');
+    expect(pollSection).toContain("registerUserProfile");
+    // pendingRegProfile cleared only after successful registerUserProfile
+    const broadcastIdx = pollSection.indexOf("registerUserProfile");
+    const clearIdx = pollSection.indexOf("setPendingRegProfile(null)", broadcastIdx);
+    expect(clearIdx).toBeGreaterThan(broadcastIdx);
+  });
+
+  it("treats Actions undefined_status as registration confirmed", () => {
+    const source = getSource();
+    const pollSection = source.slice(
+      source.indexOf("const startRegistrationPoll"),
+      source.indexOf("const stopRegistrationPoll"),
+    );
+    expect(pollSection).toMatch(
+      /actionsStatus === ['"]registered['"]\s*\|\|\s*actionsStatus === ['"]undefined_status['"]/,
+    );
+  });
+
   it("should use clearTimeout in stopRegistrationPoll", () => {
     const source = getSource();
     const stopSection = source.slice(
@@ -63,6 +89,18 @@ describe("registration poll", () => {
     expect(initIdx).toBeGreaterThan(loadIdx);
     // Full-profile reload must also bypass local cache.
     expect(fnSection).toContain("{ update: true }");
+  });
+
+  it("onRegistrationConfirmed kicks room-list sync when Matrix is already ready", () => {
+    const source = getSource();
+    const fnStart = source.indexOf("async function onRegistrationConfirmed");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnSection = source.slice(fnStart, fnStart + 4500);
+    // When matrixReady is already true, heal the empty-list skeleton instead of
+    // skipping sync entirely (post-registration hang until refresh).
+    expect(fnSection).toContain("isRoomListLoading");
+    expect(fnSection).toContain("retryImmediately");
+    expect(fnSection).toContain("refreshRoomsNow");
   });
 });
 

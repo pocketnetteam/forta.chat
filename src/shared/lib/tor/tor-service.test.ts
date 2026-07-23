@@ -121,7 +121,7 @@ describe('TorService — Android branch (regression)', () => {
     const torService = await importFreshService();
     await torService.init('always');
 
-    expect(mockStartDaemon).toHaveBeenCalledWith({ mode: 'always' });
+    expect(mockStartDaemon).toHaveBeenCalledWith({ mode: 'always', bridgeType: 'NONE' });
     expect(torService.isReady.value).toBe(true);
     expect(torService.matrixBaseUrl).toBe('http://127.0.0.1:9080');
   });
@@ -155,6 +155,20 @@ describe('TorService — web/non-native branch', () => {
     torService.initBackground();
     expect(torService.isReady.value).toBe(true);
     expect(torService.initFailed.value).toBe(false);
+  });
+
+  it('initBackground accepts options object on non-native', async () => {
+    const torService = await importFreshService();
+    torService.initBackground({ mode: 'always', bridgeType: 'SNOWFLAKE' });
+    expect(torService.isReady.value).toBe(true);
+    expect(torService.mode.value).toBe('always');
+    expect(torService.bridgeType.value).toBe('SNOWFLAKE');
+  });
+
+  it('init sets ready=true immediately on non-native', async () => {
+    const torService = await importFreshService();
+    await torService.init();
+    expect(torService.isReady.value).toBe(true);
   });
 
   it('verify() returns the neutral empty shape (no error field)', async () => {

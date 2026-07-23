@@ -60,22 +60,23 @@ cd android && ./gradlew assembleRelease && cd ..
 
 ## Тестовая сборка (QA)
 
-Release-подписанный тестовый APK выкладывается на сервер **вручную** через GitHub Actions:
+Release-подписанные тестовые APK и AAB выкладываются на сервер **вручную** через GitHub Actions:
 
 1. Откройте [Actions → Android Test APK](https://github.com/pocketnetteam/forta.chat/actions/workflows/android-test-apk.yml).
 2. Нажмите **Run workflow**, выберите ветку (обычно `master`) и подтвердите.
-3. После успешного прогона APK доступен по ссылке:
+3. После успешного прогона артефакты доступны по ссылкам:
 
-**https://forta.chat/apktests/latest.apk**
+- **APK (сайдлоад):** https://forta.chat/apktests/latest.apk
+- **AAB (Play Console):** https://forta.chat/apktests/latest.aab
 
 Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/android-test-apk.yml)
 
 | | Prod (тег `v*`) | Тест (ручной запуск) |
 |---|---|---|
-| Канал | GitHub Releases | FTP `apktests/latest.apk` |
+| Канал | GitHub Releases | FTP `apktests/latest.apk` + `latest.aab` |
 | Триггер | Push тега `v*` | `workflow_dispatch` в GitHub Actions |
 | `versionName` / `versionCode` | Из тега, напр. `1.10.46` → `11046` | Из `package.json` +1 patch (та же формула `versionCode`) |
-| Имя файла | `forta-chat-<version>.apk` | `latest.apk` (внутри CI: `forta-chat-test-<version>.apk`) |
+| Имя файла | `forta-chat-<version>.apk` | `latest.apk` / `latest.aab` (внутри CI: `forta-chat-test-<version>.{apk,aab}`) |
 | Автообновление в приложении | Да (`releases/latest`) | Нет |
 | Подпись | Release keystore | Тот же release keystore |
 
@@ -84,7 +85,7 @@ Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/androi
 Источник версии — **`package.json`** (`version`). GitHub Releases не используется.
 
 1. В `package.json` хранится последняя выпущенная версия (сейчас совпадает с prod).
-2. **Тест:** CI берёт max(`package.json`, [`apktests/version.json`](https://forta.chat/apktests/version.json)), поднимает **patch на 1** и собирает APK.
+2. **Тест:** CI берёт max(`package.json`, [`apktests/version.json`](https://forta.chat/apktests/version.json)), поднимает **patch на 1** и собирает APK + AAB.
 3. **Релиз:** после QA поднимаете `package.json` до протестированной версии, коммитите и ставите тег `v*` с тем же номером.
 4. Повторный тест до релиза снова поднимает patch (учитывается `version.json` на сервере).
 
@@ -93,6 +94,8 @@ Workflow: [`.github/workflows/android-test-apk.yml`](../.github/workflows/androi
 1. Скачать [latest.apk](https://forta.chat/apktests/latest.apk) на устройство.
 2. Разрешить установку из неизвестных источников (если потребуется).
 3. Установить APK.
+
+AAB (`latest.aab`) — для загрузки в Play Console (internal/closed testing). На устройство напрямую не ставится.
 
 ### Важно
 

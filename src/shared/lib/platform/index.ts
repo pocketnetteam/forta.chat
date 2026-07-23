@@ -1,16 +1,23 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor } from "@capacitor/core";
+import type { ElectronAPI } from "@/shared/types/electron";
 
 /** True when running inside a native Capacitor shell (Android/iOS). */
 export const isNative = Capacitor.isNativePlatform();
 
 /** True on Android specifically. */
-export const isAndroid = Capacitor.getPlatform() === 'android';
+export const isAndroid = Capacitor.getPlatform() === "android";
 
 /** True on iOS specifically. */
-export const isIOS = Capacitor.getPlatform() === 'ios';
+export const isIOS = Capacitor.getPlatform() === "ios";
+
+/** Safe accessor for the Electron preload API (undefined outside Electron). */
+export function getElectronAPI(): ElectronAPI | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window.electronAPI;
+}
 
 /** True in Electron desktop app. */
-export const isElectron = !!(window as any).electronAPI?.isElectron;
+export const isElectron = !!getElectronAPI()?.isElectron;
 
 /** True in plain browser (no native shell). */
 export const isWeb = !isNative && !isElectron;
@@ -28,11 +35,11 @@ export const isAndroidWeb =
   /android/i.test(navigator.userAgent);
 
 /** Current platform name for logging/analytics. */
-export type Platform = 'android' | 'ios' | 'electron' | 'web';
+export type Platform = "android" | "ios" | "electron" | "web";
 export const currentPlatform: Platform = isAndroid
-  ? 'android'
+  ? "android"
   : isIOS
-    ? 'ios'
+    ? "ios"
     : isElectron
-      ? 'electron'
-      : 'web';
+      ? "electron"
+      : "web";

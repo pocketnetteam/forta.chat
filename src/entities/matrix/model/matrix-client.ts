@@ -604,13 +604,39 @@ export class MatrixClientService {
     try {
       this.stopClientOnly();
       this.baseUrl = `https://${next}`;
-      this.client = await this.getClient();
-      if (this.client) {
-        this.store = this.client.store;
+      const nextClient = await this.getClient();
+      if (nextClient) {
+        this.client = nextClient;
+        this.store = nextClient.store;
         this.ready = true;
+        this.error = false;
+      } else {
+        throw new Error(`[matrix] failover to ${next} returned no client`);
       }
     } catch (e) {
       console.error("[matrix] mirror failover recreate error:", e);
+      // Never leave the tab without any Matrix client after a failed failover.
+      // The previous client has already been stopped, so the best recovery is a
+      // fresh rebuild on the original host rather than waiting for a reload.
+      this.ready = false;
+      this.client = null;
+      this.store = null;
+      this.baseUrl = `https://${current}`;
+      try {
+        const fallbackClient = await this.getClient();
+        if (fallbackClient) {
+          this.client = fallbackClient;
+          this.store = fallbackClient.store;
+          this.ready = true;
+          this.error = false;
+          console.warn(`[matrix] failover recovery rebuilt client on original host ${current}`);
+        } else {
+          this.error = `[matrix] failover recovery returned no client for ${current}`;
+        }
+      } catch (recoveryError) {
+        console.error("[matrix] failover recovery on original host failed:", recoveryError);
+        this.error = String(recoveryError);
+      }
     } finally {
       this.building = false;
       this.failoverActive = false;

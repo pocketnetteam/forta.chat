@@ -18,15 +18,15 @@
  *
  * Usage:
  *   - Call `setupDeepLinkHandler()` synchronously in `main.ts`, before any
- *     await. This wires up the Capacitor listener (and on iOS, also drains the
- *     cold-start launch URL).
+ *     await. This wires up the Capacitor / Electron listener (and on iOS, also
+ *     drains the cold-start launch URL).
  *   - Call `registerDeepLinkHandlers({ onInvite, onJoin })` once the router
  *     (and, if needed, auth/Matrix) can act on a deep link. Any URLs that
  *     arrived while we were still booting are delivered immediately.
  */
 
 import { parseDeepLink, type InviteTarget, type JoinTarget } from "@/shared/lib/parse-invite-url";
-import { isIOS, isNative } from "@/shared/lib/platform";
+import { getElectronAPI, isElectron, isIOS, isNative } from "@/shared/lib/platform";
 
 /** A URL "looks like ours" if it targets a forta host or uses the custom
  *  scheme — i.e. something the user clearly expected to open the app, but
@@ -168,13 +168,22 @@ export function onColdStartLaunchUrlForTesting(url: string): void {
   ingest(url, "cold-start");
 }
 
-/** Wire up the Capacitor listener. Safe to call once per app lifetime;
- *  subsequent calls are no-ops. On iOS we additionally drain the cold-start
- *  launch URL via `App.getLaunchUrl()` to recover Universal Links that fired
- *  before our JS listener was alive. */
+/** Wire up Capacitor / Electron deep-link listeners. Safe to call once per
+ *  app lifetime; subsequent calls are no-ops. On iOS we additionally drain the
+ *  cold-start launch URL via `App.getLaunchUrl()` to recover Universal Links
+ *  that fired before our JS listener was alive. */
 export function setupDeepLinkHandler(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
+
+  if (isElectron) {
+    const api = getElectronAPI();
+    if (!api?.onDeepLink) return;
+    api.onDeepLink((url) => {
+      onDeepLinkOpen(url);
+    });
+    return;
+  }
 
   if (!isNative) return;
 

@@ -49,6 +49,7 @@ import {
   loadMnemonic,
   clearMnemonic,
   syncProfileToMatrix,
+  syncDisplayNameAfterInit,
   readSelfProfile,
   writeSelfProfile,
   clearSelfProfile,
@@ -693,6 +694,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+
+        // Sync Pocketnet name → Matrix displayname when it changed since last push.
+        // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
+        if (address.value && userInfo.value?.name) {
+          void syncDisplayNameAfterInit(matrixService, {
+            userId: address.value,
+            name: userInfo.value.name,
+          });
+        }
 
         // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
         // soon as Matrix is connected, BEFORE we wait for PREPARED. The
@@ -1624,10 +1634,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             console.log("[auth] PKOIN received, broadcasting UserInfo...");
             setRegistrationPhase('broadcasting');
             try {
-              await appInitializer.syncNodeTime();
+              await withTimeout(
+                appInitializer.syncNodeTime(),
+                RPC_CALL_TIMEOUT,
+                "syncNodeTime",
+              );
               const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
               // Bypass local getuserprofile cache before broadcast.
-              await appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true });
+              await withTimeout(
+                appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true }),
+                RPC_CALL_TIMEOUT,
+                "initializeAndFetchUserData",
+              );
+              // registerUserProfile now forces a real send (not just queue) and
+              // throws if no txid — pendingRegProfile stays set on failure so
+              // the next poll can retry instead of hanging on confirming.
               const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
               registrationFnode = registrationNode;
               console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
@@ -1661,7 +1682,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         const actionsStatus = appInitializer.getAccountRegistrationStatus();
         console.log("[auth] Registration poll — actions:", actionsStatus, "(attempt", attempt, ")");
 
-        if (actionsStatus === 'registered') {
+        // 'undefined_status' = UserInfo action completed but status.value not
+        // flipped yet (SDK race). Treat as confirmed — otherwise we spin on
+        // step 2 until getuserstate catches up (or forever if it never does).
+        if (actionsStatus === 'registered' || actionsStatus === 'undefined_status') {
           console.log("[auth] Registration confirmed via Actions system!");
           await onRegistrationConfirmed();
           return;
@@ -1786,6 +1810,24 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         } catch (e) {
           console.warn("[auth] Matrix init failed after registration confirmation:", e);
           // Non-fatal: Matrix will retry on next app interaction or reload
+        }
+      } else {
+        // Matrix already marked ready during login, but the empty room-list
+        // skeleton may still be waiting for SYNCING (new accounts have no Dexie
+        // cache). Kick sync + force a room refresh so ChatSidebar can settle
+        // without requiring a page reload.
+        const chatStore = useChatStore();
+        if (chatStore.isRoomListLoading) {
+          try {
+            getMatrixClientService().client?.retryImmediately?.();
+          } catch (e) {
+            console.warn("[auth] retryImmediately after registration failed:", e);
+          }
+          try {
+            chatStore.refreshRoomsNow();
+          } catch (e) {
+            console.warn("[auth] refreshRoomsNow after registration failed:", e);
+          }
         }
       }
     }

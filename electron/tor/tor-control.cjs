@@ -253,12 +253,26 @@ class TorControl {
     }
 
     if (useSnowFlake2 && snowflakeExists) {
+      // CDN77 fronts (Tor Browser / Orbot) — AMP/Google fronts often blocked in RU.
+      const ice = [
+        'stun:stun.antisip.com:3478',
+        'stun:stun.epygi.com:3478',
+        'stun:stun.uls.co.za:3478',
+        'stun:stun.voipgate.com:3478',
+        'stun:stun.mixvoip.com:3478',
+        'stun:stun.nextcloud.com:443',
+        'stun:stun.sonetel.net:3478',
+        'stun:stun.voipia.net:3478',
+        'stun:stun.voys.nl:3478',
+      ].join(',');
+      const fronts = 'www.phpmyadmin.net,cdn.zk.mk';
+      const broker = 'https://1098762253.rsc.cdn77.org/';
       torConfig.push(
         '',
         'UseBridges 1',
         `ClientTransportPlugin snowflake exec ${snowflakeExecPath}`,
-        `Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://snowflake-broker.torproject.net/ ampcache=https://cdn.ampproject.org/ fronts=www.google.com,cdn.ampproject.org utls-imitate=hellorandomizedalpn ice=stun:stun.nextcloud.com:443,stun:stun.sipgate.net:10000,stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.bethesda.net:3478,stun:stun.mixvoip.com:3478,stun:stun.voipia.net:3478`,
-        `Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.torproject.net/ ampcache=https://cdn.ampproject.org/ fronts=www.google.com,cdn.ampproject.org utls-imitate=hellorandomizedalpn ice=stun:stun.nextcloud.com:443,stun:stun.sipgate.net:10000,stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.bethesda.net:3478,stun:stun.mixvoip.com:3478,stun:stun.voipia.net:3478`,
+        `Bridge snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=${broker} fronts=${fronts} ice=${ice} utls-imitate=hellorandomizedalpn`,
+        `Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=${broker} fronts=${fronts} ice=${ice} utls-imitate=hellorandomizedalpn`,
       );
     }
 

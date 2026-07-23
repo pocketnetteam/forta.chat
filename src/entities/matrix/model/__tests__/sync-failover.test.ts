@@ -274,6 +274,16 @@ describe("matrix-client.ts wiring", () => {
     expect(recreateBody).toMatch(/if\s*\(\s*this\.failoverActive\s*\|\|\s*this\.building\s*\)\s*return/);
   });
 
+  it("failed mirror recreate does not leave the service without a client", () => {
+    const recreateIdx = source.indexOf("recreateOnNextMirror");
+    expect(recreateIdx).toBeGreaterThan(-1);
+    const recreateBody = source.slice(recreateIdx, recreateIdx + 2200);
+    expect(recreateBody).toContain("failover recovery rebuilt client on original host");
+    expect(recreateBody).toContain("this.baseUrl = `https://${current}`");
+    expect(recreateBody).toContain('this.client = null');
+    expect(recreateBody).toContain("const fallbackClient = await this.getClient()");
+  });
+
   it("pingServers пропускается под Tor (review M2)", () => {
     const pingIdx = source.indexOf("async pingServers(");
     const pingBody = source.slice(pingIdx, pingIdx + 400);

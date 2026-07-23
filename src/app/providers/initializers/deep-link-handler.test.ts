@@ -15,6 +15,8 @@ vi.mock("@capacitor/app", () => ({
 vi.mock("@/shared/lib/platform", () => ({
   isNative: false,
   isIOS: false,
+  isElectron: false,
+  getElectronAPI: () => undefined,
 }));
 
 import {
@@ -90,6 +92,16 @@ describe("deep-link-handler", () => {
 
     onDeepLinkOpen(`forta://invite?ref=${VALID_ADDR}`);
     expect(onInvite).toHaveBeenCalledWith({ address: VALID_ADDR });
+  });
+
+  it("routes forta://room/<id> path deep links", () => {
+    const onInvite = vi.fn();
+    const onJoin = vi.fn();
+    registerDeepLinkHandlers({ onInvite, onJoin });
+
+    onDeepLinkOpen(`forta://room/${encodeURIComponent(ROOM_ID)}`);
+    expect(onJoin).toHaveBeenCalledWith({ roomId: ROOM_ID });
+    expect(onInvite).not.toHaveBeenCalled();
   });
 
   it("routes hash-based invite URLs (legacy web format)", () => {

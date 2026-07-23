@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
 import { useTorStore } from "@/entities/tor";
+import { getElectronAPI } from "@/shared/lib/platform";
 import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 
 const authStore = useAuthStore();
@@ -19,19 +20,20 @@ const torStatusText = computed(() => {
   }
 });
 
-const isMac = (window as any).electronAPI?.platform === "darwin";
+const electronAPI = getElectronAPI();
+const isMac = electronAPI?.platform === "darwin";
 const isMaximized = ref(false);
 
 onMounted(() => {
-  const api = (window as any).electronAPI;
+  const api = getElectronAPI();
   if (!api) return;
-  api.onMaximized?.(() => { isMaximized.value = true; });
-  api.onUnmaximized?.(() => { isMaximized.value = false; });
+  api.onMaximized(() => { isMaximized.value = true; });
+  api.onUnmaximized(() => { isMaximized.value = false; });
 });
 
-const minimize = () => (window as any).electronAPI?.minimize();
-const maximize = () => (window as any).electronAPI?.maximize();
-const close = () => (window as any).electronAPI?.close();
+const minimize = () => getElectronAPI()?.minimize();
+const maximize = () => getElectronAPI()?.maximize();
+const close = () => getElectronAPI()?.close();
 
 const torDotColor = computed(() => {
   switch (torStore.status) {

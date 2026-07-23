@@ -41,6 +41,11 @@ function toNativeMode(mode: TorMode | 'never'): 'always' | 'auto' | 'never' | 'n
   return mode;
 }
 
+export type TorStartOptions = {
+  mode?: TorMode;
+  bridgeType?: string;
+};
+
 class TorService {
   private _ready = ref(false);
   private _progress = ref(0);
@@ -79,7 +84,7 @@ class TorService {
     });
   }
 
-  async init(mode: TorMode = 'always'): Promise<void> {
+  async init(mode: TorMode = 'always', bridgeType = 'NONE'): Promise<void> {
     // Tor is not shipped on iOS — see docs/plans/ios/2026-05-12-ios-overall-plan.md
     // and 2026-05-12-ios-simple-tasks.md Task 4. JS callers see a stable API
     // surface but every native call is a no-op; downstream code falls back to
@@ -96,6 +101,7 @@ class TorService {
     }
 
     this._mode.value = mode;
+    this._bridgeType.value = bridgeType;
     await this._registerListeners();
 
     if (mode === 'neveruse') {
@@ -105,7 +111,10 @@ class TorService {
       return;
     }
 
-    const result = await TorNative.startDaemon({ mode: toNativeMode(mode) });
+    const result = await TorNative.startDaemon({
+      mode: toNativeMode(mode),
+      bridgeType,
+    });
     this._proxyPort.value = result.proxyPort;
     this._ready.value = true;
   }
@@ -115,23 +124,31 @@ class TorService {
    * Sets isReady=true when bootstrap completes.
    * Sets initFailed=true if Tor cannot start within time limits.
    */
-  initBackground(mode: TorMode = 'auto'): void {
+  initBackground(modeOrOpts: TorMode | TorStartOptions = 'auto'): void {
     if (isIOS) {
       this._ready.value = true;
       this._state.value = 'NEVER';
       this._proxyPort.value = 0;
       return;
     }
+
+    const opts: TorStartOptions =
+      typeof modeOrOpts === 'string' ? { mode: modeOrOpts } : modeOrOpts;
+    const mode = opts.mode ?? 'auto';
+    const bridgeType = opts.bridgeType ?? this._bridgeType.value;
+
+    this._mode.value = mode;
+    this._bridgeType.value = bridgeType;
+
     if (!isNative) {
       this._ready.value = true;
       return;
     }
 
-    this._mode.value = mode;
     this._initFailed.value = false;
-    this._initPromise = this._startWithStallDetection(mode)
+    this._initPromise = this._startWithStallDetection(mode, bridgeType)
       .then(() => {
-        console.log('[TOR] Background init succeeded');
+        console.log('[TOR] Background init succeeded bridge=', bridgeType);
       })
       .catch((err) => {
         console.warn('[TOR] Background init failed:', err.message);
@@ -139,17 +156,23 @@ class TorService {
       });
   }
 
-  private async _startWithStallDetection(mode: TorMode): Promise<void> {
-    const MAX_WAIT = 90_000;
-    const STALL_TIMEOUT = 20_000;
+  private async _startWithStallDetection(
+    mode: TorMode,
+    bridgeType: string,
+  ): Promise<void> {
+    const MAX_WAIT = 120_000;
+    // Snowflake often sits at ~10% while hunting proxies; allow a longer stall.
+    const STALL_TIMEOUT = bridgeType.toUpperCase() === 'SNOWFLAKE' ? 60_000 : 25_000;
 
     await this._registerListeners();
 
-    const startPromise = TorNative.startDaemon({ mode: toNativeMode(mode) })
-      .then((result) => {
-        this._proxyPort.value = result.proxyPort;
-        this._ready.value = true;
-      });
+    const startPromise = TorNative.startDaemon({
+      mode: toNativeMode(mode),
+      bridgeType,
+    }).then((result) => {
+      this._proxyPort.value = result.proxyPort;
+      this._ready.value = true;
+    });
 
     const startTime = Date.now();
     let lastProgress = 0;

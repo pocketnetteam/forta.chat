@@ -1,4 +1,5 @@
 import { IS_DEV } from "@/shared/config";
+import { isElectron } from "@/shared/lib/platform";
 import { loadScript } from "@/shared/lib/loadScript";
 
 const scriptsToLoad = {
@@ -48,8 +49,6 @@ export const loadChatScripts = (): Promise<void> => {
 
 async function _loadChatScriptsImpl(): Promise<void> {
   try {
-    const isElectron = !!(window as any).electronAPI?.isElectron;
-
     const normalizeScriptName = (scriptName: string): string => {
       if (scriptName.endsWith(".js")) {
         if (isElectron && scriptName.startsWith("/")) return "." + scriptName;

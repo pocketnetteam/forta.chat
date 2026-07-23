@@ -103,6 +103,27 @@ describe("parseJoinUrl", () => {
     });
   });
 
+  it("parses forta://room/<id> path form (Electron Phase 2)", () => {
+    const encoded = encodeURIComponent(ROOM_ID);
+    expect(parseJoinUrl(`forta://room/${encoded}`)).toEqual({
+      roomId: ROOM_ID,
+    });
+  });
+
+  it("parses https://forta.chat/room/<id> path form", () => {
+    const encoded = encodeURIComponent(ROOM_ID);
+    expect(parseJoinUrl(`https://forta.chat/room/${encoded}`)).toEqual({
+      roomId: ROOM_ID,
+    });
+  });
+
+  it("parses forta://room?room=<id> query form", () => {
+    const encoded = encodeURIComponent(ROOM_ID);
+    expect(parseJoinUrl(`forta://room?room=${encoded}`)).toEqual({
+      roomId: ROOM_ID,
+    });
+  });
+
   it("returns null for missing room param", () => {
     expect(parseJoinUrl("https://forta.chat/join")).toBeNull();
   });

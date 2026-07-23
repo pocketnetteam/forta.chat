@@ -1077,7 +1077,7 @@ export function useFileDownload() {
     }
 
     if (isElectron) {
-      const electronAPI = (window as any).electronAPI;
+      const electronAPI = window.electronAPI;
       if (electronAPI?.saveFile) {
         try {
           const response = await fetch(objectUrl);
