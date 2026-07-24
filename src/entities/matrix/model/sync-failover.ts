@@ -20,6 +20,10 @@ export const PING_TIMEOUT_MS = 4_000;
 export const ERROR_RETRY_BASE_MS = 2_000;
 export const ERROR_RETRY_MAX_MS = 30_000;
 
+/** Backoff for rebuilding a Matrix client after `client === null` (total outage). */
+export const CLIENT_RECOVERY_BASE_MS = 2_000;
+export const CLIENT_RECOVERY_MAX_MS = 60_000;
+
 /** Ordered homeserver hosts for /sync: primary first, then mirrors. */
 export const MATRIX_SYNC_HOSTS: readonly string[] = [MATRIX_SERVER, ...MATRIX_MIRRORS];
 
@@ -65,6 +69,39 @@ export async function pickLiveMatrixHost(
     }
   }
   return primary;
+}
+
+/**
+ * Probe `hosts` in order and return the first that answers, or `null` when
+ * every probe fails. Unlike {@link pickLiveMatrixHost}, this does NOT fall
+ * back to primary on total outage — callers use that to defer destructive
+ * failover (keep the existing client) instead of destroying it blindly.
+ */
+export async function findLiveMatrixHost(
+  probe: HostProbe,
+  hosts: readonly string[],
+): Promise<string | null> {
+  for (const host of hosts) {
+    try {
+      if (await probe(host)) return host;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/**
+ * Probe order for a watchdog failover: prefer the rotation target first, then
+ * the remaining configured hosts (so we can still land on the current host if
+ * only it is reachable again).
+ */
+export function failoverProbeOrder(
+  preferred: string,
+  hosts: readonly string[] = MATRIX_SYNC_HOSTS,
+): string[] {
+  const rest = hosts.filter((h) => h !== preferred);
+  return [preferred, ...rest];
 }
 
 export interface SyncWatchdogDeps {
@@ -179,6 +216,22 @@ export class SyncWatchdog {
     this.firing = false;
     this.consecutiveErrors = 0;
     this.clearStaleTimer();
+  }
+
+  /**
+   * Call when `onFailover` probed hosts and found none live — we kept the
+   * existing client. Undo the budget increment from {@link trigger} so a
+   * total DNS outage does not burn `maxConsecutiveFailovers`, then re-arm
+   * the stale timer so we probe again after `staleTimeoutMs`.
+   */
+  deferFailover(): void {
+    if (this.consecutiveFailovers > 0) this.consecutiveFailovers -= 1;
+    this.firing = false;
+    this.consecutiveErrors = 0;
+    this.clearStaleTimer();
+    if (!this.stopped && this.deps.isOnline()) {
+      this.armStaleTimer();
+    }
   }
 
   /** Permanently stop (logout / client teardown). */

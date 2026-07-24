@@ -148,6 +148,35 @@ const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *  no poll is currently active. */
 let _registrationPollKick: (() => void) | null = null;
 
+/** Debounce wallet.refresh() from blockchain-ws block/tx floods so a proxy
+ *  outage does not stampede getaddressinfo/ping on every reconnect event. */
+const WALLET_REFRESH_DEBOUNCE_MS = 8_000;
+let _walletRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let _walletRefreshInFlight = false;
+
+function scheduleWalletRefreshFromChain(): void {
+  if (_walletRefreshInFlight) return;
+  if (_walletRefreshTimer !== null) return;
+  _walletRefreshTimer = setTimeout(() => {
+    _walletRefreshTimer = null;
+    _walletRefreshInFlight = true;
+    import("@/features/wallet/model/wallet-store")
+      .then(({ useWalletStore }) => useWalletStore().refresh())
+      .catch(() => { /* wallet not ready — ignore */ })
+      .finally(() => {
+        _walletRefreshInFlight = false;
+      });
+  }, WALLET_REFRESH_DEBOUNCE_MS);
+}
+
+function clearWalletRefreshSchedule(): void {
+  if (_walletRefreshTimer !== null) {
+    clearTimeout(_walletRefreshTimer);
+    _walletRefreshTimer = null;
+  }
+  _walletRefreshInFlight = false;
+}
+
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
   const backgroundSyncManager = new BackgroundSyncManager();
@@ -797,15 +826,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                   pcrypto.value.setBlock({ height });
                 }
                 // Lazy-import to avoid circular dependency wallet → auth.
-                import("@/features/wallet/model/wallet-store")
-                  .then(({ useWalletStore }) => useWalletStore().refresh())
-                  .catch(() => { /* wallet not ready — ignore */ });
+                scheduleWalletRefreshFromChain();
                 _registrationPollKick?.();
               },
               onTransaction: () => {
-                import("@/features/wallet/model/wallet-store")
-                  .then(({ useWalletStore }) => useWalletStore().refresh())
-                  .catch(() => { /* wallet not ready — ignore */ });
+                scheduleWalletRefreshFromChain();
                 _registrationPollKick?.();
               },
               onUserInfo: ({ addrFrom }) => {
@@ -1323,6 +1348,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // ── 1.5. Stop best-effort blockchain WS BEFORE Matrix teardown so its
     //         handlers can't try to refresh torn-down stores. ──
     try { blockchainWs.stop(); } catch { /* ignore */ }
+    clearWalletRefreshSchedule();
 
     // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
@@ -2051,6 +2077,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // Stop blockchain WS before Matrix so its handlers can't fire against
       // torn-down stores; initMatrix() below will re-start it for the new account.
       try { blockchainWs.stop(); } catch { /* ignore */ }
+      clearWalletRefreshSchedule();
       resetMatrixClientService();
       matrixReady.value = false;
       matrixError.value = null;

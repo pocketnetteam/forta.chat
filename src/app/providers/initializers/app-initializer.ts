@@ -110,6 +110,13 @@ export class AppInitializer {
   private scoreFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private scoreFlushUpdate = false;
 
+  /** Coalesce concurrent getBlockHeight callers + cool down after a failed /
+   *  zero-height result so outages don't stampede node-failover RPCs. */
+  private blockHeightInFlight: Promise<number> | null = null;
+  private blockHeightCooldownUntil = 0;
+  private blockHeightLastResult = 0;
+  private static readonly BLOCK_HEIGHT_COOLDOWN_MS = 45_000;
+
   constructor(pocketnetInstance: PocketnetInstanceType) {
     this.pocketnetInstance = pocketnetInstance;
 
@@ -151,14 +158,37 @@ export class AppInitializer {
   /** Fetch current blockchain block height via getnodeinfo RPC.
    *  Block height is the linchpin for Pcrypto key derivation, so a single
    *  502 node must not zero it out: try the SDK path first, then fall back to a
-   *  direct getnodeinfo fetch that fails over across all configured nodes. */
+   *  direct getnodeinfo fetch that fails over across all configured nodes.
+   *
+   *  Concurrent callers share one in-flight promise. After a zero/failed
+   *  result we cool down (~45s) and return the last known height so a DNS
+   *  outage does not stampede every proxy node on each 60s poll + WS reconnect. */
   async getBlockHeight(): Promise<number> {
+    if (this.blockHeightInFlight) return this.blockHeightInFlight;
+
+    if (Date.now() < this.blockHeightCooldownUntil) {
+      return this.blockHeightLastResult;
+    }
+
+    this.blockHeightInFlight = this.fetchBlockHeightUncached().finally(() => {
+      this.blockHeightInFlight = null;
+    });
+    return this.blockHeightInFlight;
+  }
+
+  private async fetchBlockHeightUncached(): Promise<number> {
+    let height = 0;
+
     // Primary: SDK Api (has its own internal node handling).
     if (this.api) {
       try {
         const info = await this.api.rpc("getnodeinfo");
-        const height = info?.height ?? 0;
-        if (height > 0) return height;
+        height = info?.height ?? 0;
+        if (height > 0) {
+          this.blockHeightLastResult = height;
+          this.blockHeightCooldownUntil = 0;
+          return height;
+        }
         console.warn("[appInit] getBlockHeight via SDK returned 0 — falling back to direct node failover");
       } catch (e) {
         console.warn("[appInit] getBlockHeight via SDK failed — falling back to direct node failover:", e);
@@ -172,11 +202,19 @@ export class AppInitializer {
       const envelope = await callPocketnetRpc<{ height?: number }>({
         method: "getnodeinfo",
       });
-      return unwrapRpcPayload(envelope).height ?? 0;
+      height = unwrapRpcPayload(envelope).height ?? 0;
     } catch (e) {
       console.error("[appInit] getBlockHeight error (all nodes failed):", e);
-      return 0;
+      height = 0;
     }
+
+    if (height > 0) {
+      this.blockHeightLastResult = height;
+      this.blockHeightCooldownUntil = 0;
+    } else {
+      this.blockHeightCooldownUntil = Date.now() + AppInitializer.BLOCK_HEIGHT_COOLDOWN_MS;
+    }
+    return height;
   }
 
   /** Find a proxy node that has a registration wallet.
