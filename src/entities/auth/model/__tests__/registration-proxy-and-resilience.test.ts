@@ -74,7 +74,7 @@ describe("registration: proxy rotation & resilience (session 05)", () => {
     const src = getStoresSource();
     const logoutStart = src.indexOf("const logout = async");
     expect(logoutStart).toBeGreaterThan(-1);
-    const logoutFn = src.slice(logoutStart, logoutStart + 3000);
+    const logoutFn = src.slice(logoutStart, logoutStart + 4500);
     expect(logoutFn).toMatch(/clearGlobalUser|clearUserAddress/);
   });
 

@@ -22,10 +22,15 @@ import {
   pickLiveMatrixHost,
   nextMatrixHost,
   hostFromBaseUrl,
+  findLiveMatrixHost,
+  failoverProbeOrder,
   SyncWatchdog,
   PING_TIMEOUT_MS,
   ERROR_RETRY_BASE_MS,
   ERROR_RETRY_MAX_MS,
+  CLIENT_RECOVERY_BASE_MS,
+  CLIENT_RECOVERY_MAX_MS,
+  MATRIX_SYNC_HOSTS,
 } from "./sync-failover";
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
 
@@ -65,6 +70,13 @@ export class MatrixClientService {
   // replacing the old tight retryImmediately() loop (WEE-105 H2).
   private errorRetryAttempt = 0;
   private errorRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Persistent rebuild after client was destroyed and every host was unreachable
+  // (full DNS/outage). Without this the tab stays dead until a manual reload.
+  private clientRecoveryAttempt = 0;
+  private clientRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private clientRecoveryListenersAttached = false;
+  private onOnlineRecovery: (() => void) | null = null;
+  private onVisibilityRecovery: (() => void) | null = null;
 
   setTorProxyUrl(url: string) {
     this.torProxyUrl = url;
@@ -569,12 +581,25 @@ export class MatrixClientService {
     // latency. Tor is out of scope here (it isn't a working transport for us),
     // so keep the current host and skip probing entirely.
     if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
-    return pickLiveMatrixHost((host) =>
-      axios
-        .get(`https://${host}/_matrix/client/versions`, { timeout: PING_TIMEOUT_MS })
-        .then(() => true)
-        .catch(() => false),
-    );
+    return pickLiveMatrixHost((host) => this.probeHost(host));
+  }
+
+  /** Single-host /versions probe. Tor skips network and treats the current
+   *  baseUrl host as live. */
+  private async probeHost(host: string): Promise<boolean> {
+    if (this.torProxyUrl) return host === hostFromBaseUrl(this.baseUrl);
+    try {
+      await axios.get(`https://${host}/_matrix/client/versions`, { timeout: PING_TIMEOUT_MS });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** First live host in `order`, or null when every probe fails (no primary fallback). */
+  private async findLiveHost(order: readonly string[]): Promise<string | null> {
+    if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
+    return findLiveMatrixHost((host) => this.probeHost(host), order);
   }
 
   /** Stop the current SDK client without tearing down handlers/credentials/
@@ -590,8 +615,54 @@ export class MatrixClientService {
     this.chatsReady = false;
   }
 
+  /** Destroy current client (if any) and rebuild against `host`. Throws on failure. */
+  private async swapClientToHost(host: string): Promise<void> {
+    this.stopClientOnly();
+    this.baseUrl = `https://${host}`;
+    const nextClient = await this.getClient();
+    if (!nextClient) {
+      throw new Error(`[matrix] failover to ${host} returned no client`);
+    }
+    this.client = nextClient;
+    this.store = nextClient.store;
+    this.ready = true;
+    this.error = false;
+  }
+
+  /**
+   * After a destructive swap failed, try any host that still answers /versions.
+   * Returns true when a client was rebuilt.
+   */
+  private async tryRebuildOnAnyLiveHost(preferHost: string): Promise<boolean> {
+    const order = failoverProbeOrder(preferHost, MATRIX_SYNC_HOSTS);
+    for (const host of order) {
+      const live = await this.probeHost(host);
+      if (!live) continue;
+      try {
+        this.baseUrl = `https://${host}`;
+        const rebuilt = await this.getClient();
+        if (rebuilt) {
+          this.client = rebuilt;
+          this.store = rebuilt.store;
+          this.ready = true;
+          this.error = false;
+          console.warn(`[matrix] failover recovery rebuilt client on ${host}`);
+          return true;
+        }
+      } catch (e) {
+        console.warn(`[matrix] failover recovery on ${host} failed:`, e);
+      }
+    }
+    return false;
+  }
+
   /** Watchdog-triggered recovery: rotate baseUrl to the next mirror and rebuild
-   *  the client without a page reload (WEE-105 A2). */
+   *  the client without a page reload (WEE-105 A2).
+   *
+   *  Probe-before-destroy: never call stopClientOnly until at least one
+   *  homeserver answers /versions. A total DNS outage must leave the existing
+   *  (ERROR) client in place so scheduleErrorRetry can heal when the network
+   *  returns — destroying first left the tab permanently dead (client=null). */
   private async recreateOnNextMirror(): Promise<void> {
     // Yield to any in-flight client (re)creation — a concurrent boot-retry
     // init() or a previous recreate owns `this.client` until it settles.
@@ -601,49 +672,145 @@ export class MatrixClientService {
     const current = hostFromBaseUrl(this.baseUrl);
     const next = nextMatrixHost(current);
     console.warn(`[matrix] sync stuck — failing over ${current} → ${next}`);
+    let deferred = false;
     try {
-      this.stopClientOnly();
-      this.baseUrl = `https://${next}`;
-      const nextClient = await this.getClient();
-      if (nextClient) {
-        this.client = nextClient;
-        this.store = nextClient.store;
-        this.ready = true;
-        this.error = false;
-      } else {
-        throw new Error(`[matrix] failover to ${next} returned no client`);
+      const liveHost = await this.findLiveHost(failoverProbeOrder(next, MATRIX_SYNC_HOSTS));
+      if (!liveHost) {
+        console.warn("[matrix] failover deferred — no live host");
+        deferred = true;
+        return;
       }
-    } catch (e) {
-      console.error("[matrix] mirror failover recreate error:", e);
-      // Never leave the tab without any Matrix client after a failed failover.
-      // The previous client has already been stopped, so the best recovery is a
-      // fresh rebuild on the original host rather than waiting for a reload.
-      this.ready = false;
-      this.client = null;
-      this.store = null;
-      this.baseUrl = `https://${current}`;
+
       try {
-        const fallbackClient = await this.getClient();
-        if (fallbackClient) {
-          this.client = fallbackClient;
-          this.store = fallbackClient.store;
-          this.ready = true;
-          this.error = false;
-          console.warn(`[matrix] failover recovery rebuilt client on original host ${current}`);
-        } else {
-          this.error = `[matrix] failover recovery returned no client for ${current}`;
+        await this.swapClientToHost(liveHost);
+        this.clearClientRecovery();
+      } catch (e) {
+        console.error("[matrix] mirror failover recreate error:", e);
+        // Previous client is already stopped — try any other live host before
+        // accepting a dead-client state.
+        this.ready = false;
+        this.client = null;
+        this.store = null;
+        const recovered = await this.tryRebuildOnAnyLiveHost(current);
+        if (!recovered) {
+          this.error = String(e);
+          console.error("[matrix] failover recovery failed on all hosts:", e);
+          this.scheduleClientRecovery();
         }
-      } catch (recoveryError) {
-        console.error("[matrix] failover recovery on original host failed:", recoveryError);
-        this.error = String(recoveryError);
       }
     } finally {
       this.building = false;
       this.failoverActive = false;
-      // Re-arm so the new mirror is watched too — if it is also dead the
-      // watchdog rotates to the next host on the following episode (up to the
-      // failover budget).
-      this.watchdog?.reset();
+      if (deferred) {
+        // Do not burn the failover budget on a no-op outage probe.
+        this.watchdog?.deferFailover();
+      } else {
+        // Re-arm so the new mirror is watched too — if it is also dead the
+        // watchdog rotates to the next host on the following episode (up to the
+        // failover budget).
+        this.watchdog?.reset();
+      }
+    }
+  }
+
+  /** Schedule a rebuild when `client === null` after a failed destructive failover.
+   *  Single-flight exponential backoff; also woken by `online` / visibility. */
+  private scheduleClientRecovery(): void {
+    if (this.client || this.clientRecoveryTimer !== null) return;
+    this.attachClientRecoveryListeners();
+    const delay = Math.min(
+      CLIENT_RECOVERY_BASE_MS * 2 ** this.clientRecoveryAttempt,
+      CLIENT_RECOVERY_MAX_MS,
+    );
+    this.clientRecoveryAttempt += 1;
+    console.warn(
+      `[matrix] client dead — recovery retry in ${delay}ms (attempt ${this.clientRecoveryAttempt})`,
+    );
+    this.clientRecoveryTimer = setTimeout(() => {
+      this.clientRecoveryTimer = null;
+      void this.attemptClientRecovery();
+    }, delay);
+  }
+
+  private clearClientRecovery(): void {
+    if (this.clientRecoveryTimer !== null) {
+      clearTimeout(this.clientRecoveryTimer);
+      this.clientRecoveryTimer = null;
+    }
+    this.clientRecoveryAttempt = 0;
+    this.detachClientRecoveryListeners();
+  }
+
+  private attachClientRecoveryListeners(): void {
+    if (this.clientRecoveryListenersAttached || typeof window === "undefined") return;
+    this.clientRecoveryListenersAttached = true;
+    this.onOnlineRecovery = () => {
+      if (this.client) return;
+      // Collapse pending backoff and try immediately when the browser reports connectivity.
+      if (this.clientRecoveryTimer !== null) {
+        clearTimeout(this.clientRecoveryTimer);
+        this.clientRecoveryTimer = null;
+      }
+      void this.attemptClientRecovery();
+    };
+    this.onVisibilityRecovery = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (this.client) return;
+      if (this.clientRecoveryTimer !== null) {
+        clearTimeout(this.clientRecoveryTimer);
+        this.clientRecoveryTimer = null;
+      }
+      void this.attemptClientRecovery();
+    };
+    window.addEventListener("online", this.onOnlineRecovery);
+    document.addEventListener("visibilitychange", this.onVisibilityRecovery);
+  }
+
+  private detachClientRecoveryListeners(): void {
+    if (!this.clientRecoveryListenersAttached) return;
+    this.clientRecoveryListenersAttached = false;
+    if (typeof window !== "undefined" && this.onOnlineRecovery) {
+      window.removeEventListener("online", this.onOnlineRecovery);
+    }
+    if (typeof document !== "undefined" && this.onVisibilityRecovery) {
+      document.removeEventListener("visibilitychange", this.onVisibilityRecovery);
+    }
+    this.onOnlineRecovery = null;
+    this.onVisibilityRecovery = null;
+  }
+
+  private async attemptClientRecovery(): Promise<void> {
+    if (this.client || this.building || this.failoverActive) return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      this.scheduleClientRecovery();
+      return;
+    }
+    this.building = true;
+    try {
+      const liveHost = await this.findLiveHost(MATRIX_SYNC_HOSTS);
+      if (!liveHost) {
+        this.scheduleClientRecovery();
+        return;
+      }
+      this.baseUrl = `https://${liveHost}`;
+      const rebuilt = await this.getClient();
+      if (rebuilt) {
+        this.client = rebuilt;
+        this.store = rebuilt.store;
+        this.ready = true;
+        this.error = false;
+        this.clearClientRecovery();
+        this.ensureWatchdog();
+        this.watchdog?.reset();
+        console.warn(`[matrix] dead-client recovery rebuilt on ${liveHost}`);
+      } else {
+        this.scheduleClientRecovery();
+      }
+    } catch (e) {
+      console.warn("[matrix] dead-client recovery failed:", e);
+      this.scheduleClientRecovery();
+    } finally {
+      this.building = false;
     }
   }
 
@@ -1194,6 +1361,7 @@ export class MatrixClientService {
     this.failoverActive = false;
     this.building = false;
     this.clearErrorRetry();
+    this.clearClientRecovery();
     if (this.client) {
       this.client.removeAllListeners();
       this.client.stopClient();
