@@ -6,6 +6,8 @@ import {
   pickLiveMatrixHost,
   nextMatrixHost,
   hostFromBaseUrl,
+  findLiveMatrixHost,
+  failoverProbeOrder,
   SyncWatchdog,
   type SyncWatchdogDeps,
 } from "../sync-failover";
@@ -65,6 +67,52 @@ describe("nextMatrixHost / hostFromBaseUrl — host rotation", () => {
   it("hostFromBaseUrl снимает протокол и хвостовой слэш", () => {
     expect(hostFromBaseUrl("https://matrix.pocketnet.app")).toBe("matrix.pocketnet.app");
     expect(hostFromBaseUrl("https://matrix.pocketnet.app/")).toBe("matrix.pocketnet.app");
+  });
+});
+
+describe("findLiveMatrixHost / failoverProbeOrder — probe-before-destroy", () => {
+  it("возвращает null когда никто не отвечает (без fallback на primary)", async () => {
+    const probe = vi.fn(async () => false);
+    const picked = await findLiveMatrixHost(probe, HOSTS);
+    expect(picked).toBeNull();
+    expect(probe).toHaveBeenCalledTimes(HOSTS.length);
+  });
+
+  it("предпочитает preferred host в failoverProbeOrder", () => {
+    expect(failoverProbeOrder("b.host", ["a.host", "b.host", "c.host"])).toEqual([
+      "b.host",
+      "a.host",
+      "c.host",
+    ]);
+  });
+
+  it("findLiveMatrixHost идёт по порядку и останавливается на первом живом", async () => {
+    const probe = vi.fn(async (host: string) => host === "c.host");
+    const picked = await findLiveMatrixHost(probe, ["a.host", "b.host", "c.host"]);
+    expect(picked).toBe("c.host");
+    expect(probe).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("SyncWatchdog.deferFailover — outage не сжигает бюджет", () => {
+  it("deferFailover откатывает счётчик и позволяет следующий failover", () => {
+    const { wd, onFailover, advance } = makeWatchdog(
+      {},
+      { maxConsecutiveErrors: 1, maxConsecutiveFailovers: 2, staleTimeoutMs: 30_000 },
+    );
+    wd.notifySync("ERROR"); // failover 1
+    expect(onFailover).toHaveBeenCalledTimes(1);
+    wd.deferFailover(); // no live host — undo budget burn, re-arm stale
+    advance(30_000); // stale fires again
+    expect(onFailover).toHaveBeenCalledTimes(2);
+  });
+
+  it("без deferFailover бюджет исчерпывается на пустых попытках", () => {
+    const { wd, onFailover } = makeWatchdog({}, { maxConsecutiveErrors: 1, maxConsecutiveFailovers: 1 });
+    wd.notifySync("ERROR");
+    wd.reset(); // counts as spent
+    wd.notifySync("ERROR");
+    expect(onFailover).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -274,14 +322,36 @@ describe("matrix-client.ts wiring", () => {
     expect(recreateBody).toMatch(/if\s*\(\s*this\.failoverActive\s*\|\|\s*this\.building\s*\)\s*return/);
   });
 
-  it("failed mirror recreate does not leave the service without a client", () => {
+  it("failed mirror recreate does not leave the service without a recovery path", () => {
     const recreateIdx = source.indexOf("recreateOnNextMirror");
     expect(recreateIdx).toBeGreaterThan(-1);
-    const recreateBody = source.slice(recreateIdx, recreateIdx + 2200);
-    expect(recreateBody).toContain("failover recovery rebuilt client on original host");
-    expect(recreateBody).toContain("this.baseUrl = `https://${current}`");
-    expect(recreateBody).toContain('this.client = null');
-    expect(recreateBody).toContain("const fallbackClient = await this.getClient()");
+    const recreateBody = source.slice(recreateIdx, recreateIdx + 3500);
+    expect(recreateBody).toContain("failover deferred — no live host");
+    expect(recreateBody).toContain("findLiveHost");
+    expect(recreateBody).toContain("swapClientToHost");
+    expect(recreateBody).toContain("scheduleClientRecovery");
+    expect(recreateBody).toContain("tryRebuildOnAnyLiveHost");
+    expect(recreateBody).toContain("deferFailover");
+  });
+
+  it("probe-before-destroy: stopClientOnly only after a live host is found", () => {
+    const recreateIdx = source.indexOf("recreateOnNextMirror");
+    const recreateBody = source.slice(recreateIdx, recreateIdx + 3500);
+    // Live host must be resolved before any destructive stop.
+    const liveIdx = recreateBody.indexOf("findLiveHost");
+    const stopIdx = recreateBody.indexOf("swapClientToHost");
+    expect(liveIdx).toBeGreaterThan(-1);
+    expect(stopIdx).toBeGreaterThan(liveIdx);
+  });
+
+  it("dead-client recovery loop + destroy() clears it", () => {
+    expect(source).toContain("scheduleClientRecovery");
+    expect(source).toContain("attemptClientRecovery");
+    expect(source).toContain("clearClientRecovery");
+    expect(source).toMatch(/addEventListener\(\s*["']online["']/);
+    const destroyIdx = source.indexOf("destroy() {");
+    const destroyBody = source.slice(destroyIdx, destroyIdx + 600);
+    expect(destroyBody).toContain("clearClientRecovery");
   });
 
   it("pingServers пропускается под Tor (review M2)", () => {

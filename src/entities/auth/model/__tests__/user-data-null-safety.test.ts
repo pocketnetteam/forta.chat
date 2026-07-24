@@ -31,9 +31,12 @@ const getAppInitializerSource = () =>
 describe("UserData null-safety in registration/login flow", () => {
   it("app-initializer.loadUserData skips the onLoad callback when psdk returns null/undefined", () => {
     const src = getAppInitializerSource();
-    const fnStart = src.indexOf("loadUserData(");
-    expect(fnStart).toBeGreaterThan(-1);
-    const fn = src.slice(fnStart, fnStart + 1000);
+    // Prefer the method definition over earlier call sites.
+    const fnStart = src.indexOf("loadUserData(\n");
+    const altStart = src.indexOf("loadUserData(\r\n");
+    const start = fnStart >= 0 ? fnStart : altStart;
+    expect(start).toBeGreaterThan(-1);
+    const fn = src.slice(start, start + 2000);
     // The callback must be guarded — no unconditional `onLoad(userData)`.
     // Either an explicit userData truthiness check or early-return.
     expect(fn).toMatch(/if\s*\(\s*onLoad\s*&&\s*userData\s*\)|if\s*\(\s*userData\s*\)\s*\{[^}]*onLoad\(/);
