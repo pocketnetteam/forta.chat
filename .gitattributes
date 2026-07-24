@@ -1,0 +1,2 @@
+# Exact bytes required by Play Console package ownership verification.
+android/app/src/main/assets/adi-registration.properties -text
