@@ -67,19 +67,31 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build release APK
+      - name: Build sideload APK and Play AAB
         working-directory: android
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleSideloadRelease bundlePlayRelease
         env:
           RELEASE_STORE_FILE: release-keystore.jks
           RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
-      - name: Rename APK
+      - name: Verify distribution manifests
+        run: node scripts/verify-android-distribution.mjs
+
+      - name: Rename APK and AAB
         run: |
-          mv android/app/build/outputs/apk/release/app-release.apk \
-             android/app/build/outputs/apk/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
+          APK_DIR="android/app/build/outputs/apk/sideload/release"
+          AAB_DIR="android/app/build/outputs/bundle/playRelease"
+          if [ ! -f "$APK_DIR/app-sideload-release.apk" ]; then
+            echo "ERROR: signed sideload APK missing — check RELEASE_* signing secrets" >&2
+            ls -la "$APK_DIR" || true
+            exit 1
+          fi
+          mv "$APK_DIR/app-sideload-release.apk" \
+             "$APK_DIR/forta-chat-${{ steps.version.outputs.VERSION }}.apk"
+          mv "$AAB_DIR/app-play-release.aab" \
+             "$AAB_DIR/forta-chat-${{ steps.version.outputs.VERSION }}.aab"
 
       - name: Extract release notes from tag
         id: notes
@@ -101,7 +113,9 @@ jobs:
         with:
           name: "Forta Chat ${{ github.ref_name }}"
           body: ${{ steps.notes.outputs.NOTES }}
-          files: android/app/build/outputs/apk/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
+          files: |
+            android/app/build/outputs/apk/sideload/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
+            android/app/build/outputs/bundle/playRelease/forta-chat-${{ steps.version.outputs.VERSION }}.aab
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -41,6 +41,18 @@ android {
             }
         }
     }
+    flavorDimensions += "distribution"
+    productFlavors {
+        sideload {
+            dimension "distribution"
+            isDefault true
+            buildConfigField "boolean", "ENABLE_APP_UPDATER", "true"
+        }
+        play {
+            dimension "distribution"
+            buildConfigField "boolean", "ENABLE_APP_UPDATER", "false"
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
@@ -78,7 +90,8 @@ dependencies {
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
 
-    // Auto-update: HTTP client + JSON parsing + coroutines
+    // Auto-update HTTP client (AppUpdater lives in main; required for both
+    // flavors to compile — gated at runtime via BuildConfig.ENABLE_APP_UPDATER)
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 

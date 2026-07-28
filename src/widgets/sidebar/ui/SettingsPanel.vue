@@ -7,7 +7,13 @@ import { AccountList, AddAccountModal } from "@/features/account-switcher";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative, isAndroid, hasTor, isElectron } from "@/shared/lib/platform";
+import {
+  isNative,
+  isAndroid,
+  hasTor,
+  isElectron,
+  resolveAppUpdaterEnabled,
+} from "@/shared/lib/platform";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import {
@@ -20,7 +26,7 @@ import { getLocalIssueCache } from "@/shared/lib/bug-report";
 import { BastyonInteropBanner } from "@/features/bastyon-interop";
 import { useSidebarTab } from "../model/use-sidebar-tab";
 
-// App updater Capacitor plugin (Android only)
+// App updater Capacitor plugin (Android sideload only; absent on Play builds)
 interface AppUpdaterPlugin {
   checkForUpdate(): Promise<void>;
 }
@@ -76,6 +82,8 @@ const currentUser = computed(() =>
 
 // --- App version ---
 const appVersion = ref("");
+/** Sideload Android only — Play AAB hides the check-updates control. */
+const appUpdaterEnabled = ref(false);
 onMounted(async () => {
   if (isNative) {
     try {
@@ -85,13 +93,14 @@ onMounted(async () => {
       appVersion.value = "";
     }
   }
+  appUpdaterEnabled.value = await resolveAppUpdaterEnabled();
 });
 
-// --- Check for updates (Android only) ---
+// --- Check for updates (Android sideload only) ---
 const updateChecking = ref(false);
 
 const handleCheckUpdates = async () => {
-  if (!AppUpdaterPlugin || updateChecking.value) return;
+  if (!AppUpdaterPlugin || !appUpdaterEnabled.value || updateChecking.value) return;
   updateChecking.value = true;
   try {
     await AppUpdaterPlugin.checkForUpdate();
@@ -500,14 +509,12 @@ const handleLogout = () => {
         </div>
 
         <!--
-          Auto-update is Android-only: Apple App Store policy forbids in-app
-          installation of binaries outside the Store. iOS users must update
-          via the App Store, which surfaces an update prompt automatically
-          when a newer build is published. See
-          docs/plans/ios/2026-05-12-ios-simple-tasks.md Task 6.
+          Auto-update is Android sideload only (not Play AAB): Apple App Store
+          and Google Play forbid in-app APK install outside their stores.
+          See docs/plans/ios/2026-05-12-ios-simple-tasks.md Task 6.
         -->
         <button
-          v-if="isAndroid"
+          v-if="appUpdaterEnabled"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
           :disabled="updateChecking"
           @click="handleCheckUpdates"
