@@ -225,6 +225,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 - [Privacy Policy](https://forta.chat/privacy.html)
 - [Terms of Use](https://forta.chat/terms.html)
+- [Child Safety Standards (CSAE)](https://forta.chat/csae.html)
 
 ## Links
 
