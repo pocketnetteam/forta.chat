@@ -52,7 +52,10 @@ class MainActivity : BridgeActivity() {
         registerPlugin(CallPlugin::class.java)
         registerPlugin(TorFilePlugin::class.java)
         registerPlugin(WebRTCPlugin::class.java)
-        registerPlugin(UpdaterPlugin::class.java)
+        // Sideload only — Play flavor must not expose in-app APK install.
+        if (BuildConfig.ENABLE_APP_UPDATER) {
+            registerPlugin(UpdaterPlugin::class.java)
+        }
         registerPlugin(PushDataPlugin::class.java)
         registerPlugin(LocalePlugin::class.java)
         registerPlugin(SaveMediaPlugin::class.java)
@@ -113,9 +116,11 @@ class MainActivity : BridgeActivity() {
         // safely reveals inputs within overflow containers while the shell
         // stays put. No scroll prevention needed.
 
-        // Auto-check for updates (respects 1-hour cache)
-        activityScope.launch {
-            AppUpdater.checkForUpdateIfNeeded(this@MainActivity, isManual = false)
+        // Auto-check for updates (sideload only; respects 1-hour cache)
+        if (BuildConfig.ENABLE_APP_UPDATER) {
+            activityScope.launch {
+                AppUpdater.checkForUpdateIfNeeded(this@MainActivity, isManual = false)
+            }
         }
 
         // Read system bar + IME insets and inject as CSS custom properties.

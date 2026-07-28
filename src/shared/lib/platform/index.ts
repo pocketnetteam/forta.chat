@@ -1,6 +1,8 @@
 import { Capacitor } from "@capacitor/core";
 import type { ElectronAPI } from "@/shared/types/electron";
 
+export { resolveAppUpdaterEnabled } from "./resolve-app-updater-enabled";
+
 /** True when running inside a native Capacitor shell (Android/iOS). */
 export const isNative = Capacitor.isNativePlatform();
 

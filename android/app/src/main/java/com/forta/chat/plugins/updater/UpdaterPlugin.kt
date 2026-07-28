@@ -1,6 +1,8 @@
 package com.forta.chat.plugins.updater
 
+import com.forta.chat.BuildConfig
 import com.forta.chat.updater.AppUpdater
+import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
@@ -16,7 +18,19 @@ class UpdaterPlugin : Plugin() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     @PluginMethod
+    fun isEnabled(call: PluginCall) {
+        val result = JSObject()
+        result.put("enabled", BuildConfig.ENABLE_APP_UPDATER)
+        call.resolve(result)
+    }
+
+    @PluginMethod
     fun checkForUpdate(call: PluginCall) {
+        if (!BuildConfig.ENABLE_APP_UPDATER) {
+            call.reject("AppUpdater is disabled for this build")
+            return
+        }
+
         val activity = activity ?: run {
             call.reject("Activity not available")
             return
