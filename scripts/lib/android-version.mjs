@@ -119,14 +119,32 @@ export function resolveNextAndroidVersion(baseVersions) {
  * @param {string} content
  * @param {string} versionName
  * @param {number} versionCode
+ * @returns {boolean}
+ */
+function buildGradleHasVersion(content, versionName, versionCode) {
+  const codeRe = new RegExp(`versionCode\\s+${versionCode}\\b`);
+  const nameRe = new RegExp(`versionName\\s+"${versionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
+  return codeRe.test(content) && nameRe.test(content);
+}
+
+/**
+ * @param {string} content
+ * @param {string} versionName
+ * @param {number} versionCode
  * @returns {string}
  */
 export function patchBuildGradle(content, versionName, versionCode) {
+  // Idempotent: CI may re-run inject when build.gradle already has the
+  // resolved version (e.g. committed locally for a Play re-upload).
+  if (buildGradleHasVersion(content, versionName, versionCode)) {
+    return content;
+  }
+
   const updated = content
     .replace(/versionCode \d+/, `versionCode ${versionCode}`)
     .replace(/versionName "[^"]*"/, `versionName "${versionName}"`);
 
-  if (updated === content) {
+  if (updated === content || !buildGradleHasVersion(updated, versionName, versionCode)) {
     throw new Error("build.gradle version fields were not updated");
   }
 
