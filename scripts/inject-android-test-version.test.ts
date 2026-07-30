@@ -75,6 +75,20 @@ describe("patchBuildGradle", () => {
     expect(result).toContain("versionCode 11046");
     expect(result).toContain('versionName "1.10.46"');
   });
+
+  it("is idempotent when build.gradle already has the target version", () => {
+    const already = `
+        versionCode 11104
+        versionName "1.11.4"
+`;
+    expect(patchBuildGradle(already, "1.11.4", 11_104)).toBe(already);
+  });
+
+  it("throws when version fields are missing", () => {
+    expect(() => patchBuildGradle("android { }", "1.11.4", 11_104)).toThrow(
+      /were not updated/,
+    );
+  });
 });
 
 describe("readPackageVersion", () => {
