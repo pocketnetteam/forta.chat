@@ -17,7 +17,7 @@ import PermissionDeniedModal from "@/features/video-calls/ui/PermissionDeniedMod
 import QuickSearchModal from "@/features/search/ui/QuickSearchModal.vue";
 import { JoinRoomPreviewModal } from "@/features/join-room";
 import { handleSdkSync } from "@/features/sync-status";
-import { getElectronAPI, isElectron, isNative } from "@/shared/lib/platform";
+import { getElectronAPI, isElectron, isIOS, isNative } from "@/shared/lib/platform";
 import { useRouter } from "vue-router";
 import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
@@ -33,6 +33,7 @@ import { useI18n } from "@/shared/lib/i18n";
 
 import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
 import { useIOSKeyboardCssVar } from "@/shared/lib/composables/use-ios-keyboard-css-var";
+import { useIOSKeyboardDismiss } from "@/shared/lib/composables/use-ios-keyboard-dismiss";
 import { useResumeRedirect } from "@/shared/lib/composables/use-resume-redirect";
 import { useUnreadDocumentTitle } from "@/shared/lib/composables/use-unread-document-title";
 import { useElectronUnreadBadge } from "@/shared/lib/composables/use-electron-unread-badge";
@@ -425,11 +426,17 @@ onMounted(async () => {
   // --safe-area-inset-bottom from @capacitor/keyboard events. Android
   // already drives these from MainActivity; this is a no-op there.
   useIOSKeyboardCssVar();
+  // iOS: tap outside focused inputs blurs so the soft keyboard dismisses.
+  useIOSKeyboardDismiss();
 
   // Initialize Android Share Target listener
   initShareTargetListener((data) => processExternalShare(data));
 
-  // Mark Electron mode on <html> for CSS adjustments (drag regions, traffic light padding)
+  // Mark platform on <html> for CSS adjustments (iOS keyboard padding,
+  // Electron drag regions / traffic light padding).
+  if (isIOS) {
+    document.documentElement.classList.add("is-ios");
+  }
   const electronAPI = getElectronAPI();
   if (electronAPI?.isElectron) {
     document.documentElement.classList.add("is-electron");

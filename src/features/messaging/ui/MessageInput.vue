@@ -926,7 +926,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
 </script>
 
 <template>
-  <div ref="inputRootRef" class="relative border-t border-neutral-grad-0 bg-background-total-theme">
+  <div ref="inputRootRef" data-keyboard-aware class="relative border-t border-neutral-grad-0 bg-background-total-theme">
     <!-- Send error banner (WEE-20): permission/upload/queue failures from
          sendFile/sendImage/sendAudio + voice recorder are routed here via
          the send-error bus so they stop disappearing silently. -->
