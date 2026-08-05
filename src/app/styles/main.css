@@ -28,6 +28,19 @@
   .pb-safe {
     padding-bottom: var(--safe-area-inset-bottom, 0px);
   }
+  /*
+   * iOS only: WebView does not resize (Keyboard.resize: 'none'), so the shell
+   * must lift above the soft keyboard via --keyboardheight. Android keeps the
+   * default .safe-* rules above — do not change those without coordinating
+   * with the Android keyboard workstream.
+   */
+  .is-ios .safe-bottom,
+  .is-ios .safe-y {
+    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
+  }
+  .is-ios .safe-all {
+    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
+  }
   /* Hide element when soft keyboard shrinks the viewport (FAB etc.) */
   .hide-on-keyboard {
     transition: opacity 0.15s ease, max-height 0.15s ease;

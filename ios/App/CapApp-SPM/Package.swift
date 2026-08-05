@@ -2,6 +2,8 @@
 import PackageDescription
 
 // DO NOT MODIFY THIS FILE - managed by Capacitor CLI commands
+// Paths use forward slashes so the package resolves on macOS Xcode builds
+// (Cap CLI on Windows may emit backslashes — normalize before committing).
 let package = Package(
     name: "CapApp-SPM",
     platforms: [.iOS(.v15)],

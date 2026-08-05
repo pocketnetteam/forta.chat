@@ -26,7 +26,8 @@
     "cap:apk": "npm run cap:build && node scripts/run-android-gradle.mjs assembleSideloadRelease",
     "cap:aab:play": "npm run cap:build && node scripts/run-android-gradle.mjs bundlePlayRelease",
     "cap:verify-dist": "node scripts/verify-android-distribution.mjs",
-    "cap:build:ios": "node scripts/sync-vendor-assets.mjs && vite build && npx cap sync ios",
+    "cap:version:ios": "node scripts/inject-ios-version.mjs",
+    "cap:build:ios": "npm run cap:version:ios && node scripts/sync-vendor-assets.mjs && vite build && npx cap sync ios",
     "cap:open:ios": "npx cap open ios",
     "cap:run:ios": "npm run cap:build:ios && npx cap run ios",
     "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\" && node scripts/sync-vendor-assets.mjs"
