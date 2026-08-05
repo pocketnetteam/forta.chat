@@ -18,7 +18,10 @@ Publish (локально или CI):
 npx electron-builder --config electron-builder.json --win --publish always
 ```
 
-На GitHub Release должны появиться installer + `latest.yml` / `latest-mac.yml` / `latest-linux.yml`.
+Publish на tag создаёт **draft** GitHub Release (`releaseType: draft` в `electron-builder.json`).
+На draft должны появиться installer + `latest.yml` / `latest-mac.yml` / `latest-linux.yml`
+(плюс Android assets из того же `release.yml`). Draft не виден `electron-updater` —
+сначала подпиши Win локально / замени `latest.yml`, затем Publish в UI GitHub.
 
 Критерий Phase 3: установка vN → публикация vN+1 → приложение предлагает обновиться и перезапускается.
 

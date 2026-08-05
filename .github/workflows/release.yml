@@ -1,0 +1,271 @@
+name: Release
+
+# Single tag workflow: desktop (Win/mac/Linux) + Android → one GitHub draft release.
+# Publish the draft manually after signing Windows locally and replacing latest.yml.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+          - os: macos-latest
+            platform: mac
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~\AppData\Local\electron
+            ~\AppData\Local\electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install Node dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Verify package.json version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json version ($PKG) does not match tag ($TAG)"
+            exit 1
+          fi
+
+      - name: Build web assets
+        run: npx vite build
+        env:
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
+
+      - name: Package and publish (${{ matrix.platform }})
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM: ${{ matrix.platform }}
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          SHARED_CSC_LINK: ${{ secrets.CSC_LINK }}
+          SHARED_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          EXTRA=()
+          if [ "$PLATFORM" = "mac" ]; then
+            export CSC_LINK="${MAC_CSC_LINK:-$SHARED_CSC_LINK}"
+            export CSC_KEY_PASSWORD="${MAC_CSC_KEY_PASSWORD:-$SHARED_CSC_KEY_PASSWORD}"
+          elif [ "$PLATFORM" = "win" ]; then
+            export CSC_LINK="${WIN_CSC_LINK:-$SHARED_CSC_LINK}"
+            export CSC_KEY_PASSWORD="${WIN_CSC_KEY_PASSWORD:-$SHARED_CSC_KEY_PASSWORD}"
+          else
+            unset CSC_LINK CSC_KEY_PASSWORD || true
+          fi
+
+          if { [ "$PLATFORM" = "mac" ] || [ "$PLATFORM" = "win" ]; } && [ -n "${CSC_LINK:-}" ]; then
+            EXTRA+=(-c.forceCodeSigning=true)
+            export CSC_IDENTITY_AUTO_DISCOVERY=true
+          else
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+
+          # Draft release (electron-builder.json releaseType: draft). Publish manually
+          # after local Windows signing + latest.yml replace.
+          PUBLISH=never
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            PUBLISH=always
+          fi
+
+          npx electron-builder --config electron-builder.json --"$PLATFORM" --publish "$PUBLISH" "${EXTRA[@]}"
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ github.ref_name }}
+          path: release/*
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Verify package.json version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json version ($PKG) does not match tag ($TAG)"
+            exit 1
+          fi
+
+      - name: Build web assets
+        run: npx vite build
+        env:
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Decode google-services.json
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 -d > android/app/google-services.json
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > android/app/release-keystore.jks
+
+      - name: Extract version from tag or package.json
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          IFS='.' read -r major minor patch <<< "$VERSION"
+          VERSION_CODE=$(( ${major:-0} * 10000 + ${minor:-0} * 100 + ${patch:-0} ))
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Inject version into build.gradle
+        run: |
+          sed -i 's/versionCode .*/versionCode ${{ steps.version.outputs.VERSION_CODE }}/' android/app/build.gradle
+          sed -i 's/versionName ".*"/versionName "${{ steps.version.outputs.VERSION }}"/' android/app/build.gradle
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build sideload APK and Play AAB
+        working-directory: android
+        run: ./gradlew assembleSideloadRelease bundlePlayRelease
+        env:
+          RELEASE_STORE_FILE: release-keystore.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Verify distribution manifests
+        run: node scripts/verify-android-distribution.mjs
+
+      - name: Rename APK and AAB
+        run: |
+          APK_DIR="android/app/build/outputs/apk/sideload/release"
+          AAB_DIR="android/app/build/outputs/bundle/playRelease"
+          if [ ! -f "$APK_DIR/app-sideload-release.apk" ]; then
+            echo "ERROR: signed sideload APK missing — check RELEASE_* signing secrets" >&2
+            ls -la "$APK_DIR" || true
+            exit 1
+          fi
+          mv "$APK_DIR/app-sideload-release.apk" \
+             "$APK_DIR/forta-chat-${{ steps.version.outputs.VERSION }}.apk"
+          mv "$AAB_DIR/app-play-release.aab" \
+             "$AAB_DIR/forta-chat-${{ steps.version.outputs.VERSION }}.aab"
+
+      - name: Extract release notes from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: notes
+        run: |
+          git fetch origin --tags --force
+          BODY="$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")"
+          if [ -z "$BODY" ]; then
+            BODY="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")"
+          fi
+          {
+            echo "NOTES<<EOFNOTES"
+            echo "$BODY"
+            echo "EOFNOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload Android assets to draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Forta Chat ${{ github.ref_name }}"
+          body: ${{ steps.notes.outputs.NOTES }}
+          draft: true
+          files: |
+            android/app/build/outputs/apk/sideload/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
+            android/app/build/outputs/bundle/playRelease/forta-chat-${{ steps.version.outputs.VERSION }}.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Android build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ github.ref_name }}
+          path: |
+            android/app/build/outputs/apk/sideload/release/forta-chat-*.apk
+            android/app/build/outputs/bundle/playRelease/forta-chat-*.aab
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup secrets
+        if: always()
+        run: |
+          rm -f android/app/release-keystore.jks
+          rm -f android/app/google-services.json
