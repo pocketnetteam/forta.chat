@@ -7,7 +7,7 @@
 | [electron-desktop-integration-plan.md](./electron-desktop-integration-plan.md) | Основной план: baseline → packaging → UX → updates → CI |
 | [packaging-checklist.md](./packaging-checklist.md) | Чеклист сборки и релиза installers |
 | [signing-and-updates.md](./signing-and-updates.md) | Phase 3: electron-updater, GitHub publish, signing env |
-| [ci-desktop.md](./ci-desktop.md) | Phase 4: desktop-smoke + desktop-release workflows |
+| [ci-desktop.md](./ci-desktop.md) | Phase 4: desktop-smoke + unified `release.yml` (desktop + Android draft) |
 | [smoke-checklist.md](./smoke-checklist.md) | Phase 0–2: ручной smoke на Win + команды верификации |
 
 ## Статус фаз
@@ -34,7 +34,7 @@ npm run electron:build:linux
 
 Артефакты: `release/` (gitignored).
 
-CI: `.github/workflows/desktop-smoke.yml` (PR), `desktop-release.yml` (tag `v*`).
+CI: `.github/workflows/desktop-smoke.yml` (PR), `release.yml` (tag `v*` → draft: desktop + Android).
 
 Deep links: `forta://join?room=<id>`, `forta://room/<id>`, `forta://invite?ref=<addr>`.
 

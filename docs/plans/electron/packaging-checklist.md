@@ -66,10 +66,12 @@ npm run electron:build:linux   # Ubuntu runner / Linux host
 
 ## Publish
 
-- [ ] Tag `v*` с версией = `package.json` (CI Desktop Release)
-- [ ] Upload на GitHub Release (`electron-builder --publish always` + `GH_TOKEN`) — или артефакты из Actions
+- [ ] Tag `v*` с версией = `package.json` (CI `release.yml` → **draft**)
+- [ ] Draft: desktop installers + `latest*.yml` + Android APK/AAB
+- [ ] Windows: подписать локально, заменить installer + `latest.yml` (`--clobber`)
+- [ ] Publish draft вручную в GitHub
 - [ ] Проверка download URL из `latest*.yml`
-- [ ] Пост в канал релиза + известные ограничения (unsigned / SmartScreen)
+- [ ] Пост в канал релиза + известные ограничения (SmartScreen на новых OV-сертах)
 - [ ] Smoke: vN → vN+1 auto-update (Settings → Desktop → Updates)
 
 CI details: [ci-desktop.md](./ci-desktop.md).

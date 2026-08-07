@@ -129,7 +129,7 @@ flowchart TB
 | Иконки installer / tray | один `public/forta-icon.png` | `.ico` (Win), `.icns` (mac), набор PNG (Linux/tray) |
 | Code signing | документировано | Win Authenticode + mac Developer ID + notarize (secrets в CI) |
 | Auto-update | ✅ electron-updater + GitHub publish | E2E после первого signed/tag release |
-| CI desktop builds | ✅ `desktop-smoke` + `desktop-release` | secrets signing optional |
+| CI desktop builds | ✅ `desktop-smoke` + `release.yml` (desktop+Android draft) | secrets signing optional |
 | Deep links | ✅ | `forta://` / `https://forta.chat/...` → open room |
 | System tray / close-to-tray | ✅ | опционально, UX как у мессенджеров |
 | Single instance | ✅ | `requestSingleInstanceLock` |
@@ -224,7 +224,7 @@ flowchart TB
 **Цель:** каждый tag / release собирает артефакты автоматически.
 
 ```yaml
-# .github/workflows/desktop-release.yml
+# .github/workflows/release.yml
 strategy:
   matrix:
     include:
@@ -237,10 +237,11 @@ strategy:
 ```
 
 - [x] Job `desktop-smoke` на PR: `vite build` + `scripts/electron-smoke.cjs` (xvfb на Ubuntu)
-- [x] Job `desktop-release` на tag `v*`: matrix + `--publish always` / GitHub Release + artifacts
-- [x] Secrets: signing + Apple notarize (документированы; optional — unsigned publish без certs)
+- [x] Job `release` на tag `v*`: desktop matrix + Android → draft GitHub Release + artifacts
+- [x] Secrets: signing + Apple notarize (документированы; optional — unsigned Win, локальная подпись)
+- [x] `releaseType: draft` — ручной Publish после Win signing
 - [x] Кэш `electron` download + `node_modules` (setup-node cache + actions/cache)
-- [x] Не смешивать с Android `cap:build` в одном job (отдельные workflows)
+- [x] Desktop и Android — отдельные jobs в одном `release.yml` (не один job / не два tag-publish)
 
 **Критерий готовности:** tag создаёт скачиваемые installer’ы для трёх ОС.
 
@@ -302,7 +303,7 @@ forta.chat/
 │   └── ci-desktop.md                          # фаза 4
 └── .github/workflows/
     ├── desktop-smoke.yml      # фаза 4 (PR)
-    └── desktop-release.yml    # фаза 4 (tag v*)
+    └── release.yml            # фаза 4 (tag v*: desktop + Android → draft)
 ```
 
 ---

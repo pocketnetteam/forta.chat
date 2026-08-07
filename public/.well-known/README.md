@@ -8,7 +8,7 @@ open the app directly instead of showing a chooser (or opening in Chrome).
 
 Мы **не** используем Google Play — APK раздаётся через GitHub Releases, подпись
 делается в CI из keystore, хранящегося как `ANDROID_KEYSTORE` в GitHub Secrets
-(см. `.github/workflows/android-release.yml`).
+(см. `.github/workflows/release.yml` / `android-release.yml`).
 
 Файл `assetlinks.json` в репозитории содержит **placeholder**
 (`PLACEHOLDER_FILL_BEFORE_RELEASE:...`) — так production-fingerprint не попадает
@@ -26,7 +26,7 @@ FTP-деплоя (`.github/workflows/deploy.yml`) через
 
 ## Требуемые GitHub Secrets
 
-Уже существуют (используются в `android-release.yml`):
+Уже существуют (используются в `release.yml` / `android-release.yml`):
 
 - `ANDROID_KEYSTORE` — base64-закодированный `.jks` файл
 - `ANDROID_KEYSTORE_PASSWORD` — пароль keystore
