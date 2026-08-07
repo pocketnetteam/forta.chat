@@ -1,16 +1,20 @@
-name: Android Release
+name: Android Release (manual)
 
+# Android-only emergency / ad-hoc build. Tag releases use `.github/workflows/release.yml`.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: android-release-manual
+  cancel-in-progress: false
+
 jobs:
-  build-and-release:
+  build-and-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -19,8 +23,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: "22"
+          cache: npm
 
       - name: Install Node dependencies
         run: npm ci --legacy-peer-deps
@@ -37,9 +41,9 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '21'
-          cache: 'gradle'
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
 
       - name: Decode google-services.json
         run: |
@@ -49,12 +53,11 @@ jobs:
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > android/app/release-keystore.jks
 
-      - name: Extract version from tag
+      - name: Extract version from package.json
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="$(node -p "require('./package.json').version")"
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          # Compute versionCode from semver: 1.2.3 -> 10203
           IFS='.' read -r major minor patch <<< "$VERSION"
           VERSION_CODE=$(( ${major:-0} * 10000 + ${minor:-0} * 100 + ${patch:-0} ))
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_OUTPUT"
@@ -93,31 +96,15 @@ jobs:
           mv "$AAB_DIR/app-play-release.aab" \
              "$AAB_DIR/forta-chat-${{ steps.version.outputs.VERSION }}.aab"
 
-      - name: Extract release notes from tag
-        id: notes
-        run: |
-          git fetch origin --tags --force
-          BODY="$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")"
-          # Use tag body if present, otherwise fall back to subject
-          if [ -z "$BODY" ]; then
-            BODY="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")"
-          fi
-          {
-            echo "NOTES<<EOFNOTES"
-            echo "$BODY"
-            echo "EOFNOTES"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: "Forta Chat ${{ github.ref_name }}"
-          body: ${{ steps.notes.outputs.NOTES }}
-          files: |
-            android/app/build/outputs/apk/sideload/release/forta-chat-${{ steps.version.outputs.VERSION }}.apk
-            android/app/build/outputs/bundle/playRelease/forta-chat-${{ steps.version.outputs.VERSION }}.aab
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: android-manual-${{ steps.version.outputs.VERSION }}-${{ github.run_id }}
+          path: |
+            android/app/build/outputs/apk/sideload/release/forta-chat-*.apk
+            android/app/build/outputs/bundle/playRelease/forta-chat-*.aab
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Cleanup secrets
         if: always()

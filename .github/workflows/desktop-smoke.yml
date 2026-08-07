@@ -13,7 +13,7 @@ on:
       - "package-lock.json"
       - "scripts/electron-smoke.cjs"
       - ".github/workflows/desktop-smoke.yml"
-      - ".github/workflows/desktop-release.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 concurrency:

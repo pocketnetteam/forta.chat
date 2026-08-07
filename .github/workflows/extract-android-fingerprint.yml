@@ -1,7 +1,7 @@
 name: Extract Android SHA-256 Fingerprint
 
 # Manual-only. Outputs the SHA-256 fingerprint of the release keystore
-# (the same one used by `android-release.yml` to sign APKs and by `deploy.yml`
+# (the same one used by `release.yml` to sign APKs and by `deploy.yml`
 # to stamp `.well-known/assetlinks.json`). Useful for verifying App Links
 # verification on a device, or when cross-checking what Google's App Links
 # verifier sees.

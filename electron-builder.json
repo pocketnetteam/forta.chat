@@ -9,7 +9,8 @@
   "publish": {
     "provider": "github",
     "owner": "pocketnetteam",
-    "repo": "forta.chat"
+    "repo": "forta.chat",
+    "releaseType": "draft"
   },
   "forceCodeSigning": false,
   "asar": true,
@@ -46,4 +47,4 @@
     "icon": "build/icons"
   }
 }
-
+

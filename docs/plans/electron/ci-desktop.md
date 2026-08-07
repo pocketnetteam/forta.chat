@@ -1,15 +1,18 @@
-# Desktop CI/CD (Phase 4)
+# Release CI/CD (desktop + Android)
 
-Автоматические сборки Forta Chat Desktop. Не смешивать с Android (`android-release.yml` / `cap:build`) — отдельные workflows.
+Один tag-workflow собирает Desktop и Android в **draft** GitHub Release. Публикация — вручную после локальной подписи Windows.
 
 ## Workflows
 
 | Workflow | Триггер | Назначение |
 |----------|---------|------------|
+| [release.yml](../../../.github/workflows/release.yml) | tag `v*` + `workflow_dispatch` | Desktop (Win/mac/Linux) + Android APK/AAB → **draft** Release |
 | [desktop-smoke.yml](../../../.github/workflows/desktop-smoke.yml) | PR (paths: electron/src/…) + `workflow_dispatch` | `vite build` + boot smoke под xvfb |
-| [desktop-release.yml](../../../.github/workflows/desktop-release.yml) | tag `v*` + `workflow_dispatch` | matrix Win/mac/Linux → GitHub Release |
+| [android-release.yml](../../../.github/workflows/android-release.yml) | только `workflow_dispatch` | Android-only ad-hoc (artifacts, без tag/Release) |
 
-## Локальный smoke
+Не путать с `android-test-apk.yml` (тестовые APK) и `deploy.yml` (web).
+
+## Локальный smoke (desktop)
 
 ```bash
 npm run electron:smoke
@@ -18,39 +21,46 @@ npm run electron:smoke
 
 Режим `FORTA_ELECTRON_SMOKE=1`: без tray/auto-updater, Tor `neveruse`, выход после `did-finish-load` с логом `[smoke] ok`.
 
-## Release
+## Release (tag `v*`)
 
 1. Версия в `package.json` = тег без `v` (например `1.12.0` ↔ `v1.12.0`). CI падает, если не совпадает.
-2. Push tag `v*` → три runner’а собирают `--win` / `--mac` / `--linux` с `--publish always`.
-   `workflow_dispatch` без тега собирает installers с `--publish never` (только artifacts).
-3. electron-builder заливает installers + `latest.yml` / `latest-mac.yml` / `latest-linux.yml` в GitHub Release того же тега (рядом с Android APK, если Android-job тоже бежит).
-4. Artifacts дублируются в Actions (`desktop-{win|mac|linux}-…`) на 14 дней.
+2. Push tag `v*` → job `desktop` (matrix win/mac/linux) + job `android` параллельно.
+3. Desktop: `electron-builder --publish always` с `releaseType: draft` в `electron-builder.json`.
+   Подпись Win/mac — если заданы cert secrets; иначе unsigned (типично: Win подписывается локально).
+4. Android: signed APK + AAB → `softprops/action-gh-release` с `draft: true` в тот же draft.
+5. Artifacts дублируются в Actions (`desktop-{win|mac|linux}-…`, `android-…`) на 14 дней.
+6. **Вручную:** скачать/собрать Win → подписать → заменить installer + `latest.yml` на draft (`gh release upload … --clobber`) → **Publish release** в GitHub.
+
+`workflow_dispatch` без тега: desktop с `--publish never` + android только как Actions artifacts (без Release).
 
 ## Secrets (signing)
 
-Без сертификатов сборка **unsigned** (как локально: `forceCodeSigning: false`).  
-С сертификатами CI добавляет `-c.forceCodeSigning=true` и включает `CSC_IDENTITY_AUTO_DISCOVERY`.
+Без сертификатов desktop-сборка **unsigned** (`forceCodeSigning: false`, пока нет `CSC_*`).  
+С сертификатами desktop job добавляет `-c.forceCodeSigning=true`.
 
 | Secret | ОС | Назначение |
 |--------|-----|------------|
-| `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` | Windows | base64 `.pfx` + пароль |
+| `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` | Windows | base64 `.pfx` + пароль (опционально; часто локально) |
 | `MAC_CSC_LINK` / `MAC_CSC_KEY_PASSWORD` | macOS | base64 `.p12` + пароль |
 | `CSC_LINK` / `CSC_KEY_PASSWORD` | fallback | общие, если platform-specific не заданы |
 | `APPLE_ID` | macOS | notarize |
 | `APPLE_APP_SPECIFIC_PASSWORD` | macOS | notarize |
 | `APPLE_TEAM_ID` | macOS | notarize |
+| `ANDROID_KEYSTORE` + passwords/alias | Android | release APK/AAB |
+| `GOOGLE_SERVICES_JSON` | Android | Firebase |
 | `GITHUB_TOKEN` | все | уже есть у Actions (`contents: write`) → `GH_TOKEN` |
 
-Подробности: [signing-and-updates.md](./signing-and-updates.md).
+Подробности desktop: [signing-and-updates.md](./signing-and-updates.md).
 
 ## Кэш
 
 - `actions/setup-node` → npm cache
 - `actions/cache` → Electron / electron-builder download dirs по OS
+- `actions/setup-java` → gradle cache (android job)
 
-## Чеклист после первого tag-релиза
+## Чеклист после tag → перед Publish
 
-- [ ] На Release page есть Win NSIS/zip, mac DMG/zip, Linux AppImage/deb
-- [ ] Есть `latest*.yml` для electron-updater
-- [ ] (если secrets) подпись / notarize без ошибок в логах
-- [ ] Установка vN → публикация vN+1 → Settings → Updates предлагает обновиться
+- [ ] Draft Release содержит Win/mac/Linux + `latest*.yml` + Android APK/AAB
+- [ ] Win installer подписан локально; `latest.yml` обновлён (sha512/size)
+- [ ] (если secrets) mac notarize без ошибок в логах
+- [ ] Publish draft → updater видит релиз; smoke vN → vN+1
