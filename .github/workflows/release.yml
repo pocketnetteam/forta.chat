@@ -74,25 +74,40 @@ jobs:
           VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
           VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
 
+      - name: Decode Apple certificate
+        if: matrix.platform == 'mac'
+        env:
+          APPLECERT: ${{ secrets.APPLECERT }}
+        run: |
+          if [ -z "${APPLECERT:-}" ]; then
+            echo "APPLECERT not set — mac build will be unsigned"
+            exit 0
+          fi
+          echo "$APPLECERT" | base64 -d > applecert.p12
+
       - name: Package and publish (${{ matrix.platform }})
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLATFORM: ${{ matrix.platform }}
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           SHARED_CSC_LINK: ${{ secrets.CSC_LINK }}
           SHARED_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLECERTPWD: ${{ secrets.APPLECERTPWD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASS }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           EXTRA=()
           if [ "$PLATFORM" = "mac" ]; then
-            export CSC_LINK="${MAC_CSC_LINK:-$SHARED_CSC_LINK}"
-            export CSC_KEY_PASSWORD="${MAC_CSC_KEY_PASSWORD:-$SHARED_CSC_KEY_PASSWORD}"
+            if [ -f applecert.p12 ]; then
+              export CSC_LINK="file://$(pwd)/applecert.p12"
+              export CSC_KEY_PASSWORD="${APPLECERTPWD}"
+            else
+              unset CSC_LINK CSC_KEY_PASSWORD || true
+            fi
           elif [ "$PLATFORM" = "win" ]; then
             export CSC_LINK="${WIN_CSC_LINK:-$SHARED_CSC_LINK}"
             export CSC_KEY_PASSWORD="${WIN_CSC_KEY_PASSWORD:-$SHARED_CSC_KEY_PASSWORD}"
@@ -115,6 +130,10 @@ jobs:
           fi
 
           npx electron-builder --config electron-builder.json --"$PLATFORM" --publish "$PUBLISH" "${EXTRA[@]}"
+
+      - name: Cleanup Apple certificate
+        if: always() && matrix.platform == 'mac'
+        run: rm -f applecert.p12
 
       - name: Upload build artifacts
         if: always()
