@@ -57,6 +57,10 @@ onMounted(async () => {
   if (!address || supportReport.value?.capabilities.inference === false) return;
   await localAiStore.refreshManifest(address).catch(() => {});
   await localAiStore.checkEligibility(address).catch(() => {});
+  // Silently re-verify an already-downloaded model on a fresh session — see
+  // `restoreModelIfPreviouslyDownloaded`'s doc comment. Never blocks/replaces
+  // the explicit "Скачать" click for a device that hasn't downloaded before.
+  await localAiStore.restoreModelIfPreviouslyDownloaded(address).catch(() => {});
 });
 
 async function handleDownload(): Promise<void> {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
 import { mkdtempSync } from "node:fs";
@@ -16,7 +16,7 @@ import {
   SystemClockAdapter,
   WebCryptoHashAdapter,
 } from "local-ai/adapters/node-testing";
-import { useLocalAiStore } from "./local-ai-store";
+import { useLocalAiStore, MODEL_DOWNLOADED_MARKER_KEY } from "./local-ai-store";
 
 /** Reuses `local-ai`'s own node-testing fakes (roadmap 2.2) instead of
  *  hand-rolled mocks — a real `LocalAiClient` backed entirely by in-memory/
@@ -67,6 +67,7 @@ describe("useLocalAiStore", () => {
   beforeEach(() => {
     setActivePinia(createTestingPinia({ stubActions: false }));
     store = useLocalAiStore();
+    window.localStorage.removeItem(MODEL_DOWNLOADED_MARKER_KEY);
   });
 
   it("checkSupportOnce returns and caches the support report for the session", async () => {
@@ -156,6 +157,17 @@ describe("useLocalAiStore", () => {
     expect(store.downloadState.model.ready).toBe(true);
     expect(store.downloadState.model.progress).toBeNull();
     expect(store.modelReady).toBe(true);
+    // Persists the device-wide marker `restoreModelIfPreviouslyDownloaded`
+    // relies on to skip the download gate on a future session.
+    expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBe("1");
+  });
+
+  it("download:completed for the embedding kind does NOT set the model-downloaded marker", async () => {
+    const client = await store.ensureClient("addr_a", makeFakeConfig());
+
+    await emitOn(client, "download:completed", { key: "k", kind: "embedding" });
+
+    expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBeNull();
   });
 
   it("propagates download:failed into the artifact's error state", async () => {
@@ -189,5 +201,47 @@ describe("useLocalAiStore", () => {
 
     const client2 = await store.ensureClient("addr_a", makeFakeConfig());
     expect(client2).not.toBe(client1);
+  });
+
+  // Regression: `downloadState.model.ready` is in-memory-only and resets on
+  // every fresh Pinia store (app restart, logout/login) even though the
+  // model file itself is still on disk — without a persisted marker, the
+  // download gate would reappear on every session for a model already
+  // downloaded (see `restoreModelIfPreviouslyDownloaded`'s doc comment).
+  describe("restoreModelIfPreviouslyDownloaded", () => {
+    it("does nothing when the device has never completed a download before", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const spy = vi.spyOn(client, "ensureModelReady");
+
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(store.modelReady).toBe(false);
+    });
+
+    it("silently restores modelReady when the device-wide marker is set, without a fresh download call", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const spy = vi.spyOn(client, "ensureModelReady").mockResolvedValue(undefined);
+      // Simulates the marker a real download would have left behind in an
+      // earlier session — `modelReady` itself starts false this session
+      // (fresh Pinia store), same as after an app restart/logout-login.
+      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1");
+      expect(store.modelReady).toBe(false);
+
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(store.modelReady).toBe(true);
+    });
+
+    it("is a no-op once modelReady is already true this session", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      await emitOn(client, "download:completed", { key: "k", kind: "model" });
+      const spy = vi.spyOn(client, "ensureModelReady");
+
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+
+      expect(spy).not.toHaveBeenCalled();
+    });
   });
 });

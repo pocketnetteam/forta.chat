@@ -5,6 +5,35 @@ import type { LocalAiClient, LocalAiConfig, ModelArtifact, PlatformSupportPort }
 import { createLocalAiConfig, createPlatformSupportPort } from "../lib/create-client";
 import { createEmptyDownloadState, type EligibilityReport, type SupportReport } from "./types";
 
+/** Device-wide (not per-account — the model file is shared/content-addressed
+ *  across accounts, plan §4.2) marker that `ensureModelReady()` has
+ *  succeeded at least once on this device. `downloadState.model.ready` itself
+ *  is in-memory only and resets to `false` on every fresh app launch/Pinia
+ *  reset, even though the file is still on disk — without this marker,
+ *  `AiModelGate`/Settings would show the "Скачать" gate again on every app
+ *  restart, forcing a redundant (if fast, no-op) click before an already-
+ *  downloaded model can be used. Read/write are best-effort — a
+ *  `localStorage` failure just means the one-time restore silently doesn't
+ *  happen and the user sees the ordinary download gate instead, same as
+ *  before this existed. */
+export const MODEL_DOWNLOADED_MARKER_KEY = "local_ai_model_downloaded";
+
+function readModelDownloadedMarker(): boolean {
+  try {
+    return window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeModelDownloadedMarker(): void {
+  try {
+    window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1");
+  } catch {
+    // best-effort — see MODEL_DOWNLOADED_MARKER_KEY doc comment
+  }
+}
+
 /**
  * Owner of the `local-ai` runtime (plan §4, roadmap Phase 2). Two questions
  * both Settings → Local AI and an open AI-chat need answered from the SAME
@@ -65,6 +94,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
         downloadState.value[kind].ready = true;
         downloadState.value[kind].progress = null;
         downloadState.value[kind].error = null;
+        if (kind === "model") writeModelDownloadedMarker();
       }),
       c.on("download:failed", ({ kind, error }) => {
         downloadState.value[kind].error = error.message;
@@ -170,9 +200,11 @@ export const useLocalAiStore = defineStore("local-ai", () => {
   }
 
   /** Downloads/loads ONLY the model — never the embedding artifact (plan
-   *  §6, RAG is out of scope for this integration). */
-  async function downloadModel(address: string): Promise<void> {
-    const c = await ensureClient(address);
+   *  §6, RAG is out of scope for this integration).
+   *  @param configOverride Test seam, forwarded to `ensureClient()` — see its
+   *    own doc comment. Production callers omit it. */
+  async function downloadModel(address: string, configOverride?: LocalAiConfig): Promise<void> {
+    const c = await ensureClient(address, configOverride);
     downloadState.value.model.error = null;
     try {
       await c.ensureModelReady({
@@ -182,10 +214,29 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       });
       downloadState.value.model.ready = true;
       downloadState.value.model.progress = null;
+      writeModelDownloadedMarker();
     } catch (e) {
       downloadState.value.model.error = e instanceof Error ? e.message : String(e);
       throw e;
     }
+  }
+
+  /** Best-effort, silent restore of `modelReady` on a fresh session — NOT a
+   *  substitute for the explicit-click download decision (plan §9 item 3):
+   *  only acts when {@link MODEL_DOWNLOADED_MARKER_KEY} proves a previous
+   *  session already completed a real download on this device. In that case
+   *  `ensureModelReady()` is safe/cheap to call unprompted — the library's
+   *  own contract is "a no-op once the model is already loaded", so this
+   *  just re-verifies the on-disk file and flips `modelReady` back to `true`
+   *  without a fresh multi-GB download. Never throws — a failed restore
+   *  (e.g. the file was removed out-of-band) just leaves the ordinary
+   *  download gate visible, same as a device that never downloaded.
+   *  @param configOverride Test seam, forwarded to `downloadModel()`.
+   *    Production callers omit it. */
+  async function restoreModelIfPreviouslyDownloaded(address: string, configOverride?: LocalAiConfig): Promise<void> {
+    if (downloadState.value.model.ready || downloadState.value.model.progress) return;
+    if (!readModelDownloadedMarker()) return;
+    await downloadModel(address, configOverride).catch(() => {});
   }
 
   /** Downloads and swaps in whatever `manifest.model` currently is — safe
@@ -205,6 +256,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       });
       downloadState.value.model.ready = true;
       downloadState.value.model.progress = null;
+      writeModelDownloadedMarker();
     } catch (e) {
       downloadState.value.model.error = e instanceof Error ? e.message : String(e);
       throw e;
@@ -252,6 +304,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     checkEligibility,
     downloadModel,
     switchModel,
+    restoreModelIfPreviouslyDownloaded,
     releaseRuntime,
   };
 });
