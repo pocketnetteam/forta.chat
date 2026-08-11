@@ -304,9 +304,16 @@ export class MatrixClientService {
             // followed by any other event (typing, read receipt promoted
             // to timeline on some servers, or a retry hangup) would
             // disappear from our /sync, and the Matrix SDK would never
-            // fire Call.incoming. Raise to 4 so a realistic burst of
-            // new events still fits without losing the call invite.
-            limit: 20,
+            // fire Call.incoming. #37 raised this to 20 to be safe, but
+            // that made every /sync 20x heavier per room across ALL
+            // rooms (not just call rooms), which is the dominant cost of
+            // initial sync payload size. 4 is a middle ground: still
+            // covers a realistic burst (invite + a couple of retries/
+            // candidates) without the full 20x cost. If call invites
+            // start getting dropped again in bursty rooms, that's the
+            // tradeoff to revisit — not a regression to silently "fix"
+            // back to 20.
+            limit: 4,
             lazy_load_members: true,
           },
           state: {
@@ -345,11 +352,12 @@ export class MatrixClientService {
     // Sync config: lazy loading for speed, members loaded explicitly when needed
     // initialSyncLimit applies ONLY to the very first /sync (no saved token) —
     // the SDK clones the filter inline with this timeline limit, while all
-    // incremental syncs use the uploaded filter above (limit 20). Was 1, which
-    // made the first sync return a single event per room and forced sequential
-    // per-room scrollback to fill timelines — skeletons on every first room
-    // open after install/re-login (WEE-97 item 4). 20 matches the incremental
-    // filter limit; full history is still loaded on-demand (loadAllMessages).
+    // incremental syncs use the uploaded filter above (limit 4, see above).
+    // Was 1, which made the first sync return a single event per room and
+    // forced sequential per-room scrollback to fill timelines — skeletons on
+    // every first room open after install/re-login (WEE-97 item 4). Kept at 4
+    // to match the incremental filter limit; full history is still loaded
+    // on-demand (loadAllMessages).
     await userClient.startClient({
       pollTimeout: 60000,
       resolveInvitesToProfiles: false,
