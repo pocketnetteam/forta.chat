@@ -2,8 +2,9 @@
 import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { useChatStore } from "@/entities/chat";
 import { useChannelStore } from "@/entities/channel";
+import { isNative } from "@/shared/lib/platform";
 
-type FilterValue = "all" | "personal" | "groups" | "invites" | "channels";
+type FilterValue = "all" | "personal" | "groups" | "invites" | "channels" | "ai";
 
 interface Props {
   modelValue: FilterValue;
@@ -22,12 +23,18 @@ const tabs = computed(() => [
   { value: "groups" as const, label: t("tabs.groups") },
   { value: "invites" as const, label: t("tabs.invites") },
   { value: "channels" as const, label: t("tabs.channels") },
+  { value: "ai" as const, label: t("tabs.ai") },
 ]);
 
 const visibleTabs = computed(() =>
   tabs.value.filter(t => {
     if (t.value === "invites") return chatStore.inviteCount > 0;
     if (t.value === "channels") return channelStore.channels.length > 0;
+    // "AI" is a native-only capability (llama-cpp-capacitor has no web
+    // build) — gated cheaply on `isNative`, same rule as ChatSidebar's
+    // `visibleTabValues` (plan §7.1). The real `checkSupport()` runs
+    // inside the tab itself once opened, not here.
+    if (t.value === "ai") return isNative;
     return true;
   })
 );

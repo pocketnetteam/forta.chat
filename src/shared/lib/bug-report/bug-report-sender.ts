@@ -224,6 +224,22 @@ async function formatBody(
     }
   }
 
+  // Roadmap 7.6 (docs/plans/llama2): `local-ai` log export — collapsed by
+  // default, same as the invite-history block above, so a non-AI report
+  // stays short.
+  const aiDiag = input.aiDiagnostics;
+  if (aiDiag) {
+    lines.push(
+      '',
+      '<details><summary>local-ai logs</summary>',
+      '',
+      '```',
+      aiDiag.logs,
+      '```',
+      '</details>',
+    );
+  }
+
   return lines.join('\n');
 }
 

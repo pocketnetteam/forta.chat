@@ -6,6 +6,7 @@ import { useFileDownload } from "@/features/messaging/model/use-file-download";
 import { getChatDb, isChatDbReady, useLiveQuery, type CallProvider } from "@/shared/lib/local-db";
 import { ChannelView } from "@/features/channels";
 import { useChannelStore } from "@/entities/channel";
+import { useAiChatStore } from "@/entities/ai-chat";
 import { MessageList, MessageInput } from "@/features/messaging";
 import SelectionBar from "@/features/messaging/ui/SelectionBar.vue";
 import ForwardPicker from "@/features/messaging/ui/ForwardPicker.vue";
@@ -31,6 +32,7 @@ const chatStore = useChatStore();
 const authStore = useAuthStore();
 const userStore = useUserStore();
 const channelStore = useChannelStore();
+const aiChatStore = useAiChatStore();
 const emit = defineEmits<{ back: [] }>();
 
 const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
@@ -84,7 +86,10 @@ playback.setOnEnded(async (endedMessageId: string, roomId: string) => {
 });
 
 watch(() => chatStore.activeRoomId, (roomId) => {
-  if (roomId) channelStore.clearActiveChannel();
+  if (roomId) {
+    channelStore.clearActiveChannel();
+    aiChatStore.selectChat(null);
+  }
 });
 
 // Stop audio when switching rooms — prevents invisible playback

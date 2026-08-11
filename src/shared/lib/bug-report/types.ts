@@ -29,4 +29,15 @@ export interface BugReportInput {
    * throttle), and S4 (stale invite) without a repro.
    */
   callDiagnostics?: import('./collect-call-diagnostics').BugReportCallDiagnostics;
+  /**
+   * Roadmap 7.6 (docs/plans/llama2): `local-ai`'s persisted log export,
+   * collected whenever a `local-ai` client exists this session (feature
+   * touched at all, not gated on "opened from AI context" — see
+   * `entities/local-ai/lib/collect-ai-diagnostics.ts`). The only
+   * diagnostic channel for a Capacitor integration that has never run on
+   * a real device in the library's own test suite. Type kept local here
+   * (not imported from `entities/local-ai`) — `shared/` depends on
+   * nothing above it (`CLAUDE.md`).
+   */
+  aiDiagnostics?: { logs: string };
 }

@@ -8,6 +8,7 @@ import MessageStatusIcon from "@/features/messaging/ui/MessageStatusIcon.vue";
 import { useAuthStore } from "@/entities/auth";
 import { useChannelStore } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
+import { useAiChatStore } from "@/entities/ai-chat";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
@@ -36,6 +37,7 @@ const props = withDefaults(defineProps<Props>(), { filter: "all" });
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const channelStore = useChannelStore();
+const aiChatStore = useAiChatStore();
 const userStore = useUserStore();
 const { t, locale } = useI18n();
 const { formatPreview } = useFormatPreview();
@@ -50,6 +52,7 @@ const handleSelect = (room: ChatRoom) => {
   }
   chatStore.setActiveRoom(room.id);
   channelStore.clearActiveChannel();
+  aiChatStore.selectChat(null);
   emit("selectRoom", room.id);
 };
 
@@ -57,6 +60,7 @@ const handleSelectChannel = (channel: Channel) => {
   if (ctxMenu.value.show) return;
   channelStore.setActiveChannel(channel.address);
   chatStore.setActiveRoom(null);
+  aiChatStore.selectChat(null);
   emit("selectChannel", channel.address);
 };
 

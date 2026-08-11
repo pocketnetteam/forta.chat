@@ -8,6 +8,8 @@ import { useChatStore } from "@/entities/chat";
 import { useUserStore } from "@/entities/user/model";
 import { useCallStore } from "@/entities/call/model/call-store";
 import { useChannelStore } from "@/entities/channel/model/channel-store";
+import { useLocalAiStore } from "@/entities/local-ai";
+import { useAiChatStore } from "@/entities/ai-chat";
 import {
   getMatrixClientService,
   resetMatrixClientService,
@@ -515,6 +517,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         },
       );
       chatStore.setChatDbKit(chatDbKit);
+      useAiChatStore().setChatDbKit(chatDbKit);
 
       // WEE-33: spin up the persistent media cache so subsequent chat opens
       // hit the disk cache instead of re-downloading every photo/video.
@@ -1344,6 +1347,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     useUserStore().cleanup();
     useCallStore().clearCall();
     useChannelStore().cleanup();
+    useAiChatStore().cleanup();
+    // Releases local-ai's native runtime contexts (not the account's AI-chat
+    // history — that lives in Dexie and is wiped by deleteChatDb() below,
+    // roadmap 2.4/7.2). Never throws; no-op if no client was ever created.
+    useLocalAiStore().releaseRuntime().catch(() => {});
 
     // ── 1.5. Stop best-effort blockchain WS BEFORE Matrix teardown so its
     //         handlers can't try to refresh torn-down stores. ──
@@ -2074,6 +2082,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       useChatStore().cleanup();
       useChannelStore().cleanup();
       useCallStore().clearCall();
+      useAiChatStore().cleanup();
+      // Release the outgoing account's local-ai runtime before the incoming
+      // account's ensureClient() opens a new per-account SQLite database —
+      // otherwise both accounts' contexts could be live at once (plan §4.2).
+      await useLocalAiStore().releaseRuntime().catch(() => {});
       // Stop blockchain WS before Matrix so its handlers can't fire against
       // torn-down stores; initMatrix() below will re-start it for the new account.
       try { blockchainWs.stop(); } catch { /* ignore */ }

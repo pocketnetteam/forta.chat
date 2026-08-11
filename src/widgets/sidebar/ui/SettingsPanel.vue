@@ -381,6 +381,23 @@ const handleLogout = () => {
           </svg>
         </button>
 
+        <!-- Local AI (roadmap Phase 6) — native-only, same gate as Desktop below -->
+        <button
+          v-if="isNative"
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="openSettingsContent('localAi')"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-text-on-main-bg-color">
+            <path d="M12 8V4H8" />
+            <rect width="16" height="12" x="4" y="8" rx="2" />
+            <path d="M2 14h2m16 0h2M9 13v2m6-2v2" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("ai.settingsTitle") }}</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-text-on-main-bg-color">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+
         <!-- Dark Mode -->
         <div
           class="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"

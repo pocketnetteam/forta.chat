@@ -310,6 +310,39 @@ export interface CallProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Local AI chats (`local-ai` Mode B — see docs/plans/llama2/2026-08-11-local-ai-integration-plan.md §3)
+// ---------------------------------------------------------------------------
+
+export type AiMessageStatus = "pending" | "streaming" | "complete" | "cancelled" | "error";
+
+/** Dexie is the source of truth for AI-chat metadata shown in the sidebar;
+ *  `local-ai`'s internal SQLite only mirrors the same rows (by `id`) to build
+ *  prompts/session-cache — it never drives the UI directly (Mode B). */
+export interface LocalAiChat {
+  id: string;                 // UUID, generated locally; the same id is sent to local-ai.upsertChat()
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  lastMessagePreview?: string;
+  lastMessageTimestamp?: number;
+  /** local-ai manifest model id the chat history was built against — for UI/debug
+   *  display only; local-ai itself always resolves the current model via its own
+   *  ModelRegistry regardless of this field. */
+  modelId?: string;
+}
+
+export interface LocalAiMessage {
+  localId?: number;           // Dexie auto PK
+  id: string;                 // UUID; the same id is sent as userMessageId/assistantMessageId
+  chatId: string;             // FK -> LocalAiChat.id
+  role: "user" | "assistant"; // system messages are never rendered, not stored in this table
+  content: string;
+  status: AiMessageStatus;
+  createdAt: number;
+  tokenCount?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
 
@@ -328,6 +361,8 @@ export class ChatDatabase extends Dexie {
   mediaCacheIndex!: Table<MediaCacheIndexEntry>;
   mediaCacheBlobs!: Table<MediaCacheBlobRow>;
   callProviders!: Table<CallProvider>;
+  aiChats!: Table<LocalAiChat>;
+  aiMessages!: Table<LocalAiMessage>;
 
   constructor(userId: string) {
     super(`bastyon-chat-${userId}`);
@@ -788,6 +823,34 @@ export class ChatDatabase extends Dexie {
       mediaCacheIndex: "mxc, accessedAt, roomId, category",
       mediaCacheBlobs: "mxc",
       callProviders: "++id",
+    });
+
+    // Version 18: add aiChats/aiMessages tables for local AI chats (`local-ai`
+    // library integration, Mode B — Dexie stays the source of truth, local-ai's
+    // internal SQLite only mirrors these rows to build prompts/session-cache).
+    // Not part of the Matrix/SyncEngine pipeline — no PendingOperation, no
+    // encryption, no event-writer involvement. See
+    // docs/plans/llama2/2026-08-11-local-ai-integration-plan.md §3.
+    this.version(18).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      mediaCacheIndex: "mxc, accessedAt, roomId, category",
+      mediaCacheBlobs: "mxc",
+      callProviders: "++id",
+      // PK: id. Index: updatedAt (sidebar sort, most-recent-first).
+      aiChats: "id, updatedAt",
+      // PK: auto-incremented localId. Indexes:
+      //   id             — dedup/lookup by the id shared with local-ai
+      //   [chatId+createdAt] — paginated per-chat timeline queries
+      aiMessages: "++localId, id, [chatId+createdAt]",
     });
   }
 }

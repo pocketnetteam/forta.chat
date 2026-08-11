@@ -46,6 +46,10 @@ vi.mock("@/entities/chat", () => ({
   useChatStore: () => ({ setActiveRoom: vi.fn() }),
 }));
 
+vi.mock("@/entities/ai-chat", () => ({
+  useAiChatStore: () => ({ selectChat: vi.fn() }),
+}));
+
 vi.mock("@/shared/lib/i18n", () => ({
   useI18n: () => ({ t: (k: string) => k }),
 }));
