@@ -179,6 +179,17 @@ var pSDK = function ({ app, api, actions }) {
         if(!baddata[key]) baddata[key] = {}
     }
 
+    // Forta publishes 12 BIP32 encryption public keys per account (see
+    // src/entities/auth/lib/key-republish.ts). Pocketnet returns them as an
+    // array or a comma-separated string under `k` (preferred) or `keys`
+    // (legacy). Mirrors countPublishedKeys() in that file.
+    var hasEncryptionKeys = function (data) {
+        var raw = data.k != null ? data.k : data.keys
+        if (Array.isArray(raw)) return _.some(raw, (k) => !!k)
+        if (typeof raw === 'string') return raw.split(',').some((k) => !!k)
+        return false
+    }
+
     var settodb = function (dbname, result, p = {}) {
         if (!dbname || !dbmeta[dbname]) {
             return Promise.resolve()
@@ -190,10 +201,16 @@ var pSDK = function ({ app, api, actions }) {
 
             if (data.___temp) return Promise.resolve()
 
-            // userInfo* stores: never persist empty-name profiles
-            if ((dbname === 'userInfoFull' || dbname === 'userInfoLight' || dbname === 'userInfoFullFB')
-                && !(data.name || data.n)) {
-                return Promise.resolve()
+            if (dbname === 'userInfoFull' || dbname === 'userInfoLight' || dbname === 'userInfoFullFB') {
+                // never persist empty-name profiles
+                if (!(data.name || data.n)) return Promise.resolve()
+                // never persist profiles with no published encryption keys as
+                // if they were valid — a peer resolved mid key-publish (or a
+                // transient RPC hiccup) must not stick around for the full
+                // userInfoLight TTL (~14 days). Still cached in-memory for
+                // this session (see loadList/storage) to avoid re-fetching on
+                // every call; just not persisted across app restarts.
+                if (!hasEncryptionKeys(data)) return Promise.resolve()
             }
 
             if (dbmeta[dbname].authorized) key = key + '_' + app.user.address.value
