@@ -897,14 +897,8 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Misc ──
   "chat.messageNotFound": "Сообщение не найдено",
-  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования — пока не опубликует, сообщения отправятся без шифрования. Можно попробовать снова или переопубликовать свои ключи.",
+  "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования — пока не опубликует, сообщения отправятся без шифрования. Можно попробовать снова.",
   "chat.peerKeysRetry": "Повторить",
-  "chat.republishKeys": "Опубликовать мои ключи",
-  "chat.republishKeysInProgress": "Публикуем…",
-  "chat.republishKeysSuccess": "Ключи шифрования опубликованы",
-  "chat.republishKeysError": "Не удалось опубликовать ключи",
-  "chat.republishKeysAlreadyOk": "Ваши ключи уже опубликованы",
-  "chat.republishKeysNeedsFunds": "Недостаточно PKOIN для публикации ключей",
   "chat.unencryptedRoom": "Сообщения в этой комнате не шифруются",
   "tor.disable": "Отключить Tor",
   "register.registrationFailed": "Ошибка регистрации",

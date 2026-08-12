@@ -190,7 +190,10 @@ export interface PcryptoRoomInstance {
    *  "open channel" style rooms return false here; plaintext is OK for
    *  those by design. */
   requiresEncryption(): boolean;
-  prepare(): Promise<PcryptoRoomInstance>;
+  /** @param forceRefresh - bypass the cached peer profile and hit the network
+   *  for fresh keys. Set only from an explicit user retry — never from an
+   *  automatic/periodic recheck, to avoid hammering the network. */
+  prepare(forceRefresh?: boolean): Promise<PcryptoRoomInstance>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _encrypt(userid: string, text: string, v?: number): Promise<{ encrypted: string; nonce: string }>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -225,7 +228,9 @@ export class Pcrypto {
   private pcryptoFile = new PcryptoFile();
 
   // Callbacks
-  private getUsersInfoCb: ((ids: string[]) => Promise<CryptoUserInfo[]>) | null = null;
+  private getUsersInfoCb:
+    | ((ids: string[], options?: { forceUpdate?: boolean }) => Promise<CryptoUserInfo[]>)
+    | null = null;
   private getIsTetatetChat: ((room: unknown) => boolean) | null = null;
   private getIsChatPublic: ((room: unknown) => boolean) | null = null;
   private getMatrixId: ((id: string) => string) | null = null;
@@ -238,7 +243,7 @@ export class Pcrypto {
   }
 
   setHelpers(helpers: {
-    getUsersInfo: (ids: string[]) => Promise<CryptoUserInfo[]>;
+    getUsersInfo: (ids: string[], options?: { forceUpdate?: boolean }) => Promise<CryptoUserInfo[]>;
     isTetatetChat: (room: unknown) => boolean;
     isChatPublic: (room: unknown) => boolean;
     matrixId: (id: string) => string;
@@ -263,14 +268,14 @@ export class Pcrypto {
     }
   }
 
-  async addRoom(chat: Record<string, unknown>): Promise<PcryptoRoomInstance> {
+  async addRoom(chat: Record<string, unknown>, forceRefresh?: boolean): Promise<PcryptoRoomInstance> {
     const roomId = chat.roomId as string;
     if (this.rooms[roomId]) {
-      return this.rooms[roomId].prepare();
+      return this.rooms[roomId].prepare(forceRefresh);
     }
     const room = await this.createPcryptoRoom(chat);
     this.rooms[roomId] = room;
-    return room.prepare();
+    return room.prepare(forceRefresh);
   }
 
   /**
@@ -284,6 +289,13 @@ export class Pcrypto {
     // Exact same variables as original
     let users: Record<string, { id: string; life: { start: number; end?: number }[] }> = {};
     let usersinfo: Record<string, CryptoUserInfo> = {};
+    // Monotonic generation counter guarding `usersinfo` writes below. Two
+    // getusersinfo() calls can be in flight at once (e.g. the 30s auto-recheck
+    // vs. an explicit forced "Retry"/"Republish"); without this, whichever
+    // network call happens to resolve LAST wins — even if it was the older,
+    // unforced (cached) call started before the forced one — silently
+    // clobbering freshly-fetched keys with stale data.
+    let usersinfoGeneration = 0;
 
     const version = 2;
     const ecachekey = "e_pcrypto10_";
@@ -435,9 +447,14 @@ export class Pcrypto {
     }
 
     // ---- getusersinfo — EXACT match of original lines 157-173 ----
-    async function getusersinfo(): Promise<void> {
+    // forceRefresh bypasses the cached peer profile (SDK userInfo cache) and
+    // hits the network for fresh keys — only ever passed from an explicit
+    // user retry (see PcryptoRoomInstance.prepare docs), never from an
+    // automatic/periodic recheck.
+    async function getusersinfo(forceRefresh?: boolean): Promise<void> {
       const us = Object.values(users).map(function (uh) { return uh.id; });
       if (!pcrypto.getUsersInfoCb) return;
+      const myGeneration = ++usersinfoGeneration;
       let _usersinfo: CryptoUserInfo[];
       try {
         // Bound the key-resolution RPC: a stalled Pocketnet node must never
@@ -446,7 +463,7 @@ export class Pcrypto {
         // decrypt deterministically downstream, surfacing error+retry instead
         // of an eternal media spinner.
         _usersinfo = await withTimeout(
-          pcrypto.getUsersInfoCb(us),
+          pcrypto.getUsersInfoCb(us, { forceUpdate: forceRefresh }),
           GETUSERSINFO_TIMEOUT_MS,
           "getusersinfo",
         );
@@ -454,6 +471,10 @@ export class Pcrypto {
         console.warn("[pcrypto] getusersinfo timed out/failed:", e);
         return;
       }
+      // Discard a stale response: a newer getusersinfo() call (e.g. a forced
+      // retry started while this unforced one was still in flight) already
+      // wrote more current data — applying this one now would clobber it.
+      if (myGeneration !== usersinfoGeneration) return;
       usersinfo = {};
       for (const ui of _usersinfo) {
         usersinfo[ui.id] = ui;
@@ -712,7 +733,7 @@ export class Pcrypto {
         return usersinfoArray.every(u => u.keys && u.keys.length >= m);
       },
 
-      async prepare(): Promise<PcryptoRoomInstance> {
+      async prepare(forceRefresh?: boolean): Promise<PcryptoRoomInstance> {
         getusershistory();
 
         // Skip expensive network call for large rooms: E2EE is disabled
@@ -725,7 +746,7 @@ export class Pcrypto {
         const actualMemberCount = (chat as any).getJoinedMemberCount?.() ?? 0;
         const memberCount = Math.max(actualMemberCount, Object.keys(users).length);
         if (memberCount < 50) {
-          await getusersinfo();
+          await getusersinfo(forceRefresh);
         }
 
         return room;

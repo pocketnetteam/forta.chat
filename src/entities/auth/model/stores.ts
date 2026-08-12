@@ -409,14 +409,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       };
       cryptoInstance.init(cryptoUser);
       cryptoInstance.setHelpers({
-        getUsersInfo: async (ids: string[]) => {
+        getUsersInfo: async (ids: string[], options?: { forceUpdate?: boolean }) => {
           // ids are hex-encoded addresses; decode to raw for Pocketnet API
           try {
             const rawAddresses = ids.map((id) => hexDecode(id));
 
-            // Single SDK load (getuserprofile once per batch); raw rows stored pre-cleanData in SDK
+            // Single SDK load (getuserprofile once per batch); raw rows stored pre-cleanData in SDK.
+            // forceUpdate bypasses the SDK's in-memory profile cache — only set
+            // from an explicit user retry (peer-keys "Retry" button), never from
+            // an automatic recheck, so a stale cached peer profile (e.g. fetched
+            // before they had keys) can't get stuck for the rest of the session.
             await appInitializer
-              .loadUsersInfo(rawAddresses, { update: false })
+              .loadUsersInfo(rawAddresses, { update: options?.forceUpdate ?? false })
               .catch((e) => {
                 console.warn("[pcrypto] loadUsersInfo failed:", e);
               });
