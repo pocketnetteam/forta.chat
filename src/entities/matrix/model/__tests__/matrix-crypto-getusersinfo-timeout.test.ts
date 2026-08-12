@@ -39,7 +39,7 @@ describe("matrix-crypto getusersinfo — bounded key RPC (WEE-90 H1)", () => {
 
   it("wraps the getUsersInfoCb call in withTimeout with a named ceiling", () => {
     const block = getGetusersinfo(getSource());
-    expect(block).toMatch(/withTimeout\(\s*pcrypto\.getUsersInfoCb\(us\)\s*,\s*GETUSERSINFO_TIMEOUT_MS/);
+    expect(block).toMatch(/withTimeout\(\s*pcrypto\.getUsersInfoCb\(us,\s*\{\s*forceUpdate:\s*forceRefresh\s*\}\)\s*,\s*GETUSERSINFO_TIMEOUT_MS/);
   });
 
   it("defines a finite timeout constant", () => {

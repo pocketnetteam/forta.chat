@@ -150,7 +150,7 @@ describe("pcrypto getUsersInfo profile load", () => {
     const idx = source.indexOf("getUsersInfo: async");
     expect(idx).toBeGreaterThan(-1);
     const section = source.slice(idx, idx + 4500);
-    expect(section).toContain("loadUsersInfo(rawAddresses, { update: false })");
+    expect(section).toContain("loadUsersInfo(rawAddresses, { update: options?.forceUpdate ?? false })");
     expect(section).toContain("getUserData");
     expect(section).not.toContain("loadUsersInfoRaw");
   });
