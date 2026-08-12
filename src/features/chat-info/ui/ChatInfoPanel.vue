@@ -225,6 +225,47 @@ const getMemberPowerLevel = (hexId: string): number => {
 
 const isMemberAdmin = (hexId: string): boolean => getMemberPowerLevel(hexId) >= 50;
 
+// Public / shareable-by-link rooms (roomShareable also covers Bastyon
+// world_readable broadcast channels that keep join_rule="invite" — see its
+// own doc comment) are typically large channels (hundreds/thousands of
+// members). Rendering every one as a DOM row froze scrolling on low-end
+// Android and, combined with UserAvatar's per-row profile fetch, meant
+// opening this panel alone could kick off hundreds of network requests.
+// Private/group rooms stay uncapped — E2E encryption already limits them to
+// <50 members (canBeEncrypt).
+//
+// Admins of THIS room are exempt from the cap: kick/mute/promote (openMemberMenu)
+// only ever operate on rows actually rendered here, and there is no other UI
+// (the search box above only finds NEW users to invite, not existing members)
+// to reach anyone past position 50 — capping for admins would make members
+// beyond the cap permanently unmanageable in a large room.
+const MEMBER_LIST_CAP = 50;
+const visibleMembers = computed(() => {
+  if (!room.value) return [];
+  if (!roomShareable.value || isAdmin.value) return room.value.members;
+  const capped = room.value.members.slice(0, MEMBER_LIST_CAP);
+  // Member order is server/insertion order, not sorted — nothing guarantees
+  // OUR row lands in the first 50. Without this, a non-admin ranked past the
+  // cap would silently lose their own row (and the rename/mute/admin badges
+  // gated on `member === myHexId`) in a large room.
+  const self = myHexId.value;
+  if (self && room.value.members.includes(self) && !capped.includes(self)) {
+    return [...capped, self];
+  }
+  return capped;
+});
+const hiddenMemberCount = computed(() => {
+  if (!room.value || !roomShareable.value || isAdmin.value) return 0;
+  // room.members can be a partial list right after opening the room (full
+  // member state is still landing via /sync) — chatStore.getRoomMemberCount
+  // prefers the server summary (getJoinedMemberCount) for exactly this case,
+  // matching how canBeEncrypt()/loadProfilesForRoomIds already treat member
+  // counts elsewhere. Without this, the banner briefly undercounts (or
+  // vanishes entirely) for a room whose local member list hasn't caught up.
+  const totalCount = Math.max(chatStore.getRoomMemberCount(room.value.id), room.value.members.length);
+  return Math.max(0, totalCount - visibleMembers.value.length);
+});
+
 // My hex ID for self-check (room.members are hex-encoded)
 const myHexId = computed(() => hexEncode(authStore.address ?? "").toLowerCase());
 
@@ -922,9 +963,9 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
 
               <!-- Member list — joined first, invited (pending) below with badge -->
               <div class="flex flex-col gap-1">
-                <!-- Joined members -->
+                <!-- Joined members (capped for public rooms, see visibleMembers) -->
                 <div
-                  v-for="member in room.members"
+                  v-for="member in visibleMembers"
                   :key="`join-${member}`"
                   class="group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors"
                   :class="isAdmin && member !== myHexId ? 'cursor-pointer hover:bg-neutral-grad-0' : ''"
@@ -958,6 +999,16 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   >
                     {{ t("info.admin") }}
                   </span>
+                </div>
+
+                <!-- Public room member list is capped (see visibleMembers) — the
+                     rest resolve lazily elsewhere (message avatars, search) rather
+                     than being fetched/rendered just for this panel. -->
+                <div
+                  v-if="hiddenMemberCount > 0"
+                  class="px-2 py-2 text-xs text-text-on-main-bg-color"
+                >
+                  {{ t("info.andNMore", { count: hiddenMemberCount }) }}
                 </div>
 
                 <!-- Invited (pending) members. Same menu — Matrix `kick` API

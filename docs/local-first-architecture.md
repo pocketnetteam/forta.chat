@@ -932,7 +932,7 @@ Matrix's `txnId` parameter on `PUT /send` endpoints provides built-in idempotenc
 
 ### 6.3 Sync Token Persistence
 
-The Matrix SDK already persists sync state in its own IndexedDB store (`matrix-js-sdk-v6:*`). Our additional persistence in the `syncState` table is for:
+The Matrix SDK already persists sync state in its own IndexedDB store (`matrix-js-sdk-v7:*`). Our additional persistence in the `syncState` table is for:
 - Tracking per-room sync freshness (`roomId:last_synced_at`)
 - Storing pagination tokens per room
 - Detecting stale rooms that need refresh

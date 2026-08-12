@@ -425,6 +425,7 @@ export const en = {
   "info.title": "Info",
   "info.directMessage": "Direct message",
   "info.members": "{count} members",
+  "info.andNMore": "and {count} more",
   "info.notifications": "Notifications",
   "info.shared": "Shared",
   "info.media": "{count} media",

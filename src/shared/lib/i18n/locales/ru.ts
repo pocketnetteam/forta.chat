@@ -427,6 +427,7 @@ export const ru: Record<TranslationKey, string> = {
   "info.title": "Инфо",
   "info.directMessage": "Личное сообщение",
   "info.members": "{count} участн.",
+  "info.andNMore": "и ещё {count} участн.",
   "info.notifications": "Уведомления",
   "info.shared": "Общие файлы",
   "info.media": "{count} медиа",

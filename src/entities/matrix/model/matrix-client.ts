@@ -246,9 +246,16 @@ export class MatrixClientService {
 
     localStorage.accessToken = userData.access_token;
 
+    // v6 → v7: bump forces every client to rebuild its local Matrix sync
+    // store from scratch instead of reconciling incrementally on top of
+    // state cached while member lazy-loading was still on. Without this, an
+    // existing install could keep its old partial member state around
+    // indefinitely — canBeEncrypt() would still see it as incomplete — since
+    // disabling lazy loading only changes what *future* /sync responses
+    // contain, it doesn't retroactively backfill an already-populated store.
     const indexedDBStore = new sdk.IndexedDBStore({
       indexedDB: window.indexedDB,
-      dbName: "matrix-js-sdk-v6:" + this.credentials.username,
+      dbName: "matrix-js-sdk-v7:" + this.credentials.username,
       localStorage: window.localStorage
     });
 

@@ -52,6 +52,32 @@ export async function migrateCryptoStorage(address: string): Promise<void> {
   }
 }
 
+/**
+ * Delete the pre-v7 Matrix JS SDK IndexedDB sync stores. matrix-client.ts
+ * bumped its IndexedDBStore name from "matrix-js-sdk-v6:*" to
+ * "matrix-js-sdk-v7:*" to force every client to rebuild its local sync store
+ * from scratch (state cached while lazyLoadMembers was still on could be
+ * incomplete — see that file's comment). Without this cleanup the old v6
+ * database — full room/timeline state, can be sizable — is orphaned on disk
+ * forever, which matters on the storage-constrained low-end Android devices
+ * this project targets. Enumerates by prefix (not a specific username)
+ * since accounts can be multi-session (SessionManager).
+ * Non-blocking, fire-and-forget — safe to lose if it fails.
+ */
+export async function migrateMatrixSdkV6Storage(): Promise<void> {
+  if (!window.indexedDB?.databases) return;
+  try {
+    const dbs = await window.indexedDB.databases();
+    for (const db of dbs) {
+      if (db.name?.startsWith("matrix-js-sdk-v6:")) {
+        indexedDB.deleteDatabase(db.name);
+      }
+    }
+  } catch (e) {
+    console.warn("[migration] matrix-js-sdk v6 store cleanup failed:", e);
+  }
+}
+
 /** Drop empty-name entries from the Forta user-store localStorage cache. */
 export function purgeEmptyUserStoreProfiles(): number {
   try {
@@ -197,4 +223,7 @@ export function migrateAll(): void {
 
   // Drop empty getuserprofile rows that older builds cached locally.
   purgeEmptyProfilesOnce();
+
+  // Fire-and-forget: reclaim the orphaned pre-v7 Matrix sync store(s).
+  migrateMatrixSdkV6Storage().catch(() => {});
 }
