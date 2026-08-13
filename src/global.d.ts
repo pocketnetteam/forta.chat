@@ -83,6 +83,15 @@ interface PocketnetInstanceType {
         off(eventType: string, lStorageProp: string): void;
         on(eventType: string, lStorageProp: string, callback: (e: StorageEvent) => void): void;
       };
+      /** Extra wallet addresses (HD rotation / z-addresses) folded into
+       *  unspent lookups by Actions SDK (Account.loadUnspents/makeTransaction).
+       *  Chat has no wallet address rotation — always empty. */
+      addresses: {
+        storage: {
+          addresses: string[];
+          addressesobj: unknown[];
+        };
+      };
       /** Wallet API — only available when running inside Bastyon main app */
       wallet?: {
         txbase(
@@ -217,6 +226,12 @@ interface UserDataSDK {
 
 interface Window {
   POCKETNETINSTANCE: PocketnetInstanceType;
+  /** Alias for POCKETNETINSTANCE (same object reference). The vendor Bastyon
+   *  SDK (actions.js/api.js/sdk.js) reads a bare global `app` in several
+   *  places instead of `parent.app`/`self.app` — must exist with `.platform`
+   *  before Actions/Api/pSDK are constructed, or vendor calls like
+   *  Account.loadUnspents() throw reading `app.platform.currentBlock`. */
+  app: PocketnetInstanceType;
   testpocketnet: boolean;
   storage_tab: number;
 }

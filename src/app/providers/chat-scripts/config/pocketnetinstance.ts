@@ -22,8 +22,7 @@ export const PocketnetInstance: PocketnetInstanceType = {
     listofnodes: null,
     listofproxies: [
       { host: "1.pocketnet.app", port: 8899, wss: 8099 },
-      { host: "2.pocketnet.app", port: 8899, wss: 8099 },
-      { host: "6.pocketnet.app", port: 8899, wss: 8099 }
+      { host: "2.pocketnet.app", port: 8899, wss: 8099 }
     ],
     localStoragePrefix: "bastyon",
     matrix: "matrix.pocketnet.app",
@@ -79,6 +78,18 @@ export const PocketnetInstance: PocketnetInstanceType = {
             this.eventListeners[lStorageProp] = {};
           }
           this.eventListeners[lStorageProp][eventType] = callback;
+        }
+      },
+      // Actions SDK reads platform.sdk.addresses.storage.{addresses,addressesobj}
+      // to fold extra wallet addresses (HD rotation / z-addresses) into unspent
+      // lookups (actions.js Account.loadUnspents/makeTransaction). Chat has a
+      // single registered address per account — no wallet address rotation —
+      // so this stays empty; the `|| []` fallbacks in vendor code still apply,
+      // but the object itself must exist or accessing `.storage` throws.
+      addresses: {
+        storage: {
+          addresses: [] as string[],
+          addressesobj: [] as unknown[]
         }
       }
     },

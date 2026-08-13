@@ -45,7 +45,9 @@ describe("auth store wires the self-profile cache (WEE-26)", () => {
     const src = getStoresSource();
     const start = src.indexOf("const fetchUserInfo = async () =>");
     expect(start).toBeGreaterThan(-1);
-    const block = src.slice(start, start + 3000);
+    // Window widened (WEE-XX): initializeAndFetchUserData is now wrapped in
+    // withTimeout (unguarded-hang fix), pushing writeSelfProfile's syncedAt further in.
+    const block = src.slice(start, start + 3500);
     expect(block).toMatch(/readSelfProfile\(/);
     expect(block).toMatch(/mergeSelfProfileWithRemote\(/);
     // Must call setUserInfo with the merged result — not the raw userData.
