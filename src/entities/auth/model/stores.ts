@@ -148,6 +148,15 @@ const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *  no poll is currently active. */
 let _registrationPollKick: (() => void) | null = null;
 
+/** Node that emitted the most recent blockchain-ws "transaction" event for
+ *  the active address. Passed as a first-attempt pin to checkUnspents —
+ *  that node has already indexed the incoming tx, working around node-to-node
+ *  replication lag where a round-robined RPC can still see an empty
+ *  txunspent right after the WS event fires ("сервер до сих пор отдает
+ *  пустые unspents"). checkUnspents falls back to normal failover on a miss,
+ *  so a stale hint here cannot strand the registration poll. */
+let _lastTxNodeHint: string | null = null;
+
 /** Debounce wallet.refresh() from blockchain-ws block/tx floods so a proxy
  *  outage does not stampede getaddressinfo/ping on every reconnect event. */
 const WALLET_REFRESH_DEBOUNCE_MS = 8_000;
@@ -222,6 +231,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // certainly via Bastyon. Feeds the dual-install warning (see bastyon-warning).
   const likelyBastyonUser = ref(false);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Monotonic token identifying the current poll loop. `startRegistrationPoll`
+  // is called from 4 places (register, retryRegistrationWithNewName,
+  // retryRegistration, resumeRegistrationPoll on app reload) and
+  // `registrationPollTimer` is only assigned once the FIRST poll() tick
+  // finishes (inside schedulePoll) — so a second start during that window
+  // (e.g. App.vue's onMounted resume racing a fresh register()) slipped past
+  // the `registrationPollTimer` reentrancy check and spun up a second,
+  // independent poll loop. Both loops then broadcast the same UserInfo action
+  // for the same address concurrently, and the Actions SDK's collision guard
+  // rejects one of them ("actions_collision" / "did not produce a
+  // transaction"). Every poll() closure captures the generation active when
+  // it was created and bails before broadcasting if a newer loop has since
+  // started.
+  let registrationPollGeneration = 0;
 
   // Tracks active (non-backgrounded) time for the registration poll so
   // Android/Capacitor WebView throttling does not "charge" background time
@@ -367,8 +391,25 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return result;
     });
 
+  // Reentrancy guard for initMatrix (WEE-XX): register()'s background
+  // completeLoginNetwork() and onRegistrationConfirmed() can both decide to
+  // call initMatrix() around the same time — completeLoginNetwork() runs
+  // fire-and-forget while startRegistrationPoll() is already ticking, and
+  // onRegistrationConfirmed() calls initMatrix() again whenever matrixReady
+  // is still false when the blockchain confirms. Without dedup, two
+  // concurrent calls would each create a fresh MatrixKit/Pcrypto instance,
+  // double-wire Matrix event handlers, and race on the shared matrixKit ref.
+  let _initMatrixPromise: Promise<void> | null = null;
+  const initMatrix = (): Promise<void> => {
+    if (_initMatrixPromise) return _initMatrixPromise;
+    _initMatrixPromise = initMatrixInner().finally(() => {
+      _initMatrixPromise = null;
+    });
+    return _initMatrixPromise;
+  };
+
   /** Initialize Matrix client, kit and crypto after login */
-  const initMatrix = async () => {
+  const initMatrixInner = async () => {
     if (!address.value || !privateKey.value) {
       console.warn("[auth] initMatrix skipped: no credentials");
       matrixError.value = "No credentials";
@@ -833,7 +874,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 scheduleWalletRefreshFromChain();
                 _registrationPollKick?.();
               },
-              onTransaction: () => {
+              onTransaction: ({ node }) => {
+                if (node) _lastTxNodeHint = node;
                 scheduleWalletRefreshFromChain();
                 _registrationPollKick?.();
               },
@@ -1054,60 +1096,77 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // the first post-login getuserprofile — always hit the network.
     const forceNetwork = registrationPending.value || !!pendingRegProfile.value;
 
-    await appInitializer.initializeAndFetchUserData(
-      requestAddress,
-      (userData: UserData) => {
-        // Defensive: app-initializer guards against undefined userData, but
-        // this callback is reached from three flows (login, onConfirmed,
-        // HMR) and any future refactor could reintroduce undefined. If it
-        // happens, we must not throw — throwing here used to cascade into
-        // login()'s catch and surface as "Invalid private key or mnemonic"
-        // on the register page after a successful registration.
-        if (!userData) return;
+    // Proxy nodes occasionally answer 408 here (observed in production), or
+    // — same root cause as the registration RPCs (WEE-23) — simply never
+    // respond, in which case the SDK fetch never settles at all. try/catch
+    // alone only guards the 408 case; an unresolved fetch would hang this
+    // await forever and, during registration, block completeLoginNetwork()
+    // from ever reaching initMatrix() — leaving the chat page's room-list
+    // skeleton spinning with no watchdog started (forta-bugs, "chat window
+    // preloader hangs after registration until manual reload"). 15s matches
+    // REGISTRATION_RPC_TIMEOUT for this class of proxy call.
+    try {
+      await withTimeout(
+        appInitializer.initializeAndFetchUserData(
+          requestAddress,
+          (userData: UserData) => {
+            // Defensive: app-initializer guards against undefined userData, but
+            // this callback is reached from three flows (login, onConfirmed,
+            // HMR) and any future refactor could reintroduce undefined. If it
+            // happens, we must not throw — throwing here used to cascade into
+            // login()'s catch and surface as "Invalid private key or mnemonic"
+            // on the register page after a successful registration.
+            if (!userData) return;
 
-        // Bail if the active account changed mid-flight — the response
-        // belongs to a logged-out session and must not touch the new one.
-        if (address.value !== requestAddress) return;
+            // Bail if the active account changed mid-flight — the response
+            // belongs to a logged-out session and must not touch the new one.
+            if (address.value !== requestAddress) return;
 
-        // Merge cached self-profile (last user save) into the remote snapshot
-        // so a stale Pocketnet `getuserprofile` response cannot revert the
-        // user's name within the propagation window — WEE-26 / forta-bugs#596,
-        // #580. When no cache exists or the local edit is older than the grace
-        // window, remote wins unchanged.
-        const cached = readSelfProfile(requestAddress);
-        const merged = mergeSelfProfileWithRemote(cached, userData);
+            // Merge cached self-profile (last user save) into the remote snapshot
+            // so a stale Pocketnet `getuserprofile` response cannot revert the
+            // user's name within the propagation window — WEE-26 / forta-bugs#596,
+            // #580. When no cache exists or the local edit is older than the grace
+            // window, remote wins unchanged.
+            const cached = readSelfProfile(requestAddress);
+            const merged = mergeSelfProfileWithRemote(cached, userData);
 
-        setUserInfo(merged);
-        PocketnetInstanceConfigurator.setUserAddress(requestAddress);
-        PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-          createKeyPair(requestPrivateKey)
-        );
+            setUserInfo(merged);
+            PocketnetInstanceConfigurator.setUserAddress(requestAddress);
+            PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
+              createKeyPair(requestPrivateKey)
+            );
 
-        writeSelfProfile({
-          address: requestAddress,
-          name: merged.name ?? "",
-          about: merged.about ?? "",
-          image: merged.image ?? "",
-          site: merged.site ?? "",
-          language: merged.language ?? "",
-          localEditedAt: cached?.localEditedAt ?? 0,
-          syncedAt: Date.now(),
-        });
+            writeSelfProfile({
+              address: requestAddress,
+              name: merged.name ?? "",
+              about: merged.about ?? "",
+              image: merged.image ?? "",
+              site: merged.site ?? "",
+              language: merged.language ?? "",
+              localEditedAt: cached?.localEditedAt ?? 0,
+              syncedAt: Date.now(),
+            });
 
-        // Sync own profile to userStore so Avatar components show correct name/initial
-        if (merged.name) {
-          useUserStore().setUser(requestAddress, {
-            address: requestAddress,
-            name: merged.name ?? "",
-            about: merged.about ?? "",
-            image: merged.image ?? "",
-            site: merged.site ?? "",
-            language: merged.language ?? "",
-          });
-        }
-      },
-      forceNetwork ? { update: true } : undefined,
-    );
+            // Sync own profile to userStore so Avatar components show correct name/initial
+            if (merged.name) {
+              useUserStore().setUser(requestAddress, {
+                address: requestAddress,
+                name: merged.name ?? "",
+                about: merged.about ?? "",
+                image: merged.image ?? "",
+                site: merged.site ?? "",
+                language: merged.language ?? "",
+              });
+            }
+          },
+          forceNetwork ? { update: true } : undefined,
+        ),
+        RPC_CALL_TIMEOUT,
+        "fetchUserInfo",
+      );
+    } catch (e) {
+      console.warn("[auth] fetchUserInfo: initializeAndFetchUserData failed (non-fatal):", e);
+    }
   };
 
   /** Verify user has 12 published encryption keys; re-publish if missing.
@@ -1285,41 +1344,63 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Synchronous half of login: derive keys from the mnemonic/private key and
+   *  establish the auth session. Throws on a bad credential (caller wraps in
+   *  try/catch — see `login` and `register`).
+   *
+   *  Split out from the network half below (WEE-XX) so `register()` can start
+   *  the bounded registration poll (30-min PollTimer) right after this,
+   *  instead of after the whole login chain — see `completeLoginNetwork`. */
+  const establishAuthSession = (cryptoCredential: string): AuthData => {
+    const keyPair = createKeyPair(cryptoCredential);
+    const addr = getAddressFromPubKey(keyPair.publicKey);
+    if (!addr) throw new Error("Failed to derive address");
+
+    const authData: AuthData = {
+      address: addr,
+      privateKey: convertToHexString(keyPair.privateKey)
+    };
+    setAuthData(authData);
+
+    // WEE-102: hydrate local contact aliases from Dexie BEFORE any network
+    // step (fetchUserInfo / verifyAndRepublishKeys / initMatrix). Offline,
+    // those steps can stall and the alias hydration buried inside initMatrix
+    // would never run, leaving every renamed contact stuck on its raw
+    // nickname. Reading Dexie needs no connectivity, so it is safe and
+    // user-visible from the first frame; initMatrix's loadLocalAliases later
+    // refreshes it via the live kit.
+    useChatStore().hydrateLocalAliasesEarly(addr).catch(() => { /* best-effort */ });
+
+    return authData;
+  };
+
+  /** Network half of login: profile fetch, key verification, Matrix init.
+   *  Effectively non-throwing for the registration path — fetchUserInfo is
+   *  internally try/caught (proxy 408s observed in production),
+   *  verifyAndRepublishKeys short-circuits while registrationPending is set,
+   *  and initMatrix() catches its own errors — but kept `async`/unswallowed
+   *  here so a genuinely unexpected throw still surfaces to callers that
+   *  await it directly (e.g. the plain `login()` below). */
+  const completeLoginNetwork = async (): Promise<void> => {
+    await fetchUserInfo();
+
+    // Verify encryption keys are published; re-publish if missing
+    await verifyAndRepublishKeys();
+
+    // Initialize Matrix after successful auth
+    await initMatrix();
+
+    // Bind per-account localStorage keys (pinned/muted rooms)
+    if (address.value) {
+      useChatStore().bindAccountKeys(address.value);
+    }
+  };
+
   const { execute: login, isLoading: isLoggingIn } = useAsyncOperation(
     async (cryptoCredential: string) => {
       try {
-        const keyPair = createKeyPair(cryptoCredential);
-        const addr = getAddressFromPubKey(keyPair.publicKey);
-        if (!addr) throw new Error("Failed to derive address");
-
-        const authData: AuthData = {
-          address: addr,
-          privateKey: convertToHexString(keyPair.privateKey)
-        };
-        setAuthData(authData);
-
-        // WEE-102: hydrate local contact aliases from Dexie BEFORE any network
-        // step (fetchUserInfo / verifyAndRepublishKeys / initMatrix). Offline,
-        // those steps can stall and the alias hydration buried inside initMatrix
-        // would never run, leaving every renamed contact stuck on its raw
-        // nickname. Reading Dexie needs no connectivity, so it is safe and
-        // user-visible from the first frame; initMatrix's loadLocalAliases later
-        // refreshes it via the live kit.
-        useChatStore().hydrateLocalAliasesEarly(addr).catch(() => { /* best-effort */ });
-
-        await fetchUserInfo();
-
-        // Verify encryption keys are published; re-publish if missing
-        await verifyAndRepublishKeys();
-
-        // Initialize Matrix after successful auth
-        await initMatrix();
-
-        // Bind per-account localStorage keys (pinned/muted rooms)
-        if (address.value) {
-          useChatStore().bindAccountKeys(address.value);
-        }
-
+        const authData = establishAuthSession(cryptoCredential);
+        await completeLoginNetwork();
         return { data: authData, error: null };
       } catch (e){
         console.error(e)
@@ -1386,6 +1467,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // Drop self-profile snapshot (WEE-26). Routed through the cache helper
     // so the key prefix stays a single source of truth.
     if (logoutAddress) clearSelfProfile(logoutAddress);
+    // Drop any still-queued UserInfo action for this address (see
+    // pendingUserInfoActions doc comment) — cancelRegistration already does
+    // this on its own path, but logout can also fire mid-registration (app
+    // closed and relaunched, or any future caller), and AppInitializer is a
+    // session-lifetime singleton that would otherwise keep a stale non-terminal
+    // action around for reuse if this address ever registers again.
+    if (logoutAddress) appInitializer.clearPendingUserInfoAction(logoutAddress);
 
     // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
     // Clear the persistent media cache FIRST so we wipe Capacitor Filesystem
@@ -1519,23 +1607,40 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // 3. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
     setPendingRegProfile({ ...profile, encPublicKeys });
 
-    // 4. Auto-login with the generated mnemonic (sets up SDK account + Matrix)
+    // 4. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
+    // Split into a sync half (derive keys, set auth state) and a network half
+    // (profile fetch, key verification, Matrix init) so the bounded
+    // registration poll (30-min PollTimer, per-RPC withTimeout) can start
+    // right after the sync half — previously it only started once the whole
+    // network half had finished, and that chain had no top-level timeout of
+    // its own, so a dead/blocked proxy there (observed: fetchUserInfo 408s)
+    // could hang the "Подготовка аккаунта" screen with no safety net at all.
     const mnemonic = regMnemonic.value;
     clearRegistrationState();
+
+    try {
+      establishAuthSession(mnemonic);
+    } catch (e) {
+      throw new Error(e instanceof Error ? e.message : 'Login failed after registration');
+    }
 
     // Mark as pending — blockchain hasn't confirmed yet
     setRegistrationPending(true);
     setRegistrationPhase('init');
 
-    const loginResult = await login(mnemonic);
-    if (!loginResult?.data) {
-      setRegistrationPending(false);
-      setRegistrationPhase('init');
-      throw new Error(loginResult?.error ?? 'Login failed after registration');
-    }
-
-    // 5. Start polling — will broadcast UserInfo when PKOIN arrives, then wait for confirmation
+    // 5. Start polling now — will broadcast UserInfo when PKOIN arrives, then
+    // wait for confirmation. Runs concurrently with the network login below;
+    // onRegistrationConfirmed() already re-runs initMatrix() itself if Matrix
+    // isn't ready yet by the time the blockchain confirms, so the ordering
+    // here is safe.
     startRegistrationPoll();
+
+    // Network login continues in the background. Effectively non-fatal for
+    // registration (see completeLoginNetwork) — swallow defensively so a
+    // genuinely unexpected throw doesn't become an unhandled rejection.
+    completeLoginNetwork().catch((e) => {
+      console.warn("[auth] completeLoginNetwork failed during registration auto-login (non-fatal, poll continues):", e);
+    });
   };
 
   /** Retry registration with a new username after code 18 error.
@@ -1552,6 +1657,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     const language = pendingRegProfile.value?.language ?? "en";
     const about = pendingRegProfile.value?.about ?? "";
     const image = pendingRegProfile.value?.image;
+
+    // Drop any still-queued UserInfo action for this address before
+    // restarting — broadcastUserInfoAction reuses a non-terminal pending
+    // action across retries (see pendingUserInfoActions doc comment), and
+    // that action was built from the OLD name. Relying on the SDK having
+    // already marked it `.rejected` (which triggers the same cleanup
+    // incidentally) isn't guaranteed for every failure mode that lands here,
+    // so clear it explicitly rather than risk silently re-broadcasting stale
+    // content under the new name.
+    appInitializer.clearPendingUserInfoAction(address.value);
 
     setPendingRegProfile({ name: newName, language, about, image, encPublicKeys });
     setRegistrationPending(true);
@@ -1574,12 +1689,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  bug on Android where setTimeout is throttled but Date.now() still advances. */
   const startRegistrationPoll = () => {
     if (registrationPollTimer) clearTimeout(registrationPollTimer);
+    // Supersede any previous poll loop (including one still mid-flight in an
+    // awaited RPC — see registrationPollGeneration doc comment above).
+    const myGeneration = ++registrationPollGeneration;
     let pollInterval = 3000;
     const MAX_POLL_INTERVAL = 60000;
     let attempt = 0;
     pollTimer = new PollTimer();
     registrationPollAttempt.value = 0;
     let consecutiveErrors = 0;
+    // Guards against _registrationPollKick re-entering poll() while a tick
+    // from this same loop is still mid-flight (see comment at the check site).
+    let pollInFlight = false;
     console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
 
     // Wire background pause so the 30-min timeout budget only counts active
@@ -1621,6 +1742,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
 
     const poll = async () => {
+      // A newer poll loop has since started (see registrationPollGeneration
+      // doc comment) — this stale loop must not touch shared poll state
+      // (attempt/pollInterval/registrationPollTimer belong to the new loop
+      // now) or reschedule itself.
+      if (myGeneration !== registrationPollGeneration) return;
+
       if (!address.value) {
         stopRegistrationPoll();
         return;
@@ -1635,117 +1762,152 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         return;
       }
 
+      // _registrationPollKick calls poll() directly without checking whether
+      // a previous tick is still mid-flight (registrationPollTimer is only
+      // set once a tick finishes, inside schedulePoll) — a blockchain-ws
+      // event arriving while a tick is awaiting an RPC would otherwise start
+      // a second concurrent tick of the SAME loop, which can broadcast the
+      // same UserInfo action twice and hit the Actions SDK collision guard.
+      if (pollInFlight) return;
+      pollInFlight = true;
+
       attempt++;
       registrationPollAttempt.value = attempt;
       try {
-        // Phase 1: Broadcast UserInfo once PKOIN arrives
-        if (pendingRegProfile.value) {
-          // Fresh getuserprofile (update:true) — local SDK cache from login may
-          // still hold an empty pre-registration row. If the account is already
-          // on-chain, leave step 1 and finish instead of waiting for PKOIN forever.
-          const rawProfiles = await withTimeout(
-            appInitializer.loadUsersInfoRaw([address.value]),
-            RPC_CALL_TIMEOUT,
-            "getuserprofile",
-          );
-          if (rawProfiles.length > 0) {
-            console.log("[auth] getuserprofile already has account during phase 1 — completing registration");
-            setPendingRegProfile(null);
+        try {
+          // Phase 1: Broadcast UserInfo once PKOIN arrives
+          if (pendingRegProfile.value) {
+            // Fresh getuserprofile (update:true) — local SDK cache from login may
+            // still hold an empty pre-registration row. If the account is already
+            // on-chain, leave step 1 and finish instead of waiting for PKOIN forever.
+            const rawProfiles = await withTimeout(
+              appInitializer.loadUsersInfoRaw([address.value]),
+              RPC_CALL_TIMEOUT,
+              "getuserprofile",
+            );
+            if (rawProfiles.length > 0) {
+              // A newer loop may have started during the RPC await above and
+              // could itself be mid-completion — avoid a double
+              // onRegistrationConfirmed() (redundant profile reload/initMatrix
+              // work; correctness is otherwise unaffected since it's the
+              // SAME confirmed registration either loop would report).
+              if (myGeneration !== registrationPollGeneration) return;
+              console.log("[auth] getuserprofile already has account during phase 1 — completing registration");
+              setPendingRegProfile(null);
+              await onRegistrationConfirmed();
+              return;
+            }
+
+            // Pin the first attempt to whichever node last told us (via
+            // blockchain-ws) that a tx landed for this address — works around
+            // node-to-node replication lag right after that event fires.
+            // checkUnspents falls back to normal failover on a miss.
+            const hasUnspents = await withTimeout(
+              appInitializer.checkUnspents(address.value, _lastTxNodeHint),
+              RPC_CALL_TIMEOUT,
+              "checkUnspents",
+            );
+            if (hasUnspents) {
+              console.log("[auth] PKOIN received, broadcasting UserInfo...");
+              setRegistrationPhase('broadcasting');
+              try {
+                await withTimeout(
+                  appInitializer.syncNodeTime(),
+                  RPC_CALL_TIMEOUT,
+                  "syncNodeTime",
+                );
+                const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
+                // Bypass local getuserprofile cache before broadcast.
+                await withTimeout(
+                  appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true }),
+                  RPC_CALL_TIMEOUT,
+                  "initializeAndFetchUserData",
+                );
+                // Re-check: the awaits above can take seconds, long enough for
+                // another loop to have started and already begun broadcasting
+                // this same UserInfo action. Racing two broadcasts triggers the
+                // Actions SDK's collision guard ("actions_collision" /
+                // "did not produce a transaction") — bail and let the newer
+                // loop own the broadcast instead.
+                if (myGeneration !== registrationPollGeneration) return;
+
+                // registerUserProfile now forces a real send (not just queue) and
+                // throws if no txid — pendingRegProfile stays set on failure so
+                // the next poll can retry instead of hanging on confirming.
+                const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
+                registrationFnode = registrationNode;
+                console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
+                setRegistrationPhase('confirming');
+                setPendingRegProfile(null);
+                pollInterval = 3000;
+                attempt = 0;
+              } catch (broadcastErr: unknown) {
+                // Check for error code 18 (username taken/invalid) — stop polling and surface error
+                const errCode = extractErrorCode(broadcastErr);
+                if (errCode === 18) {
+                  console.error("[auth] UserInfo broadcast rejected: username taken/invalid (code 18)");
+                  setRegistrationPhase('error');
+                  registrationUsernameError.value = true;
+                  setRegistrationPending(false);
+                  stopRegistrationPoll();
+                  return;
+                }
+                // Other broadcast errors — rethrow to be caught by outer catch and retried
+                throw broadcastErr;
+              }
+            } else {
+              console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
+            }
+            consecutiveErrors = 0;
+            schedulePoll();
+            return;
+          }
+
+          // Phase 2: Wait for blockchain confirmation of UserInfo
+          const actionsStatus = appInitializer.getAccountRegistrationStatus();
+          console.log("[auth] Registration poll — actions:", actionsStatus, "(attempt", attempt, ")");
+
+          // 'undefined_status' = UserInfo action completed but status.value not
+          // flipped yet (SDK race). Treat as confirmed — otherwise we spin on
+          // step 2 until getuserstate catches up (or forever if it never does).
+          if (actionsStatus === 'registered' || actionsStatus === 'undefined_status') {
+            if (myGeneration !== registrationPollGeneration) return;
+            console.log("[auth] Registration confirmed via Actions system!");
             await onRegistrationConfirmed();
             return;
           }
 
-          const hasUnspents = await withTimeout(
-            appInitializer.checkUnspents(address.value),
+          const confirmed = await withTimeout(
+            appInitializer.checkUserRegistered(address.value, registrationFnode),
             RPC_CALL_TIMEOUT,
-            "checkUnspents",
+            "checkUserRegistered",
           );
-          if (hasUnspents) {
-            console.log("[auth] PKOIN received, broadcasting UserInfo...");
-            setRegistrationPhase('broadcasting');
-            try {
-              await withTimeout(
-                appInitializer.syncNodeTime(),
-                RPC_CALL_TIMEOUT,
-                "syncNodeTime",
-              );
-              const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
-              // Bypass local getuserprofile cache before broadcast.
-              await withTimeout(
-                appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true }),
-                RPC_CALL_TIMEOUT,
-                "initializeAndFetchUserData",
-              );
-              // registerUserProfile now forces a real send (not just queue) and
-              // throws if no txid — pendingRegProfile stays set on failure so
-              // the next poll can retry instead of hanging on confirming.
-              const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
-              registrationFnode = registrationNode;
-              console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
-              setRegistrationPhase('confirming');
-              setPendingRegProfile(null);
-              pollInterval = 3000;
-              attempt = 0;
-            } catch (broadcastErr: unknown) {
-              // Check for error code 18 (username taken/invalid) — stop polling and surface error
-              const errCode = extractErrorCode(broadcastErr);
-              if (errCode === 18) {
-                console.error("[auth] UserInfo broadcast rejected: username taken/invalid (code 18)");
-                setRegistrationPhase('error');
-                registrationUsernameError.value = true;
-                setRegistrationPending(false);
-                stopRegistrationPoll();
-                return;
-              }
-              // Other broadcast errors — rethrow to be caught by outer catch and retried
-              throw broadcastErr;
-            }
-          } else {
-            console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
+          if (confirmed) {
+            // Same double-completion guard as above — checkUserRegistered's
+            // RPC await is long enough for a newer loop to have taken over.
+            if (myGeneration !== registrationPollGeneration) return;
+            console.log("[auth] Registration confirmed on blockchain! (fnode:", registrationFnode, ")");
+            await onRegistrationConfirmed();
+            return;
           }
+
           consecutiveErrors = 0;
-          schedulePoll();
-          return;
+          console.log("[auth] Waiting for blockchain confirmation... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
+        } catch (e) {
+          consecutiveErrors++;
+          console.warn("[auth] Registration poll error (attempt", attempt, ", consecutive:", consecutiveErrors, "):", e);
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            console.error("[auth] Too many consecutive poll errors, showing error UI");
+            registrationErrorMessage.value = 'network';
+            setRegistrationPhase('error');
+            stopRegistrationPoll();
+            return;
+          }
         }
-
-        // Phase 2: Wait for blockchain confirmation of UserInfo
-        const actionsStatus = appInitializer.getAccountRegistrationStatus();
-        console.log("[auth] Registration poll — actions:", actionsStatus, "(attempt", attempt, ")");
-
-        // 'undefined_status' = UserInfo action completed but status.value not
-        // flipped yet (SDK race). Treat as confirmed — otherwise we spin on
-        // step 2 until getuserstate catches up (or forever if it never does).
-        if (actionsStatus === 'registered' || actionsStatus === 'undefined_status') {
-          console.log("[auth] Registration confirmed via Actions system!");
-          await onRegistrationConfirmed();
-          return;
-        }
-
-        const confirmed = await withTimeout(
-          appInitializer.checkUserRegistered(address.value, registrationFnode),
-          RPC_CALL_TIMEOUT,
-          "checkUserRegistered",
-        );
-        if (confirmed) {
-          console.log("[auth] Registration confirmed on blockchain! (fnode:", registrationFnode, ")");
-          await onRegistrationConfirmed();
-          return;
-        }
-
-        consecutiveErrors = 0;
-        console.log("[auth] Waiting for blockchain confirmation... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
-      } catch (e) {
-        consecutiveErrors++;
-        console.warn("[auth] Registration poll error (attempt", attempt, ", consecutive:", consecutiveErrors, "):", e);
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          console.error("[auth] Too many consecutive poll errors, showing error UI");
-          registrationErrorMessage.value = 'network';
-          setRegistrationPhase('error');
-          stopRegistrationPoll();
-          return;
-        }
+        schedulePoll();
+      } finally {
+        pollInFlight = false;
       }
-      schedulePoll();
     };
 
     const schedulePoll = () => {
@@ -1778,44 +1940,57 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         const confirmedAddress = address.value!;
         // Always network getuserprofile — local userInfoFull may still hold the
         // empty row cached at login before UserInfo landed on-chain.
-        await appInitializer.loadUsersInfo([confirmedAddress], { update: true });
-        await appInitializer.initializeAndFetchUserData(
-          confirmedAddress,
-          (data: UserData) => {
-            // Defensive guard — see fetchUserInfo for rationale. Without
-            // this, a timing quirk in psdk.userInfo.get() (cache miss right
-            // after blockchain confirmation) would crash the callback and
-            // abort the post-registration flow.
-            if (!data) return;
-            if (address.value !== confirmedAddress) return;
-            // Same merge logic as fetchUserInfo — preserves any cached
-            // self-profile (e.g. from pendingRegProfile or a prior session)
-            // when Pocketnet returns an empty/stale row right after the
-            // confirmation tx propagates (WEE-26).
-            const cached = readSelfProfile(confirmedAddress);
-            const merged = mergeSelfProfileWithRemote(cached, data);
-            setUserInfo(merged);
-            writeSelfProfile({
-              address: confirmedAddress,
-              name: merged.name ?? "",
-              about: merged.about ?? "",
-              image: merged.image ?? "",
-              site: merged.site ?? "",
-              language: merged.language ?? "",
-              localEditedAt: cached?.localEditedAt ?? 0,
-              syncedAt: Date.now(),
-            });
-            // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
-            useUserStore().setUser(confirmedAddress, {
-              address: confirmedAddress,
-              name: merged.name ?? "",
-              about: merged.about ?? "",
-              image: merged.image ?? "",
-              site: merged.site ?? "",
-              language: merged.language ?? "",
-            });
-          },
-          { update: true },
+        await withTimeout(
+          appInitializer.loadUsersInfo([confirmedAddress], { update: true }),
+          RPC_CALL_TIMEOUT,
+          "onRegistrationConfirmed loadUsersInfo",
+        );
+        // Bounded like fetchUserInfo (WEE-XX): an unguarded hang here — not just
+        // a fast 408 — would keep registrationPending true forever, since the
+        // state cleanup below never runs until this settles. That would strand
+        // the user on the "Подготовка аккаунта" overlay instead of the chat
+        // page's room-list skeleton, but it's the same proxy failure class.
+        await withTimeout(
+          appInitializer.initializeAndFetchUserData(
+            confirmedAddress,
+            (data: UserData) => {
+              // Defensive guard — see fetchUserInfo for rationale. Without
+              // this, a timing quirk in psdk.userInfo.get() (cache miss right
+              // after blockchain confirmation) would crash the callback and
+              // abort the post-registration flow.
+              if (!data) return;
+              if (address.value !== confirmedAddress) return;
+              // Same merge logic as fetchUserInfo — preserves any cached
+              // self-profile (e.g. from pendingRegProfile or a prior session)
+              // when Pocketnet returns an empty/stale row right after the
+              // confirmation tx propagates (WEE-26).
+              const cached = readSelfProfile(confirmedAddress);
+              const merged = mergeSelfProfileWithRemote(cached, data);
+              setUserInfo(merged);
+              writeSelfProfile({
+                address: confirmedAddress,
+                name: merged.name ?? "",
+                about: merged.about ?? "",
+                image: merged.image ?? "",
+                site: merged.site ?? "",
+                language: merged.language ?? "",
+                localEditedAt: cached?.localEditedAt ?? 0,
+                syncedAt: Date.now(),
+              });
+              // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+              useUserStore().setUser(confirmedAddress, {
+                address: confirmedAddress,
+                name: merged.name ?? "",
+                about: merged.about ?? "",
+                image: merged.image ?? "",
+                site: merged.site ?? "",
+                language: merged.language ?? "",
+              });
+            },
+            { update: true },
+          ),
+          RPC_CALL_TIMEOUT,
+          "onRegistrationConfirmed initializeAndFetchUserData",
         );
       } catch (e) {
         console.warn("[auth] initializeAndFetchUserData failed after confirmation, continuing:", e);
@@ -1864,6 +2039,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const stopRegistrationPoll = () => {
+    // Invalidate the current generation so a poll() call already mid-flight
+    // (e.g. awaiting an RPC when cancelRegistration fires) bails before
+    // broadcasting instead of racing whatever starts next.
+    registrationPollGeneration++;
     if (registrationPollTimer) {
       clearTimeout(registrationPollTimer);
       registrationPollTimer = null;
@@ -1898,6 +2077,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     registrationErrorMessage.value = null;
     registrationUsernameError.value = false;
     clearRegistrationState();
+    // Drop the queued-but-unresolved UserInfo action so a future registration
+    // attempt for this address (unlikely, but possible in the same app
+    // session) starts clean instead of reusing a stale action reference.
+    if (address.value) appInitializer.clearPendingUserInfoAction(address.value);
     registrationFnode = null;
     await logout();
   };

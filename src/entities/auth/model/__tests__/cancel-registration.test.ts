@@ -50,7 +50,7 @@ describe("cancelRegistration", () => {
     const src = getStoresSource();
     const logoutStart = src.indexOf("const logout = async");
     expect(logoutStart).toBeGreaterThan(-1);
-    const logoutFn = src.slice(logoutStart, logoutStart + 3200);
+    const logoutFn = src.slice(logoutStart, logoutStart + 3800);
     expect(logoutFn).toMatch(/setRegistrationPhase\s*\(\s*["']init["']\s*\)/);
   });
 
