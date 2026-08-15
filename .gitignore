@@ -93,3 +93,4 @@ auto-imports.d.ts
 # Planning artifacts
 .planning/
 *.plist
+!electron/entitlements.mac.plist
