@@ -116,11 +116,12 @@ const peerKeysMissing = computed(() => {
 const { toast } = useToast();
 const { t } = useI18n();
 
-// Retry/republish handlers for the peer-keys banner. The banner is no longer
-// a hard blocker (regression #597/#598/#639) — it now offers two escape
-// hatches so a stuck "missing" state never traps the user.
+// Retry handler for the peer-keys banner. The banner is no longer a hard
+// blocker (regression #597/#598/#639) — it offers an escape hatch so a stuck
+// "missing" state never traps the user. There is deliberately no "republish
+// my own keys" action here: the banner means the PEER hasn't published keys,
+// not the local user — republishing keys that already exist is a no-op.
 const peerKeysRetrying = ref(false);
-const peerKeysRepublishing = ref(false);
 
 const retryPeerKeys = async () => {
   const roomId = chatStore.activeRoomId;
@@ -128,47 +129,15 @@ const retryPeerKeys = async () => {
   peerKeysRetrying.value = true;
   try {
     const roomCrypto = authStore.pcrypto?.rooms[roomId];
-    if (roomCrypto) await roomCrypto.prepare();
+    // forceRefresh:true — explicit user action, so bypass the cached peer
+    // profile and hit the network. The automatic 30s recheck below stays
+    // on the cache (no force) to avoid extra network load on every tick.
+    if (roomCrypto) await roomCrypto.prepare(true);
     await chatStore.checkPeerKeys(roomId);
   } catch (e) {
     console.warn("[ChatWindow] peer-keys retry failed:", e);
   } finally {
     peerKeysRetrying.value = false;
-  }
-};
-
-const republishMyKeys = async () => {
-  if (peerKeysRepublishing.value) return;
-  peerKeysRepublishing.value = true;
-  try {
-    const result = await authStore.republishKeysFromUi();
-    if (result.state === "republished" || result.state === "already-ok") {
-      const roomId = chatStore.activeRoomId;
-      if (roomId) {
-        const roomCrypto = authStore.pcrypto?.rooms[roomId];
-        if (roomCrypto) await roomCrypto.prepare();
-        await chatStore.checkPeerKeys(roomId);
-      }
-      toast(
-        result.state === "already-ok"
-          ? t("chat.republishKeysAlreadyOk")
-          : t("chat.republishKeysSuccess"),
-        "success",
-      );
-    } else if (result.state === "needs-funds") {
-      toast(t("chat.republishKeysNeedsFunds"), "error");
-    } else if (result.state === "broadcast-failed") {
-      console.error("[ChatWindow] republish keys broadcast failed:", result.reason);
-      toast(t("chat.republishKeysError"), "error");
-    } else {
-      // skipped (no creds / registration in progress) — show generic error
-      toast(t("chat.republishKeysError"), "error");
-    }
-  } catch (e) {
-    console.error("[ChatWindow] republish keys failed:", e);
-    toast(t("chat.republishKeysError"), "error");
-  } finally {
-    peerKeysRepublishing.value = false;
   }
 };
 
@@ -185,6 +154,11 @@ watch(() => chatStore.activeRoomId, (roomId) => {
   if (!roomId) return;
 
   peerKeyRecheckTimer = setInterval(async () => {
+    // Skip while an explicit forced retry is already in flight — both write
+    // the same room's `usersinfo`, and this unforced tick reading the (still
+    // stale) cache could resolve after the forced one and clobber the
+    // freshly-fetched keys it just wrote.
+    if (peerKeysRetrying.value) return;
     const status = chatStore.peerKeysStatus.get(roomId);
     if (status === "missing") {
       const roomCrypto = authStore.pcrypto?.rooms[roomId];
@@ -689,14 +663,6 @@ onUnmounted(() => {
                 @click="retryPeerKeys"
               >
                 {{ t("chat.peerKeysRetry") }}
-              </button>
-              <button
-                type="button"
-                class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                :disabled="peerKeysRepublishing"
-                @click="republishMyKeys"
-              >
-                {{ peerKeysRepublishing ? t("chat.republishKeysInProgress") : t("chat.republishKeys") }}
               </button>
             </div>
           </div>

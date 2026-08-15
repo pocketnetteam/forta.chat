@@ -46,7 +46,10 @@ describe("UserData null-safety in registration/login flow", () => {
     const src = getStoresSource();
     const fnStart = src.indexOf("const fetchUserInfo = async () =>");
     expect(fnStart).toBeGreaterThan(-1);
-    const fn = src.slice(fnStart, fnStart + 1500);
+    // Window widened (WEE-XX): fetchUserInfo's network call is now wrapped in
+    // its own try/catch (proxy 408s observed in production must not fail the
+    // whole login()/register() chain), pushing the userData guard further in.
+    const fn = src.slice(fnStart, fnStart + 2000);
     // Must guard against undefined userData before dereferencing any field.
     // Old buggy version: `if (userData.name)` — crashes on undefined.
     // Fixed version: `if (userData && userData.name)` or an early guard.
@@ -58,7 +61,10 @@ describe("UserData null-safety in registration/login flow", () => {
     const src = getStoresSource();
     const fnStart = src.indexOf("async function onRegistrationConfirmed");
     expect(fnStart).toBeGreaterThan(-1);
-    const fn = src.slice(fnStart, fnStart + 1500);
+    // Window widened (WEE-XX): the loadUsersInfo/initializeAndFetchUserData
+    // calls here are now wrapped in withTimeout (same unguarded-hang class as
+    // fetchUserInfo — see that test above), pushing the userData guard further in.
+    const fn = src.slice(fnStart, fnStart + 2000);
     // Must not unconditionally reach `data.name ?? ""` — that crashes on undefined.
     // Guard may be either `if (data)` or optional chaining on all field accesses.
     expect(fn).toMatch(/if\s*\(\s*data\s*\)|if\s*\(\s*!data\s*\)|data\?\.name/);

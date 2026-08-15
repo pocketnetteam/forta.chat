@@ -12,8 +12,10 @@ import {
   isAndroid,
   hasTor,
   isElectron,
+  isWeb,
   resolveAppUpdaterEnabled,
 } from "@/shared/lib/platform";
+import { AppPages } from "@/app/providers/router";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
 import {
@@ -560,6 +562,39 @@ const handleLogout = () => {
           >
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        </button>
+
+        <!-- Download apps (web only) -->
+        <button
+          v-if="isWeb"
+          class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
+          @click="router.push({ name: AppPages.apps })"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span class="flex-1 text-left text-sm text-text-color">{{ t("settings.downloadApps") }}</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="shrink-0 text-text-on-main-bg-color"
+          >
+            <polyline points="9 18 15 12 9 6" />
           </svg>
         </button>
 

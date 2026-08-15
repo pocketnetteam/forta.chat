@@ -180,11 +180,14 @@ export const setupProviders = async (app: App) => {
     }
   }
 
-  // Static pages (e.g. /download landing) don't need chat scripts —
+  // Static pages (e.g. /download landing, /apps downloads) don't need chat scripts —
   // skip blocking wait so they render instantly.
   const isStaticRoute = location.hash === "#/download"
     || location.hash.startsWith("#/download?")
-    || location.hash.startsWith("#/download/");
+    || location.hash.startsWith("#/download/")
+    || location.hash === "#/apps"
+    || location.hash.startsWith("#/apps?")
+    || location.hash.startsWith("#/apps/");
 
   if (!isStaticRoute) {
     // Scripts must finish before router mounts the app — components

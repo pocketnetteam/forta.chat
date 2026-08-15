@@ -117,10 +117,22 @@ export class AppInitializer {
   private blockHeightLastResult = 0;
   private static readonly BLOCK_HEIGHT_COOLDOWN_MS = 45_000;
 
+  /** UserInfo broadcast action currently queued per address, keyed by
+   *  address. The Actions SDK manages a queued action's retries itself (a 3s
+   *  internal interval started by `Actions.init()`) — calling
+   *  `addActionAndSendIfCan` again for the same account creates a SECOND
+   *  queued action instead of advancing the first. The SDK's own collision
+   *  guard only supersedes an older UserInfo action while it hasn't been
+   *  sent yet; once sent, both coexist and the SDK rejects one of them with
+   *  "actions_collision" the next time it processes the queue. Reuse the
+   *  same action reference across registration poll retries instead of
+   *  requeuing a fresh one on every attempt. */
+  private pendingUserInfoActions = new Map<string, BroadcastableAction>();
+
   constructor(pocketnetInstance: PocketnetInstanceType) {
     this.pocketnetInstance = pocketnetInstance;
 
-    // Configure the shared RPC node pool (1/2/6.pocketnet.app:8899) for the
+    // Configure the shared RPC node pool (1/2.pocketnet.app:8899) for the
     // centralized failover client — done before the standalone guard so direct
     // fetches have failover even when the SDK globals are absent.
     configurePocketnetNodes(buildNodeBaseUrls(pocketnetInstance.options.listofproxies));
@@ -310,8 +322,9 @@ export class AppInitializer {
    *  the sendrawtransaction — use it as fnode for subsequent getuserstate calls.
    *
    *  New accounts: `addActionAndSendIfCan` only queues (checkAccountReadySend requires
-   *  already-registered status). We preload unspents, force `processingWithIterations`,
-   *  and require a real txid — otherwise registration UI hangs on step 2 forever. */
+   *  already-registered status). We preload unspents, force `processingWithIteractions`
+   *  (vendor spelling — see ensure-action-broadcast.ts), and require a real txid —
+   *  otherwise registration UI hangs on step 2 forever. */
   async registerUserProfile(
     address: string,
     profile: { name: string; language: string; about: string },
@@ -343,11 +356,40 @@ export class AppInitializer {
     return { action, registrationNode };
   }
 
-  /** Queue UserInfo, warm unspent cache, force broadcast for new accounts. */
+  /** Queue UserInfo, warm unspent cache, force broadcast for new accounts.
+   *
+   *  Reuses an already-queued action for this address instead of requeuing:
+   *  a fresh `UserInfo` object is passed in on every registration poll
+   *  retry, but the vendor `Action` object returned by `addActionAndSendIfCan`
+   *  already IS the thing to keep driving forward — the SDK tracks retries by
+   *  action identity, not by re-diffing content. Queueing a second action
+   *  while the first is still outstanding is exactly what produces
+   *  "actions_collision" (see pendingUserInfoActions doc comment). */
   private async broadcastUserInfoAction(
     address: string,
     userInfo: InstanceType<typeof UserInfo>,
   ): Promise<BroadcastableAction> {
+    const existing = this.pendingUserInfoActions.get(address);
+    if (existing) {
+      try {
+        const result = await ensureActionBroadcast(existing);
+        this.pendingUserInfoActions.delete(address);
+        return result;
+      } catch (e) {
+        if (!existing.rejected) {
+          // Not a terminal outcome — the SDK's own interval (or our own
+          // timeout racing it) may still land this action. Keep monitoring
+          // the SAME reference on the next retry instead of requeuing.
+          throw e;
+        }
+        // Terminal rejection (e.g. code 18 username taken) — drop it so the
+        // next attempt (fresh name via retryRegistrationWithNewName, or a
+        // genuinely new UserInfo) queues a clean action.
+        this.pendingUserInfoActions.delete(address);
+        throw e;
+      }
+    }
+
     // Warm Actions unspent cache so makeTransaction does not hit
     // actions_noinputs → requestUnspents → platform.ui.captcha (absent in chat).
     try {
@@ -367,12 +409,30 @@ export class AppInitializer {
       console.warn("[appInit] preload unspents before UserInfo broadcast failed:", e);
     }
 
-    const queued = await this.actions!.addActionAndSendIfCan(
+    const queued = (await this.actions!.addActionAndSendIfCan(
       userInfo,
       null,
       address,
-    );
-    return ensureActionBroadcast(queued as BroadcastableAction);
+    )) as BroadcastableAction;
+    this.pendingUserInfoActions.set(address, queued);
+
+    try {
+      const result = await ensureActionBroadcast(queued);
+      this.pendingUserInfoActions.delete(address);
+      return result;
+    } catch (e) {
+      if (!queued.rejected) throw e;
+      this.pendingUserInfoActions.delete(address);
+      throw e;
+    }
+  }
+
+  /** Drop any queued-but-unresolved UserInfo action for an address so the
+   *  next broadcastUserInfoAction call starts clean. Call on registration
+   *  cancel/abort — otherwise a stale action reference could be reused if
+   *  the same address is ever registered again in this app session. */
+  clearPendingUserInfoAction(address: string): void {
+    this.pendingUserInfoActions.delete(address);
   }
 
   /** Extract the node address from a completed action's transaction via global txidnodestorage.
@@ -984,12 +1044,35 @@ export class AppInitializer {
   }
 
   /** Check if address has unspent outputs (PKOIN balance) via txunspent RPC.
-   *  Used to verify that free registration PKOIN has arrived before broadcasting UserInfo. */
-  async checkUnspents(address: string): Promise<boolean> {
+   *  Used to verify that free registration PKOIN has arrived before broadcasting UserInfo.
+   *
+   *  `hintNode` pins the FIRST attempt to the node that emitted the
+   *  blockchain-ws "transaction" event for this address (see stores.ts's
+   *  onTransaction handler) — the node that already indexed the incoming tx,
+   *  working around node-to-node replication lag where a round-robined RPC
+   *  can still see an empty txunspent right after the WS event fires. The
+   *  Actions SDK disables cross-node retry entirely once a node is pinned
+   *  (`fnode`, see api.js rpc()), so a bad/stale hint must not strand the
+   *  caller — always fall back to the normal failover call on a miss. */
+  async checkUnspents(address: string, hintNode?: string | null): Promise<boolean> {
     if (!this.api) return false;
     try {
       await this.initApi();
       await this.waitForApiReady();
+
+      if (hintNode) {
+        try {
+          const pinned = await withTimeout(
+            this.api.rpc("txunspent", [[address], 1, 9999999], { fnode: hintNode }),
+            REGISTRATION_RPC_TIMEOUT,
+            "checkUnspents(pinned)",
+          );
+          if (Array.isArray(pinned) && pinned.length > 0) return true;
+        } catch (e) {
+          console.warn("[appInit] checkUnspents: pinned-node check failed, falling back to failover:", e);
+        }
+      }
+
       const data = await this.api.rpc("txunspent", [[address], 1, 9999999]);
       return Array.isArray(data) && data.length > 0;
     } catch {

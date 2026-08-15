@@ -35,7 +35,10 @@ describe("registration RPC timeouts (WEE-23)", () => {
     const src = getSource();
     const start = src.indexOf("async registerUserProfile(");
     expect(start).toBeGreaterThan(-1);
-    const body = src.slice(start, start + 2500);
+    // Wide enough to reach into broadcastUserInfoAction's own body (the
+    // loadUnspents preload only runs on the cold-start path — see the
+    // pendingUserInfoActions reuse tests below for that branch specifically).
+    const body = src.slice(start, start + 4000);
     expect(body).toContain("withTimeout");
     expect(body).toContain("registerUserProfile");
     expect(body).toContain("ensureActionBroadcast");

@@ -3028,12 +3028,63 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Load user profiles for members of specific rooms (viewport-based lazy loading).
    *  Uses Matrix SDK addresses when available (most complete), falls back to ChatRoom.members.
    *  Only marks a room as "requested" if we actually found addresses to load or all are cached.
-   *  On batch load failure, unblocks affected rooms so retry can happen on next call. */
+   *  On batch load failure, unblocks affected rooms so retry can happen on next call.
+   *  Public/shareable-by-link rooms are the exception: only the last-message
+   *  sender is loaded, not every member — see comment inline. */
   const loadProfilesForRoomIds = (roomIds: string[]) => {
     const uStore = useUserStore();
     const addressesToLoad: string[] = [];
     for (const roomId of roomIds) {
       if (profilesRequestedForRooms.has(roomId)) continue;
+
+      // Publicly-joinable rooms (join_rule=public) AND world_readable
+      // broadcast/stream channels (isRoomShareableByLink — Bastyon channels
+      // commonly keep join_rule="invite" but are still effectively public,
+      // see its own doc comment) are typically large — hundreds/thousands of
+      // members. The sidebar preview only needs the room name (already
+      // resolved from Matrix state, no member profiles required) and the
+      // last-message sender's name, not every member. Loading everyone here
+      // used to fire off a profile fetch per member the instant such a room
+      // merely appeared in the list. Deliberately not added to
+      // profilesRequestedForRooms: this is cheap (one address) and should
+      // re-check on every call so a new last message's sender still resolves.
+      // Other members load lazily on demand — per-message avatar (UserAvatar's
+      // viewport IntersectionObserver) or the capped member list (ChatInfoPanel).
+      //
+      // isRoomShareableByLink() needs a live Matrix SDK room object — at cold
+      // start (ChatSidebar reads Dexie-cached rooms before login/sync
+      // finishes) that's not available yet and it returns false, which would
+      // otherwise fall through to the expensive full-member load below for
+      // exactly the large rooms this is meant to protect. dexieRoomMap's
+      // persisted `historyVisibility` (written the last time the room WAS
+      // live-checked) survives across restarts and catches world_readable
+      // broadcast channels even during that pre-sync window.
+      // KNOWN GAP: LocalRoom doesn't persist join_rule (only historyVisibility),
+      // so a plain join_rule=public room (no world_readable) isn't caught by
+      // this cold-start fallback — it still gets one full-member load until
+      // the live Matrix room syncs and isRoomShareableByLink can see it. Same
+      // behavior as before this change (not a regression), just not yet
+      // covered by the fix; persisting join_rule would close it but needs a
+      // schema migration, out of scope here.
+      // Also require isGroup — a 2-member room misclassified as shareable
+      // would only get its last-message sender preloaded, silently starving
+      // the other participant's profile (ChatInfoPanel's own roomShareable
+      // gates on isGroup for the same reason).
+      const roomForShareCheck = getRoomById(roomId);
+      const knownShareable =
+        !!roomForShareCheck?.isGroup &&
+        (isRoomShareableByLink(roomId) ||
+          isStreamHistoryVisibility(dexieRoomMap.get(roomId)?.historyVisibility ?? null));
+      if (knownShareable) {
+        // Message.senderId is already a decoded Bastyon address (set via
+        // matrixIdToAddress(), which hexDecode()s internally) — NOT hex-encoded
+        // like ChatRoom.members entries. Re-decoding it here would mangle it.
+        const senderAddr = roomForShareCheck?.lastMessage?.senderId;
+        if (senderAddr && /^[A-Za-z0-9]+$/.test(senderAddr) && !uStore.users[senderAddr]) {
+          addressesToLoad.push(senderAddr);
+        }
+        continue;
+      }
 
       const roomUncached: string[] = [];
 

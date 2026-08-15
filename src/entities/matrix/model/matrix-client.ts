@@ -246,9 +246,16 @@ export class MatrixClientService {
 
     localStorage.accessToken = userData.access_token;
 
+    // v6 → v7: bump forces every client to rebuild its local Matrix sync
+    // store from scratch instead of reconciling incrementally on top of
+    // state cached while member lazy-loading was still on. Without this, an
+    // existing install could keep its old partial member state around
+    // indefinitely — canBeEncrypt() would still see it as incomplete — since
+    // disabling lazy loading only changes what *future* /sync responses
+    // contain, it doesn't retroactively backfill an already-populated store.
     const indexedDBStore = new sdk.IndexedDBStore({
       indexedDB: window.indexedDB,
-      dbName: "matrix-js-sdk-v6:" + this.credentials.username,
+      dbName: "matrix-js-sdk-v7:" + this.credentials.username,
       localStorage: window.localStorage
     });
 
@@ -314,10 +321,17 @@ export class MatrixClientService {
             // tradeoff to revisit — not a regression to silently "fix"
             // back to 20.
             limit: 4,
-            lazy_load_members: true,
+            lazy_load_members: false,
           },
           state: {
-            lazy_load_members: true,
+            // Lazy loading left member state (m.room.member) unresolved for
+            // freshly-created 1:1 chats until the peer sent a first message —
+            // getusershistory() in matrix-crypto.ts only sees locally-synced
+            // member events, so canBeEncrypt() read an incomplete `usersinfo`
+            // (just the local user) and reported the peer as missing
+            // encryption keys even though they were published. Full member
+            // state removes that race at the cost of a heavier initial /sync.
+            lazy_load_members: false,
             types: [
               "m.room.name",
               "m.room.avatar",
@@ -349,7 +363,7 @@ export class MatrixClientService {
       console.warn("Failed to create sync filter, falling back to unfiltered sync:", e);
     }
 
-    // Sync config: lazy loading for speed, members loaded explicitly when needed
+    // Sync config.
     // initialSyncLimit applies ONLY to the very first /sync (no saved token) —
     // the SDK clones the filter inline with this timeline limit, while all
     // incremental syncs use the uploaded filter above (limit 4, see above).
@@ -358,12 +372,22 @@ export class MatrixClientService {
     // every first room open after install/re-login (WEE-97 item 4). Kept at 4
     // to match the incremental filter limit; full history is still loaded
     // on-demand (loadAllMessages).
+    // lazyLoadMembers is OFF: with it on, a brand-new 1:1 chat had no
+    // member state for the peer until they sent a first message, so
+    // Pcrypto's canBeEncrypt() saw an incomplete member set and reported
+    // "peer hasn't published encryption keys" for peers who had. Full
+    // member state costs a heavier /sync but removes that false warning.
+    // resolveInvitesToProfiles is ON: makes the SDK resolve an inviter's
+    // Matrix profile (name/avatar) via getProfileInfo() for invite events.
+    // Was turned off for a perf reason (wasted getProfileInfo() calls per
+    // invite on every sync cycle, see git history) — re-enabled deliberately;
+    // that per-invite cost is accepted as the tradeoff here.
     await userClient.startClient({
       pollTimeout: 60000,
-      resolveInvitesToProfiles: false,
+      resolveInvitesToProfiles: true,
       initialSyncLimit: 4,
       disablePresence: true,
-      lazyLoadMembers: true,
+      lazyLoadMembers: false,
       ...(syncFilter ? { filter: syncFilter } : {}),
     });
 
