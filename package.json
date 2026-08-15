@@ -3,7 +3,10 @@
   "private": true,
   "version": "1.11.1",
   "description": "Forta Chat — Decentralized Messenger",
-  "author": "Forta",
+  "author": {
+    "name": "Forta",
+    "email": "support@forta.chat"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
