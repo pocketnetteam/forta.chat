@@ -3,29 +3,74 @@ import { useI18n } from "@/shared/lib/i18n";
 import { useLocaleStore } from "@/entities/locale";
 import type { Locale } from "@/entities/locale";
 import { downloadLinks } from "@/shared/config/download-links";
+import {
+  useLatestReleaseDownloads,
+  type DownloadPlatform,
+} from "@/shared/lib/download";
+import { AppPages } from "@/app/providers/router";
+import { useAuthStore } from "@/entities/auth";
 
 const { t } = useI18n();
 const localeStore = useLocaleStore();
+const authStore = useAuthStore();
+const router = useRouter();
+
+const {
+  loading,
+  version,
+  recommendedPlatform,
+  sortedPlatforms,
+  urlFor,
+} = useLatestReleaseDownloads();
+
 const currentYear = new Date().getFullYear();
 
-const apkUrl = ref<string>(downloadLinks.androidApk);
-const latestVersion = ref("");
-
-onMounted(async () => {
-  try {
-    const res = await fetch("https://api.github.com/repos/pocketnetteam/forta.chat/releases/latest");
-    if (!res.ok) return;
-    const data = await res.json();
-    latestVersion.value = (data.tag_name as string)?.replace(/^v/, "") ?? "";
-    const apkAsset = (data.assets as Array<{ name: string; browser_download_url: string }>)
-      ?.find(a => a.name.endsWith(".apk"));
-    if (apkAsset) {
-      apkUrl.value = apkAsset.browser_download_url;
-    }
-  } catch {
-    // Fallback to releases/latest page — already set
+const primaryHref = computed(() => {
+  if (recommendedPlatform.value) {
+    return urlFor(recommendedPlatform.value);
   }
+  return urlFor("android");
 });
+
+const primaryLabel = computed(() => {
+  if (recommendedPlatform.value) {
+    return t("download.downloadFor", {
+      platform: platformChipLabel(recommendedPlatform.value),
+    });
+  }
+  return t("download.downloadApk");
+});
+
+function platformChipLabel(platform: DownloadPlatform): string {
+  switch (platform) {
+    case "windows":
+      return t("download.platform.windows");
+    case "macos":
+      return t("download.platform.macos");
+    case "linux":
+      return t("download.platform.linux");
+    case "android":
+      return t("download.platform.android");
+    default: {
+      const _exhaustive: never = platform;
+      return _exhaustive;
+    }
+  }
+}
+
+function goBack() {
+  if (window.history.state?.back != null) {
+    router.back();
+    return;
+  }
+  void router.push({
+    name: authStore.isAuthenticated ? AppPages.chat : AppPages.welcome,
+  });
+}
+
+function goToApps() {
+  void router.push({ name: AppPages.apps });
+}
 
 const stats = computed(() => [
   { label: t("download.statUptime"), value: t("download.statUptimeVal") },
@@ -46,12 +91,22 @@ const features = computed(() => [
 <template>
   <div class="landing h-full overflow-y-auto bg-[#09090b] text-white">
     <!-- Nav -->
-    <nav class="fade-in flex items-center justify-between px-6 py-5 sm:px-10">
-      <div class="flex items-center gap-2.5">
+    <nav class="fade-in flex items-center justify-between gap-3 px-6 py-5 sm:px-10">
+      <div class="flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          class="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+          :aria-label="t('nav.back')"
+          @click="goBack"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+          </svg>
+        </button>
         <img src="/forta-icon.png" alt="Forta Chat" class="h-8 w-8 object-contain" />
-        <span class="text-base font-semibold tracking-tight">FortaChat</span>
+        <span class="truncate text-base font-semibold tracking-tight">FortaChat</span>
       </div>
-      <div class="flex items-center gap-1 text-[13px]">
+      <div class="flex shrink-0 items-center gap-1 text-[13px]">
         <button
           v-for="lang in (['en', 'ru'] as const)"
           :key="lang"
@@ -85,13 +140,21 @@ const features = computed(() => [
           {{ t("download.register") }}
         </a>
         <a
-          :href="apkUrl"
+          :href="primaryHref"
           class="flex h-12 cursor-pointer items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/5 px-8 text-sm font-semibold text-white transition-all duration-200 hover:border-white/25 hover:bg-white/10"
+          :class="{ 'pointer-events-none opacity-50': loading }"
         >
           <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-          {{ t("download.downloadApk") }}
+          {{ primaryLabel }}
         </a>
       </div>
+      <button
+        type="button"
+        class="mt-5 cursor-pointer text-[13px] text-white/40 underline-offset-2 transition-colors hover:text-white/70 hover:underline"
+        @click="goToApps"
+      >
+        {{ t("download.allPlatforms") }}
+      </button>
     </section>
 
     <!-- Zero-Knowledge -->
@@ -114,7 +177,7 @@ const features = computed(() => [
           <div class="card group rounded-xl border border-white/8 bg-white/[0.03] p-6 transition-all duration-300 hover:border-white/15 hover:bg-white/[0.05]">
             <div class="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-white/8 transition-colors duration-300 group-hover:bg-white/12">
               <svg class="h-5 w-5 text-white/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3.75 3.75 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
               </svg>
             </div>
             <h3 class="mb-2 text-[15px] font-semibold">{{ t("download.cryptoKeys") }}</h3>
@@ -174,23 +237,37 @@ const features = computed(() => [
       </div>
     </section>
 
-    <!-- Download CTA -->
+    <!-- Download CTA — multi-platform chips -->
     <section class="slide-up-delay-2 px-6 pb-24 sm:px-10">
       <div class="mx-auto max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-8 text-center sm:p-10">
         <span class="mb-4 inline-block rounded-full bg-emerald-500/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-widest text-emerald-400">
           {{ t("download.availableNow") }}
         </span>
-        <h2 class="mb-3 text-xl font-bold sm:text-2xl">{{ t("download.getOnAndroid") }}</h2>
-        <p class="mb-7 text-sm text-white/40">{{ t("download.getOnAndroidDesc") }}</p>
-        <a
-          :href="apkUrl"
-          class="mx-auto flex h-12 w-full max-w-xs cursor-pointer items-center justify-center gap-2 rounded-lg bg-white px-7 text-sm font-semibold text-black transition-all duration-200 hover:bg-white/90 hover:shadow-[0_0_24px_rgba(255,255,255,0.12)]"
+        <h2 class="mb-3 text-xl font-bold sm:text-2xl">{{ t("download.getTheApp") }}</h2>
+        <p class="mb-7 text-sm text-white/40">{{ t("download.getTheAppDesc") }}</p>
+        <div class="mb-6 flex flex-wrap justify-center gap-2">
+          <a
+            v-for="platform in sortedPlatforms"
+            :key="platform"
+            :href="urlFor(platform)"
+            class="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg border px-4 text-[13px] font-semibold transition-colors"
+            :class="platform === recommendedPlatform
+              ? 'border-white/30 bg-white text-black hover:bg-white/90'
+              : 'border-white/12 bg-white/5 text-white hover:border-white/25 hover:bg-white/10'"
+            :aria-disabled="loading"
+          >
+            {{ platformChipLabel(platform) }}
+          </a>
+        </div>
+        <button
+          type="button"
+          class="mx-auto flex h-11 w-full max-w-xs cursor-pointer items-center justify-center rounded-lg border border-white/12 bg-transparent text-sm font-semibold text-white/80 transition-colors hover:border-white/25 hover:text-white"
+          @click="goToApps"
         >
-          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-          {{ t("download.downloadApk") }}
-        </a>
+          {{ t("download.allPlatforms") }}
+        </button>
         <p class="mt-4 text-[11px] text-white/25">
-          {{ latestVersion ? `v${latestVersion}` : t("download.versionInfo") }}
+          {{ version ? `v${version}` : t("download.versionInfo") }}
         </p>
       </div>
     </section>
