@@ -9,6 +9,7 @@ import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { Toggle } from "@/shared/ui/toggle";
 import {
   isNative,
+  isNativePlatform,
   isAndroid,
   hasTor,
   isElectron,
@@ -383,9 +384,11 @@ const handleLogout = () => {
           </svg>
         </button>
 
-        <!-- Local AI (roadmap Phase 6) — native-only, same gate as Desktop below -->
+        <!-- Local AI (roadmap Phase 6) — native-only; live Capacitor check
+             (not module-load `isNative` snapshot) so a late androidBridge
+             still unlocks the row in-session. -->
         <button
-          v-if="isNative"
+          v-if="isNativePlatform()"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
           @click="openSettingsContent('localAi')"
         >

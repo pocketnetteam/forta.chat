@@ -9,6 +9,11 @@ const config: CapacitorConfig = {
     iosScheme: 'forta-app',
   },
   android: {
+    // Capacitor CLI ignores Gradle isDefault. Empty flavor → `assembleDebug`
+    // (rebuilds ALL debug variants — hence the long build) but then deploys
+    // stale `apk/debug/app-debug.apk` (no llama). Must be PascalCase so the
+    // task is `assembleSideloadDebug`, not `assemblesideloadDebug`.
+    flavor: "Sideload",
     buildOptions: {
       keystorePath: undefined,
       keystoreAlias: undefined,

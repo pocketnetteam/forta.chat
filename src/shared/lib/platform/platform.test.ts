@@ -55,6 +55,7 @@ describe("platform helpers", () => {
   afterEach(() => {
     delete window.electronAPI;
     delete window.fetchBridge;
+    delete (window as Window & { androidBridge?: unknown }).androidBridge;
     vi.resetModules();
   });
 
@@ -78,5 +79,22 @@ describe("platform helpers", () => {
     expect(isWeb).toBe(false);
     expect(hasTor).toBe(true);
     expect(currentPlatform).toBe("electron");
+  });
+
+  it("isNativePlatform() follows Capacitor androidBridge at call time", async () => {
+    // Capacitor's getPlatformId reads win.androidBridge on each call — the
+    // AI tab/Settings gate must use the live helper, not a stale snapshot.
+    const { Capacitor } = await import("@capacitor/core");
+    expect(Capacitor.isNativePlatform()).toBe(false);
+
+    (window as Window & { androidBridge?: unknown }).androidBridge = {
+      postMessage: () => {},
+    };
+    expect(Capacitor.isNativePlatform()).toBe(true);
+    expect(Capacitor.getPlatform()).toBe("android");
+
+    const { isNativePlatform, getCapacitorPlatform } = await import("./index");
+    expect(isNativePlatform()).toBe(true);
+    expect(getCapacitorPlatform()).toBe("android");
   });
 });

@@ -8,7 +8,7 @@ import { InviteModal } from "@/features/invite";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
-import { isNative } from "@/shared/lib/platform";
+import { isNativePlatform, logPlatformGate } from "@/shared/lib/platform";
 import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import { SelectionBar, useSelectionStore } from "@/features/selection";
@@ -39,6 +39,7 @@ useAndroidBackHandler("chat-selection", 92, () => {
 });
 
 onMounted(async () => {
+  logPlatformGate("[AI-gate]");
   chatStore.loadCachedRooms();
   // Show persisted channel list immediately, then refresh from RPC in
   // the background — same pattern chatStore already uses for rooms (WEE-24).
@@ -132,11 +133,11 @@ const visibleTabValues = computed(() => {
   if (chatStore.inviteCount > 0) tabs.push("invites");
   if (channelStore.channels.length > 0) tabs.push("channels");
   // AI is a native-only capability (no web build of llama-cpp-capacitor) —
-  // gated on `isNative` alone, not on whether AI chats already exist, since
-  // it's a discoverable product feature, not a data-dependent tab like
-  // channels/invites (plan §7.1). `checkSupport()`/eligibility surface
-  // *inside* the tab once opened.
-  if (isNative) tabs.push("ai");
+  // gated on a *live* Capacitor check (not the module-load `isNative`
+  // snapshot), and not on whether AI chats already exist — discoverable
+  // product feature, unlike channels/invites (plan §7.1).
+  // `checkSupport()`/eligibility surface *inside* the tab once opened.
+  if (isNativePlatform()) tabs.push("ai");
   return tabs;
 });
 
