@@ -98,6 +98,7 @@ export const ru: Record<TranslationKey, string> = {
   "ai.eligibilityBlocked": "На этом устройстве недостаточно памяти для AI-модели",
   "ai.eligibilityUnknown": "Не удалось определить, поддерживает ли устройство AI-модель",
   "ai.unsupported": "AI-чат недоступен в этой сборке",
+  "ai.initError": "Не удалось подготовить AI-движок: {error}",
   "ai.generating": "Генерация…",
   "ai.stop": "Стоп",
   "ai.busyOtherChat": "Ожидание ответа в другом AI-чате — одновременно можно генерировать только один ответ",

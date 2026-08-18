@@ -138,6 +138,9 @@ async function handleCheckUpdates(): Promise<void> {
         </div>
 
         <p v-if="downloadState.error" class="mt-2 text-xs text-color-bad">{{ downloadState.error }}</p>
+        <p v-else-if="localAiStore.initError" class="mt-2 text-xs text-color-bad">
+          {{ t("ai.initError", { error: localAiStore.initError }) }}
+        </p>
         <p v-if="downloadBypassesTor && !localAiStore.modelReady" class="mt-2 text-xs text-color-star-yellow">
           {{ t("ai.downloadBypassesTor") }}
         </p>

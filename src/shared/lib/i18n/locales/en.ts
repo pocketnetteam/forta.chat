@@ -96,6 +96,7 @@ export const en = {
   "ai.eligibilityBlocked": "This device doesn't have enough memory for the AI model",
   "ai.eligibilityUnknown": "Couldn't determine if this device supports the AI model",
   "ai.unsupported": "AI chat isn't available in this build",
+  "ai.initError": "Failed to prepare the AI engine: {error}",
   "ai.generating": "Generating…",
   "ai.stop": "Stop",
   "ai.busyOtherChat": "Waiting for a reply in another AI chat — only one response at a time",

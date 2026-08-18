@@ -75,6 +75,9 @@ async function handleDownload(): Promise<void> {
         {{ t("ai.eligibilityUnknown") }}
       </p>
       <p v-if="downloadState.error" class="text-xs text-color-bad">{{ downloadState.error }}</p>
+      <p v-else-if="localAiStore.initError" class="text-xs text-color-bad">
+        {{ t("ai.initError", { error: localAiStore.initError }) }}
+      </p>
       <button
         class="rounded-lg bg-color-bg-ac px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-color-bg-ac/90"
         @click="handleDownload"

@@ -4,7 +4,7 @@ import { createTestingPinia } from "@pinia/testing";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { LocalAiConfig } from "local-ai";
+import type { LocalAiConfig, SqlitePort } from "local-ai";
 import {
   FakePlatformSupportAdapter,
   FakeDeviceInfoAdapter,
@@ -48,6 +48,17 @@ function makeFakeConfig(overrides: Partial<LocalAiConfig> = {}): LocalAiConfig {
     },
     ...overrides,
   };
+}
+
+/** A `SqlitePort` whose every method rejects — simulates a native
+ *  `@capacitor-community/sqlite` failure surfacing through `Client.create()`
+ *  (`database.migrate()` is the first thing `create()` does). Regression
+ *  coverage for a device reporting e.g. "CreateConnection: Connection
+ *  local_ai_<address> already exists" / "Already in transaction" from a
+ *  stale native connection. */
+function makeBrokenSqlitePort(message: string): SqlitePort {
+  const fail = () => Promise.reject(new Error(message));
+  return { execute: fail, query: fail, transaction: fail, close: fail };
 }
 
 /** `LocalAiClient.emit()` is a private instance method — real events (e.g.
@@ -128,6 +139,39 @@ describe("useLocalAiStore", () => {
     await expect(creationPromise).rejects.toThrow(/superseded/);
 
     expect(store.client).toBeNull();
+  });
+
+  // Regression: a `Client.create()` failure (e.g. the native SQLite plugin
+  // rejecting with "CreateConnection: ... already exists") used to only
+  // reach `initError`, silently swallowed by call sites that `.catch()`
+  // `downloadModel()`/`ensureClient()` with just a `console.warn` — the
+  // download button appeared to "do nothing". `initError` must be set (and
+  // `downloadState.model.error` left untouched, since `downloadModel()`'s own
+  // try/catch never runs) so the UI has something to render.
+  it("ensureClient() failure surfaces into initError, not downloadState.model.error", async () => {
+    const base = makeFakeConfig();
+    const config: LocalAiConfig = {
+      ...base,
+      ports: { ...base.ports, sqlite: makeBrokenSqlitePort("CreateConnection: Connection local_ai_addr_a already exists") },
+    };
+
+    await expect(store.ensureClient("addr_a", config)).rejects.toThrow(/already exists/);
+
+    expect(store.initError).toMatch(/already exists/);
+    expect(store.downloadState.model.error).toBeNull();
+    expect(store.client).toBeNull();
+  });
+
+  it("downloadModel() propagates an ensureClient() failure instead of silently swallowing it", async () => {
+    const base = makeFakeConfig();
+    const config: LocalAiConfig = {
+      ...base,
+      ports: { ...base.ports, sqlite: makeBrokenSqlitePort("Already in transaction") },
+    };
+
+    await expect(store.downloadModel("addr_a", config)).rejects.toThrow(/Already in transaction/);
+
+    expect(store.initError).toMatch(/Already in transaction/);
   });
 
   it("checkEligibility resolves 'unknown' with no cached manifest, without any network call", async () => {
