@@ -256,6 +256,19 @@ describe("useAiChatStore — Mode B over Dexie", () => {
     expect(updatedChat?.lastMessagePreview).toBe("Hello");
   });
 
+  it("sendMessage requests enableThinking: false (perf-tuning plan §4 — skip the reasoning phase on CPU-only hardware)", async () => {
+    const sendMessageSpy = scriptSendMessage(localAi.client!, { tokens: ["Hi"], outcome: "complete", tokenCount: 1 });
+
+    const chat = await store.createChat();
+    await store.sendMessage(chat.id, "Hi there");
+
+    expect(sendMessageSpy).toHaveBeenCalledWith(
+      chat.id,
+      "Hi there",
+      expect.objectContaining({ completionOptions: { enableThinking: false } }),
+    );
+  });
+
   it("two concurrent sendMessage() calls (different chats) — the second is rejected by our own guard, not the library's RuntimeBusyError", async () => {
     scriptSendMessage(localAi.client!, { tokens: ["ok"], outcome: "complete" });
     const chatA = await store.createChat("A");
