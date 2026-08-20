@@ -123,10 +123,10 @@ index 735d8c8..bdd0f9c 100644
  
      @PluginMethod
 diff --git a/node_modules/llama-cpp-pro/android/src/main/jni.cpp b/node_modules/llama-cpp-pro/android/src/main/jni.cpp
-index 412267e..2ca9ff5 100644
+index 412267e..5ab877d 100644
 --- a/node_modules/llama-cpp-pro/android/src/main/jni.cpp
 +++ b/node_modules/llama-cpp-pro/android/src/main/jni.cpp
-@@ -28,6 +28,47 @@
+@@ -28,6 +28,66 @@
  
  namespace jni_utils {
  
@@ -142,15 +142,31 @@ index 412267e..2ca9ff5 100644
 +// process live, 2026-08-19 ("JNI DETECTED ERROR IN APPLICATION: input is
 +// not valid Modified UTF-8: illegal continuation byte", from this exact
 +// function via Java_..._completionNative's result-map construction).
-+// Scanning and truncating at the first invalid byte here — the single
-+// choke point every string leaving this file passes through — closes that
-+// off everywhere at once, rather than needing every generated-text call
-+// site individually guarded, and rather than assuming the only possible
-+// defect is an incomplete *trailing* sequence (it can be anywhere).
-+// Ported from the `llama-cpp-capacitor@0.1.5` patch (patches/) during the
-+// `llama-cpp-pro` migration — this file still has the same bug in 0.2.4,
-+// it was never upstreamed.
++//
++// 2026-08-20 correction (real-device regression, perf-tuning-plan device
++// pass): the original version of this function TRUNCATED the whole string
++// at the first invalid byte (`return s.substr(0, i)`), on the assumption
++// that an invalid byte can only mean "generation got cut off mid-character
++// right here, discard the (incomplete) rest". That assumption doesn't hold
++// for a stray single bad byte in the *middle* of an otherwise-complete,
++// naturally-EOS-terminated response (confirmed live: a 315-token reply,
++// `has_next_token=false`/`stopped_eos=1`, i.e. NOT a hard n_predict cutoff,
++// still lost ~60% of its content this way — a lone malformed byte
++// mid-string, most likely a byte-level BPE token whose raw output wasn't a
++// complete UTF-8 sequence on its own, silently amputated everything after
++// it). Fixed to only DROP the specific offending byte(s) and keep scanning,
++// so one bad byte loses at most one character instead of the rest of the
++// reply — `out` is still built exclusively from validated complete
++// sequences, so it's still impossible to hand `NewStringUTF()` anything
++// invalid (the original bug this function exists for). The one case that's
++// still a truncation, not a skip, is a multi-byte sequence that runs past
++// the *end* of the string — that can only legitimately happen at the very
++// tail (every other position has more bytes following it to check), which
++// is exactly the "cut off mid-character by a hard boundary" case the
++// original comment described; nothing meaningful is lost by stopping there.
 +std::string sanitize_utf8(const std::string& s) {
++    std::string out;
++    out.reserve(s.size());
 +    size_t len = s.size();
 +    size_t i = 0;
 +    while (i < len) {
@@ -160,21 +176,24 @@ index 412267e..2ca9ff5 100644
 +        else if ((c & 0xE0) == 0xC0) seq_len = 2; // 110xxxxx
 +        else if ((c & 0xF0) == 0xE0) seq_len = 3; // 1110xxxx
 +        else if ((c & 0xF8) == 0xF0) seq_len = 4; // 11110xxx
-+        else return s.substr(0, i);               // not a valid lead byte (stray continuation byte, or 0xF8-0xFF) — truncate here
-+        if (i + static_cast<size_t>(seq_len) > len) return s.substr(0, i); // sequence runs past the end of the string — incomplete, truncate here
++        else { i += 1; continue; }                // not a valid lead byte (stray continuation byte, or 0xF8-0xFF) — drop just this byte, keep scanning
++        if (i + static_cast<size_t>(seq_len) > len) break; // sequence runs past the end of the string — only possible at the tail, stop here
++        bool validContinuation = true;
 +        for (int k = 1; k < seq_len; k++) {
 +            unsigned char cont = static_cast<unsigned char>(s[i + k]);
-+            if ((cont & 0xC0) != 0x80) return s.substr(0, i); // expected a continuation byte (10xxxxxx) and didn't find one — truncate here
++            if ((cont & 0xC0) != 0x80) { validContinuation = false; break; } // expected a continuation byte (10xxxxxx) and didn't find one
 +        }
-+        i += seq_len;
++        if (!validContinuation) { i += 1; continue; } // malformed sequence — drop just the lead byte, keep scanning (a mis-set lead byte is more often noise than a real multi-byte start)
++        out.append(s, i, static_cast<size_t>(seq_len));
++        i += static_cast<size_t>(seq_len);
 +    }
-+    return s;
++    return out;
 +}
 +
  std::string jstring_to_string(JNIEnv* env, jstring jstr) {
      if (jstr == nullptr) return "";
      const char* chars = env->GetStringUTFChars(jstr, nullptr);
-@@ -37,7 +78,7 @@ std::string jstring_to_string(JNIEnv* env, jstring jstr) {
+@@ -37,7 +97,7 @@ std::string jstring_to_string(JNIEnv* env, jstring jstr) {
  }
  
  jstring string_to_jstring(JNIEnv* env, const std::string& str) {
@@ -183,7 +202,7 @@ index 412267e..2ca9ff5 100644
  }
  
  std::vector<std::string> jstring_array_to_string_vector(JNIEnv* env, jobjectArray jarray) {
-@@ -542,7 +583,7 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_releaseContextNative(
+@@ -542,7 +602,7 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_releaseContextNative(
  
  JNIEXPORT jobject JNICALL
  Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
@@ -192,7 +211,7 @@ index 412267e..2ca9ff5 100644
  
      try {
          LOGI("Starting completion for context: %ld", context_id);
-@@ -828,13 +869,61 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+@@ -828,13 +888,61 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
              
              LOGI("Starting token generation loop (max tokens: %d)...", n_predict);
  
@@ -255,7 +274,7 @@ index 412267e..2ca9ff5 100644
                          LOGI("Reached EOS token, stopping generation");
                          break;
                      }
-@@ -846,6 +935,21 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+@@ -846,6 +954,21 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
  
                      LOGI("Generated token %d (ID: %d): %s", tokens_generated, token_output.tok, token_text.c_str());
  
