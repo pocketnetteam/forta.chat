@@ -189,6 +189,22 @@ describe("useAiChatStore — Mode B over Dexie", () => {
     await localAi.ensureClient(TEST_ADDRESS, makeFakeConfig());
   });
 
+  it("setChatDbKit() cancels any message still stuck at status: streaming from a previous, now-dead session", async () => {
+    // Simulate the app having been killed mid-generation on a prior run —
+    // no AbortController survives a process restart to resolve this row,
+    // so it must be swept up as soon as the DB becomes available again.
+    await db.aiChats.add({ id: "chat_1", title: "Old chat", createdAt: 1, updatedAt: 1 });
+    await db.aiMessages.add({ id: "stale_1", chatId: "chat_1", role: "assistant", content: "partial", status: "streaming", createdAt: 2 });
+
+    const fresh = useAiChatStore();
+    fresh.setChatDbKit(makeKit(db)); // the call under test — cleanup is fire-and-forget inside it
+
+    await waitFor(async () => (await db.aiMessages.where("id").equals("stale_1").first())?.status === "cancelled");
+    const row = await db.aiMessages.where("id").equals("stale_1").first();
+    expect(row?.status).toBe("cancelled");
+    expect(row?.content).toBe("partial"); // untouched
+  });
+
   it("createChat writes to Dexie immediately without requiring a local-ai client", async () => {
     await localAi.releaseRuntime(); // no client at all
     const chat = await store.createChat("Hello");

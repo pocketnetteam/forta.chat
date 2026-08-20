@@ -62,5 +62,5 @@ project(':capgo-capacitor-share-target').projectDir = new File('../node_modules/
 include ':capgo-capacitor-webview-version-checker'
 project(':capgo-capacitor-webview-version-checker').projectDir = new File('../node_modules/@capgo/capacitor-webview-version-checker/android')
 
-include ':llama-cpp-capacitor'
-project(':llama-cpp-capacitor').projectDir = new File('../node_modules/llama-cpp-capacitor/android')
+include ':llama-cpp-pro'
+project(':llama-cpp-pro').projectDir = new File('../node_modules/llama-cpp-pro/android')

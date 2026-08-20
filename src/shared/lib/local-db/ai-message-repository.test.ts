@@ -99,4 +99,31 @@ describe("AiMessageRepository", () => {
     expect(await repo.listByChat("a")).toEqual([]);
     expect(await repo.listByChat("b")).toHaveLength(1);
   });
+
+  describe("cancelStaleStreamingMessages", () => {
+    it("flips every streaming message across every chat to cancelled, leaving content untouched", async () => {
+      await db.aiMessages.bulkAdd([
+        makeMessage({ id: "1", chatId: "a", status: "streaming", content: "partial a" }),
+        makeMessage({ id: "2", chatId: "b", status: "streaming", content: "" }),
+        makeMessage({ id: "3", chatId: "a", status: "complete", content: "done" }),
+      ]);
+
+      const fixed = await repo.cancelStaleStreamingMessages();
+
+      expect(fixed).toBe(2);
+      const [m1] = await db.aiMessages.where("id").equals("1").toArray();
+      const [m2] = await db.aiMessages.where("id").equals("2").toArray();
+      const [m3] = await db.aiMessages.where("id").equals("3").toArray();
+      expect(m1.status).toBe("cancelled");
+      expect(m1.content).toBe("partial a"); // untouched
+      expect(m2.status).toBe("cancelled");
+      expect(m3.status).toBe("complete"); // untouched — was never streaming
+    });
+
+    it("is a no-op, resolving 0, when nothing is stuck streaming", async () => {
+      await repo.create(makeMessage({ id: "1", chatId: "a", status: "complete" }));
+
+      expect(await repo.cancelStaleStreamingMessages()).toBe(0);
+    });
+  });
 });

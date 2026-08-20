@@ -29,7 +29,7 @@ dependencies {
     implementation project(':capgo-capacitor-incoming-call-kit')
     implementation project(':capgo-capacitor-share-target')
     implementation project(':capgo-capacitor-webview-version-checker')
-    implementation project(':llama-cpp-capacitor')
+    implementation project(':llama-cpp-pro')
 
 }
 

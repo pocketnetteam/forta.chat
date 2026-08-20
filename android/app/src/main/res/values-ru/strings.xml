@@ -17,6 +17,12 @@
     <string name="channel_active_call_desc">Отображается во время звонка</string>
     <string name="channel_incoming_calls">Входящие звонки</string>
     <string name="channel_incoming_calls_desc">Уведомления о входящих звонках</string>
+    <string name="channel_model_download">Загрузка модели ИИ</string>
+    <string name="channel_model_download_desc">Отображается во время загрузки офлайн-модели ИИ</string>
+
+    <!-- AI model download notification -->
+    <string name="model_download_title">Загрузка модели ИИ</string>
+    <string name="model_download_progress">%1$d%%</string>
 
     <!-- Call UI -->
     <string name="call_connecting">Соединение…</string>

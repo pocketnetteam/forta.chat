@@ -46,4 +46,28 @@ export class AiMessageRepository {
   async deleteByChat(chatId: string): Promise<void> {
     await this.db.aiMessages.where("chatId").equals(chatId).delete();
   }
+
+  /**
+   * Flips every message still stuck at `status: "streaming"` to
+   * `"cancelled"` — called once per app start (`ai-chat-store`'s
+   * `setChatDbKit()`). A message can only be `"streaming"` while
+   * `sendMessage()`'s promise chain is actually running; if the app
+   * process was killed or crashed mid-generation, that row is orphaned
+   * forever with no `AbortController` left to cancel it and no
+   * `streamingContent` to show — the bubble would otherwise render as a
+   * permanent, empty "still generating" placeholder. Content is left
+   * untouched (whatever was last checkpointed, possibly empty — there's
+   * nothing better to show for a genuinely-interrupted generation).
+   * Returns the number of rows fixed, for logging/tests.
+   */
+  async cancelStaleStreamingMessages(): Promise<number> {
+    // `status` isn't an indexed field (this table is small — per-chat AI
+    // history, not a candidate for a schema migration just for this), so
+    // filter() over the whole table rather than where().equals().
+    const stale = await this.db.aiMessages.filter((m) => m.status === "streaming").toArray();
+    for (const row of stale) {
+      if (row.localId !== undefined) await this.db.aiMessages.update(row.localId, { status: "cancelled" });
+    }
+    return stale.length;
+  }
 }

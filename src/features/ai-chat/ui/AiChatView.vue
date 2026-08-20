@@ -5,7 +5,7 @@
  * streaming instead of instant delivery, no reactions/forwards/media in v1.
  */
 import { computed, watch } from "vue";
-import { useAiChatStore } from "@/entities/ai-chat";
+import { useAiChatStore, parseThinking } from "@/entities/ai-chat";
 import { useLocalAiStore } from "@/entities/local-ai";
 import ChatVirtualScroller from "@/shared/ui/ChatVirtualScroller.vue";
 import AiModelGate from "./AiModelGate.vue";
@@ -48,6 +48,19 @@ function bubbleContent(message: AiMessage): string {
     return aiChatStore.streamingContent.get(props.chatId) ?? message.content;
   }
   return message.content;
+}
+
+/**
+ * `local-ai` only strips `<think>...</think>` from the *final*, persisted
+ * message — while streaming, `bubbleContent()` reads the raw, still-growing
+ * token accumulation, so a reasoning model's tags render literally unless
+ * parsed here too (see `parseThinking()`'s own doc comment, live bug
+ * 2026-08-19). Applied uniformly to both streaming and settled messages —
+ * settled content should already be clean, but this stays correct even if
+ * it isn't.
+ */
+function parsedBubble(message: AiMessage) {
+  return parseThinking(bubbleContent(message));
 }
 
 async function handleSend(text: string): Promise<void> {
@@ -107,8 +120,27 @@ function handleStop(): void {
                 </svg>
                 {{ t("ai.messageError") }}
               </span>
+              <template v-else-if="message.status === 'streaming' && parsedBubble(message).isThinking">
+                <!-- Only while genuinely live — a *settled* message with an
+                     unclosed <think> tag is truncated historical data (e.g.
+                     the old n_predict=50 bug), not something still
+                     generating; falls through to the reasoning <details>
+                     below instead of claiming to still be thinking forever. -->
+                <span class="flex items-center gap-1.5 text-xs italic opacity-70">
+                  <span class="inline-flex gap-0.5">
+                    <span class="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.3s]" />
+                    <span class="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.15s]" />
+                    <span class="h-1 w-1 animate-bounce rounded-full bg-current" />
+                  </span>
+                  {{ t("ai.thinking") }}
+                </span>
+              </template>
               <template v-else>
-                {{ bubbleContent(message) }}
+                <details v-if="parsedBubble(message).thinking" class="mb-1.5 text-xs opacity-70">
+                  <summary class="cursor-pointer select-none">{{ t("ai.reasoning") }}</summary>
+                  <p class="mt-1 whitespace-pre-wrap italic">{{ parsedBubble(message).thinking }}</p>
+                </details>
+                {{ parsedBubble(message).answer }}
                 <span
                   v-if="message.status === 'streaming'"
                   class="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-current align-middle"

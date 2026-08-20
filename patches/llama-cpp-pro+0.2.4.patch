@@ -1,0 +1,95 @@
+diff --git a/node_modules/llama-cpp-pro/android/src/main/jni.cpp b/node_modules/llama-cpp-pro/android/src/main/jni.cpp
+index 412267e..710dc71 100644
+--- a/node_modules/llama-cpp-pro/android/src/main/jni.cpp
++++ b/node_modules/llama-cpp-pro/android/src/main/jni.cpp
+@@ -28,6 +28,47 @@
+ 
+ namespace jni_utils {
+ 
++// A byte-level BPE tokenizer (used by Qwen and most current models) can
++// split a single Unicode character — emoji in particular — across multiple
++// tokens, each contributing raw bytes with no obligation to land on a UTF-8
++// character boundary, and detokenization/formatting fallbacks for a token
++// with no clean text mapping can also inject a stray byte outside any valid
++// sequence. Either way, generated_text can end up not being valid UTF-8 by
++// the time a hard n_predict cutoff (or in principle an interrupted stream)
++// ends generation. env->NewStringUTF() validates strictly and calls abort()
++// on invalid input when CheckJNI is active — this crashed the whole app
++// process live, 2026-08-19 ("JNI DETECTED ERROR IN APPLICATION: input is
++// not valid Modified UTF-8: illegal continuation byte", from this exact
++// function via Java_..._completionNative's result-map construction).
++// Scanning and truncating at the first invalid byte here — the single
++// choke point every string leaving this file passes through — closes that
++// off everywhere at once, rather than needing every generated-text call
++// site individually guarded, and rather than assuming the only possible
++// defect is an incomplete *trailing* sequence (it can be anywhere).
++// Ported from the `llama-cpp-capacitor@0.1.5` patch (patches/) during the
++// `llama-cpp-pro` migration — this file still has the same bug in 0.2.4,
++// it was never upstreamed.
++std::string sanitize_utf8(const std::string& s) {
++    size_t len = s.size();
++    size_t i = 0;
++    while (i < len) {
++        unsigned char c = static_cast<unsigned char>(s[i]);
++        int seq_len;
++        if ((c & 0x80) == 0x00) seq_len = 1;      // 0xxxxxxx
++        else if ((c & 0xE0) == 0xC0) seq_len = 2; // 110xxxxx
++        else if ((c & 0xF0) == 0xE0) seq_len = 3; // 1110xxxx
++        else if ((c & 0xF8) == 0xF0) seq_len = 4; // 11110xxx
++        else return s.substr(0, i);               // not a valid lead byte (stray continuation byte, or 0xF8-0xFF) — truncate here
++        if (i + static_cast<size_t>(seq_len) > len) return s.substr(0, i); // sequence runs past the end of the string — incomplete, truncate here
++        for (int k = 1; k < seq_len; k++) {
++            unsigned char cont = static_cast<unsigned char>(s[i + k]);
++            if ((cont & 0xC0) != 0x80) return s.substr(0, i); // expected a continuation byte (10xxxxxx) and didn't find one — truncate here
++        }
++        i += seq_len;
++    }
++    return s;
++}
++
+ std::string jstring_to_string(JNIEnv* env, jstring jstr) {
+     if (jstr == nullptr) return "";
+     const char* chars = env->GetStringUTFChars(jstr, nullptr);
+@@ -37,7 +78,7 @@ std::string jstring_to_string(JNIEnv* env, jstring jstr) {
+ }
+ 
+ jstring string_to_jstring(JNIEnv* env, const std::string& str) {
+-    return env->NewStringUTF(str.c_str());
++    return env->NewStringUTF(sanitize_utf8(str).c_str());
+ }
+ 
+ std::vector<std::string> jstring_array_to_string_vector(JNIEnv* env, jobjectArray jarray) {
+@@ -833,8 +874,32 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+                     LOGI("Generating token %d...", tokens_generated + 1);
+                     auto token_output = ctx->completion->nextToken();
+ 
++                    // nextToken() itself already checks the model's *actual*
++                    // end-of-generation token(s) via llama_vocab_is_eog() —
++                    // correct across models, unlike a hardcoded token id —
++                    // and sets has_next_token = false when generation should
++                    // stop (cap-completion.cpp). This loop wasn't checking
++                    // that at all: it only compared against a hardcoded
++                    // `tok == 2`, which isn't Qwen's (or most current
++                    // models') actual end-of-turn token. The result, live,
++                    // 2026-08-19: every single response ran the full
++                    // n_predict budget regardless of how short the model's
++                    // real answer was — several minutes per reply on this
++                    // device's CPU-only inference, even for "hi". Checking
++                    // has_next_token is the fix; the old tok==2 check is
++                    // kept as a redundant fallback in case a model somehow
++                    // resumes past its own EOG token. Ported from the
++                    // `llama-cpp-capacitor@0.1.5` patch during the
++                    // `llama-cpp-pro` migration — still present in 0.2.4;
++                    // notably `cap-ios-bridge.cpp` in this same package
++                    // already checks `has_next_token` correctly, only this
++                    // Android JNI loop didn't.
++                    if (!ctx->completion->has_next_token) {
++                        LOGI("Reached end-of-generation (has_next_token=false, stopped_eos=%d), stopping generation", ctx->completion->stopped_eos);
++                        break;
++                    }
+                     // Check for end-of-sequence (simplified check)
+-                    if (token_output.tok == 2) { // Most models use 2 as EOS token
++                    if (token_output.tok == 2) { // fallback: most models use 2 as EOS token
+                         LOGI("Reached EOS token, stopping generation");
+                         break;
+                     }

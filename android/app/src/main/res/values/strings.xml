@@ -22,6 +22,12 @@
     <string name="channel_active_call_desc">Shows when a call is in progress</string>
     <string name="channel_incoming_calls">Incoming Calls</string>
     <string name="channel_incoming_calls_desc">Incoming call notifications</string>
+    <string name="channel_model_download">AI Model Download</string>
+    <string name="channel_model_download_desc">Shows while the offline AI model is downloading</string>
+
+    <!-- AI model download notification -->
+    <string name="model_download_title">Downloading AI model</string>
+    <string name="model_download_progress">%1$d%%</string>
 
     <!-- Call UI -->
     <string name="call_connecting">Connecting…</string>

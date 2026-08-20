@@ -1,9 +1,14 @@
 import type { LocalAiConfig, LocalAiLogger } from "local-ai";
+import { isAndroid } from "@/shared/lib/platform";
+import { NativeForegroundDownloadAdapter } from "./native-foreground-download.adapter";
+import { NativeFastVerifyAdapter } from "./native-fast-verify.adapter";
 
-// TODO(local-ai-0.1): placeholder — see docs/plans/llama2/decisions.md, open
-// question #1. Not a real CDN/domain yet, replace before shipping a build
-// with the AI tab enabled.
-export const MANIFEST_URL_PLACEHOLDER = "https://static.forta.chat/local-ai/manifest.json";
+// See docs/plans/llama2/decisions.md, open question #1 — this now points at
+// a real, reachable manifest (2026-08-19, self-hosted by the user) so the
+// device loop can exercise download/ensureModelReady/sendMessage for real.
+// Not necessarily the final production URL — confirm with the product owner
+// before shipping a release build with the AI tab enabled.
+export const MANIFEST_URL_PLACEHOLDER = "https://bastyon.com/local-ai-manifest.json";
 
 /** Routes `local-ai`'s pluggable logger through the project's console
  *  conventions (`CLAUDE.md` → Error Handling): only warn/error surface,
@@ -21,8 +26,10 @@ const logger: LocalAiLogger = {
  * takes `address` as a parameter instead of reading the auth store directly
  * (roadmap 2.1). Callers pass the result to `LocalAiClient.create()`.
  *
- * Dynamically imports `local-ai/adapters/capacitor` — `llama-cpp-capacitor`
- * and friends have no reason to sit in the web/Electron entry bundle, only
+ * Dynamically imports `local-ai/adapters/capacitor` — `llama-cpp-pro`
+ * (formerly `llama-cpp-capacitor`, see `local-ai`'s
+ * `docs/adr/0008-llama-cpp-pro-migration.md`) and friends have no reason to
+ * sit in the web/Electron entry bundle, only
  * native builds ever call this (plan §7.1, "AI" tab is native-only).
  *
  * `databaseName` is per-account (`local_ai_<address>`) so switching accounts
@@ -35,7 +42,7 @@ export async function createLocalAiConfig(address: string): Promise<LocalAiConfi
   const {
     CapacitorPlatformSupportAdapter,
     CapgoDeviceInfoAdapter,
-    CapgoDownloaderAdapter,
+    CapacitorRangeDownloadAdapter,
     CapacitorFsAdapter,
     CapacitorSqliteAdapter,
     LlamaCppCapacitorAdapter,
@@ -44,19 +51,48 @@ export async function createLocalAiConfig(address: string): Promise<LocalAiConfi
     SystemClockAdapter,
   } = await import("local-ai/adapters/capacitor");
 
+  // Shared instance (not one per port) — the download transport needs the
+  // same FileSystemPort the rest of the client uses, both for where it
+  // writes chunks and so resume-offset stat()s see what downloadTransport
+  // itself just wrote.
+  const fileSystem = new CapacitorFsAdapter();
+
   return {
     manifestUrl: MANIFEST_URL_PLACEHOLDER,
     databaseName: `local_ai_${address}`,
     ports: {
       platformSupport: new CapacitorPlatformSupportAdapter(),
       deviceInfo: new CapgoDeviceInfoAdapter(),
-      downloadTransport: new CapgoDownloaderAdapter(),
-      fileSystem: new CapacitorFsAdapter(),
+      // Real byte-level resume — see docs/plans/llama2/decisions.md's "no
+      // real resume on Android" entry (2026-08-19): @capgo/capacitor-downloader
+      // (DownloadManager) has none at all on Android, pause()/resume() reject
+      // unconditionally.
+      //
+      // On Android specifically, NativeForegroundDownloadAdapter (a real
+      // ModelDownloadService foreground service) is used instead of the
+      // JS-only CapacitorRangeDownloadAdapter — a WebView JS loop gets
+      // throttled/killed once the app is backgrounded, so the "real resume"
+      // fix above didn't actually survive the user switching apps (see
+      // docs/decisions.md's "background download" entry). No iOS
+      // equivalent plugin exists yet, so iOS keeps the JS adapter — iOS
+      // background execution has its own constraints or would need a
+      // BGProcessingTask, out of scope here.
+      downloadTransport: isAndroid
+        ? new NativeForegroundDownloadAdapter(fileSystem)
+        : new CapacitorRangeDownloadAdapter(fileSystem),
+      fileSystem,
       sqlite: new CapacitorSqliteAdapter(`local_ai_${address}`),
       llmRuntime: new LlamaCppCapacitorAdapter(),
       appLifecycle: new CapacitorAppLifecycleAdapter(),
       hash: new WebCryptoHashAdapter(),
       clock: new SystemClockAdapter(),
+      // Android-only, same reasoning as downloadTransport above — see
+      // NativeFastVerifyAdapter's own doc comment: checksum verification
+      // through the portable Filesystem-bridge path took ~1.9 hours for a
+      // 2.3GB model on-device (confirmed live, 2026-08-19), read as a hang
+      // ("скачалась модель - зависла на 100%"). Omitted on iOS/web —
+      // DownloadEngine falls back to the portable path there.
+      fastVerify: isAndroid ? new NativeFastVerifyAdapter() : undefined,
     },
     // roadmap 7.1: library default is `false` (memory-vs-latency tradeoff
     // left to the consumer, docs/guides/memory-and-lifecycle.md). Explicit

@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef } from "vue";
-import type { LocalAiClient, LocalAiConfig, ModelArtifact, PlatformSupportPort } from "local-ai";
+import type { LocalAiClient, LocalAiConfig, ModelArtifact, PartialDownloadProgress, PlatformSupportPort } from "local-ai";
 
 import { createLocalAiConfig, createPlatformSupportPort } from "../lib/create-client";
 import { createEmptyDownloadState, type EligibilityReport, type SupportReport } from "./types";
@@ -29,6 +29,17 @@ function readModelDownloadedMarker(): boolean {
 function writeModelDownloadedMarker(): void {
   try {
     window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1");
+  } catch {
+    // best-effort — see MODEL_DOWNLOADED_MARKER_KEY doc comment
+  }
+}
+
+/** Counterpart to {@link writeModelDownloadedMarker} — clears the marker
+ *  after `deleteModel()` so a later app restart doesn't try to silently
+ *  restore a model that was just deliberately deleted. */
+function clearModelDownloadedMarker(): void {
+  try {
+    window.localStorage.removeItem(MODEL_DOWNLOADED_MARKER_KEY);
   } catch {
     // best-effort — see MODEL_DOWNLOADED_MARKER_KEY doc comment
   }
@@ -63,6 +74,22 @@ export const useLocalAiStore = defineStore("local-ai", () => {
    *  `refreshManifest()` and kept in sync via the `manifest:updated` event;
    *  `null` until the manifest has been fetched at least once. */
   const currentModel = ref<ModelArtifact | null>(null);
+  /** Bytes already on disk for an interrupted-and-not-yet-resumed model
+   *  download, read without starting anything (roadmap: "докачать модель
+   *  (X%)" instead of "Скачать модель" when there's real work to resume —
+   *  see `checkPartialDownload()`). `null` = nothing to report, either a
+   *  fresh device or the check hasn't run yet this mount. */
+  const partialDownload = ref<PartialDownloadProgress | null>(null);
+  /** UI-only "is the model download currently paused" flag — `local-ai`'s
+   *  own `pauseModelDownload()` doesn't surface this through
+   *  `download:progress` at all (the transport's `pause()` deliberately
+   *  fires neither `onProgress` nor any other event while paused, so there
+   *  is nothing for `download:progress` to relay), so the store tracks it
+   *  independently. Toggled by `pauseDownload()`/`resumeDownload()`;
+   *  cleared by any real progress tick or a terminal
+   *  `download:completed`/`download:failed`, so a stale "paused" label
+   *  can't survive past whatever actually happens to the transfer next. */
+  const isPaused = ref(false);
 
   const modelReady = computed(() => downloadState.value.model.ready);
 
@@ -81,6 +108,38 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     unsubscribers = [];
   }
 
+  /** Single place every download-failure path (the `download:failed` event,
+   *  and `downloadModel()`/`switchModel()`'s own catch blocks for a failure
+   *  that happens before any download even starts, e.g. an eligibility
+   *  check) funnels through. Three things every one of those needs:
+   *  1) `errorCode` alongside the raw message, so the UI can show a
+   *     translated, human-readable string instead of exception text like
+   *     "download of model__x__v1.gguf failed after 5 attempts: ..." — a
+   *     real network blip mid-download surfaced exactly that, with no
+   *     clear next action (docs/decisions.md).
+   *  2) Clearing `progress` to `null` — otherwise `isDownloading` (`progress
+   *     !== null`) stays true forever after a failure, hiding the
+   *     Скачать/Докачать button behind a stale, non-functional-looking
+   *     progress bar with no way for the user to actually retry.
+   *  3) Re-reading how many bytes are actually still on disk, so the button
+   *     that reappears reads "Докачать модель (X%)" — accurate for a
+   *     resume-capable transport, since bytes already downloaded before a
+   *     transient failure (e.g. the connection dropping) are still there —
+   *     rather than a bare "Скачать модель" that reads like starting over. */
+  function applyDownloadFailure(kind: "model" | "embedding", error: Error): void {
+    downloadState.value[kind].error = error.message;
+    downloadState.value[kind].errorCode = (error as Partial<{ code: string }>).code ?? null;
+    downloadState.value[kind].progress = null;
+    if (kind !== "model") return;
+    isPaused.value = false;
+    client.value
+      ?.getDownloadProgress("model")
+      .then((p) => {
+        partialDownload.value = p;
+      })
+      .catch(() => {});
+  }
+
   function subscribeToEvents(c: LocalAiClient): void {
     clearEventSubscriptions();
     unsubscribers.push(
@@ -88,17 +147,22 @@ export const useLocalAiStore = defineStore("local-ai", () => {
         downloadState.value[progress.kind].progress = progress;
         if (progress.status === "completed") {
           downloadState.value[progress.kind].error = null;
+          downloadState.value[progress.kind].errorCode = null;
         }
+        if (progress.kind === "model") isPaused.value = false; // a real tick landed — definitely not paused anymore
       }),
       c.on("download:completed", ({ kind }) => {
         downloadState.value[kind].ready = true;
         downloadState.value[kind].progress = null;
         downloadState.value[kind].error = null;
-        if (kind === "model") writeModelDownloadedMarker();
+        downloadState.value[kind].errorCode = null;
+        if (kind === "model") {
+          writeModelDownloadedMarker();
+          partialDownload.value = null;
+          isPaused.value = false;
+        }
       }),
-      c.on("download:failed", ({ kind, error }) => {
-        downloadState.value[kind].error = error.message;
-      }),
+      c.on("download:failed", ({ kind, error }) => applyDownloadFailure(kind, error)),
       c.on("manifest:updated", (diff) => {
         // Cached manifest changed — eligibility may now read differently
         // against the new artifact, force a re-check next time it's asked.
@@ -199,6 +263,64 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     return report;
   }
 
+  /** Reads how much of the model is already on disk from an interrupted
+   *  download, without starting/resuming anything — lets `AiModelGate`/
+   *  `LocalAiSettingsSection` show "Докачать модель (X%)" instead of
+   *  "Скачать модель" when there's real bytes to resume. Call after
+   *  `refreshManifest()` (needs a cached manifest to size the percentage
+   *  against — resolves `null` without one, same as a fresh device). Never
+   *  throws — a failed check just means the button reads as a fresh
+   *  download, same as before this existed. */
+  async function checkPartialDownload(address: string): Promise<void> {
+    const c = await ensureClient(address);
+    partialDownload.value = await c.getDownloadProgress("model").catch(() => null);
+  }
+
+  /** Flips the UI to "downloading" the instant an explicit tap is handled,
+   *  before the async `downloadModel()` chain even starts — chunked
+   *  `Range:` requests (`CapacitorRangeDownloadAdapter`) can take a couple
+   *  of seconds before their first real `onProgress` tick, during which the
+   *  "Скачать"/"Докачать" button otherwise looked like it did nothing.
+   *  Seeds the displayed percent from `partialDownload` (bytes already on
+   *  disk) rather than hardcoding 0 — a resumed download otherwise visibly
+   *  restarted the progress bar from 0% for the couple of seconds before
+   *  the transport's first real tick caught back up to where it actually
+   *  was, even though the resume itself was already byte-correct at the
+   *  transport level. Call sites: `AiModelGate.vue`/
+   *  `LocalAiSettingsSection.vue`'s `handleDownload()`, right before
+   *  `downloadModel()` — NOT called from
+   *  `restoreModelIfPreviouslyDownloaded()`'s background restore path,
+   *  which should stay silent unless there's real work to show. */
+  function markDownloadStarting(): void {
+    const startPercent = partialDownload.value?.percent ?? 0;
+    downloadState.value.model.progress = { key: "model", kind: "model", percent: startPercent, status: "pending" };
+    // The live progress bar takes over display duties from here — stop
+    // showing the pre-download "resume from X%" figure alongside it.
+    partialDownload.value = null;
+  }
+
+  /** Pauses an in-flight model download — the partial file stays on disk
+   *  at whatever byte offset it reached; `resumeDownload()` continues from
+   *  there (real byte-offset resume, `CapacitorRangeDownloadAdapter`).
+   *  No-op if nothing is downloading right now. */
+  async function pauseDownload(address: string): Promise<void> {
+    const c = await ensureClient(address);
+    await c.pauseModelDownload();
+    isPaused.value = true;
+  }
+
+  /** Resumes a download paused via `pauseDownload()`. No-op if nothing is
+   *  paused. */
+  async function resumeDownload(address: string): Promise<void> {
+    // Flips before the ensureClient()/resumeModelDownload() awaits, not
+    // after — same "update the UI on the same tick as the tap" reasoning as
+    // markDownloadStarting(), so the button doesn't sit on "Возобновить"
+    // for a beat after being pressed.
+    isPaused.value = false;
+    const c = await ensureClient(address);
+    await c.resumeModelDownload();
+  }
+
   /** Downloads/loads ONLY the model — never the embedding artifact (plan
    *  §6, RAG is out of scope for this integration).
    *  @param configOverride Test seam, forwarded to `ensureClient()` — see its
@@ -206,6 +328,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
   async function downloadModel(address: string, configOverride?: LocalAiConfig): Promise<void> {
     const c = await ensureClient(address, configOverride);
     downloadState.value.model.error = null;
+    downloadState.value.model.errorCode = null;
     try {
       await c.ensureModelReady({
         onProgress: (p) => {
@@ -214,11 +337,38 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       });
       downloadState.value.model.ready = true;
       downloadState.value.model.progress = null;
+      // Defensive: also clear here, not just at this call's own start above
+      // — observed live (2026-08-19) that the automatic background
+      // restoreModelIfPreviouslyDownloaded() check and an explicit user tap
+      // can both call downloadModel() within the same narrow window (the
+      // button hasn't disappeared yet because the silent restore hasn't
+      // resolved), and whichever call's rejection lands LAST re-sets a
+      // stale error even after the OTHER call already reached ready. This
+      // doesn't fully close that race (a late failure can still overwrite
+      // this), but does mean success always leaves a clean error state at
+      // the moment it happens, not just at this call's own entry.
+      downloadState.value.model.error = null;
+      downloadState.value.model.errorCode = null;
       writeModelDownloadedMarker();
     } catch (e) {
-      downloadState.value.model.error = e instanceof Error ? e.message : String(e);
+      applyDownloadFailure("model", e instanceof Error ? e : new Error(String(e)));
       throw e;
     }
+  }
+
+  /** Deletes the model entirely — stops any in-flight/paused transfer,
+   *  removes the (partial or complete) file, and resets every piece of
+   *  local state a fresh device would have, including
+   *  {@link MODEL_DOWNLOADED_MARKER_KEY} so a later app restart doesn't try
+   *  to silently restore it via `restoreModelIfPreviouslyDownloaded()`. A
+   *  later `downloadModel()` call starts completely from scratch. */
+  async function deleteModel(address: string): Promise<void> {
+    const c = await ensureClient(address);
+    await c.deleteModel();
+    downloadState.value.model = createEmptyDownloadState();
+    partialDownload.value = null;
+    isPaused.value = false;
+    clearModelDownloadedMarker();
   }
 
   /** Best-effort, silent restore of `modelReady` on a fresh session — NOT a
@@ -248,6 +398,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
   async function switchModel(address: string): Promise<void> {
     const c = await ensureClient(address);
     downloadState.value.model.error = null;
+    downloadState.value.model.errorCode = null;
     try {
       await c.switchModel({
         onProgress: (p) => {
@@ -258,7 +409,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       downloadState.value.model.progress = null;
       writeModelDownloadedMarker();
     } catch (e) {
-      downloadState.value.model.error = e instanceof Error ? e.message : String(e);
+      applyDownloadFailure("model", e instanceof Error ? e : new Error(String(e)));
       throw e;
     }
   }
@@ -279,6 +430,8 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       embedding: createEmptyDownloadState(),
     };
     eligibilityReport.value = null;
+    partialDownload.value = null;
+    isPaused.value = false;
     isGenerating.value = false;
     if (c) {
       try {
@@ -296,13 +449,20 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     downloadState,
     modelReady,
     currentModel,
+    partialDownload,
+    isPaused,
     isGenerating,
     initError,
     checkSupportOnce,
     ensureClient,
     refreshManifest,
     checkEligibility,
+    checkPartialDownload,
+    markDownloadStarting,
+    pauseDownload,
+    resumeDownload,
     downloadModel,
+    deleteModel,
     switchModel,
     restoreModelIfPreviouslyDownloaded,
     releaseRuntime,

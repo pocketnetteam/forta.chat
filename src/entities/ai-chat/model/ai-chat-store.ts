@@ -43,6 +43,15 @@ export const useAiChatStore = defineStore("ai-chat", () => {
 
   function setChatDbKit(kit: ChatDbKit): void {
     chatDbKitRef.value = kit;
+    // A message can only be `status: "streaming"` while sendMessage()'s
+    // promise chain is actually running — if the app was killed/crashed
+    // mid-generation, that row is orphaned (no AbortController survives a
+    // process restart to cancel it) and would otherwise render as a
+    // permanent, empty "still generating" bubble forever. Runs once per
+    // app start, right as the DB becomes available.
+    kit.aiMessages.cancelStaleStreamingMessages().catch((e) => {
+      console.warn("[ai-chat-store] cancelStaleStreamingMessages failed:", e);
+    });
   }
 
   function getDbKit(): ChatDbKit {

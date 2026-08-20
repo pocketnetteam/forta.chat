@@ -2,6 +2,8 @@
 import { useAiChatStore } from "@/entities/ai-chat";
 import { useChatStore } from "@/entities/chat";
 import { useChannelStore } from "@/entities/channel";
+import { useLocalAiStore } from "@/entities/local-ai";
+import { useAuthStore } from "@/entities/auth";
 import { formatRelativeTime } from "@/shared/lib/format";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -10,13 +12,32 @@ import type { AiChat } from "@/entities/ai-chat";
 const aiChatStore = useAiChatStore();
 const chatStore = useChatStore();
 const channelStore = useChannelStore();
+const localAiStore = useLocalAiStore();
+const authStore = useAuthStore();
 const { t } = useI18n();
 
-const emit = defineEmits<{ selectChat: [chatId: string] }>();
+const emit = defineEmits<{ selectChat: [chatId: string]; modelNotReady: [] }>();
 
 const ITEM_HEIGHT = 68;
 
-const handleSelect = (chat: AiChat) => {
+const handleSelect = async (chat: AiChat) => {
+  // modelReady only reflects "already downloaded" once something has run
+  // restoreModelIfPreviouslyDownloaded() this session — if this is the very
+  // first AI-related tap this session, check it here first so an
+  // already-set-up device doesn't get redirected to Settings by mistake.
+  // Cheap/fast when there's nothing to restore (see that function's own doc
+  // comment).
+  if (!localAiStore.modelReady && authStore.address) {
+    await localAiStore.restoreModelIfPreviouslyDownloaded(authStore.address).catch(() => {});
+  }
+  // The model isn't configured/downloaded yet — send the user to the setup
+  // screen (Settings → Local AI) instead of an AI chat that can't answer
+  // anything yet. The widget layer owns the actual navigation (it needs
+  // sidebar tab state this feature doesn't depend on) — this just signals it.
+  if (!localAiStore.modelReady) {
+    emit("modelNotReady");
+    return;
+  }
   aiChatStore.selectChat(chat.id);
   // Only one content pane can be active at a time — mirrors
   // ContactList/ChannelList's own cross-clearing (ChatWindow's own watch is

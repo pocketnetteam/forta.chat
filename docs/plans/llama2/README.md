@@ -12,6 +12,8 @@
 | [2026-08-11-local-ai-library-feedback.md](./2026-08-11-local-ai-library-feedback.md) | Фидбек по самой библиотеке `local-ai` (не по интеграции) — что понравилось, что стоит улучшить |
 | [decisions.md](./decisions.md) | Плейсхолдеры/решения по открытым вопросам (§9 плана) + находки Фаз 0.4, 6.5, 7.1, 7.3 |
 | [qa-checklist-phase7.md](./qa-checklist-phase7.md) | Ручной чеклист для первого прогона на реальном Android-устройстве (Фазы 0.5/0.6/5/7.4, не выполнено в этой сессии) |
+| [device-ai-loop.md](./device-ai-loop.md) | Правила итерации fix ⇄ реальное устройство для багов `local-ai`, видимых только через настоящий Capacitor/Android мост |
+| [2026-08-20-local-ai-perf-tuning-plan.md](./2026-08-20-local-ai-perf-tuning-plan.md) | Тюнинг скорости генерации (CPU-only, без GPU): `enable_thinking`, `n_threads`, `n_batch`, KV-cache quant, `bench()`→`tooSlow`-вердикт — план по фазам в обоих репозиториях |
 
 ## Статус фаз
 
@@ -91,6 +93,9 @@
 
 - Библиотека: `C:\inetpub2026\localai` — `README.md`, `docs/2026-08-10-local-ai-library-tz.md` (полное
   ТЗ), `ROADMAP.md` (статус фаз 0–8 + security), `docs/decisions.md`, `docs/guides/`.
+- План перехода `llama-cpp-capacitor` → `llama-cpp-pro` (Фаза 0 перед перф-тюнинг-планом, см. выше):
+  `C:\inetpub2026\localai\docs\2026-08-20-llama-cpp-pro-migration-plan.md` — живёт в `local-ai`, т.к.
+  весь объём работы там.
 - Предыдущий (устаревший) план в этом репозитории: [`docs/plans/llama/README.md`](../llama/README.md)
   — LoRA-адаптерная схема поверх `llama-cpp-capacitor` напрямую, архитектурно заменена готовой
   `local-ai`; сохранён только как исторический контекст.

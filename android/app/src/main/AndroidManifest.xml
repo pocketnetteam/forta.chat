@@ -146,6 +146,14 @@
             android:foregroundServiceType="microphone|phoneCall"
             android:exported="false" />
 
+        <!-- Local-AI model download — survives the app being backgrounded,
+             see docs/decisions.md's "background download" entry and
+             ModelDownloadService's own doc comment. -->
+        <service
+            android:name="com.forta.chat.plugins.download.ModelDownloadService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <service
             android:name=".FortaFirebaseMessagingService"
             android:exported="false">
@@ -170,6 +178,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />

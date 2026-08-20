@@ -222,6 +222,43 @@ describe("useLocalAiStore", () => {
     expect(store.downloadState.embedding.error).toBe("network down");
   });
 
+  // Regression: chunked Range requests (CapacitorRangeDownloadAdapter) can
+  // take a couple of seconds before their first real onProgress tick — the
+  // "Скачать" button looked unresponsive for that whole window. Call sites
+  // (AiModelGate.vue/LocalAiSettingsSection.vue) call this synchronously
+  // before awaiting downloadModel(), so isDownloading flips true on the same
+  // tick as the tap.
+  it("markDownloadStarting() flips downloadState.model.progress to a non-null 0% placeholder immediately", () => {
+    expect(store.downloadState.model.progress).toBeNull();
+
+    store.markDownloadStarting();
+
+    expect(store.downloadState.model.progress).toEqual({ key: "model", kind: "model", percent: 0, status: "pending" });
+  });
+
+  // Regression: pressing "Докачать модель (X%)" visibly restarted the
+  // progress bar from 0% for the couple of seconds before the transport's
+  // first real tick caught back up to where the resume actually was —
+  // the resume itself was already byte-correct, only the DISPLAY lied.
+  it("markDownloadStarting() seeds the placeholder from partialDownload's percent, not a hardcoded 0", async () => {
+    const client = await store.ensureClient("addr_a", makeFakeConfig());
+    vi.spyOn(client, "getDownloadProgress").mockResolvedValue({ bytesDownloaded: 30, sizeBytesExpected: 100, percent: 30 });
+    await store.checkPartialDownload("addr_a");
+
+    store.markDownloadStarting();
+
+    expect(store.downloadState.model.progress).toEqual({ key: "model", kind: "model", percent: 30, status: "pending" });
+  });
+
+  it("markDownloadStarting()'s placeholder is overwritten by the first real download:progress event", async () => {
+    const client = await store.ensureClient("addr_a", makeFakeConfig());
+    store.markDownloadStarting();
+
+    await emitOn(client, "download:progress", { key: "model__x__v1", kind: "model", percent: 3, status: "downloading" });
+
+    expect(store.downloadState.model.progress).toEqual({ key: "model__x__v1", kind: "model", percent: 3, status: "downloading" });
+  });
+
   it("propagates device:eligibility-warning events into eligibilityReport", async () => {
     const client = await store.ensureClient("addr_a", makeFakeConfig());
     const report = { verdict: "tight" as const, reasons: ["low ram"], device: null };
@@ -245,6 +282,191 @@ describe("useLocalAiStore", () => {
 
     const client2 = await store.ensureClient("addr_a", makeFakeConfig());
     expect(client2).not.toBe(client1);
+  });
+
+  // Regression coverage for forta.chat's Settings → Local AI pause/resume/
+  // delete buttons (docs/decisions.md, 2026-08-19). `local-ai` itself never
+  // surfaces "paused" through download:progress (the transport's pause()
+  // deliberately fires no event at all) — isPaused is store-only state.
+  describe("pauseDownload/resumeDownload", () => {
+    it("pauseDownload() calls client.pauseModelDownload() and sets isPaused", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const spy = vi.spyOn(client, "pauseModelDownload").mockResolvedValue(undefined);
+
+      await store.pauseDownload("addr_a");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(store.isPaused).toBe(true);
+    });
+
+    it("resumeDownload() calls client.resumeModelDownload() and clears isPaused synchronously, before the call resolves", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      let resolveResume!: () => void;
+      const spy = vi
+        .spyOn(client, "resumeModelDownload")
+        .mockReturnValue(new Promise((resolve) => (resolveResume = resolve)));
+      store.isPaused = true;
+
+      const resumePromise = store.resumeDownload("addr_a");
+      expect(store.isPaused).toBe(false); // flips immediately, doesn't wait for the transport call
+
+      resolveResume();
+      await resumePromise;
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it("a real download:progress tick clears isPaused even without resumeDownload() being called", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      store.isPaused = true;
+
+      await emitOn(client, "download:progress", { key: "k", kind: "model", percent: 10, status: "downloading" });
+
+      expect(store.isPaused).toBe(false);
+    });
+
+    it("download:completed and download:failed for the model both clear isPaused", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      store.isPaused = true;
+      await emitOn(client, "download:completed", { key: "k", kind: "model" });
+      expect(store.isPaused).toBe(false);
+
+      store.isPaused = true;
+      await emitOn(client, "download:failed", { kind: "model", error: new Error("network") });
+      expect(store.isPaused).toBe(false);
+    });
+
+    it("releaseRuntime() resets isPaused", async () => {
+      await store.ensureClient("addr_a", makeFakeConfig());
+      store.isPaused = true;
+
+      await store.releaseRuntime();
+
+      expect(store.isPaused).toBe(false);
+    });
+  });
+
+  // Regression: a real network drop mid-download exhausted DownloadEngine's
+  // retries and left the UI with a stale progress bar + a raw, untranslated
+  // exception message and no actionable button — download:failed only ever
+  // set `.error`, never cleared `.progress` (so isDownloading stayed true
+  // forever) and never carried a code the UI could translate.
+  describe("download failure recovery", () => {
+    it("download:failed carries the error's .code into errorCode", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const err = Object.assign(new Error("download failed after 5 attempts"), { code: "download_failed" });
+
+      await emitOn(client, "download:failed", { kind: "model", error: err });
+
+      expect(store.downloadState.model.error).toBe("download failed after 5 attempts");
+      expect(store.downloadState.model.errorCode).toBe("download_failed");
+    });
+
+    it("download:failed for the model clears progress, so isDownloading-gated UI (the resume button) reappears", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      await emitOn(client, "download:progress", { key: "k", kind: "model", percent: 45, status: "downloading" });
+      expect(store.downloadState.model.progress).not.toBeNull();
+
+      await emitOn(client, "download:failed", { kind: "model", error: new Error("network down") });
+
+      expect(store.downloadState.model.progress).toBeNull();
+    });
+
+    it("download:failed for the model re-reads getDownloadProgress() so partialDownload reflects bytes already on disk", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue({ bytesDownloaded: 45, sizeBytesExpected: 100, percent: 45 });
+
+      await emitOn(client, "download:failed", { kind: "model", error: new Error("network down") });
+      // applyDownloadFailure()'s getDownloadProgress() refresh is a
+      // fire-and-forget .then() chain, not awaited by the event handler
+      // itself — flush the macrotask queue so it's had a chance to settle.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(store.partialDownload).toEqual({ bytesDownloaded: 45, sizeBytesExpected: 100, percent: 45 });
+    });
+
+    it("download:failed for the embedding does not touch partialDownload (model-only)", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const spy = vi.spyOn(client, "getDownloadProgress");
+
+      await emitOn(client, "download:failed", { kind: "embedding", error: new Error("network down") });
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("downloadModel()'s own catch sets errorCode too, for a failure before any download:failed event fires (e.g. eligibility check)", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const err = Object.assign(new Error("device not eligible"), { code: "device_not_eligible" });
+      vi.spyOn(client, "ensureModelReady").mockRejectedValue(err);
+
+      await expect(store.downloadModel("addr_a")).rejects.toThrow("device not eligible");
+
+      expect(store.downloadState.model.errorCode).toBe("device_not_eligible");
+      expect(store.downloadState.model.progress).toBeNull();
+    });
+
+    // Regression: observed live (2026-08-19) that the automatic background
+    // restoreModelIfPreviouslyDownloaded() check and an explicit user tap
+    // can both call downloadModel() within the same narrow window — the
+    // button hadn't disappeared yet because the silent restore call hadn't
+    // resolved. A stale error from one of those calls could sit in the
+    // store even after the OTHER one reached ready, showing "download
+    // failed" right next to a fully populated, working model card.
+    it("downloadModel() clears a stale error at its success point too, not just at its own start", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      vi.spyOn(client, "ensureModelReady").mockImplementation(async () => {
+        // Simulates a concurrent call's failure landing while this one is
+        // still in flight — this call's own initial reset (at the top of
+        // downloadModel()) already ran and can't see this.
+        store.downloadState.model.error = "a concurrent call's stale error";
+        store.downloadState.model.errorCode = "download_failed";
+      });
+
+      await store.downloadModel("addr_a");
+
+      expect(store.modelReady).toBe(true);
+      expect(store.downloadState.model.error).toBeNull();
+      expect(store.downloadState.model.errorCode).toBeNull();
+    });
+  });
+
+  // Regression coverage for the "Удалить модель" button — LocalAiClient has
+  // no delete API until 2026-08-19 (docs/decisions.md); this is the store's
+  // side of wiring the new pauseModelDownload/resumeModelDownload/
+  // deleteModel() methods in.
+  describe("deleteModel", () => {
+    it("calls client.deleteModel() and resets downloadState.model, partialDownload, and isPaused", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const spy = vi.spyOn(client, "deleteModel").mockResolvedValue(undefined);
+      await emitOn(client, "download:completed", { key: "k", kind: "model" });
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue({ bytesDownloaded: 1, sizeBytesExpected: 2, percent: 50 });
+      await store.checkPartialDownload("addr_a");
+      store.isPaused = true;
+      expect(store.modelReady).toBe(true);
+
+      await store.deleteModel("addr_a");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(store.modelReady).toBe(false);
+      expect(store.downloadState.model.progress).toBeNull();
+      expect(store.partialDownload).toBeNull();
+      expect(store.isPaused).toBe(false);
+    });
+
+    // Regression: MODEL_DOWNLOADED_MARKER_KEY drove a silent
+    // restoreModelIfPreviouslyDownloaded() on the next app launch — without
+    // clearing it, a deliberately-deleted model would silently come back.
+    it("clears MODEL_DOWNLOADED_MARKER_KEY so a later restoreModelIfPreviouslyDownloaded() stays a no-op", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      vi.spyOn(client, "deleteModel").mockResolvedValue(undefined);
+      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1");
+
+      await store.deleteModel("addr_a");
+
+      expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBeNull();
+      const restoreSpy = vi.spyOn(client, "ensureModelReady");
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+      expect(restoreSpy).not.toHaveBeenCalled();
+    });
   });
 
   // Regression: `downloadState.model.ready` is in-memory-only and resets on
@@ -286,6 +508,52 @@ describe("useLocalAiStore", () => {
       await store.restoreModelIfPreviouslyDownloaded("addr_a");
 
       expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  // Regression: an interrupted download resumes correctly at the transport
+  // level (CapacitorRangeDownloadAdapter), but nothing in the UI could tell
+  // the difference from a fresh download — read as "resume doesn't work"
+  // when it actually did (docs/plans/llama2/decisions.md).
+  describe("checkPartialDownload", () => {
+    it("reads getDownloadProgress('model') into partialDownload", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const progress = { bytesDownloaded: 512, sizeBytesExpected: 2048, percent: 25 };
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue(progress);
+
+      await store.checkPartialDownload("addr_a");
+
+      expect(store.partialDownload).toEqual(progress);
+    });
+
+    it("leaves partialDownload null when there's nothing to resume (no manifest cached / no partial file)", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue(null);
+
+      await store.checkPartialDownload("addr_a");
+
+      expect(store.partialDownload).toBeNull();
+    });
+
+    it("markDownloadStarting() clears a stale partialDownload once the live progress bar takes over", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue({ bytesDownloaded: 1, sizeBytesExpected: 2, percent: 50 });
+      await store.checkPartialDownload("addr_a");
+      expect(store.partialDownload).not.toBeNull();
+
+      store.markDownloadStarting();
+
+      expect(store.partialDownload).toBeNull();
+    });
+
+    it("download:completed for the model clears partialDownload", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue({ bytesDownloaded: 1, sizeBytesExpected: 2, percent: 50 });
+      await store.checkPartialDownload("addr_a");
+
+      await emitOn(client, "download:completed", { key: "k", kind: "model" });
+
+      expect(store.partialDownload).toBeNull();
     });
   });
 });

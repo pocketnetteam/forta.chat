@@ -25,7 +25,7 @@
     "cap:prepare": "node scripts/ensure-android-sdk.mjs",
     "cap:build": "npm run cap:prepare && node scripts/sync-vendor-assets.mjs && vite build && npx cap sync android",
     "cap:open": "npx cap open android",
-    "cap:run": "npm run cap:build && npx cap run android --flavor Sideload",
+    "cap:run": "npm run cap:build && node scripts/run-android-device.mjs",
     "cap:apk": "npm run cap:build && node scripts/run-android-gradle.mjs assembleSideloadRelease",
     "cap:aab:play": "npm run cap:build && node scripts/run-android-gradle.mjs bundlePlayRelease",
     "cap:verify-dist": "node scripts/verify-android-distribution.mjs",
@@ -33,7 +33,7 @@
     "cap:build:ios": "npm run cap:version:ios && node scripts/sync-vendor-assets.mjs && vite build && npx cap sync ios",
     "cap:open:ios": "npx cap open ios",
     "cap:run:ios": "npm run cap:build:ios && npx cap run ios",
-    "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\" && node scripts/sync-vendor-assets.mjs"
+    "postinstall": "node -e \"const fs=require('fs'),p='node_modules/@capgo/capacitor-webview-version-checker/scripts';fs.mkdirSync(p,{recursive:true});const f=p+'/generate-version-share-data.mjs';if(!fs.existsSync(f))fs.writeFileSync(f,'// stub\\n')\" && node scripts/sync-vendor-assets.mjs && patch-package"
   },
   "dependencies": {
     "@capacitor-community/file-opener": "^8.0.0",
@@ -73,7 +73,7 @@
     "emoji-kitchen-mart": "^6.0.5",
     "file-saver": "^2.0.5",
     "heic2any": "^0.0.4",
-    "llama-cpp-capacitor": "^0.1.5",
+    "llama-cpp-pro": "^0.2.4",
     "local-ai": "file:../../inetpub2026/localai",
     "matrix-js-sdk-bastyon": "^23.2.5",
     "miscreant": "^0.3.2",
@@ -106,6 +106,7 @@
     "emoji-assets": "6.6.0",
     "fake-indexeddb": "^6.2.5",
     "happy-dom": "^20.6.2",
+    "patch-package": "^8.0.1",
     "postcss": "^8.4.40",
     "tailwindcss": "^3.4.7",
     "terser": "^5.46.0",
