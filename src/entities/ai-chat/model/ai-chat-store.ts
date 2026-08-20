@@ -3,7 +3,7 @@ import { ref, shallowRef } from "vue";
 import type { LocalAiClient } from "local-ai";
 
 import { useAuthStore } from "@/entities/auth/model/stores";
-import { useLocalAiStore } from "@/entities/local-ai";
+import { startAiInferenceKeepAlive, stopAiInferenceKeepAlive, useLocalAiStore } from "@/entities/local-ai";
 import { useLiveQuery } from "@/shared/lib/local-db/use-live-query";
 import type { ChatDbKit, LocalAiChat, LocalAiMessage } from "@/shared/lib/local-db";
 import { tRaw } from "@/shared/lib/i18n";
@@ -191,6 +191,10 @@ export const useAiChatStore = defineStore("ai-chat", () => {
     localAi.isGenerating = true;
     const controller = new AbortController();
     abortControllers.set(chatId, controller);
+    // Android-only, no-op elsewhere (startAiInferenceKeepAlive's own doc
+    // comment) — keeps the process alive for the duration of this
+    // generation in case the app gets backgrounded mid-reply.
+    await startAiInferenceKeepAlive();
 
     try {
       const address = useAuthStore().address;
@@ -230,6 +234,7 @@ export const useAiChatStore = defineStore("ai-chat", () => {
       streamingContent.value = new Map(streamingContent.value);
       abortControllers.delete(chatId);
       localAi.isGenerating = false;
+      await stopAiInferenceKeepAlive();
     }
   }
 

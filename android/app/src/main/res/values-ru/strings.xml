@@ -19,10 +19,15 @@
     <string name="channel_incoming_calls_desc">Уведомления о входящих звонках</string>
     <string name="channel_model_download">Загрузка модели ИИ</string>
     <string name="channel_model_download_desc">Отображается во время загрузки офлайн-модели ИИ</string>
+    <string name="channel_ai_inference">Ответ ИИ</string>
+    <string name="channel_ai_inference_desc">Отображается во время генерации офлайн-ответа ИИ</string>
 
     <!-- AI model download notification -->
     <string name="model_download_title">Загрузка модели ИИ</string>
     <string name="model_download_progress">%1$d%%</string>
+
+    <!-- AI reply generation notification -->
+    <string name="ai_inference_notification_title">Генерация ответа ИИ…</string>
 
     <!-- Call UI -->
     <string name="call_connecting">Соединение…</string>

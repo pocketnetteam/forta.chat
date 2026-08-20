@@ -26,9 +26,18 @@ import { AiMessageRepository } from "@/shared/lib/local-db/ai-message-repository
 import type { ChatDbKit } from "@/shared/lib/local-db";
 import type { LocalAiChat, LocalAiMessage } from "@/shared/lib/local-db/schema";
 import { useAuthStore } from "@/entities/auth/model/stores";
+import { startAiInferenceKeepAlive, stopAiInferenceKeepAlive } from "@/entities/local-ai/lib/ai-inference-keep-alive.adapter";
 
 vi.mock("@/entities/auth/model/stores", () => ({
   useAuthStore: vi.fn(),
+}));
+
+// The real adapter is Android-only and already no-ops in this (non-Android)
+// test environment — mocked anyway so the bracketing tests below assert
+// call order/count deterministically regardless of platform detection.
+vi.mock("@/entities/local-ai/lib/ai-inference-keep-alive.adapter", () => ({
+  startAiInferenceKeepAlive: vi.fn(async () => {}),
+  stopAiInferenceKeepAlive: vi.fn(async () => {}),
 }));
 
 const TEST_ADDRESS = "addr_test";
@@ -175,6 +184,8 @@ describe("useAiChatStore — Mode B over Dexie", () => {
   beforeEach(async () => {
     setActivePinia(createTestingPinia({ stubActions: false }));
     vi.mocked(useAuthStore).mockReturnValue({ address: TEST_ADDRESS } as ReturnType<typeof useAuthStore>);
+    vi.mocked(startAiInferenceKeepAlive).mockClear();
+    vi.mocked(stopAiInferenceKeepAlive).mockClear();
 
     db = new TestDb();
     store = useAiChatStore();
@@ -387,5 +398,53 @@ describe("useAiChatStore — Mode B over Dexie", () => {
     // failure — no "error" status/toast for what was really a logout.
     const messages = await db.aiMessages.where("chatId").equals(chat.id).sortBy("createdAt");
     expect(messages[1].status).toBe("cancelled");
+  });
+
+  // Android foreground-service keep-alive (docs/plans/llama2/decisions.md's
+  // "AI-chat background generation" entry) — brackets exactly the window
+  // isGenerating already tracks, via the same claim/finally in sendMessage().
+  describe("AI-inference keep-alive bracketing", () => {
+    it("start()s before generation and stop()s after a normal completion", async () => {
+      scriptSendMessage(localAi.client!, { tokens: ["ok"], outcome: "complete" });
+      const chat = await store.createChat();
+
+      await store.sendMessage(chat.id, "hi");
+
+      expect(startAiInferenceKeepAlive).toHaveBeenCalledTimes(1);
+      expect(stopAiInferenceKeepAlive).toHaveBeenCalledTimes(1);
+    });
+
+    it("still stop()s when generation is cancelled mid-stream", async () => {
+      scriptSendMessage(localAi.client!, { tokens: ["A", "B", "C", "D"], outcome: "complete" });
+      const chat = await store.createChat();
+      const sendPromise = store.sendMessage(chat.id, "cancel me");
+
+      await waitFor(() => (store.streamingContent.get(chat.id)?.length ?? 0) > 0);
+      store.cancelMessage(chat.id);
+      await sendPromise;
+
+      expect(startAiInferenceKeepAlive).toHaveBeenCalledTimes(1);
+      expect(stopAiInferenceKeepAlive).toHaveBeenCalledTimes(1);
+    });
+
+    it("still stop()s when generation settles with status 'error'", async () => {
+      scriptSendMessage(localAi.client!, { tokens: ["oops"], outcome: "error" });
+      const chat = await store.createChat();
+
+      await store.sendMessage(chat.id, "will fail");
+
+      expect(startAiInferenceKeepAlive).toHaveBeenCalledTimes(1);
+      expect(stopAiInferenceKeepAlive).toHaveBeenCalledTimes(1);
+    });
+
+    it("never start()s when the single-generation guard rejects before claiming the slot", async () => {
+      localAi.isGenerating = true;
+      const chat = await store.createChat();
+
+      await expect(store.sendMessage(chat.id, "blocked")).rejects.toThrow();
+
+      expect(startAiInferenceKeepAlive).not.toHaveBeenCalled();
+      expect(stopAiInferenceKeepAlive).not.toHaveBeenCalled();
+    });
   });
 });

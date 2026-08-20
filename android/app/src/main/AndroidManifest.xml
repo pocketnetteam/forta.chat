@@ -154,6 +154,18 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <!-- Local-AI reply generation — keeps the process alive while a
+             sendMessage()/complete() call is in flight so it survives the
+             app being backgrounded, mirroring ModelDownloadService above.
+             See docs/plans/llama2/decisions.md's "AI-chat background
+             generation" entry and AiInferenceForegroundService's own doc
+             comment. Reuses "dataSync" (same type ModelDownloadService
+             already declares) — no new FGS permission needed. -->
+        <service
+            android:name="com.forta.chat.plugins.aiinference.AiInferenceForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <service
             android:name=".FortaFirebaseMessagingService"
             android:exported="false">

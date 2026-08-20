@@ -22,6 +22,7 @@ import com.forta.chat.plugins.push.PushDataPlugin
 import com.forta.chat.plugins.locale.LocalePlugin
 import com.forta.chat.plugins.savemedia.SaveMediaPlugin
 import com.forta.chat.plugins.download.ModelDownloadPlugin
+import com.forta.chat.plugins.aiinference.AiInferencePlugin
 import com.forta.chat.updater.AppUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +62,7 @@ class MainActivity : BridgeActivity() {
         registerPlugin(LocalePlugin::class.java)
         registerPlugin(SaveMediaPlugin::class.java)
         registerPlugin(ModelDownloadPlugin::class.java)
+        registerPlugin(AiInferencePlugin::class.java)
         super.onCreate(savedInstanceState)
 
         // When this activity is launched from the push-call ringer's

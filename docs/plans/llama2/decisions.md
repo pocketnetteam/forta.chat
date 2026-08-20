@@ -51,21 +51,30 @@ ABI (если модель когда-нибудь потребует `armeabi-v
 ### Обновление 2026-08-20 — миграция `llama-cpp-capacitor` → `llama-cpp-pro`
 
 Зависимость (и в `local-ai`, и здесь) переведена на `llama-cpp-pro@^0.2.4` (то же самое приложение
-под новым npm-именем — `local-ai`'s `docs/adr/0008-llama-cpp-pro-migration.md`). Прекомпилированный
-`arm64-v8a` `.so` в новом пакете — 7 095 896 байт (~6.8 MB, stripped) против 58 354 360 байт
-(~58.3 MB, unstripped) в `llama-cpp-capacitor@0.1.5` — **несжатое** сравнение; строка выше
-(«+24 MB», 19.68 MB сжато) осталась как исторический замер на старом пакете, **новый замер тем же
-методом (`gradlew assembleSideloadDebug --rerun-tasks`) на `llama-cpp-pro` не выполнен в этой
-сессии** — нет доступа к реальному Android/Gradle-сборочному окружению здесь. Ожидаемое
-направление — заметно меньше, но не экстраполировать линейно от несжатого числа (см. ADR 0008 §
-Consequences п.2). Также обнаружено и перенесено на `llama-cpp-pro`: `patches/` (`patch-package`)
-нёс два живых Android-фикса (`jni.cpp` — JNI-краш на невалидном UTF-8, зависание на полном
-`n_predict`-бюджете из-за захардкоженной EOS-проверки) поверх `llama-cpp-capacitor@0.1.5`, которых
-не было в исходном плане миграции — оба бага подтверждённо присутствуют байт-в-байт и в
-`llama-cpp-pro@0.2.4`'s `jni.cpp` (не были апстримлены), портированы туда же и перезафиксированы как
-`patches/llama-cpp-pro+0.2.4.patch`. Полный список пунктов, требующих реального устройства
-(session-persistence тайминг, APK-размер, jinja/`n_predict=50`-регрессии) — см. ADR 0008 §
-Consequences и `device-ai-loop.md`; не выполнены в этой сессии по той же причине (нет устройства).
+под новым npm-именем — `local-ai`'s `docs/adr/0008-llama-cpp-pro-migration.md`). Также обнаружено и
+перенесено на `llama-cpp-pro`: `patches/` (`patch-package`) нёс два живых Android-фикса (`jni.cpp` —
+JNI-краш на невалидном UTF-8, зависание на полном `n_predict`-бюджете из-за захардкоженной
+EOS-проверки) поверх `llama-cpp-capacitor@0.1.5`, которых не было в исходном плане миграции — оба
+бага подтверждённо присутствуют байт-в-байт и в `llama-cpp-pro@0.2.4`'s `jni.cpp` (не были
+апстримлены), портированы туда же и перезафиксированы как `patches/llama-cpp-pro+0.2.4.patch`.
+
+**Обновление 2026-08-20, реальное устройство — APK-размер пересчитан, ожидание не подтвердилось.**
+`gradlew assembleSideloadDebug --rerun-tasks` (тот же метод, что и историческая строка «+24 MB»
+выше), реальный телефон: итоговый `.apk` — **137 526 865 байт (~131.2 MB)**, против 132 024 519
+байт (~125.9 MB) на `llama-cpp-capacitor@0.1.5` — **+5.5 MB, БОЛЬШЕ, не меньше**, вопреки ожиданию из
+предыдущей записи. `lib/arm64-v8a/libllama-cpp-arm64.so` в самом APK — 89 395 384 байт несжатый /
+24 811 281 сжатый (было 68 740 712 / 19 683 547 на `0.1.5`). Причина: сравнение выше («7.1 MB
+stripped») смотрело на **прекомпилированный `.so` внутри npm-тарболла** — но реальная Gradle-сборка
+запускает `configureCMakeDebug[arm64-v8a]`/`buildCMakeDebug[arm64-v8a]` и **компилирует нативный код
+из исходников заново** под debug-конфигурацию (подтверждено: `stripSideloadDebugDebugSymbols` в логе
+сборки — «Unable to strip... libllama-cpp-arm64.so... packaging them as they are», то есть это
+неоптимизированный, нестрипнутый debug-бинарник, а не тот стрипнутый артефакт из тарболла). Release-сборка
+(оптимизированная, стрипуемая) не измерена в этой сессии — не экстраполировать ни в одну сторону без
+отдельного замера. Полная деталь и остальные 4 пункта device-верификации (session-persistence,
+smoke, jinja/`n_predict=50`-регрессии — все закрыты, ни одна не воспроизвелась/подтверждена) — см.
+ADR 0008 § Consequences (`localai/docs/adr/0008-llama-cpp-pro-migration.md`) и
+`localai/docs/decisions.md`'s «ADR 0008 §7 device-verification checklist closed out» (2026-08-20) —
+там же baseline `tgAvg` для `2026-08-20-local-ai-perf-tuning-plan.md`'s §9.
 
 ## Фаза 6.5 — «Удалить модель» (2026-08-11)
 
@@ -174,6 +183,36 @@ OOM-killer'ом на слабых устройствах, а не только �
    существующими `checkSupportOnce`/`checkEligibility`. Регрессия —
    `local-ai-store.test.ts` → `describe("restoreModelIfPreviouslyDownloaded", …)` + маркер-assertion в
    существующем `download:completed`-тесте.
+
+## AI-chat background generation (2026-08-20)
+
+Жалоба: «написал в AI-чат, свернул приложение — ответ не приходит». Ровно то, о чём предупреждала
+Фаза 7.1 выше («пересмотреть... если задержка возврата окажется неприемлемой») — только оказалось не
+задержкой, а полным обрывом генерации. Две независимые причины, обе исправлены вместе (одна без
+другой — no-op):
+
+1. **`local-ai`** (`RuntimeFacade`/`LifecycleManager`/`LocalAiClient`, см. `local-ai`'s
+   `docs/guides/memory-and-lifecycle.md`): `autoUnloadOnBackground: true` (Фаза 7.1) при уходе в фон
+   безусловно рвал нативный контекст (`releaseModel()`) даже посреди активной генерации — не было
+   понятия «идёт ответ прямо сейчас». **Исправлено**: `RuntimeFacade.waitUntilIdle()` — релиз теперь
+   ждёт завершения текущей генерации (если она есть) вместо того, чтобы рвать её; в «не занят» случае
+   поведение/тайминг не изменились (синхронная проверка `isBusy`, без лишнего microtask-тика — иначе
+   ломался существующий тест на точных тиках).
+2. **forta.chat**: для AI-инференса не было foreground service вообще (только `CallForegroundService`
+   для звонков и `ModelDownloadService` для скачивания модели) — без него Android мог убить/заморозить
+   процесс в фоне независимо от пункта 1 (та же причина, по которой существует `ModelDownloadService`,
+   см. его doc comment). **Добавлено**: `AiInferenceForegroundService.kt` + `AiInferencePlugin.kt`
+   (`AiInferenceKeepAlive` Capacitor-плагин) — пустой keep-alive без своей работы (генерация токенов и
+   так идёт нативно в отдельном потоке внутри `llama-cpp-pro`, подтверждено на устройстве логами
+   `LlamaCpp`/`RNLlama` — см. `llama-cpp-capacitor.adapter.ts`), только держит foreground-уведомление
+   на время одного `sendMessage()`. `foregroundServiceType="dataSync"` — тот же тип, что уже у
+   `ModelDownloadService`, новый permission не нужен. Вызывается из
+   `entities/ai-chat/model/ai-chat-store.ts::sendMessage()`, тем же `try/finally`, что уже владеет
+   `isGenerating` — покрывает и cancel, и error-пути.
+
+Не проверено на реальном устройстве в этой сессии (нет подключённого Android-устройства) — следующий
+шаг: прогон через `device-ai-loop` skill, реально свернуть приложение посреди генерации и убедиться,
+что ответ дописывается.
 
 ## Как обновить плейсхолдеры позже
 

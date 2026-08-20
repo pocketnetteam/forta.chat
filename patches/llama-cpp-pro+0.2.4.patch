@@ -1,5 +1,129 @@
+diff --git a/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCpp.java b/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCpp.java
+index fe9b334..2a939cf 100644
+--- a/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCpp.java
++++ b/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCpp.java
+@@ -254,6 +254,10 @@ public class LlamaCpp {
+     private Context context;
+     // Memory admission control (parity with the Web DefaultModelScheduler).
+     private final ModelAdmissionController admissionController;
++    // Set by LlamaCppPlugin so emitPartialToken() below can reach notifyListeners() — see that
++    // method's own doc comment. Never null in production (LlamaCppPlugin.load() always passes
++    // itself); nullable only so existing single-arg-constructor call sites/tests don't break.
++    private LlamaCppPlugin plugin;
+ 
+     // Constructor to receive context
+     public LlamaCpp(Context context) {
+@@ -261,10 +265,21 @@ public class LlamaCpp {
+         this.admissionController = new ModelAdmissionController(context);
+     }
+ 
++    public LlamaCpp(Context context, LlamaCppPlugin plugin) {
++        this(context);
++        this.plugin = plugin;
++    }
++
+     // Native method declarations
+     private native long initContextNative(String modelPath, String[] searchPaths, JSObject params);
+     private native void releaseContextNative(long nativeContextId);
+-    private native Map<String, Object> completionNative(long contextId, JSObject params);
++    // `contextId` (JS-level, routes the JS wrapper's per-context EVENT_ON_TOKEN listener —
++    // dist/esm/index.js's `completion()`: `if (contextId !== this.id) return;`) is a *new* param
++    // here, plumbed through purely so emitPartialToken() below (called from jni.cpp's token loop)
++    // knows which JS-side id to stamp on the event; `nativeContextId` (the existing long handle)
++    // still identifies the actual llama_context. See docs/decisions.md's "no per-token streaming
++    // on Android" entry for why this didn't exist before 2026-08-20.
++    private native Map<String, Object> completionNative(long nativeContextId, int contextId, JSObject params);
+     private native Map<String, Object> modelInfoNative(String modelPath);
+     private native void stopCompletionNative(long contextId);
+     private native String getFormattedChatNative(long contextId, String messages, String chatTemplate);
+@@ -745,7 +760,7 @@ public class LlamaCpp {
+             Log.i(TAG, "Starting completion for context: " + contextId);
+ 
+             // Call native completion with full params
+-            Map<String, Object> result = completionNative(context.getNativeContextId(), params);
++            Map<String, Object> result = completionNative(context.getNativeContextId(), contextId, params);
+ 
+             if (result != null) {
+                 Log.i(TAG, "Completion completed successfully");
+@@ -760,6 +775,28 @@ public class LlamaCpp {
+         }
+     }
+ 
++    /**
++     * Called from native code only (jni.cpp's token-generation loop in
++     * `completionNative`, one `CallVoidMethod` per generated token, gated on the
++     * request's `emit_partial_completion` param) — never call this from Java.
++     * Forwards to the Capacitor bridge as `@LlamaCpp_onToken`, matching the
++     * event name/payload shape `dist/esm/index.js`'s `completion()` already
++     * listens for (`{ contextId, tokenResult: { token } }`) — that JS-side
++     * wiring predates this method and was already correct; only this native
++     * emission was missing. See docs/decisions.md's "no per-token streaming on
++     * Android, confirmed" (2026-08-20) entry for the investigation that found
++     * the gap, and its follow-up entry for this fix.
++     */
++    public void emitPartialToken(int contextId, String token) {
++        if (plugin == null) return;
++        JSObject tokenResult = new JSObject();
++        tokenResult.put("token", token);
++        JSObject event = new JSObject();
++        event.put("contextId", contextId);
++        event.put("tokenResult", tokenResult);
++        plugin.emitTokenEvent(event);
++    }
++
+     public void stopCompletion(int contextId, LlamaCallback<Void> callback) {
+         LlamaContext context = contexts.get(contextId);
+         if (context == null) {
+@@ -820,7 +857,7 @@ public class LlamaCpp {
+             }
+             
+             // Call native completion
+-            Map<String, Object> result = completionNative(context.getNativeContextId(), completionParams);
++            Map<String, Object> result = completionNative(context.getNativeContextId(), contextId, completionParams);
+ 
+             if (result != null) {
+                 Log.i(TAG, "Chat completed successfully");
+@@ -878,7 +915,7 @@ public class LlamaCpp {
+             }
+             
+             // Call native completion
+-            Map<String, Object> result = completionNative(context.getNativeContextId(), completionParams);
++            Map<String, Object> result = completionNative(context.getNativeContextId(), contextId, completionParams);
+ 
+             if (result != null) {
+                 Log.i(TAG, "Text generation completed successfully");
+diff --git a/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCppPlugin.java b/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCppPlugin.java
+index 735d8c8..bdd0f9c 100644
+--- a/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCppPlugin.java
++++ b/node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/LlamaCppPlugin.java
+@@ -26,11 +26,23 @@ public class LlamaCppPlugin extends Plugin {
+     @Override
+     public void load() {
+         super.load();
+-        // Initialize implementation with context
+-        implementation = new LlamaCpp(getContext());
++        // `this` lets LlamaCpp.emitPartialToken() reach emitTokenEvent() below for per-token
++        // streaming (jni.cpp's completion loop -> LlamaCpp.emitPartialToken() -> here) —
++        // see that method's doc comment / docs/decisions.md's 2026-08-20 streaming-fix entry.
++        implementation = new LlamaCpp(getContext(), this);
+         Log.i(TAG, "LlamaCppPlugin loaded successfully");
+     }
+ 
++    /**
++     * Thin public wrapper around `Plugin.notifyListeners()` (which is `protected` — `LlamaCpp`
++     * holds a reference to this plugin but isn't a `Plugin` subclass itself, so it can't call
++     * that directly across the `com.getcapacitor` package boundary). Only caller is
++     * `LlamaCpp.emitPartialToken()`.
++     */
++    void emitTokenEvent(JSObject event) {
++        notifyListeners("@LlamaCpp_onToken", event);
++    }
++
+     // MARK: - Core initialization and management
+ 
+     @PluginMethod
 diff --git a/node_modules/llama-cpp-pro/android/src/main/jni.cpp b/node_modules/llama-cpp-pro/android/src/main/jni.cpp
-index 412267e..710dc71 100644
+index 412267e..2ca9ff5 100644
 --- a/node_modules/llama-cpp-pro/android/src/main/jni.cpp
 +++ b/node_modules/llama-cpp-pro/android/src/main/jni.cpp
 @@ -28,6 +28,47 @@
@@ -59,7 +183,45 @@ index 412267e..710dc71 100644
  }
  
  std::vector<std::string> jstring_array_to_string_vector(JNIEnv* env, jobjectArray jarray) {
-@@ -833,8 +874,32 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+@@ -542,7 +583,7 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_releaseContextNative(
+ 
+ JNIEXPORT jobject JNICALL
+ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+-    JNIEnv* env, jobject thiz, jlong context_id, jobject params) {
++    JNIEnv* env, jobject thiz, jlong context_id, jint js_context_id, jobject params) {
+ 
+     try {
+         LOGI("Starting completion for context: %ld", context_id);
+@@ -828,13 +869,61 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+             
+             LOGI("Starting token generation loop (max tokens: %d)...", n_predict);
+ 
++            // Per-token streaming (docs/decisions.md's "no per-token streaming on Android,
++            // confirmed" entry, 2026-08-20): resolved once, outside the loop, so a hot
++            // GetMethodID lookup doesn't run per token. `emit_partial_completion` mirrors the
++            // JS wrapper's own `completion()` (`nativeParams.emit_partial_completion:
++            // !!callback`) — only pay for the JNI call-back when a JS-side listener is actually
++            // registered. `LlamaCpp.emitPartialToken(int, String)` forwards to
++            // `LlamaCppPlugin.notifyListeners("@LlamaCpp_onToken", ...)`; if that method is ever
++            // renamed/removed upstream this lookup fails closed (streaming silently skipped)
++            // rather than crashing generation.
++            bool emit_partial = jni_utils::jsobject_opt_bool(env, params, "emit_partial_completion", false);
++            jmethodID emit_token_method = nullptr;
++            if (emit_partial) {
++                jclass thiz_class = env->GetObjectClass(thiz);
++                emit_token_method = env->GetMethodID(thiz_class, "emitPartialToken", "(ILjava/lang/String;)V");
++                if (env->ExceptionCheck()) {
++                    env->ExceptionClear();
++                    emit_token_method = nullptr;
++                }
++                if (!emit_token_method) {
++                    LOGE("LlamaCpp.emitPartialToken(int, String) not found — per-token streaming disabled for this call");
++                    emit_partial = false;
++                }
++            }
++
+             while (tokens_generated < n_predict && !ctx->completion->is_interrupted) {
+                 try {
                      LOGI("Generating token %d...", tokens_generated + 1);
                      auto token_output = ctx->completion->nextToken();
  
@@ -93,3 +255,28 @@ index 412267e..710dc71 100644
                          LOGI("Reached EOS token, stopping generation");
                          break;
                      }
+@@ -846,6 +935,21 @@ Java_ai_annadata_plugin_capacitor_LlamaCpp_completionNative(
+ 
+                     LOGI("Generated token %d (ID: %d): %s", tokens_generated, token_output.tok, token_text.c_str());
+ 
++                    if (emit_partial && emit_token_method) {
++                        jstring token_jstr = jni_utils::string_to_jstring(env, token_text);
++                        env->CallVoidMethod(thiz, emit_token_method, js_context_id, token_jstr);
++                        env->DeleteLocalRef(token_jstr);
++                        if (env->ExceptionCheck()) {
++                            // A JS-side listener threw, or the bridge rejected the event —
++                            // don't let that abort generation, just stop trying to stream
++                            // for the rest of this call (the caller still gets the full
++                            // text via completionNative's normal return either way).
++                            LOGE("emitPartialToken threw for token %d — disabling streaming for the rest of this generation", tokens_generated);
++                            env->ExceptionClear();
++                            emit_partial = false;
++                        }
++                    }
++
+                 } catch (const std::exception& e) {
+                     LOGE("Exception during token generation %d: %s", tokens_generated + 1, e.what());
+                     break;
+diff --git a/node_modules/llama-cpp-pro/android/src/main/jniLibs/arm64-v8a/libllama-cpp-arm64.so b/node_modules/llama-cpp-pro/android/src/main/jniLibs/arm64-v8a/libllama-cpp-arm64.so
+index 6d21512..4a56126 100644
+Binary files a/node_modules/llama-cpp-pro/android/src/main/jniLibs/arm64-v8a/libllama-cpp-arm64.so and b/node_modules/llama-cpp-pro/android/src/main/jniLibs/arm64-v8a/libllama-cpp-arm64.so differ

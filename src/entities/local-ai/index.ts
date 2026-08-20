@@ -5,3 +5,4 @@ export { collectAiDiagnostics } from "./lib/collect-ai-diagnostics";
 export type { AiDiagnostics } from "./lib/collect-ai-diagnostics";
 export { downloadErrorMessage } from "./lib/download-error-message";
 export { downloadPhaseLabel } from "./lib/download-phase-label";
+export { startAiInferenceKeepAlive, stopAiInferenceKeepAlive } from "./lib/ai-inference-keep-alive.adapter";

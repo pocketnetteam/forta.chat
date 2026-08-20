@@ -24,10 +24,15 @@
     <string name="channel_incoming_calls_desc">Incoming call notifications</string>
     <string name="channel_model_download">AI Model Download</string>
     <string name="channel_model_download_desc">Shows while the offline AI model is downloading</string>
+    <string name="channel_ai_inference">AI Reply</string>
+    <string name="channel_ai_inference_desc">Shows while the offline AI is generating a reply</string>
 
     <!-- AI model download notification -->
     <string name="model_download_title">Downloading AI model</string>
     <string name="model_download_progress">%1$d%%</string>
+
+    <!-- AI reply generation notification -->
+    <string name="ai_inference_notification_title">Generating AI reply…</string>
 
     <!-- Call UI -->
     <string name="call_connecting">Connecting…</string>
