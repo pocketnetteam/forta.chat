@@ -22,6 +22,25 @@ const logger: LocalAiLogger = {
 };
 
 /**
+ * `n_threads` for `local-ai`'s `runtimeTuning.threads` (perf-tuning plan
+ * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3). No
+ * `DeviceSnapshot` field carries CPU core count (plan §11 open question 4,
+ * deliberately out of scope here), so this reads `navigator.hardwareConcurrency`
+ * directly — available in the WebView. Capped at 4 rather than passed through
+ * uncapped: on bigLITTLE Android SoCs (common on the older/weaker devices
+ * this project targets, `CLAUDE.md`) using every reported core risks pulling
+ * in slow efficiency cores and/or thermal throttling, which can make CPU
+ * inference *slower*, not faster — a real risk without per-device
+ * measurement, hence the conservative starting cap (raise only after a real
+ * on-device `tgAvg` comparison, plan §9/§11). Floored at 2 so a
+ * `hardwareConcurrency` of `0`/`undefined` (some WebView configurations
+ * report it as absent) never collapses to single-threaded.
+ */
+export function computeRuntimeThreads(hardwareConcurrency: number | undefined): number {
+  return Math.max(2, Math.min(hardwareConcurrency || 4, 4));
+}
+
+/**
  * Builds a `LocalAiConfig` scoped to one Bastyon account. Pure/testable —
  * takes `address` as a parameter instead of reading the auth store directly
  * (roadmap 2.1). Callers pass the result to `LocalAiClient.create()`.
@@ -106,6 +125,13 @@ export async function createLocalAiConfig(address: string): Promise<LocalAiConfi
     // stream, so a cold-start delay before the first token is not a new
     // class of wait for the user.
     autoUnloadOnBackground: true,
+    // perf-tuning plan §3 — n_threads was previously never passed to
+    // initLlama() at all, leaving the native plugin's own thread-count
+    // default in effect. See computeRuntimeThreads()'s own doc comment for
+    // the cap rationale.
+    runtimeTuning: {
+      threads: computeRuntimeThreads(typeof navigator !== "undefined" ? navigator.hardwareConcurrency : undefined),
+    },
     logger,
     // Persistent log store enabled so real-device diagnostics are available
     // through the existing bug-report flow (plan §11, roadmap 7.6) — this is
