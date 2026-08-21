@@ -632,17 +632,38 @@ describe("useLocalAiStore", () => {
       expect(ensureSpy).toHaveBeenCalledTimes(1);
     });
 
-    it("leaves the download gate visible (no download call) when the marked model can't be re-selected", async () => {
+    it("leaves the download gate visible (no download call) when the marked model can't be re-selected and nothing is on disk", async () => {
       const client = await store.ensureClient("addr_a", makeFakeConfig());
       const ensureSpy = vi.spyOn(client, "ensureModelReady").mockResolvedValue(undefined);
       vi.spyOn(client, "selectModel").mockRejectedValue(new Error("not an active model in the current manifest"));
       vi.spyOn(client, "getSelectedModelId").mockReturnValue("small-model");
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue(null); // nothing on disk for the fallback default either
       window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "removed-model");
 
       await store.restoreModelIfPreviouslyDownloaded("addr_a");
 
       expect(ensureSpy).not.toHaveBeenCalled();
       expect(store.modelReady).toBe(false);
+    });
+
+    // Live-device regression (2026-08-21): a device with a model already
+    // fully installed from before the multi-model marker shape existed (or
+    // whose marked id was since removed/deprecated) got stuck showing
+    // "Скачать" forever — selectModel(markerModelId) failing was treated as
+    // "give up entirely", even though the file the client would naturally
+    // resolve to by default was sitting right there on disk, complete.
+    it("falls back to restoring the client's natural default when the marked model can't be re-selected but that default is already 100% on disk", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const ensureSpy = vi.spyOn(client, "ensureModelReady").mockResolvedValue(undefined);
+      vi.spyOn(client, "selectModel").mockRejectedValue(new Error("not an active model in the current manifest"));
+      vi.spyOn(client, "getSelectedModelId").mockReturnValue(null);
+      vi.spyOn(client, "getDownloadProgress").mockResolvedValue({ bytesDownloaded: 100, sizeBytesExpected: 100, percent: 100 });
+      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1"); // legacy pre-multi-model marker value
+
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+
+      expect(ensureSpy).toHaveBeenCalledTimes(1);
+      expect(store.modelReady).toBe(true);
     });
 
     it("is a no-op once modelReady is already true this session", async () => {

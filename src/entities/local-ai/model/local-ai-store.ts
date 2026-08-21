@@ -515,12 +515,21 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       try {
         await selectModel(address, downloadedModelId);
       } catch {
-        // The previously-downloaded model no longer exists/isn't active in
-        // the manifest (deprecated/removed upstream) — don't fall through
-        // to silently downloading whatever IS selected instead; leave the
-        // ordinary download gate visible, same as a device that never
-        // downloaded (rare edge case, multi-model plan §8 p.3).
-        return;
+        // Live-device regression (2026-08-21): a device that already had
+        // *any* model fully on disk — including from before this
+        // multi-model marker shape existed (a bare "1", not a real model
+        // id) — hit this catch and returned unconditionally, permanently
+        // showing "Скачать" over a model that was already installed and
+        // working. downloadedModelId is unusable, but that's not reason
+        // enough to abandon the restore outright: check whether whatever
+        // the client naturally resolves to by default (selected ->
+        // recommended -> first-active, same fallback ensureModelReady()
+        // itself uses) is ALREADY fully on disk — a pure byte-size check
+        // against `getDownloadProgress()`, no network call — and restore
+        // that instead. Only proceeds when the file is already complete;
+        // never starts a real download the user didn't ask for.
+        const progress = await c.getDownloadProgress('model').catch(() => null);
+        if (progress?.percent !== 100) return;
       }
     }
     await downloadModel(address, configOverride).catch(() => {});
