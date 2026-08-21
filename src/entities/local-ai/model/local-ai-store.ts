@@ -1,34 +1,38 @@
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef } from "vue";
-import type { LocalAiClient, LocalAiConfig, ModelArtifact, PartialDownloadProgress, PlatformSupportPort } from "local-ai";
+import type { LocalAiClient, LocalAiConfig, ManifestDiff, ModelArtifact, PartialDownloadProgress, PlatformSupportPort } from "local-ai";
 
 import { createLocalAiConfig, createPlatformSupportPort } from "../lib/create-client";
 import { createEmptyDownloadState, type EligibilityReport, type SupportReport } from "./types";
 
 /** Device-wide (not per-account — the model file is shared/content-addressed
- *  across accounts, plan §4.2) marker that `ensureModelReady()` has
- *  succeeded at least once on this device. `downloadState.model.ready` itself
- *  is in-memory only and resets to `false` on every fresh app launch/Pinia
- *  reset, even though the file is still on disk — without this marker,
- *  `AiModelGate`/Settings would show the "Скачать" gate again on every app
- *  restart, forcing a redundant (if fast, no-op) click before an already-
- *  downloaded model can be used. Read/write are best-effort — a
- *  `localStorage` failure just means the one-time restore silently doesn't
- *  happen and the user sees the ordinary download gate instead, same as
- *  before this existed. */
+ *  across accounts, plan §4.2) marker of WHICH model `ensureModelReady()`
+ *  last succeeded for on this device — the model's `id`, not a bare boolean
+ *  (multi-model plan §8 p.3: with more than one model on offer, "something
+ *  was downloaded before" isn't enough, `restoreModelIfPreviouslyDownloaded`
+ *  needs to know *which* one to avoid silently kicking off a fresh
+ *  multi-GB download of whatever's merely selected-but-not-yet-applied).
+ *  `downloadState.model.ready` itself is in-memory only and resets to
+ *  `false` on every fresh app launch/Pinia reset, even though the file is
+ *  still on disk — without this marker, `AiModelGate`/Settings would show
+ *  the "Скачать" gate again on every app restart, forcing a redundant (if
+ *  fast, no-op) click before an already-downloaded model can be used.
+ *  Read/write are best-effort — a `localStorage` failure just means the
+ *  one-time restore silently doesn't happen and the user sees the ordinary
+ *  download gate instead, same as before this existed. */
 export const MODEL_DOWNLOADED_MARKER_KEY = "local_ai_model_downloaded";
 
-function readModelDownloadedMarker(): boolean {
+function readModelDownloadedMarker(): string | null {
   try {
-    return window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY) === "1";
+    return window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY);
   } catch {
-    return false;
+    return null;
   }
 }
 
-function writeModelDownloadedMarker(): void {
+function writeModelDownloadedMarker(modelId: string): void {
   try {
-    window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1");
+    window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, modelId);
   } catch {
     // best-effort — see MODEL_DOWNLOADED_MARKER_KEY doc comment
   }
@@ -69,11 +73,41 @@ export const useLocalAiStore = defineStore("local-ai", () => {
    *  plan §7.3). Toggled by `entities/ai-chat`'s `sendMessage`/cancel. */
   const isGenerating = ref(false);
   const initError = ref<string | null>(null);
-  /** Current manifest's model artifact metadata (displayName/paramsB/quant/
-   *  sizeBytes) — Settings → Local AI display (roadmap 6.3). Populated by
+  /** Every `status: 'active'` model in the current manifest (multi-model
+   *  plan §6/§9) — Settings → Local AI's model picker list. Populated by
    *  `refreshManifest()` and kept in sync via the `manifest:updated` event;
-   *  `null` until the manifest has been fetched at least once. */
-  const currentModel = ref<ModelArtifact | null>(null);
+   *  empty until the manifest has been fetched at least once. */
+  const availableModels = ref<ModelArtifact[]>([]);
+  /** Mirrors `LocalAiClient.getSelectedModelId()` — the user's persisted
+   *  model choice (`null` = none made yet, `currentModel` below falls back
+   *  to `recommended`/first-active the same way the client itself does).
+   *  Kept in sync by `refreshManifest()`/`ensureClient()`/`selectModel()` —
+   *  no separate localStorage layer: `LocalAiClient`'s own per-account
+   *  `kv_store` (already namespaced by `databaseName: local_ai_<address>`,
+   *  `create-client.ts`) is the actual durable store, this ref just mirrors
+   *  it for reactive UI reads. */
+  const selectedModelId = ref<string | null>(null);
+  /** The resolved "current" model for display (Settings → Local AI's model
+   *  info card) — the selected model if `selectedModelId` names one still
+   *  active in `availableModels`, else the manifest's `recommended: true`
+   *  model, else the first active one. Mirrors
+   *  `LocalAiClient`'s own `resolveSelectedModel()` fallback (multi-model
+   *  plan §6 п.1/п.3) so the UI never shows "—" while the library itself
+   *  would happily resolve a default. */
+  const currentModel = computed<ModelArtifact | null>(() => {
+    if (availableModels.value.length === 0) return null;
+    const bySelection = selectedModelId.value
+      ? availableModels.value.find((m) => m.id === selectedModelId.value)
+      : undefined;
+    if (bySelection) return bySelection;
+    return availableModels.value.find((m) => m.recommended === true) ?? availableModels.value[0] ?? null;
+  });
+  /** Per-modelId cache for {@link modelEligibility} — a model-picker list
+   *  renders one eligibility badge per row; without caching, re-rendering
+   *  the list would re-run `checkDeviceEligibility()` (a device-info read)
+   *  once per row on every reactive update. Cleared on `manifest:updated`
+   *  (thresholds may have changed) and `releaseRuntime()` (account switch). */
+  const modelEligibilityCache = ref<Record<string, EligibilityReport>>({});
   /** Bytes already on disk for an interrupted-and-not-yet-resumed model
    *  download, read without starting anything (roadmap: "докачать модель
    *  (X%)" instead of "Скачать модель" when there's real work to resume —
@@ -157,17 +191,26 @@ export const useLocalAiStore = defineStore("local-ai", () => {
         downloadState.value[kind].error = null;
         downloadState.value[kind].errorCode = null;
         if (kind === "model") {
-          writeModelDownloadedMarker();
           partialDownload.value = null;
           isPaused.value = false;
         }
       }),
       c.on("download:failed", ({ kind, error }) => applyDownloadFailure(kind, error)),
+      // The actual model that got loaded — covers downloadModel()/
+      // switchModel() alike, and ensureModelReady()'s own internal
+      // convergence when a different model was already live (multi-model
+      // plan §6 п.4) — whichever path led here, this is the id that's
+      // really on disk and in the runtime right now.
+      c.on("runtime:model-loaded", ({ modelId }) => {
+        writeModelDownloadedMarker(modelId);
+      }),
       c.on("manifest:updated", (diff) => {
         // Cached manifest changed — eligibility may now read differently
-        // against the new artifact, force a re-check next time it's asked.
+        // against the new/changed artifacts, force a re-check next time
+        // it's asked.
         eligibilityReport.value = null;
-        currentModel.value = diff.model.to;
+        modelEligibilityCache.value = {};
+        applyManifestDiff(c, diff);
       }),
       c.on("manifest:invalid", ({ error }) => {
         initError.value = error.message;
@@ -175,7 +218,24 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       c.on("device:eligibility-warning", (report) => {
         eligibilityReport.value = report;
       }),
+      c.on("model:selected", ({ modelId }) => {
+        selectedModelId.value = modelId;
+      }),
     );
+  }
+
+  /** Shared by the `manifest:updated` handler and `refreshManifest()` (which
+   *  needs this even on the very first fetch — `manifest:updated` itself
+   *  only fires on a genuine change, TZ §5.3's `If-None-Match`/304 path).
+   *  `diff.models` already carries every model in the fresh manifest as
+   *  `.to` (plus any removed-since-installed id with `to: undefined`) — no
+   *  separate manifest read needed, `LocalAiClient` has no public getter
+   *  for the raw manifest by design (hexagonal boundary). */
+  function applyManifestDiff(c: LocalAiClient, diff: ManifestDiff): void {
+    availableModels.value = diff.models
+      .map((m) => m.to)
+      .filter((m): m is ModelArtifact => m != null && m.status === "active");
+    selectedModelId.value = c.getSelectedModelId();
   }
 
   /** Environment-only check — no network, safe before `ensureClient()`.
@@ -249,8 +309,9 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     const diff = await c.refreshManifest();
     // Reflects the diff's own return value directly — `manifest:updated`
     // only fires on a genuine change (TZ §5.3's `If-None-Match`/304 path),
-    // but `currentModel` should still populate on the very first fetch.
-    currentModel.value = diff.model.to;
+    // but `availableModels`/`selectedModelId` should still populate on the
+    // very first fetch.
+    applyManifestDiff(c, diff);
   }
 
   async function checkEligibility(
@@ -261,6 +322,40 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     const report = await c.checkDeviceEligibility(target);
     eligibilityReport.value = report;
     return report;
+  }
+
+  /** Eligibility for one specific model in {@link availableModels}, not
+   *  necessarily the selected one — a model-picker row's badge (multi-model
+   *  plan §6/§9). Cached per `modelId` in {@link modelEligibilityCache}
+   *  (cleared on `manifest:updated`/account switch) so re-rendering an
+   *  N-model list doesn't re-run a device-info read N times per render.
+   *  Readonly — never mutates `selectedModelId`, same contract as
+   *  `LocalAiClient.checkDeviceEligibility(target, modelId)` itself. */
+  async function modelEligibility(address: string, modelId: string): Promise<EligibilityReport> {
+    const cached = modelEligibilityCache.value[modelId];
+    if (cached) return cached;
+    const c = await ensureClient(address);
+    const report = await c.checkDeviceEligibility("model", modelId);
+    modelEligibilityCache.value[modelId] = report;
+    return report;
+  }
+
+  /** Records the user's model choice (multi-model plan §6 п.2/§9) —
+   *  persists through `LocalAiClient.selectModel()` (per-account `kv_store`,
+   *  survives restarts) and updates {@link selectedModelId} for reactive UI.
+   *  Deliberately does not download/switch anything itself, same contract as
+   *  the underlying client method — call `downloadModel()`/`switchModel()`
+   *  afterward (both already resolve against whatever's now selected, see
+   *  `LocalAiClient.ensureModelReady()`/`switchModel()`'s own doc comments).
+   *  @throws If `modelId` isn't an active model in the current manifest. */
+  async function selectModel(address: string, modelId: string): Promise<void> {
+    const c = await ensureClient(address);
+    await c.selectModel(modelId);
+    selectedModelId.value = c.getSelectedModelId();
+    // A different model may read differently against device thresholds —
+    // force checkEligibility()'s next call to re-evaluate, same reasoning
+    // as the manifest:updated handler.
+    eligibilityReport.value = null;
   }
 
   /** Reads how much of the model is already on disk from an interrupted
@@ -349,7 +444,10 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       // the moment it happens, not just at this call's own entry.
       downloadState.value.model.error = null;
       downloadState.value.model.errorCode = null;
-      writeModelDownloadedMarker();
+      // Marker written by the runtime:model-loaded event handler above —
+      // always fires with the actual model that got loaded, whether that's
+      // this call's target or (via ensureModelReady()'s own convergence,
+      // multi-model plan §6 п.4) a different one.
     } catch (e) {
       applyDownloadFailure("model", e instanceof Error ? e : new Error(String(e)));
       throw e;
@@ -385,16 +483,37 @@ export const useLocalAiStore = defineStore("local-ai", () => {
    *    Production callers omit it. */
   async function restoreModelIfPreviouslyDownloaded(address: string, configOverride?: LocalAiConfig): Promise<void> {
     if (downloadState.value.model.ready || downloadState.value.model.progress) return;
-    if (!readModelDownloadedMarker()) return;
+    const downloadedModelId = readModelDownloadedMarker();
+    if (!downloadedModelId) return;
+    const c = await ensureClient(address, configOverride);
+    if (c.getSelectedModelId() !== downloadedModelId) {
+      // selectModel() was called (this session, or a previous one killed
+      // before applying it) without a follow-up download/switch — restore
+      // what's actually on disk first, never silently start downloading
+      // whatever's merely selected-but-not-yet-applied instead (multi-model
+      // plan §8 p.3).
+      try {
+        await selectModel(address, downloadedModelId);
+      } catch {
+        // The previously-downloaded model no longer exists/isn't active in
+        // the manifest (deprecated/removed upstream) — don't fall through
+        // to silently downloading whatever IS selected instead; leave the
+        // ordinary download gate visible, same as a device that never
+        // downloaded (rare edge case, multi-model plan §8 p.3).
+        return;
+      }
+    }
     await downloadModel(address, configOverride).catch(() => {});
   }
 
-  /** Downloads and swaps in whatever `manifest.model` currently is — safe
-   *  update ordering per the library's own contract (release old context →
-   *  verify+load new → delete old file). Call `refreshManifest()` first if
-   *  you want to react to `ManifestDiff.modelChanged` specifically;
-   *  `switchModel()` itself always targets the current manifest regardless
-   *  (roadmap 6.3 "Обновить модель"). */
+  /** Downloads and swaps in whatever's currently selected (`selectModel()`,
+   *  or the manifest's `recommended`/first-active model if nothing was
+   *  explicitly chosen) — safe update ordering per the library's own
+   *  contract (release old context → verify+load new → delete old file).
+   *  Call `refreshManifest()` first if you want to react to
+   *  `ManifestDiff.modelChanged` specifically; `switchModel()` itself always
+   *  targets the current selection regardless (roadmap 6.3 "Обновить
+   *  модель", multi-model plan §6 п.4). */
   async function switchModel(address: string): Promise<void> {
     const c = await ensureClient(address);
     downloadState.value.model.error = null;
@@ -407,7 +526,8 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       });
       downloadState.value.model.ready = true;
       downloadState.value.model.progress = null;
-      writeModelDownloadedMarker();
+      // Marker written by the runtime:model-loaded event handler — see
+      // downloadModel()'s matching comment.
     } catch (e) {
       applyDownloadFailure("model", e instanceof Error ? e : new Error(String(e)));
       throw e;
@@ -433,6 +553,9 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     partialDownload.value = null;
     isPaused.value = false;
     isGenerating.value = false;
+    availableModels.value = [];
+    selectedModelId.value = null;
+    modelEligibilityCache.value = {};
     if (c) {
       try {
         await c.releaseRuntime({ closeDatabase: true });
@@ -449,6 +572,8 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     downloadState,
     modelReady,
     currentModel,
+    availableModels,
+    selectedModelId,
     partialDownload,
     isPaused,
     isGenerating,
@@ -457,6 +582,8 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     ensureClient,
     refreshManifest,
     checkEligibility,
+    modelEligibility,
+    selectModel,
     checkPartialDownload,
     markDownloadStarting,
     pauseDownload,

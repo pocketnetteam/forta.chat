@@ -6,13 +6,23 @@ import LocalAiSettingsSection from "../LocalAiSettingsSection.vue";
 // Regression: same as AiModelGate.test.ts — an `ensureClient()` failure only
 // reached `initError`, never `downloadState.model.error`, and the "Скачать"/
 // "Обновить" buttons in Settings → Local AI silently no-op'd on it.
+type FakeModel = { id: string; displayName: string; quant: string; sizeBytes: number; recommended?: boolean };
+
+const QWEN_4B: FakeModel = { id: "qwen-4b", displayName: "Qwen 4B", quant: "Q4_K_M", sizeBytes: 2_500_000_000, recommended: true };
+
 const fakeLocalAiStore = reactive({
   supportReport: { isNative: true, capabilities: { inference: true } } as {
     isNative: boolean;
     capabilities: { inference: boolean };
   } | null,
   eligibilityReport: null as { verdict: "ok" | "tight" | "no" | "unknown" } | null,
-  currentModel: null as { displayName: string; quant: string; sizeBytes: number } | null,
+  // Multi-model plan §9 — single-fixture manifest by default (most tests
+  // here don't care about model identity, only download/progress/error/
+  // delete UI); `availableModels`/`currentModel` mirror the real store's
+  // resolved-selection shape once a manifest has been fetched.
+  availableModels: [QWEN_4B] as FakeModel[],
+  selectedModelId: null as string | null,
+  currentModel: QWEN_4B as FakeModel | null,
   downloadState: {
     model: { error: null as string | null, errorCode: null as string | null, progress: null as { percent: number; status?: string } | null },
   },
@@ -20,6 +30,10 @@ const fakeLocalAiStore = reactive({
   initError: null as string | null,
   checkSupportOnce: vi.fn(async () => {}),
   checkEligibility: vi.fn(async () => {}),
+  modelEligibility: vi.fn(async (_address: string, _modelId: string): Promise<{ verdict: "ok" | "tight" | "no" | "unknown" }> => ({
+    verdict: "ok",
+  })),
+  selectModel: vi.fn(async (_address: string, _modelId: string) => {}),
   refreshManifest: vi.fn(async () => {}),
   restoreModelIfPreviouslyDownloaded: vi.fn(async () => {}),
   partialDownload: null as { percent: number } | null,
@@ -97,7 +111,9 @@ vi.mock("@/shared/lib/i18n", () => ({
 beforeEach(() => {
   fakeLocalAiStore.supportReport = { isNative: true, capabilities: { inference: true } };
   fakeLocalAiStore.eligibilityReport = null;
-  fakeLocalAiStore.currentModel = null;
+  fakeLocalAiStore.availableModels = [QWEN_4B];
+  fakeLocalAiStore.selectedModelId = null;
+  fakeLocalAiStore.currentModel = QWEN_4B;
   fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: null } };
   fakeLocalAiStore.modelReady = false;
   fakeLocalAiStore.initError = null;
@@ -170,7 +186,7 @@ describe("LocalAiSettingsSection", () => {
 
       expect(wrapper.text()).not.toContain("stale error from a losing concurrent call");
       expect(wrapper.text()).not.toContain("Couldn't download the model");
-      expect(wrapper.text()).toContain("ai.ready"); // this file's dict has no mapping for it — the fake t() echoes the raw key back, matching its other baseline tests
+      expect(wrapper.text()).toContain("ai.active"); // this file's dict has no mapping for it — the fake t() echoes the raw key back, matching its other baseline tests
     });
 
     it("maps errorCode 'checksum_mismatch' to the checksum-specific message", async () => {
@@ -418,6 +434,117 @@ describe("LocalAiSettingsSection", () => {
       await flushPromises();
 
       expect(wrapper.findAll("button").find((b) => /^(Delete model|Discard download)$/.test(b.text()))).toBeUndefined();
+    });
+  });
+
+  // Multi-model plan §9 — the model-picker list.
+  describe("multi-model list", () => {
+    const SMALL_MODEL: FakeModel = { id: "small-model", displayName: "Small Model", quant: "Q4_K_M", sizeBytes: 900_000_000 };
+
+    it("renders one row per model in availableModels", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("Qwen 4B");
+      expect(wrapper.text()).toContain("Small Model");
+    });
+
+    it("marks the recommended model", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("ai.recommended"); // unmapped in this file's dict — echoed raw
+    });
+
+    /** Scopes to one model's row (`.rounded-xl` card) by its displayName
+     *  text, then returns that row's own button — `find("button")` alone
+     *  can't disambiguate rows that render the same button text (e.g. two
+     *  not-yet-downloaded models both showing "ai.download"). */
+    function rowButton(wrapper: ReturnType<typeof mount>, displayName: string) {
+      const row = wrapper.findAll(".rounded-xl").find((el) => el.text().includes(displayName));
+      return row?.find("button");
+    }
+
+    it("a model whose eligibility check resolves 'no' has its download button disabled and unclickable", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+      fakeLocalAiStore.modelEligibility.mockImplementation(async (_address, modelId) => ({
+        verdict: modelId === "qwen-4b" ? ("no" as const) : ("ok" as const),
+      }));
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      const qwenButton = rowButton(wrapper, "Qwen 4B");
+      expect(qwenButton?.exists()).toBe(true);
+      expect(qwenButton?.attributes("disabled")).toBeDefined();
+
+      await qwenButton!.trigger("click");
+      expect(fakeLocalAiStore.downloadModel).not.toHaveBeenCalled();
+    });
+
+    it("clicking 'download' on a not-yet-selected model calls selectModel() before downloadModel()", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+      fakeLocalAiStore.selectedModelId = "qwen-4b";
+      const callOrder: string[] = [];
+      fakeLocalAiStore.selectModel.mockImplementation(async () => {
+        callOrder.push("selectModel");
+      });
+      fakeLocalAiStore.downloadModel.mockImplementation(async () => {
+        callOrder.push("downloadModel");
+      });
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      const smallButton = rowButton(wrapper, "Small Model");
+      expect(smallButton?.exists()).toBe(true);
+      await smallButton!.trigger("click");
+
+      expect(fakeLocalAiStore.selectModel).toHaveBeenCalledWith("addr_a", "small-model");
+      expect(callOrder).toEqual(["selectModel", "downloadModel"]);
+    });
+
+    it("does not call selectModel() again when the clicked model is already the selection", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+      fakeLocalAiStore.selectedModelId = "small-model";
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      const smallButton = rowButton(wrapper, "Small Model");
+      await smallButton!.trigger("click");
+
+      expect(fakeLocalAiStore.selectModel).not.toHaveBeenCalled();
+      expect(fakeLocalAiStore.downloadModel).toHaveBeenCalledWith("addr_a");
+    });
+
+    it("the active model's row shows a disabled 'Active' state instead of a download button", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+      fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.currentModel = QWEN_4B;
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("ai.active");
+      // The other (non-active) model still shows its own download action.
+      const smallButton = wrapper.findAll("button").find((b) => /^(ai\.download|ai\.downloadAndSwitch)$/.test(b.text()));
+      expect(smallButton).toBeTruthy();
+    });
+
+    it("shows 'download and switch' wording for a model other than the currently ready one", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+      fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.currentModel = QWEN_4B;
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      expect(wrapper.findAll("button").some((b) => b.text() === "ai.downloadAndSwitch")).toBe(true);
     });
   });
 });

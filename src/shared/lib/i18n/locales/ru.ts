@@ -124,6 +124,9 @@ export const ru: Record<TranslationKey, string> = {
   "ai.modelSize": "Размер модели",
   "ai.status": "Статус",
   "ai.downloadBypassesTor": "Загрузка модели идёт мимо Tor, даже в режиме «Всегда»",
+  "ai.active": "Активна",
+  "ai.downloadAndSwitch": "Скачать и переключиться",
+  "ai.recommended": "Рекомендуется",
 
   // ── Каналы ──
   "channels.repostPreview": "Репост",

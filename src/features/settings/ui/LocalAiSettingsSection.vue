@@ -5,7 +5,8 @@
  *  one progress bar, two renderers, never two `onProgress` subscriptions
  *  (plan §8 p.4). */
 import { computed, onMounted, ref } from "vue";
-import { useLocalAiStore, downloadErrorMessage, downloadPhaseLabel } from "@/entities/local-ai";
+import type { ModelArtifact } from "local-ai";
+import { useLocalAiStore, downloadErrorMessage, downloadPhaseLabel, type EligibilityReport } from "@/entities/local-ai";
 import { useAuthStore } from "@/entities/auth";
 import { useTorStore } from "@/entities/tor";
 import { formatBytes } from "@/entities/tor/lib/format-bytes";
@@ -25,8 +26,13 @@ const { t } = useI18n();
 const downloadBypassesTor = computed(() => torStore.mode === "always");
 
 const supportReport = computed(() => localAiStore.supportReport);
-const eligibility = computed(() => localAiStore.eligibilityReport);
-const model = computed(() => localAiStore.currentModel);
+const models = computed(() => localAiStore.availableModels);
+/** Per-model eligibility badges (multi-model plan §9) — populated by
+ *  {@link refreshModelEligibility}, one entry per {@link models} row.
+ *  `null` means the check itself failed (readable as "unknown" in
+ *  {@link modelBadge}); a key simply absent means it hasn't been checked
+ *  yet this mount. */
+const modelEligibilityMap = ref<Record<string, EligibilityReport | null>>({});
 const downloadState = computed(() => localAiStore.downloadState.model);
 const percent = computed(() => Math.round(downloadState.value.progress?.percent ?? 0));
 const isDownloading = computed(() => downloadState.value.progress !== null);
@@ -95,29 +101,71 @@ const canDelete = computed(
  *  in that case. */
 const isModelFullyInstalled = computed(() => localAiStore.modelReady);
 
+/** Whether `modelId` is the one actually loaded right now — at most one
+ *  row can be (multi-model plan §2: one model on disk at a time). */
+function isModelActive(modelId: string): boolean {
+  return localAiStore.modelReady && localAiStore.currentModel?.id === modelId;
+}
+
+/** Only ever true for the selected model's row — `downloadState.model`
+ *  (and its progress bar below) always tracks whatever `ensureModelReady()`/
+ *  `switchModel()` is currently acting on, which is always the selection. */
+function isRowDownloading(modelId: string): boolean {
+  return isDownloading.value && localAiStore.currentModel?.id === modelId;
+}
+
 // Same eligibility-badge pattern as `torStatusInfo` in SettingsPanel.vue
-// (plan §8 p.2): color + short text, hidden entirely when 'ok'.
-const eligibilityBadge = computed(() => {
-  switch (eligibility.value?.verdict) {
+// (plan §8 p.2), now per-model-row (plan §9): color + short text, hidden
+// entirely when 'ok'.
+function modelBadge(modelId: string): { text: string; color: string } | null {
+  switch (modelEligibilityMap.value[modelId]?.verdict) {
     case "tight": return { text: t("ai.eligibilityTight"), color: "text-color-star-yellow" };
     case "no": return { text: t("ai.eligibilityBlocked"), color: "text-color-bad" };
     case "unknown": return { text: t("ai.eligibilityUnknown"), color: "text-text-on-main-bg-color" };
     default: return null;
   }
-});
+}
 
-const statusLabel = computed(() => {
-  if (isDownloading.value) return phaseLabel.value;
-  if (!localAiStore.modelReady) return t("ai.notDownloaded");
-  return t("ai.ready");
-});
+function rowStatusLabel(modelId: string): string {
+  if (isRowDownloading(modelId)) return phaseLabel.value;
+  if (isModelActive(modelId)) return t("ai.active");
+  return t("ai.notDownloaded");
+}
+
+/** Action-button label for a not-yet-active row — "Скачать" for a
+ *  genuinely fresh device, "Докачать (X%)" if this is the selected model
+ *  and there's a real interrupted download to resume, or "Скачать и
+ *  переключиться" when a *different* model is already installed (plan §9:
+ *  selectModel() + downloadModel() as one user action — `downloadModel()`
+ *  itself already resolves/switches to whatever's now selected, see
+ *  `LocalAiClient.ensureModelReady()`'s own doc comment). */
+function downloadLabel(modelId: string): string {
+  if (resumePercent.value !== null && modelId === localAiStore.currentModel?.id) {
+    return t("ai.resumeDownload", { percent: resumePercent.value });
+  }
+  return localAiStore.modelReady ? t("ai.downloadAndSwitch") : t("ai.download");
+}
+
+/** Runs `modelEligibility()` for every row in {@link models} — called on
+ *  mount and after every manifest refresh (plan §9); cached per-modelId by
+ *  the store itself (`modelEligibilityCache`), so re-running this after a
+ *  `selectModel()` call (which doesn't change the manifest) is cheap. */
+async function refreshModelEligibility(): Promise<void> {
+  const address = authStore.address;
+  if (!address) return;
+  await Promise.all(
+    models.value.map(async (m: ModelArtifact) => {
+      modelEligibilityMap.value[m.id] = await localAiStore.modelEligibility(address, m.id).catch(() => null);
+    }),
+  );
+}
 
 onMounted(async () => {
   await localAiStore.checkSupportOnce();
   const address = authStore.address;
   if (!address || supportReport.value?.capabilities.inference === false) return;
   await localAiStore.refreshManifest(address).catch(() => {});
-  await localAiStore.checkEligibility(address).catch(() => {});
+  await refreshModelEligibility();
   // Silently re-verify an already-downloaded model on a fresh session — see
   // `restoreModelIfPreviouslyDownloaded`'s doc comment. Never blocks/replaces
   // the explicit "Скачать" click for a device that hasn't downloaded before.
@@ -127,13 +175,23 @@ onMounted(async () => {
   if (!localAiStore.modelReady) await localAiStore.checkPartialDownload(address).catch(() => {});
 });
 
-async function handleDownload(): Promise<void> {
+/** Downloads `modelId` — selects it first if it isn't already the current
+ *  selection (plan §9's "Скачать и переключиться" — one tap, two library
+ *  calls: `downloadModel()`'s `ensureModelReady()` already resolves/
+ *  switches to whatever's selected on its own, so selecting first is all
+ *  this needs to do differently from the single-model "Скачать" flow). */
+async function handleSelectAndDownload(modelId: string): Promise<void> {
   const address = authStore.address;
   if (!address) return;
-  localAiStore.markDownloadStarting();
-  await localAiStore.downloadModel(address).catch((e) => {
-    console.warn("[LocalAiSettingsSection] downloadModel failed:", e);
-  });
+  try {
+    if (localAiStore.selectedModelId !== modelId) {
+      await localAiStore.selectModel(address, modelId);
+    }
+    localAiStore.markDownloadStarting();
+    await localAiStore.downloadModel(address);
+  } catch (e) {
+    console.warn("[LocalAiSettingsSection] selectModel/downloadModel failed:", e);
+  }
 }
 
 async function handleUpdate(): Promise<void> {
@@ -150,7 +208,7 @@ async function handleCheckUpdates(): Promise<void> {
   isCheckingUpdates.value = true;
   try {
     await localAiStore.refreshManifest(address);
-    await localAiStore.checkEligibility(address);
+    await refreshModelEligibility();
   } catch (e) {
     console.warn("[LocalAiSettingsSection] refreshManifest failed:", e);
   } finally {
@@ -193,32 +251,50 @@ async function handleDeleteConfirmed(): Promise<void> {
       </div>
 
       <template v-else>
-        <!-- Model info -->
-        <div class="space-y-0.5 rounded-xl bg-background-secondary-theme">
-          <div class="flex items-center justify-between px-4 py-3">
-            <span class="text-sm text-text-on-main-bg-color">{{ t("ai.settingsTitle") }}</span>
-            <span class="text-sm font-medium text-text-color">
-              {{ model ? `${model.displayName} · ${model.quant}` : "—" }}
-            </span>
-          </div>
-          <div class="mx-4 border-t border-neutral-grad-0" />
-          <div class="flex items-center justify-between px-4 py-3">
-            <span class="text-sm text-text-on-main-bg-color">{{ t("ai.modelSize") }}</span>
-            <span class="font-mono text-sm font-medium text-text-color">
-              {{ model ? formatBytes(model.sizeBytes) : "—" }}
-            </span>
-          </div>
-          <div class="mx-4 border-t border-neutral-grad-0" />
-          <div class="flex items-center justify-between px-4 py-3">
-            <span class="text-sm text-text-on-main-bg-color">{{ t("ai.status") }}</span>
-            <span
-              class="flex items-center gap-1.5 text-sm"
-              :class="eligibilityBadge?.color ?? 'text-text-color'"
-            >{{ eligibilityBadge?.text ?? statusLabel }}</span>
+        <!-- Model list — one row per available model (multi-model plan §9);
+             at most one row is ever "active" (plan §2: one model on disk
+             at a time). -->
+        <div class="space-y-2">
+          <div
+            v-for="m in models"
+            :key="m.id"
+            class="space-y-0.5 rounded-xl bg-background-secondary-theme"
+          >
+            <div class="flex items-center justify-between px-4 py-3">
+              <div>
+                <p class="text-sm font-medium text-text-color">
+                  {{ m.displayName }} · {{ m.quant }}
+                  <span v-if="m.recommended" class="text-xs font-normal text-color-bg-ac">({{ t("ai.recommended") }})</span>
+                </p>
+                <p class="font-mono text-xs text-text-on-main-bg-color">{{ formatBytes(m.sizeBytes) }}</p>
+              </div>
+              <span
+                class="flex items-center gap-1.5 text-sm"
+                :class="modelBadge(m.id)?.color ?? 'text-text-on-main-bg-color'"
+              >{{ modelBadge(m.id)?.text ?? rowStatusLabel(m.id) }}</span>
+            </div>
+            <div v-if="!isRowDownloading(m.id)" class="px-4 pb-3">
+              <button
+                v-if="isModelActive(m.id)"
+                disabled
+                class="btn-press w-full rounded-lg border border-color-bg-ac/40 px-4 py-1.5 text-sm font-medium text-color-bg-ac disabled:opacity-80"
+              >
+                {{ t("ai.active") }}
+              </button>
+              <button
+                v-else
+                class="btn-press w-full rounded-lg bg-color-bg-ac px-4 py-1.5 text-sm font-medium text-white transition-all hover:bg-color-bg-ac/90 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-60"
+                :disabled="modelEligibilityMap[m.id]?.verdict === 'no' || isDownloading"
+                @click="handleSelectAndDownload(m.id)"
+              >
+                {{ downloadLabel(m.id) }}
+              </button>
+            </div>
           </div>
         </div>
 
-        <!-- Progress bar — same downloadState as AiModelGate.vue -->
+        <!-- Progress bar — same downloadState as AiModelGate.vue, always the
+             selected model's row (see isRowDownloading) -->
         <div v-if="isDownloading" class="mt-3">
           <p class="mb-1.5 text-sm text-text-on-main-bg-color">{{ phaseLabel }}</p>
           <div class="h-2 w-full overflow-hidden rounded-full bg-neutral-grad-0">
@@ -245,18 +321,13 @@ async function handleDeleteConfirmed(): Promise<void> {
           {{ t("ai.downloadBypassesTor") }}
         </p>
 
-        <!-- Actions -->
+        <!-- Actions — "Обновить" relates to the already-selected model's
+             own version (roadmap 6.3), never a model switch; "Проверить
+             обновления" is manifest-wide, independent of how many models
+             are on offer (plan §9). -->
         <div v-if="!isDownloading" class="mt-3 flex flex-wrap gap-2">
           <button
-            v-if="!localAiStore.modelReady"
-            class="btn-press rounded-lg bg-color-bg-ac px-4 py-2 text-sm font-medium text-white transition-all hover:bg-color-bg-ac/90 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-60"
-            :disabled="eligibility?.verdict === 'no'"
-            @click="handleDownload"
-          >
-            {{ resumePercent !== null ? t("ai.resumeDownload", { percent: resumePercent }) : t("ai.download") }}
-          </button>
-          <button
-            v-else
+            v-if="localAiStore.modelReady"
             class="btn-press rounded-lg bg-color-bg-ac px-4 py-2 text-sm font-medium text-white transition-all hover:bg-color-bg-ac/90 active:scale-[0.97]"
             @click="handleUpdate"
           >

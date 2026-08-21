@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
 import { mkdtempSync } from "node:fs";
@@ -72,6 +72,103 @@ function emitOn(client: unknown, event: string, payload: unknown): Promise<void>
   return (client as { emit: (e: string, p: unknown) => Promise<void> }).emit(event, payload);
 }
 
+const TEST_MANIFEST_URL = "https://test.invalid/manifest.json";
+const hash = new WebCryptoHashAdapter();
+const MANIFEST_MODEL_BYTES = Buffer.from("fake-model-weights-content");
+
+/** A two-active-model + one-deprecated-model manifest (multi-model plan
+ *  §8) — `qwen-4b` is `recommended: true`, `small-model` shares the one
+ *  embedding via `compatibleModelIds`, `old-model` is deprecated (must be
+ *  filtered out of `availableModels`). */
+function twoModelManifestBody() {
+  return {
+    manifestVersion: 1,
+    publishedAt: "2026-01-01T00:00:00.000Z",
+    models: [
+      {
+        id: "qwen-4b",
+        version: 1,
+        displayName: "Qwen 4B",
+        family: "qwen",
+        paramsB: 4,
+        quant: "Q4_K_M",
+        languages: "multilingual" as const,
+        contextLength: 2048,
+        source: { type: "huggingface" as const, repo: "org/qwen", revision: "abc123def456", file: "model.gguf" },
+        filename: "model.gguf",
+        sha256: hash.sha256(MANIFEST_MODEL_BYTES),
+        sizeBytes: MANIFEST_MODEL_BYTES.length,
+        minRamGb: 4,
+        recommendedRamGb: 8,
+        chatTemplate: "auto" as const,
+        status: "active" as const,
+        recommended: true,
+      },
+      {
+        id: "small-model",
+        version: 1,
+        displayName: "Small Model",
+        family: "qwen",
+        paramsB: 1.5,
+        quant: "Q4_K_M",
+        languages: "multilingual" as const,
+        contextLength: 2048,
+        source: { type: "huggingface" as const, repo: "org/small", revision: "def456abc789", file: "small.gguf" },
+        filename: "small-model.gguf",
+        sha256: hash.sha256(MANIFEST_MODEL_BYTES),
+        sizeBytes: MANIFEST_MODEL_BYTES.length,
+        minRamGb: 2,
+        recommendedRamGb: 2,
+        chatTemplate: "auto" as const,
+        status: "active" as const,
+      },
+      {
+        id: "old-model",
+        version: 1,
+        displayName: "Old Model",
+        family: "qwen",
+        paramsB: 1,
+        quant: "Q4_K_M",
+        languages: "multilingual" as const,
+        contextLength: 2048,
+        source: { type: "huggingface" as const, repo: "org/old", revision: "111222333444", file: "old.gguf" },
+        filename: "old-model.gguf",
+        sha256: hash.sha256(MANIFEST_MODEL_BYTES),
+        sizeBytes: MANIFEST_MODEL_BYTES.length,
+        minRamGb: 1,
+        recommendedRamGb: 1,
+        chatTemplate: "auto" as const,
+        status: "deprecated" as const,
+      },
+    ],
+    embeddings: [
+      {
+        id: "bge-small",
+        version: 1,
+        compatibleModelIds: ["qwen-4b", "small-model"],
+        dimensions: 4,
+        source: { type: "url" as const, url: "https://example.com/embedding.gguf" },
+        filename: "embedding.gguf",
+        sha256: hash.sha256(MANIFEST_MODEL_BYTES),
+        sizeBytes: MANIFEST_MODEL_BYTES.length,
+        minRamGb: 1,
+        recommendedRamGb: 2,
+        status: "active" as const,
+      },
+    ],
+  };
+}
+
+function stubManifestFetch(body: ReturnType<typeof twoModelManifestBody>): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === TEST_MANIFEST_URL) return new Response(JSON.stringify(body), { status: 200 });
+      throw new Error(`unexpected fetch in local-ai-store test: ${url}`);
+    }),
+  );
+}
+
 describe("useLocalAiStore", () => {
   let store: ReturnType<typeof useLocalAiStore>;
 
@@ -79,6 +176,10 @@ describe("useLocalAiStore", () => {
     setActivePinia(createTestingPinia({ stubActions: false }));
     store = useLocalAiStore();
     window.localStorage.removeItem(MODEL_DOWNLOADED_MARKER_KEY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("checkSupportOnce returns and caches the support report for the session", async () => {
@@ -201,9 +302,18 @@ describe("useLocalAiStore", () => {
     expect(store.downloadState.model.ready).toBe(true);
     expect(store.downloadState.model.progress).toBeNull();
     expect(store.modelReady).toBe(true);
-    // Persists the device-wide marker `restoreModelIfPreviouslyDownloaded`
-    // relies on to skip the download gate on a future session.
-    expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBe("1");
+  });
+
+  // Multi-model plan §8 p.3 — the device-wide marker now records WHICH
+  // model was loaded (runtime:model-loaded's own modelId), not a bare "1":
+  // restoreModelIfPreviouslyDownloaded() needs to know which one to restore,
+  // not just that "something" was downloaded before.
+  it("propagates runtime:model-loaded into the device-wide downloaded-model marker", async () => {
+    const client = await store.ensureClient("addr_a", makeFakeConfig());
+
+    await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+
+    expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBe("qwen-4b");
   });
 
   it("download:completed for the embedding kind does NOT set the model-downloaded marker", async () => {
@@ -488,16 +598,51 @@ describe("useLocalAiStore", () => {
     it("silently restores modelReady when the device-wide marker is set, without a fresh download call", async () => {
       const client = await store.ensureClient("addr_a", makeFakeConfig());
       const spy = vi.spyOn(client, "ensureModelReady").mockResolvedValue(undefined);
+      // The marked model already matches what's selected — no re-selection
+      // (and so no manifest fetch) needed, see the "re-selects" test below
+      // for the case where it doesn't match.
+      vi.spyOn(client, "getSelectedModelId").mockReturnValue("qwen-4b");
       // Simulates the marker a real download would have left behind in an
       // earlier session — `modelReady` itself starts false this session
       // (fresh Pinia store), same as after an app restart/logout-login.
-      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "1");
+      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "qwen-4b");
       expect(store.modelReady).toBe(false);
 
       await store.restoreModelIfPreviouslyDownloaded("addr_a");
 
       expect(spy).toHaveBeenCalledTimes(1);
       expect(store.modelReady).toBe(true);
+    });
+
+    // Multi-model plan §8 p.3 — selectModel() was called (this session or a
+    // previous one killed before applying it) without a follow-up download;
+    // the marker still names the model that's actually on disk, so the
+    // silent background restore must reload THAT one, not silently start
+    // downloading whatever's merely selected-but-not-yet-applied.
+    it("re-selects the marked model before restoring, when a different one is currently selected", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const ensureSpy = vi.spyOn(client, "ensureModelReady").mockResolvedValue(undefined);
+      const selectSpy = vi.spyOn(client, "selectModel").mockResolvedValue(undefined);
+      vi.spyOn(client, "getSelectedModelId").mockReturnValue("small-model");
+      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "qwen-4b");
+
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+
+      expect(selectSpy).toHaveBeenCalledWith("qwen-4b");
+      expect(ensureSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves the download gate visible (no download call) when the marked model can't be re-selected", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      const ensureSpy = vi.spyOn(client, "ensureModelReady").mockResolvedValue(undefined);
+      vi.spyOn(client, "selectModel").mockRejectedValue(new Error("not an active model in the current manifest"));
+      vi.spyOn(client, "getSelectedModelId").mockReturnValue("small-model");
+      window.localStorage.setItem(MODEL_DOWNLOADED_MARKER_KEY, "removed-model");
+
+      await store.restoreModelIfPreviouslyDownloaded("addr_a");
+
+      expect(ensureSpy).not.toHaveBeenCalled();
+      expect(store.modelReady).toBe(false);
     });
 
     it("is a no-op once modelReady is already true this session", async () => {
@@ -554,6 +699,90 @@ describe("useLocalAiStore", () => {
       await emitOn(client, "download:completed", { key: "k", kind: "model" });
 
       expect(store.partialDownload).toBeNull();
+    });
+  });
+
+  // docs/plans/llama2/2026-08-21-multi-model-selection-plan.md §8/§9.
+  describe("multi-model selection", () => {
+    it("refreshManifest() populates availableModels (active only) and currentModel resolves to the recommended one", async () => {
+      await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+
+      await store.refreshManifest("addr_a");
+
+      expect(store.availableModels.map((m) => m.id)).toEqual(["qwen-4b", "small-model"]); // "old-model" (deprecated) excluded
+      expect(store.currentModel?.id).toBe("qwen-4b"); // recommended: true
+      expect(store.selectedModelId).toBeNull(); // nothing explicitly selected yet
+    });
+
+    it("selectModel() updates selectedModelId, and currentModel resolves to the new selection", async () => {
+      await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+      await store.refreshManifest("addr_a");
+
+      await store.selectModel("addr_a", "small-model");
+
+      expect(store.selectedModelId).toBe("small-model");
+      expect(store.currentModel?.id).toBe("small-model");
+    });
+
+    it("selectModel() rejects an id not in the manifest and leaves selectedModelId untouched", async () => {
+      await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+      await store.refreshManifest("addr_a");
+
+      await expect(store.selectModel("addr_a", "does-not-exist")).rejects.toThrow();
+
+      expect(store.selectedModelId).toBeNull();
+    });
+
+    it("modelEligibility() caches per modelId — repeat calls for the same id don't re-check the device", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+      await store.refreshManifest("addr_a");
+      const spy = vi.spyOn(client, "checkDeviceEligibility");
+
+      await store.modelEligibility("addr_a", "small-model");
+      await store.modelEligibility("addr_a", "small-model");
+      await store.modelEligibility("addr_a", "qwen-4b");
+
+      expect(spy).toHaveBeenCalledTimes(2); // once per distinct modelId, not once per call
+    });
+
+    it("modelEligibility() never mutates selectedModelId — purely a readonly check", async () => {
+      await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+      await store.refreshManifest("addr_a");
+
+      await store.modelEligibility("addr_a", "small-model");
+
+      expect(store.selectedModelId).toBeNull();
+    });
+
+    it("manifest:updated clears modelEligibilityCache so thresholds are re-evaluated against the fresh manifest", async () => {
+      const client = await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+      await store.refreshManifest("addr_a");
+      const spy = vi.spyOn(client, "checkDeviceEligibility");
+      await store.modelEligibility("addr_a", "small-model");
+
+      await emitOn(client, "manifest:updated", { modelChanged: false, embeddingChanged: false, models: [], embeddings: [] });
+      await store.modelEligibility("addr_a", "small-model");
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it("releaseRuntime() resets availableModels/selectedModelId/currentModel so a new account starts clean", async () => {
+      await store.ensureClient("addr_a", makeFakeConfig());
+      stubManifestFetch(twoModelManifestBody());
+      await store.refreshManifest("addr_a");
+      await store.selectModel("addr_a", "small-model");
+
+      await store.releaseRuntime();
+
+      expect(store.availableModels).toEqual([]);
+      expect(store.selectedModelId).toBeNull();
+      expect(store.currentModel).toBeNull();
     });
   });
 });

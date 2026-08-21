@@ -122,6 +122,9 @@ export const en = {
   "ai.modelSize": "Model size",
   "ai.status": "Status",
   "ai.downloadBypassesTor": "The model download does not go through Tor, even in \"Always\" mode",
+  "ai.active": "Active",
+  "ai.downloadAndSwitch": "Download & switch",
+  "ai.recommended": "Recommended",
 
   // ── Channels ──
   "channels.repostPreview": "Repost",
