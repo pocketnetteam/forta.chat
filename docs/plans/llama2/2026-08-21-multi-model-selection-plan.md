@@ -1,6 +1,35 @@
 # `local-ai` — выбор модели из нескольких вариантов манифеста
 
-Дата: 2026-08-21. Статус: план, не начато.
+Дата: 2026-08-21. Статус: **Фазы 1-7 реализованы и закоммичены** (ветка
+`llama2-model-select` в обоих репозиториях). Фаза 8 (публикация второй
+модели в реальный манифест) — внешняя задача, не код, не блокирует.
+
+Реализация (2026-08-21):
+- `local-ai` (`llama2-model-select`, коммит `464e6ea`): Фазы 1-5 —
+  `models[]`/`embeddings[]` массивы, `validateManifest()` с индексами и
+  exclude-семантикой `maxModelParamsB`, `diffManifest()` по массивам,
+  `LocalAiClient.selectModel()`/`getSelectedModelId()`, `ensureModelReady()`/
+  `switchModel()` резолвят через `resolveSelectedModel()`, второй параметр
+  `checkDeviceEligibility(target, modelId?)`. 180 unit + 99 integration
+  тестов, lint/typecheck/build чисты.
+- `forta.chat` (`llama2-model-select`, коммиты `20e1f79` + `31d957c`
+  code-review фикс): Фазы 6-7 — `availableModels`/`selectedModelId`/
+  `modelEligibility()`/`selectModel()` в сторе, список моделей с
+  бейджами/действиями в `LocalAiSettingsSection.vue`. Отдельный
+  `loadedModelId` (не `selectedModelId`) — код-ревью нашёл, что
+  `selectedModelId` меняется синхронно раньше, чем модель реально
+  загрузится, из-за чего строка «Активна» могла показываться не на той
+  модели во время/после неудачного переключения. vue-tsc/build чисты,
+  3537+/3548 тестов (11 непройденных — предсуществующие, не связаны с
+  этой задачей: iOS/Electron-моки в deep-link-handler/call-controls-speaker,
+  парсинг MediaPreview.vue в use-file-download-тестах).
+
+Открытые (осознанно отложенные) ограничения — см. commit `31d957c`:
+устаревший маркер `"1"` от домультимодельной сборки не мигрируется
+автоматически (нет ни одной такой сборки в проде); `checkPartialDownload()`
+не разбит по моделям (косметика — реальный resume на уровне
+`DownloadEngine` не страдает); N параллельных `deviceInfo.getSnapshot()`
+на N моделей в списке (перф-оптимизация, требует расширения `local-ai`).
 
 Повод: 4B-модель (текущий единственный вариант) заметно тормозит на слабом Android-телефоне
 пользователя — субъективно то же самое семейство жалоб, что и в
