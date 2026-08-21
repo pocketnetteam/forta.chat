@@ -258,6 +258,10 @@ export const useAiChatStore = defineStore("ai-chat", () => {
         userMessageId,
         assistantMessageId,
         signal: controller.signal,
+        // Skip the reasoning phase — a reasoning-capable model otherwise
+        // streams a raw <think>...</think> block before the real answer.
+        // Perf-tuning plan §4 (docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md).
+        completionOptions: { enableThinking: false },
       });
 
       for await (const token of stream) {
