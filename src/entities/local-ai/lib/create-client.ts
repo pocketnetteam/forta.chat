@@ -106,6 +106,12 @@ export async function createLocalAiConfig(address: string): Promise<LocalAiConfi
     // stream, so a cold-start delay before the first token is not a new
     // class of wait for the user.
     autoUnloadOnBackground: true,
+    // Multi-model UI follow-up (2026-08-21): each downloaded model stays on
+    // disk across a switch, so switching back to a previously-downloaded
+    // model is instant, no re-download. Deliberate product trade-off (more
+    // storage used) discussed and chosen over the library's storage-
+    // conscious default — see local-ai-store.ts's `modelDiskState`.
+    retainInactiveModels: true,
     logger,
     // Persistent log store enabled so real-device diagnostics are available
     // through the existing bug-report flow (plan §11, roadmap 7.6) — this is

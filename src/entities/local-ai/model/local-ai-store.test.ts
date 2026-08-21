@@ -854,5 +854,149 @@ describe("useLocalAiStore", () => {
         expect(store.loadedModelId).toBeNull();
       });
     });
+
+    // Multi-model UI rework (2026-08-21) — "Обновить" folded into the
+    // active row's own action slot instead of a separate global button.
+    describe("activeModelUpdateAvailable", () => {
+      it("is false when nothing is loaded yet", async () => {
+        await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+
+        expect(store.activeModelUpdateAvailable).toBe(false);
+      });
+
+      it("becomes true when the manifest bumps the loaded model's version, and false again once switchModel() reloads it", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        expect(store.activeModelUpdateAvailable).toBe(false);
+
+        const bumped = twoModelManifestBody();
+        bumped.models[0]!.version = 2;
+        stubManifestFetch(bumped);
+        await store.refreshManifest("addr_a");
+
+        expect(store.activeModelUpdateAvailable).toBe(true);
+
+        // switchModel() reloads at the new version -> runtime:model-loaded fires again with version 2
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 2 });
+
+        expect(store.activeModelUpdateAvailable).toBe(false);
+      });
+
+      it("stays false for a version bump of a DIFFERENT (inactive) model", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+
+        const bumped = twoModelManifestBody();
+        bumped.models[1]!.version = 2; // small-model, not the loaded one
+        stubManifestFetch(bumped);
+        await store.refreshManifest("addr_a");
+
+        expect(store.activeModelUpdateAvailable).toBe(false);
+      });
+    });
+
+    describe("checkModelDiskState", () => {
+      it("caches per modelId — repeat calls for the same id don't re-check the filesystem", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        const spy = vi.spyOn(client, "getDownloadProgress");
+
+        await store.checkModelDiskState("addr_a", "small-model");
+        await store.checkModelDiskState("addr_a", "small-model");
+        await store.checkModelDiskState("addr_a", "qwen-4b");
+
+        expect(spy).toHaveBeenCalledTimes(2); // once per distinct modelId, not once per call
+      });
+
+      it("resolves null for a model that was never downloaded", async () => {
+        await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+
+        const progress = await store.checkModelDiskState("addr_a", "small-model");
+
+        expect(progress).toBeNull();
+      });
+
+      it("manifest:updated clears the disk-state cache", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        const spy = vi.spyOn(client, "getDownloadProgress");
+        await store.checkModelDiskState("addr_a", "small-model");
+
+        await emitOn(client, "manifest:updated", { modelChanged: false, embeddingChanged: false, models: [], embeddings: [] });
+        await store.checkModelDiskState("addr_a", "small-model");
+
+        expect(spy).toHaveBeenCalledTimes(2);
+      });
+
+      it("runtime:model-loaded invalidates that model's cached entry (it just finished loading, definitely resident now)", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        const spy = vi.spyOn(client, "getDownloadProgress");
+        await store.checkModelDiskState("addr_a", "qwen-4b");
+
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        await store.checkModelDiskState("addr_a", "qwen-4b");
+
+        expect(spy).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    // config.retainInactiveModels — a resident, inactive model can now be
+    // deleted independently of the active one. Uses the same emitOn()+spy
+    // pattern as this file's other deleteModel()/download:completed tests
+    // — no real network download (ensureClient()'s manifest here resolves
+    // to real-looking but non-existent huggingface.co URLs).
+    describe("deleteModel(address, modelId) — multi-model resident", () => {
+      it("deleting an inactive resident model leaves the active model's ready state and marker untouched", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig({ retainInactiveModels: true }));
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        vi.spyOn(client, "deleteModel").mockResolvedValue(undefined);
+        // Simulates qwen-4b downloaded+loaded, then small-model becoming
+        // active (what a real switchModel() sequence produces) — qwen-4b
+        // stays resident on disk with retainInactiveModels.
+        await emitOn(client, "download:completed", { key: "k1", kind: "model" });
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        await store.selectModel("addr_a", "small-model");
+        await emitOn(client, "runtime:unloaded", { reason: "model-switch" });
+        await emitOn(client, "download:completed", { key: "k2", kind: "model" });
+        await emitOn(client, "runtime:model-loaded", { modelId: "small-model", version: 1 });
+        expect(store.loadedModelId).toBe("small-model");
+        expect(store.modelReady).toBe(true);
+        const markerBefore = window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY);
+
+        await store.deleteModel("addr_a", "qwen-4b");
+
+        expect(store.modelReady).toBe(true); // active model (small-model) untouched
+        expect(store.loadedModelId).toBe("small-model");
+        expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBe(markerBefore);
+      });
+
+      it("deleting the active model resets downloadState.model and clears the marker", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig({ retainInactiveModels: true }));
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        vi.spyOn(client, "deleteModel").mockResolvedValue(undefined);
+        await emitOn(client, "download:completed", { key: "k", kind: "model" });
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBe("qwen-4b");
+
+        await store.deleteModel("addr_a", "qwen-4b");
+
+        expect(store.modelReady).toBe(false);
+        expect(window.localStorage.getItem(MODEL_DOWNLOADED_MARKER_KEY)).toBeNull();
+      });
+    });
   });
 });

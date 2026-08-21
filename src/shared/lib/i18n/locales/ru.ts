@@ -99,7 +99,6 @@ export const ru: Record<TranslationKey, string> = {
   "ai.loadingModel": "Загрузка модели в память…",
   "ai.downloading": "Скачивание… {percent}%",
   "ai.checkUpdates": "Проверить обновления",
-  "ai.checkingUpdates": "Проверка…",
   "ai.notDownloaded": "Не скачана",
   "ai.updateAvailable": "Доступно обновление",
   "ai.eligibilityTight": "На этом устройстве может работать медленно",
@@ -122,8 +121,8 @@ export const ru: Record<TranslationKey, string> = {
   "ai.settingsDescription": "Офлайн AI-чат — модель работает полностью на этом устройстве",
   "ai.downloadBypassesTor": "Загрузка модели идёт мимо Tor, даже в режиме «Всегда»",
   "ai.active": "Активна",
-  "ai.downloadAndSwitch": "Скачать и переключиться",
   "ai.recommended": "Рекомендуется",
+  "ai.switchTo": "Переключиться",
 
   // ── Каналы ──
   "channels.repostPreview": "Репост",

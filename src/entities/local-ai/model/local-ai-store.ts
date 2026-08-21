@@ -121,11 +121,41 @@ export const useLocalAiStore = defineStore("local-ai", () => {
    *  context's release and the new one's load) — `'embedding-switch'`
    *  unloads are excluded from clearing this, they don't touch the model. */
   const loadedModelId = ref<string | null>(null);
+  /** The `version` of {@link loadedModelId}'s model, from the same
+   *  `runtime:model-loaded` event — paired with `availableModels`' current
+   *  version for the same id to derive {@link activeModelUpdateAvailable}
+   *  without needing to snapshot/re-diff a manifest fetch separately: once
+   *  `switchModel()` reloads the active model at its new version, this
+   *  updates to match and the "update available" state self-clears. */
+  const loadedModelVersion = ref<number | null>(null);
+  /** True when the manifest's current version of the *active* model
+   *  (`loadedModelId`) differs from what's actually loaded — drives the
+   *  active row's action slot showing "Обновить" instead of "Активна"
+   *  (multi-model UI rework, 2026-08-21: folds the old separate "Обновить
+   *  модель"/"Проверить обновления" buttons into one contextual, per-row
+   *  action). Only ever true for the active row — a not-yet-downloaded
+   *  model has no "update" concept distinct from a fresh download. */
+  const activeModelUpdateAvailable = computed<boolean>(() => {
+    if (!loadedModelId.value || loadedModelVersion.value == null) return false;
+    const manifestModel = availableModels.value.find((m) => m.id === loadedModelId.value);
+    return manifestModel != null && manifestModel.version !== loadedModelVersion.value;
+  });
+  /** Per-modelId on-disk state — `null`/absent-key = never checked or
+   *  nothing on disk, `percent < 100` = an interrupted download to resume,
+   *  `percent === 100` = fully resident (multi-model UI rework: with
+   *  `retainInactiveModels: true`, an *inactive* model can be resident too
+   *  — this is what tells a row "Переключиться" (instant, already on disk)
+   *  apart from "Скачать" (needs a real download) from truth, not a guess).
+   *  Cached per modelId like {@link modelEligibilityCache}; invalidated by
+   *  {@link invalidateModelDiskState}. */
+  const modelDiskState = ref<Record<string, PartialDownloadProgress | null>>({});
   /** Bytes already on disk for an interrupted-and-not-yet-resumed model
    *  download, read without starting anything (roadmap: "докачать модель
    *  (X%)" instead of "Скачать модель" when there's real work to resume —
    *  see `checkPartialDownload()`). `null` = nothing to report, either a
-   *  fresh device or the check hasn't run yet this mount. */
+   *  fresh device or the check hasn't run yet this mount. Single-model
+   *  view only (`AiModelGate.vue`'s in-chat gate) — Settings' model list
+   *  uses the per-model {@link modelDiskState} instead. */
   const partialDownload = ref<PartialDownloadProgress | null>(null);
   /** UI-only "is the model download currently paused" flag — `local-ai`'s
    *  own `pauseModelDownload()` doesn't surface this through
@@ -214,22 +244,29 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       // convergence when a different model was already live (multi-model
       // plan §6 п.4) — whichever path led here, this is the id that's
       // really on disk and in the runtime right now.
-      c.on("runtime:model-loaded", ({ modelId }) => {
+      c.on("runtime:model-loaded", ({ modelId, version }) => {
         writeModelDownloadedMarker(modelId);
         loadedModelId.value = modelId;
+        loadedModelVersion.value = version;
+        invalidateModelDiskState(modelId); // it just finished loading -> definitely 100% on disk now
       }),
       // Model context released — clears which row is "Активна" until the
       // next runtime:model-loaded. Excludes 'embedding-switch': that reason
       // only touches the embedding context, the model stays loaded.
       c.on("runtime:unloaded", ({ reason }) => {
-        if (reason !== "embedding-switch") loadedModelId.value = null;
+        if (reason !== "embedding-switch") {
+          loadedModelId.value = null;
+          loadedModelVersion.value = null;
+        }
       }),
       c.on("manifest:updated", (diff) => {
-        // Cached manifest changed — eligibility may now read differently
-        // against the new/changed artifacts, force a re-check next time
-        // it's asked.
+        // Cached manifest changed — eligibility/disk-state may now read
+        // differently against the new/changed artifacts (a version bump
+        // changes the expected filename/sizeBytes a percent is computed
+        // against), force a re-check next time either is asked.
         eligibilityReport.value = null;
         modelEligibilityCache.value = {};
+        invalidateModelDiskState();
         applyManifestDiff(c, diff);
       }),
       c.on("manifest:invalid", ({ error }) => {
@@ -360,6 +397,36 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     return report;
   }
 
+  /** Per-model on-disk state for a picker row — resolves whether `modelId`
+   *  is fully resident (`percent === 100`, offer "Переключиться"),
+   *  partially downloaded (offer "Докачать X%"), or absent (offer
+   *  "Скачать"). Cached in {@link modelDiskState}, same reasoning as
+   *  {@link modelEligibility} — an N-model list must not re-stat() the
+   *  filesystem N times per render (a native `Filesystem` bridge round
+   *  trip on Android, not free). */
+  async function checkModelDiskState(address: string, modelId: string): Promise<PartialDownloadProgress | null> {
+    if (modelId in modelDiskState.value) return modelDiskState.value[modelId] ?? null;
+    const c = await ensureClient(address);
+    const progress = await c.getDownloadProgress("model", modelId).catch(() => null);
+    modelDiskState.value[modelId] = progress;
+    return progress;
+  }
+
+  /** Clears {@link modelDiskState} for one `modelId`, or every entry when
+   *  omitted — called whenever disk truth might have changed (a model
+   *  finished loading, was deleted, or the manifest changed underneath
+   *  it). Object spread (not direct key mutation) so a `false` result from
+   *  `key in obj` after deletion is unambiguous. */
+  function invalidateModelDiskState(modelId?: string): void {
+    if (!modelId) {
+      modelDiskState.value = {};
+      return;
+    }
+    const next = { ...modelDiskState.value };
+    delete next[modelId];
+    modelDiskState.value = next;
+  }
+
   /** Records the user's model choice (multi-model plan §6 п.2/§9) —
    *  persists through `LocalAiClient.selectModel()` (per-account `kv_store`,
    *  survives restarts) and updates {@link selectedModelId} for reactive UI.
@@ -402,16 +469,23 @@ export const useLocalAiStore = defineStore("local-ai", () => {
    *  the transport's first real tick caught back up to where it actually
    *  was, even though the resume itself was already byte-correct at the
    *  transport level. Call sites: `AiModelGate.vue`/
-   *  `LocalAiSettingsSection.vue`'s `handleDownload()`, right before
+   *  `LocalAiSettingsSection.vue`'s per-row action handler, right before
    *  `downloadModel()` — NOT called from
    *  `restoreModelIfPreviouslyDownloaded()`'s background restore path,
-   *  which should stay silent unless there's real work to show. */
-  function markDownloadStarting(): void {
-    const startPercent = partialDownload.value?.percent ?? 0;
-    downloadState.value.model.progress = { key: "model", kind: "model", percent: startPercent, status: "pending" };
-    // The live progress bar takes over display duties from here — stop
-    // showing the pre-download "resume from X%" figure alongside it.
-    partialDownload.value = null;
+   *  which should stay silent unless there's real work to show.
+   *  @param modelId Settings' per-row call seeds from {@link modelDiskState}
+   *    instead of the singular {@link partialDownload} — omit for
+   *    `AiModelGate.vue`'s single-model call site (unchanged behavior). */
+  function markDownloadStarting(modelId?: string): void {
+    const startPercent = modelId ? (modelDiskState.value[modelId]?.percent ?? 0) : (partialDownload.value?.percent ?? 0);
+    downloadState.value.model.progress = { key: modelId ?? "model", kind: "model", percent: startPercent, status: "pending" };
+    if (modelId) {
+      invalidateModelDiskState(modelId); // the live progress bar takes over display duties for this row now
+    } else {
+      // The live progress bar takes over display duties from here — stop
+      // showing the pre-download "resume from X%" figure alongside it.
+      partialDownload.value = null;
+    }
   }
 
   /** Pauses an in-flight model download — the partial file stays on disk
@@ -474,19 +548,28 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     }
   }
 
-  /** Deletes the model entirely — stops any in-flight/paused transfer,
-   *  removes the (partial or complete) file, and resets every piece of
-   *  local state a fresh device would have, including
-   *  {@link MODEL_DOWNLOADED_MARKER_KEY} so a later app restart doesn't try
-   *  to silently restore it via `restoreModelIfPreviouslyDownloaded()`. A
-   *  later `downloadModel()` call starts completely from scratch. */
-  async function deleteModel(address: string): Promise<void> {
+  /** Deletes a model entirely — stops any in-flight/paused transfer, removes
+   *  the (partial or complete) file. `modelId` omitted deletes whatever's
+   *  selected (original single-model contract); a resident, *inactive*
+   *  model (multi-model UI rework — `retainInactiveModels: true` means more
+   *  than one row can have a real file) can now be deleted independently
+   *  without disturbing the active one. Only resets `downloadState.model`/
+   *  {@link MODEL_DOWNLOADED_MARKER_KEY} — the *active*-model tracking —
+   *  when the deleted model actually was the active one; deleting a
+   *  different resident row leaves the active model's ready/loaded state
+   *  untouched. A later `downloadModel()` call for the deleted id starts
+   *  completely from scratch. */
+  async function deleteModel(address: string, modelId?: string): Promise<void> {
     const c = await ensureClient(address);
-    await c.deleteModel();
-    downloadState.value.model = createEmptyDownloadState();
-    partialDownload.value = null;
-    isPaused.value = false;
-    clearModelDownloadedMarker();
+    const deletingActiveModel = !modelId || loadedModelId.value === modelId;
+    await c.deleteModel(modelId);
+    if (deletingActiveModel) {
+      downloadState.value.model = createEmptyDownloadState();
+      partialDownload.value = null;
+      isPaused.value = false;
+      clearModelDownloadedMarker();
+    }
+    invalidateModelDiskState(modelId);
   }
 
   /** Best-effort, silent restore of `modelReady` on a fresh session — NOT a
@@ -586,6 +669,8 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     selectedModelId.value = null;
     modelEligibilityCache.value = {};
     loadedModelId.value = null;
+    loadedModelVersion.value = null;
+    modelDiskState.value = {};
     if (c) {
       try {
         await c.releaseRuntime({ closeDatabase: true });
@@ -605,6 +690,9 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     availableModels,
     selectedModelId,
     loadedModelId,
+    loadedModelVersion,
+    activeModelUpdateAvailable,
+    modelDiskState,
     partialDownload,
     isPaused,
     isGenerating,
@@ -615,6 +703,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     checkEligibility,
     modelEligibility,
     selectModel,
+    checkModelDiskState,
     checkPartialDownload,
     markDownloadStarting,
     pauseDownload,

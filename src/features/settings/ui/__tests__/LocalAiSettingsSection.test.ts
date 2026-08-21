@@ -7,6 +7,7 @@ import LocalAiSettingsSection from "../LocalAiSettingsSection.vue";
 // reached `initError`, never `downloadState.model.error`, and the "Скачать"/
 // "Обновить" buttons in Settings → Local AI silently no-op'd on it.
 type FakeModel = { id: string; displayName: string; quant: string; sizeBytes: number; recommended?: boolean };
+type DiskState = { percent: number } | null;
 
 const QWEN_4B: FakeModel = { id: "qwen-4b", displayName: "Qwen 4B", quant: "Q4_K_M", sizeBytes: 2_500_000_000, recommended: true };
 
@@ -24,6 +25,10 @@ const fakeLocalAiStore = reactive({
   selectedModelId: null as string | null,
   currentModel: QWEN_4B as FakeModel | null,
   loadedModelId: null as string | null,
+  activeModelUpdateAvailable: false,
+  // Multi-model UI rework (2026-08-21) — per-model disk residency, drives
+  // Скачать/Докачать/Переключиться and per-row delete visibility.
+  modelDiskState: {} as Record<string, DiskState>,
   downloadState: {
     model: { error: null as string | null, errorCode: null as string | null, progress: null as { percent: number; status?: string } | null },
   },
@@ -34,18 +39,19 @@ const fakeLocalAiStore = reactive({
   modelEligibility: vi.fn(async (_address: string, _modelId: string): Promise<{ verdict: "ok" | "tight" | "no" | "unknown" }> => ({
     verdict: "ok",
   })),
+  checkModelDiskState: vi.fn(async (_address: string, modelId: string): Promise<DiskState> => fakeLocalAiStore.modelDiskState[modelId] ?? null),
   selectModel: vi.fn(async (_address: string, _modelId: string) => {}),
   refreshManifest: vi.fn(async () => {}),
   restoreModelIfPreviouslyDownloaded: vi.fn(async () => {}),
   partialDownload: null as { percent: number } | null,
   checkPartialDownload: vi.fn(async () => {}),
-  markDownloadStarting: vi.fn(() => {}),
+  markDownloadStarting: vi.fn((_modelId?: string) => {}),
   downloadModel: vi.fn(async () => {}),
   switchModel: vi.fn(async () => {}),
   isPaused: false,
   pauseDownload: vi.fn(async () => {}),
   resumeDownload: vi.fn(async () => {}),
-  deleteModel: vi.fn(async () => {}),
+  deleteModel: vi.fn(async (_address: string, _modelId?: string) => {}),
 });
 
 // Imports downloadErrorMessage directly from its own file (not the
@@ -89,7 +95,6 @@ const dict: Record<string, string> = {
   "ai.deleteConfirm": "Delete the downloaded model? You can download it again later.",
   "ai.discardDownload": "Discard download",
   "ai.discardDownloadConfirm": "Discard the downloaded data? You'll need to download the model from scratch.",
-  "ai.deleting": "Deleting…",
   "common.cancel": "Cancel",
   "ai.downloadErrorGeneric": "Couldn't download the model. Check your internet connection and tap Resume.",
   "ai.downloadErrorChecksum": "The downloaded file was corrupted. Try downloading the model again.",
@@ -109,6 +114,24 @@ vi.mock("@/shared/lib/i18n", () => ({
   }),
 }));
 
+/** Scopes to one model's row (`.rounded-xl` card) by its displayName text —
+ *  `find("button")` alone can't disambiguate rows that render the same
+ *  button text (e.g. two not-yet-downloaded models both showing
+ *  "ai.download"), and the section now also has an icon-only refresh
+ *  button that has no text of its own to collide with anyway. */
+function findRow(wrapper: ReturnType<typeof mount>, displayName: string) {
+  return wrapper.findAll(".rounded-xl").find((el) => el.text().includes(displayName));
+}
+function rowActionButton(wrapper: ReturnType<typeof mount>, displayName: string) {
+  // The row's action button is the last labeled (non-icon-only) button in
+  // its card — distinguishes it from the row's own kebab ("⋮") menu button,
+  // which also lives inside the same `.rounded-xl` card but has no text.
+  return findRow(wrapper, displayName)
+    ?.findAll("button")
+    .filter((b) => b.text().length > 0)
+    .at(-1);
+}
+
 beforeEach(() => {
   fakeLocalAiStore.supportReport = { isNative: true, capabilities: { inference: true } };
   fakeLocalAiStore.eligibilityReport = null;
@@ -116,6 +139,8 @@ beforeEach(() => {
   fakeLocalAiStore.selectedModelId = null;
   fakeLocalAiStore.currentModel = QWEN_4B;
   fakeLocalAiStore.loadedModelId = null;
+  fakeLocalAiStore.activeModelUpdateAvailable = false;
+  fakeLocalAiStore.modelDiskState = {};
   fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: null } };
   fakeLocalAiStore.modelReady = false;
   fakeLocalAiStore.initError = null;
@@ -125,13 +150,13 @@ beforeEach(() => {
   // vi.clearAllMocks() clears call history but NOT a custom
   // mockImplementation() set by an earlier test — reset every mock a later
   // test overrides with a custom implementation back to a safe default, or
-  // a later "baseline" test can flakily inherit that override (code review
-  // finding for modelEligibility/selectModel/downloadModel, matching the
-  // pattern already established here for checkPartialDownload).
+  // a later "baseline" test can flakily inherit that override.
   fakeLocalAiStore.checkPartialDownload.mockImplementation(async () => {});
   fakeLocalAiStore.modelEligibility.mockImplementation(async () => ({ verdict: "ok" as const }));
+  fakeLocalAiStore.checkModelDiskState.mockImplementation(async (_address, modelId) => fakeLocalAiStore.modelDiskState[modelId] ?? null);
   fakeLocalAiStore.selectModel.mockImplementation(async () => {});
   fakeLocalAiStore.downloadModel.mockImplementation(async () => {});
+  fakeLocalAiStore.deleteModel.mockImplementation(async () => {});
 });
 
 describe("LocalAiSettingsSection", () => {
@@ -156,6 +181,30 @@ describe("LocalAiSettingsSection", () => {
     expect(wrapper.text()).toContain("Couldn't download the model. Check your internet connection and tap Resume.");
     expect(wrapper.text()).not.toContain("download-specific failure");
     expect(wrapper.text()).not.toContain("stale init error from an earlier attempt");
+  });
+
+  // Automatic check-for-updates on mount (multi-model UI rework, 2026-08-21)
+  // — no manual "Проверить обновления" button needed anymore.
+  it("automatically refreshes the manifest on mount, without any button click", async () => {
+    mount(LocalAiSettingsSection);
+    await flushPromises();
+
+    expect(fakeLocalAiStore.refreshManifest).toHaveBeenCalledWith("addr_a");
+  });
+
+  it("the manual refresh icon re-runs refreshManifest()/eligibility/disk-state checks", async () => {
+    const wrapper = mount(LocalAiSettingsSection);
+    await flushPromises();
+    vi.clearAllMocks();
+    fakeLocalAiStore.refreshManifest.mockResolvedValue(undefined);
+
+    const refreshButton = wrapper.find('[aria-label="ai.checkUpdates"]');
+    expect(refreshButton.exists()).toBe(true);
+    await refreshButton.trigger("click");
+
+    expect(fakeLocalAiStore.refreshManifest).toHaveBeenCalledWith("addr_a");
+    expect(fakeLocalAiStore.modelEligibility).toHaveBeenCalled();
+    expect(fakeLocalAiStore.checkModelDiskState).toHaveBeenCalled();
   });
 
   // Regression: a real network drop mid-download exhausted DownloadEngine's
@@ -215,9 +264,9 @@ describe("LocalAiSettingsSection", () => {
       expect(wrapper.text()).toContain("Not enough storage space on this device to download the model.");
     });
 
-    it("shows a resume-labeled button when partialDownload has real bytes after a failure", async () => {
+    it("shows a resume-labeled button when the model's disk state has real partial bytes after a failure", async () => {
       fakeLocalAiStore.downloadState = { model: { error: "network drop", errorCode: "download_failed", progress: null } };
-      fakeLocalAiStore.partialDownload = { percent: 33 };
+      fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 33 } };
 
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
@@ -234,9 +283,20 @@ describe("LocalAiSettingsSection", () => {
     const wrapper = mount(LocalAiSettingsSection);
     await flushPromises();
 
-    await wrapper.find("button").trigger("click"); // the download button is first when !modelReady
+    await rowActionButton(wrapper, "Qwen 4B")!.trigger("click");
 
-    expect(fakeLocalAiStore.markDownloadStarting).toHaveBeenCalled();
+    expect(fakeLocalAiStore.markDownloadStarting).toHaveBeenCalledWith(QWEN_4B.id);
+    expect(fakeLocalAiStore.downloadModel).toHaveBeenCalledWith("addr_a");
+  });
+
+  it("does not seed a fake 'starting' placeholder when switching to an already-resident model", async () => {
+    fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 100 } };
+
+    const wrapper = mount(LocalAiSettingsSection);
+    await flushPromises();
+    await rowActionButton(wrapper, "Qwen 4B")!.trigger("click");
+
+    expect(fakeLocalAiStore.markDownloadStarting).not.toHaveBeenCalled();
     expect(fakeLocalAiStore.downloadModel).toHaveBeenCalledWith("addr_a");
   });
 
@@ -244,23 +304,24 @@ describe("LocalAiSettingsSection", () => {
   // level (CapacitorRangeDownloadAdapter), but the button always read
   // "Скачать модель" regardless — indistinguishable from a fresh download,
   // reported as "resume doesn't work" when it actually did.
-  it("checks for a partial download on mount and labels the button 'resume' when one exists", async () => {
-    fakeLocalAiStore.checkPartialDownload.mockImplementation(async () => {
-      fakeLocalAiStore.partialDownload = { percent: 17 };
+  it("checks per-model disk state on mount and labels the button 'resume' when a real partial file exists", async () => {
+    fakeLocalAiStore.checkModelDiskState.mockImplementation(async (_address, modelId) => {
+      fakeLocalAiStore.modelDiskState[modelId] = { percent: 17 };
+      return fakeLocalAiStore.modelDiskState[modelId];
     });
 
     const wrapper = mount(LocalAiSettingsSection);
     await flushPromises();
 
-    expect(fakeLocalAiStore.checkPartialDownload).toHaveBeenCalledWith("addr_a");
-    expect(wrapper.find("button").text()).toContain("ai.resumeDownload");
+    expect(fakeLocalAiStore.checkModelDiskState).toHaveBeenCalledWith("addr_a", QWEN_4B.id);
+    expect(rowActionButton(wrapper, "Qwen 4B")!.text()).toContain("ai.resumeDownload");
   });
 
-  it("labels the button as a fresh download when there is no partial download", async () => {
+  it("labels the button as a fresh download when there is nothing on disk", async () => {
     const wrapper = mount(LocalAiSettingsSection);
     await flushPromises();
 
-    expect(wrapper.find("button").text()).toBe("ai.download");
+    expect(rowActionButton(wrapper, "Qwen 4B")!.text()).toBe("ai.download");
   });
 
   describe("pause/resume", () => {
@@ -296,29 +357,33 @@ describe("LocalAiSettingsSection", () => {
   });
 
   // Regression: v1 shipped with no delete control at all (LocalAiClient had
-  // no delete API) — this is the first coverage for it existing.
+  // no delete API) — now per-row, tucked into a small overflow ("⋮") menu
+  // (multi-model UI rework, 2026-08-21).
   describe("delete", () => {
-    it("hides the delete button on a fresh device with nothing downloaded or in progress", async () => {
+    it("hides the row's overflow menu on a fresh device with nothing downloaded", async () => {
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
-      expect(wrapper.findAll("button").find((b) => b.text() === "Delete model")).toBeUndefined();
+      expect(findRow(wrapper, "Qwen 4B")!.findAll("button")).toHaveLength(1); // action button only, no kebab
     });
 
     // The confirm dialog is rendered via <Teleport to="body"> — outside the
     // component's own root element, so it's queried through document.body
     // directly rather than wrapper.find()/wrapper.text(), which only see
     // the wrapper's own DOM subtree.
-    it("shows the delete button once the model is ready, opens a confirm dialog, and calls deleteModel() only after confirming", async () => {
+    it("opens the overflow menu, then a confirm dialog, and calls deleteModel(address, modelId) only after confirming", async () => {
       fakeLocalAiStore.modelReady = true;
-      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
+      fakeLocalAiStore.loadedModelId = QWEN_4B.id;
+      fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 100 } };
 
       const wrapper = mount(LocalAiSettingsSection, { attachTo: document.body });
       await flushPromises();
 
-      const deleteButton = wrapper.findAll("button").find((b) => b.text() === "Delete model");
-      expect(deleteButton).toBeTruthy();
-      await deleteButton!.trigger("click");
+      const kebabButton = findRow(wrapper, "Qwen 4B")!.findAll("button")[0]!; // kebab is the first (icon-only) button in the row
+      await kebabButton.trigger("click");
+      const deleteMenuItem = wrapper.findAll("button").find((b) => b.text() === "Delete model");
+      expect(deleteMenuItem).toBeTruthy();
+      await deleteMenuItem!.trigger("click");
 
       expect(fakeLocalAiStore.deleteModel).not.toHaveBeenCalled(); // not yet — confirm dialog first
       expect(document.body.textContent).toContain("Delete the downloaded model?");
@@ -330,17 +395,19 @@ describe("LocalAiSettingsSection", () => {
       confirmButton!.dispatchEvent(new Event("click"));
       await flushPromises();
 
-      expect(fakeLocalAiStore.deleteModel).toHaveBeenCalledWith("addr_a");
+      expect(fakeLocalAiStore.deleteModel).toHaveBeenCalledWith("addr_a", QWEN_4B.id);
       wrapper.unmount();
     });
 
     it("cancelling the confirm dialog never calls deleteModel()", async () => {
       fakeLocalAiStore.modelReady = true;
-      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
+      fakeLocalAiStore.loadedModelId = QWEN_4B.id;
+      fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 100 } };
 
       const wrapper = mount(LocalAiSettingsSection, { attachTo: document.body });
       await flushPromises();
-      await wrapper.findAll("button").find((b) => b.text() === "Delete model")!.trigger("click");
+      await findRow(wrapper, "Qwen 4B")!.findAll("button")[0]!.trigger("click"); // open kebab
+      await wrapper.findAll("button").find((b) => b.text() === "Delete model")!.trigger("click"); // request delete
 
       const cancelButton = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "Cancel");
       expect(cancelButton).toBeTruthy();
@@ -352,54 +419,62 @@ describe("LocalAiSettingsSection", () => {
       wrapper.unmount();
     });
 
-    it("shows a 'discard download' (not 'delete model') label while a partial download exists and the model isn't ready", async () => {
-      fakeLocalAiStore.partialDownload = { percent: 17 };
+    it("shows a 'discard download' (not 'delete model') menu label for a real partial download that isn't complete", async () => {
+      fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 17 } };
 
-      const wrapper = mount(LocalAiSettingsSection);
+      const wrapper = mount(LocalAiSettingsSection, { attachTo: document.body });
       await flushPromises();
+      await findRow(wrapper, "Qwen 4B")!.findAll("button")[0]!.trigger("click");
 
       // Never the "delete model" wording — nothing is actually fully
       // downloaded yet, so that phrasing would be inaccurate.
       expect(wrapper.findAll("button").find((b) => b.text() === "Delete model")).toBeUndefined();
       expect(wrapper.findAll("button").find((b) => b.text() === "Discard download")).toBeTruthy();
+      wrapper.unmount();
     });
 
-    // Regression: the delete button rendered even while a transfer was
+    // Regression: the delete affordance rendered even while a transfer was
     // actively streaming in — showing "Удалить модель"/"delete the
     // downloaded model" made no sense (nothing is downloaded yet), and
     // having it sit right next to an advancing progress bar read as if
     // deleting and downloading could somehow happen at once.
     describe("hidden while actively downloading, shown while paused", () => {
-      it("hides the delete button entirely while actively (un-paused) downloading", async () => {
+      it("hides the row's overflow menu entirely while actively (un-paused) downloading", async () => {
         fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: { percent: 40, status: "downloading" } } };
         fakeLocalAiStore.isPaused = false;
+        fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 40 } };
 
         const wrapper = mount(LocalAiSettingsSection);
         await flushPromises();
 
-        expect(wrapper.findAll("button").find((b) => /^(Delete model|Discard download)$/.test(b.text()))).toBeUndefined();
+        // The row's action area is hidden entirely while downloading (see
+        // isRowDownloading), so there's no button at all in the row's card.
+        expect(findRow(wrapper, "Qwen 4B")!.findAll("button")).toHaveLength(0);
       });
 
-      it("shows the delete button (as 'Discard download') once paused mid-download", async () => {
+      it("shows the overflow menu (as 'Discard download') once paused mid-download", async () => {
         fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: { percent: 40, status: "downloading" } } };
         fakeLocalAiStore.isPaused = true;
+        fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 40 } };
 
         const wrapper = mount(LocalAiSettingsSection);
         await flushPromises();
+        await findRow(wrapper, "Qwen 4B")!.find("button").trigger("click");
 
         expect(wrapper.findAll("button").find((b) => b.text() === "Discard download")).toBeTruthy();
       });
     });
 
-    it("shows the delete button (as 'Discard download') after a download failure with the discard-specific confirm text", async () => {
+    it("shows the overflow menu (as 'Discard download') after a download failure with the discard-specific confirm text", async () => {
       fakeLocalAiStore.downloadState = { model: { error: "network drop", errorCode: "download_failed", progress: null } };
+      fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 40 } };
 
       const wrapper = mount(LocalAiSettingsSection, { attachTo: document.body });
       await flushPromises();
-
-      const deleteButton = wrapper.findAll("button").find((b) => b.text() === "Discard download");
-      expect(deleteButton).toBeTruthy();
-      await deleteButton!.trigger("click");
+      await findRow(wrapper, "Qwen 4B")!.findAll("button")[0]!.trigger("click");
+      const menuItem = wrapper.findAll("button").find((b) => b.text() === "Discard download");
+      expect(menuItem).toBeTruthy();
+      await menuItem!.trigger("click");
 
       expect(document.body.textContent).toContain("Discard the downloaded data? You'll need to download the model from scratch.");
       expect(document.body.textContent).not.toContain("Delete the downloaded model?");
@@ -412,16 +487,16 @@ describe("LocalAiSettingsSection", () => {
   // progress bar frozen at "Скачивание… 100%" — genuinely slow phases for
   // a GB-scale file, reported live as "скачалась модель - зависла на
   // 100%". Both phases now get their own distinct label (including in the
-  // "Статус" row), and neither offers a Pause button.
+  // row's own status text), and neither offers a Pause button.
   describe("verifying/loading phases", () => {
-    it("shows incremental verification progress with its own label in both the status row and progress text, and no Pause button", async () => {
+    it("shows incremental verification progress with its own label in both the row status and progress text, and no Pause button", async () => {
       fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: { percent: 63, status: "verifying" } } };
 
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
       const occurrences = wrapper.text().split("Verifying file… 63%").length - 1;
-      expect(occurrences).toBe(2); // status row + progress text
+      expect(occurrences).toBe(2); // row status + progress text
       expect(wrapper.text()).not.toContain("Downloading… 63%");
       expect(wrapper.findAll("button").find((b) => b.text() === "Pause")).toBeUndefined();
     });
@@ -437,17 +512,18 @@ describe("LocalAiSettingsSection", () => {
       expect(wrapper.findAll("button").find((b) => b.text() === "Pause")).toBeUndefined();
     });
 
-    it("hides the delete/discard button during verifying and loading, same as an active download", async () => {
+    it("hides the row's action area (including the overflow menu) during verifying and loading, same as an active download", async () => {
       fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: { percent: 100, status: "loading" } } };
+      fakeLocalAiStore.modelDiskState = { [QWEN_4B.id]: { percent: 100 } };
 
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
-      expect(wrapper.findAll("button").find((b) => /^(Delete model|Discard download)$/.test(b.text()))).toBeUndefined();
+      expect(findRow(wrapper, "Qwen 4B")!.findAll("button")).toHaveLength(0);
     });
   });
 
-  // Multi-model plan §9 — the model-picker list.
+  // Multi-model UI rework (2026-08-21) — the model-picker list.
   describe("multi-model list", () => {
     const SMALL_MODEL: FakeModel = { id: "small-model", displayName: "Small Model", quant: "Q4_K_M", sizeBytes: 900_000_000 };
 
@@ -470,16 +546,7 @@ describe("LocalAiSettingsSection", () => {
       expect(wrapper.text()).toContain("ai.recommended"); // unmapped in this file's dict — echoed raw
     });
 
-    /** Scopes to one model's row (`.rounded-xl` card) by its displayName
-     *  text, then returns that row's own button — `find("button")` alone
-     *  can't disambiguate rows that render the same button text (e.g. two
-     *  not-yet-downloaded models both showing "ai.download"). */
-    function rowButton(wrapper: ReturnType<typeof mount>, displayName: string) {
-      const row = wrapper.findAll(".rounded-xl").find((el) => el.text().includes(displayName));
-      return row?.find("button");
-    }
-
-    it("a model whose eligibility check resolves 'no' has its download button disabled and unclickable", async () => {
+    it("a model whose eligibility check resolves 'no' has its action button disabled and unclickable", async () => {
       fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
       fakeLocalAiStore.modelEligibility.mockImplementation(async (_address, modelId) => ({
         verdict: modelId === "qwen-4b" ? ("no" as const) : ("ok" as const),
@@ -488,7 +555,7 @@ describe("LocalAiSettingsSection", () => {
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
-      const qwenButton = rowButton(wrapper, "Qwen 4B");
+      const qwenButton = rowActionButton(wrapper, "Qwen 4B");
       expect(qwenButton?.exists()).toBe(true);
       expect(qwenButton?.attributes("disabled")).toBeDefined();
 
@@ -510,7 +577,7 @@ describe("LocalAiSettingsSection", () => {
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
-      const smallButton = rowButton(wrapper, "Small Model");
+      const smallButton = rowActionButton(wrapper, "Small Model");
       expect(smallButton?.exists()).toBe(true);
       await smallButton!.trigger("click");
 
@@ -525,7 +592,7 @@ describe("LocalAiSettingsSection", () => {
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
-      const smallButton = rowButton(wrapper, "Small Model");
+      const smallButton = rowActionButton(wrapper, "Small Model");
       await smallButton!.trigger("click");
 
       expect(fakeLocalAiStore.selectModel).not.toHaveBeenCalled();
@@ -535,7 +602,7 @@ describe("LocalAiSettingsSection", () => {
     it("the active model's row shows a disabled 'Active' state instead of a download button", async () => {
       fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
       fakeLocalAiStore.modelReady = true;
-      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
+      fakeLocalAiStore.loadedModelId = QWEN_4B.id;
       fakeLocalAiStore.currentModel = QWEN_4B;
 
       const wrapper = mount(LocalAiSettingsSection);
@@ -543,20 +610,48 @@ describe("LocalAiSettingsSection", () => {
 
       expect(wrapper.text()).toContain("ai.active");
       // The other (non-active) model still shows its own download action.
-      const smallButton = wrapper.findAll("button").find((b) => /^(ai\.download|ai\.downloadAndSwitch)$/.test(b.text()));
-      expect(smallButton).toBeTruthy();
+      const smallButton = rowActionButton(wrapper, "Small Model");
+      expect(smallButton?.text()).toBe("ai.download");
     });
 
-    it("shows 'download and switch' wording for a model other than the currently ready one", async () => {
+    it("shows 'switch' wording for a different, already-resident model instead of 'download'", async () => {
       fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
       fakeLocalAiStore.modelReady = true;
-      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
+      fakeLocalAiStore.loadedModelId = QWEN_4B.id;
+      fakeLocalAiStore.currentModel = QWEN_4B;
+      fakeLocalAiStore.modelDiskState = { [SMALL_MODEL.id]: { percent: 100 } }; // retainInactiveModels — resident but not active
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      expect(rowActionButton(wrapper, "Small Model")?.text()).toBe("ai.switchTo");
+    });
+
+    it("shows 'download' (not 'switch') for a different model that genuinely isn't on disk", async () => {
+      fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
+      fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = QWEN_4B.id;
       fakeLocalAiStore.currentModel = QWEN_4B;
 
       const wrapper = mount(LocalAiSettingsSection);
       await flushPromises();
 
-      expect(wrapper.findAll("button").some((b) => b.text() === "ai.downloadAndSwitch")).toBe(true);
+      expect(rowActionButton(wrapper, "Small Model")?.text()).toBe("ai.download");
+    });
+
+    it("shows 'Обновить' instead of 'Активна' on the active row when an update is available, and calls switchModel()", async () => {
+      fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = QWEN_4B.id;
+      fakeLocalAiStore.activeModelUpdateAvailable = true;
+
+      const wrapper = mount(LocalAiSettingsSection);
+      await flushPromises();
+
+      const button = rowActionButton(wrapper, "Qwen 4B");
+      expect(button?.text()).toBe("ai.update");
+      await button!.trigger("click");
+
+      expect(fakeLocalAiStore.switchModel).toHaveBeenCalledWith("addr_a");
     });
   });
 });

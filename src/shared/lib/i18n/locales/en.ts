@@ -97,7 +97,6 @@ export const en = {
   "ai.loadingModel": "Loading model into memory…",
   "ai.downloading": "Downloading… {percent}%",
   "ai.checkUpdates": "Check for updates",
-  "ai.checkingUpdates": "Checking…",
   "ai.notDownloaded": "Not downloaded",
   "ai.updateAvailable": "Update available",
   "ai.eligibilityTight": "May run slowly on this device",
@@ -120,8 +119,8 @@ export const en = {
   "ai.settingsDescription": "Offline AI chat — the model runs entirely on this device",
   "ai.downloadBypassesTor": "The model download does not go through Tor, even in \"Always\" mode",
   "ai.active": "Active",
-  "ai.downloadAndSwitch": "Download & switch",
   "ai.recommended": "Recommended",
+  "ai.switchTo": "Switch",
 
   // ── Channels ──
   "channels.repostPreview": "Repost",
