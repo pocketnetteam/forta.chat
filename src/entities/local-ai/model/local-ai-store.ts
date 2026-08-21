@@ -108,6 +108,19 @@ export const useLocalAiStore = defineStore("local-ai", () => {
    *  once per row on every reactive update. Cleared on `manifest:updated`
    *  (thresholds may have changed) and `releaseRuntime()` (account switch). */
   const modelEligibilityCache = ref<Record<string, EligibilityReport>>({});
+  /** The model actually loaded in the native runtime right now — driven by
+   *  `runtime:model-loaded`/`runtime:unloaded`, not by `selectedModelId`.
+   *  Deliberately a separate signal: `selectModel()` flips `selectedModelId`
+   *  (and so `currentModel`) synchronously, before any byte of the new
+   *  model has downloaded — a model-picker row's "Активна" state must
+   *  reflect what's really running, not merely what's intended, or a
+   *  switch that's still in flight (or that failed outright) would show
+   *  the *new* model as active and the *old*, still-genuinely-loaded one
+   *  as "not downloaded" (multi-model plan §9, code review finding). `null`
+   *  while nothing is loaded (including mid-switch, between the old
+   *  context's release and the new one's load) — `'embedding-switch'`
+   *  unloads are excluded from clearing this, they don't touch the model. */
+  const loadedModelId = ref<string | null>(null);
   /** Bytes already on disk for an interrupted-and-not-yet-resumed model
    *  download, read without starting anything (roadmap: "докачать модель
    *  (X%)" instead of "Скачать модель" when there's real work to resume —
@@ -203,6 +216,13 @@ export const useLocalAiStore = defineStore("local-ai", () => {
       // really on disk and in the runtime right now.
       c.on("runtime:model-loaded", ({ modelId }) => {
         writeModelDownloadedMarker(modelId);
+        loadedModelId.value = modelId;
+      }),
+      // Model context released — clears which row is "Активна" until the
+      // next runtime:model-loaded. Excludes 'embedding-switch': that reason
+      // only touches the embedding context, the model stays loaded.
+      c.on("runtime:unloaded", ({ reason }) => {
+        if (reason !== "embedding-switch") loadedModelId.value = null;
       }),
       c.on("manifest:updated", (diff) => {
         // Cached manifest changed — eligibility may now read differently
@@ -556,6 +576,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     availableModels.value = [];
     selectedModelId.value = null;
     modelEligibilityCache.value = {};
+    loadedModelId.value = null;
     if (c) {
       try {
         await c.releaseRuntime({ closeDatabase: true });
@@ -574,6 +595,7 @@ export const useLocalAiStore = defineStore("local-ai", () => {
     currentModel,
     availableModels,
     selectedModelId,
+    loadedModelId,
     partialDownload,
     isPaused,
     isGenerating,

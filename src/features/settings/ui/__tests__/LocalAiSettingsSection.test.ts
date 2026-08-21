@@ -23,6 +23,7 @@ const fakeLocalAiStore = reactive({
   availableModels: [QWEN_4B] as FakeModel[],
   selectedModelId: null as string | null,
   currentModel: QWEN_4B as FakeModel | null,
+  loadedModelId: null as string | null,
   downloadState: {
     model: { error: null as string | null, errorCode: null as string | null, progress: null as { percent: number; status?: string } | null },
   },
@@ -114,6 +115,7 @@ beforeEach(() => {
   fakeLocalAiStore.availableModels = [QWEN_4B];
   fakeLocalAiStore.selectedModelId = null;
   fakeLocalAiStore.currentModel = QWEN_4B;
+  fakeLocalAiStore.loadedModelId = null;
   fakeLocalAiStore.downloadState = { model: { error: null, errorCode: null, progress: null } };
   fakeLocalAiStore.modelReady = false;
   fakeLocalAiStore.initError = null;
@@ -121,10 +123,15 @@ beforeEach(() => {
   fakeLocalAiStore.isPaused = false;
   vi.clearAllMocks();
   // vi.clearAllMocks() clears call history but NOT a custom
-  // mockImplementation() set by an earlier test — reset the mock this file's
-  // resume test overrides with a side effect back to a safe no-op, or a
-  // later "baseline" test can flakily inherit that override.
+  // mockImplementation() set by an earlier test — reset every mock a later
+  // test overrides with a custom implementation back to a safe default, or
+  // a later "baseline" test can flakily inherit that override (code review
+  // finding for modelEligibility/selectModel/downloadModel, matching the
+  // pattern already established here for checkPartialDownload).
   fakeLocalAiStore.checkPartialDownload.mockImplementation(async () => {});
+  fakeLocalAiStore.modelEligibility.mockImplementation(async () => ({ verdict: "ok" as const }));
+  fakeLocalAiStore.selectModel.mockImplementation(async () => {});
+  fakeLocalAiStore.downloadModel.mockImplementation(async () => {});
 });
 
 describe("LocalAiSettingsSection", () => {
@@ -179,6 +186,7 @@ describe("LocalAiSettingsSection", () => {
     // of defense — modelReady is the fact that actually matters here.
     it("never shows the error text once the model is ready, even if downloadState.error is somehow still set", async () => {
       fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
       fakeLocalAiStore.downloadState = { model: { error: "stale error from a losing concurrent call", errorCode: "download_failed", progress: null } };
 
       const wrapper = mount(LocalAiSettingsSection);
@@ -303,6 +311,7 @@ describe("LocalAiSettingsSection", () => {
     // the wrapper's own DOM subtree.
     it("shows the delete button once the model is ready, opens a confirm dialog, and calls deleteModel() only after confirming", async () => {
       fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
 
       const wrapper = mount(LocalAiSettingsSection, { attachTo: document.body });
       await flushPromises();
@@ -327,6 +336,7 @@ describe("LocalAiSettingsSection", () => {
 
     it("cancelling the confirm dialog never calls deleteModel()", async () => {
       fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
 
       const wrapper = mount(LocalAiSettingsSection, { attachTo: document.body });
       await flushPromises();
@@ -525,6 +535,7 @@ describe("LocalAiSettingsSection", () => {
     it("the active model's row shows a disabled 'Active' state instead of a download button", async () => {
       fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
       fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
       fakeLocalAiStore.currentModel = QWEN_4B;
 
       const wrapper = mount(LocalAiSettingsSection);
@@ -539,6 +550,7 @@ describe("LocalAiSettingsSection", () => {
     it("shows 'download and switch' wording for a model other than the currently ready one", async () => {
       fakeLocalAiStore.availableModels = [QWEN_4B, SMALL_MODEL];
       fakeLocalAiStore.modelReady = true;
+      fakeLocalAiStore.loadedModelId = fakeLocalAiStore.currentModel?.id ?? QWEN_4B.id;
       fakeLocalAiStore.currentModel = QWEN_4B;
 
       const wrapper = mount(LocalAiSettingsSection);

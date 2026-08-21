@@ -101,10 +101,16 @@ const canDelete = computed(
  *  in that case. */
 const isModelFullyInstalled = computed(() => localAiStore.modelReady);
 
-/** Whether `modelId` is the one actually loaded right now — at most one
- *  row can be (multi-model plan §2: one model on disk at a time). */
+/** Whether `modelId` is the one actually loaded in the runtime right now —
+ *  at most one row can be (multi-model plan §2: one model on disk at a
+ *  time). Deliberately `loadedModelId`, not `currentModel`/`selectedModelId`
+ *  — those flip to a new choice the instant `selectModel()` resolves,
+ *  before anything has actually downloaded/loaded; using them here would
+ *  show the new (not-yet-ready) row as "Активна" and the still-genuinely-
+ *  loaded old row as "not downloaded" for the whole switch window, and
+ *  permanently if the switch then fails (code review finding). */
 function isModelActive(modelId: string): boolean {
-  return localAiStore.modelReady && localAiStore.currentModel?.id === modelId;
+  return localAiStore.loadedModelId === modelId;
 }
 
 /** Only ever true for the selected model's row — `downloadState.model`
@@ -183,15 +189,27 @@ onMounted(async () => {
 async function handleSelectAndDownload(modelId: string): Promise<void> {
   const address = authStore.address;
   if (!address) return;
-  try {
-    if (localAiStore.selectedModelId !== modelId) {
+  if (localAiStore.selectedModelId !== modelId) {
+    try {
       await localAiStore.selectModel(address, modelId);
+    } catch (e) {
+      // Surfaced the same way downloadModel()'s own failures are — a bare
+      // console.warn here left the button silently reverting with zero
+      // user-visible feedback (code review finding); downloadModel()'s own
+      // catch below already reports through downloadState.model.error via
+      // the store's applyDownloadFailure(), this mirrors that for the
+      // selectModel()-specific failure window that precedes it.
+      const err = e instanceof Error ? e : new Error(String(e));
+      localAiStore.downloadState.model.error = err.message;
+      localAiStore.downloadState.model.errorCode = null;
+      console.warn("[LocalAiSettingsSection] selectModel failed:", e);
+      return;
     }
-    localAiStore.markDownloadStarting();
-    await localAiStore.downloadModel(address);
-  } catch (e) {
-    console.warn("[LocalAiSettingsSection] selectModel/downloadModel failed:", e);
   }
+  localAiStore.markDownloadStarting();
+  await localAiStore.downloadModel(address).catch((e: unknown) => {
+    console.warn("[LocalAiSettingsSection] downloadModel failed:", e);
+  });
 }
 
 async function handleUpdate(): Promise<void> {

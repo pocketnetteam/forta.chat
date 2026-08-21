@@ -784,5 +784,54 @@ describe("useLocalAiStore", () => {
       expect(store.selectedModelId).toBeNull();
       expect(store.currentModel).toBeNull();
     });
+
+    // Code review finding: `selectModel()` flips `selectedModelId`/
+    // `currentModel` synchronously, before anything has actually loaded —
+    // `loadedModelId` must stay independent of that so a model-picker row's
+    // "Активна" state reflects what's really running, not merely selected.
+    describe("loadedModelId", () => {
+      it("selectModel() does not change loadedModelId — only runtime:model-loaded does", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        stubManifestFetch(twoModelManifestBody());
+        await store.refreshManifest("addr_a");
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        expect(store.loadedModelId).toBe("qwen-4b");
+
+        await store.selectModel("addr_a", "small-model");
+
+        expect(store.selectedModelId).toBe("small-model"); // intent changed...
+        expect(store.loadedModelId).toBe("qwen-4b"); // ...but qwen-4b is still what's actually loaded
+      });
+
+      it("runtime:unloaded (model-switch) clears loadedModelId until the next runtime:model-loaded", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        expect(store.loadedModelId).toBe("qwen-4b");
+
+        await emitOn(client, "runtime:unloaded", { reason: "model-switch" });
+        expect(store.loadedModelId).toBeNull();
+
+        await emitOn(client, "runtime:model-loaded", { modelId: "small-model", version: 1 });
+        expect(store.loadedModelId).toBe("small-model");
+      });
+
+      it("runtime:unloaded (embedding-switch) does NOT clear loadedModelId — only the embedding context changed", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+
+        await emitOn(client, "runtime:unloaded", { reason: "embedding-switch" });
+
+        expect(store.loadedModelId).toBe("qwen-4b");
+      });
+
+      it("releaseRuntime() resets loadedModelId", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+
+        await store.releaseRuntime();
+
+        expect(store.loadedModelId).toBeNull();
+      });
+    });
   });
 });
