@@ -121,6 +121,8 @@ export const en = {
   "ai.active": "Active",
   "ai.recommended": "Recommended",
   "ai.switchTo": "Switch",
+  "ai.deleteChat": "Delete chat?",
+  "ai.deleteChatConfirm": "Are you sure you want to delete this chat? This can't be undone.",
 
   // ── Channels ──
   "channels.repostPreview": "Repost",

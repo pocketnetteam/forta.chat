@@ -24,6 +24,7 @@ const fakeAiChatStore = reactive({
   chats: [{ id: "chat-1", title: "New chat", lastMessagePreview: "", lastMessageTimestamp: null }],
   activeChatId: null as string | null,
   selectChat: vi.fn(),
+  deleteChat: vi.fn(async () => {}),
 });
 
 const fakeChatStore = reactive({ setActiveRoom: vi.fn() });
@@ -96,5 +97,54 @@ describe("AiChatList", () => {
     expect(fakeChatStore.setActiveRoom).toHaveBeenCalledWith(null);
     expect(fakeChannelStore.clearActiveChannel).toHaveBeenCalled();
     expect(wrapper.emitted("selectChat")).toEqual([["chat-1"]]);
+  });
+
+  it("right-click opens a menu with a delete action, and confirming deletes the chat", async () => {
+    const wrapper = mount(AiChatList, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.find("button").trigger("contextmenu");
+    await flushPromises();
+
+    const deleteMenuItem = document.body
+      .querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
+    expect(deleteMenuItem).toHaveLength(1);
+    expect(deleteMenuItem[0].textContent).toContain("contactList.delete");
+
+    deleteMenuItem[0].click();
+    await flushPromises();
+
+    // Confirmation dialog, not an immediate delete.
+    expect(document.body.textContent).toContain("ai.deleteChatConfirm");
+    expect(fakeAiChatStore.deleteChat).not.toHaveBeenCalled();
+
+    const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "contactList.delete",
+    );
+    confirmButton?.click();
+    await flushPromises();
+
+    expect(fakeAiChatStore.deleteChat).toHaveBeenCalledWith("chat-1");
+    wrapper.unmount();
+  });
+
+  it("canceling the delete confirmation does not delete the chat", async () => {
+    const wrapper = mount(AiChatList, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.find("button").trigger("contextmenu");
+    await flushPromises();
+    document.body.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click();
+    await flushPromises();
+
+    const cancelButton = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "contactList.cancel",
+    );
+    cancelButton?.click();
+    await flushPromises();
+
+    expect(fakeAiChatStore.deleteChat).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("ai.deleteChatConfirm");
+    wrapper.unmount();
   });
 });

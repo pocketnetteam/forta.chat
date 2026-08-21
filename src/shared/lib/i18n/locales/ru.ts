@@ -123,6 +123,8 @@ export const ru: Record<TranslationKey, string> = {
   "ai.active": "Активна",
   "ai.recommended": "Рекомендуется",
   "ai.switchTo": "Переключиться",
+  "ai.deleteChat": "Удалить чат?",
+  "ai.deleteChatConfirm": "Вы действительно хотите удалить этот чат? Это действие необратимо.",
 
   // ── Каналы ──
   "channels.repostPreview": "Репост",
