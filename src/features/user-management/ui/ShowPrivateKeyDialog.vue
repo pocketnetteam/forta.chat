@@ -119,7 +119,7 @@ onUnmounted(() => {
         {{ t("settings.privateKeyLabel") }}
       </label>
       <div class="mb-5 rounded-xl border border-neutral-grad-1 bg-neutral-grad-0/50 p-4">
-        <p class="break-all font-mono text-sm leading-6 text-text-color">
+        <p class="select-text break-all font-mono text-sm leading-6 text-text-color">
           {{ privateKey }}
         </p>
       </div>

@@ -68,7 +68,7 @@ const averageScore = computed(() => {
       <!-- Caption -->
       <div
         v-if="captionText"
-        class="mb-1 text-sm font-semibold leading-snug text-text-color"
+        class="select-text mb-1 text-sm font-semibold leading-snug text-text-color"
       >
         {{ captionText }}
       </div>
@@ -127,7 +127,7 @@ const averageScore = computed(() => {
       <!-- Message text -->
       <div
         v-if="bodyText"
-        class="whitespace-pre-wrap break-words text-sm text-text-color"
+        class="select-text whitespace-pre-wrap break-words text-sm text-text-color"
       >
         {{ bodyText.length > 300 ? bodyText.slice(0, 300) + '...' : bodyText }}
       </div>

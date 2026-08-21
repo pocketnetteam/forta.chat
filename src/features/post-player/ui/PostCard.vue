@@ -285,14 +285,14 @@ onMounted(loadPostData);
       <!-- Caption -->
       <div
         v-if="post.caption"
-        class="text-sm font-semibold leading-snug sm:text-base"
+        class="select-text text-sm font-semibold leading-snug sm:text-base"
         :class="isOwn ? 'text-white' : 'text-text-color'"
       >{{ post.caption }}</div>
 
       <!-- Message -->
       <div
         v-if="truncatedMessage"
-        class="break-words text-xs leading-relaxed sm:text-[13px]"
+        class="select-text break-words text-xs leading-relaxed sm:text-[13px]"
         :class="isOwn ? 'text-white/80' : 'text-text-color/80'"
       >{{ truncatedMessage }}</div>
 

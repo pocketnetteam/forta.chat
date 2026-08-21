@@ -106,7 +106,7 @@ function handleStop(): void {
             :class="message.role === 'user' ? 'justify-end' : 'justify-start'"
           >
             <div
-              class="max-w-[80%] rounded-2xl px-3.5 py-2 text-[15px] whitespace-pre-wrap break-words"
+              class="max-w-[80%] select-text rounded-2xl px-3.5 py-2 text-[15px] whitespace-pre-wrap break-words"
               :class="[
                 message.role === 'user'
                   ? 'rounded-br-sm bg-chat-bubble-own text-text-on-bg-ac-color'

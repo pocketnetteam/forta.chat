@@ -64,7 +64,7 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
 
 <template>
   <!-- When there are block-level embeds, use div wrapper to avoid div-in-span -->
-  <div v-if="hasBlockSegments">
+  <div v-if="hasBlockSegments" class="select-text">
     <template v-for="(seg, i) in segments" :key="i">
       <template v-if="seg.type === 'text'">
         <template v-if="activeQuery">
@@ -98,7 +98,7 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
   </div>
 
   <!-- Default: pure inline content (no block embeds) -->
-  <div v-else>
+  <div v-else class="select-text">
     <span class="whitespace-pre-wrap break-words">
       <template v-for="(seg, i) in segments" :key="i">
         <template v-if="seg.type === 'text'">
