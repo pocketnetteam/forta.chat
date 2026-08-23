@@ -2012,6 +2012,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const isRoomListLoadingSlow = computed(() =>
     isRoomListLoading.value && initialSyncStatus.value === "degraded",
   );
+  // First sync stalled (8s watchdog) or Matrix sync errored — offer manual retry.
+  // RECONNECTING is intentionally excluded (may self-heal without user action).
+  const isRoomListStuck = computed(() =>
+    sortedRooms.value.length === 0
+    && !isRoomListAuthoritativeEmpty.value
+    && (
+      initialSyncStatus.value === "degraded"
+      || syncState.value === "ERROR"
+      || syncState.value === "STOPPED"
+    ),
+  );
 
   // Arm / cancel empty-list escape timers. Large accounts get a short grace
   // after PREPARED; stuck sync after degrade eventually shows empty instead of
@@ -7442,6 +7453,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     isRoomListAuthoritativeEmpty,
     isRoomListLoading,
     isRoomListLoadingSlow,
+    isRoomListStuck,
     startInitialSyncWatch,
     namesReady,
     syncState,

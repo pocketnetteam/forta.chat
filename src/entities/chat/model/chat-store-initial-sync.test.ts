@@ -189,6 +189,7 @@ describe("chat-store room-list first-load states", () => {
     expect(store.initialSyncStatus).toBe("degraded");
     expect(store.isRoomListLoading).toBe(true);
     expect(store.isRoomListLoadingSlow).toBe(true);
+    expect(store.isRoomListStuck).toBe(true);
     // Must NOT flash the "no dialogs" empty state on degrade.
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
   });
@@ -250,6 +251,15 @@ describe("chat-store room-list first-load states", () => {
     expect(store.isRoomListAuthoritativeEmpty).toBe(true);
     expect(store.isRoomListLoading).toBe(false);
     expect(store.isRoomListLoadingSlow).toBe(false);
+    expect(store.isRoomListStuck).toBe(false);
+  });
+
+  it("isRoomListStuck when Matrix sync errors before rooms arrive", () => {
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
+    store.setSyncState("ERROR");
+    expect(store.isRoomListStuck).toBe(true);
+    expect(store.isRoomListLoading).toBe(true);
+    expect(store.isRoomListAuthoritativeEmpty).toBe(false);
   });
 
   it("cancels PREPARED empty escape when rooms appear before grace elapses", () => {
