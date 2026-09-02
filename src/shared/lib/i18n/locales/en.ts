@@ -790,6 +790,7 @@ export const en = {
   "register.initError": "Failed to initialize. Please try again.",
   "register.captchaPlaceholder": "Enter the text shown above",
   "register.captchaIncorrect": "Incorrect captcha. Please try again.",
+  "register.captchaFundingFailed": "Couldn't complete registration with this captcha. Please try a new one.",
   "register.refreshCaptcha": "Refresh",
   "register.submit": "Submit",
   "register.displayName": "Display Name",

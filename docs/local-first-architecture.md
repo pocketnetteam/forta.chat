@@ -1,24 +1,36 @@
 # Local-First Architecture: Technical Design Document
 
+> **Статус: реализовано.** Этот документ изначально был design-планом миграции на local-first
+> (см. секцию 8 «Migration Plan» ниже — она описывает пройденный путь, а не будущие шаги).
+> Текущее состояние приложения соответствует описанному ниже "Target state": Dexie — единственный
+> источник истины, основной путь чтения/записи идёт через `SyncEngine`/`EventWriter`
+> (см. `CLAUDE.md` и [architecture-data-flow.md](architecture-data-flow.md)).
+
 ## 1. Executive Summary
 
-### Current state
-The app uses a **server-first + cache** model:
-- Matrix server is the source of truth
-- Pinia stores hold data in memory (volatile)
-- `chat-cache.ts` caches rooms/messages in IndexedDB for instant first paint
-- `offline-queue.ts` queues only text messages in localStorage
-- Optimistic updates exist only for message sending
+### Current state (реализовано)
+Приложение использует **local-first** модель:
+- **IndexedDB (Dexie.js)** — локальный источник истины (`shared/lib/local-db/schema.ts`, schema v18, 15 таблиц)
+- Все чтения идут из локальной БД через `useLiveQuery`, а не напрямую из Matrix SDK
+- Все мутации сначала пишутся локально, затем синхронизируются в фоне через `SyncEngine`
+  (FIFO-очередь `pendingOps`, exponential backoff + jitter)
+- Очередь операций поддерживает все типы мутаций (отправка, редактирование, реакции, удаление, файлы)
+- Работает офлайн часами — полная история и создание сообщений без сети
+- При восстановлении соединения дозаписывает pending-операции и применяет серверные дельты через `EventWriter`
+- Конфликты между устройствами разрешаются через неизменяемую модель событий Matrix (last-event-wins)
 
-### Target state
-**Local-first** model:
-- **IndexedDB (Dexie.js)** is the local source of truth
-- All reads come from the local DB, never from the Matrix SDK directly
-- All mutations write locally first, then sync in the background
-- Full **operation queue** supports all mutation types (send, edit, react, delete, files)
-- Works offline for hours — full history browsing, message creation
-- On reconnect, replays pending operations and applies server deltas
-- Multi-device conflicts resolved via Matrix's immutable event model (last-event-wins)
+### Исходное состояние (до миграции, для контекста)
+До перехода на local-first приложение использовало **server-first + cache** модель:
+- Matrix-сервер был источником истины
+- Pinia stores хранили данные только в памяти (volatile)
+- `chat-cache.ts` кэшировал комнаты/сообщения в IndexedDB для мгновенного первого рендера
+- `offline-queue.ts` ставил в очередь только текстовые сообщения через localStorage
+- Оптимистичные обновления существовали только для отправки сообщений
+
+Файлы `chat-cache.ts` (`shared/lib/cache/`) и `offline-queue.ts` (`shared/lib/`) физически ещё есть в кодовой базе
+и используются в отдельных местах (`entities/auth/model/stores.ts`, `entities/chat/model/chat-store.ts`,
+`features/messaging/model/use-messages.ts`) — секция 8 «Migration Plan» (Phase 5) их полное удаление
+не завершила до конца; Dexie/`SyncEngine` при этом уже является основным путём чтения/записи.
 
 ### Why Dexie.js
 - Works in Browser, Electron, and Mobile WebView (Capacitor)

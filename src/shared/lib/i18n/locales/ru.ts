@@ -792,6 +792,7 @@ export const ru: Record<TranslationKey, string> = {
   "register.initError": "Ошибка инициализации. Попробуйте снова.",
   "register.captchaPlaceholder": "Введите текст с картинки",
   "register.captchaIncorrect": "Неверная капча. Попробуйте снова.",
+  "register.captchaFundingFailed": "Не удалось завершить регистрацию с этой капчей. Попробуйте новую.",
   "register.refreshCaptcha": "Обновить",
   "register.submit": "Отправить",
   "register.displayName": "Отображаемое имя",

@@ -122,6 +122,16 @@ export interface NativeWebRTCPlugin {
     handler: (data: { peerId: string }) => void
   ): Promise<PluginListenerHandle>;
 
+  // Real signalingState from the native libwebrtc PeerConnection. The JS
+  // proxy used to re-derive this from local/remote description presence,
+  // which never reset on renegotiation and broke the SDK's offer-collision
+  // detection (matrix-js-sdk-bastyon relies on signalingState === "stable"
+  // to decide whether an incoming offer collides with one in flight).
+  addListener(
+    event: "onSignalingStateChange",
+    handler: (data: { peerId: string; state: string }) => void
+  ): Promise<PluginListenerHandle>;
+
   addListener(
     event: "onNativeHangup",
     handler: (data: Record<string, never>) => void

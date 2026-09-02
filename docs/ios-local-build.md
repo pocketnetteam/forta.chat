@@ -138,7 +138,7 @@ Entry:
 | Bundle ID | `com.forta.chat` |
 | App Group | `group.com.forta.chat` |
 | Capacitor | 8.2 |
-| iOS deployment target | 13.0 (Capacitor 8 default) |
+| iOS deployment target | 15.0 |
 | Xcode | 16+ |
 | iOS SDK | 17+ |
 | URL scheme (custom) | `forta://` (внутренний — Share Extension wake-up) |

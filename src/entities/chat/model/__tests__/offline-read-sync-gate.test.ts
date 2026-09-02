@@ -17,6 +17,9 @@ vi.mock("@/entities/matrix", () => ({
 }));
 
 import { useChatStore } from "../chat-store";
+import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
+
+const INITIAL_SYNC_TIMEOUT_MS = DEFAULT_WATCHDOG_CONFIG.staleTimeoutMs;
 
 function makeLocalRoom(id: string, overrides: Partial<LocalRoom> = {}): LocalRoom {
   return {
@@ -93,9 +96,10 @@ describe("WEE-80 — chat-store offline read path (no Matrix, no network)", () =
     // Genuine first-load phase: skeleton allowed.
     expect(store.isSyncing).toBe(true);
 
-    // Watchdog gives up after 8s with no sync → degraded. Cached Dexie data is
-    // now authoritative, so the read path must stop reporting "syncing".
-    vi.advanceTimersByTime(8000);
+    // Watchdog gives up after INITIAL_SYNC_TIMEOUT_MS with no sync → degraded.
+    // Cached Dexie data is now authoritative, so the read path must stop
+    // reporting "syncing".
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.isSyncing).toBe(false);
 
     // A failing/recovering Matrix poll (offline) must NOT re-raise the

@@ -37,6 +37,7 @@ const mockGetRoom = vi.fn(() => ({ selfMembership: "join" }));
 const mockSetPowerLevel = vi.fn();
 const mockSearchUserDirectory = vi.fn<(term: string, limit?: number) => Promise<{ limited: boolean; results: Array<{ user_id: string; display_name?: string; avatar_url?: string }> }>>();
 const mockIsReady = vi.fn(() => true);
+const mockMxcToHttp = vi.fn((mxcUrl: string) => mxcUrl.replace("mxc://", "https://matrix.pocketnet.app/_matrix/media/r0/download/"));
 
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
@@ -49,6 +50,7 @@ vi.mock("@/entities/matrix", () => ({
     setPowerLevel: mockSetPowerLevel,
     sendText: vi.fn(),
     searchUserDirectory: (term: string, limit?: number) => mockSearchUserDirectory(term, limit),
+    mxcToHttp: (mxcUrl: string) => mockMxcToHttp(mxcUrl),
   })),
   resetMatrixClientService: vi.fn(),
   MatrixClientService: vi.fn(),
@@ -238,6 +240,27 @@ describe("useContacts", () => {
       if (contacts.searchError.value) {
         expect(contacts.searchError.value).toMatch(/^search\./);
       }
+    });
+
+    it("converts a Matrix user_directory mxc:// avatar_url to an HTTP URL", async () => {
+      mockRpcSearchUsers.mockResolvedValue([]);
+      const targetHex = hexEncode("PMaxtest2222222222222222222222222AB").toLowerCase();
+      mockSearchUserDirectory.mockResolvedValue({
+        limited: false,
+        results: [{
+          user_id: `@${targetHex}:matrix.pocketnet.app`,
+          display_name: "maxtest",
+          avatar_url: "mxc://matrix.pocketnet.app/abc123",
+        }],
+      });
+
+      await contacts.searchUsers("maxtest");
+
+      expect(mockMxcToHttp).toHaveBeenCalledWith("mxc://matrix.pocketnet.app/abc123");
+      expect(contacts.searchResults.value.length).toBeGreaterThan(0);
+      const [result] = contacts.searchResults.value;
+      expect(result.image).not.toMatch(/^mxc:\/\//);
+      expect(result.image).toBe("https://matrix.pocketnet.app/_matrix/media/r0/download/matrix.pocketnet.app/abc123");
     });
 
     // ─── Security: malformed user_directory input ────────────

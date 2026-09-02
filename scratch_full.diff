@@ -1,0 +1,1177 @@
+warning: in the working copy of 'android/app/capacitor.build.gradle', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'android/capacitor.settings.gradle', LF will be replaced by CRLF the next time Git touches it
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 9394b74c..6ae0f228 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -27,11 +27,11 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
+ После завершения каждой задачи обязательно прогонять полную верификацию перед коммитом:
+ 
+ 1. `npm run build` — сборка (vue-tsc + vite)
+-2. `npm run lint` — линтер
+-3. `npx vue-tsc --noEmit` — проверка типов
+-4. `npm run test` — тесты
++2. `npx vue-tsc --noEmit` — проверка типов (быстрая проверка без полной сборки)
++3. `npm run test` — тесты
++4. Code review — skill `code-review` (`/code-review`) — архитектурный ревью изменений
+ 
+-5. Code review агент (`superpowers:code-reviewer`) — архитектурный ревью изменений
++В репозитории нет отдельного `npm run lint` / ESLint-конфига — линтинг не входит в этот список, пока скрипт не появится.
+ 
+ Не коммитить, пока все проверки не пройдены.
+ 
+@@ -43,10 +43,12 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
+ 
+ Перед коммитом/PR активировать для финальной проверки:
+ 
+-- Code review — выбирать по масштабу изменений:
+-  - `review` — для обычных задач (архитектурный ревью)
+-  - `review-fix` — для крупных изменений (7 ревьюеров + автофикс)
+-  - `review-team` — для PR перед мержем (5 агентов + Devil's Advocate)
++- Code review — skill `code-review` (`/code-review`), уровень по масштабу изменений:
++  - `low`/`medium` — для обычных задач (несколько высокоуверенных находок)
++  - `high`/`max` — для крупных изменений (более широкое покрытие)
++  - `ultra` — для PR перед мержем (multi-agent cloud review)
++
++  (Skills `review-fix`/`review-team`, упоминавшиеся здесь ранее, в `.claude/skills/` этого репозитория отсутствуют — сейчас там только `device-ai-loop`.)
+ 
+ <!-- GSD:project-start source:PROJECT.md -->
+ ## Project
+@@ -77,7 +79,7 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
+ ## Runtime
+ - Node.js (inferred from npm/package-lock.json)
+ - Browser (Web/Electron via Chromium)
+-- Android (via Capacitor 8.2.0)
++- Android and iOS (via Capacitor 8.2.0 / `@capacitor/ios` 8.3.3)
+ - npm - Primary package manager
+ - Lockfile: `package-lock.json` (present)
+ ## Frameworks
+@@ -135,18 +137,17 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
+ - stream-browserify 3.0.0 - Node.js stream polyfill
+ ## Configuration
+ - Variables loaded from `.env` (via Vite's `import.meta.env`)
+-- Critical env vars (see INTEGRATIONS.md):
+-- `vite.config.ts` - Main build configuration
++- `vite.config.ts` - Main build configuration; Vitest settings live in its `test` block (happy-dom environment, `src/**/*.test.ts` pattern) — there is no separate `vitest.config.ts`
+ - `tsconfig.json` - TypeScript strict mode, path aliases (@/, @app/, @entities/, etc.)
+ - `tailwind.config.js` - Theme tokens using CSS custom properties
+-- `vitest.config.ts` - Vitest settings (happy-dom environment, `src/**/*.test.ts` pattern)
+-- `capacitor.config.ts` - Capacitor configuration
++- `capacitor.config.ts` - Capacitor configuration (app id, web dir, native plugin options — does NOT contain `minSdk`/`targetSdk`, those live in `android/variables.gradle`)
+ ## Platform Requirements
+ - Node.js 18+ (inferred from TypeScript ES2020 target)
+ - npm 7+ (lockfile v2)
+ - TypeScript 5.5.4 (strict mode enabled)
+ - Modern browser supporting:
+ - Android 7.0+ (API level 24+)
++- iOS 15.0+
+ - Capacitor 8.2.0
+ - Windows 10+, macOS 10.13+, Linux (glibc 2.28+)
+ - Chromium 126+ (via Electron 40.6.0)
+@@ -258,7 +259,7 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
+ - Depends on: All other layers
+ - Used by: index.html (entry point via #app mount)
+ - Purpose: Route containers that assemble features + layouts
+-- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, `SettingsPage.vue`, etc.
++- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, etc. (settings are a panel — `widgets/sidebar/ui/SettingsPanel.vue` — not a route-level page)
+ - Depends on: Features, widgets, entities
+ - Used by: Vue Router (from `app/providers/router/`)
+ - Purpose: Composed surfaces combining features and UI components (sidebar, layouts, chat window, header)
+@@ -352,12 +353,14 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
+ <!-- GSD:skills-start source:skills/ -->
+ ## Project Skills
+ 
++> Только `device-ai-loop` реально существует в `.claude/skills/` этого репозитория.
++> Строки ниже (`develop-team`, `fix-ticket`, `review-fix`, `review-team`) описывают skills, ссылки
++> на которые ранее были в этом файле, но соответствующих `SKILL.md` в `.claude/skills/` сейчас нет —
++> не полагайтесь на них, пока они не будут добавлены заново.
++
+ | Skill | Description | Path |
+ |-------|-------------|------|
+-| develop-team | This skill should be used when the user asks to "develop a feature", "implement a ticket", "build BAST-123", "run the development pipeline", "develop this ticket end to end", or wants fully autonomous feature implementation with parallel research agents, planning, phased implementation, review, and PR creation. Zero checkpoints; pauses only on blockers. | `.claude/skills/develop-team/SKILL.md` |
+-| fix-ticket | "Automate the full Linear bug-fix pipeline end-to-end. Use when the user says 'fix ticket', 'fix BAST-123', 'fix this bug', 'resolve BAST-XXX', 'fix and ship this ticket', or passes a Linear ticket ID for autonomous bug resolution. Reads the Linear ticket, implements the fix, reviews it, commits, updates the ticket status, and comments with a summary. Also use when the user wants to automate the fix-review-commit-handoff cycle for any Linear bug ticket." | `.claude/skills/fix-ticket/SKILL.md` |
+-| review-fix | Automated review-fix loop that spawns 7 reviewers in parallel, fixes quick-fix items automatically, and accumulates strategic items for user decision. Iterates until no issues remain or max iterations reached. Adapted for Vue 3 + TypeScript + Pinia codebase. | `.claude/skills/review-fix/SKILL.md` |
+-| review-team | Agent Teams PR review with Devil's Advocate. Spawns 5 team members — 4 specialist reviewers + 1 adversarial challenger — to produce confidence-rated findings. Only findings that survive cross-examination make the final report. Adapted for Vue 3 + TypeScript + Pinia with Linear ticket integration. | `.claude/skills/review-team/SKILL.md` |
++| device-ai-loop | Iterate on a local-ai (`C:\inetpub2026\localai`) bug that only reproduces through the real Capacitor/Android bridge, using Forta Chat as the live consumer app on a connected device. Use when the user reports an AI-chat/local-ai bug seen on a real device, asks to test local-ai changes on-device, or says "run cap:run and see the AI errors" / "fix the local-ai build errors on device". | `.claude/skills/device-ai-loop/SKILL.md` |
+ <!-- GSD:skills-end -->
+ 
+ <!-- GSD:workflow-start source:GSD defaults -->
+diff --git a/README.md b/README.md
+index cff082a5..c60905ac 100644
+--- a/README.md
++++ b/README.md
+@@ -35,7 +35,7 @@
+ 
+ **Forta Chat** is an end-to-end encrypted messenger built on a **local-first** architecture: every message, media file, and piece of metadata lives in IndexedDB on your device, while background workers sync with a Matrix server. You sign in with the private key of your [Bastyon](https://bastyon.com) account — no usernames, no passwords.
+ 
+-Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / macOS / Linux), and on Android.
++Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / macOS / Linux), and on Android and iOS.
+ 
+ ## Features
+ 
+@@ -45,7 +45,7 @@ Available on the web at [forta.chat](https://forta.chat), on desktop (Windows /
+ - 🎙 **Rich media**: photos, videos, voice notes, video circles, and files with crash-recovery uploads
+ - 🌐 **Public rooms & invite links**, reactions, polls, read watermarks, edit/redact
+ - 🔑 **Sign in with Bastyon** — use your existing Bastyon private key — see [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
+-- 🖥 **Cross-platform**: Web, Electron (Windows / macOS / Linux), Android 7.0+ (API 24+)
++- 🖥 **Cross-platform**: Web, Electron (Windows / macOS / Linux), Android 7.0+ (API 24+), iOS 15+
+ 
+ ## Download
+ 
+@@ -71,7 +71,7 @@ Available on the web at [forta.chat](https://forta.chat), on desktop (Windows /
+ | Chat protocol | `matrix-js-sdk-bastyon` (Matrix fork maintained by Bastyon) |
+ | Calls | WebRTC |
+ | Desktop | Electron 40 + electron-builder |
+-| Mobile | Capacitor 8 (Android) |
++| Mobile | Capacitor 8 (Android, iOS) |
+ | Crypto | `@noble/secp256k1`, `miscreant` (AEAD), `pbkdf2` |
+ 
+ ## Quick start
+@@ -139,7 +139,7 @@ npm run cap:run     # run on a connected device
+ 
+ Full APK build guide (debug/release, keystore, env vars) — [docs/android-local-build.md](docs/android-local-build.md).
+ 
+-Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
++Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`). SDK versions (`minSdk 24`, `targetSdk 36`) live in [android/variables.gradle](android/variables.gradle), not in `capacitor.config.ts`.
+ 
+ ### iOS (Capacitor)
+ 
+diff --git a/agent-changelog.md b/agent-changelog.md
+index 905b78a0..f486a146 100644
+--- a/agent-changelog.md
++++ b/agent-changelog.md
+@@ -70,7 +70,7 @@ Scanned 10+ core files. Found **10 issues** (2 HIGH, 5 MEDIUM, 3 LOW).
+ ### UI Layer Scan Results
+ - Room list: RecycleScroller with prefetch (good), but re-sorts O(n log n) on every user update
+ - Routing: auth guard works, but redirect param unused after login, no deep linking
+-- Notifications: **NO push notification system** — only basic toast
++- Notifications: **NO push notification system** — only basic toast *(historical: push has since been implemented, see `src/shared/lib/push/push-service.ts`; this file records a point-in-time scan, not current status)*
+ - Theme: well-implemented, CSS vars, no flicker, reduced motion support
+ - Accessibility: 41 ARIA attrs found, but gaps in room list items and aria-live for messages
+ 
+diff --git a/android/app/src/main/java/com/forta/chat/plugins/download/ModelDownloadService.kt b/android/app/src/main/java/com/forta/chat/plugins/download/ModelDownloadService.kt
+index c7e31660..d4c54494 100644
+--- a/android/app/src/main/java/com/forta/chat/plugins/download/ModelDownloadService.kt
++++ b/android/app/src/main/java/com/forta/chat/plugins/download/ModelDownloadService.kt
+@@ -9,6 +9,7 @@ import android.content.Intent
+ import android.content.pm.ServiceInfo
+ import android.os.Build
+ import android.os.IBinder
++import android.os.PowerManager
+ import android.util.Log
+ import androidx.core.app.NotificationCompat
+ import com.forta.chat.R
+@@ -58,6 +59,13 @@ class ModelDownloadService : Service() {
+         private const val CHANNEL_ID = "model_download"
+         private const val NOTIFICATION_ID = 20001
+         private const val BUFFER_SIZE = 8192
++        private const val WAKELOCK_TAG = "bastyon:model_download_wakelock"
++        // Multi-GB models on a slow/throttled connection can legitimately
++        // take hours (checksum verification alone measured ~1.9h on-device
++        // for a 2.3GB file, see docs/decisions.md) — this is only a safety
++        // valve against a leaked wakelock if release() is ever missed, not
++        // an expected duration.
++        private const val WAKELOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000L
+ 
+         const val ACTION_START = "com.forta.chat.MODEL_DOWNLOAD_START"
+         const val ACTION_PAUSE = "com.forta.chat.MODEL_DOWNLOAD_PAUSE"
+@@ -133,6 +141,12 @@ class ModelDownloadService : Service() {
+     @Volatile
+     private var activeConnection: HttpURLConnection? = null
+     private var downloadThread: Thread? = null
++    // Volatile: released from runDownload()'s background thread (natural
++    // completion/failure) as well as onStartCommand/onDestroy on the main
++    // thread (pause/stop/OS teardown) — same cross-thread-field reasoning as
++    // currentState/currentPercent above.
++    @Volatile
++    private var wakeLock: PowerManager.WakeLock? = null
+ 
+     override fun onBind(intent: Intent?): IBinder? = null
+ 
+@@ -154,6 +168,7 @@ class ModelDownloadService : Service() {
+                 currentState = "running"
+                 currentError = null
+                 startForegroundWithNotification(currentPercent)
++                acquireWakeLock()
+ 
+                 downloadThread = Thread {
+                     runDownload(id, url, destinationPath, headersJson)
+@@ -163,6 +178,7 @@ class ModelDownloadService : Service() {
+                 cancelled = true
+                 activeConnection?.disconnect() // unblocks a stream read() that's mid-wait, see runDownload()'s catch
+                 currentState = "paused"
++                releaseWakeLock()
+                 stopForeground(STOP_FOREGROUND_REMOVE)
+                 stopSelf()
+             }
+@@ -172,6 +188,7 @@ class ModelDownloadService : Service() {
+                 currentId = null
+                 currentState = "pending"
+                 currentPercent = 0
++                releaseWakeLock()
+                 stopForeground(STOP_FOREGROUND_REMOVE)
+                 stopSelf()
+             }
+@@ -182,6 +199,7 @@ class ModelDownloadService : Service() {
+     override fun onDestroy() {
+         cancelled = true
+         activeConnection?.disconnect()
++        releaseWakeLock()
+         super.onDestroy()
+     }
+ 
+@@ -281,16 +299,43 @@ class ModelDownloadService : Service() {
+         } finally {
+             activeConnection = null
+             if (!cancelled || success) {
+-                // A genuine pause()/stop() already called stopForeground()/
+-                // stopSelf() itself from onStartCommand — only tear down
+-                // here for the natural completion/failure paths, so a
+-                // pause doesn't race itself into calling stopSelf() twice.
++                // A genuine pause()/stop() already released the wakelock and
++                // called stopForeground()/stopSelf() itself from
++                // onStartCommand — only tear down here for the natural
++                // completion/failure paths, so a pause doesn't race itself
++                // into calling stopSelf() twice.
++                releaseWakeLock()
+                 stopForeground(STOP_FOREGROUND_REMOVE)
+                 stopSelf()
+             }
+         }
+     }
+ 
++    // -----------------------------------------------------------------------
++    // Wakelock — CPU-only (PARTIAL_WAKE_LOCK, doesn't keep the screen on),
++    // same pattern as CallForegroundService. The foreground service itself
++    // keeps the process alive, but without a wakelock the CPU can still
++    // suspend once the screen locks, stalling the transfer until the user
++    // taps the device again — the whole point of a background/resumable
++    // model download is that it keeps progressing while the screen is off.
++    // -----------------------------------------------------------------------
++
++    private fun acquireWakeLock() {
++        if (wakeLock != null) return
++        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
++        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
++            acquire(WAKELOCK_TIMEOUT_MS)
++        }
++        Log.d(TAG, "Wakelock acquired")
++    }
++
++    private fun releaseWakeLock() {
++        wakeLock?.let {
++            if (it.isHeld) it.release()
++            wakeLock = null
++        }
++    }
++
+     private fun createNotificationChannel() {
+         val channel = NotificationChannel(
+             CHANNEL_ID,
+diff --git a/android/app/src/main/java/com/forta/chat/plugins/webrtc/NativeWebRTCManager.kt b/android/app/src/main/java/com/forta/chat/plugins/webrtc/NativeWebRTCManager.kt
+index 91dda6e8..cb505172 100644
+--- a/android/app/src/main/java/com/forta/chat/plugins/webrtc/NativeWebRTCManager.kt
++++ b/android/app/src/main/java/com/forta/chat/plugins/webrtc/NativeWebRTCManager.kt
+@@ -78,6 +78,7 @@ class NativeWebRTCManager(private val context: Context) {
+         fun onAddTrack(peerId: String, receiver: RtpReceiver, streams: Array<out MediaStream>)
+         fun onRemoveTrack(peerId: String, receiver: RtpReceiver)
+         fun onRenegotiationNeeded(peerId: String)
++        fun onSignalingStateChange(peerId: String, state: PeerConnection.SignalingState)
+     }
+ 
+     private var factory: PeerConnectionFactory? = null
+@@ -233,7 +234,19 @@ class NativeWebRTCManager(private val context: Context) {
+             }
+ 
+             override fun onDataChannel(dc: DataChannel) {}
+-            override fun onSignalingChange(state: PeerConnection.SignalingState) {}
++            override fun onSignalingChange(state: PeerConnection.SignalingState) {
++                // The JS proxy (rtc-peer-connection-proxy.ts) used to derive
++                // signalingState from local presence/absence of descriptions,
++                // which never reset on renegotiation and permanently reported
++                // "stable" after the first offer/answer exchange — silently
++                // breaking the SDK's perfect-negotiation collision detection
++                // (matrix-js-sdk-bastyon's onNegotiateReceived reads exactly
++                // this field to decide whether an incoming offer collides).
++                // libwebrtc's own state machine is the correct source of
++                // truth; forward it so the JS side no longer re-derives it.
++                Log.d(TAG, "[$peerId] onSignalingChange: $state")
++                listener.onSignalingStateChange(peerId, state)
++            }
+             override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
+                 Log.d(TAG, "[$peerId] Connection state: $state")
+             }
+diff --git a/android/app/src/main/java/com/forta/chat/plugins/webrtc/WebRTCPlugin.kt b/android/app/src/main/java/com/forta/chat/plugins/webrtc/WebRTCPlugin.kt
+index c13c1d9d..1ab34d25 100644
+--- a/android/app/src/main/java/com/forta/chat/plugins/webrtc/WebRTCPlugin.kt
++++ b/android/app/src/main/java/com/forta/chat/plugins/webrtc/WebRTCPlugin.kt
+@@ -228,6 +228,16 @@ class WebRTCPlugin : Plugin() {
+                     }
+                     notifyListeners("onRenegotiationNeeded", data)
+                 }
++
++                override fun onSignalingStateChange(peerId: String, state: PeerConnection.SignalingState) {
++                    val data = JSObject().apply {
++                        put("peerId", peerId)
++                        // W3C RTCSignalingState spelling ("have-local-offer", etc.) —
++                        // libwebrtc's enum names use underscores, W3C uses dashes.
++                        put("state", state.name.lowercase().replace("_", "-"))
++                    }
++                    notifyListeners("onSignalingStateChange", data)
++                }
+             })
+ 
+             call.resolve()
+diff --git a/docs/android-local-build.md b/docs/android-local-build.md
+index 856d3b84..2c3fc474 100644
+--- a/docs/android-local-build.md
++++ b/docs/android-local-build.md
+@@ -2,9 +2,9 @@
+ 
+ ## Пререквизиты
+ 
+-1. **JDK 17+** — Gradle 8.14 требует минимум JDK 17
++1. **JDK 21** — проект собирается с `sourceCompatibility/targetCompatibility JavaVersion.VERSION_21` (см. `android/app/build.gradle`), CI-воркфлоу также используют JDK 21
+    ```bash
+-   brew install openjdk@17
++   brew install openjdk@21
+    ```
+ 
+ 2. **Android SDK** — compileSdk 36, minSdk 24, targetSdk 36
+@@ -150,7 +150,7 @@ adb install android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk
+ | compileSdk | 36 |
+ | minSdk | 24 |
+ | targetSdk | 36 |
+-| JDK | 17+ |
++| JDK | 21 |
+ | Capacitor | 8.2 |
+ | Firebase | опционально (`google-services.json`) |
+ | applicationId | `com.forta.chat` |
+diff --git a/docs/architecture-data-flow.md b/docs/architecture-data-flow.md
+index 207125f2..b3995f5d 100644
+--- a/docs/architecture-data-flow.md
++++ b/docs/architecture-data-flow.md
+@@ -13,7 +13,7 @@ Forta Chat использует **offline-first** архитектуру с дв
+ 
+ ## 1. Слои хранения
+ 
+-### 1.1 Dexie (IndexedDB) — 8 таблиц
++### 1.1 Dexie (IndexedDB) — 15 таблиц (schema v18)
+ 
+ | Таблица | Назначение | Ключ | Индексы |
+ |---------|-----------|------|---------|
+@@ -23,8 +23,15 @@ Forta Chat использует **offline-first** архитектуру с дв
+ | `pendingOps` | Очередь отправки (offline) | `++id` | `roomId`, `status` |
+ | `syncState` | Точка синхронизации Matrix | `key` | — |
+ | `attachments` | Метаданные вложений | `id` | `messageId` |
+-| `decryptionQueue` | Очередь повторной расшифровки | `id` | `roomId`, `retryAfter` |
+-| `listenedMessages` | Прослушанные голосовые | `id` | — |
++| `decryptionQueue` | Очередь повторной расшифровки | `++id` | `eventId`, `roomId`, `status`, `[status+nextAttemptAt]` |
++| `listenedMessages` | Прослушанные голосовые | `messageId` | — |
++| `searchCache` | Кэш результатов поиска | `query` | `expiresAt` |
++| `channels` | Подписки на каналы | `address` | `syncOrder`, `updatedAt` |
++| `mediaCacheIndex` | Индекс кэша медиа-файлов | `mxc` | `accessedAt`, `roomId`, `category` |
++| `mediaCacheBlobs` | Blob-данные кэша медиа | `mxc` | — |
++| `callProviders` | Провайдеры звонков | `++id` | — |
++| `aiChats` | Локальные AI-чаты | `id` | `updatedAt` |
++| `aiMessages` | Сообщения AI-чатов | `++localId` | `id`, `[chatId+createdAt]` |
+ 
+ ### 1.2 Pinia stores — 3 основных
+ 
+diff --git a/docs/ios-local-build.md b/docs/ios-local-build.md
+index bec637ef..59eadccf 100644
+--- a/docs/ios-local-build.md
++++ b/docs/ios-local-build.md
+@@ -138,7 +138,7 @@ Entry:
+ | Bundle ID | `com.forta.chat` |
+ | App Group | `group.com.forta.chat` |
+ | Capacitor | 8.2 |
+-| iOS deployment target | 13.0 (Capacitor 8 default) |
++| iOS deployment target | 15.0 |
+ | Xcode | 16+ |
+ | iOS SDK | 17+ |
+ | URL scheme (custom) | `forta://` (внутренний — Share Extension wake-up) |
+diff --git a/docs/local-first-architecture.md b/docs/local-first-architecture.md
+index e9ea9df8..eadc73c4 100644
+--- a/docs/local-first-architecture.md
++++ b/docs/local-first-architecture.md
+@@ -1,24 +1,36 @@
+ # Local-First Architecture: Technical Design Document
+ 
++> **Статус: реализовано.** Этот документ изначально был design-планом миграции на local-first
++> (см. секцию 8 «Migration Plan» ниже — она описывает пройденный путь, а не будущие шаги).
++> Текущее состояние приложения соответствует описанному ниже "Target state": Dexie — единственный
++> источник истины, основной путь чтения/записи идёт через `SyncEngine`/`EventWriter`
++> (см. `CLAUDE.md` и [architecture-data-flow.md](architecture-data-flow.md)).
++
+ ## 1. Executive Summary
+ 
+-### Current state
+-The app uses a **server-first + cache** model:
+-- Matrix server is the source of truth
+-- Pinia stores hold data in memory (volatile)
+-- `chat-cache.ts` caches rooms/messages in IndexedDB for instant first paint
+-- `offline-queue.ts` queues only text messages in localStorage
+-- Optimistic updates exist only for message sending
+-
+-### Target state
+-**Local-first** model:
+-- **IndexedDB (Dexie.js)** is the local source of truth
+-- All reads come from the local DB, never from the Matrix SDK directly
+-- All mutations write locally first, then sync in the background
+-- Full **operation queue** supports all mutation types (send, edit, react, delete, files)
+-- Works offline for hours — full history browsing, message creation
+-- On reconnect, replays pending operations and applies server deltas
+-- Multi-device conflicts resolved via Matrix's immutable event model (last-event-wins)
++### Current state (реализовано)
++Приложение использует **local-first** модель:
++- **IndexedDB (Dexie.js)** — локальный источник истины (`shared/lib/local-db/schema.ts`, schema v18, 15 таблиц)
++- Все чтения идут из локальной БД через `useLiveQuery`, а не напрямую из Matrix SDK
++- Все мутации сначала пишутся локально, затем синхронизируются в фоне через `SyncEngine`
++  (FIFO-очередь `pendingOps`, exponential backoff + jitter)
++- Очередь операций поддерживает все типы мутаций (отправка, редактирование, реакции, удаление, файлы)
++- Работает офлайн часами — полная история и создание сообщений без сети
++- При восстановлении соединения дозаписывает pending-операции и применяет серверные дельты через `EventWriter`
++- Конфликты между устройствами разрешаются через неизменяемую модель событий Matrix (last-event-wins)
++
++### Исходное состояние (до миграции, для контекста)
++До перехода на local-first приложение использовало **server-first + cache** модель:
++- Matrix-сервер был источником истины
++- Pinia stores хранили данные только в памяти (volatile)
++- `chat-cache.ts` кэшировал комнаты/сообщения в IndexedDB для мгновенного первого рендера
++- `offline-queue.ts` ставил в очередь только текстовые сообщения через localStorage
++- Оптимистичные обновления существовали только для отправки сообщений
++
++Файлы `chat-cache.ts` (`shared/lib/cache/`) и `offline-queue.ts` (`shared/lib/`) физически ещё есть в кодовой базе
++и используются в отдельных местах (`entities/auth/model/stores.ts`, `entities/chat/model/chat-store.ts`,
++`features/messaging/model/use-messages.ts`) — секция 8 «Migration Plan» (Phase 5) их полное удаление
++не завершила до конца; Dexie/`SyncEngine` при этом уже является основным путём чтения/записи.
+ 
+ ### Why Dexie.js
+ - Works in Browser, Electron, and Mobile WebView (Capacitor)
+diff --git a/src/entities/auth/model/stores.ts b/src/entities/auth/model/stores.ts
+index 083d9f3e..60d4cc01 100644
+--- a/src/entities/auth/model/stores.ts
++++ b/src/entities/auth/model/stores.ts
+@@ -1594,6 +1594,35 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
+     return result;
+   };
+ 
++  /** Requests PKOIN funding for the just-solved captcha. Kept as a separate
++   *  call from submitCaptcha() (not folded into it) so a wrong-answer
++   *  failure and a funding failure are two structurally distinct call sites
++   *  for the caller (see CaptchaStep.vue) instead of one function silently
++   *  doing "verify captcha AND spend it" — that would give a future change
++   *  (e.g. a retry-on-wrong-answer path) no seam to avoid accidentally
++   *  re-triggering funding too.
++   *
++   *  Called right after submitCaptcha() succeeds (CaptchaStep.vue), not
++   *  deferred to register() — a captcha grant can be single-use/time-limited
++   *  server-side, and deferring funding to the final wizard step (after the
++   *  user reviews/copies their mnemonic, an arbitrarily long delay) used to
++   *  surface funding failures as a dead-end "Retry" loop with no way back to
++   *  get a fresh captcha. */
++  const requestRegistrationFunding = async () => {
++    if (!regAddress.value || !regProxyId.value || !regCaptchaId.value) {
++      throw new Error("No captcha in progress");
++    }
++    try {
++      await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
++    } catch (e) {
++      // This specific captcha grant is burned — reset it so the caller gets
++      // a fresh captcha instead of retrying with a doomed id pair.
++      regCaptchaId.value = null;
++      regCaptchaDone.value = false;
++      throw e;
++    }
++  };
++
+   /** Check if a username is already taken on the blockchain.
+    *  Returns the owning address if taken, null if available. */
+   const checkUsername = async (name: string): Promise<string | null> => {
+@@ -1601,21 +1630,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
+   };
+ 
+   const register = async (profile: { name: string; language: string; about: string; image?: string }) => {
+-    if (!regAddress.value || !regCaptchaId.value || !regProxyId.value || !regMnemonic.value) {
++    // PKOIN was already requested in submitCaptcha() right after the captcha
++    // was solved (see there) — no separate free-balance step here anymore.
++    if (!regAddress.value || !regMnemonic.value || !regCaptchaDone.value) {
+       throw new Error("Registration state incomplete");
+     }
+ 
+-    // 1. Request free registration PKOIN
+-    await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
+-
+-    // 2. Generate encryption public keys (12 BIP32 keys) for chat encryption
++    // 1. Generate encryption public keys (12 BIP32 keys) for chat encryption
+     const encKeys = generateEncryptionKeys(regPrivateKeyHex.value!);
+     const encPublicKeys = encKeys.map(k => k.public);
+ 
+-    // 3. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
++    // 2. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
+     setPendingRegProfile({ ...profile, encPublicKeys });
+ 
+-    // 4. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
++    // 3. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
+     // Split into a sync half (derive keys, set auth state) and a network half
+     // (profile fetch, key verification, Matrix init) so the bounded
+     // registration poll (30-min PollTimer, per-RPC withTimeout) can start
+@@ -1636,7 +1664,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
+     setRegistrationPending(true);
+     setRegistrationPhase('init');
+ 
+-    // 5. Start polling now — will broadcast UserInfo when PKOIN arrives, then
++    // 4. Start polling now — will broadcast UserInfo when PKOIN arrives, then
+     // wait for confirmation. Runs concurrently with the network login below;
+     // onRegistrationConfirmed() already re-runs initMatrix() itself if Matrix
+     // isn't ready yet by the time the blockchain confirms, so the ordering
+@@ -2382,6 +2410,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
+     registrationPollAttempt,
+     registrationPollElapsedMs,
+     registrationUsernameError,
++    requestRegistrationFunding,
+     resumeRegistrationPoll,
+     retryRegistration,
+     retryRegistrationWithNewName,
+diff --git a/src/entities/chat/model/__tests__/offline-read-sync-gate.test.ts b/src/entities/chat/model/__tests__/offline-read-sync-gate.test.ts
+index aad3017a..2f39f494 100644
+--- a/src/entities/chat/model/__tests__/offline-read-sync-gate.test.ts
++++ b/src/entities/chat/model/__tests__/offline-read-sync-gate.test.ts
+@@ -17,6 +17,9 @@ vi.mock("@/entities/matrix", () => ({
+ }));
+ 
+ import { useChatStore } from "../chat-store";
++import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
++
++const INITIAL_SYNC_TIMEOUT_MS = DEFAULT_WATCHDOG_CONFIG.staleTimeoutMs;
+ 
+ function makeLocalRoom(id: string, overrides: Partial<LocalRoom> = {}): LocalRoom {
+   return {
+@@ -93,9 +96,10 @@ describe("WEE-80 — chat-store offline read path (no Matrix, no network)", () =
+     // Genuine first-load phase: skeleton allowed.
+     expect(store.isSyncing).toBe(true);
+ 
+-    // Watchdog gives up after 8s with no sync → degraded. Cached Dexie data is
+-    // now authoritative, so the read path must stop reporting "syncing".
+-    vi.advanceTimersByTime(8000);
++    // Watchdog gives up after INITIAL_SYNC_TIMEOUT_MS with no sync → degraded.
++    // Cached Dexie data is now authoritative, so the read path must stop
++    // reporting "syncing".
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.isSyncing).toBe(false);
+ 
+     // A failing/recovering Matrix poll (offline) must NOT re-raise the
+diff --git a/src/entities/chat/model/chat-store-initial-sync.test.ts b/src/entities/chat/model/chat-store-initial-sync.test.ts
+index 4d2c5b60..6b8fed41 100644
+--- a/src/entities/chat/model/chat-store-initial-sync.test.ts
++++ b/src/entities/chat/model/chat-store-initial-sync.test.ts
+@@ -25,6 +25,9 @@ vi.mock("@/entities/matrix", () => ({
+ 
+ import { useChatStore } from "./chat-store";
+ import { isChatsInteractive, __resetBootSignalsForTests } from "@/shared/lib/boot-signals";
++import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
++
++const INITIAL_SYNC_TIMEOUT_MS = DEFAULT_WATCHDOG_CONFIG.staleTimeoutMs;
+ 
+ describe("chat-store WEE-55 initial-sync watchdog", () => {
+   let store: ReturnType<typeof useChatStore>;
+@@ -53,7 +56,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
+     store.startInitialSyncWatch();
+     expect(store.initialSyncStatus).toBe("loading");
+ 
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+ 
+     // Stop blocking the UI: surface cached rooms / empty hint, not a spinner.
+     expect(store.initialSyncStatus).toBe("degraded");
+@@ -63,7 +66,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
+ 
+   it("does not degrade before the deadline elapses", () => {
+     store.startInitialSyncWatch();
+-    vi.advanceTimersByTime(7999);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS - 1);
+     expect(store.initialSyncStatus).toBe("loading");
+     expect(store.isSyncing).toBe(true);
+   });
+@@ -81,7 +84,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
+     expect(store.isSyncing).toBe(false);
+ 
+     // The watchdog must have been cleared — staying ready past the deadline.
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.initialSyncStatus).toBe("ready");
+   });
+ 
+@@ -108,7 +111,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
+   it("upgrades degraded → ready when a real PREPARED sync arrives late", () => {
+     // Simulate the post-update hang: watchdog armed, sync never lands in time.
+     store.setHelpers(mockMatrixService.kit as never, {} as never);
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.initialSyncStatus).toBe("degraded");
+     expect(store.roomsInitialized).toBe(true);
+     expect(store.isSyncing).toBe(false);
+@@ -137,13 +140,13 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
+   it("WEE-97: signals chats-interactive on watchdog degrade too", () => {
+     expect(isChatsInteractive()).toBe(false);
+     store.startInitialSyncWatch();
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(isChatsInteractive()).toBe(true);
+   });
+ 
+   it("cleanup resets the lifecycle back to 'loading'", () => {
+     store.startInitialSyncWatch();
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.initialSyncStatus).toBe("degraded");
+ 
+     store.cleanup();
+@@ -152,7 +155,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
+ 
+     // A fresh watchdog can be armed again after cleanup.
+     store.startInitialSyncWatch();
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.initialSyncStatus).toBe("degraded");
+   });
+ });
+@@ -183,9 +186,9 @@ describe("chat-store room-list first-load states", () => {
+     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+   });
+ 
+-  it("switches to slow placeholder after the 8s degrade (still not empty)", () => {
++  it("switches to slow placeholder after the degrade watchdog (still not empty)", () => {
+     store.startInitialSyncWatch();
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.initialSyncStatus).toBe("degraded");
+     expect(store.isRoomListLoading).toBe(true);
+     expect(store.isRoomListLoadingSlow).toBe(true);
+@@ -195,7 +198,7 @@ describe("chat-store room-list first-load states", () => {
+ 
+   it("accepts authoritative empty after degraded escape window", () => {
+     store.startInitialSyncWatch();
+-    vi.advanceTimersByTime(8000);
++    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
+     expect(store.isRoomListLoadingSlow).toBe(true);
+     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+ 
+diff --git a/src/entities/chat/model/chat-store.ts b/src/entities/chat/model/chat-store.ts
+index 2c645ff5..89db825d 100644
+--- a/src/entities/chat/model/chat-store.ts
++++ b/src/entities/chat/model/chat-store.ts
+@@ -1,6 +1,7 @@
+ import { getMatrixClientService } from "@/entities/matrix";
+ import type { MatrixKit } from "@/entities/matrix";
+ import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
++import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
+ import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
+ import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
+ import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
+@@ -493,8 +494,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
+   // message skeleton. "degraded" is the escape hatch: stop waiting and fall
+   // back to whatever the Dexie cache holds (or the empty-state hint).
+   const initialSyncStatus = ref<"loading" | "ready" | "degraded">("loading");
+-  /** Watchdog deadline before we give up on the first sync and degrade. */
+-  const INITIAL_SYNC_TIMEOUT_MS = 8000;
++  /** Watchdog deadline before we give up on the first sync and degrade. Tied to
++   *  the matrix-client mirror-failover budget (sync-failover.ts) so the room
++   *  list doesn't declare "empty" before the network layer has even had a
++   *  chance to fail over and recover — an empty cache has nothing to fall
++   *  back to, so degrading early here just shows a false "no chats". */
++  const INITIAL_SYNC_TIMEOUT_MS = DEFAULT_WATCHDOG_CONFIG.staleTimeoutMs;
+   /**
+    * After ready+PREPARED with an empty room list, wait this long for rooms to
+    * materialize (large accounts / slow WebView) before accepting "no dialogs".
+@@ -502,9 +507,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
+    */
+   const PREPARED_EMPTY_GRACE_MS = 3000;
+   /**
+-   * After the 8s degrade watchdog, keep the "taking longer" skeleton this long
+-   * on an empty cache, then accept authoritative empty so new accounts are not
+-   * stuck forever waiting for SYNCING.
++   * After the degrade watchdog (INITIAL_SYNC_TIMEOUT_MS) fires, keep the
++   * "taking longer" skeleton this long on an empty cache, then accept
++   * authoritative empty so new accounts are not stuck forever waiting for
++   * SYNCING.
+    */
+   const DEGRADED_EMPTY_ESCAPE_MS = 8000;
+   let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;
+diff --git a/src/entities/local-ai/model/local-ai-store.test.ts b/src/entities/local-ai/model/local-ai-store.test.ts
+index 6a5f55c5..9d31fc4b 100644
+--- a/src/entities/local-ai/model/local-ai-store.test.ts
++++ b/src/entities/local-ai/model/local-ai-store.test.ts
+@@ -845,6 +845,38 @@ describe("useLocalAiStore", () => {
+         expect(store.loadedModelId).toBe("qwen-4b");
+       });
+ 
++      // Live bug, 2026-08-29: `autoUnloadOnBackground` (create-client.ts)
++      // releases the native runtime on every backgrounding, but `modelReady`
++      // stayed true (only loadedModelId was cleared) — AiChatView/AiModelGate
++      // gate purely on modelReady, so the composer stayed visible while the
++      // runtime was gone, and every sendMessage() died with local-ai's "call
++      // ensureModelReady() before sendMessage()" until the app was killed and
++      // relaunched. modelReady must reset here so AiModelGate remounts and
++      // its restoreModelIfPreviouslyDownloaded() actually reloads the model.
++      it("runtime:unloaded (background) resets modelReady — the file is still on disk, but the runtime context is gone", async () => {
++        const client = await store.ensureClient("addr_a", makeFakeConfig());
++        await emitOn(client, "download:completed", { key: "model", kind: "model" });
++        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
++        expect(store.modelReady).toBe(true);
++
++        await emitOn(client, "runtime:unloaded", { reason: "background" });
++
++        expect(store.modelReady).toBe(false);
++        expect(store.loadedModelId).toBeNull();
++      });
++
++      it("runtime:unloaded (model-switch/embedding-switch) does NOT reset modelReady — only 'background' does", async () => {
++        const client = await store.ensureClient("addr_a", makeFakeConfig());
++        await emitOn(client, "download:completed", { key: "model", kind: "model" });
++        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
++
++        await emitOn(client, "runtime:unloaded", { reason: "model-switch" });
++        expect(store.modelReady).toBe(true);
++
++        await emitOn(client, "runtime:unloaded", { reason: "embedding-switch" });
++        expect(store.modelReady).toBe(true);
++      });
++
+       it("releaseRuntime() resets loadedModelId", async () => {
+         const client = await store.ensureClient("addr_a", makeFakeConfig());
+         await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+diff --git a/src/entities/local-ai/model/local-ai-store.ts b/src/entities/local-ai/model/local-ai-store.ts
+index 2c224c8c..facaa40a 100644
+--- a/src/entities/local-ai/model/local-ai-store.ts
++++ b/src/entities/local-ai/model/local-ai-store.ts
+@@ -258,6 +258,21 @@ export const useLocalAiStore = defineStore("local-ai", () => {
+           loadedModelId.value = null;
+           loadedModelVersion.value = null;
+         }
++        // `autoUnloadOnBackground` (create-client.ts) releases the native
++        // runtime on every backgrounding, but the model file stays fully on
++        // disk — unlike 'model-switch'/'embedding-switch', `modelReady` must
++        // NOT keep reading true here, or AiModelGate/AiChatView skip straight
++        // to the composer while the runtime is unloaded and every
++        // sendMessage() dies with local-ai's "call ensureModelReady() before
++        // sendMessage()" (RuntimeInitError) until the whole app is killed and
++        // relaunched (live bug, 2026-08-29). Flipping this back to false
++        // makes AiChatView remount AiModelGate, whose own onMounted calls
++        // restoreModelIfPreviouslyDownloaded() — that now actually reloads
++        // the context (its early-return guard was skipping it while
++        // `modelReady` stayed true) instead of silently doing nothing.
++        if (reason === "background") {
++          downloadState.value.model.ready = false;
++        }
+       }),
+       c.on("manifest:updated", (diff) => {
+         // Cached manifest changed — eligibility/disk-state may now read
+diff --git a/src/entities/matrix/model/sync-failover.ts b/src/entities/matrix/model/sync-failover.ts
+index 58bd6bc4..a52aa3e2 100644
+--- a/src/entities/matrix/model/sync-failover.ts
++++ b/src/entities/matrix/model/sync-failover.ts
+@@ -129,7 +129,7 @@ export interface SyncWatchdogConfig {
+ 
+ export const DEFAULT_WATCHDOG_CONFIG: SyncWatchdogConfig = {
+   maxConsecutiveErrors: 4,
+-  staleTimeoutMs: 45_000,
++  staleTimeoutMs: 300_000,
+   maxConsecutiveFailovers: 4,
+ };
+ 
+diff --git a/src/features/auth/ui/register-form/steps/CaptchaStep.vue b/src/features/auth/ui/register-form/steps/CaptchaStep.vue
+index 26e6c1ec..47f8673e 100644
+--- a/src/features/auth/ui/register-form/steps/CaptchaStep.vue
++++ b/src/features/auth/ui/register-form/steps/CaptchaStep.vue
+@@ -42,13 +42,31 @@ const handleSubmit = async () => {
+   if (!captchaText.value.trim()) return;
+   submitting.value = true;
+   error.value = "";
++
+   try {
+     await authStore.submitCaptcha(captchaText.value.trim());
+-    emit("done");
+   } catch {
+     error.value = t("register.captchaIncorrect");
+     submitting.value = false;
+     await loadCaptcha(false);
++    return;
++  }
++
++  try {
++    // PKOIN funding is requested right here, while the captcha grant is
++    // fresh, instead of being deferred to the final wizard step — see
++    // requestRegistrationFunding()'s doc comment in the auth store.
++    await authStore.requestRegistrationFunding();
++    emit("done");
++  } catch {
++    // The captcha text was correct but the funding grant failed
++    // (expired/single-use/rate-limited) — a distinct message from a wrong
++    // captcha answer. Either way, load a FRESH captcha: the store already
++    // reset regCaptchaId on this failure, so retrying the old id would just
++    // fail again identically.
++    error.value = t("register.captchaFundingFailed");
++    submitting.value = false;
++    await loadCaptcha(false);
+   }
+ };
+ 
+diff --git a/src/features/contacts/model/use-contacts.test.ts b/src/features/contacts/model/use-contacts.test.ts
+index f0f7cdc4..3467f33f 100644
+--- a/src/features/contacts/model/use-contacts.test.ts
++++ b/src/features/contacts/model/use-contacts.test.ts
+@@ -37,6 +37,7 @@ const mockGetRoom = vi.fn(() => ({ selfMembership: "join" }));
+ const mockSetPowerLevel = vi.fn();
+ const mockSearchUserDirectory = vi.fn<(term: string, limit?: number) => Promise<{ limited: boolean; results: Array<{ user_id: string; display_name?: string; avatar_url?: string }> }>>();
+ const mockIsReady = vi.fn(() => true);
++const mockMxcToHttp = vi.fn((mxcUrl: string) => mxcUrl.replace("mxc://", "https://matrix.pocketnet.app/_matrix/media/r0/download/"));
+ 
+ vi.mock("@/entities/matrix", () => ({
+   getMatrixClientService: vi.fn(() => ({
+@@ -49,6 +50,7 @@ vi.mock("@/entities/matrix", () => ({
+     setPowerLevel: mockSetPowerLevel,
+     sendText: vi.fn(),
+     searchUserDirectory: (term: string, limit?: number) => mockSearchUserDirectory(term, limit),
++    mxcToHttp: (mxcUrl: string) => mockMxcToHttp(mxcUrl),
+   })),
+   resetMatrixClientService: vi.fn(),
+   MatrixClientService: vi.fn(),
+@@ -240,6 +242,27 @@ describe("useContacts", () => {
+       }
+     });
+ 
++    it("converts a Matrix user_directory mxc:// avatar_url to an HTTP URL", async () => {
++      mockRpcSearchUsers.mockResolvedValue([]);
++      const targetHex = hexEncode("PMaxtest2222222222222222222222222AB").toLowerCase();
++      mockSearchUserDirectory.mockResolvedValue({
++        limited: false,
++        results: [{
++          user_id: `@${targetHex}:matrix.pocketnet.app`,
++          display_name: "maxtest",
++          avatar_url: "mxc://matrix.pocketnet.app/abc123",
++        }],
++      });
++
++      await contacts.searchUsers("maxtest");
++
++      expect(mockMxcToHttp).toHaveBeenCalledWith("mxc://matrix.pocketnet.app/abc123");
++      expect(contacts.searchResults.value.length).toBeGreaterThan(0);
++      const [result] = contacts.searchResults.value;
++      expect(result.image).not.toMatch(/^mxc:\/\//);
++      expect(result.image).toBe("https://matrix.pocketnet.app/_matrix/media/r0/download/matrix.pocketnet.app/abc123");
++    });
++
+     // ─── Security: malformed user_directory input ────────────
+ 
+     it("rejects Matrix results whose decoded address is not Bastyon-shaped", async () => {
+diff --git a/src/features/contacts/model/use-contacts.ts b/src/features/contacts/model/use-contacts.ts
+index 19c8e800..a12d1489 100644
+--- a/src/features/contacts/model/use-contacts.ts
++++ b/src/features/contacts/model/use-contacts.ts
+@@ -25,7 +25,10 @@ function getAppInit() {
+  *  Matrix user_id format: @<hex-address>:<server>. We decode the hex back
+  *  to a Bastyon address using the shared `hexDecode` (which mirrors
+  *  `hexEncode`'s 0x350 offset), then validate against the Bastyon shape. */
+-function normalizeMatrixDirectoryUser(entry: { user_id: string; display_name?: string; avatar_url?: string }): { address: string; name: string; image: string } | null {
++function normalizeMatrixDirectoryUser(
++  entry: { user_id: string; display_name?: string; avatar_url?: string },
++  mxcToHttp: (mxcUrl: string) => string | null,
++): { address: string; name: string; image: string } | null {
+   // Extract hex localpart from @<localpart>:<server>
+   const m = /^@([^:]+):/.exec(entry.user_id);
+   if (!m) return null;
+@@ -45,7 +48,8 @@ function normalizeMatrixDirectoryUser(entry: { user_id: string; display_name?: s
+   return {
+     address,
+     name: entry.display_name && entry.display_name !== entry.user_id ? entry.display_name : address,
+-    image: entry.avatar_url ?? "",
++    // The directory returns a raw mxc:// content URI, not a fetchable HTTP URL.
++    image: entry.avatar_url ? mxcToHttp(entry.avatar_url) ?? "" : "",
+   };
+ }
+ 
+@@ -144,7 +148,7 @@ export function useContacts() {
+         try {
+           const resp = await matrixService.searchUserDirectory(trimmed, 20);
+           matrixResults = resp.results
+-            .map(normalizeMatrixDirectoryUser)
++            .map(entry => normalizeMatrixDirectoryUser(entry, url => matrixService.mxcToHttp(url)))
+             .filter((u): u is { address: string; name: string; image: string } => u !== null);
+         } catch (mErr) {
+           console.warn("[useContacts] Matrix user_directory fallback failed:", mErr);
+diff --git a/src/shared/lib/i18n/locales/en.ts b/src/shared/lib/i18n/locales/en.ts
+index a1fec583..d16a0ca2 100644
+--- a/src/shared/lib/i18n/locales/en.ts
++++ b/src/shared/lib/i18n/locales/en.ts
+@@ -790,6 +790,7 @@ export const en = {
+   "register.initError": "Failed to initialize. Please try again.",
+   "register.captchaPlaceholder": "Enter the text shown above",
+   "register.captchaIncorrect": "Incorrect captcha. Please try again.",
++  "register.captchaFundingFailed": "Couldn't complete registration with this captcha. Please try a new one.",
+   "register.refreshCaptcha": "Refresh",
+   "register.submit": "Submit",
+   "register.displayName": "Display Name",
+diff --git a/src/shared/lib/i18n/locales/ru.ts b/src/shared/lib/i18n/locales/ru.ts
+index 2fecd0b4..86af9a98 100644
+--- a/src/shared/lib/i18n/locales/ru.ts
++++ b/src/shared/lib/i18n/locales/ru.ts
+@@ -792,6 +792,7 @@ export const ru: Record<TranslationKey, string> = {
+   "register.initError": "Ошибка инициализации. Попробуйте снова.",
+   "register.captchaPlaceholder": "Введите текст с картинки",
+   "register.captchaIncorrect": "Неверная капча. Попробуйте снова.",
++  "register.captchaFundingFailed": "Не удалось завершить регистрацию с этой капчей. Попробуйте новую.",
+   "register.refreshCaptcha": "Обновить",
+   "register.submit": "Отправить",
+   "register.displayName": "Отображаемое имя",
+diff --git a/src/shared/lib/native-webrtc/native-webrtc-bridge.ts b/src/shared/lib/native-webrtc/native-webrtc-bridge.ts
+index dfc0ac51..61787747 100644
+--- a/src/shared/lib/native-webrtc/native-webrtc-bridge.ts
++++ b/src/shared/lib/native-webrtc/native-webrtc-bridge.ts
+@@ -122,6 +122,16 @@ export interface NativeWebRTCPlugin {
+     handler: (data: { peerId: string }) => void
+   ): Promise<PluginListenerHandle>;
+ 
++  // Real signalingState from the native libwebrtc PeerConnection. The JS
++  // proxy used to re-derive this from local/remote description presence,
++  // which never reset on renegotiation and broke the SDK's offer-collision
++  // detection (matrix-js-sdk-bastyon relies on signalingState === "stable"
++  // to decide whether an incoming offer collides with one in flight).
++  addListener(
++    event: "onSignalingStateChange",
++    handler: (data: { peerId: string; state: string }) => void
++  ): Promise<PluginListenerHandle>;
++
+   addListener(
+     event: "onNativeHangup",
+     handler: (data: Record<string, never>) => void
+diff --git a/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.test.ts b/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.test.ts
+index 02c8335e..b65f95a4 100644
+--- a/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.test.ts
++++ b/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.test.ts
+@@ -76,6 +76,22 @@ import {
+ // Helper: wait a microtask tick so async init of NativeRTCPeerConnection completes.
+ const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+ 
++// happy-dom doesn't implement RTCSessionDescription (unlike RTCIceCandidate,
++// which it does provide). The proxy only uses it as a plain {type, sdp}
++// holder, so a minimal stub is enough for setLocalDescription/
++// setRemoteDescription tests to run under this test environment.
++if (typeof globalThis.RTCSessionDescription === "undefined") {
++  (globalThis as unknown as { RTCSessionDescription: unknown }).RTCSessionDescription =
++    class {
++      type: string;
++      sdp: string;
++      constructor(init: { type?: string; sdp?: string }) {
++        this.type = init.type ?? "offer";
++        this.sdp = init.sdp ?? "";
++      }
++    };
++}
++
+ describe("NativeRTCPeerConnection proxy", () => {
+   beforeEach(() => {
+     for (const k of Object.keys(bridgeMethods)) {
+@@ -434,6 +450,91 @@ describe("NativeRTCPeerConnection proxy", () => {
+     });
+   });
+ 
++  describe("signalingState (native-sourced)", () => {
++    // Regression coverage for the bug where signalingState was inferred
++    // locally from "do we have a local/remote description" rather than
++    // read from the real libwebrtc state machine. That heuristic never
++    // reset on renegotiation, so once both descriptions had been set once
++    // it reported "stable" forever — silently breaking the SDK's
++    // perfect-negotiation offer-collision detection in
++    // matrix-js-sdk-bastyon's onNegotiateReceived (which reads
++    // peerConn.signalingState to decide whether an incoming offer
++    // collides with one already in flight). signalingState must now come
++    // exclusively from the native onSignalingStateChange event.
++
++    async function newPcAndPeerId(): Promise<{ pc: RTCPeerConnection; peerId: string }> {
++      const pc = new window.RTCPeerConnection();
++      await tick();
++      await tick();
++      const arg = getBridgeMethod("createPeerConnection").mock.calls.at(-1)?.[0] as {
++        peerId: string;
++      };
++      return { pc, peerId: arg.peerId };
++    }
++
++    it("starts as 'stable' and updates only in response to the native event", async () => {
++      const { pc, peerId } = await newPcAndPeerId();
++      expect(pc.signalingState).toBe("stable");
++
++      fireNativeEvent("onSignalingStateChange", { peerId, state: "have-remote-offer" });
++      expect(pc.signalingState).toBe("have-remote-offer");
++
++      fireNativeEvent("onSignalingStateChange", { peerId, state: "stable" });
++      expect(pc.signalingState).toBe("stable");
++
++      pc.close();
++    });
++
++    it("does NOT flip to 'stable' merely because both descriptions are set locally (the old bug)", async () => {
++      const { pc, peerId } = await newPcAndPeerId();
++
++      // Normal answerer flow: remote offer then local answer — both
++      // description fields get populated on the proxy.
++      await pc.setRemoteDescription({ type: "offer", sdp: "v=0\r\n" });
++      await pc.setLocalDescription({ type: "answer", sdp: "v=0\r\n" });
++
++      // No native signalingState event fired yet — the proxy must not
++      // self-derive "stable" from description presence any more.
++      expect(pc.signalingState).toBe("stable"); // unchanged from the initial default
++
++      fireNativeEvent("onSignalingStateChange", { peerId, state: "stable" });
++      expect(pc.signalingState).toBe("stable");
++
++      // ICE restart: a fresh local offer is set while the old remote
++      // description is still cached. The removed heuristic saw
++      // hadLocal && hadRemote and always reported "stable" here, which
++      // broke SDK offer-collision detection during renegotiation.
++      await pc.setLocalDescription({ type: "offer", sdp: "v=0\r\n(restart)" });
++      expect(pc.signalingState).toBe("stable"); // still not self-derived
++
++      fireNativeEvent("onSignalingStateChange", { peerId, state: "have-local-offer" });
++      expect(pc.signalingState).toBe("have-local-offer");
++
++      pc.close();
++    });
++
++    it("ignores signalingState events for a different peerId", async () => {
++      const { pc } = await newPcAndPeerId();
++
++      fireNativeEvent("onSignalingStateChange", {
++        peerId: "some-other-peer-id",
++        state: "have-local-offer",
++      });
++      expect(pc.signalingState).toBe("stable");
++
++      pc.close();
++    });
++
++    it("ignores unrecognised state strings", async () => {
++      const { pc, peerId } = await newPcAndPeerId();
++
++      fireNativeEvent("onSignalingStateChange", { peerId, state: "not-a-real-state" });
++      expect(pc.signalingState).toBe("stable");
++
++      pc.close();
++    });
++  });
++
+   describe("_syncLocalStreamIds (renegotiation)", () => {
+     it("updates local stream.id on first createOffer to match native SDP msid", async () => {
+       const sdpWithMsid =
+diff --git a/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.ts b/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.ts
+index 4a44e9c0..1f773560 100644
+--- a/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.ts
++++ b/src/shared/lib/native-webrtc/rtc-peer-connection-proxy.ts
+@@ -32,6 +32,19 @@ const ICE_STATE_MAP: Record<string, RTCIceConnectionState> = {
+   closed: "closed",
+ };
+ 
++// Signaling state mapping: native (libwebrtc, forwarded by WebRTCPlugin.kt's
++// onSignalingChange) → RTCSignalingState. The native side already sends the
++// W3C spelling (see WebRTCPlugin.kt's onSignalingStateChange), this map is a
++// validating passthrough so an unrecognised value can't corrupt state.
++const SIGNALING_STATE_MAP: Record<string, RTCSignalingState> = {
++  stable: "stable",
++  "have-local-offer": "have-local-offer",
++  "have-local-pranswer": "have-local-pranswer",
++  "have-remote-offer": "have-remote-offer",
++  "have-remote-pranswer": "have-remote-pranswer",
++  closed: "closed",
++};
++
+ class NativeRTCPeerConnection extends EventTarget {
+   // Manual event listener tracking — EventTarget.dispatchEvent may not
+   // work correctly in Capacitor WebView for custom classes
+@@ -219,6 +232,16 @@ class NativeRTCPeerConnection extends EventTarget {
+         )
+       );
+ 
++      this.listeners.push(
++        await NativeWebRTC.addListener(
++          "onSignalingStateChange",
++          (data) => {
++            if (this._closed || data.peerId !== this._peerId) return;
++            this._handleSignalingStateChange(data.state);
++          }
++        )
++      );
++
+       this.listeners.push(
+         await NativeWebRTC.addListener("onTrack", (data) => {
+           if (this._closed || data.peerId !== this._peerId) return;
+@@ -386,7 +409,6 @@ class NativeRTCPeerConnection extends EventTarget {
+       type: desc.type ?? "offer",
+     });
+     this._localDescription = new RTCSessionDescription(desc);
+-    this._updateSignalingState();
+   }
+ 
+   async setRemoteDescription(
+@@ -400,7 +422,6 @@ class NativeRTCPeerConnection extends EventTarget {
+       type: desc.type ?? "answer",
+     });
+     this._remoteDescription = new RTCSessionDescription(desc);
+-    this._updateSignalingState();
+   }
+ 
+   async addIceCandidate(
+@@ -591,6 +612,20 @@ class NativeRTCPeerConnection extends EventTarget {
+    * and drive the resilience watchdog (auto-restart on disconnected/failed,
+    * dead-connection escalation).
+    */
++  /**
++   * Handle a native signalingState transition. libwebrtc is the single
++   * source of truth here — it drives the same state machine the SDK's
++   * perfect-negotiation code (matrix-js-sdk-bastyon call.ts) assumes it is
++   * reading from a spec-compliant RTCPeerConnection.
++   */
++  private _handleSignalingStateChange(state: string): void {
++    const mapped = SIGNALING_STATE_MAP[state];
++    if (!mapped || mapped === this._signalingState) return;
++    this._signalingState = mapped;
++    this.onsignalingstatechange?.(new Event("signalingstatechange"));
++    this._fireEvent(new Event("signalingstatechange"));
++  }
++
+   private _handleIceConnectionStateChange(state: string): void {
+     this._iceConnectionState = ICE_STATE_MAP[state] ?? "new";
+     if (state === "connected" || state === "completed") {
+@@ -748,18 +783,6 @@ class NativeRTCPeerConnection extends EventTarget {
+     }
+   }
+ 
+-  private _updateSignalingState() {
+-    const hadLocal = this._localDescription !== null;
+-    const hadRemote = this._remoteDescription !== null;
+-    if (hadLocal && hadRemote) {
+-      this._signalingState = "stable";
+-    } else if (hadLocal) {
+-      this._signalingState = "have-local-offer";
+-    } else if (hadRemote) {
+-      this._signalingState = "have-remote-offer";
+-    }
+-    this.onsignalingstatechange?.(new Event("signalingstatechange"));
+-  }
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/src/shared/ui/avatar/Avatar.vue b/src/shared/ui/avatar/Avatar.vue
+index e36d9c9e..b4665a03 100644
+--- a/src/shared/ui/avatar/Avatar.vue
++++ b/src/shared/ui/avatar/Avatar.vue
+@@ -79,7 +79,7 @@ const hasImage = computed(() => !!props.src && !imgError.value);
+       :src="fixedSrc"
+       :alt="props.name"
+       class="absolute inset-0 h-full w-full object-cover"
+-      @error="imgError = true"
++      @error="() => { console.warn('[Avatar] image failed to load:', fixedSrc); imgError = true; }"
+     />
+   </div>
+ </template>

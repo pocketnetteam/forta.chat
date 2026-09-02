@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.forta.chat.R
@@ -58,6 +59,13 @@ class ModelDownloadService : Service() {
         private const val CHANNEL_ID = "model_download"
         private const val NOTIFICATION_ID = 20001
         private const val BUFFER_SIZE = 8192
+        private const val WAKELOCK_TAG = "bastyon:model_download_wakelock"
+        // Multi-GB models on a slow/throttled connection can legitimately
+        // take hours (checksum verification alone measured ~1.9h on-device
+        // for a 2.3GB file, see docs/decisions.md) — this is only a safety
+        // valve against a leaked wakelock if release() is ever missed, not
+        // an expected duration.
+        private const val WAKELOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000L
 
         const val ACTION_START = "com.forta.chat.MODEL_DOWNLOAD_START"
         const val ACTION_PAUSE = "com.forta.chat.MODEL_DOWNLOAD_PAUSE"
@@ -133,6 +141,12 @@ class ModelDownloadService : Service() {
     @Volatile
     private var activeConnection: HttpURLConnection? = null
     private var downloadThread: Thread? = null
+    // Volatile: released from runDownload()'s background thread (natural
+    // completion/failure) as well as onStartCommand/onDestroy on the main
+    // thread (pause/stop/OS teardown) — same cross-thread-field reasoning as
+    // currentState/currentPercent above.
+    @Volatile
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -154,6 +168,7 @@ class ModelDownloadService : Service() {
                 currentState = "running"
                 currentError = null
                 startForegroundWithNotification(currentPercent)
+                acquireWakeLock()
 
                 downloadThread = Thread {
                     runDownload(id, url, destinationPath, headersJson)
@@ -163,6 +178,7 @@ class ModelDownloadService : Service() {
                 cancelled = true
                 activeConnection?.disconnect() // unblocks a stream read() that's mid-wait, see runDownload()'s catch
                 currentState = "paused"
+                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -172,6 +188,7 @@ class ModelDownloadService : Service() {
                 currentId = null
                 currentState = "pending"
                 currentPercent = 0
+                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -182,6 +199,7 @@ class ModelDownloadService : Service() {
     override fun onDestroy() {
         cancelled = true
         activeConnection?.disconnect()
+        releaseWakeLock()
         super.onDestroy()
     }
 
@@ -281,13 +299,40 @@ class ModelDownloadService : Service() {
         } finally {
             activeConnection = null
             if (!cancelled || success) {
-                // A genuine pause()/stop() already called stopForeground()/
-                // stopSelf() itself from onStartCommand — only tear down
-                // here for the natural completion/failure paths, so a
-                // pause doesn't race itself into calling stopSelf() twice.
+                // A genuine pause()/stop() already released the wakelock and
+                // called stopForeground()/stopSelf() itself from
+                // onStartCommand — only tear down here for the natural
+                // completion/failure paths, so a pause doesn't race itself
+                // into calling stopSelf() twice.
+                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Wakelock — CPU-only (PARTIAL_WAKE_LOCK, doesn't keep the screen on),
+    // same pattern as CallForegroundService. The foreground service itself
+    // keeps the process alive, but without a wakelock the CPU can still
+    // suspend once the screen locks, stalling the transfer until the user
+    // taps the device again — the whole point of a background/resumable
+    // model download is that it keeps progressing while the screen is off.
+    // -----------------------------------------------------------------------
+
+    private fun acquireWakeLock() {
+        if (wakeLock != null) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
+            acquire(WAKELOCK_TIMEOUT_MS)
+        }
+        Log.d(TAG, "Wakelock acquired")
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+            wakeLock = null
         }
     }
 

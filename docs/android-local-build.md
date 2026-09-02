@@ -2,9 +2,9 @@
 
 ## Пререквизиты
 
-1. **JDK 17+** — Gradle 8.14 требует минимум JDK 17
+1. **JDK 21** — проект собирается с `sourceCompatibility/targetCompatibility JavaVersion.VERSION_21` (см. `android/app/build.gradle`), CI-воркфлоу также используют JDK 21
    ```bash
-   brew install openjdk@17
+   brew install openjdk@21
    ```
 
 2. **Android SDK** — compileSdk 36, minSdk 24, targetSdk 36
@@ -150,7 +150,7 @@ adb install android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk
 | compileSdk | 36 |
 | minSdk | 24 |
 | targetSdk | 36 |
-| JDK | 17+ |
+| JDK | 21 |
 | Capacitor | 8.2 |
 | Firebase | опционально (`google-services.json`) |
 | applicationId | `com.forta.chat` |

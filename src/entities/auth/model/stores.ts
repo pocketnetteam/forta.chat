@@ -1594,6 +1594,35 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     return result;
   };
 
+  /** Requests PKOIN funding for the just-solved captcha. Kept as a separate
+   *  call from submitCaptcha() (not folded into it) so a wrong-answer
+   *  failure and a funding failure are two structurally distinct call sites
+   *  for the caller (see CaptchaStep.vue) instead of one function silently
+   *  doing "verify captcha AND spend it" — that would give a future change
+   *  (e.g. a retry-on-wrong-answer path) no seam to avoid accidentally
+   *  re-triggering funding too.
+   *
+   *  Called right after submitCaptcha() succeeds (CaptchaStep.vue), not
+   *  deferred to register() — a captcha grant can be single-use/time-limited
+   *  server-side, and deferring funding to the final wizard step (after the
+   *  user reviews/copies their mnemonic, an arbitrarily long delay) used to
+   *  surface funding failures as a dead-end "Retry" loop with no way back to
+   *  get a fresh captcha. */
+  const requestRegistrationFunding = async () => {
+    if (!regAddress.value || !regProxyId.value || !regCaptchaId.value) {
+      throw new Error("No captcha in progress");
+    }
+    try {
+      await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
+    } catch (e) {
+      // This specific captcha grant is burned — reset it so the caller gets
+      // a fresh captcha instead of retrying with a doomed id pair.
+      regCaptchaId.value = null;
+      regCaptchaDone.value = false;
+      throw e;
+    }
+  };
+
   /** Check if a username is already taken on the blockchain.
    *  Returns the owning address if taken, null if available. */
   const checkUsername = async (name: string): Promise<string | null> => {
@@ -1601,21 +1630,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const register = async (profile: { name: string; language: string; about: string; image?: string }) => {
-    if (!regAddress.value || !regCaptchaId.value || !regProxyId.value || !regMnemonic.value) {
+    // PKOIN was already requested in submitCaptcha() right after the captcha
+    // was solved (see there) — no separate free-balance step here anymore.
+    if (!regAddress.value || !regMnemonic.value || !regCaptchaDone.value) {
       throw new Error("Registration state incomplete");
     }
 
-    // 1. Request free registration PKOIN
-    await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
-
-    // 2. Generate encryption public keys (12 BIP32 keys) for chat encryption
+    // 1. Generate encryption public keys (12 BIP32 keys) for chat encryption
     const encKeys = generateEncryptionKeys(regPrivateKeyHex.value!);
     const encPublicKeys = encKeys.map(k => k.public);
 
-    // 3. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
+    // 2. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
     setPendingRegProfile({ ...profile, encPublicKeys });
 
-    // 4. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
+    // 3. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
     // Split into a sync half (derive keys, set auth state) and a network half
     // (profile fetch, key verification, Matrix init) so the bounded
     // registration poll (30-min PollTimer, per-RPC withTimeout) can start
@@ -1636,7 +1664,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setRegistrationPending(true);
     setRegistrationPhase('init');
 
-    // 5. Start polling now — will broadcast UserInfo when PKOIN arrives, then
+    // 4. Start polling now — will broadcast UserInfo when PKOIN arrives, then
     // wait for confirmation. Runs concurrently with the network login below;
     // onRegistrationConfirmed() already re-runs initMatrix() itself if Matrix
     // isn't ready yet by the time the blockchain confirms, so the ordering
@@ -2382,6 +2410,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     registrationPollAttempt,
     registrationPollElapsedMs,
     registrationUsernameError,
+    requestRegistrationFunding,
     resumeRegistrationPoll,
     retryRegistration,
     retryRegistrationWithNewName,

@@ -258,6 +258,21 @@ export const useLocalAiStore = defineStore("local-ai", () => {
           loadedModelId.value = null;
           loadedModelVersion.value = null;
         }
+        // `autoUnloadOnBackground` (create-client.ts) releases the native
+        // runtime on every backgrounding, but the model file stays fully on
+        // disk — unlike 'model-switch'/'embedding-switch', `modelReady` must
+        // NOT keep reading true here, or AiModelGate/AiChatView skip straight
+        // to the composer while the runtime is unloaded and every
+        // sendMessage() dies with local-ai's "call ensureModelReady() before
+        // sendMessage()" (RuntimeInitError) until the whole app is killed and
+        // relaunched (live bug, 2026-08-29). Flipping this back to false
+        // makes AiChatView remount AiModelGate, whose own onMounted calls
+        // restoreModelIfPreviouslyDownloaded() — that now actually reloads
+        // the context (its early-return guard was skipping it while
+        // `modelReady` stayed true) instead of silently doing nothing.
+        if (reason === "background") {
+          downloadState.value.model.ready = false;
+        }
       }),
       c.on("manifest:updated", (diff) => {
         // Cached manifest changed — eligibility/disk-state may now read

@@ -1,6 +1,7 @@
 import { getMatrixClientService } from "@/entities/matrix";
 import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
@@ -493,8 +494,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // message skeleton. "degraded" is the escape hatch: stop waiting and fall
   // back to whatever the Dexie cache holds (or the empty-state hint).
   const initialSyncStatus = ref<"loading" | "ready" | "degraded">("loading");
-  /** Watchdog deadline before we give up on the first sync and degrade. */
-  const INITIAL_SYNC_TIMEOUT_MS = 8000;
+  /** Watchdog deadline before we give up on the first sync and degrade. Tied to
+   *  the matrix-client mirror-failover budget (sync-failover.ts) so the room
+   *  list doesn't declare "empty" before the network layer has even had a
+   *  chance to fail over and recover — an empty cache has nothing to fall
+   *  back to, so degrading early here just shows a false "no chats". */
+  const INITIAL_SYNC_TIMEOUT_MS = DEFAULT_WATCHDOG_CONFIG.staleTimeoutMs;
   /**
    * After ready+PREPARED with an empty room list, wait this long for rooms to
    * materialize (large accounts / slow WebView) before accepting "no dialogs".
@@ -502,9 +507,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    */
   const PREPARED_EMPTY_GRACE_MS = 3000;
   /**
-   * After the 8s degrade watchdog, keep the "taking longer" skeleton this long
-   * on an empty cache, then accept authoritative empty so new accounts are not
-   * stuck forever waiting for SYNCING.
+   * After the degrade watchdog (INITIAL_SYNC_TIMEOUT_MS) fires, keep the
+   * "taking longer" skeleton this long on an empty cache, then accept
+   * authoritative empty so new accounts are not stuck forever waiting for
+   * SYNCING.
    */
   const DEGRADED_EMPTY_ESCAPE_MS = 8000;
   let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;

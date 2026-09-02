@@ -845,6 +845,38 @@ describe("useLocalAiStore", () => {
         expect(store.loadedModelId).toBe("qwen-4b");
       });
 
+      // Live bug, 2026-08-29: `autoUnloadOnBackground` (create-client.ts)
+      // releases the native runtime on every backgrounding, but `modelReady`
+      // stayed true (only loadedModelId was cleared) — AiChatView/AiModelGate
+      // gate purely on modelReady, so the composer stayed visible while the
+      // runtime was gone, and every sendMessage() died with local-ai's "call
+      // ensureModelReady() before sendMessage()" until the app was killed and
+      // relaunched. modelReady must reset here so AiModelGate remounts and
+      // its restoreModelIfPreviouslyDownloaded() actually reloads the model.
+      it("runtime:unloaded (background) resets modelReady — the file is still on disk, but the runtime context is gone", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        await emitOn(client, "download:completed", { key: "model", kind: "model" });
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+        expect(store.modelReady).toBe(true);
+
+        await emitOn(client, "runtime:unloaded", { reason: "background" });
+
+        expect(store.modelReady).toBe(false);
+        expect(store.loadedModelId).toBeNull();
+      });
+
+      it("runtime:unloaded (model-switch/embedding-switch) does NOT reset modelReady — only 'background' does", async () => {
+        const client = await store.ensureClient("addr_a", makeFakeConfig());
+        await emitOn(client, "download:completed", { key: "model", kind: "model" });
+        await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });
+
+        await emitOn(client, "runtime:unloaded", { reason: "model-switch" });
+        expect(store.modelReady).toBe(true);
+
+        await emitOn(client, "runtime:unloaded", { reason: "embedding-switch" });
+        expect(store.modelReady).toBe(true);
+      });
+
       it("releaseRuntime() resets loadedModelId", async () => {
         const client = await store.ensureClient("addr_a", makeFakeConfig());
         await emitOn(client, "runtime:model-loaded", { modelId: "qwen-4b", version: 1 });

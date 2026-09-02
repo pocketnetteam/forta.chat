@@ -25,7 +25,10 @@ function getAppInit() {
  *  Matrix user_id format: @<hex-address>:<server>. We decode the hex back
  *  to a Bastyon address using the shared `hexDecode` (which mirrors
  *  `hexEncode`'s 0x350 offset), then validate against the Bastyon shape. */
-function normalizeMatrixDirectoryUser(entry: { user_id: string; display_name?: string; avatar_url?: string }): { address: string; name: string; image: string } | null {
+function normalizeMatrixDirectoryUser(
+  entry: { user_id: string; display_name?: string; avatar_url?: string },
+  mxcToHttp: (mxcUrl: string) => string | null,
+): { address: string; name: string; image: string } | null {
   // Extract hex localpart from @<localpart>:<server>
   const m = /^@([^:]+):/.exec(entry.user_id);
   if (!m) return null;
@@ -45,7 +48,8 @@ function normalizeMatrixDirectoryUser(entry: { user_id: string; display_name?: s
   return {
     address,
     name: entry.display_name && entry.display_name !== entry.user_id ? entry.display_name : address,
-    image: entry.avatar_url ?? "",
+    // The directory returns a raw mxc:// content URI, not a fetchable HTTP URL.
+    image: entry.avatar_url ? mxcToHttp(entry.avatar_url) ?? "" : "",
   };
 }
 
@@ -144,7 +148,7 @@ export function useContacts() {
         try {
           const resp = await matrixService.searchUserDirectory(trimmed, 20);
           matrixResults = resp.results
-            .map(normalizeMatrixDirectoryUser)
+            .map(entry => normalizeMatrixDirectoryUser(entry, url => matrixService.mxcToHttp(url)))
             .filter((u): u is { address: string; name: string; image: string } => u !== null);
         } catch (mErr) {
           console.warn("[useContacts] Matrix user_directory fallback failed:", mErr);
