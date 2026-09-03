@@ -13,7 +13,7 @@ Forta Chat использует **offline-first** архитектуру с дв
 
 ## 1. Слои хранения
 
-### 1.1 Dexie (IndexedDB) — 8 таблиц
+### 1.1 Dexie (IndexedDB) — 15 таблиц (schema v18)
 
 | Таблица | Назначение | Ключ | Индексы |
 |---------|-----------|------|---------|
@@ -23,8 +23,15 @@ Forta Chat использует **offline-first** архитектуру с дв
 | `pendingOps` | Очередь отправки (offline) | `++id` | `roomId`, `status` |
 | `syncState` | Точка синхронизации Matrix | `key` | — |
 | `attachments` | Метаданные вложений | `id` | `messageId` |
-| `decryptionQueue` | Очередь повторной расшифровки | `id` | `roomId`, `retryAfter` |
-| `listenedMessages` | Прослушанные голосовые | `id` | — |
+| `decryptionQueue` | Очередь повторной расшифровки | `++id` | `eventId`, `roomId`, `status`, `[status+nextAttemptAt]` |
+| `listenedMessages` | Прослушанные голосовые | `messageId` | — |
+| `searchCache` | Кэш результатов поиска | `query` | `expiresAt` |
+| `channels` | Подписки на каналы | `address` | `syncOrder`, `updatedAt` |
+| `mediaCacheIndex` | Индекс кэша медиа-файлов | `mxc` | `accessedAt`, `roomId`, `category` |
+| `mediaCacheBlobs` | Blob-данные кэша медиа | `mxc` | — |
+| `callProviders` | Провайдеры звонков | `++id` | — |
+| `aiChats` | Локальные AI-чаты | `id` | `updatedAt` |
+| `aiMessages` | Сообщения AI-чатов | `++localId` | `id`, `[chatId+createdAt]` |
 
 ### 1.2 Pinia stores — 3 основных
 

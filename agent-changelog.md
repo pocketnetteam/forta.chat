@@ -70,7 +70,7 @@ Scanned 10+ core files. Found **10 issues** (2 HIGH, 5 MEDIUM, 3 LOW).
 ### UI Layer Scan Results
 - Room list: RecycleScroller with prefetch (good), but re-sorts O(n log n) on every user update
 - Routing: auth guard works, but redirect param unused after login, no deep linking
-- Notifications: **NO push notification system** — only basic toast
+- Notifications: **NO push notification system** — only basic toast *(historical: push has since been implemented, see `src/shared/lib/push/push-service.ts`; this file records a point-in-time scan, not current status)*
 - Theme: well-implemented, CSS vars, no flicker, reduced motion support
 - Accessibility: 41 ARIA attrs found, but gaps in room list items and aria-live for messages
 

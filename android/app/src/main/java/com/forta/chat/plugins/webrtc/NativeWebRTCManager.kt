@@ -78,6 +78,7 @@ class NativeWebRTCManager(private val context: Context) {
         fun onAddTrack(peerId: String, receiver: RtpReceiver, streams: Array<out MediaStream>)
         fun onRemoveTrack(peerId: String, receiver: RtpReceiver)
         fun onRenegotiationNeeded(peerId: String)
+        fun onSignalingStateChange(peerId: String, state: PeerConnection.SignalingState)
     }
 
     private var factory: PeerConnectionFactory? = null
@@ -233,7 +234,19 @@ class NativeWebRTCManager(private val context: Context) {
             }
 
             override fun onDataChannel(dc: DataChannel) {}
-            override fun onSignalingChange(state: PeerConnection.SignalingState) {}
+            override fun onSignalingChange(state: PeerConnection.SignalingState) {
+                // The JS proxy (rtc-peer-connection-proxy.ts) used to derive
+                // signalingState from local presence/absence of descriptions,
+                // which never reset on renegotiation and permanently reported
+                // "stable" after the first offer/answer exchange — silently
+                // breaking the SDK's perfect-negotiation collision detection
+                // (matrix-js-sdk-bastyon's onNegotiateReceived reads exactly
+                // this field to decide whether an incoming offer collides).
+                // libwebrtc's own state machine is the correct source of
+                // truth; forward it so the JS side no longer re-derives it.
+                Log.d(TAG, "[$peerId] onSignalingChange: $state")
+                listener.onSignalingStateChange(peerId, state)
+            }
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
                 Log.d(TAG, "[$peerId] Connection state: $state")
             }

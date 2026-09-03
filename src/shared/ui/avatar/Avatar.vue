@@ -79,7 +79,7 @@ const hasImage = computed(() => !!props.src && !imgError.value);
       :src="fixedSrc"
       :alt="props.name"
       class="absolute inset-0 h-full w-full object-cover"
-      @error="imgError = true"
+      @error="() => { console.warn('[Avatar] image failed to load:', fixedSrc); imgError = true; }"
     />
   </div>
 </template>

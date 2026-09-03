@@ -35,7 +35,7 @@
 
 **Forta Chat** is an end-to-end encrypted messenger built on a **local-first** architecture: every message, media file, and piece of metadata lives in IndexedDB on your device, while background workers sync with a Matrix server. You sign in with the private key of your [Bastyon](https://bastyon.com) account — no usernames, no passwords.
 
-Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / macOS / Linux), and on Android.
+Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / macOS / Linux), and on Android and iOS.
 
 ## Features
 
@@ -45,7 +45,7 @@ Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / 
 - 🎙 **Rich media**: photos, videos, voice notes, video circles, and files with crash-recovery uploads
 - 🌐 **Public rooms & invite links**, reactions, polls, read watermarks, edit/redact
 - 🔑 **Sign in with Bastyon** — use your existing Bastyon private key — see [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
-- 🖥 **Cross-platform**: Web, Electron (Windows / macOS / Linux), Android 7.0+ (API 24+)
+- 🖥 **Cross-platform**: Web, Electron (Windows / macOS / Linux), Android 7.0+ (API 24+), iOS 15+
 
 ## Download
 
@@ -71,7 +71,7 @@ Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / 
 | Chat protocol | `matrix-js-sdk-bastyon` (Matrix fork maintained by Bastyon) |
 | Calls | WebRTC |
 | Desktop | Electron 40 + electron-builder |
-| Mobile | Capacitor 8 (Android) |
+| Mobile | Capacitor 8 (Android, iOS) |
 | Crypto | `@noble/secp256k1`, `miscreant` (AEAD), `pbkdf2` |
 
 ## Quick start
@@ -139,7 +139,7 @@ npm run cap:run     # run on a connected device
 
 Full APK build guide (debug/release, keystore, env vars) — [docs/android-local-build.md](docs/android-local-build.md).
 
-Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
+Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`). SDK versions (`minSdk 24`, `targetSdk 36`) live in [android/variables.gradle](android/variables.gradle), not in `capacitor.config.ts`.
 
 ### iOS (Capacitor)
 

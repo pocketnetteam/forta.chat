@@ -11,6 +11,7 @@ apply from: "../capacitor-cordova-android-plugins/cordova.variables.gradle"
 dependencies {
     implementation project(':capacitor-community-file-opener')
     implementation project(':capacitor-community-safe-area')
+    implementation project(':capacitor-community-sqlite')
     implementation project(':capacitor-app')
     implementation project(':capacitor-browser')
     implementation project(':capacitor-camera')
@@ -23,9 +24,12 @@ dependencies {
     implementation project(':capacitor-push-notifications')
     implementation project(':capacitor-share')
     implementation project(':capacitor-status-bar')
+    implementation project(':capgo-capacitor-device-info')
+    implementation project(':capgo-capacitor-downloader')
     implementation project(':capgo-capacitor-incoming-call-kit')
     implementation project(':capgo-capacitor-share-target')
     implementation project(':capgo-capacitor-webview-version-checker')
+    implementation project(':llama-cpp-pro')
 
 }
 

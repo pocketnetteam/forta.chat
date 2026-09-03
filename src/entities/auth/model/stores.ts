@@ -8,6 +8,8 @@ import { useChatStore } from "@/entities/chat";
 import { useUserStore } from "@/entities/user/model";
 import { useCallStore } from "@/entities/call/model/call-store";
 import { useChannelStore } from "@/entities/channel/model/channel-store";
+import { useLocalAiStore } from "@/entities/local-ai";
+import { useAiChatStore } from "@/entities/ai-chat";
 import {
   getMatrixClientService,
   resetMatrixClientService,
@@ -560,6 +562,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         },
       );
       chatStore.setChatDbKit(chatDbKit);
+      useAiChatStore().setChatDbKit(chatDbKit);
 
       // WEE-33: spin up the persistent media cache so subsequent chat opens
       // hit the disk cache instead of re-downloading every photo/video.
@@ -1429,6 +1432,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     useUserStore().cleanup();
     useCallStore().clearCall();
     useChannelStore().cleanup();
+    useAiChatStore().cleanup();
+    // Releases local-ai's native runtime contexts (not the account's AI-chat
+    // history — that lives in Dexie and is wiped by deleteChatDb() below,
+    // roadmap 2.4/7.2). Never throws; no-op if no client was ever created.
+    useLocalAiStore().releaseRuntime().catch(() => {});
 
     // ── 1.5. Stop best-effort blockchain WS BEFORE Matrix teardown so its
     //         handlers can't try to refresh torn-down stores. ──
@@ -1586,6 +1594,35 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     return result;
   };
 
+  /** Requests PKOIN funding for the just-solved captcha. Kept as a separate
+   *  call from submitCaptcha() (not folded into it) so a wrong-answer
+   *  failure and a funding failure are two structurally distinct call sites
+   *  for the caller (see CaptchaStep.vue) instead of one function silently
+   *  doing "verify captcha AND spend it" — that would give a future change
+   *  (e.g. a retry-on-wrong-answer path) no seam to avoid accidentally
+   *  re-triggering funding too.
+   *
+   *  Called right after submitCaptcha() succeeds (CaptchaStep.vue), not
+   *  deferred to register() — a captcha grant can be single-use/time-limited
+   *  server-side, and deferring funding to the final wizard step (after the
+   *  user reviews/copies their mnemonic, an arbitrarily long delay) used to
+   *  surface funding failures as a dead-end "Retry" loop with no way back to
+   *  get a fresh captcha. */
+  const requestRegistrationFunding = async () => {
+    if (!regAddress.value || !regProxyId.value || !regCaptchaId.value) {
+      throw new Error("No captcha in progress");
+    }
+    try {
+      await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
+    } catch (e) {
+      // This specific captcha grant is burned — reset it so the caller gets
+      // a fresh captcha instead of retrying with a doomed id pair.
+      regCaptchaId.value = null;
+      regCaptchaDone.value = false;
+      throw e;
+    }
+  };
+
   /** Check if a username is already taken on the blockchain.
    *  Returns the owning address if taken, null if available. */
   const checkUsername = async (name: string): Promise<string | null> => {
@@ -1593,21 +1630,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   };
 
   const register = async (profile: { name: string; language: string; about: string; image?: string }) => {
-    if (!regAddress.value || !regCaptchaId.value || !regProxyId.value || !regMnemonic.value) {
+    // PKOIN was already requested in submitCaptcha() right after the captcha
+    // was solved (see there) — no separate free-balance step here anymore.
+    if (!regAddress.value || !regMnemonic.value || !regCaptchaDone.value) {
       throw new Error("Registration state incomplete");
     }
 
-    // 1. Request free registration PKOIN
-    await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
-
-    // 2. Generate encryption public keys (12 BIP32 keys) for chat encryption
+    // 1. Generate encryption public keys (12 BIP32 keys) for chat encryption
     const encKeys = generateEncryptionKeys(regPrivateKeyHex.value!);
     const encPublicKeys = encKeys.map(k => k.public);
 
-    // 3. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
+    // 2. Save profile for deferred broadcast (PKOIN hasn't arrived yet)
     setPendingRegProfile({ ...profile, encPublicKeys });
 
-    // 4. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
+    // 3. Auto-login with the generated mnemonic (sets up SDK account + Matrix).
     // Split into a sync half (derive keys, set auth state) and a network half
     // (profile fetch, key verification, Matrix init) so the bounded
     // registration poll (30-min PollTimer, per-RPC withTimeout) can start
@@ -1628,7 +1664,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setRegistrationPending(true);
     setRegistrationPhase('init');
 
-    // 5. Start polling now — will broadcast UserInfo when PKOIN arrives, then
+    // 4. Start polling now — will broadcast UserInfo when PKOIN arrives, then
     // wait for confirmation. Runs concurrently with the network login below;
     // onRegistrationConfirmed() already re-runs initMatrix() itself if Matrix
     // isn't ready yet by the time the blockchain confirms, so the ordering
@@ -2261,6 +2297,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       useChatStore().cleanup();
       useChannelStore().cleanup();
       useCallStore().clearCall();
+      useAiChatStore().cleanup();
+      // Release the outgoing account's local-ai runtime before the incoming
+      // account's ensureClient() opens a new per-account SQLite database —
+      // otherwise both accounts' contexts could be live at once (plan §4.2).
+      await useLocalAiStore().releaseRuntime().catch(() => {});
       // Stop blockchain WS before Matrix so its handlers can't fire against
       // torn-down stores; initMatrix() below will re-start it for the new account.
       try { blockchainWs.stop(); } catch { /* ignore */ }
@@ -2369,6 +2410,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     registrationPollAttempt,
     registrationPollElapsedMs,
     registrationUsernameError,
+    requestRegistrationFunding,
     resumeRegistrationPoll,
     retryRegistration,
     retryRegistrationWithNewName,

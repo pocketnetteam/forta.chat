@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { ContactList, ContactSearch, FolderTabs } from "@/features/contacts";
 import { ChannelList } from "@/features/channels";
+import { AiChatList } from "@/features/ai-chat";
 import { useChannelStore } from "@/entities/channel";
+import { useAiChatStore } from "@/entities/ai-chat";
+import { useLocalAiStore } from "@/entities/local-ai";
 import { InviteModal } from "@/features/invite";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
+import { isNativePlatform, logPlatformGate } from "@/shared/lib/platform";
 import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import { SelectionBar, useSelectionStore } from "@/features/selection";
@@ -18,10 +22,13 @@ import TorShieldIndicator from "./ui/TorShieldIndicator.vue";
 import { useSidebarTab } from "./model/use-sidebar-tab";
 import type { SidebarTab } from "./model/use-sidebar-tab";
 import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions";
+import { getSidebarFabMode } from "./model/sidebar-fab";
 
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
 const channelStore = useChannelStore();
+const aiChatStore = useAiChatStore();
+const localAiStore = useLocalAiStore();
 const authStore = useAuthStore();
 const selectionStore = useSelectionStore();
 const tabProgress = ref<number | undefined>(undefined);
@@ -35,6 +42,7 @@ useAndroidBackHandler("chat-selection", 92, () => {
 });
 
 onMounted(async () => {
+  logPlatformGate("[AI-gate]");
   chatStore.loadCachedRooms();
   // Show persisted channel list immediately, then refresh from RPC in
   // the background — same pattern chatStore already uses for rooms (WEE-24).
@@ -56,7 +64,7 @@ watch(
 );
 
 const { t } = useI18n();
-const { activeTab, setTab } = useSidebarTab();
+const { activeTab, setTab, openSettingsContent } = useSidebarTab();
 
 const sidebarSearchQuery = ref("");
 
@@ -67,7 +75,7 @@ const searchPlaceholder = computed(() => {
   const shortcut = isMac ? "⌘K" : "Ctrl+K";
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
-const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels">("all");
+const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels" | "ai">("all");
 
 // Android Back inside the Chats tab cascades before the app is allowed to
 // minimize (forta-bugs#877): clear an active search first, then collapse a
@@ -127,6 +135,12 @@ const visibleTabValues = computed(() => {
   const tabs: string[] = ["all", "personal", "groups"];
   if (chatStore.inviteCount > 0) tabs.push("invites");
   if (channelStore.channels.length > 0) tabs.push("channels");
+  // AI is a native-only capability (no web build of llama-cpp-capacitor) —
+  // gated on a *live* Capacitor check (not the module-load `isNative`
+  // snapshot), and not on whether AI chats already exist — discoverable
+  // product feature, unlike channels/invites (plan §7.1).
+  // `checkSupport()`/eligibility surface *inside* the tab once opened.
+  if (isNativePlatform()) tabs.push("ai");
   return tabs;
 });
 
@@ -182,6 +196,41 @@ const handleRoomCreated = () => {
   emit("selectRoom");
 };
 
+/** Starts a new AI chat and opens it immediately (roadmap 4.3) — writes to
+ *  Dexie synchronously, never waits on the model (plan §4.1). Except: if the
+ *  model isn't configured/downloaded yet, there's nothing an AI chat could
+ *  do — send the user to Settings → Local AI to set it up first instead of
+ *  opening an empty chat behind the inline download gate. */
+const handleNewAiChat = async () => {
+  // modelReady only reflects "already downloaded" once something has run
+  // restoreModelIfPreviouslyDownloaded() this session (AiModelGate/Settings
+  // onMounted) — if this is the very first AI-related tap this session,
+  // check it here first so an already-set-up device doesn't get redirected
+  // to Settings by mistake. Cheap/fast when there's nothing to restore (see
+  // that function's own doc comment).
+  if (!localAiStore.modelReady && authStore.address) {
+    await localAiStore.restoreModelIfPreviouslyDownloaded(authStore.address).catch(() => {});
+  }
+  if (!localAiStore.modelReady) {
+    openLocalAiSettings();
+    return;
+  }
+  const chat = await aiChatStore.createChat();
+  aiChatStore.selectChat(chat.id);
+  chatStore.setActiveRoom(null);
+  channelStore.clearActiveChannel();
+  sidebarSearchQuery.value = "";
+  emit("selectRoom");
+};
+
+/** Shared by `handleNewAiChat` above and `AiChatList`'s `@model-not-ready`
+ *  (opening an existing AI chat while the model isn't ready) — same redirect
+ *  either way. */
+const openLocalAiSettings = () => {
+  setTab("settings");
+  openSettingsContent("localAi");
+};
+
 const handleSelectMessage = (payload: { roomId: string; messageId: string }) => {
   chatStore.setActiveRoom(payload.roomId);
   sidebarSearchQuery.value = "";
@@ -190,6 +239,14 @@ const handleSelectMessage = (payload: { roomId: string; messageId: string }) => 
 };
 
 const showInviteModal = ref(false);
+
+const sidebarFabMode = computed(() =>
+  getSidebarFabMode({
+    activeTab: activeTab.value,
+    searchQuery: sidebarSearchQuery.value,
+    activeFilter: activeFilter.value,
+  }),
+);
 
 // Wallet in header
 const walletStore = useWalletStore();
@@ -252,6 +309,21 @@ const walletStore = useWalletStore();
               >{{ formatPkoin(walletStore.balance) }}</span>
             </button>
 
+            <!-- New AI chat — contextual header button, only on the AI tab
+                 (roadmap 4.3). Starts a chat immediately, no modal, like
+                 ChatGPT's "new chat". -->
+            <button
+              v-if="activeFilter === 'ai'"
+              class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
+              :title="t('ai.newChat')"
+              :aria-label="t('ai.newChat')"
+              @click="handleNewAiChat"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+
             <!-- New Group — WEE-52 / forta-bugs#526, #851 (web), #167 cluster.
                  Previously a pencil glyph that users repeatedly reported as
                  unclear ("how do I create a group?"). Switched to a
@@ -259,6 +331,7 @@ const walletStore = useWalletStore();
                  "add people / new group" at a glance. Tooltip and aria-label
                  already declared the action; the glyph now matches. -->
             <button
+              v-else
               class="btn-press flex h-11 w-11 items-center justify-center rounded-full text-text-on-main-bg-color transition-colors hover:bg-neutral-grad-0"
               :title="t('nav.newGroup')"
               :aria-label="t('nav.newGroup')"
@@ -364,6 +437,13 @@ const walletStore = useWalletStore();
                   @select-channel="handleSelectRoom"
                 />
               </template>
+              <template #ai>
+                <AiChatList
+                  class="h-full overflow-y-auto"
+                  @select-chat="handleSelectRoom"
+                  @model-not-ready="openLocalAiSettings"
+                />
+              </template>
             </SwipeableTabs>
           </div>
         </template>
@@ -386,10 +466,26 @@ const walletStore = useWalletStore();
       </transition>
     </div>
 
-    <!-- Invite banner — hidden while a search query is active so the FAB's
-         glow ring cannot visually overlap the search input or steal taps. -->
+    <!-- New AI chat FAB — replaces the invite banner only on the AI tab
+         (forta-bugs: AI tab had no way to start a chat besides the small
+         header "+"). Same action as handleNewAiChat via the header button. -->
     <button
-      v-show="!sidebarSearchQuery.trim()"
+      v-if="sidebarFabMode === 'ai-new-chat'"
+      class="invite-fab hide-on-keyboard btn-press mx-2 mb-1.5 flex shrink-0 items-center justify-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-bold text-text-on-bg-ac-color shadow-lg transition-all active:scale-[0.97]"
+      :title="t('ai.newChat')"
+      @click="handleNewAiChat"
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14" />
+      </svg>
+      <span>{{ t("ai.newChat") }}</span>
+    </button>
+
+    <!-- Invite banner — hidden while a search query is active so the FAB's
+         glow ring cannot visually overlap the search input or steal taps,
+         and hidden on the AI tab where the "new chat" FAB above takes over. -->
+    <button
+      v-else-if="sidebarFabMode === 'invite'"
       class="invite-fab hide-on-keyboard btn-press mx-2 mb-1.5 flex shrink-0 items-center justify-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-bold text-text-on-bg-ac-color shadow-lg transition-all active:scale-[0.97]"
       :title="t('invite.fab')"
       @click="showInviteModal = true"

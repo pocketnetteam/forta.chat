@@ -76,6 +76,22 @@ import {
 // Helper: wait a microtask tick so async init of NativeRTCPeerConnection completes.
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
+// happy-dom doesn't implement RTCSessionDescription (unlike RTCIceCandidate,
+// which it does provide). The proxy only uses it as a plain {type, sdp}
+// holder, so a minimal stub is enough for setLocalDescription/
+// setRemoteDescription tests to run under this test environment.
+if (typeof globalThis.RTCSessionDescription === "undefined") {
+  (globalThis as unknown as { RTCSessionDescription: unknown }).RTCSessionDescription =
+    class {
+      type: string;
+      sdp: string;
+      constructor(init: { type?: string; sdp?: string }) {
+        this.type = init.type ?? "offer";
+        this.sdp = init.sdp ?? "";
+      }
+    };
+}
+
 describe("NativeRTCPeerConnection proxy", () => {
   beforeEach(() => {
     for (const k of Object.keys(bridgeMethods)) {
@@ -429,6 +445,121 @@ describe("NativeRTCPeerConnection proxy", () => {
       // Advance past 20s to ensure it fires once.
       await vi.advanceTimersByTimeAsync(5_000);
       expect(deadHandler).toHaveBeenCalledOnce();
+
+      pc.close();
+    });
+  });
+
+  describe("signalingState (native-sourced)", () => {
+    // Regression coverage for the bug where signalingState was inferred
+    // locally from "do we have a local/remote description" rather than
+    // read from the real libwebrtc state machine. That heuristic never
+    // reset on renegotiation, so once both descriptions had been set once
+    // it reported "stable" forever — silently breaking the SDK's
+    // perfect-negotiation offer-collision detection in
+    // matrix-js-sdk-bastyon's onNegotiateReceived (which reads
+    // peerConn.signalingState to decide whether an incoming offer
+    // collides with one already in flight).
+    //
+    // The fix is a hybrid: setLocalDescription/setRemoteDescription apply
+    // the correct W3C state transition synchronously (so there is no async
+    // gap between the promise resolving and signalingState being right —
+    // code like call-service.ts's network-change restart guard reads it
+    // immediately after such an await), while the native
+    // onSignalingStateChange event remains the authoritative correction
+    // for anything the local transition can't predict (e.g. an implicit
+    // rollback from a glare collision).
+
+    async function newPcAndPeerId(): Promise<{ pc: RTCPeerConnection; peerId: string }> {
+      const pc = new window.RTCPeerConnection();
+      await tick();
+      await tick();
+      const arg = getBridgeMethod("createPeerConnection").mock.calls.at(-1)?.[0] as {
+        peerId: string;
+      };
+      return { pc, peerId: arg.peerId };
+    }
+
+    it("starts as 'stable' and updates only in response to the native event", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+      expect(pc.signalingState).toBe("stable");
+
+      fireNativeEvent("onSignalingStateChange", { peerId, state: "have-remote-offer" });
+      expect(pc.signalingState).toBe("have-remote-offer");
+
+      fireNativeEvent("onSignalingStateChange", { peerId, state: "stable" });
+      expect(pc.signalingState).toBe("stable");
+
+      pc.close();
+    });
+
+    it("updates signalingState synchronously the instant setRemoteDescription/setLocalDescription resolve", async () => {
+      const { pc } = await newPcAndPeerId();
+
+      // Normal answerer flow: remote offer then local answer. Real
+      // RTCPeerConnection updates signalingState as part of the promise
+      // resolution itself, not on a later event tick — code that reads
+      // pc.signalingState right after the await (e.g. call-service.ts's
+      // network-change restart guard) must see the correct value with no
+      // async gap.
+      await pc.setRemoteDescription({ type: "offer", sdp: "v=0\r\n" });
+      expect(pc.signalingState).toBe("have-remote-offer");
+
+      await pc.setLocalDescription({ type: "answer", sdp: "v=0\r\n" });
+      expect(pc.signalingState).toBe("stable");
+
+      pc.close();
+    });
+
+    it("reports 'have-local-offer' immediately after an ICE-restart offer, not a stale 'stable' (the old bug)", async () => {
+      const { pc } = await newPcAndPeerId();
+
+      await pc.setRemoteDescription({ type: "offer", sdp: "v=0\r\n" });
+      await pc.setLocalDescription({ type: "answer", sdp: "v=0\r\n" });
+      expect(pc.signalingState).toBe("stable");
+
+      // ICE restart: a fresh local offer is set while the old remote
+      // description is still cached. The removed presence-based heuristic
+      // saw hadLocal && hadRemote and always reported "stable" here,
+      // breaking the SDK's offer-collision detection during renegotiation.
+      await pc.setLocalDescription({ type: "offer", sdp: "v=0\r\n(restart)" });
+      expect(pc.signalingState).toBe("have-local-offer");
+
+      pc.close();
+    });
+
+    it("lets the native event correct the state for outcomes the local computation can't predict", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      await pc.setLocalDescription({ type: "offer", sdp: "v=0\r\n" });
+      expect(pc.signalingState).toBe("have-local-offer");
+
+      // libwebrtc rolled back internally after a glare collision — the
+      // JS-side optimistic transition has no way to predict this on its
+      // own, so the native event must still win as the final word.
+      fireNativeEvent("onSignalingStateChange", { peerId, state: "stable" });
+      expect(pc.signalingState).toBe("stable");
+
+      pc.close();
+    });
+
+    it("ignores signalingState events for a different peerId", async () => {
+      const { pc } = await newPcAndPeerId();
+
+      fireNativeEvent("onSignalingStateChange", {
+        peerId: "some-other-peer-id",
+        state: "have-local-offer",
+      });
+      expect(pc.signalingState).toBe("stable");
+
+      pc.close();
+    });
+
+    it("ignores unrecognised state strings", async () => {
+      const { pc, peerId } = await newPcAndPeerId();
+
+      fireNativeEvent("onSignalingStateChange", { peerId, state: "not-a-real-state" });
+      expect(pc.signalingState).toBe("stable");
 
       pc.close();
     });

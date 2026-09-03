@@ -42,11 +42,29 @@ const handleSubmit = async () => {
   if (!captchaText.value.trim()) return;
   submitting.value = true;
   error.value = "";
+
   try {
     await authStore.submitCaptcha(captchaText.value.trim());
-    emit("done");
   } catch {
     error.value = t("register.captchaIncorrect");
+    submitting.value = false;
+    await loadCaptcha(false);
+    return;
+  }
+
+  try {
+    // PKOIN funding is requested right here, while the captcha grant is
+    // fresh, instead of being deferred to the final wizard step — see
+    // requestRegistrationFunding()'s doc comment in the auth store.
+    await authStore.requestRegistrationFunding();
+    emit("done");
+  } catch {
+    // The captcha text was correct but the funding grant failed
+    // (expired/single-use/rate-limited) — a distinct message from a wrong
+    // captcha answer. Either way, load a FRESH captcha: the store already
+    // reset regCaptchaId on this failure, so retrying the old id would just
+    // fail again identically.
+    error.value = t("register.captchaFundingFailed");
     submitting.value = false;
     await loadCaptcha(false);
   }

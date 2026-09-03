@@ -12,6 +12,7 @@ import type {
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { isNative } from "@/shared/lib/platform";
 import { useAuthStore } from "@/entities/auth";
+import { collectAiDiagnostics } from "@/entities/local-ai";
 import { useBugReport } from "../model/use-bug-report";
 
 const { isOpen, prefillContext, prefillError, close } = useBugReport();
@@ -26,6 +27,7 @@ const errorMsg = ref("");
 const fileInput = ref<HTMLInputElement>();
 const environment = ref<AppEnvironment>();
 const callDiagnostics = ref<BugReportCallDiagnostics>();
+const aiDiagnostics = ref<{ logs: string }>();
 const showExamples = ref(false);
 
 watch(isOpen, async (val) => {
@@ -45,12 +47,17 @@ watch(isOpen, async (val) => {
     sent.value = false;
     errorMsg.value = "";
     showExamples.value = false;
-    environment.value = await collectEnvironment();
-    // Session 25: pull call diagnostics in parallel with environment.
-    // Non-throwing — collectCallDiagnostics swallows native plugin
-    // failures so a missing throttle snapshot can never block the
-    // bug-report flow itself.
-    callDiagnostics.value = await collectCallDiagnostics();
+    // All three are independent — genuinely run in parallel (the comment on
+    // collectCallDiagnostics predates this having actually been sequential;
+    // fixed alongside adding aiDiagnostics rather than compounding the
+    // latency further). Both call/AI diagnostics are non-throwing — they
+    // swallow native-plugin/no-client failures so a missing snapshot can
+    // never block the bug-report flow itself.
+    [environment.value, callDiagnostics.value, aiDiagnostics.value] = await Promise.all([
+      collectEnvironment(),
+      collectCallDiagnostics(),
+      collectAiDiagnostics(),
+    ]);
   }
 });
 
@@ -119,6 +126,7 @@ const handleSend = async () => {
       screenshots: screenshots.value.map((s) => s.base64),
       reporterAddress: authStore.address ?? undefined,
       callDiagnostics: callDiagnostics.value,
+      aiDiagnostics: aiDiagnostics.value,
     });
     console.log("[BugReport] created issue #", result.issueNumber, "url:", result.issueUrl);
     if (authStore.address && result.issueNumber) {

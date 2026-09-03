@@ -16,7 +16,7 @@ import { Toggle } from "@/shared/ui/toggle";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import EmojiPicker from "@/features/messaging/ui/EmojiPicker.vue";
 import { UserEditForm, CallProvidersSection } from "@/features/user-management";
-import { StorageSettings, NotificationSettings, TorSettingsSection, DesktopSettingsSection } from "@/features/settings";
+import { StorageSettings, NotificationSettings, TorSettingsSection, DesktopSettingsSection, LocalAiSettingsSection } from "@/features/settings";
 import { useLiveQuery, isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import type { TelemetrySnapshot } from "@/shared/lib/telemetry";
 import { isNative, isAndroid } from "@/shared/lib/platform";
@@ -164,6 +164,7 @@ const title = computed(() => {
     case "storage": return t("settings.storage");
     case "networking": return t("tor.networking");
     case "desktop": return t("desktopSettings.title");
+    case "localAi": return t("ai.settingsTitle");
     case "about": return t("settings.about");
     default: return "";
   }
@@ -541,6 +542,11 @@ const title = computed(() => {
     <!-- ════════ Desktop (Electron) ════════ -->
     <div v-else-if="settingsSubView === 'desktop'" class="flex-1 overflow-y-auto">
       <DesktopSettingsSection />
+    </div>
+
+    <!-- ════════ Local AI (roadmap Phase 6) ════════ -->
+    <div v-else-if="settingsSubView === 'localAi'" class="flex-1 overflow-y-auto">
+      <LocalAiSettingsSection />
     </div>
 
     <!-- ════════ About ════════ -->

@@ -87,6 +87,14 @@ vi.mock("@/entities/channel", () => ({
   }),
 }));
 
+// ── Mock ai-chat store — ChatWindow clears it on activeRoomId changes ──
+vi.mock("@/entities/ai-chat", () => ({
+  useAiChatStore: () => ({
+    activeChatId: null,
+    selectChat: vi.fn(),
+  }),
+}));
+
 // ── Mock user store ───────────────────────────────────────────────
 vi.mock("@/entities/user/model", () => ({
   useUserStore: () => ({

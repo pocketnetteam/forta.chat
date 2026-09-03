@@ -157,14 +157,14 @@ onUnmounted(() => {
               </span>
             </div>
 
-            <h2 v-if="post.caption" class="text-base font-bold leading-snug text-text-color">
+            <h2 v-if="post.caption" class="select-text text-base font-bold leading-snug text-text-color">
               {{ post.caption }}
             </h2>
 
             <ArticleBody
               v-if="post.message"
               :raw="post.message"
-              class="text-sm leading-relaxed text-text-color/80"
+              class="select-text text-sm leading-relaxed text-text-color/80"
             />
 
             <div v-if="post.tags.length" class="flex flex-wrap gap-1.5">

@@ -3,9 +3,11 @@ import ChatSidebar from "@/widgets/sidebar/ChatSidebar.vue";
 import ChatWindow from "@/widgets/chat-window/ChatWindow.vue";
 import SettingsContentPanel from "@/widgets/sidebar/ui/SettingsContentPanel.vue";
 import { GroupCreationPanel } from "@/features/group-creation";
+import { AiChatView } from "@/features/ai-chat";
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useChannelStore } from "@/entities/channel";
+import { useAiChatStore } from "@/entities/ai-chat";
 import { useI18n } from "@/shared/lib/i18n";
 import { useSidebarTab } from "@/widgets/sidebar/model/use-sidebar-tab";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
@@ -14,6 +16,7 @@ import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback"
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const channelStore = useChannelStore();
+const aiChatStore = useAiChatStore();
 const { t } = useI18n();
 const { activeTab, settingsSubView, closeSettingsContent, setTab } = useSidebarTab();
 
@@ -35,6 +38,7 @@ const showSidebar = computed(() => {
   if (userForcedSidebar.value) return true;
   if (chatStore.activeRoomId) return false;
   if (channelStore.activeChannelAddress) return false;
+  if (aiChatStore.activeChatId) return false;
   return true;
 });
 
@@ -71,11 +75,12 @@ const onSelectRoom = () => {
 // store — without this, tapping a channel left the sidebar on top even
 // though ChatWindow was already rendering ChannelView underneath.
 watch(
-  [() => chatStore.activeRoomId, () => channelStore.activeChannelAddress],
-  ([newRoomId, newChannelAddr], [oldRoomId, oldChannelAddr]) => {
+  [() => chatStore.activeRoomId, () => channelStore.activeChannelAddress, () => aiChatStore.activeChatId],
+  ([newRoomId, newChannelAddr, newAiChatId], [oldRoomId, oldChannelAddr, oldAiChatId]) => {
     const roomChanged = newRoomId && newRoomId !== oldRoomId;
     const channelChanged = newChannelAddr && newChannelAddr !== oldChannelAddr;
-    if (!roomChanged && !channelChanged) return;
+    const aiChatChanged = newAiChatId && newAiChatId !== oldAiChatId;
+    if (!roomChanged && !channelChanged && !aiChatChanged) return;
     if (isMobile.value) {
       closeSettingsContent();
       setTab("chats");
@@ -90,6 +95,7 @@ const onBackToSidebar = () => {
   // Defense-in-depth: ChannelView's own back handler also clears this before
   // emitting, but we cover the room/empty-state back paths here too. Idempotent.
   channelStore.clearActiveChannel();
+  aiChatStore.selectChat(null);
 };
 
 const showGroupCreation = ref(false);
@@ -158,6 +164,12 @@ useAndroidBackHandler("chat-tab-to-chats", 55, () => {
         v-else-if="settingsSubView"
         class="h-full flex-1"
       />
+      <AiChatView
+        v-else-if="aiChatStore.activeChatId"
+        :chat-id="aiChatStore.activeChatId"
+        class="h-full flex-1"
+        @back="onBackToSidebar"
+      />
       <ChatWindow
         v-else
         class="h-full flex-1"
@@ -176,7 +188,15 @@ useAndroidBackHandler("chat-tab-to-chats", 55, () => {
         />
       </transition>
       <transition name="slide-right">
+        <AiChatView
+          v-if="aiChatStore.activeChatId"
+          v-show="!showSidebar && !showGroupCreation && !settingsSubView"
+          :chat-id="aiChatStore.activeChatId"
+          class="absolute inset-0 z-10 h-full w-full"
+          @back="onBackToSidebar"
+        />
         <ChatWindow
+          v-else
           v-show="!showSidebar && !showGroupCreation && !settingsSubView"
           class="absolute inset-0 z-10 h-full w-full"
           @back="onBackToSidebar"

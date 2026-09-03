@@ -3,6 +3,7 @@ import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { useChannelStore, getChannelPreviewText } from "@/entities/channel";
 import type { Channel } from "@/entities/channel";
 import { useChatStore } from "@/entities/chat";
+import { useAiChatStore } from "@/entities/ai-chat";
 import { formatRelativeTime } from "@/shared/lib/format";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -10,6 +11,7 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
 const channelStore = useChannelStore();
 const chatStore = useChatStore();
+const aiChatStore = useAiChatStore();
 const { t } = useI18n();
 
 const emit = defineEmits<{ selectChannel: [address: string] }>();
@@ -41,6 +43,7 @@ const hasDetectedDuplicates = computed(() => {
 const handleSelect = (channel: Channel) => {
   channelStore.setActiveChannel(channel.address);
   chatStore.setActiveRoom(null);
+  aiChatStore.selectChat(null);
   emit("selectChannel", channel.address);
 };
 

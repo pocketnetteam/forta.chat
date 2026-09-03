@@ -68,6 +68,22 @@ vi.mock("@/entities/channel", () => ({
   }),
 }));
 
+// ── Mock ai-chat store — ChatPage must react to activeChatId the same way
+//    it reacts to activeRoomId/activeChannelAddress ─────────────────────
+const fakeActiveChatId = ref<string | null>(null);
+const selectChatSpy = vi.fn((id: string | null) => {
+  fakeActiveChatId.value = id;
+});
+
+vi.mock("@/entities/ai-chat", () => ({
+  useAiChatStore: () => ({
+    get activeChatId() {
+      return fakeActiveChatId.value;
+    },
+    selectChat: selectChatSpy,
+  }),
+}));
+
 // ── Mock auth store (ChatPage only reads from it) ─────────────────
 vi.mock("@/entities/auth", () => ({
   useAuthStore: () => ({
@@ -134,6 +150,10 @@ const mountOpts = {
         name: "ChatWindow",
         template: '<div data-testid="chat-window" />',
       },
+      AiChatView: {
+        name: "AiChatView",
+        template: '<div data-testid="ai-chat-view" />',
+      },
       SettingsContentPanel: {
         name: "SettingsContentPanel",
         template: '<div data-testid="settings-content" />',
@@ -153,12 +173,14 @@ beforeEach(() => {
   fakeRooms.value = [];
   fakeRoomsInitialized.value = false;
   fakeActiveChannelAddress.value = null;
+  fakeActiveChatId.value = null;
   settingsSubViewRef.value = null;
   activeTabRef.value = "chats";
   setActiveRoomSpy.mockClear();
   closeSettingsContentSpy.mockClear();
   setTabSpy.mockClear();
   clearActiveChannelSpy.mockClear();
+  selectChatSpy.mockClear();
   vi.mocked(useAndroidBackHandler).mockClear();
 });
 

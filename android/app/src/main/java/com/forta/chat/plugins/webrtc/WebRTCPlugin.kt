@@ -228,6 +228,16 @@ class WebRTCPlugin : Plugin() {
                     }
                     notifyListeners("onRenegotiationNeeded", data)
                 }
+
+                override fun onSignalingStateChange(peerId: String, state: PeerConnection.SignalingState) {
+                    val data = JSObject().apply {
+                        put("peerId", peerId)
+                        // W3C RTCSignalingState spelling ("have-local-offer", etc.) —
+                        // libwebrtc's enum names use underscores, W3C uses dashes.
+                        put("state", state.name.lowercase().replace("_", "-"))
+                    }
+                    notifyListeners("onSignalingStateChange", data)
+                }
             })
 
             call.resolve()

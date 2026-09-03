@@ -17,7 +17,12 @@ if (tasks.length === 0) {
 }
 
 const isWin = process.platform === "win32";
-const cmd = isWin ? "gradlew.bat" : "./gradlew";
+// ".\\" prefix required: this machine (and possibly others) has the
+// NoDefaultCurrentDirectoryInExePath env var set, which stops cmd.exe from
+// implicitly resolving a bare relative filename against cwd — it silently
+// falls back to PATH-only lookup and fails with "'gradlew.bat' is not
+// recognized". `.\gradlew.bat` bypasses PATH lookup entirely.
+const cmd = isWin ? ".\\gradlew.bat" : "./gradlew";
 
 const result = spawnSync(cmd, tasks, {
   cwd: androidDir,

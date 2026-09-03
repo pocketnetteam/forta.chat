@@ -32,6 +32,45 @@ const ICE_STATE_MAP: Record<string, RTCIceConnectionState> = {
   closed: "closed",
 };
 
+// Signaling state mapping: native (libwebrtc, forwarded by WebRTCPlugin.kt's
+// onSignalingChange) → RTCSignalingState. The native side already sends the
+// W3C spelling (see WebRTCPlugin.kt's onSignalingStateChange), this map is a
+// validating passthrough so an unrecognised value can't corrupt state.
+const SIGNALING_STATE_MAP: Record<string, RTCSignalingState> = {
+  stable: "stable",
+  "have-local-offer": "have-local-offer",
+  "have-local-pranswer": "have-local-pranswer",
+  "have-remote-offer": "have-remote-offer",
+  "have-remote-pranswer": "have-remote-pranswer",
+  closed: "closed",
+};
+
+/**
+ * W3C signalingState transition for a description that was just committed
+ * (https://w3c.github.io/webrtc-pc/#state-definitions). Used to update
+ * `signalingState` synchronously the instant setLocalDescription/
+ * setRemoteDescription resolves — matching real RTCPeerConnection
+ * semantics, where the promise resolution and the state update are not
+ * separated by an event round-trip. Callers relying on `pc.signalingState`
+ * right after `await pc.setLocalDescription(...)` (e.g. call-service.ts's
+ * network-change restart guard) would otherwise read a stale value during
+ * the async gap before the native onSignalingStateChange event lands.
+ * The native event (see _handleSignalingStateChange) still runs afterwards
+ * as the authoritative correction for anything this local computation
+ * can't foresee, such as an implicit rollback from a glare collision.
+ */
+function nextSignalingState(isLocal: boolean, type: RTCSdpType): RTCSignalingState {
+  if (type === "rollback") return "stable";
+  if (isLocal) {
+    if (type === "pranswer") return "have-local-pranswer";
+    if (type === "answer") return "stable";
+    return "have-local-offer";
+  }
+  if (type === "pranswer") return "have-remote-pranswer";
+  if (type === "answer") return "stable";
+  return "have-remote-offer";
+}
+
 class NativeRTCPeerConnection extends EventTarget {
   // Manual event listener tracking — EventTarget.dispatchEvent may not
   // work correctly in Capacitor WebView for custom classes
@@ -220,6 +259,16 @@ class NativeRTCPeerConnection extends EventTarget {
       );
 
       this.listeners.push(
+        await NativeWebRTC.addListener(
+          "onSignalingStateChange",
+          (data) => {
+            if (this._closed || data.peerId !== this._peerId) return;
+            this._handleSignalingStateChange(data.state);
+          }
+        )
+      );
+
+      this.listeners.push(
         await NativeWebRTC.addListener("onTrack", (data) => {
           if (this._closed || data.peerId !== this._peerId) return;
           console.log("[NativeRTCProxy] onTrack received:", data.kind,
@@ -386,7 +435,7 @@ class NativeRTCPeerConnection extends EventTarget {
       type: desc.type ?? "offer",
     });
     this._localDescription = new RTCSessionDescription(desc);
-    this._updateSignalingState();
+    this._applySignalingState(nextSignalingState(true, (desc.type ?? "offer") as RTCSdpType));
   }
 
   async setRemoteDescription(
@@ -400,7 +449,7 @@ class NativeRTCPeerConnection extends EventTarget {
       type: desc.type ?? "answer",
     });
     this._remoteDescription = new RTCSessionDescription(desc);
-    this._updateSignalingState();
+    this._applySignalingState(nextSignalingState(false, (desc.type ?? "answer") as RTCSdpType));
   }
 
   async addIceCandidate(
@@ -583,6 +632,39 @@ class NativeRTCPeerConnection extends EventTarget {
   }
 
   // -----------------------------------------------------------------------
+  // Signaling state (native-sourced, with an optimistic local pre-update)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Apply a new signalingState and fire the SDK's change event, but only
+   * if it actually changed — both callers below (the optimistic local
+   * transition and the authoritative native event) may compute/report a
+   * state that matches what's already set.
+   */
+  private _applySignalingState(state: RTCSignalingState): void {
+    if (state === this._signalingState) return;
+    this._signalingState = state;
+    this.onsignalingstatechange?.(new Event("signalingstatechange"));
+    this._fireEvent(new Event("signalingstatechange"));
+  }
+
+  /**
+   * Handle a native signalingState transition. libwebrtc is the single
+   * source of truth here — it drives the same state machine the SDK's
+   * perfect-negotiation code (matrix-js-sdk-bastyon call.ts) assumes it is
+   * reading from a spec-compliant RTCPeerConnection. This is the final
+   * word on the state; it corrects whatever the optimistic local
+   * transition in setLocalDescription/setRemoteDescription computed
+   * (e.g. an implicit rollback from a glare collision that only
+   * libwebrtc's internal state machine could know about).
+   */
+  private _handleSignalingStateChange(state: string): void {
+    const mapped = SIGNALING_STATE_MAP[state];
+    if (!mapped) return;
+    this._applySignalingState(mapped);
+  }
+
+  // -----------------------------------------------------------------------
   // ICE connection state + Session 03 watchdog
   // -----------------------------------------------------------------------
 
@@ -748,18 +830,6 @@ class NativeRTCPeerConnection extends EventTarget {
     }
   }
 
-  private _updateSignalingState() {
-    const hadLocal = this._localDescription !== null;
-    const hadRemote = this._remoteDescription !== null;
-    if (hadLocal && hadRemote) {
-      this._signalingState = "stable";
-    } else if (hadLocal) {
-      this._signalingState = "have-local-offer";
-    } else if (hadRemote) {
-      this._signalingState = "have-remote-offer";
-    }
-    this.onsignalingstatechange?.(new Event("signalingstatechange"));
-  }
 }
 
 // ---------------------------------------------------------------------------

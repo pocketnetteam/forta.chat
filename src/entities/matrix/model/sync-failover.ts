@@ -129,7 +129,7 @@ export interface SyncWatchdogConfig {
 
 export const DEFAULT_WATCHDOG_CONFIG: SyncWatchdogConfig = {
   maxConsecutiveErrors: 4,
-  staleTimeoutMs: 45_000,
+  staleTimeoutMs: 300_000,
   maxConsecutiveFailovers: 4,
 };
 

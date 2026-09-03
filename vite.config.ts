@@ -14,6 +14,12 @@ export default defineConfig({
     setupFiles: ["./src/test-setup.ts"],
     // Prevent cross-file mock/timer pollution (call-service, sync-engine races).
     fileParallelism: false,
+    // entities/local-ai's tests construct a real `local-ai` LocalAiClient
+    // against `local-ai/adapters/node-testing`'s NodeSqliteAdapter (node:sqlite),
+    // which is still experimental on Node 22 — mirrors local-ai's own
+    // `test:*` scripts (`NODE_OPTIONS=--experimental-sqlite`). Harmless for
+    // every other test file, which never touches node:sqlite.
+    execArgv: ["--experimental-sqlite"],
   },
   plugins: [
     vue(),

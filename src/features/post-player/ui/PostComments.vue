@@ -99,7 +99,7 @@ const formatTime = (ts: number) => {
             </span>
             <span class="text-[10px] text-text-on-main-bg-color">{{ formatTime(comment.time) }}</span>
           </div>
-          <p class="text-xs leading-relaxed text-text-color/80">{{ comment.message }}</p>
+          <p class="select-text text-xs leading-relaxed text-text-color/80">{{ comment.message }}</p>
         </div>
       </div>
     </div>

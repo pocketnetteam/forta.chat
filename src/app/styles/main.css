@@ -253,8 +253,20 @@ textarea,
   direction: ltr !important;
   unicode-bidi: plaintext;
   text-align: left;
+  /* Keep editable fields selectable — see the selection-lock note on `body`. */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
+/*
+ * Selection lock: text selection constantly misfired on taps/long-presses
+ * over UI chrome (buttons, avatars, timestamps, bubbles) — annoying on both
+ * desktop and Android. Disable selection globally and re-enable it only on
+ * message/publication body text via the `.select-text` utility (Tailwind),
+ * applied at the specific text containers (MessageContent, post captions/
+ * bodies, article body, comments). Inputs/textareas/contenteditable are
+ * excluded above so the composer and edit fields keep working normally.
+ */
 body {
   min-height: 100%;
   height: 100%;
@@ -262,6 +274,8 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 * {

@@ -27,11 +27,11 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 После завершения каждой задачи обязательно прогонять полную верификацию перед коммитом:
 
 1. `npm run build` — сборка (vue-tsc + vite)
-2. `npm run lint` — линтер
-3. `npx vue-tsc --noEmit` — проверка типов
-4. `npm run test` — тесты
+2. `npx vue-tsc --noEmit` — проверка типов (быстрая проверка без полной сборки)
+3. `npm run test` — тесты
+4. Code review — skill `code-review` (`/code-review`) — архитектурный ревью изменений
 
-5. Code review агент (`superpowers:code-reviewer`) — архитектурный ревью изменений
+В репозитории нет отдельного `npm run lint` / ESLint-конфига — линтинг не входит в этот список, пока скрипт не появится.
 
 Не коммитить, пока все проверки не пройдены.
 
@@ -43,10 +43,12 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 
 Перед коммитом/PR активировать для финальной проверки:
 
-- Code review — выбирать по масштабу изменений:
-  - `review` — для обычных задач (архитектурный ревью)
-  - `review-fix` — для крупных изменений (7 ревьюеров + автофикс)
-  - `review-team` — для PR перед мержем (5 агентов + Devil's Advocate)
+- Code review — skill `code-review` (`/code-review`), уровень по масштабу изменений:
+  - `low`/`medium` — для обычных задач (несколько высокоуверенных находок)
+  - `high`/`max` — для крупных изменений (более широкое покрытие)
+  - `ultra` — для PR перед мержем (multi-agent cloud review)
+
+  (Skills `review-fix`/`review-team`, упоминавшиеся здесь ранее, в `.claude/skills/` этого репозитория отсутствуют — сейчас там только `device-ai-loop`.)
 
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
@@ -77,7 +79,7 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 ## Runtime
 - Node.js (inferred from npm/package-lock.json)
 - Browser (Web/Electron via Chromium)
-- Android (via Capacitor 8.2.0)
+- Android and iOS (via Capacitor 8.2.0 / `@capacitor/ios` 8.3.3)
 - npm - Primary package manager
 - Lockfile: `package-lock.json` (present)
 ## Frameworks
@@ -135,18 +137,17 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 - stream-browserify 3.0.0 - Node.js stream polyfill
 ## Configuration
 - Variables loaded from `.env` (via Vite's `import.meta.env`)
-- Critical env vars (see INTEGRATIONS.md):
-- `vite.config.ts` - Main build configuration
+- `vite.config.ts` - Main build configuration; Vitest settings live in its `test` block (happy-dom environment, `src/**/*.test.ts` pattern) — there is no separate `vitest.config.ts`
 - `tsconfig.json` - TypeScript strict mode, path aliases (@/, @app/, @entities/, etc.)
 - `tailwind.config.js` - Theme tokens using CSS custom properties
-- `vitest.config.ts` - Vitest settings (happy-dom environment, `src/**/*.test.ts` pattern)
-- `capacitor.config.ts` - Capacitor configuration
+- `capacitor.config.ts` - Capacitor configuration (app id, web dir, native plugin options — does NOT contain `minSdk`/`targetSdk`, those live in `android/variables.gradle`)
 ## Platform Requirements
 - Node.js 18+ (inferred from TypeScript ES2020 target)
 - npm 7+ (lockfile v2)
 - TypeScript 5.5.4 (strict mode enabled)
 - Modern browser supporting:
 - Android 7.0+ (API level 24+)
+- iOS 15.0+
 - Capacitor 8.2.0
 - Windows 10+, macOS 10.13+, Linux (glibc 2.28+)
 - Chromium 126+ (via Electron 40.6.0)
@@ -258,7 +259,7 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 - Depends on: All other layers
 - Used by: index.html (entry point via #app mount)
 - Purpose: Route containers that assemble features + layouts
-- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, `SettingsPage.vue`, etc.
+- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, etc. (settings are a panel — `widgets/sidebar/ui/SettingsPanel.vue` — not a route-level page)
 - Depends on: Features, widgets, entities
 - Used by: Vue Router (from `app/providers/router/`)
 - Purpose: Composed surfaces combining features and UI components (sidebar, layouts, chat window, header)
@@ -352,12 +353,14 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 <!-- GSD:skills-start source:skills/ -->
 ## Project Skills
 
+> Только `device-ai-loop` реально существует в `.claude/skills/` этого репозитория.
+> Строки ниже (`develop-team`, `fix-ticket`, `review-fix`, `review-team`) описывают skills, ссылки
+> на которые ранее были в этом файле, но соответствующих `SKILL.md` в `.claude/skills/` сейчас нет —
+> не полагайтесь на них, пока они не будут добавлены заново.
+
 | Skill | Description | Path |
 |-------|-------------|------|
-| develop-team | This skill should be used when the user asks to "develop a feature", "implement a ticket", "build BAST-123", "run the development pipeline", "develop this ticket end to end", or wants fully autonomous feature implementation with parallel research agents, planning, phased implementation, review, and PR creation. Zero checkpoints; pauses only on blockers. | `.claude/skills/develop-team/SKILL.md` |
-| fix-ticket | "Automate the full Linear bug-fix pipeline end-to-end. Use when the user says 'fix ticket', 'fix BAST-123', 'fix this bug', 'resolve BAST-XXX', 'fix and ship this ticket', or passes a Linear ticket ID for autonomous bug resolution. Reads the Linear ticket, implements the fix, reviews it, commits, updates the ticket status, and comments with a summary. Also use when the user wants to automate the fix-review-commit-handoff cycle for any Linear bug ticket." | `.claude/skills/fix-ticket/SKILL.md` |
-| review-fix | Automated review-fix loop that spawns 7 reviewers in parallel, fixes quick-fix items automatically, and accumulates strategic items for user decision. Iterates until no issues remain or max iterations reached. Adapted for Vue 3 + TypeScript + Pinia codebase. | `.claude/skills/review-fix/SKILL.md` |
-| review-team | Agent Teams PR review with Devil's Advocate. Spawns 5 team members — 4 specialist reviewers + 1 adversarial challenger — to produce confidence-rated findings. Only findings that survive cross-examination make the final report. Adapted for Vue 3 + TypeScript + Pinia with Linear ticket integration. | `.claude/skills/review-team/SKILL.md` |
+| device-ai-loop | Iterate on a local-ai (`C:\inetpub2026\localai`) bug that only reproduces through the real Capacitor/Android bridge, using Forta Chat as the live consumer app on a connected device. Use when the user reports an AI-chat/local-ai bug seen on a real device, asks to test local-ai changes on-device, or says "run cap:run and see the AI errors" / "fix the local-ai build errors on device". | `.claude/skills/device-ai-loop/SKILL.md` |
 <!-- GSD:skills-end -->
 
 <!-- GSD:workflow-start source:GSD defaults -->

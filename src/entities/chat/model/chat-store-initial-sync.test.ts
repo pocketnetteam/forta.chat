@@ -25,6 +25,9 @@ vi.mock("@/entities/matrix", () => ({
 
 import { useChatStore } from "./chat-store";
 import { isChatsInteractive, __resetBootSignalsForTests } from "@/shared/lib/boot-signals";
+import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
+
+const INITIAL_SYNC_TIMEOUT_MS = DEFAULT_WATCHDOG_CONFIG.staleTimeoutMs;
 
 describe("chat-store WEE-55 initial-sync watchdog", () => {
   let store: ReturnType<typeof useChatStore>;
@@ -53,7 +56,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
     store.startInitialSyncWatch();
     expect(store.initialSyncStatus).toBe("loading");
 
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
 
     // Stop blocking the UI: surface cached rooms / empty hint, not a spinner.
     expect(store.initialSyncStatus).toBe("degraded");
@@ -63,7 +66,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
 
   it("does not degrade before the deadline elapses", () => {
     store.startInitialSyncWatch();
-    vi.advanceTimersByTime(7999);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS - 1);
     expect(store.initialSyncStatus).toBe("loading");
     expect(store.isSyncing).toBe(true);
   });
@@ -81,7 +84,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
     expect(store.isSyncing).toBe(false);
 
     // The watchdog must have been cleared — staying ready past the deadline.
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.initialSyncStatus).toBe("ready");
   });
 
@@ -108,7 +111,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
   it("upgrades degraded → ready when a real PREPARED sync arrives late", () => {
     // Simulate the post-update hang: watchdog armed, sync never lands in time.
     store.setHelpers(mockMatrixService.kit as never, {} as never);
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.initialSyncStatus).toBe("degraded");
     expect(store.roomsInitialized).toBe(true);
     expect(store.isSyncing).toBe(false);
@@ -137,13 +140,13 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
   it("WEE-97: signals chats-interactive on watchdog degrade too", () => {
     expect(isChatsInteractive()).toBe(false);
     store.startInitialSyncWatch();
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(isChatsInteractive()).toBe(true);
   });
 
   it("cleanup resets the lifecycle back to 'loading'", () => {
     store.startInitialSyncWatch();
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.initialSyncStatus).toBe("degraded");
 
     store.cleanup();
@@ -152,7 +155,7 @@ describe("chat-store WEE-55 initial-sync watchdog", () => {
 
     // A fresh watchdog can be armed again after cleanup.
     store.startInitialSyncWatch();
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.initialSyncStatus).toBe("degraded");
   });
 });
@@ -183,9 +186,9 @@ describe("chat-store room-list first-load states", () => {
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
   });
 
-  it("switches to slow placeholder after the 8s degrade (still not empty)", () => {
+  it("switches to slow placeholder after the degrade watchdog (still not empty)", () => {
     store.startInitialSyncWatch();
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.initialSyncStatus).toBe("degraded");
     expect(store.isRoomListLoading).toBe(true);
     expect(store.isRoomListLoadingSlow).toBe(true);
@@ -195,7 +198,7 @@ describe("chat-store room-list first-load states", () => {
 
   it("accepts authoritative empty after degraded escape window", () => {
     store.startInitialSyncWatch();
-    vi.advanceTimersByTime(8000);
+    vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.isRoomListLoadingSlow).toBe(true);
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
 
