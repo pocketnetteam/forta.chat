@@ -3012,10 +3012,9 @@ lines-and-columns@^1.1.6:
   resolved "https://registry.npmjs.org/lines-and-columns/-/lines-and-columns-1.2.4.tgz"
   integrity sha512-7ylylesZQ/PV29jhEDl3Ufjo6ZX7gCqJr5F7PKrqc93v7fzSymt1BpwEU8nAUXs8qzzvqhbjhK5QZg6Mt/HkBg==
 
-llama-cpp-pro@^0.2.4:
+"llama-cpp-pro@github:maxgithubprofile/llama-cpp-pro#v0.2.4-local-ai.1":
   version "0.2.4"
-  resolved "https://registry.npmjs.org/llama-cpp-pro/-/llama-cpp-pro-0.2.4.tgz"
-  integrity sha512-CPGajTlgjE3OZ5szRppdl9GyjcBOriy0EV/M+nXQWu9v1txXrjgNs18qZ+D/rb2UhM2J/vz75N8kT/3fyX/cFw==
+  resolved "git+ssh://git@github.com/maxgithubprofile/llama-cpp-pro.git#fa59c356cdf7fd9a2601387a3c072ec474daeeb4"
 
 "local-ai@file:../../inetpub2026/localai":
   version "0.0.0"
