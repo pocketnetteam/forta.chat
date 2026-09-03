@@ -852,5 +852,64 @@ export class ChatDatabase extends Dexie {
       //   [chatId+createdAt] — paginated per-chat timeline queries
       aiMessages: "++localId, id, [chatId+createdAt]",
     });
+
+    // Version 19: re-queue group messages permanently stuck "[encrypted]"
+    // because of the aeskeys cache-collision bug (matrix-crypto.ts —
+    // eaa.aeskeys was memoized under a cache key that ignored the actual
+    // resolved member set for group chats, so a stale AES key could get
+    // reused for the rest of a room's session and every send/decrypt after
+    // the first would derive the wrong key). Those messages exhausted
+    // MAX_ATTEMPTS and reached the terminal decryptionStatus "failed",
+    // which the normal boot/room-open recovery sweeps deliberately never
+    // resurrect (to avoid retrying genuinely-undecryptable content forever
+    // — see DecryptionWorker.recoverAllStuckMessages). Since the cache bug
+    // is fixed, give them exactly one more chance by resetting them back to
+    // "pending" so the existing recovery machinery picks them up normally.
+    this.version(19).stores({
+      rooms: "id, updatedAt, membership, isDeleted",
+      messages: "++localId, eventId, clientId, [roomId+timestamp], [roomId+status], senderId",
+      users: "address, updatedAt, aliasUpdatedAt",
+      pendingOps: "++id, [roomId+createdAt], status, clientId, [status+nextAttemptAt]",
+      syncState: "key",
+      attachments: "++id, messageLocalId, status",
+      decryptionQueue: "++id, eventId, roomId, status, [status+nextAttemptAt]",
+      listenedMessages: "messageId",
+      searchCache: "query, expiresAt",
+      channels: "address, syncOrder, updatedAt",
+      mediaCacheIndex: "mxc, accessedAt, roomId, category",
+      mediaCacheBlobs: "mxc",
+      callProviders: "++id",
+      aiChats: "id, updatedAt",
+      aiMessages: "++localId, id, [chatId+createdAt]",
+    }).upgrade(async (tx) => {
+      const messages = tx.table("messages");
+      const rooms = tx.table("rooms");
+
+      const deadMsgs = await messages
+        .filter((m: any) =>
+          m.decryptionStatus === "failed" &&
+          !!m.encryptedBody &&
+          !m.softDeleted &&
+          !m.deleted
+        )
+        .toArray();
+
+      if (deadMsgs.length > 0) {
+        for (const msg of deadMsgs) {
+          await messages.update(msg.localId, { decryptionStatus: "pending" });
+        }
+        console.log(`[ChatDB] aeskeys-cache heal: re-queued ${deadMsgs.length} permanently-failed message(s) for re-decryption`);
+      }
+
+      // Clear the terminal room-preview flag so the sidebar re-decrypts the
+      // preview instead of staying pinned on the old "failed" placeholder.
+      const affectedRoomIds = new Set(deadMsgs.map((m: any) => m.roomId));
+      for (const roomId of affectedRoomIds) {
+        const room = await rooms.get(roomId);
+        if (room?.lastMessageDecryptionStatus === "failed") {
+          await rooms.update(roomId, { lastMessageDecryptionStatus: undefined });
+        }
+      }
+    });
   }
 }

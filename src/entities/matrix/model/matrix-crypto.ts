@@ -298,7 +298,15 @@ export class Pcrypto {
     let usersinfoGeneration = 0;
 
     const version = 2;
-    const ecachekey = "e_pcrypto10_";
+    // Bumped (10 -> 11) to invalidate any decrypted-plaintext entries cached
+    // under the old prefix before the aeskeys cache-collision fix — cheap
+    // insurance so a stale entry can never be served even though AES-SIV's
+    // built-in authentication means a wrong key should already fail loudly
+    // rather than silently caching wrong plaintext.
+    const ecachekey = "e_pcrypto11_";
+    // ---- persistent AES-key cache (pcrypto.ls) — original lines 36, 61 ----
+    const lcachekey = "pcrypto10_" + roomId + "_";
+    const lsspromises: Record<string, Promise<{ keys: Record<string, unknown>; k: string }>> = {};
 
     // ---- getusersbytime — EXACT match of original lines 294-307 ----
     function getusersbytime(time: number): { id: string; life: { start: number; end?: number }[] }[] {
@@ -367,8 +375,10 @@ export class Pcrypto {
       return ui;
     }
 
-    // ---- getusershistory — EXACT match of original lines 175-278 ----
-    function getusershistory() {
+    // ---- getuserseventshistory — EXACT match of original lines 175-219 ----
+    type HistoryEntry = { time: number; membership: string; id: string };
+
+    function getuserseventshistory(): HistoryEntry[] {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const chatAny = chat as any;
       const tetatet = pcrypto.getIsTetatetChat?.(chat) ?? false;
@@ -388,8 +398,6 @@ export class Pcrypto {
         allevents.push(e);
       }
 
-      // Build history — EXACT match of original lines 183-218
-      type HistoryEntry = { time: number; membership: string; id: string };
       let history: HistoryEntry[] = [];
 
       for (const ue of allevents) {
@@ -415,6 +423,41 @@ export class Pcrypto {
 
       // Sort by time
       history = history.sort(function (a, b) { return a.time - b.time; });
+      return history;
+    }
+
+    // ---- period — EXACT match of original lines 221-232 ----
+    // Cache-key component for the implicit ("current room members", usersIds
+    // == null) case in aeskeysls() below: an index derived from the member
+    // event history, so a join/leave that changes the history changes this
+    // value and busts any AES-key cache entry keyed on the old one — instead
+    // of a bare (time, block, v) tuple, which stays identical across a
+    // membership change and would silently serve stale derived keys.
+    function period(time: number): number {
+      let result = 0;
+      const h = getuserseventshistory();
+
+      for (let i = h.length - 1; i >= 0; i--) {
+        if ((h[i].time < time || !time) && !result) {
+          result = i;
+        }
+      }
+
+      return result;
+    }
+
+    // ---- orderedIdsHash — EXACT match of original lines 841-845 ----
+    function orderedIdsHash(ids: string[]): string {
+      const sorted = [...ids].sort(function (a, b) {
+        return Number(a.replace(/[^0-9]/g, "")) - Number(b.replace(/[^0-9]/g, ""));
+      });
+      return md5(sorted.join(""));
+    }
+
+    // ---- getusershistory — EXACT match of original lines 244-278 ----
+    function getusershistory() {
+      const history = getuserseventshistory();
+      const tetatet = pcrypto.getIsTetatetChat?.(chat) ?? false;
 
       // Build users dict — EXACT match of original lines 244-278
       users = {};
@@ -577,19 +620,11 @@ export class Pcrypto {
         return sum;
       },
 
-      // LRU cache for derived AES keys — same (block, usersIds, v) tuple
-      // produces identical keys, so we skip the expensive ECDH + pbkdf2 work.
-      _aesKeyCache: new Map<string, Record<string, unknown>>(),
-      _AES_CACHE_MAX: 64,
-
+      // ---- aeskeys — EXACT match of original eaa.aeskeys (lines 504-526) ----
+      // Pure derivation, no caching here — caching lives one level up, in
+      // aeskeysls() below (matches original: eaa.aeskeys is raw, the cache
+      // is in eaac.aeskeysls).
       aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number) {
-        // Build cache key from the parameters that determine the output
-        const cacheKey = `${time}|${block}|${usersIds ? usersIds.join(",") : ""}|${v}`;
-        const cached = eaa._aesKeyCache.get(cacheKey);
-        if (cached) return cached;
-
-        const _users = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(time, v);
-
         const us = eaa.userspublics(time, block, usersIds, v);
         const c = eaa.current(time, block, usersIds, v);
 
@@ -611,16 +646,62 @@ export class Pcrypto {
           }
         }
 
-        // Evict oldest entries if cache is full
-        if (eaa._aesKeyCache.size >= eaa._AES_CACHE_MAX) {
-          const firstKey = eaa._aesKeyCache.keys().next().value;
-          if (firstKey !== undefined) eaa._aesKeyCache.delete(firstKey);
-        }
-        eaa._aesKeyCache.set(cacheKey, su);
-
         return su;
       },
     };
+
+    // ---- aeskeysls — EXACT match of original eaac.aeskeysls (lines 348-396) ----
+    // Persistent, membership-aware cache for aeskeys(): keyed on orderedIdsHash
+    // (explicit usersIds) or period(time) (implicit "current room members"),
+    // never on a bare tuple that stays constant across a membership change —
+    // see period() above for why that distinction matters. Backed by
+    // pcrypto.ls (IndexedDB) so the expensive ECDH+pbkdf2 derivation runs once
+    // per member-state generation, not once per message, and survives reloads.
+    async function aeskeysls(
+      time: number,
+      block: number,
+      usersIds: string[] | null,
+      v: number | undefined
+    ): Promise<{ keys: Record<string, unknown>; k: string }> {
+      let _time = time;
+      let _block = block;
+      if (!_time) _time = 0;
+      if (!_block) {
+        const tetatet = pcrypto.getIsTetatetChat?.(chat) ?? false;
+        _block = tetatet ? pcrypto.currentblock.height : 10;
+      }
+
+      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v || version}`;
+      const ek = `${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`;
+
+      if (!lsspromises[ek]) {
+        lsspromises[ek] = (async () => {
+          try {
+            const stored = await pcrypto.ls?.get(ek);
+            if (!stored) throw new Error("Data does not exist");
+            const keys: Record<string, unknown> = {};
+            for (const [id, b64] of Object.entries(stored as Record<string, string>)) {
+              keys[id] = Buffer.from(b64, "base64");
+            }
+            return { keys, k };
+          } catch {
+            const keys = eaa.aeskeys(_time, _block, usersIds, v as number);
+            if (preparedUsers(_time, v).length > 1) {
+              const serialized: Record<string, string> = {};
+              for (const [id, buf] of Object.entries(keys)) {
+                serialized[id] = Buffer.from(buf as Buffer).toString("base64");
+              }
+              await pcrypto.ls?.set(ek, serialized).catch(() => {});
+            }
+            return { keys, k };
+          }
+        })().finally(() => {
+          delete lsspromises[ek];
+        });
+      }
+
+      return lsspromises[ek];
+    }
 
     /** Prepare users data for Worker serialization (fast — no crypto, just filtering). */
     function prepareWorkerUsers(usersIds: string[] | null, v: number): Array<{ id: string; keys: string[] }> {
@@ -1116,12 +1197,24 @@ export class Pcrypto {
           }
         }
 
-        // Main-thread fallback for environments without (module) Worker
-        // support — same ECDH + pbkdf2 derivation via eaa, AES-SIV via miscreant.
-        const aeskeysls = eaa.aeskeys(_time, _block, usersIds, v || version);
-        const key = aeskeysls[userid];
-        if (!key) throw new Error("emptykey");
-        return decrypt(key, encData);
+        // Main-thread fallback — persistent, membership-aware key cache
+        // (matches original self.decrypt, pcrypto.js lines 529-556): on a
+        // decrypt failure or missing key, evict the cached entry so the
+        // next attempt recomputes fresh instead of failing forever on a
+        // stale key.
+        const { keys, k } = await aeskeysls(_time, _block, usersIds, v || version);
+        const key = keys[userid];
+        if (key) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return await decrypt(key as any, encData);
+          } catch (e) {
+            await pcrypto.ls?.clear(`${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`).catch(() => {});
+            throw e;
+          }
+        }
+        await pcrypto.ls?.clear(`${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`).catch(() => {});
+        throw new Error("emptykey");
       },
 
       // Internal encrypt — offloaded to Web Worker.
@@ -1160,11 +1253,17 @@ export class Pcrypto {
           }
         }
 
-        // Main-thread fallback — see _decrypt above.
-        const aeskeysls = eaa.aeskeys(_time, _block, null, v || version);
-        const key = aeskeysls[userid];
-        if (!key) throw new Error("emptykey");
-        return encrypt(text, key);
+        // Main-thread fallback — see _decrypt above and aeskeysls() for the
+        // eviction rationale (matches original self.encrypt, pcrypto.js
+        // lines 558-572).
+        const { keys, k } = await aeskeysls(_time, _block, null, v || version);
+        const key = keys[userid];
+        if (key) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return encrypt(text, key as any);
+        }
+        await pcrypto.ls?.clear(`${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`).catch(() => {});
+        throw new Error("emptykey");
       },
 
       async encryptFile(file: Blob): Promise<{ file: File; secrets: Record<string, unknown> }> {
