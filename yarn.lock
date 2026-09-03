@@ -52,7 +52,7 @@
   resolved "https://registry.npmjs.org/@capacitor-community/safe-area/-/safe-area-8.0.1.tgz"
   integrity sha512-zVVQ7k94DbOff1mHP8qrZGTJZWyhGZnKHD2eXdcobIoOBFW9CeVphLNZYDCop/DBsHXfv6r8k0/Ac8xMIlwT+A==
 
-"@capacitor-community/sqlite@^8.1.1":
+"@capacitor-community/sqlite@^8.1.1", "@capacitor-community/sqlite@>=8.0.0":
   version "8.1.1"
   resolved "https://registry.npmjs.org/@capacitor-community/sqlite/-/sqlite-8.1.1.tgz"
   integrity sha512-wsqscMOMveDeIvB9WHLm38jkUV2317LmuWvvbhvmOB1REdr8GH6weFZpAiKmLimbpP2CQ2eVs8nmRcrTqbd9ng==
@@ -64,7 +64,7 @@
   resolved "https://registry.npmjs.org/@capacitor/android/-/android-8.3.0.tgz"
   integrity sha512-EQy6ByUuKayQBJmMm/e0byJiHavqsQHrvW23BuT2GNVQvenAvipqwaePiJHzrv2PZr7A0T0+se4kgDCeROj0mQ==
 
-"@capacitor/app@^8.0.1":
+"@capacitor/app@^8.0.1", "@capacitor/app@>=8.0.0":
   version "8.1.0"
   resolved "https://registry.npmjs.org/@capacitor/app/-/app-8.1.0.tgz"
   integrity sha512-MlmttTOWHDedr/G4SrhNRxsXMqY+R75S4MM4eIgzsgCzOYhb/MpCkA5Q3nuOCfL1oHm26xjUzqZ5aupbOwdfYg==
@@ -114,7 +114,7 @@
   resolved "https://registry.npmjs.org/@capacitor/device/-/device-8.0.2.tgz"
   integrity sha512-fIqSXnG0s6bz5A/0xFgSXDkbU+Xl65ti80LhucNvLI4kGhJzcNn6SwWVwpXN9SJTOFWXblXknHNppheP8X1frQ==
 
-"@capacitor/filesystem@^8.1.2":
+"@capacitor/filesystem@^8.1.2", "@capacitor/filesystem@>=8.0.0":
   version "8.1.2"
   resolved "https://registry.npmjs.org/@capacitor/filesystem/-/filesystem-8.1.2.tgz"
   integrity sha512-doaaMfGoFR2hWU6aV6u83I+5ZsGyJVq+Gz4r9lMpJzUKMm1eMu0hLnFdV1aXZlU9FlK/RndFrVD8oRZfNOqWgQ==
@@ -166,12 +166,12 @@
   resolved "https://registry.npmjs.org/@capacitor/synapse/-/synapse-1.0.4.tgz"
   integrity sha512-/C1FUo8/OkKuAT4nCIu/34ny9siNHr9qtFezu4kxm6GY1wNFxrCFWjfYx5C1tUhVGz3fxBABegupkpjXvjCHrw==
 
-"@capgo/capacitor-device-info@^8.0.10":
+"@capgo/capacitor-device-info@^8.0.10", "@capgo/capacitor-device-info@>=8.0.0":
   version "8.0.10"
   resolved "https://registry.npmjs.org/@capgo/capacitor-device-info/-/capacitor-device-info-8.0.10.tgz"
   integrity sha512-9RBg0cKi7+niHbPoJ/iW8bOllfXB+PlMuMDfFOKQdPAEgSO5VmLT+dSN9lgPvZIo5UcW6yHta3DSeodgf5F9oQ==
 
-"@capgo/capacitor-downloader@^8.1.31":
+"@capgo/capacitor-downloader@^8.1.31", "@capgo/capacitor-downloader@>=8.0.0":
   version "8.1.31"
   resolved "https://registry.npmjs.org/@capgo/capacitor-downloader/-/capacitor-downloader-8.1.31.tgz"
   integrity sha512-oT0BacSUa2f0ifq9TCNG1HDssnY7aga4xS3yFvd2+WjejZoraC8okjebKqswGvkT6n5aS6GyZ5YKIszmQh2VIg==
@@ -518,6 +518,11 @@
   version "3.2.15"
   resolved "https://registry.npmjs.org/@matrix-org/olm/-/olm-3.2.15.tgz"
   integrity sha512-S7lOrndAK9/8qOtaTq/WhttJC/o4GAzdfK0MUPpo8ApzsJEC0QjtwrkC3KBXdFP1cD1MXi/mlKR7aaoVMKgs6Q==
+
+"@noble/hashes@^2.3.0":
+  version "2.4.0"
+  resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-2.4.0.tgz"
+  integrity sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==
 
 "@noble/secp256k1@^2.3.0":
   version "2.3.0"
@@ -2002,7 +2007,7 @@ electron-winstaller@5.4.0:
   optionalDependencies:
     "@electron/windows-sign" "^1.1.2"
 
-electron@^40.6.0:
+electron@^40.6.0, electron@>=28.0.0:
   version "40.8.5"
   resolved "https://registry.npmjs.org/electron/-/electron-40.8.5.tgz"
   integrity sha512-pgTY/VPQKaiU4sTjfU96iyxCXrFm4htVPCMRT4b7q9ijNTRgtLmLvcmzp2G4e7xDrq9p7OLHSmu1rBKFf6Y1/A==
@@ -3012,13 +3017,14 @@ lines-and-columns@^1.1.6:
   resolved "https://registry.npmjs.org/lines-and-columns/-/lines-and-columns-1.2.4.tgz"
   integrity sha512-7ylylesZQ/PV29jhEDl3Ufjo6ZX7gCqJr5F7PKrqc93v7fzSymt1BpwEU8nAUXs8qzzvqhbjhK5QZg6Mt/HkBg==
 
-"llama-cpp-pro@github:maxgithubprofile/llama-cpp-pro#v0.2.4-local-ai.1":
+llama-cpp-pro@>=0.2.4, "llama-cpp-pro@github:maxgithubprofile/llama-cpp-pro#v0.2.4-local-ai.1":
   version "0.2.4"
   resolved "git+ssh://git@github.com/maxgithubprofile/llama-cpp-pro.git#fa59c356cdf7fd9a2601387a3c072ec474daeeb4"
 
-"local-ai@file:../../inetpub2026/localai":
+"local-ai@github:maxgithubprofile/local-ai#53f94003faa53887309f71a76ab6d158d3212dc1":
   version "0.0.0"
-  resolved "file:../../inetpub2026/localai"
+  resolved "git+ssh://git@github.com/maxgithubprofile/local-ai.git#53f94003faa53887309f71a76ab6d158d3212dc1"
+  integrity sha512-ZOZ7yc6E0UzIVD7fiRm/ckgppwnf94QkPCopoYVlWCYwwvEItaZmyOYjoQ1XUSsN/F3x1f2PIk8LrDK9iDT1yA==
   dependencies:
     "@noble/hashes" "^2.3.0"
 
