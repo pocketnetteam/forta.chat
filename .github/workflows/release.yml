@@ -227,7 +227,7 @@ jobs:
 
       - name: Build sideload APK and Play AAB
         working-directory: android
-        run: ./gradlew assembleSideloadRelease bundlePlayRelease
+        run: ./gradlew assembleSideloadRelease bundlePlayRelease --stacktrace
         env:
           RELEASE_STORE_FILE: release-keystore.jks
           RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
