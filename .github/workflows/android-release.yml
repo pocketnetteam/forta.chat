@@ -67,6 +67,13 @@ jobs:
           sed -i 's/versionCode .*/versionCode ${{ steps.version.outputs.VERSION_CODE }}/' android/app/build.gradle
           sed -i 's/versionName ".*"/versionName "${{ steps.version.outputs.VERSION }}"/' android/app/build.gradle
 
+      - name: Accept Android SDK licenses
+        # llama-cpp-pro pins a specific NDK side-by-side version
+        # (android/build.gradle's ndkVersion) that Gradle auto-downloads on
+        # first build — the runner's preinstalled SDK has it cached but not
+        # pre-licensed, so the download's license gate fails without this.
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 

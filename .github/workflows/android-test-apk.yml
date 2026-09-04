@@ -53,6 +53,13 @@ jobs:
       - name: Inject test version into build.gradle
         run: node scripts/inject-android-test-version.mjs --version "${{ steps.version.outputs.version }}"
 
+      - name: Accept Android SDK licenses
+        # llama-cpp-pro pins a specific NDK side-by-side version
+        # (android/build.gradle's ndkVersion) that Gradle auto-downloads on
+        # first build — the runner's preinstalled SDK has it cached but not
+        # pre-licensed, so the download's license gate fails without this.
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
