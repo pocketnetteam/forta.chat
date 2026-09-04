@@ -75,7 +75,7 @@
     "file-saver": "^2.0.5",
     "heic2any": "^0.0.4",
     "llama-cpp-pro": "github:maxgithubprofile/llama-cpp-pro#v0.2.4-local-ai.1",
-    "local-ai": "github:maxgithubprofile/local-ai#53f94003faa53887309f71a76ab6d158d3212dc1",
+    "local-ai": "github:maxgithubprofile/local-ai#76697733968f19298143115fe9e247ca348ed269",
     "matrix-js-sdk-bastyon": "^23.2.5",
     "miscreant": "^0.3.2",
     "node-fetch": "^2.7.0",

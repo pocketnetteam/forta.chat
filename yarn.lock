@@ -3021,10 +3021,10 @@ llama-cpp-pro@>=0.2.4, "llama-cpp-pro@github:maxgithubprofile/llama-cpp-pro#v0.2
   version "0.2.4"
   resolved "git+ssh://git@github.com/maxgithubprofile/llama-cpp-pro.git#fa59c356cdf7fd9a2601387a3c072ec474daeeb4"
 
-"local-ai@github:maxgithubprofile/local-ai#53f94003faa53887309f71a76ab6d158d3212dc1":
+"local-ai@github:maxgithubprofile/local-ai#76697733968f19298143115fe9e247ca348ed269":
   version "0.0.0"
-  resolved "git+ssh://git@github.com/maxgithubprofile/local-ai.git#53f94003faa53887309f71a76ab6d158d3212dc1"
-  integrity sha512-ZOZ7yc6E0UzIVD7fiRm/ckgppwnf94QkPCopoYVlWCYwwvEItaZmyOYjoQ1XUSsN/F3x1f2PIk8LrDK9iDT1yA==
+  resolved "git+ssh://git@github.com/maxgithubprofile/local-ai.git#76697733968f19298143115fe9e247ca348ed269"
+  integrity sha512-EsR9QYhOJYtRe283+7DgK1HpB7rPM9c4TqIzS91O9ZO9G5ceYcRuY4UC7qSyLRjNYWU0ZEB1yXjN5z+hEvWAwg==
   dependencies:
     "@noble/hashes" "^2.3.0"
 
