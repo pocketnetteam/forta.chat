@@ -10,6 +10,7 @@ import { Toggle } from "@/shared/ui/toggle";
 import {
   isNative,
   isNativePlatform,
+  isLocalAiFeatureEnabled,
   isAndroid,
   hasTor,
   isElectron,
@@ -388,7 +389,7 @@ const handleLogout = () => {
              (not module-load `isNative` snapshot) so a late androidBridge
              still unlocks the row in-session. -->
         <button
-          v-if="isNativePlatform()"
+          v-if="isLocalAiFeatureEnabled && isNativePlatform()"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
           @click="openSettingsContent('localAi')"
         >

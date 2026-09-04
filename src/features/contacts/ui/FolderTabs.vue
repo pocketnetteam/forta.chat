@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { useChatStore } from "@/entities/chat";
 import { useChannelStore } from "@/entities/channel";
-import { isNativePlatform } from "@/shared/lib/platform";
+import { isNativePlatform, isLocalAiFeatureEnabled } from "@/shared/lib/platform";
 
 type FilterValue = "all" | "personal" | "groups" | "invites" | "channels" | "ai";
 
@@ -34,7 +34,7 @@ const visibleTabs = computed(() =>
     // build) — live Capacitor check, same rule as ChatSidebar's
     // `visibleTabValues` (plan §7.1). The real `checkSupport()` runs
     // inside the tab itself once opened, not here.
-    if (t.value === "ai") return isNativePlatform();
+    if (t.value === "ai") return isLocalAiFeatureEnabled && isNativePlatform();
     return true;
   })
 );
