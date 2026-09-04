@@ -13,6 +13,15 @@ export function isNativePlatform(): boolean {
   return Capacitor.isNativePlatform();
 }
 
+/**
+ * Kill switch for the local-AI feature (AI tab, its Settings section, the
+ * "New AI chat" entry point) — the work is unfinished, so this release
+ * ships with it hidden regardless of platform. Flip back to `true` when
+ * it's ready; every call site already ANDs this with {@link isNativePlatform}
+ * so nothing else needs to change.
+ */
+export const isLocalAiFeatureEnabled = false;
+
 /** Live platform id (`android` / `ios` / `web`). */
 export function getCapacitorPlatform(): string {
   return Capacitor.getPlatform();

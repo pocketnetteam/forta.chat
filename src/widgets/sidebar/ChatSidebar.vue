@@ -9,7 +9,7 @@ import { InviteModal } from "@/features/invite";
 import { useWalletStore, formatPkoin } from "@/features/wallet";
 import { useChatStore } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
-import { isNativePlatform, logPlatformGate } from "@/shared/lib/platform";
+import { isNativePlatform, isLocalAiFeatureEnabled, logPlatformGate } from "@/shared/lib/platform";
 import { ConnectionStatusHeader } from "@/features/sync-status";
 import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import { SelectionBar, useSelectionStore } from "@/features/selection";
@@ -140,7 +140,7 @@ const visibleTabValues = computed(() => {
   // snapshot), and not on whether AI chats already exist — discoverable
   // product feature, unlike channels/invites (plan §7.1).
   // `checkSupport()`/eligibility surface *inside* the tab once opened.
-  if (isNativePlatform()) tabs.push("ai");
+  if (isLocalAiFeatureEnabled && isNativePlatform()) tabs.push("ai");
   return tabs;
 });
 
