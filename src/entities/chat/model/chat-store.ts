@@ -5732,35 +5732,48 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return;
       }
 
-      // Count how many actual message events sync has provided.
       // Sync typically only provides 1-2 recent events per room (for preview).
-      // We need scrollback to fetch enough messages for a proper chat view.
+      // We need scrollback to fetch enough events for a proper chat view.
+      //
+      // Whether more history exists is decided by the SDK's own pagination
+      // token (room.oldState.paginationToken — null means the server has
+      // already told us this is the start of the room), not by classifying
+      // event types ourselves: that classification has to be kept in sync
+      // with every message-carrying event type (plain text, the app's
+      // content-level "m.encrypted" wrapper, polls, calls, ...) and silently
+      // drifting out of date there previously caused scrollback to re-run on
+      // every single room open even when the timeline already had plenty of
+      // history (see git history). The raw timeline length is only used to
+      // decide whether it's even worth *trying* — it doesn't need to be
+      // exact, just "clearly not enough to fill a chat view yet".
       let timelineEvents = getTimelineEvents(matrixRoom);
-      const MIN_MESSAGES = 20;
+      const MIN_TIMELINE_EVENTS = 20;
       const MAX_SCROLLBACK_ATTEMPTS = 5;
+      // Undefined oldState (not yet populated) deliberately reads as "keep
+      // trying", same as a real token — an unknown state must never look
+      // like "definitely no more history" and skip content the user hasn't
+      // seen yet. Only an explicit null (the SDK's own "start of room"
+      // signal) stops the loop.
+      const hasMoreHistory = () => matrixRoom.oldState?.paginationToken !== null;
 
-      const countMessages = (events: unknown[]) =>
-        events.filter((ev) => {
-          const raw = getRawEvent(ev);
-          return raw?.type === "m.room.message";
-        }).length;
-
-      let msgCount = countMessages(timelineEvents);
-
-      if (msgCount < MIN_MESSAGES) {
+      if (timelineEvents.length < MIN_TIMELINE_EVENTS && hasMoreHistory()) {
         // Brief yield if timeline is empty — sync may not have populated it yet
         if (timelineEvents.length === 0) {
           await new Promise(r => setTimeout(r, 300));
           timelineEvents = getTimelineEvents(matrixRoom);
-          msgCount = countMessages(timelineEvents);
         }
 
-        // Keep scrolling back until we have enough messages or hit the beginning.
+        // Keep scrolling back until we have enough events or the SDK confirms
+        // we've hit the beginning of the room's history.
         // Check activeRoomId between iterations — if user switched rooms, bail
         // early to avoid piling up stale scrollback/crypto work.
         // Only applies when the room WAS active (user opened it, then navigated away).
         // Viewport-fetch rooms were never active — they must complete to provide previews.
-        for (let attempt = 0; attempt < MAX_SCROLLBACK_ATTEMPTS && msgCount < MIN_MESSAGES; attempt++) {
+        for (
+          let attempt = 0;
+          attempt < MAX_SCROLLBACK_ATTEMPTS && timelineEvents.length < MIN_TIMELINE_EVENTS && hasMoreHistory();
+          attempt++
+        ) {
           if (wasActiveRoom && activeRoomId.value !== roomId) return;
           const prevCount = timelineEvents.length;
           try {
@@ -5770,7 +5783,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             break;
           }
           timelineEvents = getTimelineEvents(matrixRoom);
-          msgCount = countMessages(timelineEvents);
 
           // No new events loaded — we've reached the beginning of the room
           if (timelineEvents.length === prevCount) break;
