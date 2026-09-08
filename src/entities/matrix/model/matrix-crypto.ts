@@ -1303,6 +1303,25 @@ export class Pcrypto {
         let block = pcrypto.currentblock.height;
         if (!tetatet) block = 10;
 
+        // Diagnostic only — does not change what gets sent. preparedUsers()
+        // silently drops any member whose derived key set is short
+        // (ui.keys.length < m, e.g. a truncated RPC response — see the
+        // filterXSS fallback in entities/auth/model/stores.ts getUsersInfo),
+        // and that member is then simply absent from `encrypted` below with
+        // no exception raised. They receive the message but can never
+        // decrypt it. Surfacing this in logs makes an otherwise-invisible
+        // "why can't X read this chat" report traceable.
+        const preparedIds = new Set(_users.map((u) => u.id));
+        const excludedMemberIds = Object.keys(users).filter(
+          (id) => id !== pcrypto.user?.userinfo?.id && !preparedIds.has(id),
+        );
+        if (excludedMemberIds.length > 0) {
+          console.warn(
+            "[pcrypto] encryptKey: excluding members with incomplete key sets — they will not be able to decrypt this message:",
+            excludedMemberIds,
+          );
+        }
+
         const encrypted: Record<string, unknown> = {};
         for (let i = 0; i < _users.length; i++) {
           const user = _users[i];

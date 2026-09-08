@@ -17,38 +17,47 @@ Forta Chat использует **offline-first** архитектуру с дв
 
 | Таблица | Назначение | Ключ | Индексы |
 |---------|-----------|------|---------|
-| `rooms` | Метаданные комнат | `id` | `updatedAt` |
-| `messages` | Все сообщения | `id` | `[roomId+timestamp]`, `roomId` |
-| `users` | Профили пользователей | `address` | — |
-| `pendingOps` | Очередь отправки (offline) | `++id` | `roomId`, `status` |
+| `rooms` | Метаданные комнат | `id` | `updatedAt`, `membership`, `isDeleted` |
+| `messages` | Сообщения | `++localId` | `eventId`, `clientId`, `[roomId+timestamp]`, `[roomId+status]`, `senderId` |
+| `users` | Профили пользователей | `address` | `updatedAt`, `aliasUpdatedAt` |
+| `pendingOps` | Очередь отправки (offline) | `++id` | `[roomId+createdAt]`, `status`, `clientId`, `[status+nextAttemptAt]` |
 | `syncState` | Точка синхронизации Matrix | `key` | — |
-| `attachments` | Метаданные вложений | `id` | `messageId` |
+| `attachments` | Метаданные вложений | `++id` | `messageLocalId`, `status` |
 | `decryptionQueue` | Очередь повторной расшифровки | `++id` | `eventId`, `roomId`, `status`, `[status+nextAttemptAt]` |
 | `listenedMessages` | Прослушанные голосовые | `messageId` | — |
 | `searchCache` | Кэш результатов поиска | `query` | `expiresAt` |
 | `channels` | Подписки на каналы | `address` | `syncOrder`, `updatedAt` |
-| `mediaCacheIndex` | Индекс кэша медиа-файлов | `mxc` | `accessedAt`, `roomId`, `category` |
+| `mediaCacheIndex` | Индекс кэша медиа | `mxc` | `accessedAt`, `roomId`, `category` |
 | `mediaCacheBlobs` | Blob-данные кэша медиа | `mxc` | — |
 | `callProviders` | Провайдеры звонков | `++id` | — |
 | `aiChats` | Локальные AI-чаты | `id` | `updatedAt` |
 | `aiMessages` | Сообщения AI-чатов | `++localId` | `id`, `[chatId+createdAt]` |
 
-### 1.2 Pinia stores — 3 основных
+### 1.2 Pinia stores
 
-| Store | Данные | Тип реактивности |
-|-------|--------|-------------------|
-| `chatStore` | rooms, sortedRooms, activeRoom, messages | `shallowRef` + `triggerRef` |
-| `userStore` | users (профили), displayNames | `shallowRef` + `debouncedTrigger` |
-| `authStore` | credentials, matrixClient, initState | `ref` |
+| Store | Данные |
+|-------|--------|
+| `authStore` | credentials, sessions, matrixClient, registration |
+| `chatStore` | rooms, sortedRooms, activeRoom, messages, watermarks |
+| `userStore` | users / displayNames |
+| `callStore` | WebRTC call state |
+| `channelStore` | channel subscriptions |
+| `themeStore` | theme, accent, typography, chat UI prefs |
+| `localeStore` | locale |
+| `torStore` | Tor status |
+| `mediaStore` | media pipeline state |
+| `localAiStore` / `aiChatStore` | local AI + AI chat UI |
 
-### 1.3 localStorage — 4 ключа
+### 1.3 localStorage (основные ключи)
 
-| Ключ | Назначение | Причина |
-|------|-----------|---------|
-| `users` | Кэш профилей | Мгновенный старт без ожидания IndexedDB |
-| `pinnedRooms` | Закреплённые комнаты | Быстрый доступ без async |
-| `mutedRooms` | Заглушённые комнаты | Быстрый доступ без async |
-| `registration` | Данные регистрации | Авторизация до инициализации stores |
+| Ключ | Назначение |
+|------|-----------|
+| `forta-chat:sessions` / active session | multi-account sessions |
+| `bastyon-chat-users` | кэш профилей (быстрый старт) |
+| `chat_pinned_rooms[:addr]` | закреплённые комнаты (per-account) |
+| `chat_muted_rooms[:addr]` | заглушённые комнаты (per-account) |
+| `registration_pending` / `registration_profile` / `registration_phase` | незавершённая регистрация |
+| `theme`, `accent_color`, `font_size`, … | настройки темы (`useThemeStore`) |
 
 ### 1.4 In-memory кэши
 

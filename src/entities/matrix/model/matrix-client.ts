@@ -218,7 +218,14 @@ export class MatrixClientService {
       userData = await client.login("m.login.password", loginParams);
     } catch (e: unknown) {
       const errStr = typeof e === "string" ? e : (e as Error)?.message ?? "";
-      if (errStr.indexOf("M_USER_DEACTIVATED") > -1) {
+      // MatrixError.message is built from the server's free-text `error`
+      // field (e.g. "This account has been deactivated"), never the errcode
+      // itself — the errcode only lives in `.errcode`/`.name`. A substring
+      // check on `.message` alone can never match a real M_USER_DEACTIVATED
+      // response; check `.errcode` first and keep the string match only as a
+      // defensive fallback for non-MatrixError rejections (e.g. a raw string).
+      const errcode = e instanceof sdk.MatrixError ? e.errcode : undefined;
+      if (errcode === "M_USER_DEACTIVATED" || errStr.indexOf("M_USER_DEACTIVATED") > -1) {
         this.error = "M_USER_DEACTIVATED";
         return null;
       }

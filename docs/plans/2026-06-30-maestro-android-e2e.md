@@ -47,7 +47,7 @@ flowchart LR
 - [Android Studio](https://developer.android.com/studio) + AVD (рекомендация: **Pixel 6**, API **30** или **33**, Google APIs, x86_64)
 - `ANDROID_HOME` / `platform-tools` в PATH (`adb devices` видит эмулятор)
 - [Maestro CLI](https://maestro.mobile.dev/getting-started/installing-maestro) ≥ 1.39
-- Node 18+, JDK 17+ (как в [android-local-build.md](../android-local-build.md))
+- Node 18+, JDK 21 (как в [android-local-build.md](../android-local-build.md))
 
 ### Тестовый аккаунт
 

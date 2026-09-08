@@ -1407,7 +1407,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let _prevWatermark: number = 0;
   const activeMessages = computed<Message[]>(() => {
     let msgs: Message[];
-    if (chatDbKitRef.value) {
+    // enterDetachedMode() ("jump to message" for a target outside the loaded
+    // tail window — search results, quoted replies, pinned messages) writes
+    // its context snapshot into `messages.value[roomId]`, not Dexie. dexieMessages
+    // is a liveQuery over "latest N messages" with no anchor, so it never
+    // reflects a detached jump — without this branch, activeMessages kept
+    // reading dexieMessages even while detached and the jump silently
+    // rendered nothing/the wrong position. See exitDetachedMode() for the
+    // return-to-live path (reloads dexieMessages via loadRoomMessages).
+    if (chatDbKitRef.value && !isDetachedFromLatest.value) {
       const raw = dexieMessages.value;
       const myAddr = useAuthStore().address ?? undefined;
       const watermark = activeRoomOutboundWatermark.value;
@@ -1458,6 +1466,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       _prevWatermark = watermark;
     } else {
       msgs = activeRoomId.value ? (messages.value[activeRoomId.value] ?? []) : [];
+      // Invalidate the Dexie-branch fast-path cache. `_prevActiveOutput` is
+      // unconditionally overwritten with `msgs` below regardless of which
+      // branch produced it, so leaving `_prevDexieInput` pointing at the
+      // last live `raw` array would make the NEXT live-branch evaluation
+      // fast-path-return this (detached/legacy) branch's output — `raw`
+      // hasn't structurally changed, only which branch was taken has. A
+      // fresh array can never be `===` to a future `dexieMessages.value`,
+      // forcing a correct re-derivation instead of reusing stale output.
+      _prevDexieInput = [];
     }
 
     // Deduplicate: a pending message (clientId) and its server echo (eventId)
@@ -1974,7 +1991,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     () => chatDbKitRef.value,
     async (kit) => {
       if (kit) {
-        await initDexieRooms(kit);
+        try {
+          await initDexieRooms(kit);
+        } catch (e) {
+          // A Dexie open/read failure here (corrupted IndexedDB, quota
+          // exceeded, WebView storage wiped mid-session) used to be an
+          // unhandled rejection inside this watcher — dexieRoomsReady stays
+          // false forever with no logged cause. The existing degraded-state
+          // watchdog (startInitialSyncWatch, INITIAL_SYNC_TIMEOUT_MS) still
+          // unblocks the UI on its own timer regardless of this catch — this
+          // only makes the underlying failure visible instead of silent.
+          console.error("[chat-store] initDexieRooms failed — local DB unavailable:", e);
+          return;
+        }
         await fullRebuildSortedRoomsAsync();
         // Self-heal unread counts on first load (deferred to not block UI)
         queueMicrotask(() => syncAllUnreadFromMatrix());
@@ -4650,6 +4679,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Batched messages/rooms reactivity trigger (rAF-coalesced)
+  //
+  // WHY: addMessage() runs once per inbound Matrix timeline event, for every
+  // room (not just the active one) — during a reconnect catch-up burst this
+  // can fire dozens/hundreds of times across many rooms within a few seconds.
+  // Each call used to fire triggerRef(messages)/triggerRef(rooms) synchronously,
+  // forcing every computed/watcher reading those refs to re-evaluate once per
+  // background event. Coalescing multiple triggers landing in the same frame
+  // into one collapses the cascade — same pattern already used for the
+  // sidebar (see sortedRoomsPatcher above / patch-scheduler.ts).
+  // ---------------------------------------------------------------------------
+  const messagesTriggerScheduler = createPatchScheduler<null>(() => {
+    triggerRef(messages);
+    triggerRef(rooms);
+  });
+  const scheduleMessagesTrigger = () => messagesTriggerScheduler.schedule([null]);
+
   const addMessage = (roomId: string, message: Message) => {
     if (!messages.value[roomId]) {
       messages.value[roomId] = [];
@@ -4668,19 +4715,26 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // With shallowRef + no-spread in activeMessages, in-place push wouldn't
     // change the reference and watchers wouldn't fire.
     messages.value[roomId] = [...messages.value[roomId], message];
-    triggerRef(messages);
 
     // Update room's last message and timestamp
     const room = getRoomById(roomId);
     if (room) {
       room.lastMessage = lastMessageFromMessage(message, dexieRoomMap.get(roomId));
       room.updatedAt = message.timestamp;
-      triggerRef(rooms);
       if (roomId !== activeRoomId.value && message.senderId !== useAuthStore().address) {
         // Single writer — keeps Dexie + dexieRoomMap + sortedRooms in lock-step
         bumpUnreadCount(roomId, 1);
       }
     }
+    // addMessage() runs once per inbound Matrix timeline event, in EVERY
+    // room (not just the active one) — e.g. a reconnect catch-up burst can
+    // fire this dozens/hundreds of times across many rooms within a few
+    // seconds. Coalescing the messages/rooms reactivity notification into a
+    // single rAF-scheduled trigger (data is already written synchronously
+    // above) avoids re-evaluating every computed/watcher reading `messages`
+    // or `rooms` once per background event. Same pattern as the sidebar's
+    // sortedRoomsPatcher (see patch-scheduler.ts).
+    scheduleMessagesTrigger();
 
     // Update decrypted preview cache so refreshRoomsImmediate() preserves this preview
     if (message.content && message.content !== "[encrypted]") {
@@ -5557,7 +5611,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Also update in-memory message statuses (for non-Dexie fallback path)
       const readUpToIdx = msgs.findIndex(m => m.id === readUpToEventId);
       if (readUpToIdx < 0) {
-        // Event not in our parsed messages — mark all as read (receipt is beyond our range)
+        // The receipt's target event isn't among msgs (msgs may be narrower
+        // than the full timeline this receipt was found in — e.g. history
+        // cleared after the receipt was set). "Not found" means one of two
+        // opposite things, so it must not always mean "mark everything read":
+        //  - the receipt is NEWER than everything in msgs (peer has read
+        //    past what we loaded) → everything shown is read.
+        //  - the receipt is OLDER than everything in msgs (e.g. it sits on a
+        //    pre-clear event that's been filtered out) → we have no evidence
+        //    the peer has read anything we're actually showing — leave
+        //    statuses untouched instead of falsely marking new messages read.
+        const oldestMsgTs = msgs[0]?.timestamp ?? 0;
+        if (readUpToTimestamp < oldestMsgTs) return;
         for (const msg of msgs) {
           if (msg.senderId === myAddr && msg.status === MessageStatus.sent) {
             msg.status = MessageStatus.read;
@@ -5794,18 +5859,36 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Only applies when the room WAS active (viewport-fetch rooms were never active).
       if (wasActiveRoom && activeRoomId.value !== roomId) return;
 
-      const msgs = await parseTimelineEvents(timelineEvents, roomId);
+      // Cut the raw timeline down to post-clear events BEFORE parsing/decrypting.
+      // "Clear history" (clearHistory() in room-repository.ts) is a display-only
+      // cutoff — it never touches the underlying Matrix room or redacts anything,
+      // so the full pre-clear history stays in the SDK's timeline forever. Doing
+      // the cutoff AFTER parsing meant decrypting the entire pre-clear history on
+      // every single room open just to throw almost all of it away a few lines
+      // later — the actual cost behind an emptied "cleared" chat sitting on a
+      // skeleton for a long time with zero network activity.
+      const clearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(roomId);
+      const eventsToParse = clearedAtTs
+        ? timelineEvents.filter((ev) => {
+            const ts = getRawEvent(ev)?.origin_server_ts as number | undefined;
+            return ts === undefined || ts > clearedAtTs;
+          })
+        : timelineEvents;
+
+      const msgs = await parseTimelineEvents(eventsToParse, roomId);
 
       // Apply existing read receipts to determine message status.
       // Walk timeline backwards, find the latest read receipt from a non-self user,
-      // and mark all own messages up to that point as "read".
+      // and mark all own messages up to that point as "read". Scans the FULL
+      // (unfiltered) timeline, not eventsToParse — this only reads receipt
+      // metadata (cheap, no decryption), and a receipt can legitimately sit on
+      // a pre-clear event; applyExistingReceipts already handles that case by
+      // treating "receipt found but outside msgs' range" as "everything we're
+      // showing is read". Narrowing this scan to eventsToParse would hide that
+      // receipt entirely and leave own messages stuck as "sent".
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
 
-      // Filter out messages before the clear-history marker so they never
-      // pollute messages.value (used as a lastMessage candidate in buildChatRoom).
-      const clearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(roomId);
-      const filteredMsgs = clearedAtTs ? msgs.filter(m => m.timestamp > clearedAtTs) : msgs;
-      setMessages(roomId, filteredMsgs);
+      setMessages(roomId, msgs);
 
       // Dual-write: persist all parsed messages to Dexie.
       // WEE-95: fire-and-forget for ALL rooms — never block the render-critical
@@ -7350,6 +7433,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     profilesRequestedForRooms.clear();
     roomFetchStates.clear();
     cancelPendingPatches();
+    messagesTriggerScheduler.cancel();
     _sortedRoomsRef.value = [];
     messageWindowSize.value = 50;
     lastReadReceiptSentTs.clear();

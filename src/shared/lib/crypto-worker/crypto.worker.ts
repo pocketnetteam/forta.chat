@@ -237,13 +237,17 @@ async function aesSivEncrypt(
 const keyCache = new Map<string, Record<string, Uint8Array>>();
 const KEY_CACHE_MAX = 128;
 
+function cacheKeyFor(users: CryptoUser[], block: number): string {
+  return `${block}|${users.map((u) => u.id).join(",")}`;
+}
+
 function getCachedKeys(
   users: CryptoUser[],
   myId: string,
   privateKeys: string[],
   block: number,
 ): Record<string, Uint8Array> {
-  const cacheKey = `${block}|${users.map((u) => u.id).join(",")}`;
+  const cacheKey = cacheKeyFor(users, block);
   const cached = keyCache.get(cacheKey);
   if (cached) return cached;
 
@@ -256,6 +260,17 @@ function getCachedKeys(
   keyCache.set(cacheKey, keys);
 
   return keys;
+}
+
+/** Evict a poisoned/stale cache entry so the next attempt re-derives the key
+ *  from scratch instead of repeatedly failing against the same bad value.
+ *  Mirrors the already-fixed main-thread fallback in matrix-crypto.ts
+ *  (_decrypt) — see the schema v19 `aeskeys` cache-collision migration for
+ *  the production incident this addresses: a wrong derived key silently
+ *  cached here would fail every retry identically until the worker itself
+ *  restarted or the LRU cap cycled it out. */
+function evictCachedKeys(users: CryptoUser[], block: number): void {
+  keyCache.delete(cacheKeyFor(users, block));
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +346,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           } satisfies WorkerResponse);
           return;
         }
-        const result = await aesSivDecrypt(key, msg.encData.encrypted, msg.encData.nonce);
+        let result;
+        try {
+          result = await aesSivDecrypt(key, msg.encData.encrypted, msg.encData.nonce);
+        } catch (decryptErr) {
+          // A wrong/stale cached key must not poison every future retry —
+          // evict it here (outer catch below still reports the failure).
+          evictCachedKeys(msg.users, msg.block);
+          throw decryptErr;
+        }
         (self as unknown as Worker).postMessage({
           id: msg.id,
           result,

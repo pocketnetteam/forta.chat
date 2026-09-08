@@ -35,7 +35,7 @@
 
 **Forta Chat** — это end-to-end шифрованный мессенджер с архитектурой **local-first**: все сообщения, медиа и метаданные хранятся в IndexedDB на вашем устройстве, а синхронизация с Matrix-сервером идёт в фоне. Авторизация выполняется через приватный ключ аккаунта [Bastyon](https://bastyon.com) — никаких логинов и паролей.
 
-Работает в вебе на [forta.chat](https://forta.chat), на десктопе (Windows / macOS / Linux) и на Android.
+Работает в вебе на [forta.chat](https://forta.chat), на десктопе (Windows / macOS / Linux), на Android и iOS.
 
 ## Возможности
 
@@ -45,7 +45,7 @@
 - 🎙 **Медиа**: фото, видео, голосовые, видеокружки, файлы с crash-recovery загрузкой
 - 🌐 **Публичные комнаты и инвайт-ссылки**, реакции, опросы, read-watermarks, редактирование/удаление
 - 🔑 **Вход через Bastyon**: приватный ключ Bastyon-аккаунта — см. [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
-- 🖥 **Кросс-платформенность**: Web, Electron (Windows/macOS/Linux), Android 7.0+ (API 24+)
+- 🖥 **Кросс-платформенность**: Web, Electron (Windows/macOS/Linux), Android 7.0+ (API 24+), iOS 15+
 
 ## Скачать
 
@@ -71,7 +71,7 @@
 | Чат-протокол | `matrix-js-sdk-bastyon` (Matrix fork от Bastyon) |
 | Звонки | WebRTC |
 | Десктоп | Electron 40 + electron-builder |
-| Мобильный | Capacitor 8 (Android) |
+| Мобильный | Capacitor 8 (Android, iOS) |
 | Крипто | `@noble/secp256k1`, `miscreant` (AEAD), `pbkdf2` |
 
 ## Быстрый старт
@@ -136,7 +136,7 @@ npm run cap:run     # запустить на подключённом устр�
 
 Полная инструкция по локальной сборке APK (debug/release, keystore, переменные окружения) — [docs/android-local-build.md](docs/android-local-build.md).
 
-Capacitor-конфиг: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`, `minSdk 24`, `targetSdk 36`).
+Capacitor-конфиг: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.chat`). Версии SDK (`minSdk 24`, `targetSdk 36`) — в [android/variables.gradle](android/variables.gradle), не в `capacitor.config.ts`.
 
 ### iOS (Capacitor)
 
@@ -201,20 +201,20 @@ src/
 | [docs/webrtc-logs-analysis.md](docs/webrtc-logs-analysis.md) | Разбор логов WebRTC |
 | [docs/webrtc-solution-proposal.md](docs/webrtc-solution-proposal.md) | Предложения по улучшению звонков |
 | [docs/android-local-build.md](docs/android-local-build.md) | Локальная сборка Android APK |
+| [docs/ios-local-build.md](docs/ios-local-build.md) | Локальная сборка iOS |
 | [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md) | Как получить приватный ключ Bastyon |
-| [docs/plans/](docs/plans/) | Дизайн-документы и планы фич |
+| [docs/plans/](docs/plans/) | Дизайн-документы и планы фич (historical) |
 
 ## Разработка
 
 Перед коммитом обязательно прогнать полную верификацию:
 
 ```bash
-npm run build              # сборка (vue-tsc + vite)
-npx vue-tsc --noEmit       # проверка типов
+npm run build              # сборка (уже включает vue-tsc --noEmit + vite)
 npm run test               # тесты
 ```
 
-Конвенции, TDD, code review и прочее — в [CLAUDE.md](CLAUDE.md).
+Конвенции, TDD, code review и прочее — в [CLAUDE.md](CLAUDE.md). Отдельного `npm run lint` в репозитории нет.
 
 Коммит-сообщения: [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 
@@ -222,6 +222,7 @@ npm run test               # тесты
 
 - [Политика конфиденциальности](https://forta.chat/privacy.html)
 - [Условия использования](https://forta.chat/terms.html)
+- [Child Safety Standards (CSAE)](https://forta.chat/csae.html)
 
 ## Ссылки
 

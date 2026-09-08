@@ -1,7 +1,11 @@
-# Bastyon Chat — UX/UI Specification
+# Forta Chat — UX/UI Specification
 
 > Messenger UX inspired by Telegram's speed, simplicity, and progressive disclosure.
 > No brand copying — only the logic, feel, and interaction quality.
+>
+> **Note:** This is an aspirational UX spec. Route map highlights core flows;
+> also shipped: `/apps`, `/download`, `/invite`, `/join`, `/settings/appearance`
+> (settings hub is primarily `SettingsPanel`, not a `/settings` index).
 
 ---
 

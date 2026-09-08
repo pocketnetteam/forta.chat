@@ -1,5 +1,9 @@
 # Agent Changelog
 
+> **Historical log of agent review cycles (2026-03-23).** Point-in-time findings and fixes —
+> not current product status. For living architecture see `CLAUDE.md`, `docs/architecture-data-flow.md`.
+> Example: “NO push notification system” below is obsolete; push lives in `src/shared/lib/push/`.
+
 ## Cycle 1 — 2026-03-23 20:20 GMT+5
 
 ### Deep Codebase Sweep Results

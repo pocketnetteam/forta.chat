@@ -1,5 +1,8 @@
 # Аудит сборки (Vite) и холодного старта
 
+> **Dated audit (2026-08-13), not a post-fix status report.** Treat findings as a checklist;
+> verify against current `vite.config.ts` / boot path before assuming fixes landed.
+
 **Дата:** 2026-08-13
 **Контекст:** проект использует **Vite**, не Webpack (см. `vite.config.ts`, `package.json`). Ниже — аудит `vite.config.ts`, `index.html` и цепочки загрузки скриптов, с конкретными цифрами из `dist/` после `npm run build`, и приоритизированный список фиксов под холодный старт на Android (minSdk 24).
 

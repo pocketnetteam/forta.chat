@@ -190,6 +190,10 @@ export function initChatDb(
     for (const timer of debouncedRetryTimers.values()) clearTimeout(timer);
     debouncedRetryTimers.clear();
     decryptionWorker.dispose();
+    // Stop SyncEngine's 30s watchdog interval — without this, every user
+    // switch / logout leaves the previous SyncEngine's watchdog ticking
+    // forever against a closed Dexie handle (caught, but never stops).
+    syncEngine.dispose();
   };
 
   // Snapshot genuinely stranded "syncing" ops BEFORE the queue starts —
