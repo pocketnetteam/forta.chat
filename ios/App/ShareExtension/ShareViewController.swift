@@ -312,10 +312,29 @@ class ShareViewController: SLComposeServiceViewController {
         var responder: UIResponder? = self
         while let next = responder {
             if let app = next as? UIApplication {
-                app.perform(NSSelectorFromString("openURL:"), with: url)
+                open(url, via: app)
                 return
             }
             responder = next.next
         }
+    }
+
+    /// iOS 18 turned the legacy `openURL:` selector into a silent no-op: the
+    /// sheet closed, Forta never opened, and the share sat in the App Group
+    /// until the user launched the app by hand. Call
+    /// `openURL:options:completionHandler:` through its IMP — a direct
+    /// `open(_:options:)` call doesn't compile under
+    /// APPLICATION_EXTENSION_API_ONLY.
+    private func open(_ url: URL, via app: UIApplication) {
+        let selector = NSSelectorFromString("openURL:options:completionHandler:")
+        if app.responds(to: selector) {
+            typealias OpenURLFunction = @convention(c) (
+                AnyObject, Selector, NSURL, NSDictionary, (@convention(block) (Bool) -> Void)?
+            ) -> Void
+            let function = unsafeBitCast(app.method(for: selector), to: OpenURLFunction.self)
+            function(app, selector, url as NSURL, NSDictionary(), nil)
+            return
+        }
+        _ = app.perform(NSSelectorFromString("openURL:"), with: url)
     }
 }

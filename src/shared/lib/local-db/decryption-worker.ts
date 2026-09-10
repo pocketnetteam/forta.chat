@@ -4,6 +4,7 @@ import { MessageType } from "@/entities/chat/model/types";
 import { cryptoDebug } from "@/shared/lib/utils/crypto-debug";
 
 type GetRoomCrypto = (roomId: string) => Promise<{ decryptEvent(raw: unknown): Promise<{ body: string }> } | undefined>;
+type FetchRawEvent = (roomId: string, eventId: string) => Promise<Record<string, unknown> | undefined>;
 
 const FAST_BACKOFF_MS = [2_000, 5_000, 10_000];
 const SLOW_BACKOFF_MS = [30_000, 120_000, 600_000, 3_600_000];
@@ -27,6 +28,7 @@ export class DecryptionWorker {
     private db: ChatDatabase,
     private getRoomCrypto: GetRoomCrypto,
     private roomRepo?: RoomRepository,
+    private fetchRawEvent?: FetchRawEvent,
   ) {}
 
   /** Enqueue a failed decryption for retry. Idempotent — skips if eventId already queued. */
@@ -58,13 +60,31 @@ export class DecryptionWorker {
    * message row, writes the plaintext back on success, and clears any queued
    * job. Returns true on success, false if there's nothing to decrypt or it
    * failed (keys still unavailable).
+   *
+   * A placeholder row with no stored ciphertext (written by the old bulk
+   * room-load/scrollback paths) fetches its raw event from the server once
+   * and persists it first, so it stays recoverable even if this attempt
+   * fails. Lazy on purpose: only bubbles the user actually looks at pay the
+   * round-trip, instead of a boot sweep over the whole history.
    */
   async decryptMessageNow(eventId: string): Promise<boolean> {
     const msg = await this.db.messages.where("eventId").equals(eventId).first();
-    if (!msg || !msg.encryptedBody) return false;
+    if (!msg) return false;
+
+    let encryptedBody = msg.encryptedBody;
+    if (!encryptedBody) {
+      if (msg.content !== "[encrypted]" || msg.softDeleted || !this.fetchRawEvent) return false;
+      const fetched = await this.fetchRawEvent(msg.roomId, eventId).catch(() => undefined);
+      if (!fetched) return false;
+      encryptedBody = JSON.stringify(fetched);
+      await this.db.messages.update(msg.localId!, {
+        encryptedBody,
+        decryptionStatus: msg.decryptionStatus === "failed" ? "failed" : "pending",
+      });
+    }
 
     try {
-      const raw = JSON.parse(msg.encryptedBody);
+      const raw = JSON.parse(encryptedBody);
       const roomCrypto = await this.getRoomCrypto(msg.roomId);
       if (!roomCrypto) return false;
 

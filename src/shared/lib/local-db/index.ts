@@ -160,7 +160,7 @@ export function initChatDb(
     const crypto = await getRoomCrypto(roomId);
     if (!crypto) return undefined;
     return { decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>) };
-  }, rooms);
+  }, rooms, fetchRawEventFromServer);
 
   // --- Event-driven decryption retry triggers ---
   const debouncedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();

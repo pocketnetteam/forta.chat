@@ -749,8 +749,9 @@ export function useMessages() {
     return true;
   };
 
-  const loadMessages = async (roomId: string) => {
-    await chatStore.loadRoomMessages(roomId, { waitForSdk: true });
+  /** Resolves to the parsed message count (see chatStore.loadRoomMessages). */
+  const loadMessages = async (roomId: string): Promise<number | undefined> => {
+    return chatStore.loadRoomMessages(roomId, { waitForSdk: true });
   };
 
   /** Set typing indicator. Pass `roomIdOverride` to target a specific room

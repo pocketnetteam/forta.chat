@@ -830,6 +830,7 @@ export const en = {
   "share.copyFailed": "Failed to copy link",
   "share.nativeShare": "Share via...",
   "share.sendFailed": "Failed to send file",
+  "share.filesCount": "{count} files",
 
   // ── Share group link ──
   "shareGroup.inviteLink": "Invite Link",

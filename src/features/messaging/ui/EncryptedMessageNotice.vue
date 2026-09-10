@@ -1,40 +1,73 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onBeforeUnmount } from "vue";
 import { useChatStore } from "@/entities/chat";
 import type { Message } from "@/entities/chat";
+import { decryptRetryScheduler } from "@/features/messaging/model/decrypt-retry-scheduler";
 
 const props = defineProps<{ message: Message; isOwn?: boolean }>();
 const chatStore = useChatStore();
 const { t } = useI18n();
 
+const rootRef = ref<HTMLElement>();
 const isRetrying = ref(false);
-let autoAttempted = false;
+let observer: IntersectionObserver | undefined;
 
-async function retry(): Promise<void> {
-  if (isRetrying.value) return;
-  // A stable Matrix eventId ($...) is required to look up the stored ciphertext.
+/** A stable Matrix eventId ($...) is required to look up the stored ciphertext. */
+function stableEventId(): string | undefined {
   const eventId = props.message.id;
-  if (!eventId || !eventId.startsWith("$")) return;
+  return eventId && eventId.startsWith("$") ? eventId : undefined;
+}
+
+async function attempt(eventId: string): Promise<boolean> {
   isRetrying.value = true;
   try {
     // On success the parent liveQuery swaps this bubble for the decrypted
     // content and this component unmounts; on failure we drop back to idle.
-    await chatStore.retryMessageDecryption(eventId);
+    return await chatStore.retryMessageDecryption(eventId);
   } finally {
     isRetrying.value = false;
   }
 }
 
-// Auto-attempt once when the undecrypted bubble appears.
+/** User-initiated: runs immediately, bypassing the auto-retry cooldown. */
+async function retry(): Promise<void> {
+  const eventId = stableEventId();
+  if (!eventId || isRetrying.value) return;
+  await attempt(eventId);
+}
+
+/** Visibility-driven: bounded + deduplicated by the shared scheduler, and
+ *  repeats on each re-entry into view once the failure cooldown has passed. */
+function autoRetry(): void {
+  const eventId = stableEventId();
+  if (!eventId) return;
+  void decryptRetryScheduler.request(eventId, () => attempt(eventId));
+}
+
 onMounted(() => {
-  if (autoAttempted) return;
-  autoAttempted = true;
-  void retry();
+  if (typeof IntersectionObserver === "undefined" || !rootRef.value) {
+    autoRetry();
+    return;
+  }
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) autoRetry();
+    },
+    { rootMargin: "200px", threshold: 0 },
+  );
+  observer.observe(rootRef.value);
+});
+
+onBeforeUnmount(() => {
+  observer?.disconnect();
+  const eventId = stableEventId();
+  if (eventId) decryptRetryScheduler.cancel(eventId);
 });
 </script>
 
 <template>
   <div
+    ref="rootRef"
     class="flex items-center gap-1.5 text-sm italic"
     :class="props.isOwn ? 'text-white/70' : 'text-text-on-main-bg-color'"
   >

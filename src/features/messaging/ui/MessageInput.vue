@@ -28,6 +28,8 @@ import { deriveInputLayout } from "../model/input-layout";
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
 import { readShareUriAsBlob } from "@/shared/lib/share-target";
+import { sendExternalShareFiles } from "../model/send-external-share";
+import { narrowExternalShareForward } from "@/entities/chat/lib/external-share-forward";
 
 const PEER_KEYS_GRACE_MS = 2000;
 
@@ -312,36 +314,28 @@ const handleSend = async () => {
     } else if (chatStore.forwardingMessage) {
       const fwd = chatStore.forwardingMessage;
 
-      // External share with file: send file directly instead of text forward.
-      // Android Share Sheet hands us a content:// URI that the WebView's
-      // fetch() can't open directly — readShareUriAsBlob routes through the
-      // Capacitor Filesystem bridge so the upload pipeline gets real bytes
-      // instead of a TypeError (#650).
+      // External share with file(s): upload them directly instead of a text
+      // forward. readShareUriAsBlob reads native paths / content:// URIs that
+      // a plain WebView fetch() can't open (#650).
       if (fwd.isExternalShare && fwd.fileInfo?.url) {
-        try {
-          const mime = fwd.fileInfo.type || "application/octet-stream";
-          const blob = await readShareUriAsBlob(fwd.fileInfo.url, mime);
-          const fileName = fwd.fileInfo.name || "shared_file";
-          // Prefer the explicit mime we already had — `blob.type` from the
-          // web fetch fallback can downgrade Bastyon-served URLs to
-          // application/octet-stream which then poisons messageTypeFromMime.
-          const file = new File([blob], fileName, { type: mime || blob.type });
-
-          if (fwd.type === MessageType.image) {
-            inserted = await sendImage(file);
-          } else {
-            inserted = await sendFile(file);
-          }
-        } catch (e) {
-          // Without a visible toast the user just sees the Send tap "do
-          // nothing" — same UX surface as the silent peerKeysOk gate this
-          // session also unsticks. Surface every failure so the user can
-          // retry (Session 48 / #710 #706).
-          console.error("[MessageInput] Failed to send external share file:", e);
-          toast(t("share.sendFailed"), "error");
-          inserted = false;
+        const files = fwd.externalFiles?.length ? fwd.externalFiles : [fwd.fileInfo];
+        const { sent, failedFiles } = await sendExternalShareFiles(files, rawText, {
+          readBlob: readShareUriAsBlob,
+          sendImage,
+          sendFile,
+          sendText: (body) => sendMessage(body, linkPreview.dismissed.value),
+        });
+        // Without a visible toast the user just sees the Send tap "do
+        // nothing" — surface every failure so they can retry (#710 #706).
+        if (failedFiles.length > 0) toast(t("share.sendFailed"), "error");
+        inserted = sent > 0;
+        if (failedFiles.length === 0) {
+          chatStore.cancelForward();
+        } else if (sent > 0) {
+          // Keep only what failed: the next Send retries those files without
+          // re-sending the caption or the files that already went out.
+          chatStore.forwardingMessage = narrowExternalShareForward(fwd, failedFiles);
         }
-        if (inserted !== false) chatStore.cancelForward();
       } else {
         const forwardMeta = fwd.withSenderInfo
           ? { senderId: fwd.senderId, senderName: fwd.senderName }
@@ -561,6 +555,9 @@ const bulkForwardPreviewText = computed(() => {
 const forwardPreviewText = computed(() => {
   const fwd = chatStore.forwardingMessage;
   if (!fwd) return "";
+  if (fwd.externalFiles && fwd.externalFiles.length > 1) {
+    return t("share.filesCount", { count: fwd.externalFiles.length });
+  }
   if (fwd.type === MessageType.image) return "Photo";
   if (fwd.type === MessageType.video) return "Video";
   if (fwd.type === MessageType.videoCircle) return "Video message";

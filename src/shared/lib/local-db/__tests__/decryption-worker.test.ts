@@ -336,6 +336,70 @@ describe("DecryptionWorker", () => {
       expect(msg?.decryptionStatus).toBe("pending");
       worker.dispose();
     });
+
+    // Audit A2: rows written by the old bulk paths have no ciphertext at all.
+    describe("placeholder row without stored ciphertext", () => {
+      const RAW = { event_id: "$ev1", type: "m.room.message", content: { msgtype: "m.encrypted" } };
+
+      function makeFetchingWorker(decryptFn: (raw: unknown) => Promise<{ body: string }>, serverHasEvent = true) {
+        const getRoomCrypto = vi.fn().mockResolvedValue({ decryptEvent: decryptFn });
+        const fetchRawEvent = vi.fn(async (): Promise<Record<string, unknown> | undefined> => (serverHasEvent ? RAW : undefined));
+        const worker = new DecryptionWorker(db as any, getRoomCrypto, undefined, fetchRawEvent);
+        return { worker, fetchRawEvent };
+      }
+
+      async function addLegacyRow() {
+        await db.messages.add({
+          eventId: "$ev1", roomId: "!room1", timestamp: 1,
+          content: "[encrypted]", decryptionStatus: "ok",
+        } as any);
+      }
+
+      it("fetches the raw event from the server and decrypts it", async () => {
+        const decrypt = vi.fn(async () => ({ body: "hello" }));
+        const { worker, fetchRawEvent } = makeFetchingWorker(decrypt);
+        await addLegacyRow();
+
+        expect(await worker.decryptMessageNow("$ev1")).toBe(true);
+        expect(fetchRawEvent).toHaveBeenCalledWith("!room1", "$ev1");
+        expect(decrypt).toHaveBeenCalledWith(RAW);
+        const msg = await db.messages.where("eventId").equals("$ev1").first();
+        expect(msg?.content).toBe("hello");
+        expect(msg?.decryptionStatus).toBe("ok");
+        worker.dispose();
+      });
+
+      it("persists the fetched ciphertext as pending when decryption still fails", async () => {
+        const { worker } = makeFetchingWorker(async () => { throw new Error("no key"); });
+        await addLegacyRow();
+
+        expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+        const msg = await db.messages.where("eventId").equals("$ev1").first();
+        expect(msg?.encryptedBody).toBe(JSON.stringify(RAW));
+        expect(msg?.decryptionStatus).toBe("pending");
+        worker.dispose();
+      });
+
+      it("leaves the row untouched when the server has no such event", async () => {
+        const { worker } = makeFetchingWorker(async () => ({ body: "x" }), false);
+        await addLegacyRow();
+
+        expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+        const msg = await db.messages.where("eventId").equals("$ev1").first();
+        expect(msg?.encryptedBody).toBeUndefined();
+        expect(msg?.decryptionStatus).toBe("ok");
+        worker.dispose();
+      });
+
+      it("does not fetch for rows that are not placeholders", async () => {
+        const { worker, fetchRawEvent } = makeFetchingWorker(async () => ({ body: "x" }));
+        await db.messages.add({ eventId: "$ev1", roomId: "!room1", timestamp: 1, content: "plain" } as any);
+
+        expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+        expect(fetchRawEvent).not.toHaveBeenCalled();
+        worker.dispose();
+      });
+    });
   });
 
   describe("recoverAllStuckMessages", () => {

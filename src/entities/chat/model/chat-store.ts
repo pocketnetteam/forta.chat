@@ -8,10 +8,14 @@ import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } f
 import { parseEditBody } from "../lib/parse-edit";
 import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
+import { reuseIfUnchanged } from "../lib/message-memo";
+import { toParsedMessages } from "../lib/parsed-message";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
 import { getModeratorChange, isServiceRoomName, isWithinCreationBurst, isCreationBurstMemberEvent } from "../lib/system-event-filter";
 import { preservePendingRooms } from "../lib/preserve-pending-rooms";
+import { buildExternalShareForward } from "../lib/external-share-forward";
+import type { ExternalShareData } from "@/shared/lib/share-target";
 import {
   readJoinRule,
   getMyPowerLevel,
@@ -39,7 +43,7 @@ import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 import type { ChatDbKit, ParsedMessage, LocalRoom } from "@/shared/lib/local-db";
 import type { RoomChange } from "@/shared/lib/local-db";
-import { ChatDatabase, useLiveQuery, localToMessages, localStatusToMessageStatus, deriveOutboundStatus, readUserAliases } from "@/shared/lib/local-db";
+import { ChatDatabase, useLiveQuery, localToMessage, localToMessages, deriveOutboundStatus, readUserAliases } from "@/shared/lib/local-db";
 import type { ChatRoom, FileInfo, ForwardingMessage, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
 import { resolveCachedRoomsAddress } from "./cached-rooms-address";
@@ -68,36 +72,14 @@ function getRawEvent(matrixEvent: any): Record<string, unknown> | null {
   return null;
 }
 
-/** Shallow-compare reaction maps by emoji keys and counts (avoids deep equality on user arrays).
- *  Returns true when both sides carry the same reaction set. */
-function reactionsShallowEqual(
-  a: Record<string, { count: number; users: string[]; myEventId?: string }> | undefined,
-  b: Record<string, { count: number; users: string[]; myEventId?: string }> | undefined,
-): boolean {
-  if (a === b) return true;
-  if (!a || !b) return a === b;
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  for (const k of keysA) {
-    const ra = a[k], rb = b[k];
-    if (!rb || ra.count !== rb.count || ra.myEventId !== rb.myEventId) return false;
+/** event_id → raw event for the given timeline events. */
+function indexRawEvents(events: unknown[]): Map<string, Record<string, unknown>> {
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const ev of events) {
+    const raw = getRawEvent(ev);
+    if (raw && typeof raw.event_id === "string") byId.set(raw.event_id, raw);
   }
-  return true;
-}
-
-/** Shallow-compare poll info by vote counts and user vote. */
-function pollInfoShallowEqual(a: PollInfo | undefined, b: PollInfo | undefined): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.myVote !== b.myVote || a.ended !== b.ended) return false;
-  const aKeys = Object.keys(a.votes);
-  const bKeys = Object.keys(b.votes);
-  if (aKeys.length !== bKeys.length) return false;
-  for (const k of aKeys) {
-    if ((a.votes[k]?.length ?? 0) !== (b.votes[k]?.length ?? 0)) return false;
-  }
-  return true;
+  return byId;
 }
 
 /** Read `m.room.history_visibility` (stream rooms use `world_readable` — excluded from sidebar per bastyon-chat). */
@@ -919,30 +901,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     };
   };
 
-  /** Initialize forwarding from an external Android share (Share Sheet).
+  /** Initialize forwarding from an external share (system Share Sheet).
    *  Creates a synthetic ForwardingMessage and opens the ForwardPicker. */
-  const initExternalShare = (data: { text?: string; fileUri?: string; fileName?: string; mimeType?: string }) => {
-    const content = data.text || data.fileName || "";
-    const isMedia = !!data.fileUri && !!data.mimeType;
-
-    let type: MessageType = MessageType.text;
-    if (isMedia) {
-      if (data.mimeType!.startsWith("image/")) type = MessageType.image;
-      else if (data.mimeType!.startsWith("video/")) type = MessageType.video;
-      else type = MessageType.file;
-    }
-
+  const initExternalShare = (data: ExternalShareData) => {
     forwardPickerRequested.value = true;
-    forwardingMessage.value = {
-      id: `__external_share_${Date.now()}`,
-      roomId: "__external_share__",
-      senderId: "",
-      content,
-      type,
-      fileInfo: isMedia ? { url: data.fileUri!, name: data.fileName || "shared_file", type: data.mimeType!, size: 0 } : undefined,
-      withSenderInfo: false,
-      isExternalShare: true,
-    };
+    forwardingMessage.value = buildExternalShareForward(data);
   };
 
   /** Initialize forwarding a channel post link. Opens ForwardPicker. */
@@ -1336,17 +1299,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return chatDbKitRef.value;
   };
 
+  // Which room/window each liveQuery emission was read for, so
+  // expandMessageWindow() can wait for the emission of ITS window instead of
+  // guessing from array length with a timeout.
+  const dexieWindowMeta = new WeakMap<object, { roomId: string; windowSize: number }>();
+
   // Primary message source: Dexie liveQuery (auto-subscribes to DB changes)
   const { data: dexieMessages, isReady: dexieMessagesReady, reset: resetDexieMessages } = useLiveQuery(
     () => {
       if (!activeRoomId.value || !chatDbKitRef.value) return [] as import("@/shared/lib/local-db").LocalMessage[];
-      const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(activeRoomId.value);
-      return chatDbKitRef.value.messages.getMessages(
-        activeRoomId.value,
-        debouncedMessageWindowSize.value,
-        undefined,
-        clearedAtTs,
-      );
+      const roomId = activeRoomId.value;
+      const windowSize = debouncedMessageWindowSize.value;
+      const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(roomId);
+      return chatDbKitRef.value.messages
+        .getMessages(roomId, windowSize, undefined, clearedAtTs)
+        .then((rows) => {
+          dexieWindowMeta.set(rows, { roomId, windowSize });
+          return rows;
+        });
     },
     () => [activeRoomId.value, debouncedMessageWindowSize.value, chatDbKitRef.value, _liveQueryGen.value] as const,
     [] as import("@/shared/lib/local-db").LocalMessage[],
@@ -1427,7 +1397,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Incremental conversion: reuse Message objects for unchanged LocalMessages.
       // Build a lookup from the previous output by eventId for O(1) reuse.
-      const watermarkChanged = watermark !== _prevWatermark;
       const prevById = new Map<string, Message>();
       for (const m of _prevActiveOutput) {
         prevById.set(m.id, m);
@@ -1437,23 +1406,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         try {
           const id = local.eventId ?? local.clientId;
           const prev = id ? prevById.get(id) : undefined;
-          const isOwnMessage = myAddr && local.senderId === myAddr;
-          // Reuse if content unchanged AND status wouldn't change.
-          // Own messages must be re-derived when watermark changes (read receipt arrived).
-          // Also invalidate when reactions or poll votes change — these update the LocalMessage
-          // in Dexie without changing its timestamp.
-          if (prev && prev.timestamp === local.timestamp
-              && !(watermarkChanged && isOwnMessage)
-              && reactionsShallowEqual(prev.reactions, local.reactions)
-              && pollInfoShallowEqual(prev.pollInfo, local.pollInfo)
-              && prev.deleted === local.deleted
-              && prev.edited === local.edited
-              && prev.status === localStatusToMessageStatus(local.status)
-              && prev.uploadProgress === local.uploadProgress
-              && prev.fileInfo?.url === (local.localBlobUrl || local.fileInfo?.url)) {
-            return prev;
-          }
-          return localToMessages([local], watermark, myAddr)[0];
+          // Map first, then compare the whole result: a decrypt, a second
+          // edit or a watermark-derived status change all alter the mapped
+          // object and must produce a new reference.
+          return reuseIfUnchanged(prev, localToMessage(local, watermark, myAddr));
         } catch (err) {
           // Fault-tolerant: one corrupted LocalMessage must never crash the entire
           // computed and leave the user with a black screen. Log and substitute.
@@ -3945,9 +3901,52 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Expand the message window for scroll-up pagination.
-   *  Default 25 matches prefetchNextBatch size — smaller batches = less re-render work. */
-  const expandMessageWindow = (amount = 25) => {
+   *  Default 25 matches prefetchNextBatch size — smaller batches = less re-render work.
+   *
+   *  Applied immediately (bypassing the 200ms debounce) and resolves once the
+   *  liveQuery has emitted rows read for the new window: true when Dexie
+   *  filled it (older local history may remain), false when Dexie ran out,
+   *  the room changed, or no emission arrived in time. The caller used to
+   *  wait 300ms for `activeMessages.length` to change — shorter than debounce
+   *  + read on slow Android WebViews, so it concluded "Dexie is empty" and
+   *  fired a network scrollback on every scroll-up. */
+  const EXPAND_EMIT_TIMEOUT_MS = 5_000;
+  const expandMessageWindow = (amount = 25): Promise<boolean> => {
     messageWindowSize.value += amount;
+    const target = messageWindowSize.value;
+    const roomId = activeRoomId.value;
+    if (!roomId || !chatDbKitRef.value) return Promise.resolve(false);
+
+    if (_msgWindowDebounceTimer) {
+      clearTimeout(_msgWindowDebounceTimer);
+      _msgWindowDebounceTimer = null;
+    }
+    debouncedMessageWindowSize.value = target;
+
+    const verdict = (rows: readonly unknown[]): boolean | undefined => {
+      if (activeRoomId.value !== roomId) return false;
+      const meta = dexieWindowMeta.get(rows);
+      if (!meta || meta.roomId !== roomId || meta.windowSize < target) return undefined;
+      return rows.length >= target;
+    };
+
+    const immediate = verdict(dexieMessages.value);
+    if (immediate !== undefined) return Promise.resolve(immediate);
+
+    return new Promise<boolean>((resolve) => {
+      const finish = (filled: boolean) => {
+        clearTimeout(timer);
+        stopRoom();
+        stopRows();
+        resolve(filled);
+      };
+      const timer = setTimeout(() => finish(false), EXPAND_EMIT_TIMEOUT_MS);
+      const stopRoom = watch(activeRoomId, () => finish(false));
+      const stopRows = watch(dexieMessages, (rows) => {
+        const v = verdict(rows);
+        if (v !== undefined) finish(v);
+      });
+    });
   };
 
   /** Accept an invite: join the room and update membership */
@@ -5772,7 +5771,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Load timeline events for a room and convert to Messages */
-  const loadRoomMessages = async (roomId: string, { waitForSdk = false } = {}) => {
+  /** Resolves to the number of messages parsed from the SDK timeline, or
+   *  undefined when it bailed out before parsing (room not in the SDK, user
+   *  switched away, fatal error). 0 means the room genuinely has no messages. */
+  const loadRoomMessages = async (roomId: string, { waitForSdk = false } = {}): Promise<number | undefined> => {
     try {
       // Capture whether this room is the active room RIGHT NOW.
       // The activeRoomId early-exit optimization only applies when the user
@@ -5897,26 +5899,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // is fed by the liveQuery as soon as the write commits; if a refresh races
       // the write, messages are re-fetched from Matrix on next open.
       if (chatDbKitRef.value && msgs.length > 0) {
-        const parsedMessages: ParsedMessage[] = msgs
-          .filter(m => m.id && !m.id.startsWith("msg_")) // Skip optimistic temp messages
-          .map(m => ({
-            eventId: m.id,
-            roomId: m.roomId,
-            senderId: m.senderId,
-            content: m.content,
-            timestamp: m.timestamp,
-            type: m.type,
-            fileInfo: m.fileInfo,
-            replyTo: m.replyTo,
-            forwardedFrom: m.forwardedFrom,
-            callInfo: m.callInfo,
-            pollInfo: m.pollInfo,
-            transferInfo: m.transferInfo,
-            linkPreview: m.linkPreview,
-            deleted: m.deleted,
-            systemMeta: m.systemMeta,
-            reactions: m.reactions,
-          }));
+        const parsedMessages = toParsedMessages(msgs, indexRawEvents(eventsToParse));
         const dexieWriteWork = async () => {
           await chatDbKitRef.value!.eventWriter.writeMessages(parsedMessages);
 
@@ -5952,10 +5935,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         await loadPinnedMessages(roomId);
       }
 
+      return msgs.length;
     } catch (e) {
       console.error("[chat-store] loadRoomMessages fatal error for room %s:", roomId, e);
       // Set empty messages so UI doesn't hang
       setMessages(roomId, []);
+      return undefined;
     }
   };
 
@@ -5988,26 +5973,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // expandMessageWindow() can serve older messages from local cache
       // without a network round-trip (Telegram-like instant history).
       if (chatDbKitRef.value && msgs.length > 0) {
-        const parsedMessages: ParsedMessage[] = msgs
-          .filter(m => m.id && !m.id.startsWith("msg_"))
-          .map(m => ({
-            eventId: m.id,
-            roomId: m.roomId,
-            senderId: m.senderId,
-            content: m.content,
-            timestamp: m.timestamp,
-            type: m.type,
-            fileInfo: m.fileInfo,
-            replyTo: m.replyTo,
-            forwardedFrom: m.forwardedFrom,
-            callInfo: m.callInfo,
-            pollInfo: m.pollInfo,
-            transferInfo: m.transferInfo,
-            linkPreview: m.linkPreview,
-            deleted: m.deleted,
-            systemMeta: m.systemMeta,
-            reactions: m.reactions,
-          }));
+        const parsedMessages = toParsedMessages(msgs, indexRawEvents(timelineEvents));
         chatDbKitRef.value.eventWriter.writeMessages(parsedMessages).catch(e => {
           console.warn("[chat-store] loadMoreMessages Dexie write failed:", e);
         });
@@ -6054,26 +6020,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const msgs = await parseTimelineEvents(events, roomId);
 
       if (chatDbKitRef.value && msgs.length > 0) {
-        const parsedMessages: ParsedMessage[] = msgs
-          .filter(m => m.id && !m.id.startsWith("msg_"))
-          .map(m => ({
-            eventId: m.id,
-            roomId: m.roomId,
-            senderId: m.senderId,
-            content: m.content,
-            timestamp: m.timestamp,
-            type: m.type,
-            fileInfo: m.fileInfo,
-            replyTo: m.replyTo,
-            forwardedFrom: m.forwardedFrom,
-            callInfo: m.callInfo,
-            pollInfo: m.pollInfo,
-            transferInfo: m.transferInfo,
-            linkPreview: m.linkPreview,
-            deleted: m.deleted,
-            systemMeta: m.systemMeta,
-            reactions: m.reactions,
-          }));
+        const parsedMessages = toParsedMessages(msgs, indexRawEvents(events));
         await chatDbKitRef.value.eventWriter.writeMessages(parsedMessages);
       }
 
