@@ -15,6 +15,7 @@ vi.mock("@/shared/lib/platform", () => ({
   get isNative() { return mockIsNative; },
   get isElectron() { return mockIsElectron; },
   get isAndroid() { return mockIsAndroid; },
+  get isIOS() { return false; },
 }));
 
 vi.mock("@/entities/auth", () => ({

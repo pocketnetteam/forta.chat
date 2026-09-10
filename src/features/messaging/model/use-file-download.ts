@@ -1,4 +1,4 @@
-import { ref, onScopeDispose, type Ref } from "vue";
+import { ref, getCurrentScope, onScopeDispose, type Ref } from "vue";
 import { useAuthStore } from "@/entities/auth";
 import type { FileInfo, Message } from "@/entities/chat";
 import { getMatrixClientService } from "@/entities/matrix";
@@ -336,17 +336,66 @@ export function _mediaGateActiveForTests(): number {
 /** Cache of already-decrypted file object URLs: eventId → objectUrl */
 const cache = new Map<string, string>();
 
+/** Room each cached entry belongs to, so a chat switch can free the media of
+ *  the chat being left without touching the one being opened. */
+const cacheRoomIds = new Map<string, string>();
+
+/** Every live instance's reactive `states` map. A revoke below kills a URL for
+ *  the whole app, but each consumer keeps its own copy of that string — and
+ *  every read site guards with `getState(key).objectUrl ?? download()`, so a
+ *  dead-but-truthy URL suppresses the re-download and the media silently fails
+ *  (blank MediaViewer, black video, voice that never plays, save that writes
+ *  nothing). Clearing the instance copies alongside the cache keeps the whole
+ *  app's view of a revoked URL consistent. */
+const liveStateMaps = new Set<Ref<Record<string, FileDownloadState>>>();
+
+/** Drop the cached object URL from every live consumer for the given keys. */
+function clearInstanceUrls(keys: Iterable<string>) {
+  const targets = keys instanceof Set ? keys : new Set(keys);
+  if (targets.size === 0) return;
+  for (const states of liveStateMaps) {
+    for (const key of targets) {
+      const state = states.value[key];
+      if (!state) continue;
+      state.objectUrl = null;
+      state.blob = null;
+    }
+  }
+}
+
 /** Revoke all cached blob URLs and clear the cache */
 export function revokeAllFileUrls() {
+  const revoked = new Set(cache.keys());
   for (const url of cache.values()) {
     try { URL.revokeObjectURL(url); } catch { /* ignore */ }
   }
   cache.clear();
+  cacheRoomIds.clear();
+  clearInstanceUrls(revoked);
+}
+
+/** Revoke every cached blob URL that does not belong to `roomId` (pass null to
+ *  revoke everything). Called on chat switch: the decrypted bytes of the chat
+ *  we just left would otherwise pin RAM for the rest of the session, since the
+ *  cache is only freed when the last `useFileDownload()` consumer unmounts.
+ *  The persistent media cache still holds the bytes, so reopening that chat
+ *  re-mints the URLs without a network round-trip. */
+export function revokeFileUrlsOutsideRoom(roomId: string | null) {
+  const revoked = new Set<string>();
+  for (const [key, url] of cache) {
+    if (roomId !== null && cacheRoomIds.get(key) === roomId) continue;
+    try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+    cache.delete(key);
+    cacheRoomIds.delete(key);
+    revoked.add(key);
+  }
+  clearInstanceUrls(revoked);
 }
 
 /** Remove a specific entry from the download cache (e.g. before blob URL revocation) */
 export function invalidateDownloadCache(key: string) {
   cache.delete(key);
+  cacheRoomIds.delete(key);
 }
 
 const MAX_RETRIES = 3;
@@ -816,13 +865,30 @@ async function saveFileNative(objectUrl: string, fileName: string, mimeType?: st
 }
 
 /** Composable for downloading and decrypting files/images */
+/** Live `useFileDownload()` consumers. The unmount cleanup below used to call
+ *  `revokeAllFileUrls()` unconditionally, but the cache it clears is
+ *  module-wide: one bubble, gallery tile or info panel going away revoked the
+ *  blob URLs every *other* live consumer was still displaying. Those consumers
+ *  keep their own `states` map, where the dead URL still reads as truthy, so
+ *  nothing re-downloaded and the media silently went blank (WEE bug: image
+ *  blank on second open). Only the last consumer to leave clears the cache. */
+let liveConsumers = 0;
+
 export function useFileDownload() {
   const states = ref<Record<string, FileDownloadState>>({});
 
-  // Auto-cleanup blob URLs when the composable's effect scope is destroyed
-  onScopeDispose(() => {
-    revokeAllFileUrls();
-  });
+  // Auto-cleanup blob URLs once the last consumer's effect scope is destroyed.
+  // Skipped outside an effect scope: without a dispose hook the counter could
+  // never come back down and the cache would never be freed.
+  if (getCurrentScope()) {
+    liveConsumers++;
+    liveStateMaps.add(states);
+    onScopeDispose(() => {
+      liveStateMaps.delete(states);
+      liveConsumers = Math.max(0, liveConsumers - 1);
+      if (liveConsumers === 0) revokeAllFileUrls();
+    });
+  }
 
   const getState = (eventId: string): FileDownloadState => {
     if (!states.value[eventId]) {
@@ -867,6 +933,7 @@ export function useFileDownload() {
         try { URL.revokeObjectURL(previousUrl); } catch { /* ignore */ }
       }
       cache.delete(cacheKey);
+      cacheRoomIds.delete(cacheKey);
       const mxc = message.fileInfo.url;
       if (mxc) {
         getMediaCache()?.delete(mxc).catch(() => { /* non-fatal */ });
@@ -970,6 +1037,7 @@ export function useFileDownload() {
           state.blob = typedBlob;
           state.loading = false;
           cache.set(cacheKey, url);
+          cacheRoomIds.set(cacheKey, message.roomId);
           return url;
         }
       } catch (cacheErr) {
@@ -1003,6 +1071,7 @@ export function useFileDownload() {
       state.objectUrl = url;
       state.blob = typedBlob;
       cache.set(cacheKey, url);
+      cacheRoomIds.set(cacheKey, message.roomId);
 
       // Persist decrypted bytes so the next chat-open hits the disk cache
       // instead of re-downloading + re-decrypting. Local schemes have

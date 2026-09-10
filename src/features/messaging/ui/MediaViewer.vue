@@ -9,7 +9,7 @@ let mediaViewerInstanceCounter = 0;
 import { ref, computed, watch } from "vue";
 import type { Message } from "@/entities/chat";
 import { useChatStore, MessageType } from "@/entities/chat";
-import { useFileDownload } from "../model/use-file-download";
+import { useFileDownload, invalidateDownloadCache } from "../model/use-file-download";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import { touchDistance, nextScale, MIN_SCALE } from "../model/pinch-zoom";
@@ -61,19 +61,14 @@ const saving = ref(false);
 
 const mediaMessages = computed(() => chatStore.activeMediaMessages);
 
-watch(() => props.messageId, (id) => {
-  if (id) {
-    const idx = mediaMessages.value.findIndex(m => m.id === id);
-    currentIndex.value = idx >= 0 ? idx : 0;
-    resetTransform();
-  }
-});
-
 const currentMessage = computed(() => mediaMessages.value[currentIndex.value] ?? null);
+const currentKey = computed(() => {
+  const msg = currentMessage.value;
+  return msg ? msg._key || msg.id : null;
+});
 const currentUrl = computed(() => {
-  if (!currentMessage.value) return null;
-  const key = currentMessage.value._key || currentMessage.value.id;
-  return getState(key).objectUrl;
+  const key = currentKey.value;
+  return key ? getState(key).objectUrl : null;
 });
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -90,6 +85,73 @@ const resetTransform = () => {
   translateX.value = 0;
   translateY.value = 0;
 };
+
+/** Fetch the full-size bytes for the current item when this instance has no
+ *  live object URL for it yet. Covers video as well as images: the gallery can
+ *  open a video the feed never downloaded, and a video whose URL was revoked
+ *  would otherwise sit on a permanently black player. */
+const ensureCurrentMedia = () => {
+  const msg = currentMessage.value;
+  const key = currentKey.value;
+  if (!msg || !key || !msg.fileInfo) return;
+  if (msg.type !== MessageType.image && msg.type !== MessageType.video) return;
+  if (getState(key).objectUrl) return;
+  void download(msg);
+};
+
+// One recovery attempt per key per viewing session, so a genuinely undecodable
+// image (HEIC from another client) can't ping-pong between <img> error and
+// re-download.
+const recoveredKeys = new Set<string>();
+
+/** The browser rejected the object URL we handed the <img>/<video>. The usual cause is a blob
+ *  URL revoked by another `useFileDownload()` consumer (or by the ~5s
+ *  post-confirm revoke of an optimistic upload) while this instance kept the
+ *  now-dead string in its own state — which makes the "already have a URL"
+ *  guard skip the re-download and leaves a blank black screen (WEE bug: image
+ *  blank on second open). Drop the dead URL and re-mint one; the decrypted
+ *  bytes normally still sit in the persistent media cache, so this costs no
+ *  network round-trip. */
+const handleMediaError = () => {
+  const msg = currentMessage.value;
+  const key = currentKey.value;
+  if (!msg || !key || recoveredKeys.has(key)) return;
+  recoveredKeys.add(key);
+  invalidateDownloadCache(key);
+  const state = getState(key);
+  state.objectUrl = null;
+  state.blob = null;
+  state.error = null;
+  state.errorKind = null;
+  void download(msg);
+};
+
+const handleMediaLoad = () => {
+  const key = currentKey.value;
+  if (key) recoveredKeys.delete(key);
+};
+
+/** (Re)initialise the viewer for `messageId`. Runs on every *open*, not only
+ *  when the id changes: reopening the same image left the previous index (so a
+ *  swipe before closing won the next open), the previous zoom/pan transform (a
+ *  zoomed-and-panned photo reopened off-screen) and a possibly dead object URL
+ *  all untouched. */
+const syncToMessage = (id: string | null) => {
+  if (!id) return;
+  const idx = mediaMessages.value.findIndex(m => m.id === id);
+  currentIndex.value = idx >= 0 ? idx : 0;
+  resetTransform();
+  ensureCurrentMedia();
+};
+
+watch(() => props.messageId, syncToMessage);
+
+watch(() => props.show, (show) => {
+  if (show) {
+    recoveredKeys.clear();
+    syncToMessage(props.messageId);
+  }
+});
 
 const goNext = () => {
   if (currentIndex.value < mediaMessages.value.length - 1) {
@@ -213,12 +275,8 @@ const handleKeydown = (e: KeyboardEvent) => {
   else if (e.key === "Escape") emit("close");
 };
 
-// Ensure media is downloaded
-watch(currentMessage, async (msg) => {
-  if (msg && msg.type === MessageType.image && msg.fileInfo && !getState(msg._key || msg.id).objectUrl) {
-    await download(msg);
-  }
-});
+// Ensure media is downloaded (covers swipe navigation between items).
+watch(currentMessage, ensureCurrentMedia);
 
 const handleSaveCurrent = async () => {
   if (saving.value) return;
@@ -287,6 +345,8 @@ const handleSaveCurrent = async () => {
             class="max-h-full max-w-full object-contain"
             :style="{ transform: `scale(${scale}) translate(${translateX}px, ${translateY}px)` }"
             draggable="false"
+            @error="handleMediaError"
+            @load="handleMediaLoad"
           />
           <video
             v-else-if="currentUrl && currentMessage.type === 'video'"
@@ -295,6 +355,8 @@ const handleSaveCurrent = async () => {
             controls
             playsinline
             class="max-h-full max-w-full"
+            @error="handleMediaError"
+            @loadeddata="handleMediaLoad"
           />
           <div v-else class="flex items-center justify-center">
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />

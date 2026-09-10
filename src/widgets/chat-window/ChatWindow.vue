@@ -2,7 +2,7 @@
 import { useChatStore, MessageType } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useAudioPlayback } from "@/features/messaging/model/use-audio-playback";
-import { useFileDownload } from "@/features/messaging/model/use-file-download";
+import { useFileDownload, revokeFileUrlsOutsideRoom } from "@/features/messaging/model/use-file-download";
 import { getChatDb, isChatDbReady, useLiveQuery, type CallProvider } from "@/shared/lib/local-db";
 import { ChannelView } from "@/features/channels";
 import { useChannelStore } from "@/entities/channel";
@@ -98,6 +98,13 @@ watch(() => chatStore.activeRoomId, (_newId, oldId) => {
   if (oldId && playback.currentRoomId.value === oldId) {
     playback.stop();
   }
+});
+
+// Free the decrypted media of the chat being left. The shared blob-URL cache
+// is otherwise only cleared when the last useFileDownload() consumer unmounts,
+// which on a long session means every photo ever opened stays pinned in RAM.
+watch(() => chatStore.activeRoomId, (roomId) => {
+  revokeFileUrlsOutsideRoom(roomId);
 });
 
 const peerKeysMissing = computed(() => {

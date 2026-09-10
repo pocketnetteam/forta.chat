@@ -22,6 +22,7 @@ vi.mock("@/shared/lib/platform", () => ({
   get isNative() { return false; },
   get isElectron() { return false; },
   get isAndroid() { return false; },
+  get isIOS() { return false; },
   getElectronAPI: () => undefined,
 }));
 
