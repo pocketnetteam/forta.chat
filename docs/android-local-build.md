@@ -151,6 +151,6 @@ adb install android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk
 | minSdk | 24 |
 | targetSdk | 36 |
 | JDK | 21 |
-| Capacitor | 8.2 |
+| Capacitor | ^8.2 (lock ≈ 8.3) |
 | Firebase | опционально (`google-services.json`) |
 | applicationId | `com.forta.chat` |

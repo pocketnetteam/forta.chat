@@ -47,6 +47,40 @@ describe("onMembership triggers peer-keys recheck", () => {
     // helper. We pin the substring so the wiring can't silently regress.
     expect(section).toContain("checkPeerKeys");
   });
+
+  /**
+   * Regression: checkPeerKeys() alone only reads canBeEncrypt(), which reads
+   * the room crypto instance's ALREADY-CACHED users/usersinfo — it never
+   * refetches. onMembership used to call checkPeerKeys() directly with no
+   * prepare() first, so a member added to an already-prepared room's crypto
+   * instance was silently and permanently excluded from the group common
+   * key: usershash() kept hashing the OLD member set, so encryptEventGroup()
+   * kept reusing the pre-existing common-key event that was never wrapped
+   * for the new member (matrix-crypto.ts getOrCreateCommonKey/usershash).
+   * The fix refreshes the room's crypto state (prepare()) BEFORE
+   * checkPeerKeys so a membership change actually busts the stale cache.
+   */
+  it("refreshes the room's crypto state (prepare()) before re-checking peer keys", () => {
+    const onMembershipIdx = storesSource.indexOf("onMembership:");
+    expect(onMembershipIdx).toBeGreaterThan(-1);
+
+    const blockEnd = storesSource.indexOf("onMyMembership", onMembershipIdx);
+    const section = storesSource.slice(onMembershipIdx, blockEnd);
+
+    expect(section).toMatch(/pcrypto\.value\?\.rooms\[roomId\]/);
+    expect(section).toMatch(/roomCrypto\.prepare\(\)/);
+
+    // Order matters: prepare() must run (and settle) before checkPeerKeys,
+    // not just appear somewhere in the same handler.
+    const prepareIdx = section.indexOf("roomCrypto.prepare()");
+    const checkPeerKeysIdx = section.indexOf("checkPeerKeys(roomId)");
+    expect(prepareIdx).toBeGreaterThan(-1);
+    expect(checkPeerKeysIdx).toBeGreaterThan(prepareIdx);
+    // The two calls must be chained (checkPeerKeys inside a .then()), not
+    // fired concurrently — otherwise checkPeerKeys could still race ahead
+    // and read the pre-refresh cache.
+    expect(section.slice(prepareIdx, checkPeerKeysIdx)).toMatch(/\.then\(/);
+  });
 });
 
 describe("getUsersInfo log noise", () => {

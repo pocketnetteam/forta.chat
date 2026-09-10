@@ -47,6 +47,40 @@ function healFileInfoFromEcho(
   return incoming;
 }
 
+/** Repair a row stuck as "[encrypted]" from a later write of the same event.
+ *  Older bulk writes (room load / scrollback / prefetch) stored such rows
+ *  without ciphertext, and the duplicate-eventId skip meant no later write
+ *  could ever fix them. Now a write that carries the plaintext replaces the
+ *  placeholder (with its content-derived fields — decryption can change the
+ *  type, e.g. transfers), and one that carries the ciphertext fills a missing
+ *  `encryptedBody` so recovery sweeps and manual retry can find it.
+ *  Returns the patch to apply, or null to leave the row untouched. */
+function encryptedRepairPatch(existing: LocalMessage, incoming: LocalMessage): Partial<LocalMessage> | null {
+  if (existing.content !== "[encrypted]" || existing.softDeleted || existing.deleted) return null;
+  if (incoming.content !== "[encrypted]") {
+    if (incoming.deleted || incoming.softDeleted) return null;
+    return {
+      content: incoming.content,
+      type: incoming.type,
+      fileInfo: incoming.fileInfo,
+      replyTo: incoming.replyTo,
+      forwardedFrom: incoming.forwardedFrom,
+      callInfo: incoming.callInfo,
+      pollInfo: incoming.pollInfo,
+      transferInfo: incoming.transferInfo,
+      callLinkInfo: incoming.callLinkInfo,
+      linkPreview: existing.linkPreview ?? incoming.linkPreview,
+      systemMeta: incoming.systemMeta,
+      decryptionStatus: "ok",
+      encryptedBody: undefined,
+    };
+  }
+  if (!existing.encryptedBody && incoming.encryptedBody) {
+    return { encryptedBody: incoming.encryptedBody, decryptionStatus: "pending" };
+  }
+  return null;
+}
+
 /** A local-only phantom: a pending message the user deleted before it ever
  *  reached the server. It has no `eventId` (never synced) and is deleted
  *  locally, so it must vanish from the timeline without a placeholder — there
@@ -242,6 +276,9 @@ export class MessageRepository {
         // "Файл повреждён или не пришёл с источника" toast on a message
         // that actually reached the peer.
         const healedFileInfo = healFileInfoFromEcho(existing.fileInfo, msg.fileInfo);
+        // Inbound rows get clientId `srv_<eventId>` (EventWriter), so a
+        // re-write of someone else's message lands here, not in step 2.
+        const repair = encryptedRepairPatch(existing, msg) ?? {};
 
         // If upload is still in-flight (has localBlobUrl) and hasn't failed,
         // only store eventId — let confirmMediaSent handle the final status transition.
@@ -254,6 +291,7 @@ export class MessageRepository {
             // Merge local-only fields that the server echo may lack
             linkPreview: existing.linkPreview ?? msg.linkPreview,
             ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
+            ...repair,
           });
         } else {
           await this.db.messages.update(existing.localId!, {
@@ -265,6 +303,7 @@ export class MessageRepository {
             linkPreview: existing.linkPreview ?? msg.linkPreview,
             localBlobUrl: existing.localBlobUrl ?? msg.localBlobUrl,
             ...(healedFileInfo ? { fileInfo: healedFileInfo } : {}),
+            ...repair,
           });
         }
         return "updated";
@@ -274,7 +313,14 @@ export class MessageRepository {
     // 2. Check if eventId already exists (duplicate sync)
     if (msg.eventId) {
       const byEvent = await this.getByEventId(msg.eventId);
-      if (byEvent) return "duplicate";
+      if (byEvent) {
+        const patch = encryptedRepairPatch(byEvent, msg);
+        if (patch && byEvent.localId) {
+          await this.db.messages.update(byEvent.localId, patch);
+          return "updated";
+        }
+        return "duplicate";
+      }
     }
 
     // 3. New message from another user
@@ -301,8 +347,15 @@ export class MessageRepository {
         .where("eventId")
         .anyOf(eventIds)
         .toArray();
+      const incomingByEventId = new Map(
+        messages.filter((m) => m.eventId).map((m) => [m.eventId!, m]),
+      );
       for (const e of existingEvents) {
-        if (e.eventId) existingEventIds.add(e.eventId);
+        if (!e.eventId) continue;
+        existingEventIds.add(e.eventId);
+        const incoming = incomingByEventId.get(e.eventId);
+        const patch = incoming && encryptedRepairPatch(e, incoming);
+        if (patch && e.localId) await this.db.messages.update(e.localId, patch);
       }
     }
 

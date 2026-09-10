@@ -7,10 +7,12 @@ Vue 3 (Composition API) + Pinia + TypeScript + Vite + Vitest + Capacitor (mobile
 ## Архитектура
 
 Feature-Sliced Design (FSD):
+- `src/app/` — boot, провайдеры, роутинг
+- `src/pages/` — route-контейнеры
+- `src/widgets/` — композиции (ChatSidebar, ChatWindow, layouts)
+- `src/features/` — фичи (messaging, contacts, video-calls, auth, …)
+- `src/entities/` — бизнес-сущности (chat, matrix, auth, user, call, …)
 - `src/shared/` — утилиты, UI-компоненты, composables, local-db (Dexie)
-- `src/entities/` — бизнес-сущности (chat, matrix, auth, user)
-- `src/features/` — фичи (messaging, contacts, video-calls, auth)
-- `src/app/` — точка входа, провайдеры, роутинг
 
 Ключевые решения:
 - **Dexie = single source of truth** — все данные читаются из IndexedDB через `useLiveQuery`
@@ -26,12 +28,11 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 
 После завершения каждой задачи обязательно прогонять полную верификацию перед коммитом:
 
-1. `npm run build` — сборка (vue-tsc + vite)
-2. `npx vue-tsc --noEmit` — проверка типов (быстрая проверка без полной сборки)
-3. `npm run test` — тесты
-4. Code review — skill `code-review` (`/code-review`) — архитектурный ревью изменений
+1. `npm run build` — сборка (`vue-tsc --noEmit` + vite; отдельный `vue-tsc` не нужен)
+2. `npm run test` — тесты
+3. Code review — skill `code-review` (`/code-review`) — архитектурный ревью изменений
 
-В репозитории нет отдельного `npm run lint` / ESLint-конфига — линтинг не входит в этот список, пока скрипт не появится.
+Отдельного `npm run lint` / ESLint в репозитории нет — не требовать линтинг, пока скрипт не появится.
 
 Не коммитить, пока все проверки не пройдены.
 
@@ -44,113 +45,65 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 Перед коммитом/PR активировать для финальной проверки:
 
 - Code review — skill `code-review` (`/code-review`), уровень по масштабу изменений:
-  - `low`/`medium` — для обычных задач (несколько высокоуверенных находок)
-  - `high`/`max` — для крупных изменений (более широкое покрытие)
-  - `ultra` — для PR перед мержем (multi-agent cloud review)
-
-  (Skills `review-fix`/`review-team`, упоминавшиеся здесь ранее, в `.claude/skills/` этого репозитория отсутствуют — сейчас там только `device-ai-loop`.)
+  - `low`/`medium` — для обычных задач
+  - `high`/`max` — для крупных изменений
+  - `ultra` — для PR перед мержем
 
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
-**Forta Chat — Android Compatibility Audit & Fix**
+**Forta Chat** — децентрализованный E2E-мессенджер на Matrix (fork `matrix-js-sdk-bastyon`) с local-first хранением (Dexie), WebRTC-звонками и входом по приватному ключу Bastyon.
 
-Системный аудит и исправление Android-специфичных багов в Forta Chat — мессенджере на Vue 3 + Capacitor. На части Android-устройств пользователи сталкиваются с лагами анимаций, неработающими кнопками, сломанной навигацией и отсутствием звука в звонках. Цель — добиться одинаково стабильной работы на всех поддерживаемых Android-устройствах.
+Платформы: Web, Electron (Windows / macOS / Linux), Android 7.0+ (minSdk 24), iOS 15+.
 
-**Core Value:** Приложение должно работать одинаково хорошо на любом Android-устройстве — без прыгающего UI, без неработающих кнопок, без пропадающего звука.
+**Core Value:** Сообщения и медиа живут на устройстве; синхронизация и криптография работают offline-first; UX одинаково стабилен на Web, desktop и mobile (включая старые Android WebView).
 
 ### Constraints
 
-- **Устройства**: Поддержка Android 7.0+ (minSdk 24) — нужно учитывать старые WebView
-- **Подход**: Только фикс/оптимизация — без рефакторинга ради рефакторинга
-- **Данные**: Ориентируемся на жалобы пользователей, нет лабораторных устройств для тестирования
-- **Параллельная работа**: Другой разработчик работает над клавиатурой — не пересекаться
+- **Устройства**: Android API 24+ и iOS 15+ — учитывать различия WebView / WKWebView
+- **Подход**: Фикс и целевые улучшения — без рефакторинга ради рефакторинга
+- **Данные**: Dexie = single source of truth; не дублировать серверное состояние в Pinia как SoT
 <!-- GSD:project-end -->
 
 <!-- GSD:stack-start source:codebase/STACK.md -->
 ## Technology Stack
 
 ## Languages
-- TypeScript 5.5.4 - All source code (`src/**/*.ts`, `src/**/*.tsx`, `src/**/*.vue`)
-- JavaScript (CommonJS) - Electron main process (`electron/main.cjs`, `electron/preload.cjs`)
-- Vue 3 (.vue single-file components) - UI layer (`src/**/*.vue`)
-- CSS - Tailwind-based styling (via Tailwind config)
-- HTML - Template markup within Vue SFCs
+- TypeScript (strict) — application code (`src/**/*.ts`, `src/**/*.vue`)
+- JavaScript (CommonJS) — Electron main/preload (`electron/main.cjs`, `electron/preload.cjs`)
+- Vue 3 SFCs — UI (`src/**/*.vue`)
+- CSS — Tailwind + CSS custom properties
 ## Runtime
-- Node.js (inferred from npm/package-lock.json)
-- Browser (Web/Electron via Chromium)
-- Android and iOS (via Capacitor 8.2.0 / `@capacitor/ios` 8.3.3)
-- npm - Primary package manager
-- Lockfile: `package-lock.json` (present)
-## Frameworks
-- Vue 3.4.31 (Composition API) - UI framework
-- Vite 5.3.4 - Build tool and dev server
-- Vue Router 4 - Client-side routing
-- Pinia 2.2.0 - Global state management (Vuex replacement)
-- Dexie 4.3.0 - IndexedDB wrapper for local-first data persistence
-- TailwindCSS 3.4.7 - Utility-first CSS framework
-- unplugin-vue-components 0.27.3 - Auto-imports UI components from `src/shared/ui`
-- class-variance-authority 0.7.0 - CSS variant composition
-- Vitest 4.0.18 - Unit/integration test runner
-- @vue/test-utils 2.4.6 - Vue component testing utilities
-- happy-dom 20.6.2 - Lightweight DOM implementation for tests
-- fake-indexeddb 6.2.5 - IndexedDB mock for testing
-- Electron 40.6.0 - Desktop app framework (main + preload)
-- electron-builder 26.8.1 - Electron packaging and distribution
-- TypeScript compiler (via `vue-tsc 2.0.26`) - Type checking
-- Terser 5.46.0 - JavaScript minification
-- unplugin-auto-import 0.18.2 - Auto-imports common utilities (vue, vue-router, i18n)
+- Node.js 18+, npm 7+
+- Browser / Electron (Chromium)
+- Android + iOS via Capacitor 8 (`@capacitor/core` ^8.2, `@capacitor/ios` ^8.3.3)
+- Lockfile: `package-lock.json` (`lockfileVersion: 3`)
+## Frameworks (ranges from `package.json`; lock may resolve higher)
+- Vue ^3.4.31 (Composition API), Vite ^5.3.4, Vue Router 4, Pinia ^2.2.0
+- Dexie ^4.3.0, TailwindCSS ^3.4.7, Vitest ^4.0.18, vue-tsc ^2.0.26
+- Electron ^40.6.0, electron-builder ^26.8.1
+- TypeScript ^5.5.4, @vue/test-utils, happy-dom, fake-indexeddb
+- unplugin-vue-components, unplugin-auto-import, class-variance-authority, Terser
 ## Key Dependencies
-- matrix-js-sdk-bastyon 23.2.4 - Matrix client library (forked Bastyon version) for chat protocol
-- @capacitor/core 8.2.0 - Native bridge for Android/iOS features
-- axios 0.21.4 - HTTP client (used by Matrix SDK wrapper)
-- zod 3.23.8 - Schema validation and type inference
-- @noble/secp256k1 2.3.0 - ECDSA signing (Bastyon address derivation)
-- pbkdf2 3.1.2 - Key derivation function
-- create-hash 1.2.0 - Hash primitives (polyfill)
-- bn.js 5.2.0 - Big number arithmetic
-- miscreant 0.3.2 - AEAD encryption (forta-crypto compatibility)
-- @capacitor/camera 8.0.2 - Photo/camera capture on native
-- @capacitor/filesystem 8.1.2 - File system access (native)
-- @capacitor/share 8.0.1 - Native share dialog
-- @capgo/capacitor-share-target 8.0.25 - Receive shared files from Android
-- file-saver 2.0.5 - Download files to user device
-- audio-recorder-polyfill 0.4.1 - Audio recording (with polyfill for browsers)
-- socks-proxy-agent 8.0.5 - SOCKS5 proxy support (Tor integration)
-- node-fetch 2.7.0 - Fetch polyfill for Node.js contexts
-- emoji-kitchen-mart 6.0.5 - Emoji reactions database
-- virtua 0.48.8 - Virtual list component
-- vue-virtual-scroller 2.0.0-beta.8 - Virtual scrolling for large chat lists
-- vee-validate 4.13.2 - Form validation framework
-- @vee-validate/zod 4.13.2 - Zod integration with vee-validate
-- qs 6.10.3 - Query string serialization (used by Matrix SDK)
-- tar 7.5.9 - TAR archive support
-- @capacitor/push-notifications 8.0.2 - Push notification handling
-- @capacitor/local-notifications 8.0.2 - Local/scheduled notifications
-- @capacitor/haptics 8.0.1 - Haptic feedback (native)
-- @capacitor/app 8.0.1 - App lifecycle handling
-- @capacitor/status-bar 8.0.1 - Status bar control
-- @capacitor/local-notifications 8.0.2 - Local notification scheduling
-- tree-kill 1.2.2 - Process cleanup (dev)
-- concurrently 9.2.1 - Run multiple npm scripts in parallel
-- buffer 6.0.3 - Node.js Buffer polyfill
-- stream-browserify 3.0.0 - Node.js stream polyfill
+- `matrix-js-sdk-bastyon` ^23.2.5 — Matrix client (Bastyon fork)
+- Capacitor plugins: camera, filesystem, share, push/local notifications, haptics, app, status-bar, keyboard, network, device
+- `@capgo/capacitor-share-target`, `@capgo/capacitor-incoming-call-kit`, `@capacitor-community/sqlite`, `@capacitor-community/safe-area`
+- Crypto: `@noble/secp256k1`, `miscreant`, `pbkdf2`, `bn.js`, `create-hash`
+- UI/media: `emoji-kitchen-mart`, `virtua`, `vue-virtual-scroller`, `heic2any`, `audio-recorder-polyfill`, `file-saver`
+- Tor: `socks-proxy-agent`; forms: `vee-validate` + `@vee-validate/zod` + `zod`
+- Local AI (optional/native): `local-ai` (file dep), `llama-cpp-pro`
 ## Configuration
-- Variables loaded from `.env` (via Vite's `import.meta.env`)
-- `vite.config.ts` - Main build configuration; Vitest settings live in its `test` block (happy-dom environment, `src/**/*.test.ts` pattern) — there is no separate `vitest.config.ts`
-- `tsconfig.json` - TypeScript strict mode, path aliases (@/, @app/, @entities/, etc.)
-- `tailwind.config.js` - Theme tokens using CSS custom properties
-- `capacitor.config.ts` - Capacitor configuration (app id, web dir, native plugin options — does NOT contain `minSdk`/`targetSdk`, those live in `android/variables.gradle`)
+- Env: `.env` via Vite `import.meta.env` (no separate `INTEGRATIONS.md`)
+- `vite.config.ts` — build + Vitest (`test` block: happy-dom, `src/**/*.test.ts` / `scripts/**/*.test.ts`); отдельного `vitest.config.ts` нет
+- `tsconfig.json` — strict + path aliases (`@/`, `@app/`, `@entities/`, …)
+- `tailwind.config.js` — theme tokens
+- `capacitor.config.ts` — `appId`, webDir, plugins; **minSdk/targetSdk** — в `android/variables.gradle` (24 / 36)
 ## Platform Requirements
-- Node.js 18+ (inferred from TypeScript ES2020 target)
-- npm 7+ (lockfile v2)
-- TypeScript 5.5.4 (strict mode enabled)
-- Modern browser supporting:
-- Android 7.0+ (API level 24+)
-- iOS 15.0+
-- Capacitor 8.2.0
+- Node.js 18+, npm 7+
+- Android 7.0+ (API 24+), JDK 21 for Gradle builds
+- iOS 15.0+ (macOS 14+, Xcode 16+)
 - Windows 10+, macOS 10.13+, Linux (glibc 2.28+)
-- Chromium 126+ (via Electron 40.6.0)
+- Electron / Chromium via Electron 40.x
 <!-- GSD:stack-end -->
 
 <!-- GSD:conventions-start source:CONVENTIONS.md -->
@@ -182,7 +135,7 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 - TypeScript strict checks enforced: exact type safety required
 - No `any` types allowed in application code
 - Vue component props must use `defineProps<Props>()` with TypeScript interface
-- Composables must use `<script setup>` syntax
+- Composables — `.ts` modules (`use-*.ts`), не SFC; Vue UI — `<script setup lang="ts">`
 ## Import Organization
 ## Error Handling
 - Errors are caught explicitly with `try-catch` blocks
@@ -211,7 +164,7 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 ## CSS and Styling
 - All styling via Tailwind utility classes
 - No custom CSS unless absolutely necessary (use CSS custom properties instead)
-- Dark mode not explicitly toggled — relies on system/browser defaults
+- Theme: `useThemeStore` (`setTheme` / `toggleTheme`); fallback to system dark when unset
 - Custom colors defined as CSS tokens in global styles
 - Defined in global stylesheet for design tokens
 - Used for component variants: `bg-color-bg-ac`, `text-text-on-bg-ac-color`
@@ -255,11 +208,11 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 - Matrix Protocol integration for decentralized chat with E2E encryption
 ## Layers
 - Purpose: Bootstrap, route setup, global initialization, theme/locale setup
-- Contains: `main.ts` (entry), `App.vue` (root component), `providers/` (Pinia, router, theme), `model/` (boot status)
+- Contains: `App.vue`, `providers/` (Pinia, router, theme), `model/` (boot status); entry script — `src/main.ts`
 - Depends on: All other layers
 - Used by: index.html (entry point via #app mount)
 - Purpose: Route containers that assemble features + layouts
-- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, etc. (settings are a panel — `widgets/sidebar/ui/SettingsPanel.vue` — not a route-level page)
+- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, `AppearancePage.vue` (`/settings/appearance`); settings hub — `widgets/sidebar/ui/SettingsPanel.vue`
 - Depends on: Features, widgets, entities
 - Used by: Vue Router (from `app/providers/router/`)
 - Purpose: Composed surfaces combining features and UI components (sidebar, layouts, chat window, header)
@@ -272,18 +225,17 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 - Depends on: Entities, shared
 - Used by: Pages, widgets, other features
 - Purpose: Core domain logic, type definitions, Pinia stores for entity data
-- Contains: `auth/`, `chat/`, `user/`, `matrix/`, `channel/`, `call/`, `media/`, `theme/`, `locale/`, `tor/`
+- Contains: `auth/`, `chat/`, `user/`, `matrix/`, `channel/`, `call/`, `media/`, `theme/`, `locale/`, `tor/`, `local-ai/`, `ai-chat/`
 - Structure per entity: `model/` (Pinia stores, types), `lib/` (helpers), `index.ts` (barrel)
 - Depends on: Shared lib
 - Used by: Features, app providers
 - Purpose: Infrastructure, UI primitives, database, API clients, composables
-- Substructure:
 - Depends on: Nothing (only external libs)
 - Used by: All other layers
 ## Data Flow
-- **Server state (Matrix):** Pinia stores in `entities/` (auth, chat, user, call, channel)
-- **UI state:** Vue Composition API refs + reactive objects (no Pinia)
-- **Local storage:** Session data persisted in `localStorage` via `useLocalStorage()` helper
+- **Server state (Matrix):** Pinia stores in `entities/` (auth, chat, user, call, channel, …) поверх Dexie SSOT
+- **UI state:** Vue Composition API refs + reactive objects
+- **Local storage:** сессии, theme, pinned/muted rooms, registration — через `useLocalStorage()` / прямые ключи
 ## Key Abstractions
 - Purpose: Unified interface to local-first database and sync operations
 - Contains: `ChatDatabase` (Dexie schema), `MessageRepository`, `RoomRepository`, `UserRepository`, `SyncEngine`, `EventWriter`, `DecryptionWorker`, `ListenedRepository`
@@ -301,25 +253,17 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 - Purpose: Wrapper around Matrix SDK and E2E crypto
 - Contains: Matrix client service, room crypto instances, key management
 - Key methods: `decryptEvent()`, `encryptEvent()`, `getRoomMembers()`, `fetchEventContext()`
-- `useAuthStore()` — auth state, session management, Matrix init
-- `useChatStore()` — rooms, active room, room metadata
-- `useUserStore()` — user profiles, contact info
-- `useCallStore()` — call state, WebRTC connections
-- `useChannelStore()` — channel subscriptions
-- Accessed via: Vue Composition API `const store = useXyzStore()`
+- `useAuthStore()` — auth, sessions, Matrix init
+- `useChatStore()` — rooms, active room, metadata
+- `useUserStore()` — profiles / contacts
+- `useCallStore()` — WebRTC calls
+- `useChannelStore()` — channels
+- `useThemeStore()` / `useLocaleStore()` / `useTorStore()` / `useMediaStore()` / local-ai & ai-chat stores
+- Accessed via: `const store = useXyzStore()`
 ## Entry Points
-- Location: Project root entry
-- Triggers: Called by HTML `<script>` tag
-- Responsibilities: Mount Vue app to #app, polyfill globals (Buffer), handle boot errors
-- Location: Bootstrap function called by `main.ts`
-- Triggers: Async initialization via `setupApp()`
-- Responsibilities: Create Vue app, mount AppLoading overlay, call `setupProviders()`, handle boot timeout, return mounted app or null on error
-- Location: Provider orchestration
-- Triggers: Called during app boot
-- Responsibilities:
-- Location: Root Vue component
-- Triggers: Mounted after router ready
-- Responsibilities:
+- `src/main.ts` — mount `#app`, Buffer polyfill, boot errors
+- `setupApp()` — create Vue app, AppLoading, `setupProviders()`, boot timeout
+- `src/app/App.vue` — root after router ready
 ## Error Handling
 - Boot errors → AppLoading stays mounted with error UI, user can retry
 - SyncEngine failures → operations marked as "failed", user sees error in message, can retry manually
@@ -353,14 +297,11 @@ Conventional Commits: `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, `perf:`, `
 <!-- GSD:skills-start source:skills/ -->
 ## Project Skills
 
-> Только `device-ai-loop` реально существует в `.claude/skills/` этого репозитория.
-> Строки ниже (`develop-team`, `fix-ticket`, `review-fix`, `review-team`) описывают skills, ссылки
-> на которые ранее были в этом файле, но соответствующих `SKILL.md` в `.claude/skills/` сейчас нет —
-> не полагайтесь на них, пока они не будут добавлены заново.
+В `.claude/skills/` этого репозитория сейчас только:
 
 | Skill | Description | Path |
 |-------|-------------|------|
-| device-ai-loop | Iterate on a local-ai (`C:\inetpub2026\localai`) bug that only reproduces through the real Capacitor/Android bridge, using Forta Chat as the live consumer app on a connected device. Use when the user reports an AI-chat/local-ai bug seen on a real device, asks to test local-ai changes on-device, or says "run cap:run and see the AI errors" / "fix the local-ai build errors on device". | `.claude/skills/device-ai-loop/SKILL.md` |
+| device-ai-loop | On-device итерация багов local-ai через Capacitor/Android (Forta Chat как consumer). | `.claude/skills/device-ai-loop/SKILL.md` |
 <!-- GSD:skills-end -->
 
 <!-- GSD:workflow-start source:GSD defaults -->

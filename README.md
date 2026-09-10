@@ -204,20 +204,20 @@ Deep dives:
 | [docs/webrtc-logs-analysis.md](docs/webrtc-logs-analysis.md) | WebRTC log analysis |
 | [docs/webrtc-solution-proposal.md](docs/webrtc-solution-proposal.md) | WebRTC improvement proposals |
 | [docs/android-local-build.md](docs/android-local-build.md) | Local Android APK build |
+| [docs/ios-local-build.md](docs/ios-local-build.md) | Local iOS build |
 | [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md) | How to obtain a Bastyon private key |
-| [docs/plans/](docs/plans/) | Design docs and feature plans |
+| [docs/plans/](docs/plans/) | Design docs and feature plans (historical) |
 
 ## Development
 
 Before each commit, run the full verification pipeline:
 
 ```bash
-npm run build              # build (vue-tsc + vite)
-npx vue-tsc --noEmit       # type-check
+npm run build              # build (includes vue-tsc --noEmit + vite)
 npm run test               # tests
 ```
 
-Conventions, TDD, code review and the rest — in [CLAUDE.md](CLAUDE.md).
+Conventions, TDD, code review and the rest — in [CLAUDE.md](CLAUDE.md). There is no separate `npm run lint` in this repo.
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 

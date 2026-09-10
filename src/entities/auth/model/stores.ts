@@ -660,7 +660,23 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             if (prev) clearTimeout(prev);
             const t = setTimeout(() => {
               _peerKeysRecheckTimers.delete(roomId);
-              chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
+              // Refresh the room's cached crypto membership/key state
+              // (users/usersinfo) BEFORE checkPeerKeys — canBeEncrypt() only
+              // reads that cache, it never refetches on its own. Without this,
+              // a member added to an already-prepared room's crypto instance
+              // is silently and permanently excluded from the group common
+              // key: usershash() keeps hashing the OLD member set, so every
+              // future encryptEventGroup() keeps finding and reusing the
+              // pre-existing common-key event that was never wrapped for the
+              // new member (matrix-crypto.ts getOrCreateCommonKey/usershash).
+              // prepare() here is unforced — getusershistory() is a pure local
+              // recompute from already-synced room state (no network), and
+              // getusersinfo() only skips its *own* forceUpdate flag, so a
+              // genuinely new member's keys are still fetched.
+              const roomCrypto = pcrypto.value?.rooms[roomId];
+              (roomCrypto ? roomCrypto.prepare().catch(() => {}) : Promise.resolve())
+                .then(() => chatStore.checkPeerKeys(roomId))
+                .catch(() => { /* best-effort */ });
             }, 500);
             _peerKeysRecheckTimers.set(roomId, t);
           }

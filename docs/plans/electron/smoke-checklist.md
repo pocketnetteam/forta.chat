@@ -36,11 +36,11 @@ npm run electron:preview
 ## Автопроверки (обязательны перед коммитом)
 
 ```bash
-npm run build
-npm run lint
-npx vue-tsc --noEmit
+npm run build   # включает vue-tsc --noEmit
 npm run test
 ```
+
+Отдельного `npm run lint` в репозитории нет — см. [CLAUDE.md](../../CLAUDE.md).
 
 ## Ссылки
 

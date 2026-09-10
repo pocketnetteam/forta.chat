@@ -11,6 +11,8 @@ import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
 import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
+import { useHistoryPagination } from "../model/use-history-pagination";
+import { isCacheLikelyStale, shouldWaitForSyncedMessages } from "../model/room-open-plan";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { useToast } from "@/shared/lib/use-toast";
 import MessageBubble from "./MessageBubble.vue";
@@ -280,12 +282,25 @@ const scrollerRef = ref<{
 const isNearBottom = ref(true);
 const showScrollFab = ref(false);
 const loading = ref(false);
-const loadingMore = ref(false);
 const switching = ref(false); // true during room switch — suppresses watchers
 const settled = ref(false); // false until messages loaded + scrolled — hides scroller to prevent flicker
 const refreshingStaleCache = ref(false); // true when showing stale cached messages while fresh data loads
 const loadEverAttempted = ref(false); // true only after at least one load cycle ran for the current room
-const hasMore = ref(true);
+// Scroll-up pagination: Dexie window first, network scrollback as fallback.
+// networkWaiting = Dexie exhausted, waiting for the network page.
+const {
+  canLoadMore,
+  loadingMore,
+  networkWaiting,
+  reset: resetPagination,
+  startPrefetch,
+  loadMore: doLoadMore,
+} = useHistoryPagination({
+  getActiveRoomId: () => chatStore.activeRoomId,
+  expandWindow: () => chatStore.expandMessageWindow(),
+  loadMoreRemote: (roomId) => chatStore.loadMoreMessages(roomId),
+  prefetchRemote: (roomId) => chatStore.prefetchNextBatch(roomId),
+});
 const newMessageCount = ref(0);
 /** Timestamp (performance.now) of the last room open. Used to gate auto-dismiss
  *  against the room-switch race in shouldAutoDismissBanner. Only stamped on
@@ -303,7 +318,6 @@ const fabBadgeCount = computed(() => {
 // --- Scroll threshold state ---
 const LOAD_THRESHOLD = 1200; // px from max scroll — trigger expand
 const VELOCITY_BOOST_THRESHOLD = 1500; // px/s — fast scroll triggers early thresholds
-const networkWaiting = ref(false); // true when Dexie cache exhausted, waiting for network
 let lastScrollTop = 0;
 let lastScrollTime = 0;
 let scrollVelocity = 0; // px per second (positive = scrolling toward older)
@@ -633,12 +647,11 @@ watch(
     loadEverAttempted.value = false;
     refreshingStaleCache.value = false;
     newMessageCount.value = 0;
-    hasMore.value = true;
+    resetPagination();
     showScrollFab.value = false;
     showDateHeader.value = false;
     recentMessageIds.value.clear();
     isNearBottom.value = true;
-    networkWaiting.value = false;
     lastScrollTop = 0;
     lastScrollTime = 0;
     scrollVelocity = 0;
@@ -706,7 +719,7 @@ watch(
         // last-read message so the banner can match it in virtualItems.
         const neededWindow = plan.unreadCount + 20;
         if (neededWindow > chatStore.messageWindowSize) {
-          chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
+          void chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
         }
 
         scrollToBanner = true;
@@ -719,7 +732,10 @@ watch(
     const hasValidMessages = chatStore.activeMessages.length > 0
       && chatStore.activeMessages[0]?.roomId === roomId;
     if (anchorItemIndex === -1 && !hasValidMessages) {
-      const cacheAge = await chatStore.loadCachedMessages(roomId);
+      // With Dexie the liveQuery IS the cache — loadCachedMessages would only
+      // do a redundant 50-row read and return 0. Legacy path only.
+      const usingDexie = !!chatStore.chatDbKitRef;
+      const cacheAge = usingDexie ? 0 : await chatStore.loadCachedMessages(roomId);
       if (isStale()) return;
 
       // liveQuery can lag behind a Dexie read in loadCachedMessages — avoid treating
@@ -746,8 +762,9 @@ watch(
 
       if (!hasCached) {
         loading.value = true;
+        let parsedCount: number | undefined;
         try {
-          await loadMessages(roomId);
+          parsedCount = await loadMessages(roomId);
         } catch { /* ignore */ }
         if (isStale()) return;
 
@@ -758,7 +775,10 @@ watch(
           const hasClearedHistory = isChatDbReady()
             ? getChatDb().eventWriter.getClearedAtTs(roomId)
             : undefined;
-          if (!hasClearedHistory) {
+          if (shouldWaitForSyncedMessages({
+            parsedCount,
+            hasClearedHistory: !!hasClearedHistory,
+          })) {
             const SYNC_WAIT_MS = 8_000;
             await new Promise<void>((resolve) => {
               const timer = setTimeout(resolve, SYNC_WAIT_MS);
@@ -772,7 +792,12 @@ watch(
           }
         }
         loading.value = false;
-      } else if (cacheAge > STALE_THRESHOLD) {
+      } else if (isCacheLikelyStale({
+        usingDexie,
+        initialSyncStatus: chatStore.initialSyncStatus,
+        legacyCacheAgeMs: cacheAge,
+        staleThresholdMs: STALE_THRESHOLD,
+      })) {
         refreshingStaleCache.value = true;
         loadMessages(roomId).catch(() => {}).finally(() => { refreshingStaleCache.value = false; });
       } else {
@@ -995,64 +1020,10 @@ const updateFloatingDate = () => {
   }, 1500);
 };
 
-/** Wait for activeMessages.length to change (liveQuery responded) or timeout. */
-const waitForDataChange = (prevLen: number, timeout = 300): Promise<void> =>
-  new Promise((resolve) => {
-    if (chatStore.activeMessages.length !== prevLen) { resolve(); return; }
-    const timer = setTimeout(() => { stop(); resolve(); }, timeout);
-    const stop = watch(() => chatStore.activeMessages.length, (len) => {
-      if (len !== prevLen) { clearTimeout(timer); stop(); resolve(); }
-    });
-  });
-
-/** Prefetch one batch of 25 messages into Dexie (fire-and-forget).
- *  Called after room load and after each expand to stay one step ahead. */
-const startPrefetch = (roomId: string) => {
-  chatStore.prefetchNextBatch(roomId)
-    .then(more => { hasMore.value = more; })
-    .catch(() => {});
-};
-
-/** Expand Dexie window to show more messages on scroll-up.
- *  With the inverted scroller (column-reverse), older messages are APPENDED
- *  to the end of the reversed array = visual top = far from viewport.
- *  NO scroll correction needed — the browser maintains scroll position. */
-const doLoadMore = async (roomId: string): Promise<void> => {
-  if (loadingMore.value) return;
-  loadingMore.value = true;
-
-  try {
-    const prevLen = chatStore.activeMessages.length;
-
-    // Expand Dexie query window — should find prefetched data
-    chatStore.expandMessageWindow();
-    await waitForDataChange(prevLen);
-
-    if (chatStore.activeRoomId !== roomId) return;
-    const newLen = chatStore.activeMessages.length;
-
-    // If Dexie had nothing new, fetch from network (safety net)
-    if (newLen <= prevLen && hasMore.value) {
-      networkWaiting.value = true;
-      const more = await chatStore.loadMoreMessages(roomId);
-      hasMore.value = more;
-      if (more && chatStore.activeRoomId === roomId) {
-        chatStore.expandMessageWindow();
-        await waitForDataChange(chatStore.activeMessages.length);
-      }
-      networkWaiting.value = false;
-    }
-
-    // Prefetch next batch so it's ready for the next scroll-up
-    if (hasMore.value && chatStore.activeRoomId === roomId) {
-      startPrefetch(roomId);
-    }
-  } catch {
-    networkWaiting.value = false;
-  } finally {
-    loadingMore.value = false;
-  }
-};
+// Scroll-up (doLoadMore / startPrefetch) lives in useHistoryPagination.
+// With the inverted scroller (column-reverse), older messages are APPENDED
+// to the end of the reversed array = visual top = far from viewport, so no
+// scroll correction is needed after a window expand.
 
 /** Load newer messages (forward pagination in detached mode). */
 const loadingNewer = ref(false);
@@ -1129,15 +1100,15 @@ const onScrollThrottled = () => {
     }
   }
 
-  if (!hasMore.value) return;
+  if (!canLoadMore.value) return;
 
   // Distance from the top (oldest messages)
   const maxScroll = container.scrollHeight - container.clientHeight;
   const distFromTop = maxScroll - scrollTop;
 
   if (import.meta.env.DEV) {
-    console.log("[scroll] scrollTop=%d maxScroll=%d distFromTop=%d hasMore=%s loadingMore=%s",
-      scrollTop, maxScroll, distFromTop, hasMore.value, loadingMore.value);
+    console.log("[scroll] scrollTop=%d maxScroll=%d distFromTop=%d canLoadMore=%s loadingMore=%s",
+      scrollTop, maxScroll, distFromTop, canLoadMore.value, loadingMore.value);
   }
 
   // Velocity-adaptive threshold — fast scroll triggers expand earlier

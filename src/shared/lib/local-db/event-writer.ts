@@ -879,7 +879,14 @@ export class EventWriter {
 
   /** Convert a ParsedMessage to a LocalMessage for DB insertion */
   private toLocalMessage(parsed: ParsedMessage): LocalMessage {
-    const isEncrypted = parsed.content === "[encrypted]" && parsed.encryptedRaw;
+    const isPlaceholder = parsed.content === "[encrypted]";
+    const isEncrypted = isPlaceholder && parsed.encryptedRaw;
+    if (isPlaceholder && !parsed.encryptedRaw) {
+      // Caller dropped the ciphertext. Still mark the row "pending" (not "ok")
+      // so it is visibly undecrypted and a later write carrying the raw event
+      // or plaintext can repair it (see encryptedRepairPatch).
+      console.warn("[EventWriter] \"[encrypted]\" message written without encryptedRaw:", parsed.eventId);
+    }
     return {
       eventId: parsed.eventId,
       clientId: parsed.clientId ?? `srv_${parsed.eventId}`,
@@ -905,7 +912,7 @@ export class EventWriter {
       reactions: parsed.reactions,
       // Decryption retry metadata
       encryptedBody: isEncrypted ? JSON.stringify(parsed.encryptedRaw) : undefined,
-      decryptionStatus: isEncrypted ? "pending" : "ok",
+      decryptionStatus: isPlaceholder ? "pending" : "ok",
     };
   }
 
