@@ -32,6 +32,7 @@ import {
   CLIENT_RECOVERY_MAX_MS,
   MATRIX_SYNC_HOSTS,
 } from "./sync-failover";
+import { SyncDiagnosticsRecorder, type SyncDiagnosticsSnapshot } from "./sync-diagnostics";
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
 
 export type SyncCallback = (state: "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING") => void;
@@ -77,6 +78,8 @@ export class MatrixClientService {
   private clientRecoveryListenersAttached = false;
   private onOnlineRecovery: (() => void) | null = null;
   private onVisibilityRecovery: (() => void) | null = null;
+  // /sync health for bug reports; survives mirror recreates (same service).
+  private readonly syncDiag = new SyncDiagnosticsRecorder();
 
   setTorProxyUrl(url: string) {
     this.torProxyUrl = url;
@@ -460,6 +463,20 @@ export class MatrixClientService {
     return userClient;
   }
 
+  /** Run one of our SDK listeners without letting it throw into the SDK's
+   *  emit(). The SDK advances the sync token BEFORE processing a batch, so an
+   *  exception escaping into processSyncResponse silently drops the rest of
+   *  that batch for good (SyncUnexpectedError) — a persistent throw here means
+   *  messages stop arriving in every chat and a restart doesn't bring them back. */
+  private guard(listener: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (e) {
+      this.syncDiag.recordListenerError(listener, e);
+      console.error(`[matrix] ${listener} listener threw:`, e);
+    }
+  }
+
   private initEvents() {
     if (!this.client) return;
 
@@ -467,101 +484,99 @@ export class MatrixClientService {
 
     this.client.on("RoomMember.membership", (event: unknown, member: unknown) => {
       if (!this.chatsReady) return;
-      this.onMembership?.(event, member);
+      this.guard("RoomMember.membership", () => this.onMembership?.(event, member));
     });
 
     this.client.on("Room.timeline", (message: unknown, _room: unknown, toStartOfTimeline: unknown) => {
-      if (!this.chatsReady) return;
       // Ignore events added to start of timeline (from pagination)
       if (toStartOfTimeline) return;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = message as any;
-      if (!msg?.event?.content) return;
+      this.syncDiag.recordTimelineEvent();
+      if (!this.chatsReady) return;
+      this.guard("Room.timeline", () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const msg = message as any;
+        if (!msg?.event?.content) return;
 
-      // Parse file body
-      if (msg.event.content.msgtype === "m.file") {
-        try { msg.event.content.pbody = JSON.parse(msg.event.content.body); } catch { /* ignore */ }
-      }
+        // Parse file body
+        if (msg.event.content.msgtype === "m.file") {
+          try { msg.event.content.pbody = JSON.parse(msg.event.content.body); } catch { /* ignore */ }
+        }
 
-      // Pass reaction events from anyone (including self) for local update
-      if (msg.event.type === "m.reaction") {
+        // Reactions, state events (membership, room name, power levels, …),
+        // call hangups and all messages (including own, so cross-device sync
+        // works — chat-store's handleTimelineEvent dedups for the sending
+        // device) are all passed through from anyone.
         this.onTimeline?.(message, msg.event.room_id);
-        return;
-      }
-
-      // Pass state events (membership, room name, power levels) from anyone
-      const stateTypes = ["m.room.member", "m.room.name", "m.room.power_levels", "m.room.avatar", "m.room.topic", "m.room.pinned_events"];
-      if (stateTypes.includes(msg.event.type)) {
-        this.onTimeline?.(message, msg.event.room_id);
-        return;
-      }
-
-      // Pass call hangup events from anyone for system message display
-      if (msg.event.type === "m.call.hangup") {
-        this.onTimeline?.(message, msg.event.room_id);
-        return;
-      }
-
-      // Pass all messages (including own) so cross-device sync works.
-      // The chat-store's handleTimelineEvent handles dedup for the sending device.
-      this.onTimeline?.(message, msg.event.room_id);
+      });
     });
 
     this.client.on("RoomMember.typing", (event: unknown, member: unknown) => {
-      this.onTyping?.(event, member);
+      this.guard("RoomMember.typing", () => this.onTyping?.(event, member));
     });
 
     this.client.on("Room.receipt", (event: unknown, room: unknown) => {
       if (!this.chatsReady) return;
-      this.onReceipt?.(event, room);
+      this.guard("Room.receipt", () => this.onReceipt?.(event, room));
     });
 
     this.client.on("Room.redaction", (event: unknown, room: unknown) => {
       if (!this.chatsReady) return;
-      this.onRedaction?.(event, room);
+      this.guard("Room.redaction", () => this.onRedaction?.(event, room));
     });
 
     // Fires when MY membership changes in a room (join→leave = kicked, join→ban, etc.)
     this.client.on("Room.myMembership", (room: unknown, membership: string, prevMembership: string | undefined) => {
-      this.onMyMembership?.(room, membership, prevMembership);
+      this.guard("Room.myMembership", () => this.onMyMembership?.(room, membership, prevMembership));
     });
 
     // SDK emits "Call.incoming" when it receives m.call.invite (room or to-device)
     this.client.on("Call.incoming" as string, (call: unknown) => {
-      this.onIncomingCall?.(call);
+      this.guard("Call.incoming", () => this.onIncomingCall?.(call));
     });
 
     // Detect new rooms added to the SDK (avoids O(n) scan in incrementalRoomRefresh)
     this.client.on("Room" as string, (room: unknown) => {
       if (!this.chatsReady) return;
-      this.onRoom?.(room);
+      this.guard("Room", () => this.onRoom?.(room));
     });
 
     // Room account_data changes (e.g. clear-history markers from other devices)
     this.client.on("Room.accountData" as string, (event: unknown, room: unknown) => {
       if (!this.chatsReady) return;
-      this.onRoomAccountData?.(event, room);
+      this.guard("Room.accountData", () => this.onRoomAccountData?.(event, room));
     });
 
     // Global per-user account_data changes (e.g. contact aliases from other devices).
     // Fires whenever a /sync delivers a new global account_data event.
     this.client.on("accountData" as string, (event: unknown) => {
       if (!this.chatsReady) return;
-      this.onAccountData?.(event);
+      this.guard("accountData", () => this.onAccountData?.(event));
     });
 
     // Listen for encryption state events — triggers decryption retry for room
     this.client.on("RoomState.events" as string, (event: unknown) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ev = event as any;
-      const type = ev?.getType?.();
-      const roomId = ev?.getRoomId?.();
-      if (type === "m.room.encryption" && roomId) {
-        this.onEncryptionKeyArrived?.(roomId);
-      }
+      this.guard("RoomState.events", () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ev = event as any;
+        const type = ev?.getType?.();
+        const roomId = ev?.getRoomId?.();
+        if (type === "m.room.encryption" && roomId) {
+          this.onEncryptionKeyArrived?.(roomId);
+        }
+      });
     });
 
-    this.client.on("sync", (state: string) => {
+    // The SDK catches exceptions from processing a /sync batch, logs them and
+    // moves on with the token already advanced — the batch's remaining events
+    // are gone. Record it so a bug report can tell "SDK drops batches" apart
+    // from "/sync never delivers".
+    this.client.on("sync.unexpectedError" as string, (error: unknown) => {
+      this.syncDiag.recordUnexpectedError(error);
+      console.error("[matrix] /sync batch processing failed — events in it were dropped:", error);
+    });
+
+    this.client.on("sync", (state: string, _prevState: unknown, data: unknown) => {
+      this.syncDiag.recordSyncState(state, (data as { error?: unknown } | undefined)?.error);
       if (state === "PREPARED" || state === "SYNCING") {
         if (!this.chatsReady) {
           this.chatsReady = true;
@@ -581,7 +596,9 @@ export class MatrixClientService {
       // Feed every state to the watchdog so it can fail over to a mirror when
       // the sync is wedged while online (WEE-105 H3).
       this.watchdog?.notifySync(state);
-      this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING");
+      this.guard("sync", () =>
+        this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING"),
+      );
     });
   }
 
@@ -678,6 +695,7 @@ export class MatrixClientService {
       const live = await this.probeHost(host);
       if (!live) continue;
       try {
+        this.syncDiag.recordHostSwitch(preferHost, host, "failover recovery");
         this.baseUrl = `https://${host}`;
         const rebuilt = await this.getClient();
         if (rebuilt) {
@@ -721,6 +739,7 @@ export class MatrixClientService {
       }
 
       try {
+        this.syncDiag.recordHostSwitch(current, liveHost, "watchdog failover");
         await this.swapClientToHost(liveHost);
         this.clearClientRecovery();
       } catch (e) {
@@ -831,6 +850,7 @@ export class MatrixClientService {
         this.scheduleClientRecovery();
         return;
       }
+      this.syncDiag.recordHostSwitch(hostFromBaseUrl(this.baseUrl), liveHost, "dead-client recovery");
       this.baseUrl = `https://${liveHost}`;
       const rebuilt = await this.getClient();
       if (rebuilt) {
@@ -880,7 +900,10 @@ export class MatrixClientService {
       // baseUrl to the mirror it wants and must not be reset back to primary.
       if (!this.failoverActive) {
         try {
-          this.baseUrl = `https://${await this.pingServers()}`;
+          const prevHost = hostFromBaseUrl(this.baseUrl);
+          const liveHost = await this.pingServers();
+          if (liveHost !== prevHost) this.syncDiag.recordHostSwitch(prevHost, liveHost, "boot ping");
+          this.baseUrl = `https://${liveHost}`;
         } catch (e) {
           console.warn("[matrix] pingServers failed, using current baseUrl:", e);
         }
@@ -910,6 +933,21 @@ export class MatrixClientService {
 
   isChatsReady(): boolean {
     return this.chatsReady;
+  }
+
+  /** /sync health snapshot for bug reports. Never throws. */
+  getSyncDiagnostics(): SyncDiagnosticsSnapshot {
+    let hasSyncToken = false;
+    let roomCount = 0;
+    try { hasSyncToken = !!this.client?.getSyncToken?.(); } catch { /* ignore */ }
+    try { roomCount = this.client?.getRooms?.()?.length ?? 0; } catch { /* ignore */ }
+    return this.syncDiag.snapshot({
+      host: hostFromBaseUrl(this.baseUrl),
+      hasSyncToken,
+      chatsReady: this.chatsReady,
+      roomCount,
+      online: typeof navigator === "undefined" ? true : navigator.onLine,
+    });
   }
 
   /** Send text message. `txnId` is the Matrix transaction ID used for
@@ -1429,6 +1467,17 @@ export function getMatrixClientService(): MatrixClientService {
     instance = new MatrixClientService();
   }
   return instance;
+}
+
+/** Non-throwing /sync snapshot for the bug-report envelope; undefined before
+ *  a Matrix client service exists (e.g. report sent from the login screen). */
+export function collectSyncDiagnostics(): SyncDiagnosticsSnapshot | undefined {
+  try {
+    return instance?.getSyncDiagnostics();
+  } catch (e) {
+    console.warn("[matrix] collectSyncDiagnostics failed:", e);
+    return undefined;
+  }
 }
 
 export function resetMatrixClientService() {

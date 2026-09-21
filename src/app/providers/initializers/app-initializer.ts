@@ -8,6 +8,13 @@ import {
   type BroadcastableAction,
 } from "@/entities/auth/lib/ensure-action-broadcast";
 import {
+  readUserInfoActionState,
+  userInfoStateKey,
+  type UserInfoActionState,
+  type VendorAccount,
+  type VendorUserInfoAction,
+} from "@/entities/auth/lib/vendor-actions";
+import {
   configurePocketnetNodes,
   callPocketnetRpc,
   unwrapRpcPayload,
@@ -155,6 +162,199 @@ export class AppInitializer {
       app: pocketnetInstance
     });
     this._available = true;
+    this.installVendorNodeBridge();
+  }
+
+  /** The Actions SDK checks confirmations and ingests WS transactions through
+   *  `app.platform.sdk.node.transactions.get.tx(txid, clbk)`, and gates
+   *  `checkTransaction` on `app.platform.currentBlock` (see setCurrentBlock).
+   *  Bastyon's satolist.js provides both; the chat's PocketnetInstance did
+   *  not, so the first confirmation check of any sent action waited forever —
+   *  and since Account.processing() walks actions through a sequential
+   *  processArray, the account's whole send loop stalled with it.
+   *  Same implementation as satolist.js `sdk.node.transactions.get.tx`, except
+   *  a throwing vendor callback is contained instead of being re-invoked with
+   *  an error from the promise's catch. `txwide` is intentionally absent: the
+   *  vendor only reaches it 20 min after `actions_rejectedFromNodes`, and a
+   *  missing method lands in the same `checkInAnotherSession` outcome. */
+  private installVendorNodeBridge(): void {
+    const psdk = this.psdk;
+    const sdk = this.pocketnetInstance?.platform?.sdk as unknown as
+      | { node?: { transactions?: { get?: { tx?: unknown } } } }
+      | undefined;
+    if (!psdk || !sdk) return;
+    const node = (sdk.node ??= {});
+    const transactions = (node.transactions ??= {});
+    const get = (transactions.get ??= {});
+    if (typeof get.tx === "function") return;
+
+    get.tx = (
+      id: string,
+      clbk?: (data: unknown, error?: unknown) => void,
+      p?: unknown,
+      upd?: boolean,
+    ): void => {
+      const invoke = (data: unknown, error?: unknown) => {
+        if (!clbk) return;
+        try {
+          clbk(data, error);
+        } catch (e) {
+          console.warn("[appInit] vendor transactions.get.tx callback threw:", e);
+        }
+      };
+      psdk.transaction
+        .load(id, upd || false, p)
+        .then((tx) => invoke(tx))
+        .catch((e: unknown) => invoke(null, e));
+    };
+  }
+
+  /** Keep `platform.currentBlock` current, as satolist.js does — the Actions
+   *  SDK reads it for confirmation counts and waits on it before
+   *  checkTransaction. Never moves backwards. */
+  setCurrentBlock(height: number): void {
+    const platform = this.pocketnetInstance?.platform;
+    if (!platform || !(height > 0)) return;
+    if (!platform.currentBlock || height > platform.currentBlock) {
+      platform.currentBlock = height;
+    }
+  }
+
+  /** Feed blockchain-ws events into the Actions SDK the same way satolist.js
+   *  does (`platform.actions.ws.block/transaction`), so Account.ws picks up
+   *  incoming coins and confirmations immediately instead of waiting for its
+   *  own cached `updateUnspents` / 65-s `checkTransaction` cadence. */
+  forwardChainBlock(block: { height: number; difference?: number }): void {
+    this.setCurrentBlock(block.height);
+    if (!this.actions) return;
+    try {
+      this.actions.ws.block(block);
+    } catch (e) {
+      console.warn("[appInit] Actions ws.block failed:", e);
+    }
+  }
+
+  forwardChainTransaction(tx: { txid: string; height?: number }): void {
+    if (!this.actions || !tx.txid) return;
+    try {
+      this.actions.ws.transaction(tx);
+    } catch (e) {
+      console.warn("[appInit] Actions ws.transaction failed:", e);
+    }
+  }
+
+  private getVendorAccount(address: string): VendorAccount | null {
+    if (!this.actions) return null;
+    return this.actions.addAccount(address) as VendorAccount;
+  }
+
+  /** Post-login Actions SDK setup, same as satolist.js prepareUser: register
+   *  the address with the SDK, mark it registered when the chain says so
+   *  (without `setStatus(true)` every non-UserInfo action — upvotes, comments
+   *  — waits forever on `actions_waitUserStatus`), and warm its unspents. */
+  async syncActionsAccountStatus(address: string): Promise<boolean> {
+    const account = this.getVendorAccount(address);
+    if (!account) return false;
+    let registered = false;
+    try {
+      registered = await withTimeout(
+        this.checkUserRegistered(address),
+        REGISTRATION_RPC_TIMEOUT,
+        "syncActionsAccountStatus",
+      );
+    } catch (e) {
+      console.warn("[appInit] syncActionsAccountStatus: getuserstate failed:", e);
+    }
+    if (registered) account.setStatus(true);
+    account.updateUnspents().catch((e: unknown) => {
+      console.warn("[appInit] syncActionsAccountStatus: updateUnspents failed:", e);
+    });
+    return registered;
+  }
+
+  /** Tell the Actions SDK coins are on the way after our own free/balance
+   *  grant — exactly what Account.requestUnspents() does after calling
+   *  free/balance itself. While set (280 s) makeTransaction waits
+   *  (`actions_noinputs_wait`) instead of falling into the
+   *  actions_noinputs → requestUnspents → platform.ui.captcha path, which the
+   *  chat stubs out and which latches the account afterwards. */
+  markRegistrationFundingPending(address: string, grant: unknown, proxyId: string): void {
+    this.getVendorAccount(address)?.willChangeUnspentsCallback(grant ?? null, proxyId);
+  }
+
+  /** Queue the registration UserInfo action with the Actions SDK — once per
+   *  address. The SDK sends it from its own 3-s loop (`sendWithNullStatus`),
+   *  retries, confirms and persists it in localStorage (`actions_v0`), so a
+   *  live action (queued, in flight, sent — including one restored after an
+   *  app restart) is adopted instead of queuing a second UserInfo. No forced
+   *  send: the caller observes the action via readUserInfoActionState. */
+  async queueRegistrationUserInfo(
+    address: string,
+    profile: { name: string; language: string; about: string },
+    encryptionPublicKeys: string[],
+    image?: string,
+  ): Promise<VendorUserInfoAction | null> {
+    const account = this.getVendorAccount(address);
+    if (!account || !this.actions) return null;
+    const existing = account.getTempUserInfo();
+    if (existing) return existing;
+
+    const queued = await withTimeout(
+      this.actions.addActionAndSendIfCan(this.buildUserInfo(profile, encryptionPublicKeys, image), null, address),
+      REGISTRATION_RPC_TIMEOUT,
+      "queueRegistrationUserInfo",
+    );
+    return queued as VendorUserInfoAction;
+  }
+
+  /** Reload the SDK account's unspents (vendor `Account.loadUnspents`) and
+   *  return how many it holds — keeps the SDK's cache fresh when
+   *  blockchain-ws is down, instead of its ≤60-s-cached makeTransaction
+   *  refresh. */
+  async refreshActionsUnspents(address: string): Promise<number> {
+    const account = this.getVendorAccount(address);
+    if (!account) return 0;
+    await account.loadUnspents();
+    return account.unspents.value.length;
+  }
+
+  /** Cancel every live registration UserInfo action for an address through
+   *  the vendor's own `cancelAction` (marks it `actions_rejectedByUser`, so the
+   *  send loop drops it — merely forgetting our reference would let the SDK
+   *  keep sending it), and drop the republish-path reference too. */
+  async cancelRegistrationUserInfo(address: string): Promise<void> {
+    this.pendingUserInfoActions.delete(address);
+    const account = this.getVendorAccount(address);
+    if (!account || !this.actions) return;
+    for (const action of account.getTempActions("userInfo", null, true)) {
+      try {
+        await this.actions.cancelAction(address, action.id);
+      } catch (e) {
+        console.warn("[appInit] cancelRegistrationUserInfo: cancelAction failed:", e);
+      }
+    }
+  }
+
+  /** Subscribe to the SDK's `action` events for one address' UserInfo
+   *  actions, firing only on real state transitions — the SDK re-emits on
+   *  every internal bookkeeping change (about once per 3-s loop tick). */
+  onUserInfoActionStateChange(
+    address: string,
+    onChange: (state: UserInfoActionState) => void,
+  ): () => void {
+    const actions = this.actions;
+    if (!actions) return () => {};
+    let lastKey: string | null = null;
+    const handler = (event: { action?: VendorUserInfoAction; address?: string }) => {
+      if (event.address !== address || event.action?.object?.type !== "userInfo") return;
+      const state = readUserInfoActionState(event.action);
+      const key = userInfoStateKey(state);
+      if (key === lastKey) return;
+      lastKey = key;
+      onChange(state);
+    };
+    actions.on("action", handler);
+    return () => actions.off("action", handler);
   }
 
   syncNodeTime() {
@@ -182,9 +382,14 @@ export class AppInitializer {
       return this.blockHeightLastResult;
     }
 
-    this.blockHeightInFlight = this.fetchBlockHeightUncached().finally(() => {
-      this.blockHeightInFlight = null;
-    });
+    this.blockHeightInFlight = this.fetchBlockHeightUncached()
+      .then((height) => {
+        this.setCurrentBlock(height);
+        return height;
+      })
+      .finally(() => {
+        this.blockHeightInFlight = null;
+      });
     return this.blockHeightInFlight;
   }
 
@@ -332,15 +537,7 @@ export class AppInitializer {
     image?: string
   ): Promise<{ action: unknown; registrationNode: string | null }> {
     if (!this.actions) return { action: null, registrationNode: null };
-    const userInfo = new UserInfo();
-    userInfo.name.set(superXSS(profile.name));
-    userInfo.language.set(superXSS(profile.language));
-    userInfo.about.set(superXSS(profile.about));
-    userInfo.image.set(superXSS(image || ""));
-    userInfo.site.set("");
-    userInfo.addresses.set([]);
-    userInfo.ref.set(null);
-    userInfo.keys.set(encryptionPublicKeys ?? null);
+    const userInfo = this.buildUserInfo(profile, encryptionPublicKeys, image);
 
     // 45s ceiling: queue + force-send + proxy round-trip. Without this the
     // registration stepper can spin on step 2 indefinitely (same class of bug
@@ -354,6 +551,23 @@ export class AppInitializer {
     const registrationNode = this.extractNodeFromAction(action);
     console.log("[appInit] registerUserProfile: registrationNode =", registrationNode);
     return { action, registrationNode };
+  }
+
+  private buildUserInfo(
+    profile: { name: string; language: string; about: string },
+    encryptionPublicKeys?: string[],
+    image?: string,
+  ): InstanceType<typeof UserInfo> {
+    const userInfo = new UserInfo();
+    userInfo.name.set(superXSS(profile.name));
+    userInfo.language.set(superXSS(profile.language));
+    userInfo.about.set(superXSS(profile.about));
+    userInfo.image.set(superXSS(image || ""));
+    userInfo.site.set("");
+    userInfo.addresses.set([]);
+    userInfo.ref.set(null);
+    userInfo.keys.set(encryptionPublicKeys ?? null);
+    return userInfo;
   }
 
   /** Queue UserInfo, warm unspent cache, force broadcast for new accounts.
@@ -437,7 +651,7 @@ export class AppInitializer {
 
   /** Extract the node address from a completed action's transaction via global txidnodestorage.
    *  txidnodestorage is populated by api.js after every sendrawtransaction. */
-  private extractNodeFromAction(action: unknown): string | null {
+  extractNodeFromAction(action: unknown): string | null {
     try {
       const txid = (action as Record<string, unknown>)?.transaction as string | undefined;
       if (!txid) return null;
@@ -1083,12 +1297,16 @@ export class AppInitializer {
   /** Check the Actions system's account registration status.
    *  Uses Account.getStatus() — same as pocketnet's user.userRegistrationStatus().
    *  Returns: 'registered', 'in_progress_transaction', 'in_progress_hasUnspents',
-   *  'in_progress_wait_unspents', 'not_in_progress', 'not_in_progress_no_processing' */
-  getAccountRegistrationStatus(): string {
+   *  'in_progress_wait_unspents', 'not_in_progress', 'not_in_progress_no_processing'
+   *  Pass `address` to read a specific account instead of the SDK's current
+   *  one (`app.user.address`), which can lag behind during registration. */
+  getAccountRegistrationStatus(address?: string): string {
     if (!this.actions) return 'not_available';
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const account = (this.actions as any).getCurrentAccount?.();
+      const account = address
+        ? this.getVendorAccount(address)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        : (this.actions as any).getCurrentAccount?.();
       if (account?.getStatus) return account.getStatus();
       return 'not_available';
     } catch {

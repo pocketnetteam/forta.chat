@@ -40,4 +40,35 @@ export interface BugReportInput {
    * nothing above it (`CLAUDE.md`).
    */
   aiDiagnostics?: { logs: string };
+  /**
+   * /sync pipeline health (`entities/matrix` collectSyncDiagnostics). Lets
+   * triage split "messages never arrive" into dead /sync (network / host /
+   * persisted SDK state) vs. batches the SDK dropped while processing them.
+   * Structural copy of `SyncDiagnosticsSnapshot` — `shared/` can't import
+   * from `entities/`; a drift fails the build at the modal's assignment.
+   */
+  syncDiagnostics?: BugReportSyncDiagnostics;
+}
+
+export interface BugReportSyncDiagnostics {
+  host: string;
+  hasSyncToken: boolean;
+  chatsReady: boolean;
+  roomCount: number;
+  online: boolean;
+  lastState: string | null;
+  lastStateAgeMs: number | null;
+  lastHealthyAgeMs: number | null;
+  healthyCount: number;
+  errorsSinceHealthy: number;
+  lastError: string | null;
+  lastErrorAgeMs: number | null;
+  unexpectedErrorCount: number;
+  lastUnexpectedError: string | null;
+  lastUnexpectedErrorAgeMs: number | null;
+  timelineEventCount: number;
+  lastTimelineEventAgeMs: number | null;
+  listenerErrorCount: number;
+  lastListenerError: string | null;
+  hostSwitches: Array<{ from: string; to: string; reason: string; ageMs: number }>;
 }

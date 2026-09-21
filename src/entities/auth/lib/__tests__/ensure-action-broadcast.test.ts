@@ -42,8 +42,33 @@ describe("ensureActionBroadcast", () => {
       }),
     };
     const result = await ensureActionBroadcast(action);
-    expect(action.processingWithIteractions).toHaveBeenCalledWith(true);
+    expect(action.processingWithIteractions).toHaveBeenCalledTimes(1);
     expect(result.transaction).toBe("txid-sent");
+  });
+
+  // Regression: with rejectIfError=true the vendor stamps transient guards
+  // (e.g. `actions_alreadySending` while its own loop is mid-send) onto
+  // `action.rejected`, so callers dropped a still-in-flight action and queued
+  // a second UserInfo. The force must behave like the vendor loop: no flag.
+  it("forces without rejectIfError, like the vendor's own processing loop", async () => {
+    const action: BroadcastableAction = {
+      processingWithIteractions: vi.fn(async () => {
+        action.transaction = "txid-sent";
+      }),
+    };
+    await ensureActionBroadcast(action);
+    expect(action.processingWithIteractions).toHaveBeenCalledWith();
+  });
+
+  it("does not treat a transient vendor guard as a rejection", async () => {
+    const action: BroadcastableAction = {
+      processingWithIteractions: vi.fn(async () => {
+        // vendor loop is mid-send; without rejectIfError it does NOT set .rejected
+        throw "actions_alreadySending";
+      }),
+    };
+    await expect(ensureActionBroadcast(action)).rejects.toThrow("actions_alreadySending");
+    expect(action.rejected).toBeUndefined();
   });
 
   it("throws rejected code when processing sets rejected", async () => {
@@ -122,6 +147,6 @@ describe("ensureActionBroadcast matches the real vendor method name", () => {
     // rather than banning the string from the whole file.
     expect(ourSource).toContain("processingWithIteractions?:");
     expect(ourSource).toContain('typeof action.processingWithIteractions === "function"');
-    expect(ourSource).toContain("await action.processingWithIteractions(true)");
+    expect(ourSource).toContain("await action.processingWithIteractions()");
   });
 });

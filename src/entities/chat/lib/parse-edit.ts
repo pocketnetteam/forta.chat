@@ -34,7 +34,7 @@ export async function parseEditBody({
 
   if (isEncrypted) {
     try {
-      const decrypted = await decryptEvent(raw);
+      const decrypted = await decryptEvent(withRecoveredGroupHash(raw, content, newContent));
       return decrypted.body;
     } catch {
       return encryptedPlaceholder;
@@ -42,4 +42,17 @@ export async function parseEditBody({
   }
 
   return (newContent?.body as string) ?? (content.body as string) ?? "";
+}
+
+/** Group edits sent by older Forta builds copied body/block/version to the
+ *  outer content but not `hash`, so decryptEvent routed them to the 1:1 path
+ *  and they could never be read. Their `m.new_content` holds the full
+ *  encryptEvent() result, hash included — lift it back onto the outer content. */
+function withRecoveredGroupHash(
+  raw: Record<string, unknown>,
+  content: Record<string, unknown>,
+  newContent: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (content.hash || newContent?.msgtype !== "m.encrypted" || !newContent.hash) return raw;
+  return { ...raw, content: { ...content, hash: newContent.hash } };
 }

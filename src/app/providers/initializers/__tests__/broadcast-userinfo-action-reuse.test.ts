@@ -61,10 +61,18 @@ describe("broadcastUserInfoAction reuses a queued action across retries", () => 
     expect(storeIdx).toBeGreaterThan(queueIdx);
   });
 
-  it("exposes clearPendingUserInfoAction for the cancel-registration path", () => {
+  it("exposes clearPendingUserInfoAction (republish path) and cancelRegistrationUserInfo (registration path)", () => {
     const src = getSource();
     expect(src).toContain("clearPendingUserInfoAction(address: string): void {");
     expect(src).toContain("this.pendingUserInfoActions.delete(address);");
+
+    // Cancelling a registration must cancel the action inside the Actions SDK
+    // (it persists in actions_v0 and its loop keeps sending it) — dropping our
+    // own reference alone is not enough.
+    const cancelFnStart = src.indexOf("async cancelRegistrationUserInfo(address: string)");
+    expect(cancelFnStart).toBeGreaterThan(-1);
+    const cancelFn = src.slice(cancelFnStart, cancelFnStart + 700);
+    expect(cancelFn).toContain("this.actions.cancelAction(address, action.id)");
 
     const storesSrc = readFileSync(
       resolve(__dirname, "../../../../entities/auth/model/stores.ts"),
@@ -72,16 +80,13 @@ describe("broadcastUserInfoAction reuses a queued action across retries", () => 
     );
     const cancelStart = storesSrc.indexOf("const cancelRegistration = async () =>");
     expect(cancelStart).toBeGreaterThan(-1);
-    const cancelBody = storesSrc.slice(cancelStart, cancelStart + 700);
-    expect(cancelBody).toContain("appInitializer.clearPendingUserInfoAction(address.value);");
+    const cancelBody = storesSrc.slice(cancelStart, cancelStart + 900);
+    expect(cancelBody).toContain("appInitializer.cancelRegistrationUserInfo(address.value)");
   });
 
-  // Code-review follow-up: the reuse branch keeps re-driving a non-terminal
-  // pending action, so a caller that changes broadcast content for the same
-  // address (new username after a code-18 rejection) must not rely on the
-  // SDK having already marked the old action `.rejected` — that's incidental,
-  // not guaranteed for every failure mode. Clear explicitly instead.
-  it("retryRegistrationWithNewName clears the pending action before restarting the poll", () => {
+  // A new username after a code-18 rejection must not leave the old
+  // (rejected-18, still "temp" in the SDK) action around to be adopted again.
+  it("retryRegistrationWithNewName cancels the old UserInfo action before restarting the poll", () => {
     const storesSrc = readFileSync(
       resolve(__dirname, "../../../../entities/auth/model/stores.ts"),
       "utf-8",
@@ -90,24 +95,21 @@ describe("broadcastUserInfoAction reuses a queued action across retries", () => 
     expect(start).toBeGreaterThan(-1);
     const end = storesSrc.indexOf("const setRegistrationPending", start);
     const body = storesSrc.slice(start, end > start ? end : start + 1200);
-    const clearIdx = body.indexOf("appInitializer.clearPendingUserInfoAction(address.value)");
+    const cancelIdx = body.indexOf("await appInitializer.cancelRegistrationUserInfo(address.value)");
     const startPollIdx = body.indexOf("startRegistrationPoll()");
-    expect(clearIdx).toBeGreaterThan(-1);
-    expect(startPollIdx).toBeGreaterThan(clearIdx);
+    expect(cancelIdx).toBeGreaterThan(-1);
+    expect(startPollIdx).toBeGreaterThan(cancelIdx);
   });
 
-  // AppInitializer/pendingUserInfoActions is a session-lifetime singleton
-  // (created once in createAppInitializer()) — logout must not leave a stale
-  // non-terminal action behind for an address that might register again in
-  // the same app session.
-  it("logout() also clears the pending UserInfo action for the logging-out address", () => {
+  it("logout() cancels the registration UserInfo action mid-registration, otherwise only drops the reference", () => {
     const storesSrc = readFileSync(
       resolve(__dirname, "../../../../entities/auth/model/stores.ts"),
       "utf-8",
     );
     const start = storesSrc.indexOf("const logout = async () =>");
     expect(start).toBeGreaterThan(-1);
-    const body = storesSrc.slice(start, start + 3200);
+    const body = storesSrc.slice(start, start + 3600);
+    expect(body).toContain("await appInitializer.cancelRegistrationUserInfo(logoutAddress)");
     expect(body).toContain("appInitializer.clearPendingUserInfoAction(logoutAddress)");
   });
 });

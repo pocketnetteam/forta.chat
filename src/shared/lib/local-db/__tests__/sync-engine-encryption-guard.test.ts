@@ -148,6 +148,20 @@ describe("use-messages legacy path guards plaintext fallback", () => {
     expect(section).toContain("requiresEncryption");
   });
 
+  it("editMessage legacy path never puts the edited plaintext into an encrypted edit", () => {
+    const source = getUseMessagesSource();
+    const fnIdx = source.indexOf("const editMessage = async");
+    const end = source.indexOf("const deleteMessage =", fnIdx);
+    const section = source.slice(fnIdx, end > -1 ? end : fnIdx + 4000);
+    const encIdx = section.indexOf("roomCrypto.encryptEvent(trimmed)");
+    expect(encIdx).toBeGreaterThan(-1);
+    const encBranch = section.slice(encIdx, section.indexOf("} else {", encIdx));
+
+    // Same content shape as syncEditMessage / bastyon-chat: ciphertext only.
+    expect(encBranch).toContain("buildEncryptedEditContent(encrypted, messageId)");
+    expect(encBranch).not.toMatch(/body:\s*trimmed/);
+  });
+
   it("forwardMessages (bulk forward) refuses plaintext when encryption is required", () => {
     const source = getUseMessagesSource();
     // Bulk-forward lives inside forwardMessages, identified by the

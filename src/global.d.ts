@@ -116,6 +116,9 @@ interface PocketnetInstanceType {
         transactions: {
           get: {
             canSpend(address: string, callback: (balance: number) => void): void;
+            /** Read by the Actions SDK (checkTransaction, Account.ws.transaction).
+             *  Installed by AppInitializer when running outside Bastyon. */
+            tx?(id: string, clbk?: (data: unknown, error?: unknown) => void, p?: unknown, upd?: boolean): void;
           };
           create: {
             wallet(inputs: unknown[], outputs: unknown[]): { virtualSize(): number };
@@ -127,6 +130,9 @@ interface PocketnetInstanceType {
       };
     };
     timeDifference: number;
+    /** Current chain height. The Actions SDK computes confirmations from it and
+     *  gates checkTransaction on it (`retry` until truthy). */
+    currentBlock?: number;
     /** Interactive UI hooks used by Actions SDK — stubbed in chat */
     ui?: {
       captcha: (...args: unknown[]) => Promise<unknown>;
@@ -179,8 +185,18 @@ declare var Api: new (instance: PocketnetInstanceType) => {
 declare var Actions: new (instance: PocketnetInstanceType, api: InstanceType<typeof Api>) => {
   init(): void;
   prepare(): void;
-  addAccount(address: string): void;
+  /** Returns the vendor Account (see entities/auth/lib/vendor-actions.ts). */
+  addAccount(address: string): unknown;
   addActionAndSendIfCan(info: unknown, arg: null, address: string): Promise<unknown>;
+  cancelAction(address: string, actionId: string): Promise<void>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(key: string, f: (data: any) => void): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  off(key: string, f: (data: any) => void): void;
+  ws: {
+    transaction(data: unknown): void;
+    block(data: unknown): void;
+  };
 };
 declare var pSDK: new (opts: {
   actions: InstanceType<typeof Actions>;
@@ -190,6 +206,10 @@ declare var pSDK: new (opts: {
   userInfo: {
     load(addresses: string[], light?: boolean, reload?: boolean): Promise<void>;
     get(address: string): UserDataSDK;
+  };
+  transaction: {
+    /** getrawtransaction (verbose), cached; rejects `{ code: -5 }` when unknown. */
+    load(id: string, update?: boolean, p?: unknown): Promise<unknown>;
   };
   myScore: {
     load(

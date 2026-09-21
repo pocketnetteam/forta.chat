@@ -47,13 +47,16 @@ describe("registration getuserprofile bypasses local SDK cache", () => {
     expect(poll).toContain("getuserprofile already has account during phase 1");
   });
 
-  it("registration initializeAndFetchUserData calls pass update: true", () => {
+  it("registration's post-confirmation profile reload passes update: true", () => {
     const src = storesSrc();
     const poll = src.slice(
       src.indexOf("const startRegistrationPoll"),
       src.indexOf("const stopRegistrationPoll"),
     );
-    expect(poll).toContain("initializeAndFetchUserData(address.value, undefined, { update: true })");
+    // Phase 1 no longer needs a pre-broadcast profile reload (the Actions SDK
+    // builds and sends the UserInfo itself); the confirmed-profile reload in
+    // onRegistrationConfirmed must still bypass the cache.
+    expect(poll).not.toContain("initializeAndFetchUserData(address.value, undefined, { update: true })");
     expect(poll).toContain("{ update: true }");
   });
 

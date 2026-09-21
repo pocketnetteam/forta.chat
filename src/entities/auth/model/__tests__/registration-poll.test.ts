@@ -37,29 +37,48 @@ describe("registration poll", () => {
     expect(pollSection).toContain("60000");
   });
 
-  it("broadcast path wraps sync/init in withTimeout and keeps pending profile until send succeeds", () => {
+  it("phase 1 queues UserInfo through the Actions SDK and never forces a send", () => {
     const source = getSource();
     const pollSection = source.slice(
-      source.indexOf("const startRegistrationPoll"),
-      source.indexOf("const stopRegistrationPoll"),
+      source.indexOf("const poll = async () =>"),
+      source.indexOf("const schedulePoll ="),
     );
     expect(pollSection).toContain('"syncNodeTime"');
-    expect(pollSection).toContain('"initializeAndFetchUserData"');
-    expect(pollSection).toContain("registerUserProfile");
-    // pendingRegProfile cleared only after successful registerUserProfile
-    const broadcastIdx = pollSection.indexOf("registerUserProfile");
-    const clearIdx = pollSection.indexOf("setPendingRegProfile(null)", broadcastIdx);
-    expect(clearIdx).toBeGreaterThan(broadcastIdx);
+    expect(pollSection).toContain("appInitializer.queueRegistrationUserInfo(");
+    expect(pollSection).toContain("readUserInfoActionState(action)");
+    // The old force-send path (registerUserProfile → ensureActionBroadcast
+    // with rejectIfError) must not come back into the poll.
+    expect(pollSection).not.toContain("registerUserProfile");
+    // pendingRegProfile is cleared only once the SDK reports the action sent
+    const queueIdx = pollSection.indexOf("appInitializer.queueRegistrationUserInfo(");
+    const sentIdx = pollSection.indexOf('state.kind === "sent"', queueIdx);
+    const clearIdx = pollSection.indexOf("setPendingRegProfile(null)", sentIdx);
+    expect(sentIdx).toBeGreaterThan(queueIdx);
+    expect(clearIdx).toBeGreaterThan(sentIdx);
   });
 
-  it("treats Actions undefined_status as registration confirmed", () => {
+  it("phase 1 surfaces a code-18 rejection from the SDK action as the username-taken error", () => {
+    const source = getSource();
+    const pollSection = source.slice(
+      source.indexOf("const poll = async () =>"),
+      source.indexOf("const schedulePoll ="),
+    );
+    const rejectedIdx = pollSection.indexOf('state.kind === "rejected"');
+    expect(rejectedIdx).toBeGreaterThan(-1);
+    const branch = pollSection.slice(rejectedIdx, rejectedIdx + 900);
+    expect(branch).toContain("extractErrorCode(state.reason) === 18");
+    expect(branch).toContain("registrationUsernameError.value = true");
+  });
+
+  it("treats the vendor's confirmed statuses (incl. undefined_status) as registration confirmed", () => {
     const source = getSource();
     const pollSection = source.slice(
       source.indexOf("const startRegistrationPoll"),
       source.indexOf("const stopRegistrationPoll"),
     );
-    expect(pollSection).toMatch(
-      /actionsStatus === ['"]registered['"]\s*\|\|\s*actionsStatus === ['"]undefined_status['"]/,
+    expect(pollSection).toContain("isRegistrationConfirmedStatus(actionsStatus)");
+    expect(pollSection).toContain(
+      "isRegistrationConfirmedStatus(appInitializer.getAccountRegistrationStatus(address.value))",
     );
   });
 
@@ -98,7 +117,7 @@ describe("registration poll", () => {
     // Window widened (WEE-XX): loadUsersInfo/initializeAndFetchUserData here
     // are now wrapped in withTimeout (same unguarded-hang class as fetchUserInfo),
     // pushing the isRoomListLoading/retryImmediately/refreshRoomsNow block further in.
-    const fnSection = source.slice(fnStart, fnStart + 5200);
+    const fnSection = source.slice(fnStart, fnStart + 6000);
     // When matrixReady is already true, heal the empty-list skeleton instead of
     // skipping sync entirely (post-registration hang until refresh).
     expect(fnSection).toContain("isRoomListLoading");
@@ -107,26 +126,57 @@ describe("registration poll", () => {
   });
 });
 
-describe("registration poll pins checkUnspents to the last WS transaction node", () => {
-  // blockchain-ws "transaction" events carry a `node` field — the node that
-  // already indexed the incoming tx. checkUnspents pins its first attempt to
-  // it (with an automatic failover fallback) to work around node-to-node
-  // replication lag right after the WS event fires.
-  it("onTransaction captures the event's node into _lastTxNodeHint", () => {
+describe("blockchain-ws events feed the Actions SDK (as satolist.js does)", () => {
+  // Account.ws.transaction adds incoming outputs to the SDK's unspents straight
+  // from the tx (no txunspent replication lag) and completes matching actions;
+  // Account.ws.block ages confirmations. Without this feed the SDK only learns
+  // about coins via its cached updateUnspents and about confirmations via its
+  // 65-s checkTransaction cadence.
+  it("onTransaction forwards the event to appInitializer.forwardChainTransaction", () => {
     const source = getSource();
-    const start = source.indexOf("onTransaction: ({ node }) =>");
+    const start = source.indexOf("onTransaction: (tx) =>");
     expect(start).toBeGreaterThan(-1);
-    const body = source.slice(start, start + 200);
-    expect(body).toContain("if (node) _lastTxNodeHint = node;");
+    const body = source.slice(start, start + 600);
+    expect(body).toContain("appInitializer.forwardChainTransaction(tx)");
+    expect(body).toContain("_registrationPollKick?.()");
   });
 
-  it("phase 1's checkUnspents call passes _lastTxNodeHint", () => {
+  it("onBlock forwards the event to appInitializer.forwardChainBlock", () => {
+    const source = getSource();
+    const start = source.indexOf("onBlock: (block) =>");
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start, start + 600);
+    expect(body).toContain("appInitializer.forwardChainBlock(block)");
+  });
+
+  it("phase 1 refreshes the SDK's own unspent cache instead of a side-channel txunspent check", () => {
     const source = getSource();
     const pollSection = source.slice(
       source.indexOf("const poll = async () =>"),
       source.indexOf("const schedulePoll ="),
     );
-    expect(pollSection).toContain("appInitializer.checkUnspents(address.value, _lastTxNodeHint)");
+    expect(pollSection).toContain("appInitializer.refreshActionsUnspents(address.value)");
+    expect(pollSection).not.toContain("appInitializer.checkUnspents(");
+  });
+});
+
+describe("registration poll follows the SDK's UserInfo action events", () => {
+  it("startRegistrationPoll subscribes to action state changes and kicks the poll", () => {
+    const source = getSource();
+    const pollSection = source.slice(
+      source.indexOf("const startRegistrationPoll"),
+      source.indexOf("const stopRegistrationPoll"),
+    );
+    expect(pollSection).toContain("appInitializer.onUserInfoActionStateChange(");
+    expect(pollSection).toContain("_registrationActionUnsub =");
+  });
+
+  it("stopRegistrationPoll unsubscribes", () => {
+    const source = getSource();
+    const fnStart = source.indexOf("const stopRegistrationPoll = () =>");
+    const fnSection = source.slice(fnStart, fnStart + 900);
+    expect(fnSection).toContain("_registrationActionUnsub?.()");
+    expect(fnSection).toContain("_registrationActionUnsub = null");
   });
 });
 
@@ -164,7 +214,7 @@ describe("registration poll cannot run two concurrent loops", () => {
       "myGeneration !== registrationPollGeneration",
       pollSection.indexOf("myGeneration !== registrationPollGeneration") + 1,
     );
-    const broadcastIdx = pollSection.indexOf("appInitializer.registerUserProfile");
+    const broadcastIdx = pollSection.indexOf("appInitializer.queueRegistrationUserInfo");
     expect(secondCheckIdx).toBeGreaterThan(-1);
     expect(broadcastIdx).toBeGreaterThan(secondCheckIdx);
   });
@@ -184,8 +234,9 @@ describe("registration poll cannot run two concurrent loops", () => {
       confirmCallPositions.push(idx);
       idx = pollSection.indexOf("await onRegistrationConfirmed()", idx + 1);
     }
-    // Phase 1 early-complete, Actions-confirmed, and blockchain-confirmed paths.
-    expect(confirmCallPositions.length).toBe(3);
+    // Phase 1 getuserprofile early-complete, phase 1 SDK-status early-complete,
+    // phase 2 Actions-confirmed, and phase 2 blockchain-confirmed paths.
+    expect(confirmCallPositions.length).toBe(4);
     for (const callPos of confirmCallPositions) {
       const precedingSection = pollSection.slice(Math.max(0, callPos - 400), callPos);
       expect(precedingSection).toContain("myGeneration !== registrationPollGeneration");

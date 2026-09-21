@@ -62,6 +62,7 @@ import {
   REQUIRED_ENCRYPTION_KEYS,
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
+import { isRegistrationConfirmedStatus, readUserInfoActionState } from "../lib/vendor-actions";
 import { createKeyPair } from "./key-pair";
 import { generateEncryptionKeys, clearEncryptionKeysCache } from "./encryption-keys";
 
@@ -150,14 +151,9 @@ const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *  no poll is currently active. */
 let _registrationPollKick: (() => void) | null = null;
 
-/** Node that emitted the most recent blockchain-ws "transaction" event for
- *  the active address. Passed as a first-attempt pin to checkUnspents —
- *  that node has already indexed the incoming tx, working around node-to-node
- *  replication lag where a round-robined RPC can still see an empty
- *  txunspent right after the WS event fires ("сервер до сих пор отдает
- *  пустые unspents"). checkUnspents falls back to normal failover on a miss,
- *  so a stale hint here cannot strand the registration poll. */
-let _lastTxNodeHint: string | null = null;
+/** Unsubscribes the registration poll from the Actions SDK's UserInfo action
+ *  events. Set inside `startRegistrationPoll`, cleared in `stopRegistrationPoll`. */
+let _registrationActionUnsub: (() => void) | null = null;
 
 /** Debounce wallet.refresh() from blockchain-ws block/tx floods so a proxy
  *  outage does not stampede getaddressinfo/ping on every reconnect event. */
@@ -885,16 +881,23 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             getApi: () => appInitializer.getRawApi(),
             getLastKnownBlock: () => pcrypto.value?.currentblock?.height ?? 0,
             handlers: {
-              onBlock: ({ height }) => {
+              onBlock: (block) => {
+                const { height } = block;
                 if (height > 0 && pcrypto.value) {
                   pcrypto.value.setBlock({ height });
                 }
+                // Same feed satolist.js gives the Actions SDK
+                // (platform.actions.ws.block) + platform.currentBlock.
+                appInitializer.forwardChainBlock(block);
                 // Lazy-import to avoid circular dependency wallet → auth.
                 scheduleWalletRefreshFromChain();
                 _registrationPollKick?.();
               },
-              onTransaction: ({ node }) => {
-                if (node) _lastTxNodeHint = node;
+              onTransaction: (tx) => {
+                // Account.ws.transaction adds the incoming outputs to the SDK's
+                // unspents straight from the tx itself (no txunspent replication
+                // lag) and completes any action whose txid matches.
+                appInitializer.forwardChainTransaction(tx);
                 scheduleWalletRefreshFromChain();
                 _registrationPollKick?.();
               },
@@ -1185,6 +1188,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       );
     } catch (e) {
       console.warn("[auth] fetchUserInfo: initializeAndFetchUserData failed (non-fatal):", e);
+    }
+
+    // Same post-login Actions SDK setup as Bastyon (satolist.js prepareUser).
+    // Skipped mid-registration: the chain has no account yet and the
+    // registration poll owns the SDK account until confirmation.
+    if (!forceNetwork && address.value === requestAddress) {
+      appInitializer.syncActionsAccountStatus(requestAddress).catch((e) => {
+        console.warn("[auth] syncActionsAccountStatus failed (non-fatal):", e);
+      });
     }
   };
 
@@ -1491,13 +1503,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // Drop self-profile snapshot (WEE-26). Routed through the cache helper
     // so the key prefix stays a single source of truth.
     if (logoutAddress) clearSelfProfile(logoutAddress);
-    // Drop any still-queued UserInfo action for this address (see
-    // pendingUserInfoActions doc comment) — cancelRegistration already does
-    // this on its own path, but logout can also fire mid-registration (app
-    // closed and relaunched, or any future caller), and AppInitializer is a
-    // session-lifetime singleton that would otherwise keep a stale non-terminal
-    // action around for reuse if this address ever registers again.
-    if (logoutAddress) appInitializer.clearPendingUserInfoAction(logoutAddress);
+    // Logging out mid-registration abandons it: cancel the registration
+    // UserInfo action in the Actions SDK itself (it persists in actions_v0 and
+    // its send loop would otherwise keep driving it). Outside registration only
+    // drop our republish-path reference — a pending profile edit is left to
+    // the SDK as Bastyon does.
+    if (logoutAddress) {
+      if (registrationPending.value || pendingRegProfile.value) {
+        await appInitializer.cancelRegistrationUserInfo(logoutAddress);
+      } else {
+        appInitializer.clearPendingUserInfoAction(logoutAddress);
+      }
+    }
 
     // ── 5. Delete Dexie local-first database (await to prevent race with re-login) ──
     // Clear the persistent media cache FIRST so we wipe Capacitor Filesystem
@@ -1628,8 +1645,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (!regAddress.value || !regProxyId.value || !regCaptchaId.value) {
       throw new Error("No captcha in progress");
     }
+    const fundedAddress = regAddress.value;
+    const proxyId = regProxyId.value;
     try {
-      await appInitializer.requestFreeRegistration(regAddress.value, regCaptchaId.value, regProxyId.value);
+      const grant = await appInitializer.requestFreeRegistration(fundedAddress, regCaptchaId.value, proxyId);
+      // Same hand-off Account.requestUnspents() does after its own free/balance:
+      // the Actions SDK now waits for these coins instead of treating the
+      // empty wallet as actions_noinputs (→ stubbed captcha → latch).
+      appInitializer.markRegistrationFundingPending(fundedAddress, grant, proxyId);
     } catch (e) {
       // This specific captcha grant is burned — reset it so the caller gets
       // a fresh captcha instead of retrying with a doomed id pair.
@@ -1710,15 +1733,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     const about = pendingRegProfile.value?.about ?? "";
     const image = pendingRegProfile.value?.image;
 
-    // Drop any still-queued UserInfo action for this address before
-    // restarting — broadcastUserInfoAction reuses a non-terminal pending
-    // action across retries (see pendingUserInfoActions doc comment), and
-    // that action was built from the OLD name. Relying on the SDK having
-    // already marked it `.rejected` (which triggers the same cleanup
-    // incidentally) isn't guaranteed for every failure mode that lands here,
-    // so clear it explicitly rather than risk silently re-broadcasting stale
-    // content under the new name.
-    appInitializer.clearPendingUserInfoAction(address.value);
+    // Cancel the old UserInfo action in the Actions SDK before restarting —
+    // it carries the OLD name, and a code-18 rejection keeps it "live" in the
+    // SDK (controlReject), so queueRegistrationUserInfo would otherwise adopt
+    // it again instead of queuing one with the new name.
+    await appInitializer.cancelRegistrationUserInfo(address.value);
 
     setPendingRegProfile({ name: newName, language, about, image, encPublicKeys });
     setRegistrationPending(true);
@@ -1753,6 +1772,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // Guards against _registrationPollKick re-entering poll() while a tick
     // from this same loop is still mid-flight (see comment at the check site).
     let pollInFlight = false;
+    // Node time offset feeds the ntime of the tx the Actions SDK builds later
+    // (syncNodeTime also runs actions.prepare()) — once per loop is enough.
+    let nodeTimeSynced = false;
     console.log("[auth] Starting registration poll (phase:", pendingRegProfile.value ? "1-broadcast" : "2-confirm", ")");
 
     // Wire background pause so the 30-min timeout budget only counts active
@@ -1827,7 +1849,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       registrationPollAttempt.value = attempt;
       try {
         try {
-          // Phase 1: Broadcast UserInfo once PKOIN arrives
+          // Phase 1: queue UserInfo with the Actions SDK and watch it get sent
           if (pendingRegProfile.value) {
             // Fresh getuserprofile (update:true) — local SDK cache from login may
             // still hold an empty pre-registration row. If the account is already
@@ -1850,65 +1872,75 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               return;
             }
 
-            // Pin the first attempt to whichever node last told us (via
-            // blockchain-ws) that a tx landed for this address — works around
-            // node-to-node replication lag right after that event fires.
-            // checkUnspents falls back to normal failover on a miss.
-            const hasUnspents = await withTimeout(
-              appInitializer.checkUnspents(address.value, _lastTxNodeHint),
-              RPC_CALL_TIMEOUT,
-              "checkUnspents",
-            );
-            if (hasUnspents) {
-              console.log("[auth] PKOIN received, broadcasting UserInfo...");
-              setRegistrationPhase('broadcasting');
-              try {
-                await withTimeout(
-                  appInitializer.syncNodeTime(),
-                  RPC_CALL_TIMEOUT,
-                  "syncNodeTime",
-                );
-                const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
-                // Bypass local getuserprofile cache before broadcast.
-                await withTimeout(
-                  appInitializer.initializeAndFetchUserData(address.value, undefined, { update: true }),
-                  RPC_CALL_TIMEOUT,
-                  "initializeAndFetchUserData",
-                );
-                // Re-check: the awaits above can take seconds, long enough for
-                // another loop to have started and already begun broadcasting
-                // this same UserInfo action. Racing two broadcasts triggers the
-                // Actions SDK's collision guard ("actions_collision" /
-                // "did not produce a transaction") — bail and let the newer
-                // loop own the broadcast instead.
-                if (myGeneration !== registrationPollGeneration) return;
+            // The SDK may already know the account is registered — status
+            // restored from actions_v0, or the UserInfo action confirmed by its
+            // own checkTransaction / Account.ws.
+            if (isRegistrationConfirmedStatus(appInitializer.getAccountRegistrationStatus(address.value))) {
+              if (myGeneration !== registrationPollGeneration) return;
+              console.log("[auth] Actions SDK reports the account registered during phase 1 — completing registration");
+              setPendingRegProfile(null);
+              await onRegistrationConfirmed();
+              return;
+            }
 
-                // registerUserProfile now forces a real send (not just queue) and
-                // throws if no txid — pendingRegProfile stays set on failure so
-                // the next poll can retry instead of hanging on confirming.
-                const { registrationNode } = await appInitializer.registerUserProfile(address.value, profile, encPublicKeys, image);
-                registrationFnode = registrationNode;
-                console.log("[auth] UserInfo broadcast requested, moving to phase 2 (fnode:", registrationFnode, ")");
-                setRegistrationPhase('confirming');
-                setPendingRegProfile(null);
-                pollInterval = 3000;
-                attempt = 0;
-              } catch (broadcastErr: unknown) {
-                // Check for error code 18 (username taken/invalid) — stop polling and surface error
-                const errCode = extractErrorCode(broadcastErr);
-                if (errCode === 18) {
-                  console.error("[auth] UserInfo broadcast rejected: username taken/invalid (code 18)");
-                  setRegistrationPhase('error');
-                  registrationUsernameError.value = true;
-                  setRegistrationPending(false);
-                  stopRegistrationPoll();
-                  return;
-                }
-                // Other broadcast errors — rethrow to be caught by outer catch and retried
-                throw broadcastErr;
+            if (!nodeTimeSynced) {
+              await withTimeout(
+                appInitializer.syncNodeTime(),
+                RPC_CALL_TIMEOUT,
+                "syncNodeTime",
+              );
+              nodeTimeSynced = true;
+            }
+            // Re-check: the awaits above can take seconds — a newer loop owns
+            // the queueing from here.
+            if (myGeneration !== registrationPollGeneration) return;
+
+            // Queue once, then only observe: the SDK's own 3-s loop sends the
+            // action as soon as it sees unspents (userInfo.sendWithNullStatus),
+            // retries and persists it. Idempotent across ticks, loops and app
+            // restarts — a live action for this address is adopted, never
+            // duplicated.
+            const { encPublicKeys, image, ...profile } = pendingRegProfile.value;
+            const action = await appInitializer.queueRegistrationUserInfo(address.value, profile, encPublicKeys, image);
+            if (!action) throw new Error("Actions SDK not available");
+            if (myGeneration !== registrationPollGeneration) return;
+            const state = readUserInfoActionState(action);
+
+            if (state.kind === "rejected") {
+              if (extractErrorCode(state.reason) === 18) {
+                console.error("[auth] UserInfo rejected: username taken/invalid (code 18)");
+                setRegistrationPhase('error');
+                registrationUsernameError.value = true;
+                setRegistrationPending(false);
+                stopRegistrationPoll();
+                return;
               }
+              // Terminal for this action: the SDK no longer counts it as live,
+              // so the next tick queues a fresh one. Counted as a poll error so
+              // a persistent failure still surfaces after MAX_CONSECUTIVE_ERRORS.
+              throw new Error(`UserInfo action rejected: ${String(state.reason)}`);
+            }
+
+            if (state.kind === "sent" || state.kind === "completed") {
+              registrationFnode = appInitializer.extractNodeFromAction(action);
+              console.log("[auth] UserInfo sent by the Actions SDK, moving to phase 2 (fnode:", registrationFnode, ")");
+              setRegistrationPhase('confirming');
+              setPendingRegProfile(null);
+              pollInterval = 3000;
+              attempt = 0;
+            } else if (state.kind === "queued" && state.sending) {
+              setRegistrationPhase('broadcasting');
             } else {
-              console.log("[auth] Waiting for PKOIN... (attempt", attempt, ", next in", pollInterval / 1000, "s)");
+              // Waiting for PKOIN. Refresh the SDK's own unspent cache so its
+              // send loop sees the coins even when blockchain-ws is down.
+              const unspentCount = await withTimeout(
+                appInitializer.refreshActionsUnspents(address.value),
+                RPC_CALL_TIMEOUT,
+                "loadUnspents",
+              );
+              if (myGeneration !== registrationPollGeneration) return;
+              setRegistrationPhase(unspentCount > 0 ? 'broadcasting' : 'init');
+              console.log("[auth] UserInfo queued, waiting for the Actions SDK to send it (attempt", attempt, ", unspents:", unspentCount, ", next in", pollInterval / 1000, "s)");
             }
             consecutiveErrors = 0;
             schedulePoll();
@@ -1919,10 +1951,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           const actionsStatus = appInitializer.getAccountRegistrationStatus();
           console.log("[auth] Registration poll — actions:", actionsStatus, "(attempt", attempt, ")");
 
-          // 'undefined_status' = UserInfo action completed but status.value not
-          // flipped yet (SDK race). Treat as confirmed — otherwise we spin on
-          // step 2 until getuserstate catches up (or forever if it never does).
-          if (actionsStatus === 'registered' || actionsStatus === 'undefined_status') {
+          // Includes 'undefined_status' (UserInfo completed, status.value not
+          // flipped yet) — otherwise we spin on step 2 until getuserstate
+          // catches up (or forever if it never does).
+          if (isRegistrationConfirmedStatus(actionsStatus)) {
             if (myGeneration !== registrationPollGeneration) return;
             console.log("[auth] Registration confirmed via Actions system!");
             await onRegistrationConfirmed();
@@ -1977,6 +2009,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       pollInterval = 3000;
       poll();
     };
+
+    // React to the SDK's own UserInfo transitions (queued → sending → sent →
+    // completed/rejected) right away instead of waiting out the backoff.
+    // Deferred so poll() never runs inside the SDK's trigger() call stack.
+    _registrationActionUnsub?.();
+    _registrationActionUnsub = address.value
+      ? appInitializer.onUserInfoActionStateChange(address.value, () => {
+          setTimeout(() => _registrationPollKick?.(), 0);
+        })
+      : null;
 
     poll();
 
@@ -2053,6 +2095,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       setRegistrationPending(false);
       setRegistrationPhase('init'); // Reset phase for clean localStorage state
       stopRegistrationPoll();
+      // The account is on-chain now: mark it registered in the Actions SDK
+      // (satolist.js prepareUser) so non-UserInfo actions can send.
+      if (address.value) {
+        appInitializer.syncActionsAccountStatus(address.value).catch((e) => {
+          console.warn("[auth] syncActionsAccountStatus after registration failed (non-fatal):", e);
+        });
+      }
       // Registration is confirmed on-chain — safe to drop the seed from
       // sessionStorage (the user already has it in the regular session/auth).
       clearMnemonic();
@@ -2105,6 +2154,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
     pollTimer = null;
     _registrationPollKick = null;
+    _registrationActionUnsub?.();
+    _registrationActionUnsub = null;
     registrationPollAttempt.value = 0;
     registrationPollElapsedMs.value = 0;
     // Tear down background-pause listeners
@@ -2129,10 +2180,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     registrationErrorMessage.value = null;
     registrationUsernameError.value = false;
     clearRegistrationState();
-    // Drop the queued-but-unresolved UserInfo action so a future registration
-    // attempt for this address (unlikely, but possible in the same app
-    // session) starts clean instead of reusing a stale action reference.
-    if (address.value) appInitializer.clearPendingUserInfoAction(address.value);
+    // Cancel the registration UserInfo action inside the Actions SDK — it is
+    // persisted in actions_v0 and the SDK's loop would otherwise still send it.
+    if (address.value) await appInitializer.cancelRegistrationUserInfo(address.value);
     registrationFnode = null;
     await logout();
   };

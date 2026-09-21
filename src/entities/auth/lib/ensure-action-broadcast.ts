@@ -11,6 +11,12 @@
  *  eventually attempt) and require a concrete outcome: txid, completed, or
  *  rejected — so callers cannot treat a silent queue as success.
  *
+ *  Called WITHOUT `rejectIfError`, exactly like the vendor's own loop: with
+ *  `true`, transient guards such as `actions_alreadySending` (the loop is
+ *  mid-send) are stamped onto `action.rejected`, which made callers drop a
+ *  still-in-flight action and queue a second UserInfo. Genuine failures are
+ *  still marked rejected by the vendor itself (makeTransaction / validation).
+ *
  *  NB: the vendor method is spelled `processingWithIteractions` (actions.js —
  *  not a typo we get to fix, it's the real name on the object at runtime).
  *  The correctly-spelled `processingWithIterations` never existed on the
@@ -42,7 +48,7 @@ export async function ensureActionBroadcast(
 
   if (typeof action.processingWithIteractions === "function") {
     try {
-      await action.processingWithIteractions(true);
+      await action.processingWithIteractions();
     } catch (e) {
       if (action.rejected) throw new Error(String(action.rejected));
       if (action.transaction || action.completed) return action;

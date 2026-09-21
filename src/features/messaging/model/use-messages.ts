@@ -5,6 +5,7 @@ import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
 import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { hexEncode } from "@/shared/lib/matrix/functions";
+import { buildEncryptedEditContent } from "@/shared/lib/matrix/encrypted-edit";
 import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
@@ -1185,12 +1186,7 @@ export function useMessages() {
 
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
-        const encContent = {
-          ...encrypted,
-          "m.new_content": { body: trimmed, msgtype: "m.text" },
-          "m.relates_to": editContent["m.relates_to"],
-        };
-        await matrixService.sendEncryptedText(roomId, encContent);
+        await matrixService.sendEncryptedText(roomId, buildEncryptedEditContent(encrypted, messageId));
       } else {
         // Defense in depth: a plaintext edit retroactively exposes the
         // original ciphertext bubble. Refuse to replace a ciphertext with

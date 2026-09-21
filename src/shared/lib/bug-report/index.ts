@@ -26,5 +26,5 @@ export {
   removeFromLocalCache,
 } from './bug-report-tracker';
 export type { TrackedIssue, IssueStateReason, LocalIssueCache } from './bug-report-tracker';
-export type { AppEnvironment, BugReportInput } from './types';
+export type { AppEnvironment, BugReportInput, BugReportSyncDiagnostics } from './types';
 export type { BugReportResult } from './bug-report-sender';

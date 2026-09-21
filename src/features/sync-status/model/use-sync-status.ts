@@ -21,7 +21,6 @@ export interface SyncStatusReturn {
 
 const RECONNECT_THRESHOLD = 5_000;
 const STALE_TIMEOUT = 30_000;
-const ERROR_STALE_TIMEOUT = 60_000;
 
 const rawStatus = ref<SyncPhase>("connecting");
 let lastUpToDateAt = 0;
@@ -37,10 +36,6 @@ function getDebounced() {
   return _debouncedResult;
 }
 
-function isActivePhase(s: SyncPhase): boolean {
-  return s === "offline" || s === "connecting" || s === "catching_up" || s === "error";
-}
-
 function clearStaleTimer() {
   if (staleTimer) {
     clearTimeout(staleTimer);
@@ -49,26 +44,27 @@ function clearStaleTimer() {
 }
 
 function startStaleTimer() {
-  // Anchor the cap to the FIRST active-phase entry of an episode. The old code
-  // cleared and re-armed the timer on every ERROR/RECONNECTING, so as long as
-  // errors arrived more often than the timeout the deadline was pushed out
-  // forever and the banner never cleared (WEE-105 H4). Arm once per episode; a
-  // healthy PREPARED/SYNCING clears it via clearStaleTimer, and the matrix
-  // watchdog escalates a genuinely stuck sync to a mirror failover.
+  // Bounds the spinner, never the truth. Anchored to the FIRST entry of an
+  // episode so a reconnect storm can't push the deadline out forever (WEE-105
+  // H4). On expiry:
+  //  - catching_up → up_to_date: SYNCING is healthy, the catch-up just ran long.
+  //  - connecting → error: no healthy sync for the whole window — stop spinning
+  //    and say we can't connect.
+  // error/offline are never capped. The old cap flipped them to "up_to_date"
+  // too, so a dead /sync showed "Up to date" after a minute while no messages
+  // arrived in any chat. Only a healthy PREPARED/SYNCING (clearStaleTimer) or
+  // regained connectivity leaves them.
   if (staleTimer) return;
-  const timeout = rawStatus.value === "error" ? ERROR_STALE_TIMEOUT : STALE_TIMEOUT;
   staleTimer = setTimeout(() => {
     staleTimer = null;
-    if (isActivePhase(rawStatus.value)) {
-      rawStatus.value = "up_to_date";
-    }
-  }, timeout);
+    if (rawStatus.value === "catching_up") rawStatus.value = "up_to_date";
+    else if (rawStatus.value === "connecting") rawStatus.value = "error";
+  }, STALE_TIMEOUT);
 }
 
 export function handleSdkSync(sdkState: string): void {
   if (typeof navigator !== "undefined" && !navigator.onLine) {
     rawStatus.value = "offline";
-    startStaleTimer();
     return;
   }
 
@@ -89,7 +85,6 @@ export function handleSdkSync(sdkState: string): void {
     case "ERROR":
     case "STOPPED":
       rawStatus.value = "error";
-      startStaleTimer();
       break;
     case "RECONNECTING":
       rawStatus.value = "connecting";
@@ -114,6 +109,7 @@ export function useSyncStatus(): SyncStatusReturn {
         rawStatus.value = "offline";
       } else if (rawStatus.value === "offline") {
         rawStatus.value = "connecting";
+        startStaleTimer();
       }
     });
   }

@@ -9,9 +9,11 @@ const isActive = computed(() => {
   return s === "connecting" || s === "catching_up" || s === "offline" || s === "error";
 });
 
+// "error" is a settled state (it now persists until a healthy sync instead of
+// being faked into "up to date"), so it gets a static dot, not a spinner.
 const showSpinner = computed(() => {
   const s = displayStatus.value;
-  return s === "connecting" || s === "catching_up" || s === "error";
+  return s === "connecting" || s === "catching_up";
 });
 
 const colorClass = computed(() => {
@@ -69,10 +71,10 @@ const toggleTooltip = () => {
             stroke-linecap="round"
           />
         </svg>
-        <!-- Offline dot (no spinner) -->
+        <!-- Offline / error dot (no spinner) -->
         <span
           v-else
-          class="inline-block h-2 w-2 cursor-pointer rounded-full"
+          class="inline-block h-2 w-2 cursor-pointer rounded-full bg-current"
           :class="colorClass"
         />
 

@@ -8,11 +8,13 @@ import {
 import type {
   AppEnvironment,
   BugReportCallDiagnostics,
+  BugReportSyncDiagnostics,
 } from "@/shared/lib/bug-report";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { isNative } from "@/shared/lib/platform";
 import { useAuthStore } from "@/entities/auth";
 import { collectAiDiagnostics } from "@/entities/local-ai";
+import { collectSyncDiagnostics } from "@/entities/matrix";
 import { useBugReport } from "../model/use-bug-report";
 
 const { isOpen, prefillContext, prefillError, close } = useBugReport();
@@ -28,6 +30,7 @@ const fileInput = ref<HTMLInputElement>();
 const environment = ref<AppEnvironment>();
 const callDiagnostics = ref<BugReportCallDiagnostics>();
 const aiDiagnostics = ref<{ logs: string }>();
+const syncDiagnostics = ref<BugReportSyncDiagnostics>();
 const showExamples = ref(false);
 
 watch(isOpen, async (val) => {
@@ -47,6 +50,8 @@ watch(isOpen, async (val) => {
     sent.value = false;
     errorMsg.value = "";
     showExamples.value = false;
+    // Snapshot at open time — closest to the moment the user saw the problem.
+    syncDiagnostics.value = collectSyncDiagnostics();
     // All three are independent — genuinely run in parallel (the comment on
     // collectCallDiagnostics predates this having actually been sequential;
     // fixed alongside adding aiDiagnostics rather than compounding the
@@ -127,6 +132,7 @@ const handleSend = async () => {
       reporterAddress: authStore.address ?? undefined,
       callDiagnostics: callDiagnostics.value,
       aiDiagnostics: aiDiagnostics.value,
+      syncDiagnostics: syncDiagnostics.value,
     });
     console.log("[BugReport] created issue #", result.issueNumber, "url:", result.issueUrl);
     if (authStore.address && result.issueNumber) {

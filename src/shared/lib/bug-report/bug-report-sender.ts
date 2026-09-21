@@ -1,4 +1,4 @@
-import type { BugReportInput } from './types';
+import type { BugReportInput, BugReportSyncDiagnostics } from './types';
 import { buildReporterMarker, computeReporterHash } from './reporter-hash';
 
 const REPO = 'greenShirtMystery/forta-bugs';
@@ -108,6 +108,54 @@ function formatTitle(platform: string, description: string): string {
       ? description.slice(0, maxLen - 1) + '\u2026'
       : description;
   return `${prefix}${trimmed}`;
+}
+
+/** "12s ago" / "5m 3s ago" / "2h 4m ago"; "never" for null. */
+export function formatAge(ms: number | null): string {
+  if (ms === null) return 'never';
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s ago`;
+  return `${Math.floor(m / 60)}h ${m % 60}m ago`;
+}
+
+/** Pipes/newlines would break the markdown table row. */
+function cell(text: string | null): string {
+  return text ? text.replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ') : '—';
+}
+
+export function formatSyncDiagnostics(d: BugReportSyncDiagnostics): string[] {
+  const lines = [
+    '## Sync diagnostics',
+    '| Field | Value |',
+    '|-------|-------|',
+    `| Host | ${d.host} |`,
+    `| Online | ${d.online ? 'yes' : 'no'} |`,
+    `| Last state | ${d.lastState ?? 'none'} (${formatAge(d.lastStateAgeMs)}) |`,
+    `| Last healthy sync | ${formatAge(d.lastHealthyAgeMs)} (${d.healthyCount} total) |`,
+    `| Errors since healthy | ${d.errorsSinceHealthy} |`,
+    `| Last error | ${cell(d.lastError)} (${formatAge(d.lastErrorAgeMs)}) |`,
+    `| Dropped batches (SDK) | ${d.unexpectedErrorCount} |`,
+    `| Last dropped batch | ${cell(d.lastUnexpectedError)} (${formatAge(d.lastUnexpectedErrorAgeMs)}) |`,
+    `| Listener errors | ${d.listenerErrorCount} — ${cell(d.lastListenerError)} |`,
+    `| Live timeline events | ${d.timelineEventCount} (last ${formatAge(d.lastTimelineEventAgeMs)}) |`,
+    `| Chats ready | ${d.chatsReady ? 'yes' : 'no'} |`,
+    `| Rooms in SDK | ${d.roomCount} |`,
+    `| Sync token | ${d.hasSyncToken ? 'present' : 'none'} |`,
+  ];
+  if (d.hostSwitches.length > 0) {
+    lines.push(
+      '',
+      '<details><summary>Host switches</summary>',
+      '',
+      '| from | to | reason | when |',
+      '|------|----|--------|------|',
+      ...d.hostSwitches.map((s) => `| ${s.from} | ${s.to} | ${s.reason} | ${formatAge(s.ageMs)} |`),
+      '</details>',
+    );
+  }
+  return lines;
 }
 
 async function formatBody(
@@ -222,6 +270,10 @@ async function formatBody(
       });
       lines.push('</details>');
     }
+  }
+
+  if (input.syncDiagnostics) {
+    lines.push('', ...formatSyncDiagnostics(input.syncDiagnostics));
   }
 
   // Roadmap 7.6 (docs/plans/llama2): `local-ai` log export — collapsed by

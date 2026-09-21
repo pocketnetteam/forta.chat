@@ -4,7 +4,7 @@ import { parseEditBody } from "./parse-edit";
 /** Synthetic decrypt helper — returns the supplied body for clear events and
  *  a deterministic string for encrypted ones. Individual tests override it. */
 function makeDecrypt(result: string | Error) {
-  return vi.fn(async () => {
+  return vi.fn(async (_raw: Record<string, unknown>) => {
     if (result instanceof Error) throw result;
     return { body: result, msgtype: "m.text" };
   });
@@ -73,6 +73,64 @@ describe("parseEditBody", () => {
       encryptedPlaceholder: "[зашифровано]",
     });
     expect(body).toBe("direct body");
+  });
+
+  describe("group edits sent without outer `hash` (older Forta builds)", () => {
+    it("lifts `hash` from m.new_content so the edit routes to group decryption", async () => {
+      const decrypt = makeDecrypt("Edited in group");
+      const raw = {
+        event_id: "$edit",
+        sender: "@abc:server",
+        content: { msgtype: "m.encrypted", body: "a1b2c3", block: 10 },
+      };
+      const newContent = { msgtype: "m.encrypted", body: "a1b2c3", block: 10, hash: "h123" };
+
+      const body = await parseEditBody({
+        raw,
+        content: raw.content,
+        newContent,
+        decryptEvent: decrypt,
+        encryptedPlaceholder: "[зашифровано]",
+      });
+
+      expect(body).toBe("Edited in group");
+      const passed = decrypt.mock.calls[0][0];
+      expect((passed.content as Record<string, unknown>).hash).toBe("h123");
+      expect(passed.event_id).toBe("$edit");
+      expect(passed.sender).toBe("@abc:server");
+      // The caller's event object is not mutated.
+      expect(raw.content).not.toHaveProperty("hash");
+    });
+
+    it("passes the event through unchanged when the outer content already has `hash`", async () => {
+      const decrypt = makeDecrypt("ok");
+      const raw = { content: { msgtype: "m.encrypted", body: "a1", block: 10, hash: "outer" } };
+
+      await parseEditBody({
+        raw,
+        content: raw.content,
+        newContent: { msgtype: "m.encrypted", body: "a1", hash: "inner" },
+        decryptEvent: decrypt,
+        encryptedPlaceholder: "[зашифровано]",
+      });
+
+      expect(decrypt.mock.calls[0][0]).toBe(raw);
+    });
+
+    it("does not touch 1:1 edits (no hash anywhere)", async () => {
+      const decrypt = makeDecrypt("ok");
+      const raw = { content: { msgtype: "m.encrypted", body: "eyJ9", block: 5, version: 2 } };
+
+      await parseEditBody({
+        raw,
+        content: raw.content,
+        newContent: { msgtype: "m.encrypted", body: "eyJ9", block: 5, version: 2 },
+        decryptEvent: decrypt,
+        encryptedPlaceholder: "[зашифровано]",
+      });
+
+      expect(decrypt.mock.calls[0][0]).toBe(raw);
+    });
   });
 
   it("returns empty string when both bodies are missing in clear rooms", async () => {
