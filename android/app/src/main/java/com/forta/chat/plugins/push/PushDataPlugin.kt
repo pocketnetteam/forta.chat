@@ -244,6 +244,36 @@ class PushDataPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * Cache the roomId -> isGroup map pushed from JS.
+     *
+     * The FCM payload carries no marker for "this message came from a group
+     * chat", so without this cache the cold-start notification cannot tell a
+     * group message from a direct one and ends up showing only the sender.
+     * JS mirrors Dexie's `rooms.isGroup` here alongside the room names.
+     */
+    @PluginMethod
+    fun cacheGroupRooms(call: PluginCall) {
+        val rooms = call.getObject("rooms") ?: run {
+            call.reject("rooms object is required"); return
+        }
+        val prefs = context.getSharedPreferences(
+            FortaFirebaseMessagingService.PREFS_NAME,
+            android.content.Context.MODE_PRIVATE
+        )
+        val editor = prefs.edit()
+        val keys = rooms.keys()
+        while (keys.hasNext()) {
+            val roomId = keys.next()
+            editor.putBoolean(
+                FortaFirebaseMessagingService.groupRoomKey(roomId),
+                rooms.optBoolean(roomId, false),
+            )
+        }
+        editor.apply()
+        call.resolve()
+    }
+
     @PluginMethod
     fun cacheSenderNames(call: PluginCall) {
         val senders = call.getObject("senders") ?: run {

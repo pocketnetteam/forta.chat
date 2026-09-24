@@ -18,6 +18,7 @@ import {
   findCallSelectAnswerPushRule,
 } from './call-select-answer-push-rule';
 import { tRaw } from '@/shared/lib/i18n';
+import { buildMessageNotificationContent } from '@/shared/lib/notifications/message-notification-content';
 import { interopLog } from '@/shared/lib/interop';
 
 /**
@@ -123,10 +124,14 @@ class PushService {
   private fcmToken: string | null = null;
   private matrixClient: any = null;
   private onCallPush: ((data: { callId: string; callerName: string; roomId: string; hasVideo: boolean }) => void) | null = null;
-  private getRoomInfo: ((roomId: string) => { roomName: string } | null) | null = null;
+  private getRoomInfo: ((roomId: string) => { roomName: string; isGroup?: boolean } | null) | null = null;
   private getActiveRoomId: (() => string | null) | null = null;
   private getAllRoomNames: (() => Record<string, string>) | null = null;
   private getAllSenderNames: (() => Record<string, string>) | null = null;
+  /** roomId -> isGroup. Mirrored into native storage next to the room-name
+   *  cache so the cold-start notification (WebView not alive, JS never runs)
+   *  can still mark a push as coming from a group chat. */
+  private getAllGroupRooms: (() => Record<string, boolean>) | null = null;
   /** Callback to optimistically update room preview in Dexie when push arrives.
    *  Wired from auth store after ChatDbKit is initialized. */
   private optimisticRoomUpdate: ((roomId: string, preview: string, timestamp: number, senderId?: string, eventId?: string) => Promise<boolean>) | null = null;
@@ -151,6 +156,10 @@ class PushService {
     this.getAllSenderNames = getter;
   }
 
+  setAllGroupRoomsGetter(getter: () => Record<string, boolean>) {
+    this.getAllGroupRooms = getter;
+  }
+
   /** Set the callback for optimistic room preview updates from push notifications.
    *  Called from auth store once ChatDbKit is ready. */
   setOptimisticRoomUpdater(updater: typeof this.optimisticRoomUpdate) {
@@ -159,14 +168,41 @@ class PushService {
 
   /** Push all known room names to native SharedPreferences for offline display */
   async syncRoomNamesToNative(): Promise<void> {
-    if (!this.getAllRoomNames) return;
     try {
-      const rooms = this.getAllRoomNames();
+      const rooms = this.getAllRoomNames?.() ?? {};
       if (Object.keys(rooms).length > 0) {
         await PushData.cacheRoomNames({ rooms });
       }
     } catch (e) {
       console.warn('[PushService] Failed to sync room names to native:', e);
+    }
+    // Group flags ride along with the names: both are read by the same
+    // native notification builder, and every existing caller of this method
+    // is exactly the moment when the room list is fresh.
+    await this.syncGroupRoomsToNative();
+  }
+
+  /**
+   * Push the roomId -> isGroup map to native storage.
+   *
+   * The push payload carries no "this is a group chat" signal, so the
+   * cold-start notification (built in Kotlin / in the iOS NSE, before any JS
+   * runs) has no way to tell a group message from a direct one. Mirroring the
+   * flag the app already has in Dexie is what lets both native renderers put
+   * the group name in the title.
+   *
+   * Older native builds do not implement `cacheGroupRooms`; the rejected call
+   * is swallowed and the notification simply keeps its previous layout.
+   */
+  async syncGroupRoomsToNative(): Promise<void> {
+    if (!this.getAllGroupRooms) return;
+    try {
+      const rooms = this.getAllGroupRooms();
+      if (Object.keys(rooms).length > 0) {
+        await PushData.cacheGroupRooms({ rooms });
+      }
+    } catch (e) {
+      console.warn('[PushService] Failed to sync group rooms to native:', e);
     }
   }
 
@@ -449,11 +485,21 @@ class PushService {
     eventId: string | undefined,
     result: { senderName: string; body: string },
   ): Promise<void> {
+    // Group chats get the room name as the title and the author folded into
+    // the body — without it a group push is indistinguishable from a DM.
+    const room = this.getRoomInfo?.(roomId) ?? null;
+    const { title, body } = buildMessageNotificationContent({
+      senderName: result.senderName,
+      roomName: room?.roomName,
+      isGroup: room?.isGroup === true,
+      body: result.body,
+      fallbackTitle: tRaw('push.newMessage'),
+    });
     await PushData.replaceNotificationContent({
       roomId,
       eventId,
-      title: result.senderName,
-      body: result.body,
+      title,
+      body,
     });
   }
 

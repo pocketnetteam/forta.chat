@@ -96,6 +96,17 @@ public class IOSPushIntentPlugin: CAPPlugin {
         call.resolve()
     }
 
+    /// roomId -> isGroup, mirrored from Dexie so the NSE can mark a push as
+    /// coming from a group chat (the APNs payload has no such field).
+    @objc func cacheGroupRooms(_ call: CAPPluginCall) {
+        guard let rooms = call.getObject("rooms") as? [String: Bool] else {
+            call.reject("rooms must be an object of roomId -> isGroup booleans")
+            return
+        }
+        SharedDataStore.cacheGroupRooms(rooms)
+        call.resolve()
+    }
+
     @objc func cacheSenderNames(_ call: CAPPluginCall) {
         guard let senders = call.getObject("senders") as? [String: String] else {
             call.reject("senders must be an object of userId → name strings")

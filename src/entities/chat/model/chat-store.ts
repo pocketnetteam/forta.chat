@@ -42,6 +42,7 @@ import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { createBurstCoalescer } from "@/shared/lib/burst-coalescer";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
+import { buildMessageNotificationContent } from "@/shared/lib/notifications/message-notification-content";
 import { tRaw } from "@/shared/lib/i18n";
 import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
@@ -1445,7 +1446,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const activeRoom = computed(() => {
     // Access rooms.value to register Vue reactive dependency
     void rooms.value;
-    return activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
+    const roomId = activeRoomId.value;
+    if (!roomId) return undefined;
+    const fromMatrix = getRoomById(roomId);
+    if (fromMatrix) return fromMatrix;
+    // A push tap / deep link names a room directly, and `rooms` is rebuilt from
+    // the Matrix SDK, which materializes Room objects lazily (cold start, slow
+    // WebView, many rooms). Dexie — the source of truth the sidebar renders
+    // from — already holds that room, so resolve it from there instead of
+    // reporting "no room" and dropping the user on the "select a chat" prompt
+    // for a chat they just tapped in a notification.
+    void _dexieRoomMapVersion.value;
+    const local = dexieRoomMap.get(roomId);
+    return local ? mapLocalRoomToChatRoom(local) : undefined;
   });
 
   // Convert Dexie LocalMessage[] → Message[] for UI, fallback to old shallowRef during migration.
@@ -6381,9 +6394,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const myAddr = useAuthStore().address ?? "";
     if (msg.senderId && myAddr && msg.senderId === myAddr) return;
     const room = getRoomById(roomId);
-    const title = room?.name || getDisplayName(msg.senderId) || undefined;
     const fallbackBody = tRaw("notifications.newMessage");
-    const body = msg.content && msg.content !== "[encrypted]" ? msg.content : fallbackBody;
+    const rawBody = msg.content && msg.content !== "[encrypted]" ? msg.content : fallbackBody;
+    // Group chats: the room name is the title and the author moves into the
+    // body, so the banner shows which group the message came from.
+    const { title, body } = buildMessageNotificationContent({
+      senderName: getDisplayName(msg.senderId),
+      roomName: room?.name,
+      isGroup: room?.isGroup === true,
+      body: rawBody,
+      fallbackTitle: tRaw("titleBar.appName"),
+      directTitlePrefers: "room",
+    });
     notifyNewMessage({ roomId, body, title, fallbackTitle: tRaw("titleBar.appName") });
   };
 

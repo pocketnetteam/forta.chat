@@ -377,17 +377,18 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         // when the sender has no homeserver-side displayname. Without an
         // isMatrixId guard, that opaque ID became the visible notification
         // title — see chooseNotificationTitle().
-        val title = chooseNotificationTitle(
+        val content = buildMessageNotification(
             senderDisplayName = senderName,
             cachedSenderName = sender?.let { getCachedSenderName(it) },
             roomName = roomName,
             cachedRoomName = getCachedRoomName(roomId),
+            isGroup = isGroupRoom(roomId),
+            body = previewByMsgtype(contentMsgtype),
             fallback = getString(R.string.push_new_message),
         )
-        val body = previewByMsgtype(contentMsgtype)
 
         // Show notification (JS may replace it later with decrypted content)
-        showMessageNotification(roomId, eventId, title, body)
+        showMessageNotification(roomId, eventId, content.title, content.body)
 
         // Forward to JS for decryption
         forwardToJs(data)
@@ -426,6 +427,18 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
     private fun getCachedSenderName(sender: String): String? {
         return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString("sender_name_$sender", null)
+    }
+
+    /**
+     * Is [roomId] a group chat? Mirrored from Dexie by JS via
+     * `PushData.cacheGroupRooms` — the FCM payload itself has no such field.
+     * Unknown rooms (never synced, e.g. a first message in a brand-new room
+     * before the next sync) read as `false`, which keeps the old
+     * sender-titled layout instead of guessing.
+     */
+    private fun isGroupRoom(roomId: String): Boolean {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(groupRoomKey(roomId), false)
     }
 
     private fun showMessageNotification(roomId: String, eventId: String?, title: String, body: String) {
@@ -712,6 +725,64 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 ?: usable(roomName, rejectMatrixId = false)
                 ?: usable(cachedRoomName, rejectMatrixId = false)
                 ?: fallback
+        }
+
+        /** SharedPreferences key holding the "is a group chat" flag for [roomId]. */
+        @JvmStatic
+        fun groupRoomKey(roomId: String): String = "room_is_group_$roomId"
+
+        /** Title + body of a message notification, as shown in the shade. */
+        internal data class MessageNotification(val title: String, val body: String)
+
+        /**
+         * Build the visible title/body pair for an incoming message push.
+         *
+         * Users could not tell a group push from a direct one: both rendered
+         * as `title = sender name`, leaving the group nowhere on screen. Group
+         * chats now follow the Telegram/WhatsApp convention:
+         *
+         *   group  -> title = room name,   body = "Sender: preview"
+         *   direct -> title = sender name, body = "preview"  (unchanged)
+         *
+         * A group whose name is unknown (never synced, all layers blank) has
+         * nothing to put in the title, so it degrades to the direct layout
+         * rather than inventing a placeholder.
+         *
+         * Mirrors `buildMessageNotificationContent` in
+         * `src/shared/lib/notifications/message-notification-content.ts`, which
+         * renders the same notification once JS has decrypted the event.
+         *
+         * Pure function — unit-tested in `GroupPushNotificationTest`.
+         */
+        internal fun buildMessageNotification(
+            senderDisplayName: String?,
+            cachedSenderName: String?,
+            roomName: String?,
+            cachedRoomName: String?,
+            isGroup: Boolean,
+            body: String,
+            fallback: String,
+        ): MessageNotification {
+            val title = chooseNotificationTitle(
+                senderDisplayName = senderDisplayName,
+                cachedSenderName = cachedSenderName,
+                roomName = roomName,
+                cachedRoomName = cachedRoomName,
+                fallback = fallback,
+            )
+            if (!isGroup) return MessageNotification(title, body)
+
+            val group = roomName?.takeIf { it.isNotBlank() }
+                ?: cachedRoomName?.takeIf { it.isNotBlank() }
+                ?: return MessageNotification(title, body)
+
+            // `title` is the sender here whenever one was resolvable; when it
+            // fell through to the room name or the fallback there is no author
+            // worth prefixing the body with.
+            val author = title.takeIf { it != group && it != fallback }
+                ?: return MessageNotification(group, body)
+
+            return MessageNotification(group, "$author: $body")
         }
 
         fun cacheRoomName(context: Context, roomId: String, name: String) {
