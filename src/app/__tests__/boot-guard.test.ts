@@ -20,28 +20,35 @@ interface FakeWindow {
   __fortaBootStarted?: boolean;
   __fortaShowUnsupported?: (detail?: string) => void;
   location: { origin: string; reload: () => void };
-  addEventListener: (type: string, handler: (event: ErrorEventLike) => void) => void;
+  addEventListener: (type: string, handler: (event: ErrorEventLike) => void, capture?: boolean) => void;
   setTimeout: typeof setTimeout;
 }
 
 interface ErrorEventLike {
   filename?: string;
   message?: string;
+  target?: { tagName?: string; src?: string };
 }
 
-function runGuard(language = "en-US", withGlobalThis = false) {
+const ANDROID_UA = "Mozilla/5.0 (Linux; Android 9; wv) AppleWebKit/537.36 Chrome/66.0.3359.158 Mobile Safari/537.36";
+const DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0 Safari/537.36";
+
+function runGuard(language = "en-US", withGlobalThis = false, userAgent = ANDROID_UA) {
   const handlers: Array<(event: ErrorEventLike) => void> = [];
+  const captures: boolean[] = [];
   const win: FakeWindow = {
     location: { origin: "https://localhost", reload: vi.fn() },
-    addEventListener: (type, handler) => {
-      if (type === "error") handlers.push(handler);
+    addEventListener: (type, handler, capture?: boolean) => {
+      if (type !== "error") return;
+      handlers.push(handler);
+      captures.push(capture === true);
     },
     setTimeout: ((fn: () => void, ms?: number) => setTimeout(fn, ms)) as typeof setTimeout,
   };
   if (withGlobalThis) win.globalThis = "existing";
-  new Function("window", "document", "navigator", GUARD_SOURCE)(win, document, { language });
+  new Function("window", "document", "navigator", GUARD_SOURCE)(win, document, { language, userAgent });
   const fireError = (event: ErrorEventLike) => handlers.forEach((h) => h(event));
-  return { win, fireError };
+  return { win, fireError, captures };
 }
 
 const fallback = () => document.querySelector("[data-boot-fallback]");
@@ -97,6 +104,30 @@ describe("index.html boot guard (audit W2B-01)", () => {
     fireError({ filename: "chrome-extension://abc/content.js", message: "boom" });
     vi.advanceTimersByTime(4000);
     expect(fallback()).toBeNull();
+  });
+
+  it("listens in the capture phase so a <script> that fails to load is seen", () => {
+    const { captures, fireError } = runGuard();
+    expect(captures).toEqual([true]);
+    fireError({ target: { tagName: "SCRIPT", src: "https://localhost/assets/index-abc.js" } });
+    vi.advanceTimersByTime(4000);
+    expect(fallback()?.textContent).toContain("Failed to load https://localhost/assets/index-abc.js");
+  });
+
+  it("ignores failed images and other resources", () => {
+    const { fireError } = runGuard();
+    fireError({ target: { tagName: "IMG", src: "https://localhost/forta-icon.png" } });
+    vi.advanceTimersByTime(4000);
+    expect(fallback()).toBeNull();
+  });
+
+  it("does not send desktop or iOS users to Google Play", () => {
+    const { fireError } = runGuard("en-US", false, DESKTOP_UA);
+    fireError({ filename: "https://localhost/assets/index.js", message: "boom" });
+    vi.advanceTimersByTime(4000);
+    const text = fallback()?.textContent ?? "";
+    expect(text).toContain("Update your browser or the app");
+    expect(text).not.toContain("Google Play");
   });
 
   it("exposes the fallback for the nomodule script", () => {
