@@ -368,6 +368,36 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     wrapper.unmount();
   });
 
+  // Audit S7-03: a group with a member who never published keys can't encrypt,
+  // so every send failed after ~31 s of retries — and the banner that explains
+  // it was hard-suppressed for groups, leaving everyone guessing.
+  it("explains missing member keys in a group instead of hiding the banner", async () => {
+    fakeActiveRoomId.value = "!grp:matrix.org";
+    fakeRooms.value = [{ id: "!grp:matrix.org", name: "Team", isGroup: true, members: [], membership: "join" }];
+    fakeRoomsInitialized.value = true;
+    peerKeysStatusMap.set("!grp:matrix.org", "missing");
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("chat.groupMemberKeysMissing");
+    expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+    wrapper.unmount();
+  });
+
+  it("keeps the 1:1 wording for a direct chat whose peer has no keys", async () => {
+    fakeActiveRoomId.value = "!dm:matrix.org";
+    fakeRooms.value = [{ id: "!dm:matrix.org", name: "Alice", isGroup: false, members: [], membership: "join" }];
+    fakeRoomsInitialized.value = true;
+    peerKeysStatusMap.set("!dm:matrix.org", "missing");
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("chat.peerKeysMissing");
+    wrapper.unmount();
+  });
+
   it("docks the post-call feedback card in the joined room, not on placeholders", async () => {
     // Deliberately unstubbed: a name-keyed stub resolves even when ChatWindow
     // never imports the component, which is exactly the regression to catch.

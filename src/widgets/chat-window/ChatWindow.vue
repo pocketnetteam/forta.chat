@@ -111,17 +111,20 @@ const peerKeysMissing = computed(() => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return false;
   const status = chatStore.peerKeysStatus.get(roomId);
-  // Show warning only when peers lack keys (not for public/large rooms).
-  // Mirror the same suppression that MessageInput.vue applies to peerKeysOk —
-  // group AND public rooms must both stay banner-free, otherwise the user sees
-  // an enabled send button next to a "messaging unavailable" warning.
-  if (chatStore.activeRoom?.isGroup) return false;
+  // Show warning only when peers lack keys (not for public/large rooms, which
+  // never report "missing" to begin with). Groups get the banner too: one member
+  // without keys makes every send in the group fail after its retries, and
+  // hiding the reason left the whole group guessing (audit S7-03).
   if (chatStore.isRoomPublic(roomId)) return false;
   return status === "missing";
 });
 
 const { toast } = useToast();
 const { t } = useI18n();
+
+const peerKeysMissingText = computed(() =>
+  chatStore.activeRoom?.isGroup ? t("chat.groupMemberKeysMissing") : t("chat.peerKeysMissing"),
+);
 
 // Retry handler for the peer-keys banner. The banner is no longer a hard
 // blocker (regression #597/#598/#639) — it offers an escape hatch so a stuck
@@ -661,7 +664,7 @@ onUnmounted(() => {
             <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
           </svg>
           <div class="flex-1 min-w-0">
-            <p class="leading-snug">{{ t("chat.peerKeysMissing") }}</p>
+            <p class="leading-snug">{{ peerKeysMissingText }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
                 type="button"
