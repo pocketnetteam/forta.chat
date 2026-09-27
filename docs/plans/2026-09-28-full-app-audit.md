@@ -41,7 +41,7 @@ D desktop (Electron).
 | S6-02 | P1 | 5 | W | Web/Electron never request `Notification` permission — the OS banner can never appear | `src/shared/lib/notifications/web-notifier.ts` | open |
 | W2C-05 | P1 | 4 | AiWD | A stuck large media upload blocks all further sends in that room, and every retry re-uploads the whole file | `src/shared/lib/local-db/sync-engine.ts` | open |
 | S10-06 | P1 | owner | WAiD | Bug-report GitHub token bundled into the client with write scope; extensive PII shipped to a PUBLIC repo | `src/shared/lib/bug-report/bug-report-sender.ts` | open |
-| W2B-05 | P1 | 1 | A | Found while fixing W2B-01: the Bastyon SDK in public/js is copied verbatim with `?.` / `??`, so WebView < 80 cannot parse sdk.js, actions.js, kit.js … and login/registration have no SDK | `vite.config.ts` | open |
+| W2B-05 | P1 | 1 | A | Found while fixing W2B-01: the Bastyon SDK in public/js is copied verbatim with `?.` / `??`, so WebView < 80 cannot parse sdk.js, actions.js, kit.js … and login/registration have no SDK | `vite.config.ts` | fixed |
 | S1-03 | P2 | 3 | WAiD | "Peer hasn't published keys" verdict never self-heals automatically — only a manual Retry bypasses the stale profile cache | `src/widgets/chat-window/ChatWindow.vue` | open |
 | S3-01 | P2 | 6 | AiWD | Buffered inbound writes (150ms/500ms) have no flush-on-background hook — message loss on app kill | `src/shared/lib/local-db/write-buffer.ts` | open |
 | S4-03 | P2 | 4 | AiW | MediaViewer (full-screen / gallery) video lacks the timeout + codec-unsupported handling the inline chat bubble already has | `src/features/messaging/ui/MediaViewer.vue` | open |
