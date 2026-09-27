@@ -9,6 +9,7 @@ import { parseEditBody } from "../lib/parse-edit";
 import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { reuseIfUnchanged } from "../lib/message-memo";
+import { decidePeerKeysStatus } from "../lib/peer-keys-status";
 import { toParsedMessages } from "../lib/parsed-message";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
@@ -7454,23 +7455,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     const canEncrypt = roomCrypto.canBeEncrypt();
+    // canBeEncrypt returns false for rooms with ≥50 members, for missing peer
+    // keys, and while member profiles are still loading — tell them apart.
+    let memberCount = 0;
     if (!canEncrypt) {
-      // canBeEncrypt returns false for rooms with ≥50 members or missing peer keys.
-      // Distinguish "too large" from "missing keys":
-      const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
-      const memberCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
-      if (memberCount >= 50) {
-        peerKeysStatus.set(roomId, "not-encrypted");
-        return "not-encrypted";
-      }
-      peerKeysStatus.set(roomId, "missing");
-      return "missing";
+      const matrixRoom = getMatrixClientService().getRoom(roomId) as any;
+      memberCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
     }
-
-    peerKeysStatus.set(roomId, "available");
-    return "available";
+    const status = decidePeerKeysStatus({
+      canEncrypt,
+      membersLoaded: roomCrypto.membersLoaded?.(),
+      memberCount,
+    });
+    peerKeysStatus.set(roomId, status);
+    return status;
   };
 
   /** Reset all in-memory state and account-specific localStorage (called on logout) */

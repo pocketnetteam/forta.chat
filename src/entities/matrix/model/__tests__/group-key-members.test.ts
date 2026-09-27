@@ -36,9 +36,9 @@ describe("canBeEncrypt requires every current member to be loaded", () => {
     const source = readFileSync(resolve(__dirname, "../matrix-crypto.ts"), "utf-8");
     const start = source.indexOf("canBeEncrypt(): boolean {");
     const section = source.slice(start, source.indexOf("\n      },", start));
-    const guard = section.indexOf("everyMemberProfileLoaded(");
+    const guard = section.indexOf("currentMembersLoaded()");
     expect(guard).toBeGreaterThan(-1);
-    expect(section).toMatch(/everyMemberProfileLoaded\(\s*getusersbytime\(0\)/);
     expect(guard).toBeLessThan(section.indexOf(".every("));
+    expect(source).toMatch(/function currentMembersLoaded\(\)[\s\S]{0,120}everyMemberProfileLoaded\(\s*getusersbytime\(0\)/);
   });
 });

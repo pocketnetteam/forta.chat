@@ -185,6 +185,10 @@ export const ENCRYPTION_REQUIRED_NO_KEYS =
 
 export interface PcryptoRoomInstance {
   canBeEncrypt(): boolean;
+  /** Whether every current member's profile has loaded. canBeEncrypt() is
+   *  false until it is, so callers can tell "still loading" from "a member has
+   *  no keys" (audit S1-01). Optional so test doubles need not implement it. */
+  membersLoaded?(): boolean;
   /** Whether the room mandates encryption (i.e. private, non-public). When
    *  true and canBeEncrypt() is false, callers must NOT fall back to
    *  plaintext — the sender has to wait for keys or fail the op. Public /
@@ -347,6 +351,11 @@ export class Pcrypto {
     }
 
     // ---- preparedUsers — match of original lines 66-86 ----
+    /** Every current member has a loaded profile (audit S1-01). */
+    function currentMembersLoaded(): boolean {
+      return everyMemberProfileLoaded(getusersbytime(0).map((u) => u.id), usersinfo);
+    }
+
     function preparedUsers(time: number, v?: number): CryptoUserInfo[] {
       const filtered = getusersinfobytime(time).filter(function (ui) {
         return ui.keys && ui.keys.length >= m;
@@ -794,6 +803,10 @@ export class Pcrypto {
         return true;
       },
 
+      membersLoaded(): boolean {
+        return currentMembersLoaded();
+      },
+
       canBeEncrypt(): boolean {
         const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
         if (publicChat) return false;
@@ -814,7 +827,7 @@ export class Pcrypto {
         // wrapped only for loaded members, so anyone still loading could never
         // read what gets sent now. The send throws and SyncEngine retries once
         // the profiles land (audit S1-01, forta-bugs#1399 #1394).
-        if (!everyMemberProfileLoaded(getusersbytime(0).map((u) => u.id), usersinfo)) return false;
+        if (!currentMembersLoaded()) return false;
 
         // ALL participants must have 12 published keys for ECDH to work
         return usersinfoArray.every(u => u.keys && u.keys.length >= m);
