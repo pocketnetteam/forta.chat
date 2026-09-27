@@ -35,6 +35,7 @@ import {
 import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix/chat-storage";
 import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { everyMemberProfileLoaded } from "./group-key-members";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const m = 12;
@@ -809,6 +810,11 @@ export class Pcrypto {
         if (memberCount <= 1 || memberCount >= 50) return false;
         // Guard against empty-array short-circuit: refuse until peer is loaded.
         if (usersinfoArray.length < 2) return false;
+        // Every current member must be loaded, not just two: the common key is
+        // wrapped only for loaded members, so anyone still loading could never
+        // read what gets sent now. The send throws and SyncEngine retries once
+        // the profiles land (audit S1-01, forta-bugs#1399 #1394).
+        if (!everyMemberProfileLoaded(getusersbytime(0).map((u) => u.id), usersinfo)) return false;
 
         // ALL participants must have 12 published keys for ECDH to work
         return usersinfoArray.every(u => u.keys && u.keys.length >= m);
