@@ -16,7 +16,7 @@ D desktop (Electron).
 | ID | Priority | Batch | Platforms | Finding | Main file | Status |
 |---|---|---|---|---|---|---|
 | S2-01 | P0 | 2 | WAiD | Message send can queue "sending" forever with zero user-visible error when the Matrix client stays not-ready | `src/shared/lib/local-db/sync-engine.ts` | open |
-| W2B-01 | P0 | 1 | A | Old Android WebView (< 71) shows a permanent white screen: matrix-js-sdk-bastyon uses `globalThis` at module load, before any app code or error handler runs | `index.html` | open |
+| W2B-01 | P0 | 1 | A | Old Android WebView (< 71) shows a permanent white screen: matrix-js-sdk-bastyon uses `globalThis` at module load, before any app code or error handler runs | `index.html` | fixed |
 | S1-01 | P0 | 1 | WAiD | Group common-key creation silently excludes members whose key info hasn't loaded yet — they can never read any message under that key generation | `src/entities/matrix/model/matrix-crypto.ts` | open |
 | S1-02 | P0 | 1 | WAiD | "Peer hasn't published keys — you can send unencrypted" banner is false: the send path refuses to ever send plaintext to a private room, and the button becomes a silent no-op | `src/shared/lib/i18n/locales/en.ts` | open |
 | S10-01 | P1 | owner | WAiD | Private key and Matrix access token stored in plaintext `localStorage` on every platform | `src/entities/auth/model/session-manager.ts` | open |
@@ -25,7 +25,7 @@ D desktop (Electron).
 | S5-01 | P1 | 3 | WAiD | Secondary accounts never get their encryption keys verified/republished — and the one manual recovery path the code refers to doesn't exist in the UI | `src/entities/auth/model/stores.ts` | open |
 | S7-03 | P1 | 1 | AiWD | Adding a member without published encryption keys to a group breaks sending for the whole group, with no warning anywhere in the UI | `src/widgets/chat-window/ChatWindow.vue` | open |
 | S8-01 | P1 | 4 | A | Homeserver mirror failover is fully disabled while Tor is on — a dead primary is never rotated away from | `src/entities/matrix/model/matrix-client.ts` | open |
-| W2B-02 | P1 | 1 | Ai | `crypto.randomUUID()` unguarded and unpolyfilled on the attachment/voice send paths — silently swallowed by `Promise.allSettled` | `public/legacy-polyfills.js` | open |
+| W2B-02 | P1 | 1 | Ai | `crypto.randomUUID()` unguarded and unpolyfilled on the attachment/voice send paths — silently swallowed by `Promise.allSettled` | `public/legacy-polyfills.js` | fixed |
 | S10-02 | P1 | 5 | WAiD | SVG XSS sanitizer bypass on the registration captcha (`v-html` with untrusted content) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | open |
 | S3b-02 | P1 | 2 | AiWD | Invalid/expired Matrix session (M_UNKNOWN_TOKEN) is never detected — sync dies silently and the banner then LIES "up to date" | `src/entities/matrix/model/matrix-client.ts` | open |
 | S4-01 | P1 | 4 | A | Native Tor media download has no connect/read timeout — hangs forever and permanently exhausts the app-wide 3-slot download gate | `android/app/src/main/java/com/forta/chat/plugins/filetransfer/TorFilePlugin.kt` | open |
