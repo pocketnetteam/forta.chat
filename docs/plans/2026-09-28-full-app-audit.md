@@ -18,7 +18,7 @@ D desktop (Electron).
 | S2-01 | P0 | 2 | WAiD | Message send can queue "sending" forever with zero user-visible error when the Matrix client stays not-ready | `src/shared/lib/local-db/sync-engine.ts` | open |
 | W2B-01 | P0 | 1 | A | Old Android WebView (< 71) shows a permanent white screen: matrix-js-sdk-bastyon uses `globalThis` at module load, before any app code or error handler runs | `index.html` | fixed |
 | S1-01 | P0 | 1 | WAiD | Group common-key creation silently excludes members whose key info hasn't loaded yet — they can never read any message under that key generation | `src/entities/matrix/model/matrix-crypto.ts` | open |
-| S1-02 | P0 | 1 | WAiD | "Peer hasn't published keys — you can send unencrypted" banner is false: the send path refuses to ever send plaintext to a private room, and the button becomes a silent no-op | `src/shared/lib/i18n/locales/en.ts` | open |
+| S1-02 | P0 | 1 | WAiD | "Peer hasn't published keys — you can send unencrypted" banner is false: the send path refuses to ever send plaintext to a private room, and the button becomes a silent no-op | `src/shared/lib/i18n/locales/en.ts` | fixed |
 | S10-01 | P1 | owner | WAiD | Private key and Matrix access token stored in plaintext `localStorage` on every platform | `src/entities/auth/model/session-manager.ts` | open |
 | S2-02 | P1 | 2 | WAiD | Photo/video/voice/file sends are dropped outright (not queued) when the Matrix client is briefly not ready — text sends were fixed for this, media sends were not | `src/features/messaging/model/use-messages.ts` | open |
 | S3b-01 | P1 | 2 | AiWD | Active room silently vanishes when `getRoom()` transiently misses — matches #1390 | `src/entities/chat/model/chat-store.ts` | open |

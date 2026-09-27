@@ -976,8 +976,9 @@ export const en = {
 
   // ── Misc ──
   "chat.messageNotFound": "Message not found",
-  "chat.peerKeysMissing": "Peer hasn't published encryption keys yet — your messages will stay unencrypted until they do. You can retry now.",
+  "chat.peerKeysMissing": "Peer hasn't published encryption keys yet — messages to them can't be sent until they do. You can retry now.",
   "chat.peerKeysRetry": "Retry",
+  "chat.peerKeysSendBlocked": "Can't send yet: the peer hasn't published encryption keys",
   "chat.unencryptedRoom": "Messages in this room are not encrypted",
   "tor.disable": "Disable Tor",
   "register.registrationFailed": "Registration failed",

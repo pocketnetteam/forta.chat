@@ -279,7 +279,12 @@ const handleSend = async () => {
   // External share bypasses peerKeysOk — the user already picked the target,
   // SyncEngine queues the op. Without this branch the Send tap was a silent
   // no-op for fresh DMs where peer keys haven't propagated yet (Session 48).
-  if (!isExternalShareActive.value && !peerKeysOk.value) return;
+  if (!isExternalShareActive.value && !peerKeysOk.value) {
+    // Plaintext never goes to a private room, so this message cannot leave.
+    // Say so: Enter used to do nothing at all here (audit S1-02, forta-bugs#1332).
+    toast(t("chat.peerKeysSendBlocked"), "error");
+    return;
+  }
   const rawText = mention.resolveText();
   const savedText = text.value;
 
