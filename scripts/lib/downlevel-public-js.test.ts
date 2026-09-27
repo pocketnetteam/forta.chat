@@ -19,9 +19,16 @@ describe("downlevelForOldWebView", () => {
     expect(run({ b: { k: (v: number) => v + 1 } }, "k", 1, "fallback")).toBe(2);
   });
 
-  it("returns scripts without those operators untouched", () => {
-    const umd = '!function(n,r){"object"==typeof exports&&"undefined"!=typeof module?module.exports=r():n._=r()}(this,function(){return 1});';
-    expect(downlevelForOldWebView(umd)).toBe(umd);
+  it("lowers class fields (Chrome 72) as used by broadcaster.js and the service worker's receiver.js", () => {
+    const out = downlevelForOldWebView("class Box { items = []; static kind = 'box'; }\nvar b = new Box();");
+    expect(out).not.toMatch(/^\s*items = \[\];/m);
+    const run = new Function(`${out}; return [b.items.length, Box.kind];`);
+    expect(run()).toEqual([0, "box"]);
+  });
+
+  it("lowers a file even when a stray quote would fool a regex scan", () => {
+    const tricky = "// don't\nvar re = /'/; var x = a?.b;";
+    expect(usesModernOperators(downlevelForOldWebView(tricky))).toBe(false);
   });
 
   it("keeps a UMD wrapper working as a browser global after lowering", () => {
