@@ -36,6 +36,11 @@ describe("captchaImageSrc", () => {
     expect(decoded).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="150"/);
   });
 
+  it("still finds the root behind an XML prolog or a BOM", () => {
+    const decoded = decode(captchaImageSrc('﻿<?xml version="1.0" encoding="UTF-8"?>\n<svg width="150"><path/></svg>'));
+    expect(decoded).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="150"/);
+  });
+
   it("is empty for an empty captcha", () => {
     expect(captchaImageSrc("")).toBe("");
     expect(captchaImageSrc("   ")).toBe("");

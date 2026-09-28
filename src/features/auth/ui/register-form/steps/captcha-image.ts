@@ -11,7 +11,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
  * the root element, so it is added when the markup omits it.
  */
 export function captchaImageSrc(svg: string): string {
-  const markup = svg.trim();
+  // A BOM or an XML prolog before <svg> would hide the root from the namespace check.
+  const markup = svg.replace(/^﻿/, "").trim().replace(/^<\?xml[^>]*\?>\s*/i, "");
   if (!markup) return "";
   const namespaced = /^<svg\b[^>]*\sxmlns\s*=/i.test(markup)
     ? markup
