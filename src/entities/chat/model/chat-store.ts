@@ -1449,6 +1449,49 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     () => dexieWindowMeta.get(dexieMessages.value)?.roomId ?? null,
   );
 
+  // ── Last liveQuery emissions of recent rooms (plan 2026-09-28, stage 4) ──
+  // Re-entering a recent room shows its last emission in the first frame
+  // instead of a skeleton; the first real emission replaces it. A read cache
+  // of Dexie, never a second source of truth: keyed by room, the tail window
+  // only, filtered by the clear-history cutoff on restore.
+  const ROOM_SNAPSHOT_ROOMS = 5;
+  const ROOM_SNAPSHOT_ROWS = 50;
+  type LocalMessageRows = import("@/shared/lib/local-db").LocalMessage[];
+  const roomSnapshots = new Map<string, LocalMessageRows>();
+  /** Arrays restored from a snapshot — so waiters can tell them from a real read. */
+  const restoredSnapshots = new WeakSet<object>();
+  /** activeMessages currently come from a snapshot, not a Dexie read. */
+  const isShowingSnapshot = computed(() => restoredSnapshots.has(dexieMessages.value));
+
+  watch(dexieMessages, (rows) => {
+    const meta = dexieWindowMeta.get(rows);
+    if (!meta || meta.roomId !== activeRoomId.value || rows.length === 0) return;
+    let snapshot = rows;
+    if (rows.length > ROOM_SNAPSHOT_ROWS) {
+      snapshot = rows.slice(-ROOM_SNAPSHOT_ROWS);
+      dexieWindowMeta.set(snapshot, { roomId: meta.roomId, windowSize: ROOM_SNAPSHOT_ROWS });
+    }
+    roomSnapshots.delete(meta.roomId);
+    roomSnapshots.set(meta.roomId, snapshot);
+    while (roomSnapshots.size > ROOM_SNAPSHOT_ROOMS) {
+      roomSnapshots.delete(roomSnapshots.keys().next().value as string);
+    }
+  });
+
+  /** The room's last emission, minus anything a history clear hid since. */
+  const restoreRoomSnapshot = (roomId: string): LocalMessageRows => {
+    const snapshot = roomSnapshots.get(roomId);
+    if (!snapshot) return [];
+    const clearedAtTs = chatDbKitRef.value?.eventWriter.getClearedAtTs(roomId);
+    const visible = clearedAtTs ? snapshot.filter((m) => m.timestamp > clearedAtTs) : [...snapshot];
+    if (visible.length === 0) return [];
+    dexieWindowMeta.set(visible, { roomId, windowSize: ROOM_SNAPSHOT_ROWS });
+    restoredSnapshots.add(visible);
+    return visible;
+  };
+
+  const dropRoomSnapshot = (roomId: string) => { roomSnapshots.delete(roomId); };
+
   // Delta-based room tracking: one-time load + incremental updates via Dexie hooks.
   const dexieRooms = shallowRef<LocalRoom[]>([]);
   const dexieRoomsReady = ref(false);
@@ -3877,7 +3920,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // remain in activeMessages until the new query emits — MessageList had to poll
     // `activeMessages[0]?.roomId === roomId` every 10ms to paper over the flash.
     if (roomId !== activeRoomId.value) {
-      resetDexieMessages([]);
+      // The room's last emission (stage 4), or nothing — never another room's.
+      resetDexieMessages(roomId ? restoreRoomSnapshot(roomId) : []);
       _liveQueryGen.value++;
       roomVisitGeneration++;
     }
@@ -4257,6 +4301,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Helper: optimistically remove a room from runtime UI state */
   const optimisticRemoveRoom = (roomId: string) => {
+    dropRoomSnapshot(roomId);
     rooms.value = rooms.value.filter((r) => r.id !== roomId);
     roomsMap.delete(roomId);
     delete messages.value[roomId];
@@ -4353,6 +4398,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // 5. Invalidate caches so room list rebuilds from fresh Dexie data
     decryptedPreviewCache.delete(roomId);
+    dropRoomSnapshot(roomId);
     _chatRoomFromDexieCache.delete(roomId);
 
     // 6. Clear in-memory messages for this room
@@ -8069,6 +8115,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Reset all in-memory state and account-specific localStorage (called on logout) */
   const cleanup = () => {
+    roomSnapshots.clear();
     historyBackfill.stop();
     historyBackfill = makeHistoryBackfill();
     relationWindows.clear();
@@ -8267,6 +8314,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     hasMessage,
     dexieMessagesReady,
     activeMessagesRoomId,
+    isShowingSnapshot,
     isRoomInSyncWithSdk,
     handleTimelineReset,
     checkHistoryContinuity,

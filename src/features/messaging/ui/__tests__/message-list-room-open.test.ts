@@ -65,4 +65,19 @@ describe("MessageList — room open", () => {
   it("shows the updating pill while the backfill works on the open room", () => {
     expect(template).toMatch(/!!chatStore\.activeRoomId && chatStore\.backfillActiveRoomId === chatStore\.activeRoomId/);
   });
+
+  it("goes straight to the reveal when the room's snapshot is already on screen (stage 4)", () => {
+    const open = source.slice(source.indexOf("const openRoom = async"));
+    expect(open).toMatch(/\} else if \(hasValidMessages\) \{[\s\S]*?openResult = \{ branch: "cached", networkTimedOut: false \};/);
+  });
+
+  it("reveals a snapshot at once unless an unread banner needs scrolling to", () => {
+    expect(source).toMatch(/settled\.value = chatStore\.activeMessages\[0\]\?\.roomId === roomId\s+&& !\(\(chatStore\.getPreOpenUnreadCount\(roomId\) \?\? 0\) > 0\);/);
+  });
+
+  it("with unread messages waiting, a snapshot does not replace the real read (stage 4)", () => {
+    expect(source).toMatch(/&& !\(chatStore\.isShowingSnapshot && hasPreOpenUnread\);/);
+    expect(source).toMatch(/chatStore\.activeMessagesRoomId === roomId && !chatStore\.isShowingSnapshot/);
+  });
 });
+

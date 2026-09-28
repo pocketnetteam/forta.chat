@@ -615,7 +615,9 @@ let pendingSettledTimeout: ReturnType<typeof setTimeout> | null = null;
 const waitForFirstEmission = (roomId: string, timeoutMs: number): Promise<boolean> =>
   new Promise<boolean>((resolve) => {
     // Legacy (non-Dexie) cache has no liveQuery to wait for.
-    if (!chatStore.chatDbKitRef || chatStore.activeMessagesRoomId === roomId) {
+    // A restored snapshot (stage 4) is not a read: it predates new messages.
+    const emitted = () => chatStore.activeMessagesRoomId === roomId && !chatStore.isShowingSnapshot;
+    if (!chatStore.chatDbKitRef || emitted()) {
       resolve(true);
       return;
     }
@@ -627,10 +629,10 @@ const waitForFirstEmission = (roomId: string, timeoutMs: number): Promise<boolea
     };
     const timer = setTimeout(() => finish(false), timeoutMs);
     stop = watch(
-      () => [chatStore.activeMessagesRoomId, chatStore.activeRoomId] as const,
-      ([emittedFor, activeId]) => {
+      () => [chatStore.activeMessagesRoomId, chatStore.isShowingSnapshot, chatStore.activeRoomId] as const,
+      ([, , activeId]) => {
         if (activeId !== roomId) finish(false);
-        else if (emittedFor === roomId) finish(true);
+        else if (emitted()) finish(true);
       },
     );
   });
@@ -667,7 +669,11 @@ const openRoom = async (roomId: string | null) => {
 
   // ═══ PHASE 1: FREEZE STATE ═══
   switching.value = true;
-  settled.value = false;
+  // The room's last emission is already on screen (stage 4) and no unread
+  // banner needs scrolling to: the inverted list sits at the newest message
+  // by itself, so reveal in the first frame instead of hiding it.
+  settled.value = chatStore.activeMessages[0]?.roomId === roomId
+    && !((chatStore.getPreOpenUnreadCount(roomId) ?? 0) > 0);
   loading.value = false;
   loadEverAttempted.value = false;
   networkTimedOut.value = false;
@@ -756,8 +762,12 @@ const openRoom = async (roomId: string | null) => {
   // If no anchor was set, do normal load.
   // Guard: verify messages belong to the TARGET room, not stale liveQuery data
   // from the previous room (useLiveQuery intentionally keeps stale data during re-subscription).
+  // A snapshot with unread messages waiting does not count: they are newer
+  // than it, and the unread banner needs the real read (stage 4).
+  const hasPreOpenUnread = (chatStore.getPreOpenUnreadCount(roomId) ?? 0) > 0;
   const hasValidMessages = chatStore.activeMessages.length > 0
-    && chatStore.activeMessages[0]?.roomId === roomId;
+    && chatStore.activeMessages[0]?.roomId === roomId
+    && !(chatStore.isShowingSnapshot && hasPreOpenUnread);
   // With Dexie the liveQuery IS the cache — loadCachedMessages would only
   // do a redundant 50-row read and return 0. Legacy path only.
   const usingDexie = !!chatStore.chatDbKitRef;
@@ -794,6 +804,12 @@ const openRoom = async (roomId: string | null) => {
     if (!openResult) return;
     networkTimedOut.value = openResult.networkTimedOut;
     openBranch.value = openResult.branch;
+  } else if (hasValidMessages) {
+    // Shown in the first frame from the room's last emission (stage 4):
+    // straight to the reveal, then the same background check as a cached open.
+    openResult = { branch: "cached", networkTimedOut: false };
+    openBranch.value = "cached";
+    trace.mark("branch", "snapshot");
   }
 
   /** Background refresh of a room shown from Dexie — after the reveal, so
