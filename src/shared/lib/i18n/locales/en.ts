@@ -334,6 +334,8 @@ export const en = {
   "profile.avatarRetrying": "Connection unstable — retrying...",
   "profile.avatarError": "Failed to upload avatar",
   "profile.saveFailed": "Failed to save profile. Check your connection and try again.",
+  "profile.saveFailedTimeout": "The network didn't confirm the change in time. Try again in a minute.",
+  "profile.saveFailedRejected": "The network refused the change. It may need a little PKOIN, or a few minutes after your previous change.",
 
   // ── Message input ──
   "message.editing": "Editing",

@@ -336,6 +336,8 @@ export const ru: Record<TranslationKey, string> = {
   "profile.avatarRetrying": "Связь нестабильна — повторяем...",
   "profile.avatarError": "Не удалось загрузить аватар",
   "profile.saveFailed": "Не удалось сохранить профиль. Проверьте подключение и попробуйте снова.",
+  "profile.saveFailedTimeout": "Сеть не подтвердила изменение вовремя. Попробуйте ещё раз через минуту.",
+  "profile.saveFailedRejected": "Сеть отклонила изменение. Возможно, нужно немного PKOIN или подождать несколько минут после прошлого изменения.",
 
   // ── Message input ──
   "message.editing": "Редактирование",
