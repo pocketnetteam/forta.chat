@@ -5639,37 +5639,42 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const rel = content["m.relates_to"] as Record<string, unknown>;
       const targetId = rel.event_id as string;
       const target = msgMap.get(targetId);
-      if (target) {
-        const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
-        const isEncrypted = newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted";
-        let editBody: string;
+      const newContent = content["m.new_content"] as Record<string, unknown> | undefined;
+      const isEncrypted = newContent?.msgtype === "m.encrypted" || content.msgtype === "m.encrypted";
+      let editBody: string;
 
-        if (isEncrypted) {
-          if (roomCrypto) {
-            editBody = await parseEditBody({
-              raw,
-              content,
-              newContent,
-              decryptEvent: (e) => roomCrypto.decryptEvent(e),
-              encryptedPlaceholder: "[encrypted]",
-            });
-          } else {
-            editBody = "[encrypted]";
-          }
+      if (isEncrypted) {
+        if (roomCrypto) {
+          editBody = await parseEditBody({
+            raw,
+            content,
+            newContent,
+            decryptEvent: (e) => roomCrypto.decryptEvent(e),
+            encryptedPlaceholder: "[encrypted]",
+          });
         } else {
-          editBody = (newContent?.body as string) ?? (content.body as string) ?? "";
+          editBody = "[encrypted]";
         }
-
-        target.content = editBody.replace(/^\* /, "");
-        target.edited = true;
-
-        // Persist edit to Dexie so it survives reload
-        await chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
-          targetEventId: targetId,
-          newContent: target.content,
-          editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
-        });
+      } else {
+        editBody = (newContent?.body as string) ?? (content.body as string) ?? "";
       }
+      const editedContent = editBody.replace(/^\* /, "");
+
+      if (target) {
+        target.content = editedContent;
+        target.edited = true;
+      }
+
+      // Persist the edit to Dexie so it survives reload. For a target outside
+      // this batch (an older message) this is the only way it gets applied:
+      // writeEdit updates the stored row, or keeps the edit until the row
+      // lands. It used to be skipped until a later scroll re-parsed both
+      // events together (audit S3-03).
+      await chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+        targetEventId: targetId,
+        newContent: editedContent,
+        editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
+      });
     }
 
     // Apply reactions to messages
@@ -5683,7 +5688,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (!targetId || !emoji) continue;
 
       const targetMsg = msgMap.get(targetId);
-      if (!targetMsg) continue;
+      if (!targetMsg) {
+        // The target is outside this batch: record the reaction on the stored
+        // message (or keep it until the message lands) instead of skipping it
+        // (audit S3-03).
+        if (typeof raw.event_id === "string") {
+          await chatDbKitRef.value?.eventWriter.writeReaction({
+            eventId: raw.event_id,
+            targetEventId: targetId,
+            emoji,
+            senderAddress: matrixIdToAddress(raw.sender as string),
+            isMine: matrixService.isMe(raw.sender as string),
+          });
+        }
+        continue;
+      }
 
       if (!targetMsg.reactions) targetMsg.reactions = {};
       if (!targetMsg.reactions[emoji]) {
