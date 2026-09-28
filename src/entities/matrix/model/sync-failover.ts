@@ -209,6 +209,15 @@ export class SyncWatchdog {
     this.deps.onFailover();
   }
 
+  /** The homeserver rejected the access token (M_UNKNOWN_TOKEN — the SDK's
+   *  Session.logged_out). The SDK stops syncing after that single ERROR, so
+   *  waiting for the stale timer left the app dead for 5 minutes while the
+   *  banner said "up to date". Recover now: onFailover logs in again with the
+   *  credentials derived from the key (audit S3b-02). */
+  sessionLost(): void {
+    this.trigger();
+  }
+
   /** Re-arm after a failover recreate completes so the next mirror is watched
    *  too. The failover budget is NOT reset here — only a healthy sync clears
    *  it — so a permanently-dead network can't loop teardown+login forever. */

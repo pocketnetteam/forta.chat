@@ -613,6 +613,14 @@ export class MatrixClientService {
       this.watchdog?.notifySync(state);
       this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING");
     });
+
+    // The homeserver rejected the access token (M_UNKNOWN_TOKEN). The SDK stops
+    // syncing after that and nothing else noticed for 5 minutes; log in again
+    // right away (audit S3b-02).
+    this.client.on("Session.logged_out", () => {
+      console.warn("[matrix] access token rejected, logging in again");
+      this.watchdog?.sessionLost();
+    });
   }
 
   /** Schedule a single retry of the CURRENT host behind exponential backoff.

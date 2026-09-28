@@ -59,7 +59,10 @@ function startStaleTimer() {
   const timeout = rawStatus.value === "error" ? ERROR_STALE_TIMEOUT : STALE_TIMEOUT;
   staleTimer = setTimeout(() => {
     staleTimer = null;
-    if (isActivePhase(rawStatus.value)) {
+    // An error stays an error until a real sync clears it: turning it into
+    // "up to date" after a minute told users all was well while the sync was
+    // dead — e.g. after the homeserver rejected the token (audit S3b-02).
+    if (isActivePhase(rawStatus.value) && rawStatus.value !== "error") {
       rawStatus.value = "up_to_date";
     }
   }, timeout);

@@ -176,6 +176,29 @@ describe("MatrixClientService — a superseded init() does not start its own cli
   });
 });
 
+describe("MatrixClientService — rejected access token (audit S3b-02)", () => {
+  it("hands Session.logged_out to the watchdog so it logs in again at once", async () => {
+    created.length = 0;
+    loginImpl = async () => ({ user_id: "@u:matrix.example", access_token: "t1", device_id: "D" });
+    const s = service();
+    const sessionLost = vi.fn();
+    (s as unknown as { watchdog: { sessionLost: () => void; notifySync: () => void } }).watchdog = {
+      sessionLost,
+      notifySync: () => {},
+    };
+
+    await s.init();
+
+    const client = userClients()[0];
+    const handler = client.on.mock.calls.find(([event]) => event === "Session.logged_out")?.[1] as
+      | (() => void)
+      | undefined;
+    expect(handler).toBeTypeOf("function");
+    handler?.();
+    expect(sessionLost).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("MatrixClientService — init() retried while the homeserver is unreachable", () => {
   beforeEach(() => {
     created.length = 0;

@@ -25,7 +25,10 @@ describe("use-sync-status — bounded reconnect banner (WEE-105 H4)", () => {
     vi.useRealTimers();
   });
 
-  it("stale-таймер ERROR анкорится к ПЕРВОЙ ошибке и не продлевается на повторных", () => {
+  // Audit S3b-02: the cap used to turn a still-failing sync into "up to date"
+  // after a minute — e.g. after the homeserver rejected the token and the SDK
+  // stopped syncing for good. An error now stays until a real sync clears it.
+  it("ошибка остаётся ошибкой до настоящей синхронизации, повторные ERROR не продлевают таймер", () => {
     const { rawStatus } = useSyncStatus();
 
     handleSdkSync("ERROR"); // arms ERROR_STALE_TIMEOUT at t=0
@@ -35,7 +38,10 @@ describe("use-sync-status — bounded reconnect banner (WEE-105 H4)", () => {
     handleSdkSync("ERROR"); // must NOT push the deadline out
     expect(rawStatus.value).toBe("error");
 
-    vi.advanceTimersByTime(10_000); // t=60s from the first error → cap fires
+    vi.advanceTimersByTime(ERROR_STALE_TIMEOUT * 5);
+    expect(rawStatus.value).toBe("error");
+
+    handleSdkSync("PREPARED"); // the next real sync
     expect(rawStatus.value).toBe("up_to_date");
   });
 

@@ -116,6 +116,31 @@ describe("SyncWatchdog.deferFailover — outage не сжигает бюджет
   });
 });
 
+// Audit S3b-02: an expired or revoked token (M_UNKNOWN_TOKEN) stops the SDK's
+// sync loop after a single ERROR, so the watchdog only noticed via its 5-minute
+// stale timer. The SDK's Session.logged_out event now reaches sessionLost(),
+// which starts the same fresh-login recovery at once.
+describe("SyncWatchdog.sessionLost (audit S3b-02)", () => {
+  it("starts recovery at once instead of waiting for the stale timer", () => {
+    const { wd, onFailover } = makeWatchdog({}, { maxConsecutiveErrors: 4, staleTimeoutMs: 300_000 });
+    wd.notifySync("ERROR");
+    expect(onFailover).not.toHaveBeenCalled();
+    wd.sessionLost();
+    expect(onFailover).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing once stopped or while a recovery is already running", () => {
+    const { wd, onFailover } = makeWatchdog();
+    wd.sessionLost();
+    wd.sessionLost();
+    expect(onFailover).toHaveBeenCalledTimes(1);
+    wd.reset();
+    wd.stop();
+    wd.sessionLost();
+    expect(onFailover).toHaveBeenCalledTimes(1);
+  });
+});
+
 /** Build a SyncWatchdog with controllable clock/timers/online for tests. */
 function makeWatchdog(
   overrides: Partial<SyncWatchdogDeps> = {},
