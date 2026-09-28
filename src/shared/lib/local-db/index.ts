@@ -75,6 +75,7 @@ import { DecryptionWorker } from "./decryption-worker";
 import { ListenedRepository } from "./listened-repository";
 import { SearchCacheRepository } from "./search-cache-repository";
 import { whenChatsInteractive } from "@/shared/lib/boot-signals";
+import { withTimeout } from "@/shared/lib/with-timeout";
 import type { PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 
 export interface ChatDbKit {
@@ -341,15 +342,28 @@ export function closeChatDb(): void {
 }
 
 /**
- * Delete all local data for the current user (GDPR, "clear data" button).
- * Also closes the connection.
+ * How long deleteChatDb waits for the database to go away. Another tab holding
+ * it open blocks the deletion, and Dexie's delete() then never settles, so
+ * logout hung for good (audit S10-08). The request stays queued in IndexedDB
+ * and completes once that tab lets go.
  */
-export async function deleteChatDb(): Promise<void> {
-  if (currentKit) {
-    currentKit.dispose?.();
-    await currentKit.db.delete();
-    currentKit = null;
-    currentUserId = null;
+export const DELETE_CHAT_DB_TIMEOUT_MS = 5_000;
+
+/**
+ * Delete all local data for the current user (GDPR, "clear data" button).
+ * Also closes the connection. Always resolves, within `timeoutMs`; a deletion
+ * that failed or is still blocked is logged.
+ */
+export async function deleteChatDb(timeoutMs: number = DELETE_CHAT_DB_TIMEOUT_MS): Promise<void> {
+  const kit = currentKit;
+  if (!kit) return;
+  currentKit = null;
+  currentUserId = null;
+  kit.dispose?.();
+  try {
+    await withTimeout(kit.db.delete(), timeoutMs, "[local-db] delete");
+  } catch (e) {
+    console.warn("[local-db] the local database was not deleted (yet):", e);
   }
 }
 

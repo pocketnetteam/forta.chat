@@ -67,7 +67,7 @@ D desktop (Electron).
 | S4-05 | P2 | 6 | Ai | Large media is fully materialized in memory at least twice (Blob + base64 string) on save and on native disk-cache write | `src/features/messaging/model/use-file-download.ts` | open |
 | W2C-01 | P2 | 6 | A | Long-press context menu fires during native text selection, covering the message | `src/features/messaging/ui/MessageBubble.vue` | open |
 | W2A-02 | P2 | 6 | WAD | `useLocalStorage` has no error handling — every appearance/theme setting can silently fail to persist | `src/shared/lib/browser/use-local-storage.ts` | fixed |
-| S10-08 | P2 | 6 | WAiD | Logout's Dexie deletion failure is silently swallowed — "clear data" guarantee not enforced | `src/entities/auth/model/stores.ts` | open |
+| S10-08 | P2 | 6 | WAiD | Logout's Dexie deletion failure is silently swallowed — "clear data" guarantee not enforced | `src/entities/auth/model/stores.ts` | fixed |
 | W2D-03 | P2 | 6 | AiWD | Bug report submission is needlessly serial — screenshots upload one at a time, environment diagnostics fetch one native plugin at a time | `src/shared/lib/bug-report/bug-report-sender.ts` | fixed |
 | W2C-02 | P2 | 6 | AiW | Unread-banner scroll-to-position races the (unawaited) window expansion — falls back to "scroll to bottom" | `src/features/messaging/ui/MessageList.vue` | open |
 | W2D-01 | P2 | 6 | WDAi | Connection-status indicator freezes forever after the first ChatSidebar remount (orphaned singleton watcher) | `src/features/sync-status/model/use-sync-status.ts` | fixed |

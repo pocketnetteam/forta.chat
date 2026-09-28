@@ -1630,7 +1630,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // torn down. Otherwise the Filesystem entries leak to disk under the
     // new user's session.
     await clearMediaCache();
-    await deleteChatDb().catch(() => {});
+    await deleteChatDb();
 
     // ── 6. Delete legacy IndexedDB cache ──
     deleteLegacyCache();
