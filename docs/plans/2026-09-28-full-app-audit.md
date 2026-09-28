@@ -29,7 +29,7 @@ D desktop (Electron).
 | S10-02 | P1 | 5 | WAiD | SVG XSS sanitizer bypass on the registration captcha (`v-html` with untrusted content) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | open |
 | S3b-02 | P1 | 2 | AiWD | Invalid/expired Matrix session (M_UNKNOWN_TOKEN) is never detected — sync dies silently and the banner then LIES "up to date" | `src/entities/matrix/model/matrix-client.ts` | fixed |
 | S4-01 | P1 | 4 | A | Native Tor media download has no connect/read timeout — hangs forever and permanently exhausts the app-wide 3-slot download gate | `android/app/src/main/java/com/forta/chat/plugins/filetransfer/TorFilePlugin.kt` | fixed |
-| S7-01 | P1 | 4 | AiWD | Leaving/deleting a group silently no-ops on any network hiccup, and the tombstone auto-revives — the group reappears with zero explanation | `src/entities/chat/model/chat-store.ts` | open |
+| S7-01 | P1 | 4 | AiWD | Leaving/deleting a group silently no-ops on any network hiccup, and the tombstone auto-revives — the group reappears with zero explanation | `src/entities/chat/model/chat-store.ts` | fixed |
 | S8-02 | P1 | owner | AD | Android and Electron auto-updaters never route through Tor — update checks/downloads silently fail wherever GitHub is blocked | `android/app/src/main/java/com/forta/chat/updater/AppUpdater.kt` | open |
 | W2A-01 | P1 | 3 | WAiD | Self-missing encryption keys permanently block 1:1 messaging; UI blames the peer; the only fix path is dead code | `src/entities/matrix/model/matrix-crypto.ts` | fixed |
 | S10-04 | P1 | 5 | D | Electron: unrestricted top-level navigation + `shell.openExternal` called with no scheme check — privileged preload bridge reachable from any origin | `electron/main.cjs` | open |
@@ -51,11 +51,11 @@ D desktop (Electron).
 | S2-03 | P2 | 2 | WAiD | Once a queued op in a room permanently fails, later messages in the same room are sent out of order (FIFO invariant silently broken) | `src/shared/lib/local-db/sync-engine.ts` | kept (by design: a failed message keeps its retry, later ones still go, as in Telegram/WhatsApp) |
 | S3-02 | P2 | 6 | AiWD | Live reaction to a not-yet-persisted message is silently and permanently dropped | `src/shared/lib/local-db/event-writer.ts` | open |
 | S5-02 | P2 | 3 | A | `likelyBastyonUser` is a session-wide singleton that leaks from one account into another after `switchAccount` | `src/entities/auth/model/stores.ts` | fixed |
-| S7-04 | P2 | 4 | AiWD | Kick / ban / promote-to-admin / mute failures are silently swallowed in the chat-info member menu | `src/features/chat-info/ui/ChatInfoPanel.vue` | open |
+| S7-04 | P2 | 4 | AiWD | Kick / ban / promote-to-admin / mute failures are silently swallowed in the chat-info member menu | `src/features/chat-info/ui/ChatInfoPanel.vue` | fixed |
 | S8-04 | P2 | 5 | D | Electron window has no application menu and no context menu — no right-click Copy/Paste, no discoverable Reload | `electron/main.cjs (весь файл — нет импорта Menu)` | open |
 | W2C-04 | P2 | 6 | AWD | HEIC photos show no preview in the composer/attachment picker before sending | `src/features/messaging/model/use-media-upload.ts` | open |
 | S1-04 | P2 | 3 | WAiD | Reply preview text is resolved once and permanently baked in — if resolved while the quoted message is still mid-decrypt, the reply shows "[encrypted]" forever even after the original decrypts fine | `src/entities/chat/model/chat-store.ts` | fixed |
-| S3b-03 | P2 | 4 | AiWD | `acceptInvite` swallows `joinRoom` failures — user sees the invite screen again with no explanation | `src/entities/chat/model/chat-store.ts` | open |
+| S3b-03 | P2 | 4 | AiWD | `acceptInvite` swallows `joinRoom` failures — user sees the invite screen again with no explanation | `src/entities/chat/model/chat-store.ts` | fixed |
 | S4-04 | P2 | 6 | A | Save-to-gallery on Android 7–9 (API 24-28) never requests the runtime WRITE_EXTERNAL_STORAGE permission | `android/app/src/main/java/com/forta/chat/plugins/savemedia/SaveMediaPlugin.kt` | open |
 | S6-03 | P2 | 6 | AiWD | Avatar → Matrix sync: unbounded `fetch` of the just-uploaded image, failure silently swallowed — Matrix avatar (`avatar_url`, drives group avatars) never gets set, no user-facing error | `src/entities/auth/lib/sync-profile-to-matrix.ts` | open |
 | W2A-03 | P2 | 6 | WAiD | "Font Size" appearance setting has no effect on real chat messages — only the settings-page preview responds | `src/entities/theme/model/stores.ts` | open |

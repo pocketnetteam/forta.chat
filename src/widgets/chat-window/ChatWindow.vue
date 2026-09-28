@@ -469,7 +469,7 @@ const handleAcceptInvite = async () => {
   if (!roomId) return;
   inviteLoading.value = true;
   try {
-    await chatStore.acceptInvite(roomId);
+    if (!(await chatStore.acceptInvite(roomId))) toast(t("chat.acceptInviteFailed"), "error");
   } finally {
     inviteLoading.value = false;
   }

@@ -665,12 +665,14 @@ export class RoomRepository {
     return room?.clearedAtTs;
   }
 
-  /** Revive a tombstoned room (e.g. user re-joined the room) */
-  async reviveRoom(roomId: string): Promise<void> {
+  /** Revive a tombstoned room (e.g. user re-joined the room). `membership`
+   *  restores what the tombstone overwrote, for a leave that did not happen. */
+  async reviveRoom(roomId: string, membership?: LocalRoom["membership"]): Promise<void> {
     await this.db.rooms.update(roomId, {
       isDeleted: false,
       deletedAt: null,
       deleteReason: null,
+      ...(membership ? { membership } : {}),
     });
   }
 

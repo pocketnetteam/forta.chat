@@ -23,6 +23,8 @@ const fakeActiveRoom = computed(() => {
 });
 
 const peerKeysStatusMap = new Map<string, string>();
+const fakeAcceptInvite = vi.hoisted(() => vi.fn(async (_roomId: string) => true));
+const fakeToast = vi.hoisted(() => vi.fn());
 const activeMessagesRef = ref<unknown[]>([]);
 const selectedMessageIdsRef = ref<Set<string>>(new Set());
 
@@ -59,7 +61,7 @@ vi.mock("@/entities/chat", async () => {
       setActiveRoom: vi.fn(),
       cancelForward: vi.fn(),
       exitSelectionMode: vi.fn(),
-      acceptInvite: vi.fn(),
+      acceptInvite: fakeAcceptInvite,
       declineInvite: vi.fn(),
       checkPeerKeys: vi.fn(),
       getRoomPowerLevels: vi.fn(() => ({ myLevel: 0 })),
@@ -140,7 +142,7 @@ vi.mock("@/features/wallet", () => ({
 }));
 
 vi.mock("@/shared/lib/use-toast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: fakeToast }),
 }));
 
 vi.mock("@/features/messaging/model/use-paste-drop", () => ({
@@ -412,6 +414,32 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     } finally {
       fakeAuth.ownKeysMissing = false;
     }
+  });
+
+  // Audit S3b-03: a failed join brought the invite screen back with no word.
+  it("says so when accepting an invite fails, and stays quiet when it works", async () => {
+    fakeActiveRoomId.value = "!inv:matrix.org";
+    fakeRooms.value = [{ id: "!inv:matrix.org", name: "Team", isGroup: true, members: [], membership: "invite" }];
+    fakeRoomsInitialized.value = true;
+    fakeToast.mockClear();
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+    const accept = wrapper.findAll("button").find((b) => b.text() === "chat.accept");
+    expect(accept).toBeDefined();
+
+    fakeAcceptInvite.mockResolvedValueOnce(false);
+    await accept!.trigger("click");
+    await flushPromises();
+    expect(fakeAcceptInvite).toHaveBeenCalledWith("!inv:matrix.org");
+    expect(fakeToast).toHaveBeenCalledWith("chat.acceptInviteFailed", "error");
+
+    fakeToast.mockClear();
+    fakeAcceptInvite.mockResolvedValueOnce(true);
+    await accept!.trigger("click");
+    await flushPromises();
+    expect(fakeToast).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
   it("keeps the 1:1 wording for a direct chat whose peer has no keys", async () => {

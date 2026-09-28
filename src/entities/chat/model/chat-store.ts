@@ -44,6 +44,7 @@ import { createBurstCoalescer } from "@/shared/lib/burst-coalescer";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
 import { tRaw } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 
@@ -4078,7 +4079,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Accept an invite: join the room and update membership */
-  const acceptInvite = async (roomId: string) => {
+  /** Join an invited room. Resolves false when the join did not happen, so the
+   *  caller can say so: the invite screen used to just come back with no word
+   *  of what went wrong (audit S3b-03). */
+  const acceptInvite = async (roomId: string): Promise<boolean> => {
     try {
       const matrixService = getMatrixClientService();
       // Security (best-effort): block join if local state shows user is banned.
@@ -4086,7 +4090,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const myUserId = matrixService.getUserId() ?? "";
       if (isUserBanned(roomId, myUserId)) {
         console.warn("[chat-store] acceptInvite blocked: user is banned from room", roomId);
-        return;
+        return false;
       }
       await matrixService.joinRoom(roomId);
 
@@ -4116,8 +4120,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         profilesRequestedForRooms.delete(roomId);
         setActiveRoom(roomId);
       }
+      return true;
     } catch (e) {
       console.warn("[chat-store] acceptInvite error:", e);
+      return false;
     }
   };
 
@@ -4205,13 +4211,43 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Remove a room: kick other members → leave → forget → remove from local state.
-   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups). */
-  const removeRoom = async (roomId: string) => {
-    // Tombstone in Dexie — cross-device visible, survives reload
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "removed");
+  /** Tombstone a room the user is leaving and return the membership it had,
+   *  so a leave the server refuses can be undone. */
+  const tombstoneForLeave = async (
+    roomId: string,
+    reason: "left" | "removed",
+  ): Promise<LocalRoom["membership"] | undefined> => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return undefined;
+    const previous = await kit.rooms.getRoom(roomId);
+    await kit.rooms.tombstoneRoom(roomId, reason);
+    return previous?.membership;
+  };
+
+  /** The server refused the leave: bring the room back now and say so. It used
+   *  to vanish, then quietly return at a later sync with no explanation, since
+   *  the SDK still counted the user as joined (audit S7-01). */
+  const restoreRoomAfterFailedLeave = async (
+    roomId: string,
+    membership: LocalRoom["membership"] | undefined,
+    messageKey: "chat.leaveFailed" | "chat.deleteFailed",
+  ): Promise<void> => {
+    try {
+      await chatDbKitRef.value?.rooms.reviveRoom(roomId, membership);
+    } catch (e) {
+      console.warn("[chat-store] restoring a room after a failed leave:", e);
     }
+    markRoomChanged(roomId);
+    refreshRooms();
+    useToast().toast(tRaw(messageKey), "error");
+  };
+
+  /** Remove a room: kick other members → leave → forget → remove from local state.
+   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups).
+   *  Resolves false (the room is back, the user told why) when the leave failed. */
+  const removeRoom = async (roomId: string): Promise<boolean> => {
+    // Tombstone in Dexie — cross-device visible, survives reload
+    const previousMembership = await tombstoneForLeave(roomId, "removed");
 
     // Optimistic: remove from UI immediately
     optimisticRemoveRoom(roomId);
@@ -4258,10 +4294,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
 
       await matrixService.leaveRoom(roomId);
-      await matrixService.forgetRoom(roomId);
     } catch (e) {
-      console.warn("[chat-store] removeRoom leave/forget error:", e);
+      console.warn("[chat-store] removeRoom leave error:", e);
+      await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.deleteFailed");
+      return false;
     }
+    try {
+      await getMatrixClientService().forgetRoom(roomId);
+    } catch (e) {
+      console.warn("[chat-store] removeRoom forget error:", e);
+    }
+    return true;
   };
 
   /** Clear chat history for current user only. Room membership is NOT affected.
@@ -4304,23 +4347,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Leave a group chat without kicking other members. */
-  const leaveGroup = async (roomId: string) => {
+  /** Leave a group chat without kicking other members. Resolves false (the room
+   *  is back, the user told why) when the leave failed. */
+  const leaveGroup = async (roomId: string): Promise<boolean> => {
     // Tombstone in Dexie — cross-device visible
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "left");
-    }
+    const previousMembership = await tombstoneForLeave(roomId, "left");
 
     // Optimistic: remove from UI
     optimisticRemoveRoom(roomId);
 
+    const matrixService = getMatrixClientService();
     try {
-      const matrixService = getMatrixClientService();
       await matrixService.leaveRoom(roomId);
-      await matrixService.forgetRoom(roomId);
     } catch (e) {
       console.warn("[chat-store] leaveGroup error:", e);
+      await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.leaveFailed");
+      return false;
     }
+    try {
+      await matrixService.forgetRoom(roomId);
+    } catch (e) {
+      console.warn("[chat-store] leaveGroup forget error:", e);
+    }
+    return true;
   };
 
   /** Kick a single user from a room (requires admin power level).
