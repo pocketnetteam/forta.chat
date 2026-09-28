@@ -70,7 +70,7 @@ D desktop (Electron).
 | S10-08 | P2 | 6 | WAiD | Logout's Dexie deletion failure is silently swallowed — "clear data" guarantee not enforced | `src/entities/auth/model/stores.ts` | open |
 | W2D-03 | P2 | 6 | AiWD | Bug report submission is needlessly serial — screenshots upload one at a time, environment diagnostics fetch one native plugin at a time | `src/shared/lib/bug-report/bug-report-sender.ts` | open |
 | W2C-02 | P2 | 6 | AiW | Unread-banner scroll-to-position races the (unawaited) window expansion — falls back to "scroll to bottom" | `src/features/messaging/ui/MessageList.vue` | open |
-| W2D-01 | P2 | 6 | WDAi | Connection-status indicator freezes forever after the first ChatSidebar remount (orphaned singleton watcher) | `src/features/sync-status/model/use-sync-status.ts` | open |
+| W2D-01 | P2 | 6 | WDAi | Connection-status indicator freezes forever after the first ChatSidebar remount (orphaned singleton watcher) | `src/features/sync-status/model/use-sync-status.ts` | fixed |
 | W2D-02 | P2 | 6 | WAiD | Channels/Bastyon-post browsing accumulates unbounded memory and DOM over a session | `src/entities/channel/model/channel-store.ts` | open |
 | W2B-03 | P2 | 6 | A | `isFcmAvailable()` reflects build-time Firebase config, not runtime Google Play Services — push silently never works on Huawei/GMS-less devices (boot itself is NOT blocked — verified) | `android/app/src/main/java/com/forta/chat/plugins/push/PushDataPlugin.kt` | open |
 | S5-04 | P3 | 5 | WAiD | Captcha SVG is sanitized with hand-rolled regexes before `v-html` (defense-in-depth gap, not currently exploitable from an attacker-controlled source) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | fixed |

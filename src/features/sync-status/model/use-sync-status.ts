@@ -1,4 +1,4 @@
-import { ref, computed, watch, type Ref, type ComputedRef } from "vue";
+import { ref, computed, watch, effectScope, type Ref, type ComputedRef } from "vue";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { useDebouncedStatus, type DisplayPhase } from "./use-debounced-status";
 import { useI18n, type TranslationKey } from "@/shared/lib/i18n";
@@ -30,9 +30,15 @@ let staleTimer: ReturnType<typeof setTimeout> | null = null;
 
 let _debouncedResult: { visibleStatus: Ref<DisplayPhase> } | null = null;
 
+/**
+ * The shared debounced status lives in its own detached scope. Created inside
+ * the first caller's component, its watcher died with that component while the
+ * cached result stayed, so after ChatSidebar was remounted (desktop ↔ mobile
+ * width) the connection header froze for the rest of the session (audit W2D-01).
+ */
 function getDebounced() {
   if (!_debouncedResult) {
-    _debouncedResult = useDebouncedStatus(rawStatus);
+    _debouncedResult = effectScope(true).run(() => useDebouncedStatus(rawStatus))!;
   }
   return _debouncedResult;
 }
