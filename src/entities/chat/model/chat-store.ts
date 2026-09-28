@@ -736,6 +736,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *    4. Truncated address fallback. */
   const getDisplayName = (address: string): string => {
     if (!address) return "?";
+    const known = getKnownDisplayName(address);
+    if (known) return known;
+    // Fallback: truncated address
+    if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
+    return address;
+  };
+
+  /** Steps 1-3 of `getDisplayName` (alias, Matrix name cache, user store)
+   *  without the truncated-address fallback: null when the chat does not know
+   *  a name yet, so a caller with its own better fallback (a push title with
+   *  the Matrix member name) can use it. */
+  const getKnownDisplayName = (address: string): string | null => {
+    if (!address) return null;
     // Try hex-decoded lookup (room.members stores hex IDs, cache uses raw addresses)
     let resolvedAddr = address;
     if (/^[a-f0-9]+$/i.test(address)) {
@@ -765,9 +778,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const uStore = useUserStore();
     const userProfile = uStore.users[resolvedAddr];
     if (userProfile?.name && isDisplayableName(userProfile.name)) return userProfile.name;
-    // Fallback: truncated address
-    if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
-    return address;
+    return null;
   };
 
   /** Same resolution chain as `getDisplayName` but SKIPS the local-alias
@@ -7684,6 +7695,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     saveForwardDraft,
     restoreForwardDraft,
     getDisplayName,
+    getKnownDisplayName,
     getCanonicalDisplayName,
     getLocalAlias,
     hasLocalAlias,

@@ -1044,7 +1044,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // (audit S6-01), both in JS and in the cache native reads.
             const pushSenderName = (userId: string): string | null => {
               const address = matrixIdToAddress(userId);
-              return address ? chatStore.getDisplayName(address) : null;
+              // Only a name the chat knows; otherwise the push keeps the Matrix
+              // member name rather than a truncated address.
+              return address ? chatStore.getKnownDisplayName(address) : null;
             };
             pushService.setSenderNameResolver(pushSenderName);
 

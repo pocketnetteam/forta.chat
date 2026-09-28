@@ -66,7 +66,9 @@ describe('push sender names', () => {
   it('is wired to the chat display names, also for the cache native reads', () => {
     const stores = readFileSync(resolve(__dirname, '../../../entities/auth/model/stores.ts'), 'utf-8');
     expect(stores).toContain('pushService.setSenderNameResolver(pushSenderName);');
-    expect(stores).toContain('return address ? chatStore.getDisplayName(address) : null;');
+    // The known-name variant, not getDisplayName: its truncated-address fallback
+    // would beat the Matrix member name (batch-6 follow-up review).
+    expect(stores).toContain('return address ? chatStore.getKnownDisplayName(address) : null;');
     expect(stores).toContain('const name = pushSenderName(userId) || member.name;');
   });
 });

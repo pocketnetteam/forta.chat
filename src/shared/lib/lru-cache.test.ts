@@ -16,11 +16,9 @@ describe("LRUCache", () => {
     expect(cache.size).toBe(2);
   });
 
-  it("caps the channel post and score caches", () => {
+  it("caps the channel post cache", () => {
     const root = resolve(__dirname, "../../..");
     const init = readFileSync(resolve(root, "src/app/providers/initializers/app-initializer.ts"), "utf-8");
-    const scores = readFileSync(resolve(root, "src/features/post-player/model/use-post-scores.ts"), "utf-8");
     expect(init).toContain("private postCache = new LRUCache<string, BastyonPostData>(POST_CACHE_MAX);");
-    expect(scores).toMatch(/const scoresCache = new LRUCache<[\s\S]*?>\(500\);/);
   });
 });

@@ -1,17 +1,16 @@
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
-import { LRUCache } from "@/shared/lib/lru-cache";
 
 // Shared state per txid so PostCard and PostPlayerModal stay in sync.
 // The average/vote-count come from the getprofilefeed aggregate
 // (scoreSum/scoreCnt); only the current user's vote needs a network request.
-// Capped: it used to keep every post ever shown for the session (audit W2D-02).
-// A post evicted while still on screen keeps its own refs; a later card for it
-// just starts fresh.
-const scoresCache = new LRUCache<
+// Not capped: an evicted entry would split a still-mounted PostCard from the
+// PostPlayerModal for the same post (votes shown on one only). Cap it together
+// with the channel list virtualization, when cards actually unmount (W2D-02).
+const scoresCache = new Map<
   string,
   { myScore: Ref<number | null>; scoreSum: Ref<number>; scoreCnt: Ref<number>; seeded: Ref<boolean> }
->(500);
+>();
 
 export function usePostScores(txid: string) {
   const authStore = useAuthStore();
