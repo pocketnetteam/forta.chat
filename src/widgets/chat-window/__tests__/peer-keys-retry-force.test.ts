@@ -17,10 +17,10 @@ import { resolve } from "path";
  * matrix-crypto-force-refresh.test.ts for the callee-side half of this
  * contract (prepare(forceRefresh) → getusersinfo → getUsersInfoCb).
  *
- * There is deliberately no "republish my own keys" action on this banner:
- * "missing" means the PEER hasn't published keys, not the local user —
- * republishing keys that already exist is a no-op, so that escape hatch was
- * removed; "Retry" (re-check the peer) is the only recovery action left.
+ * "missing" is not always the peer: canBeEncrypt() also fails when THIS
+ * account's own keys are not on the chain (audit W2A-01). The banner offers
+ * "publish my keys" only in that case (authStore.ownKeysMissing, set by the
+ * own-key check); for a peer without keys "Retry" stays the only action.
  *
  * Source verification — full-mount coverage of this component already
  * exists in ChatWindow.test.ts; that harness stubs pcrypto as null, so
@@ -40,11 +40,13 @@ describe("ChatWindow peer-keys retry — forced vs automatic refresh", () => {
     expect(section).toContain("await roomCrypto.prepare(true)");
   });
 
-  it("does not offer a republish-my-keys action on the banner", () => {
+  it("offers publishing own keys only when this account's own keys are missing", () => {
     const source = getSource();
-    expect(source).not.toContain("republishMyKeys");
-    expect(source).not.toContain("republishKeysFromUi");
-    expect(source).not.toContain("peerKeysRepublishing");
+    expect(source).toMatch(/v-if="ownKeysMissing"[\s\S]{0,400}@click="publishOwnKeys"/);
+    const start = source.indexOf("const publishOwnKeys = async () => {");
+    expect(start).toBeGreaterThan(-1);
+    expect(source.slice(start, source.indexOf("\n};", start))).toContain("authStore.republishKeysFromUi()");
+    expect(source.split("republishKeysFromUi").length - 1).toBe(1);
   });
 
   it("the 30s auto-recheck does NOT force a refresh: prepare() with no args", () => {

@@ -234,7 +234,9 @@ describe("login key verification", () => {
       source.indexOf("const completeLoginNetwork") + 800
     );
     const fetchPos = loginSection.indexOf("fetchUserInfo");
-    const verifyPos = loginSection.indexOf("verifyAndRepublishKeys");
+    // Goes through verifyOwnKeysOnce (audit S5-01), which runs
+    // verifyAndRepublishKeys at most once per account per app session.
+    const verifyPos = loginSection.indexOf("verifyOwnKeysOnce");
     const matrixPos = loginSection.indexOf("initMatrix");
     expect(fetchPos).toBeGreaterThan(-1);
     expect(verifyPos).toBeGreaterThan(fetchPos);

@@ -72,11 +72,14 @@ vi.mock("@/entities/chat", async () => {
 });
 
 // ── Mock auth store ───────────────────────────────────────────────
+const fakeAuth = vi.hoisted(() => ({
+  address: null,
+  pcrypto: null,
+  ownKeysMissing: false,
+  republishKeysFromUi: vi.fn(async () => ({ state: "republished" })),
+}));
 vi.mock("@/entities/auth", () => ({
-  useAuthStore: () => ({
-    address: null,
-    pcrypto: null,
-  }),
+  useAuthStore: () => fakeAuth,
 }));
 
 // ── Mock channel store ────────────────────────────────────────────
@@ -383,6 +386,32 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     expect(wrapper.text()).toContain("chat.groupMemberKeysMissing");
     expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
     wrapper.unmount();
+  });
+
+  // Audit W2A-01: when THIS account's keys are missing, the banner blamed the
+  // peer and offered no way out; it now says so and offers to publish them.
+  it("tells the user their own keys are missing and offers to publish them", async () => {
+    fakeAuth.ownKeysMissing = true;
+    try {
+      fakeActiveRoomId.value = "!dm:matrix.org";
+      fakeRooms.value = [{ id: "!dm:matrix.org", name: "Alice", isGroup: false, members: [], membership: "join" }];
+      fakeRoomsInitialized.value = true;
+      peerKeysStatusMap.set("!dm:matrix.org", "missing");
+
+      const wrapper = mount(ChatWindow, mountOpts);
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("chat.ownKeysMissing");
+      expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+      const publish = wrapper.findAll("button").find((b) => b.text() === "chat.publishOwnKeys");
+      expect(publish).toBeDefined();
+      await publish!.trigger("click");
+      await flushPromises();
+      expect(fakeAuth.republishKeysFromUi).toHaveBeenCalledTimes(1);
+      wrapper.unmount();
+    } finally {
+      fakeAuth.ownKeysMissing = false;
+    }
   });
 
   it("keeps the 1:1 wording for a direct chat whose peer has no keys", async () => {

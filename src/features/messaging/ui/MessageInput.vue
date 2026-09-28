@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, watch, computed, onBeforeUnmount, onMounted } from "vue";
 import { useChatStore, MessageType } from "@/entities/chat";
+import { useAuthStore } from "@/entities/auth";
 import { useThemeStore } from "@/entities/theme";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
 import { getDraft, saveDraft, clearDraft } from "@/shared/lib/drafts";
@@ -282,7 +283,9 @@ const handleSend = async () => {
   if (!isExternalShareActive.value && !peerKeysOk.value) {
     // Plaintext never goes to a private room, so this message cannot leave.
     // Say so: Enter used to do nothing at all here (audit S1-02, forta-bugs#1332).
-    toast(t("chat.peerKeysSendBlocked"), "error");
+    // When it is this account's own keys that are missing, say that instead of
+    // blaming the peer (audit W2A-01).
+    toast(t(useAuthStore().ownKeysMissing ? "chat.ownKeysMissing" : "chat.peerKeysSendBlocked"), "error");
     return;
   }
   const rawText = mention.resolveText();

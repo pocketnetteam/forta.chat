@@ -20,7 +20,10 @@ describe("MessageInput when the peer has no encryption keys (audit S1-02)", () =
     const gate = source.indexOf("!peerKeysOk.value", start);
     expect(gate).toBeGreaterThan(start);
     const branch = source.slice(gate, source.indexOf("return;", gate) + "return;".length);
-    expect(branch).toMatch(/toast\(\s*t\("chat\.peerKeysSendBlocked"\)\s*,\s*"error"/);
+    // Names the right party: this account's own keys (audit W2A-01) or the peer's.
+    expect(branch).toMatch(
+      /toast\(\s*t\(useAuthStore\(\)\.ownKeysMissing \? "chat\.ownKeysMissing" : "chat\.peerKeysSendBlocked"\)\s*,\s*"error"/,
+    );
   });
 
   it("has the blocked-send message in both locales", () => {

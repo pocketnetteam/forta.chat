@@ -32,15 +32,26 @@ function extractFunctionBody(name: string): string {
 }
 
 describe("republishKeysFromUi safety", () => {
+  // republishKeysFromUi wraps republishOwnKeys (the verify-and-broadcast body)
+  // and records the verdict in ownKeysMissing for the chat banner (audit W2A-01).
+  const uiBody = () => extractFunctionBody("republishKeysFromUi") + extractFunctionBody("republishOwnKeys");
+
   it("does not flip registrationPending on the republish path", () => {
-    const body = extractFunctionBody("republishKeysFromUi");
+    const body = uiBody();
     expect(body).not.toContain("setRegistrationPending(true)");
     expect(body).not.toContain("startRegistrationPoll(");
     expect(body).not.toContain("setPendingRegProfile(");
   });
 
-  it("returns a typed result with all four UI-relevant states", () => {
+  it("records whether this account's own keys are still missing", () => {
     const body = extractFunctionBody("republishKeysFromUi");
+    expect(body).toContain("await republishOwnKeys()");
+    expect(body).toContain("ownKeysMissing.value = false");
+    expect(body).toContain("ownKeysMissing.value = true");
+  });
+
+  it("returns a typed result with all four UI-relevant states", () => {
+    const body = uiBody();
     expect(body).toContain('state: "already-ok"');
     expect(body).toContain('state: "republished"');
     expect(body).toContain('state: "needs-funds"');
@@ -48,7 +59,7 @@ describe("republishKeysFromUi safety", () => {
   });
 
   it("guards against running while a real registration is already in flight", () => {
-    const body = extractFunctionBody("republishKeysFromUi");
+    const body = uiBody();
     // If registrationPending is already true (login flow re-publishing), the
     // UI variant must short-circuit instead of racing the legitimate poll.
     expect(body).toContain("registrationPending.value");

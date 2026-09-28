@@ -122,9 +122,41 @@ const peerKeysMissing = computed(() => {
 const { toast } = useToast();
 const { t } = useI18n();
 
-const peerKeysMissingText = computed(() =>
-  chatStore.activeRoom?.isGroup ? t("chat.groupMemberKeysMissing") : t("chat.peerKeysMissing"),
-);
+// This account's own keys are missing: then nobody can read what it sends, and
+// the banner must say so instead of blaming the peer (audit W2A-01).
+const ownKeysMissing = computed(() => authStore.ownKeysMissing === true);
+
+const peerKeysMissingText = computed(() => {
+  if (ownKeysMissing.value) return t("chat.ownKeysMissing");
+  return chatStore.activeRoom?.isGroup ? t("chat.groupMemberKeysMissing") : t("chat.peerKeysMissing");
+});
+
+const OWN_KEYS_PUBLISH_TEXT = {
+  "already-ok": "chat.ownKeysPublishAlreadyOk",
+  republished: "chat.ownKeysPublishSent",
+  "needs-funds": "chat.ownKeysPublishNeedsFunds",
+  "broadcast-failed": "chat.ownKeysPublishFailed",
+  skipped: "chat.ownKeysPublishSkipped",
+} as const;
+
+const publishingOwnKeys = ref(false);
+
+const publishOwnKeys = async () => {
+  if (publishingOwnKeys.value) return;
+  publishingOwnKeys.value = true;
+  try {
+    const result = await authStore.republishKeysFromUi();
+    const ok = result.state === "republished" || result.state === "already-ok";
+    toast(t(OWN_KEYS_PUBLISH_TEXT[result.state]), ok ? "success" : "error", 6000);
+    const roomId = chatStore.activeRoomId;
+    if (ok && roomId) await chatStore.checkPeerKeys(roomId);
+  } catch (e) {
+    console.warn("[ChatWindow] publishing own keys failed:", e);
+    toast(t("chat.ownKeysPublishFailed"), "error", 6000);
+  } finally {
+    publishingOwnKeys.value = false;
+  }
+};
 
 // Retry handler for the peer-keys banner. The banner is no longer a hard
 // blocker (regression #597/#598/#639) — it offers an escape hatch so a stuck
@@ -666,6 +698,15 @@ onUnmounted(() => {
           <div class="flex-1 min-w-0">
             <p class="leading-snug">{{ peerKeysMissingText }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                v-if="ownKeysMissing"
+                type="button"
+                class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                :disabled="publishingOwnKeys"
+                @click="publishOwnKeys"
+              >
+                {{ t("chat.publishOwnKeys") }}
+              </button>
               <button
                 type="button"
                 class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"

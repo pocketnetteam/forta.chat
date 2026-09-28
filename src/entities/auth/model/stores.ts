@@ -148,6 +148,9 @@ let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _matrixReconnectUnsub: (() => void) | null = null;
 // Failed Matrix starts in a row; spaces the scheduled retries (matrixRetryDelayMs).
 let _matrixStartFailures = 0;
+// Account whose own encryption keys were already checked in this app session —
+// keeps an explicit login (which also checks) from republishing twice.
+let _keysVerifiedFor: string | null = null;
 function stopMatrixReconnect(): void {
   if (_matrixReconnectUnsub) { _matrixReconnectUnsub(); _matrixReconnectUnsub = null; }
 }
@@ -245,6 +248,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Forta's 12 encryption keys — i.e. it was registered outside Forta, almost
   // certainly via Bastyon. Feeds the dual-install warning (see bastyon-warning).
   const likelyBastyonUser = ref(false);
+  // This account's own encryption keys are not on the chain (found by the key
+  // check). Without them no encrypted chat works, and the peer-keys banner used
+  // to blame the other side (audit W2A-01).
+  const ownKeysMissing = ref(false);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Monotonic token identifying the current poll loop. `startRegistrationPoll`
@@ -847,6 +854,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         chatDbKit.syncEngine.retryNotReadyFailures().catch((e) => {
           console.warn("[auth] retrying messages that waited for Matrix failed:", e);
         });
+        // A restored session or a switched-to account checks its own keys too,
+        // not only an explicit login (audit S5-01). Background: never blocks.
+        void verifyOwnKeysOnce();
 
         // Sync Pocketnet name → Matrix displayname when it changed since last push.
         // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
@@ -1323,6 +1333,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     switch (action.kind) {
       case "keys-ok":
         console.log(`[auth] Key verification OK (${action.source}):`, action.keyCount, "keys");
+        ownKeysMissing.value = false;
         return;
       case "rpc-failed":
         // Inconclusive — don't block login, keys may well be fine.
@@ -1331,11 +1342,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // Existing on-chain account without Forta keys → registered elsewhere
         // (Bastyon). Flag it for the dual-install warning (WEE-35).
         likelyBastyonUser.value = true;
+        ownKeysMissing.value = true;
         interopLog("auth", "existing account missing Forta keys (no PKOIN) — likely Bastyon-registered");
         console.warn("[auth] Missing encryption keys but no PKOIN — login proceeds, publish keys later from settings");
         return;
       case "republish": {
         likelyBastyonUser.value = true;
+        ownKeysMissing.value = true;
         interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
         const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
         const profile = {
@@ -1354,6 +1367,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             await appInitializer.syncNodeTime();
             await appInitializer.registerUserProfile(republishAddress, profile, encPublicKeys, image);
             console.log("[auth] Encryption keys re-published in background (existing-account login)");
+            if (address.value === republishAddress) ownKeysMissing.value = false;
           } catch (e) {
             console.error("[auth] Background key re-publish failed (login proceeds):", e);
           }
@@ -1376,6 +1390,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     | { state: "skipped"; reason: string };
 
   const republishKeysFromUi = async (): Promise<RepublishResult> => {
+    const result = await republishOwnKeys();
+    if (result.state === "already-ok" || result.state === "republished") ownKeysMissing.value = false;
+    if (result.state === "needs-funds") ownKeysMissing.value = true;
+    return result;
+  };
+
+  const republishOwnKeys = async (): Promise<RepublishResult> => {
     if (!address.value || !privateKey.value) {
       return { state: "skipped", reason: "no-credentials" };
     }
@@ -1473,11 +1494,27 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  and initMatrix() catches its own errors — but kept `async`/unswallowed
    *  here so a genuinely unexpected throw still surfaces to callers that
    *  await it directly (e.g. the plain `login()` below). */
+  /** Check (and re-publish if missing) this account's own encryption keys once
+   *  per app session. It used to run only on an explicit login, so an added or
+   *  switched-to account, and every restart of a saved session, never checked
+   *  — an account without Forta keys stayed unable to use encrypted chats
+   *  (audit S5-01). */
+  const verifyOwnKeysOnce = async (): Promise<void> => {
+    const current = address.value;
+    if (!current || _keysVerifiedFor === current) return;
+    _keysVerifiedFor = current;
+    try {
+      await verifyAndRepublishKeys();
+    } catch (e) {
+      console.warn("[auth] own key verification failed:", e);
+    }
+  };
+
   const completeLoginNetwork = async (): Promise<void> => {
     await fetchUserInfo();
 
     // Verify encryption keys are published; re-publish if missing
-    await verifyAndRepublishKeys();
+    await verifyOwnKeysOnce();
 
     // Initialize Matrix after successful auth
     await initMatrix();
@@ -1562,6 +1599,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     stopMatrixReconnect();
     _matrixStartFailures = 0;
+    _keysVerifiedFor = null;
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
@@ -1609,6 +1647,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setPendingRegProfile(null);
     setRegistrationPhase("init");
     likelyBastyonUser.value = false;
+    ownKeysMissing.value = false;
     stopRegistrationPoll();
     clearMnemonic();
 
@@ -2438,6 +2477,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       sessionManager.setActive(targetAddress);
       syncSessionsFromStorage();
       userInfo.value = undefined;
+      // Per-account verdict of the key check: the previous account's "likely a
+      // Bastyon account" must not show for this one (audit S5-02).
+      likelyBastyonUser.value = false;
+      ownKeysMissing.value = false;
 
       // 4. INIT new context (reuses the existing initMatrix which reads from computed address/privateKey)
       await fetchUserInfo();
@@ -2524,6 +2567,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     submitUpvote,
     userInfo,
     republishKeysFromUi,
-    likelyBastyonUser
+    likelyBastyonUser,
+    ownKeysMissing
   };
 });
