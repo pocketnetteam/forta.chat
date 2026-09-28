@@ -297,6 +297,9 @@ export class EventWriter {
       if (item.parsed.eventId && this.pendingEdits.has(item.parsed.eventId)) {
         await this.applyPendingEdit(item.parsed.eventId, item.roomId);
       }
+      if (item.parsed.eventId && this.pendingReactions.has(item.parsed.eventId)) {
+        await this.applyPendingReactions(item.parsed.eventId);
+      }
       // Apply stashed poll votes/end for newly inserted poll.start messages
       if (
         item.parsed.eventId
@@ -363,6 +366,7 @@ export class EventWriter {
       // Apply any edit that arrived before the base message
       if (parsed.eventId) {
         await this.applyPendingEdit(parsed.eventId, parsed.roomId);
+        await this.applyPendingReactions(parsed.eventId);
       }
       // Apply any stashed poll votes/end that arrived before this poll.start
       if (parsed.eventId && parsed.type === MessageType.poll) {
@@ -406,6 +410,9 @@ export class EventWriter {
       if (m.eventId && this.pendingEdits.has(m.eventId)) {
         await this.applyPendingEdit(m.eventId, m.roomId);
       }
+      if (m.eventId && this.pendingReactions.has(m.eventId)) {
+        await this.applyPendingReactions(m.eventId);
+      }
       // Apply any stashed poll votes/end for poll.start messages
       if (m.eventId && m.type === MessageType.poll && this.pendingPollVotes.has(m.eventId)) {
         await this.applyPendingPollUpdates(m.eventId);
@@ -437,7 +444,12 @@ export class EventWriter {
     // Land messages first so the getByEventId lookups below don't drop fresh
     // reactions whose targets are merely un-flushed.
     await this.writeBuffer?.flushNow();
+    await this.applyReactions(ops);
+  }
 
+  /** Write reactions onto their target messages. Must not flush the message
+   *  buffer: it also runs from inside a message flush (applyPendingReactions). */
+  private async applyReactions(ops: ParsedReaction[]): Promise<void> {
     const changedRooms = new Set<string>();
 
     // Group by target message — one getByEventId + one updateReactions each.
@@ -452,7 +464,11 @@ export class EventWriter {
       for (const [targetEventId, list] of byTarget) {
         try {
           const msg = await this.messageRepo.getByEventId(targetEventId);
-          if (!msg) continue; // target not in Dexie (yet) — same drop semantics as before
+          if (!msg) {
+            // Target not in Dexie yet: keep the reactions until it lands.
+            this.stashPendingReactions(targetEventId, list);
+            continue;
+          }
 
           const reactions = msg.reactions ?? {};
           let last: ParsedReaction | null = null;
@@ -698,6 +714,42 @@ export class EventWriter {
   // ---------------------------------------------------------------------------
   // Edits
   // ---------------------------------------------------------------------------
+
+  /** Reactions whose target message hasn't landed in Dexie yet, keyed by the
+   *  target eventId. They used to be dropped, so a reaction that arrived before
+   *  its message never showed (audit S3-02). */
+  private pendingReactions = new Map<string, { list: ParsedReaction[]; stashedAt: number }>();
+  private static readonly PENDING_REACTION_TTL_MS = 5 * 60_000;
+  private static readonly PENDING_REACTION_MAX_SIZE = 200;
+
+  private stashPendingReactions(targetEventId: string, list: ParsedReaction[]): void {
+    const entry = this.pendingReactions.get(targetEventId);
+    if (entry) {
+      for (const reaction of list) {
+        if (!entry.list.some((r) => r.eventId === reaction.eventId)) entry.list.push(reaction);
+      }
+    } else {
+      this.pendingReactions.set(targetEventId, { list: [...list], stashedAt: Date.now() });
+    }
+    const now = Date.now();
+    for (const [key, stashed] of this.pendingReactions) {
+      if (now - stashed.stashedAt > EventWriter.PENDING_REACTION_TTL_MS) this.pendingReactions.delete(key);
+    }
+    if (this.pendingReactions.size > EventWriter.PENDING_REACTION_MAX_SIZE) {
+      const oldest = [...this.pendingReactions.entries()]
+        .sort((a, b) => a[1].stashedAt - b[1].stashedAt)
+        .slice(0, this.pendingReactions.size - EventWriter.PENDING_REACTION_MAX_SIZE);
+      for (const [key] of oldest) this.pendingReactions.delete(key);
+    }
+  }
+
+  /** Apply reactions stashed for a message that has just been written. */
+  async applyPendingReactions(eventId: string): Promise<void> {
+    const stashed = this.pendingReactions.get(eventId);
+    if (!stashed) return;
+    this.pendingReactions.delete(eventId);
+    await this.applyReactions(stashed.list);
+  }
 
   /** Edits whose base message hasn't arrived yet (keyed by target eventId) */
   private pendingEdits = new Map<string, { roomId: string; edit: ParsedEdit; stashedAt: number }>();

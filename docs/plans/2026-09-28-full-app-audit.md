@@ -49,7 +49,7 @@ D desktop (Electron).
 | S8-03 | P2 | 5 | D | Packaged Electron app never shows a tray icon — "minimise to tray" hides the window with no way back except relaunching | `electron/tray.cjs` | fixed |
 | W2A-04 | P2 | 3 | WAiD | Profile save failure reason is computed but discarded — every failure shows the same generic "failed to save profile" | `src/app/providers/initializers/app-initializer.ts` | fixed |
 | S2-03 | P2 | 2 | WAiD | Once a queued op in a room permanently fails, later messages in the same room are sent out of order (FIFO invariant silently broken) | `src/shared/lib/local-db/sync-engine.ts` | kept (by design: a failed message keeps its retry, later ones still go, as in Telegram/WhatsApp) |
-| S3-02 | P2 | 6 | AiWD | Live reaction to a not-yet-persisted message is silently and permanently dropped | `src/shared/lib/local-db/event-writer.ts` | open |
+| S3-02 | P2 | 6 | AiWD | Live reaction to a not-yet-persisted message is silently and permanently dropped | `src/shared/lib/local-db/event-writer.ts` | fixed |
 | S5-02 | P2 | 3 | A | `likelyBastyonUser` is a session-wide singleton that leaks from one account into another after `switchAccount` | `src/entities/auth/model/stores.ts` | fixed |
 | S7-04 | P2 | 4 | AiWD | Kick / ban / promote-to-admin / mute failures are silently swallowed in the chat-info member menu | `src/features/chat-info/ui/ChatInfoPanel.vue` | fixed |
 | S8-04 | P2 | 5 | D | Electron window has no application menu and no context menu — no right-click Copy/Paste, no discoverable Reload | `electron/main.cjs (весь файл — нет импорта Menu)` | fixed |
