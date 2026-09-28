@@ -112,6 +112,7 @@ const handleCallback = (event?: MouseEvent) => {
     @pointermove="longPress.onPointermove"
     @pointerup="longPress.onPointerup"
     @pointerleave="longPress.onPointerleave"
+    @pointercancel="longPress.onPointerleave"
   >
     <!-- Phone / video icon in circle -->
     <div

@@ -81,6 +81,21 @@ describe("call card menu (#1091)", () => {
     expect(launch).toHaveBeenCalledTimes(1);
   });
 
+  // A scroll that starts on the card ends in pointercancel, not pointerup: the
+  // armed timer must not open the menu mid-scroll.
+  it("does not open the menu when the press turns into a scroll", async () => {
+    vi.useFakeTimers();
+    const { default: CallEventCard } = await import("../CallEventCard.vue");
+    const wrapper = mount(CallEventCard, { props: { message: callMessage, isOwn: false, tailClass: "" } });
+    const button = wrapper.find("button");
+
+    await button.trigger("pointerdown", { clientX: 5, clientY: 5 });
+    await button.trigger("pointercancel");
+    vi.advanceTimersByTime(600);
+
+    expect(wrapper.emitted("contextmenu")).toBeUndefined();
+  });
+
   it("offers only Delete for a call card, without the reactions row", async () => {
     const { default: MessageContextMenu } = await import("../MessageContextMenu.vue");
     const { ContextMenu } = await import("@/shared/ui/context-menu");
