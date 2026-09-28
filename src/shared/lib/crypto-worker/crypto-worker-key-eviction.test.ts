@@ -27,6 +27,14 @@ import { resolve } from "path";
 const getSource = (): string =>
   readFileSync(resolve(__dirname, "./crypto.worker.ts"), "utf-8");
 
+describe("crypto.worker keyCache — keyed on the members' public keys (audit S1-05)", () => {
+  it("builds the cache key from each member's id and keys, not the ids alone", () => {
+    const source = getSource();
+    const body = source.slice(source.indexOf("function cacheKeyFor("), source.indexOf("function getCachedKeys("));
+    expect(body).toContain("users.map((u) => `${u.id}:${u.keys.join(\",\")}`).join(\";\")");
+  });
+});
+
 describe("crypto.worker keyCache — evicts on decrypt failure", () => {
   it("defines evictCachedKeys using the exact same cache-key scheme as getCachedKeys", () => {
     const source = getSource();

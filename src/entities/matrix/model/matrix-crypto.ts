@@ -681,7 +681,12 @@ export class Pcrypto {
         _block = tetatet ? pcrypto.currentblock.height : 10;
       }
 
-      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v || version}`;
+      // The members' public keys are part of the key: a member who rotated
+      // keys without a membership change kept the cached shared secret for
+      // the whole generation (audit S1-05). `k` stays local (cache + clear).
+      const keyUsers = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(_time, v);
+      const keysFingerprint = md5(keyUsers.map((u) => `${u.id}:${(u.keys ?? []).join(",")}`).join("|")).slice(0, 12);
+      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v || version}-${keysFingerprint}`;
       const ek = `${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`;
 
       if (!lsspromises[ek]) {

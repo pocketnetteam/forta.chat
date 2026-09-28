@@ -237,8 +237,10 @@ async function aesSivEncrypt(
 const keyCache = new Map<string, Record<string, Uint8Array>>();
 const KEY_CACHE_MAX = 128;
 
+/** Keyed on the members' public keys too, so a member who rotated keys gets a
+ *  fresh secret instead of the one cached for their old keys (audit S1-05). */
 function cacheKeyFor(users: CryptoUser[], block: number): string {
-  return `${block}|${users.map((u) => u.id).join(",")}`;
+  return `${block}|${users.map((u) => `${u.id}:${u.keys.join(",")}`).join(";")}`;
 }
 
 function getCachedKeys(

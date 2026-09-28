@@ -75,6 +75,17 @@ describe("aeskeysls — persistent, membership-aware AES-key cache", () => {
     expect(fn).not.toMatch(/usersIds\s*\?\s*usersIds\.join\(","\)\s*:\s*""/);
   });
 
+  // Audit S1-05: a member who rotated keys without a membership event kept the
+  // cached shared secret for the whole member generation.
+  it("includes a fingerprint of the members' public keys in the cache key", () => {
+    const source = getSource();
+    const start = source.indexOf("async function aeskeysls(");
+    const fn = source.slice(start, source.indexOf("\n    }\n", start));
+    expect(fn).toMatch(/const keyUsers = usersIds \? preparedUsersById\(usersIds, v\) : preparedUsers\(_time, v\);/);
+    expect(fn).toMatch(/md5\(keyUsers\.map\(\(u\) => `\$\{u\.id\}:\$\{\(u\.keys \?\? \[\]\)\.join\(","\)\}`\)\.join\("\|"\)\)/);
+    expect(fn).toMatch(/-\$\{v \|\| version\}-\$\{keysFingerprint\}`;/);
+  });
+
   it("persists derived keys through pcrypto.ls (IndexedDB), not an in-memory Map", () => {
     const source = getSource();
     const start = source.indexOf("async function aeskeysls(");
