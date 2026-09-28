@@ -5809,6 +5809,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           // Fetch missing events in parallel (capped at 10 to avoid flooding)
           const fetches = missingIds.slice(0, 10).map(async (eventId) => {
             try {
+              perfCount("net:event");
               const raw = await matrixService.client!.fetchRoomEvent(roomId, eventId);
               if (!raw) return;
 
@@ -5979,6 +5980,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (wasActiveRoom && activeRoomId.value !== roomId) return;
           const prevCount = timelineEvents.length;
           try {
+            perfCount("net:scrollback");
             await matrixService.scrollback(roomId, 50);
           } catch (e) {
             console.warn("[chat-store] scrollback failed:", e);
@@ -6036,6 +6038,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (chatDbKitRef.value && msgs.length > 0) {
         const parsedMessages = toParsedMessages(msgs, indexRawEvents(eventsToParse));
         const dexieWriteWork = async () => {
+          perfCount("dexie:rw:open");
           await chatDbKitRef.value!.eventWriter.writeMessages(parsedMessages);
 
           // Patch Dexie records where parseTimelineEvents resolved a reply
@@ -6055,6 +6058,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           const dbKit = chatDbKitRef.value!;
           for (const m of msgs) {
             if (m.reactions && Object.keys(m.reactions).length > 0 && m.id && !m.id.startsWith("msg_")) {
+              perfCount("dexie:rw:open");
               dbKit.messages.updateReactions(m.id, m.reactions).catch(() => {});
             }
           }
@@ -6090,6 +6094,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const prevCount = getTimelineEvents(matrixRoom).length;
 
       try {
+        perfCount("net:scrollback");
         await matrixService.scrollback(roomId, 50);
       } catch (e) {
         console.warn("[chat-store] loadMoreMessages scrollback failed:", e);
@@ -6142,6 +6147,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       const prevCount = getTimelineEvents(matrixRoom).length;
       try {
+        perfCount("net:scrollback");
         await matrixService.scrollback(roomId, 25);
       } catch {
         return false;
@@ -6156,6 +6162,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       if (chatDbKitRef.value && msgs.length > 0) {
         const parsedMessages = toParsedMessages(msgs, indexRawEvents(events));
+        perfCount("dexie:rw:open");
         await chatDbKitRef.value.eventWriter.writeMessages(parsedMessages);
       }
 
@@ -6183,6 +6190,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       while (keepGoing) {
         const prevCount = getTimelineEvents(matrixRoom).length;
         try {
+          perfCount("net:scrollback");
           await matrixService.scrollback(roomId, 25);
         } catch {
           break;

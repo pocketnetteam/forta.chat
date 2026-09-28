@@ -14,6 +14,7 @@ import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
 import { isCacheLikelyStale, shouldWaitForSyncedMessages } from "../model/room-open-plan";
+import { createRoomOpenTrace } from "../model/room-open-trace";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { useToast } from "@/shared/lib/use-toast";
 import MessageBubble from "./MessageBubble.vue";
@@ -653,6 +654,7 @@ watch(
     const isStale = () => watchVersion !== myVersion;
 
     if (!roomId) return;
+    const trace = createRoomOpenTrace(roomId);
 
     // ═══ PHASE 1: FREEZE STATE ═══
     switching.value = true;
@@ -759,9 +761,12 @@ watch(
         const clearedAtPeek = dbKit.eventWriter.getClearedAtTs(roomId);
         const peek = await dbKit.messages.getMessages(roomId, 1, undefined, clearedAtPeek);
         if (isStale()) return;
+        trace.mark("peek", peek.length);
         if (peek.length > 0) {
           await waitForRoomMessages(roomId, 2000);
           if (isStale()) return;
+          const emitted = chatStore.activeMessages[0]?.roomId === roomId;
+          trace.mark(emitted ? "first-emission" : "emission-timeout");
         }
       }
 
@@ -774,6 +779,7 @@ watch(
         && chatStore.activeMessages[0]?.roomId === roomId;
       const STALE_THRESHOLD = 60_000;
 
+      trace.mark("branch", hasCached ? "cached" : "network");
       if (!hasCached) {
         loading.value = true;
         let parsedCount: number | undefined;
@@ -840,6 +846,7 @@ watch(
         console.warn("[MessageList] settled safety timeout — force revealing scroller");
         settled.value = true;
         switching.value = false;
+        trace.settle();
       }
     }, 3000);
 
@@ -873,6 +880,7 @@ watch(
       settled.value = true;
       switching.value = false;
       checkScroll();
+      trace.settle();
 
       // Prefetch first batch of older messages into Dexie so they're
       // ready when user scrolls up — zero network latency on scroll path.
