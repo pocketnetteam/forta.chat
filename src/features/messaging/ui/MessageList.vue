@@ -13,7 +13,8 @@ import { collapsedCallEventIds, dedupeCallEvents } from "@/entities/chat/lib/ded
 import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
-import { isCacheLikelyStale, shouldWaitForSyncedMessages } from "../model/room-open-plan";
+import { isCacheLikelyStale, type RoomOpenBranch } from "../model/room-open-plan";
+import { runRoomOpenLoad, type RoomOpenLoadResult } from "../model/room-open-load";
 import { createRoomOpenTrace } from "../model/room-open-trace";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import { useToast } from "@/shared/lib/use-toast";
@@ -288,6 +289,13 @@ const switching = ref(false); // true during room switch — suppresses watchers
 const settled = ref(false); // false until messages loaded + scrolled — hides scroller to prevent flicker
 const refreshingStaleCache = ref(false); // true when showing stale cached messages while fresh data loads
 const loadEverAttempted = ref(false); // true only after at least one load cycle ran for the current room
+const networkTimedOut = ref(false); // network-only open ran out of budget with nothing to show → "Retry"
+const openBranch = ref<RoomOpenBranch | null>(null); // branch the current open took
+/** Cached open revealed before its first liveQuery emission (read stuck > 5s):
+ *  Dexie has rows, so keep the skeleton instead of "No messages yet". */
+const isCachedEmissionPending = computed(
+  () => openBranch.value === "cached" && chatStore.activeMessagesRoomId !== chatStore.activeRoomId,
+);
 // Scroll-up pagination: Dexie window first, network scrollback as fallback.
 // networkWaiting = Dexie exhausted, waiting for the network page.
 const {
@@ -600,15 +608,37 @@ let scrollThrottleRaf: number | null = null;
 // Track the settled safety timeout so it can be cleared on room switch
 let pendingSettledTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/** Resolve when activeMessages belong to `roomId`, when the user switches to
- *  another room, or after `timeoutMs` — whichever comes first. Event-driven
- *  replacement for the old 10ms polling loop (WEE-95): setActiveRoom now resets
- *  the liveQuery synchronously, so this only waits for its first emission. */
-const waitForRoomMessages = (roomId: string, timeoutMs: number): Promise<void> =>
+/** Resolve true on the first liveQuery emission read for `roomId`, false when
+ *  the user switches to another room or after `timeoutMs`. Keyed on the room
+ *  the emission was read for (not on `activeMessages[0]`), so an empty result
+ *  counts as an answer too. */
+const waitForFirstEmission = (roomId: string, timeoutMs: number): Promise<boolean> =>
+  new Promise<boolean>((resolve) => {
+    // Legacy (non-Dexie) cache has no liveQuery to wait for.
+    if (!chatStore.chatDbKitRef || chatStore.activeMessagesRoomId === roomId) {
+      resolve(true);
+      return;
+    }
+    let stop: (() => void) | null = null;
+    const finish = (emitted: boolean) => {
+      clearTimeout(timer);
+      stop?.();
+      resolve(emitted);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    stop = watch(
+      () => [chatStore.activeMessagesRoomId, chatStore.activeRoomId] as const,
+      ([emittedFor, activeId]) => {
+        if (activeId !== roomId) finish(false);
+        else if (emittedFor === roomId) finish(true);
+      },
+    );
+  });
+
+/** Resolve when the room shows any message, when the user switches away, or after `timeoutMs`. */
+const waitForAnyMessages = (roomId: string, timeoutMs: number): Promise<void> =>
   new Promise<void>((resolve) => {
-    const matches = (msgs: readonly { roomId: string }[]) =>
-      msgs.length > 0 && msgs[0]?.roomId === roomId;
-    if (matches(chatStore.activeMessages)) {
+    if (chatStore.activeMessages.length > 0) {
       resolve();
       return;
     }
@@ -620,320 +650,291 @@ const waitForRoomMessages = (roomId: string, timeoutMs: number): Promise<void> =
     };
     const timer = setTimeout(finish, timeoutMs);
     stop = watch(
-      () => [chatStore.activeMessages, chatStore.activeRoomId] as const,
-      ([msgs, activeId]) => {
-        if (activeId !== roomId || matches(msgs)) finish();
+      () => [chatStore.activeMessages.length, chatStore.activeRoomId] as const,
+      ([len, activeId]) => {
+        if (activeId !== roomId || len > 0) finish();
       },
     );
   });
 
-/** Resolve when the Dexie liveQuery produced its first emission, or after `timeoutMs`. */
-const waitForDexieReady = (timeoutMs: number): Promise<void> =>
-  new Promise<void>((resolve) => {
-    if (chatStore.dexieMessagesReady) {
-      resolve();
-      return;
-    }
-    let stop: (() => void) | null = null;
-    const finish = () => {
-      clearTimeout(timer);
-      stop?.();
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    stop = watch(() => chatStore.dexieMessagesReady, (ready) => {
-      if (ready) finish();
+// Load messages when active room changes (also re-run by "Retry").
+const openRoom = async (roomId: string | null) => {
+  const myVersion = ++watchVersion;
+  const isStale = () => watchVersion !== myVersion;
+
+  if (!roomId) return;
+  const trace = createRoomOpenTrace(roomId);
+
+  // ═══ PHASE 1: FREEZE STATE ═══
+  switching.value = true;
+  settled.value = false;
+  loading.value = false;
+  loadEverAttempted.value = false;
+  networkTimedOut.value = false;
+  openBranch.value = null;
+  refreshingStaleCache.value = false;
+  newMessageCount.value = 0;
+  resetPagination();
+  showScrollFab.value = false;
+  showDateHeader.value = false;
+  recentMessageIds.value.clear();
+  isNearBottom.value = true;
+  lastScrollTop = 0;
+  lastScrollTime = 0;
+  scrollVelocity = 0;
+  if (chatStore.isDetachedFromLatest) {
+    chatStore.isDetachedFromLatest = false;
+  }
+  if (scrollThrottleRaf !== null) {
+    cancelAnimationFrame(scrollThrottleRaf);
+    scrollThrottleRaf = null;
+  }
+  if (pendingSettledTimeout !== null) {
+    clearTimeout(pendingSettledTimeout);
+    pendingSettledTimeout = null;
+  }
+  forceDismiss();
+  if (roomId !== lastRoomIdSeen) {
+    roomOpenedAt = performance.now();
+    lastRoomIdSeen = roomId;
+  }
+  readTracker.stopTracking();
+
+  // ═══ PHASE 2: DETERMINE ANCHOR ═══
+  let anchorItemIndex = -1;
+  let scrollToBanner = false;
+
+  if (isChatDbReady()) {
+    const dbKit = getChatDb();
+    const clearedAtTs = dbKit.eventWriter.getClearedAtTs(roomId);
+
+    // WEE-95: watermark from the in-memory dexieRoomMap cache + unread count
+    // from the pre-open snapshot (sync, no I/O) instead of scanning the
+    // room's messages with countInboundAfter() — a 100-500ms JS-filter pass
+    // on 10k+ message rooms that blocked the first render. The async
+    // fallbacks only run on a cold cache (boot deep-link).
+    const plan = await resolveUnreadBannerPlan({
+      cachedRoom: chatStore.dexieRoomMap.get(roomId),
+      preOpenUnreadCount: chatStore.getPreOpenUnreadCount(roomId),
+      getRoom: () => dbKit.rooms.getRoom(roomId),
+      countUnreadAfter: (ts) =>
+        dbKit.messages.countInboundAfter(roomId, ts, authStore.address ?? "", clearedAtTs),
+      getLastMessageAtOrBefore: (ts) => dbKit.messages.getLastMessageAtOrBefore(roomId, ts, clearedAtTs),
     });
-  });
+    if (isStale()) return;
 
-// Load messages when active room changes
-watch(
-  () => chatStore.activeRoomId,
-  async (roomId) => {
-    const myVersion = ++watchVersion;
-    const isStale = () => watchVersion !== myVersion;
-
-    if (!roomId) return;
-    const trace = createRoomOpenTrace(roomId);
-
-    // ═══ PHASE 1: FREEZE STATE ═══
-    switching.value = true;
-    settled.value = false;
-    loading.value = false;
-    loadEverAttempted.value = false;
-    refreshingStaleCache.value = false;
-    newMessageCount.value = 0;
-    resetPagination();
-    showScrollFab.value = false;
-    showDateHeader.value = false;
-    recentMessageIds.value.clear();
-    isNearBottom.value = true;
-    lastScrollTop = 0;
-    lastScrollTime = 0;
-    scrollVelocity = 0;
-    if (chatStore.isDetachedFromLatest) {
-      chatStore.isDetachedFromLatest = false;
+    if (import.meta.env.DEV) {
+      console.log("[unread-banner] roomId=%s unread=%d lastReadId=%s", roomId, plan.unreadCount, plan.lastReadId);
     }
-    if (scrollThrottleRaf !== null) {
-      cancelAnimationFrame(scrollThrottleRaf);
-      scrollThrottleRaf = null;
+
+    if (plan.needsBootstrap) {
+      // Bootstrap watermark for legacy rooms (first visit after feature was
+      // added) — fire-and-forget, must not delay the first render (WEE-95).
+      dbKit.messages.getLastNonDeleted(roomId, clearedAtTs)
+        .then((latestMsg) => {
+          if (latestMsg && latestMsg.timestamp > 0) {
+            return dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
+          }
+        })
+        .catch((e) => {
+          console.warn("[unread-banner] watermark bootstrap failed:", e);
+        });
+    } else if (plan.scrollToBanner) {
+      freezeBanner(plan.lastReadId, plan.unreadCount);
+
+      // Ensure the Dexie liveQuery window is large enough to include the
+      // last-read message so the banner can match it in virtualItems.
+      const neededWindow = plan.unreadCount + 20;
+      if (neededWindow > chatStore.messageWindowSize) {
+        void chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
+      }
+
+      scrollToBanner = true;
     }
+  }
+
+  // If no anchor was set, do normal load.
+  // Guard: verify messages belong to the TARGET room, not stale liveQuery data
+  // from the previous room (useLiveQuery intentionally keeps stale data during re-subscription).
+  const hasValidMessages = chatStore.activeMessages.length > 0
+    && chatStore.activeMessages[0]?.roomId === roomId;
+  // With Dexie the liveQuery IS the cache — loadCachedMessages would only
+  // do a redundant 50-row read and return 0. Legacy path only.
+  const usingDexie = !!chatStore.chatDbKitRef;
+  let legacyCacheAge = 0;
+  let openResult: RoomOpenLoadResult | null = null;
+  if (anchorItemIndex === -1 && !hasValidMessages) {
+    if (!usingDexie) {
+      legacyCacheAge = await chatStore.loadCachedMessages(roomId);
+      if (isStale()) return;
+    }
+    // Branch on what Dexie holds, not on whether the liveQuery answered in
+    // time: with rows in Dexie the network is never on the path to the
+    // first screen (plan 2026-09-28, stage 1).
+    openResult = await runRoomOpenLoad({
+      isStale,
+      countLocalRows: async () => {
+        if (!isChatDbReady()) return chatStore.activeMessages.length;
+        const dbKit = getChatDb();
+        const peek = await dbKit.messages.getMessages(
+          roomId, 1, undefined, dbKit.eventWriter.getClearedAtTs(roomId),
+        );
+        return peek.length;
+      },
+      // Guard getChatDb(): it throws before initChatDb() completes (boot race
+      // on login / after logout).
+      hasClearedHistory: () => isChatDbReady() && !!getChatDb().eventWriter.getClearedAtTs(roomId),
+      waitForFirstEmission: (ms) => waitForFirstEmission(roomId, ms),
+      loadFromNetwork: () => loadMessages(roomId),
+      waitForMessages: (ms) => waitForAnyMessages(roomId, ms),
+      hasMessages: () => chatStore.activeMessages.length > 0,
+      setLoading: (value) => { loading.value = value; },
+      trace: trace.mark,
+    });
+    if (!openResult) return;
+    networkTimedOut.value = openResult.networkTimedOut;
+    openBranch.value = openResult.branch;
+  }
+
+  /** Background refresh of a room shown from Dexie — after the reveal, so
+   *  its parse/decrypt/write work never competes with the first read. Runs
+   *  once per open: the 3s safety reveal and a late rAF can both get here. */
+  let afterRevealDone = false;
+  const afterReveal = () => {
+    if (afterRevealDone) return;
+    afterRevealDone = true;
+    trace.settle();
+    refreshInBackground();
+  };
+  const refreshInBackground = () => {
+    if (!openResult || openResult.branch === "network" || isStale()) return;
+    if (isCacheLikelyStale({
+      usingDexie,
+      initialSyncStatus: chatStore.initialSyncStatus,
+      legacyCacheAgeMs: legacyCacheAge,
+      staleThresholdMs: 60_000,
+    })) {
+      refreshingStaleCache.value = true;
+      loadMessages(roomId).catch(() => {}).finally(() => {
+        if (!isStale()) refreshingStaleCache.value = false;
+      });
+    } else {
+      loadMessages(roomId).catch(() => {});
+    }
+  };
+
+  // Mark that at least one load cycle completed for this room.
+  // Empty state is only allowed after this flag is set.
+  loadEverAttempted.value = true;
+
+  if (isStale()) return;
+
+  // ═══ PHASE 3: RENDER + SCROLL ═══
+  await nextTick();
+  if (isStale()) return;
+  await nextTick();
+  if (isStale()) return;
+
+  // Safety net: if rAF never fires or scroll stabilization hangs
+  // (e.g. large rooms with slow rendering), force-reveal after 3s
+  // so the user never sees an empty screen indefinitely.
+  pendingSettledTimeout = setTimeout(() => {
+    pendingSettledTimeout = null;
+    if (!settled.value && !isStale()) {
+      console.warn("[MessageList] settled safety timeout — force revealing scroller");
+      settled.value = true;
+      switching.value = false;
+      afterReveal();
+    }
+  }, 3000);
+
+  requestAnimationFrame(() => {
     if (pendingSettledTimeout !== null) {
       clearTimeout(pendingSettledTimeout);
       pendingSettledTimeout = null;
     }
-    forceDismiss();
-    if (roomId !== lastRoomIdSeen) {
-      roomOpenedAt = performance.now();
-      lastRoomIdSeen = roomId;
-    }
-    readTracker.stopTracking();
+    if (isStale()) return;
 
-    // ═══ PHASE 2: DETERMINE ANCHOR ═══
-    let anchorItemIndex = -1;
-    let scrollToBanner = false;
-
-    if (isChatDbReady()) {
-      const dbKit = getChatDb();
-      const clearedAtTs = dbKit.eventWriter.getClearedAtTs(roomId);
-
-      // WEE-95: watermark from the in-memory dexieRoomMap cache + unread count
-      // from the pre-open snapshot (sync, no I/O) instead of scanning the
-      // room's messages with countInboundAfter() — a 100-500ms JS-filter pass
-      // on 10k+ message rooms that blocked the first render. The async
-      // fallbacks only run on a cold cache (boot deep-link).
-      const plan = await resolveUnreadBannerPlan({
-        cachedRoom: chatStore.dexieRoomMap.get(roomId),
-        preOpenUnreadCount: chatStore.getPreOpenUnreadCount(roomId),
-        getRoom: () => dbKit.rooms.getRoom(roomId),
-        countUnreadAfter: (ts) =>
-          dbKit.messages.countInboundAfter(roomId, ts, authStore.address ?? "", clearedAtTs),
-        getLastMessageAtOrBefore: (ts) => dbKit.messages.getLastMessageAtOrBefore(roomId, ts, clearedAtTs),
-      });
-      if (isStale()) return;
-
+    const el = getScrollContainer();
+    if (scrollToBanner && hasBanner()) {
+      const bannerIdx = virtualItems.value.findIndex(item => item.type === "unread-banner");
       if (import.meta.env.DEV) {
-        console.log("[unread-banner] roomId=%s unread=%d lastReadId=%s", roomId, plan.unreadCount, plan.lastReadId);
+        console.log("[unread-banner] PHASE3 bannerIdx=%d items=%d", bannerIdx, virtualItems.value.length);
       }
-
-      if (plan.needsBootstrap) {
-        // Bootstrap watermark for legacy rooms (first visit after feature was
-        // added) — fire-and-forget, must not delay the first render (WEE-95).
-        dbKit.messages.getLastNonDeleted(roomId, clearedAtTs)
-          .then((latestMsg) => {
-            if (latestMsg && latestMsg.timestamp > 0) {
-              return dbKit.rooms.markAsRead(roomId, latestMsg.timestamp);
-            }
-          })
-          .catch((e) => {
-            console.warn("[unread-banner] watermark bootstrap failed:", e);
-          });
-      } else if (plan.scrollToBanner) {
-        freezeBanner(plan.lastReadId, plan.unreadCount);
-
-        // Ensure the Dexie liveQuery window is large enough to include the
-        // last-read message so the banner can match it in virtualItems.
-        const neededWindow = plan.unreadCount + 20;
-        if (neededWindow > chatStore.messageWindowSize) {
-          void chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
-        }
-
-        scrollToBanner = true;
-      }
-    }
-
-    // If no anchor was set, do normal load.
-    // Guard: verify messages belong to the TARGET room, not stale liveQuery data
-    // from the previous room (useLiveQuery intentionally keeps stale data during re-subscription).
-    const hasValidMessages = chatStore.activeMessages.length > 0
-      && chatStore.activeMessages[0]?.roomId === roomId;
-    if (anchorItemIndex === -1 && !hasValidMessages) {
-      // With Dexie the liveQuery IS the cache — loadCachedMessages would only
-      // do a redundant 50-row read and return 0. Legacy path only.
-      const usingDexie = !!chatStore.chatDbKitRef;
-      const cacheAge = usingDexie ? 0 : await chatStore.loadCachedMessages(roomId);
-      if (isStale()) return;
-
-      // liveQuery can lag behind a Dexie read in loadCachedMessages — avoid treating
-      // a non-empty local DB as "no cache" and forcing Matrix scrollback + loading spinner.
-      if (isChatDbReady()) {
-        const dbKit = getChatDb();
-        const clearedAtPeek = dbKit.eventWriter.getClearedAtTs(roomId);
-        const peek = await dbKit.messages.getMessages(roomId, 1, undefined, clearedAtPeek);
-        if (isStale()) return;
-        trace.mark("peek", peek.length);
-        if (peek.length > 0) {
-          await waitForRoomMessages(roomId, 2000);
-          if (isStale()) return;
-          const emitted = chatStore.activeMessages[0]?.roomId === roomId;
-          trace.mark(emitted ? "first-emission" : "emission-timeout");
-        }
-      }
-
-      if (chatStore.chatDbKitRef && !chatStore.dexieMessagesReady) {
-        await waitForDexieReady(500);
-        if (isStale()) return;
-      }
-
-      const hasCached = chatStore.activeMessages.length > 0
-        && chatStore.activeMessages[0]?.roomId === roomId;
-      const STALE_THRESHOLD = 60_000;
-
-      trace.mark("branch", hasCached ? "cached" : "network");
-      if (!hasCached) {
-        loading.value = true;
-        let parsedCount: number | undefined;
-        try {
-          parsedCount = await loadMessages(roomId);
-        } catch { /* ignore */ }
-        if (isStale()) return;
-
-        if (chatStore.activeMessages.length === 0) {
-          // Skip waiting for messages if history was cleared — no messages will arrive.
-          // Guard getChatDb(): it throws before initChatDb() completes (boot race on
-          // login / after logout). Mirrors the isChatDbReady() pattern used above.
-          const hasClearedHistory = isChatDbReady()
-            ? getChatDb().eventWriter.getClearedAtTs(roomId)
-            : undefined;
-          if (shouldWaitForSyncedMessages({
-            parsedCount,
-            hasClearedHistory: !!hasClearedHistory,
-          })) {
-            const SYNC_WAIT_MS = 8_000;
-            await new Promise<void>((resolve) => {
-              const timer = setTimeout(resolve, SYNC_WAIT_MS);
-              const stopWatch = watch(
-                () => chatStore.activeMessages.length,
-                (len) => { if (len > 0) { clearTimeout(timer); stopWatch(); resolve(); } },
-              );
-              setTimeout(() => stopWatch(), SYNC_WAIT_MS + 50);
-            });
-            if (isStale()) return;
-          }
-        }
-        loading.value = false;
-      } else if (isCacheLikelyStale({
-        usingDexie,
-        initialSyncStatus: chatStore.initialSyncStatus,
-        legacyCacheAgeMs: cacheAge,
-        staleThresholdMs: STALE_THRESHOLD,
-      })) {
-        refreshingStaleCache.value = true;
-        loadMessages(roomId).catch(() => {}).finally(() => { refreshingStaleCache.value = false; });
-      } else {
-        loadMessages(roomId).catch(() => {});
-      }
-    }
-
-    // Mark that at least one load cycle completed for this room.
-    // Empty state is only allowed after this flag is set.
-    loadEverAttempted.value = true;
-
-    if (isStale()) return;
-
-    // ═══ PHASE 3: RENDER + SCROLL ═══
-    await nextTick();
-    if (isStale()) return;
-    await nextTick();
-    if (isStale()) return;
-
-    // Safety net: if rAF never fires or scroll stabilization hangs
-    // (e.g. large rooms with slow rendering), force-reveal after 3s
-    // so the user never sees an empty screen indefinitely.
-    pendingSettledTimeout = setTimeout(() => {
-      pendingSettledTimeout = null;
-      if (!settled.value && !isStale()) {
-        console.warn("[MessageList] settled safety timeout — force revealing scroller");
-        settled.value = true;
-        switching.value = false;
-        trace.settle();
-      }
-    }, 3000);
-
-    requestAnimationFrame(() => {
-      if (pendingSettledTimeout !== null) {
-        clearTimeout(pendingSettledTimeout);
-        pendingSettledTimeout = null;
-      }
-      if (isStale()) return;
-
-      const el = getScrollContainer();
-      if (scrollToBanner && hasBanner()) {
-        const bannerIdx = virtualItems.value.findIndex(item => item.type === "unread-banner");
-        if (import.meta.env.DEV) {
-          console.log("[unread-banner] PHASE3 bannerIdx=%d items=%d", bannerIdx, virtualItems.value.length);
-        }
-        if (bannerIdx >= 0) {
-          // Convert to reversed index for the inverted scroller
-          const reversedIdx = reversedItems.value.findIndex(item => item.type === "unread-banner");
-          if (reversedIdx >= 0) {
-            scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
-          }
-        } else if (el) {
-          el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
+      if (bannerIdx >= 0) {
+        // Convert to reversed index for the inverted scroller
+        const reversedIdx = reversedItems.value.findIndex(item => item.type === "unread-banner");
+        if (reversedIdx >= 0) {
+          scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
         }
       } else if (el) {
         el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
       }
+    } else if (el) {
+      el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
+    }
 
-      // ═══ PHASE 4: REVEAL ═══
-      settled.value = true;
-      switching.value = false;
-      checkScroll();
-      trace.settle();
+    // ═══ PHASE 4: REVEAL ═══
+    settled.value = true;
+    switching.value = false;
+    checkScroll();
+    afterReveal();
 
-      // Prefetch first batch of older messages into Dexie so they're
-      // ready when user scrolls up — zero network latency on scroll path.
-      startPrefetch(roomId);
+    // Prefetch first batch of older messages into Dexie so they're
+    // ready when user scrolls up — zero network latency on scroll path.
+    startPrefetch(roomId);
 
-      // Grace period is now handled inside useUnreadBanner (dismiss lock).
+    // Grace period is now handled inside useUnreadBanner (dismiss lock).
 
-      // Start read tracking with container polling instead of fixed timeout.
-      // getScrollContainer() may return null if VList hasn't created its
-      // internal scroll element yet — poll until available (max ~1s).
-      const startReadTracking = async () => {
-        const MAX_ATTEMPTS = 40; // 40×50ms = 2s — mobile may need longer for layout to settle
-        const POLL_MS = 50;
-        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-          if (chatStore.activeRoomId !== roomId) return; // room changed
-          const container = getScrollContainer();
-          if (container && container.scrollHeight > 0) {
-            const started = readTracker.startTracking(container);
-            if (started) {
-              // Wait one frame for layout to fully settle, then re-scan
-              requestAnimationFrame(() => {
-                readTracker.performManualScan();
-                readTracker.flushNow();
+    // Start read tracking with container polling instead of fixed timeout.
+    // getScrollContainer() may return null if VList hasn't created its
+    // internal scroll element yet — poll until available (max ~1s).
+    const startReadTracking = async () => {
+      const MAX_ATTEMPTS = 40; // 40×50ms = 2s — mobile may need longer for layout to settle
+      const POLL_MS = 50;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        if (chatStore.activeRoomId !== roomId) return; // room changed
+        const container = getScrollContainer();
+        if (container && container.scrollHeight > 0) {
+          const started = readTracker.startTracking(container);
+          if (started) {
+            // Wait one frame for layout to fully settle, then re-scan
+            requestAnimationFrame(() => {
+              readTracker.performManualScan();
+              readTracker.flushNow();
 
-                // Mobile fix: if user lands at the bottom on chat open,
-                // immediately mark the latest inbound message as read.
-                // IntersectionObserver may not fire in mobile WebViews
-                // (column-reverse + dynamic toolbar layout shifts).
-                if (isNearBottom.value) {
-                  const latestTs = findLatestInboundTimestamp();
-                  if (latestTs > 0) {
-                    chatStore.advanceInboundWatermark(roomId, latestTs);
-                  }
+              // Mobile fix: if user lands at the bottom on chat open,
+              // immediately mark the latest inbound message as read.
+              // IntersectionObserver may not fire in mobile WebViews
+              // (column-reverse + dynamic toolbar layout shifts).
+              if (isNearBottom.value) {
+                const latestTs = findLatestInboundTimestamp();
+                if (latestTs > 0) {
+                  chatStore.advanceInboundWatermark(roomId, latestTs);
                 }
-              });
-              return;
-            }
-          }
-          await new Promise<void>(r => setTimeout(r, POLL_MS));
-        }
-        // Last resort: try anyway (container may have zero scrollHeight initially)
-        if (chatStore.activeRoomId === roomId) {
-          const container = getScrollContainer();
-          if (container) {
-            readTracker.startTracking(container);
+              }
+            });
+            return;
           }
         }
-      };
-      startReadTracking();
-    });
-  },
-  { immediate: true },
-);
+        await new Promise<void>(r => setTimeout(r, POLL_MS));
+      }
+      // Last resort: try anyway (container may have zero scrollHeight initially)
+      if (chatStore.activeRoomId === roomId) {
+        const container = getScrollContainer();
+        if (container) {
+          readTracker.startTracking(container);
+        }
+      }
+    };
+    startReadTracking();
+  });
+};
+watch(() => chatStore.activeRoomId, openRoom, { immediate: true });
+
+const handleRetryOpen = () => {
+  void openRoom(chatStore.activeRoomId);
+};
 
 // Track the last message's identity to detect real appends.
 // Only tracks the newest message's stable key — NOT array length.
@@ -1316,22 +1317,41 @@ defineExpose({ scrollToMessage, setSearchQuery });
          Also show skeleton when load hasn't been attempted yet (prevents empty state flash).
          Show skeleton when settled=false to cover the gap where scroller has opacity:0.
          Never during pagination (expandMessageWindow / loadMoreMessages) to avoid skeleton flash. -->
-    <MessageSkeleton v-if="((loading || switching || !loadEverAttempted || !settled || chatStore.isSyncing) && chatStore.activeMessages.length === 0)" />
+    <!-- Overlay, not in flow: the scroller below stays mounted (opacity 0) while loading. -->
+    <MessageSkeleton
+      v-if="!networkTimedOut && ((loading || switching || !loadEverAttempted || !settled || chatStore.isSyncing || isCachedEmissionPending) && chatStore.activeMessages.length === 0)"
+      class="absolute inset-x-0 top-0 z-10"
+    />
 
     <!-- Empty state (only after fully loaded + settled + load was attempted, not during switching) -->
     <div
-      v-if="!loading && !switching && loadEverAttempted && !chatStore.isSyncing && chatStore.activeMessages.length === 0 && settled"
+      v-if="!networkTimedOut && !isCachedEmissionPending && !loading && !switching && loadEverAttempted && !chatStore.isSyncing && chatStore.activeMessages.length === 0 && settled"
       class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-text-on-main-bg-color"
     >
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="opacity-20">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
       </svg>
-      <span class="text-sm">No messages yet. Start a conversation!</span>
+      <span class="text-sm">{{ t("messageList.noMessages") }}</span>
+    </div>
+
+    <!-- Network-only open ran out of budget: offer a retry instead of an endless skeleton.
+         The request keeps running; if it lands, the liveQuery shows the messages. -->
+    <div
+      v-if="networkTimedOut && !loading && chatStore.activeMessages.length === 0"
+      data-testid="room-open-retry"
+      class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 text-text-on-main-bg-color"
+    >
+      <span class="text-sm">{{ t("messageList.loadTimedOut") }}</span>
+      <button
+        class="rounded-lg bg-color-bg-ac px-4 py-2 text-sm font-medium text-text-on-bg-ac-color transition-colors hover:bg-color-bg-ac/90"
+        @click="handleRetryOpen"
+      >
+        {{ t("messageList.retry") }}
+      </button>
     </div>
 
     <!-- Virtualized Messages (custom inverted scroller — column-reverse eliminates prepend scroll jumps) -->
     <ChatVirtualScroller
-      v-if="!loading"
       ref="scrollerRef"
       :items="reversedItems"
       class="h-full overscroll-contain px-4 py-3"

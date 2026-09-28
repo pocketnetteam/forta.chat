@@ -370,6 +370,8 @@ export const en = {
 
   // ── Message list ──
   "messageList.noMessages": "No messages yet. Start a conversation!",
+  "messageList.loadTimedOut": "Messages did not load. Check your connection.",
+  "messageList.retry": "Retry",
   "messageList.isTyping": "{name} is typing",
   "messageList.peopleTyping": "{count} people are typing",
   "messageList.typingTwo": "{name1} and {name2} are typing",

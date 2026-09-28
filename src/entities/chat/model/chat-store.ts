@@ -1401,6 +1401,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     [] as import("@/shared/lib/local-db").LocalMessage[],
   );
 
+  /** Room the current liveQuery emission was read for; null until the first
+   *  emission after a room switch (setActiveRoom resets the snapshot to a
+   *  fresh [] that carries no meta). MessageList waits on this instead of
+   *  guessing from `activeMessages[0]?.roomId`, which never matches an empty
+   *  room. */
+  const activeMessagesRoomId = computed<string | null>(
+    () => dexieWindowMeta.get(dexieMessages.value)?.roomId ?? null,
+  );
+
   // Delta-based room tracking: one-time load + incremental updates via Dexie hooks.
   const dexieRooms = shallowRef<LocalRoom[]>([]);
   const dexieRoomsReady = ref(false);
@@ -7677,6 +7686,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     getDbKit,
     hasMessage,
     dexieMessagesReady,
+    activeMessagesRoomId,
     dexieRoomMap,
     getPreOpenUnreadCount,
     dexieRoomsReady,

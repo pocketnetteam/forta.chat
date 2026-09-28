@@ -372,6 +372,8 @@ export const ru: Record<TranslationKey, string> = {
 
   // ── Message list ──
   "messageList.noMessages": "Сообщений пока нет. Начните беседу!",
+  "messageList.loadTimedOut": "Сообщения не загрузились. Проверьте соединение.",
+  "messageList.retry": "Повторить",
   "messageList.isTyping": "{name} печатает",
   "messageList.peopleTyping": "{count} чел. печатают",
   "messageList.typingTwo": "{name1} и {name2} печатают",
