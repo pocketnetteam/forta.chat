@@ -44,7 +44,7 @@ D desktop (Electron).
 | W2B-05 | P1 | 1 | A | Found while fixing W2B-01: the Bastyon SDK in public/js is copied verbatim with `?.` / `??`, so WebView < 80 cannot parse sdk.js, actions.js, kit.js … and login/registration have no SDK | `vite.config.ts` | fixed |
 | S1-03 | P2 | 3 | WAiD | "Peer hasn't published keys" verdict never self-heals automatically — only a manual Retry bypasses the stale profile cache | `src/widgets/chat-window/ChatWindow.vue` | fixed |
 | S3-01 | P2 | 6 | AiWD | Buffered inbound writes (150ms/500ms) have no flush-on-background hook — message loss on app kill | `src/shared/lib/local-db/write-buffer.ts` | open |
-| S4-03 | P2 | 4 | AiW | MediaViewer (full-screen / gallery) video lacks the timeout + codec-unsupported handling the inline chat bubble already has | `src/features/messaging/ui/MediaViewer.vue` | open |
+| S4-03 | P2 | 4 | AiW | MediaViewer (full-screen / gallery) video lacks the timeout + codec-unsupported handling the inline chat bubble already has | `src/features/messaging/ui/MediaViewer.vue` | fixed |
 | S6-01 | P2 | 6 | A | Push notification title/sender name bypasses local aliases and the raw-ID guard, can downgrade a good native title to a hex ID | `src/shared/lib/push/push-service.ts` | open |
 | S8-03 | P2 | 5 | D | Packaged Electron app never shows a tray icon — "minimise to tray" hides the window with no way back except relaunching | `electron/tray.cjs` | open |
 | W2A-04 | P2 | 3 | WAiD | Profile save failure reason is computed but discarded — every failure shows the same generic "failed to save profile" | `src/app/providers/initializers/app-initializer.ts` | fixed |
