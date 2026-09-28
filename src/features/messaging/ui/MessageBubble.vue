@@ -28,7 +28,7 @@ import ReactionRow from "./ReactionRow.vue";
 import VoiceMessage from "./VoiceMessage.vue";
 import VideoCirclePlayer from "./VideoCirclePlayer.vue";
 import { ref, inject, onMounted, onBeforeUnmount } from "vue";
-import { useLongPress, useSwipeGesture } from "@/shared/lib/gestures";
+import { useLongPress, useSwipeGesture, hasTextSelectionIn } from "@/shared/lib/gestures";
 import { useThemeStore } from "@/entities/theme";
 import { hexDecode } from "@/shared/lib/matrix/functions";
 import { getUserDisplayNameForUI } from "@/entities/chat";
@@ -101,11 +101,20 @@ const forwardedFromName = computed(() => {
 });
 
 const longPressTriggered = ref(false);
-const { onPointerdown: lpPointerdown, onPointermove, onPointerup: lpPointerup, onPointerleave: lpPointerleave } = useLongPress({
+let pressedBubble: Element | null = null;
+const {
+  onPointerdown: lpPointerdown,
+  onPointermove,
+  onPointerup: lpPointerup,
+  onPointerleave: lpPointerleave,
+  onPointercancel: lpPointercancel,
+} = useLongPress({
   onTrigger: (e) => {
     // Guard emission (not the timer cleanup) — re-opening the context menu
     // mid-multiselect would steal the tap (WEE-66 / #863, #924).
     if (chatStore.selectionMode) return;
+    // The same press started a native text selection: leave it to the user.
+    if (hasTextSelectionIn(pressedBubble)) return;
     longPressTriggered.value = true;
     emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
   },
@@ -115,12 +124,14 @@ const onPointerdown = (e: PointerEvent) => {
   // arm long-press at all.
   if (chatStore.selectionMode) return;
   longPressTriggered.value = false;
+  pressedBubble = e.currentTarget instanceof Element ? e.currentTarget : null;
   lpPointerdown(e);
 };
 // Always run cleanup so a timer armed just before selection mode flipped on
 // can't survive to fire.
 const onPointerup = () => { lpPointerup(); };
 const onPointerleave = () => { lpPointerleave(); };
+const onPointercancel = () => { lpPointercancel(); };
 
 const handleRightClick = (e: MouseEvent) => {
   if (chatStore.selectionMode) return;
@@ -802,6 +813,7 @@ const replyPreviewSender = computed(() => {
     @pointermove="onPointermove"
     @pointerup="onPointerup"
     @pointerleave="onPointerleave"
+    @pointercancel="onPointercancel"
     @contextmenu.prevent="handleRightClick"
     @touchstart="onTouchstart"
     @touchmove="onTouchmove"

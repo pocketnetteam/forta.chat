@@ -3,6 +3,12 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import type { Message } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
+import {
+  circleActionOnEnded,
+  clearCirclePausedByUser,
+  isCirclePausedByUser,
+  markCirclePausedByUser,
+} from "../model/video-circle-pause";
 
 interface Props {
   message: Message;
@@ -60,6 +66,8 @@ const setupObserver = () => {
       const entry = entries[0];
       if (!entry || !videoEl.value || !isLoaded.value) return;
       if (entry.isIntersecting) {
+        // The user stopped this circle: coming back into view does not restart it.
+        if (isCirclePausedByUser(fileCacheKey.value)) return;
         videoEl.value.play().then(() => { isPlaying.value = true; showPlayIcon.value = false; }).catch(() => {});
       } else {
         videoEl.value.pause();
@@ -86,7 +94,9 @@ const handleClick = () => {
     videoEl.value.pause();
     isPlaying.value = false;
     showPlayIcon.value = true;
+    markCirclePausedByUser(fileCacheKey.value);
   } else {
+    clearCirclePausedByUser(fileCacheKey.value);
     videoEl.value.play().then(() => { isPlaying.value = true; showPlayIcon.value = false; }).catch(() => {});
   }
 };
@@ -94,10 +104,20 @@ const handleClick = () => {
 const onTimeUpdate = () => { if (videoEl.value) currentTime.value = videoEl.value.currentTime; };
 
 const onEnded = () => {
-  if (videoEl.value) {
-    videoEl.value.currentTime = 0;
-    videoEl.value.play().then(() => { isPlaying.value = true; }).catch(() => {});
+  const el = videoEl.value;
+  if (!el) return;
+  el.currentTime = 0;
+  if (circleActionOnEnded(isMuted.value) === "loop") {
+    el.play().then(() => { isPlaying.value = true; }).catch(() => {});
+    return;
   }
+  // Listened to with sound: stop at the end, back to a muted circle that
+  // waits for a tap instead of starting over.
+  isPlaying.value = false;
+  showPlayIcon.value = true;
+  isMuted.value = true;
+  el.muted = true;
+  markCirclePausedByUser(fileCacheKey.value);
 };
 
 const onCanPlay = () => { isLoaded.value = true; };

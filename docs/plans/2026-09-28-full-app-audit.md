@@ -62,10 +62,10 @@ D desktop (Electron).
 | S2-04 | P2 | 6 | WAiD | Legacy localStorage offline-queue path marks a message "sent" while it is only queued on-device, with no reconnect trigger beyond a browser `online` event | `src/features/messaging/model/use-messages.ts` | open |
 | S3-03 | P2 | 6 | AiWD | Bulk timeline parse drops edits/reactions whose target isn't in the same parsed batch (no Dexie fallback, unlike replies) | `src/entities/chat/model/chat-store.ts` | open |
 | S5-03 | P2 | 2 | WAiD | `bootStatus` reaches `"ready"` before Matrix ever starts connecting — the dedicated "matrix unreachable" boot-error screen can never render | `src/app/index.ts` | covered by S2-01 (timed Matrix retry + connection header) |
-| W2C-03 | P2 | 6 | Ai | Video-circle (video note) player force-loops and force-resumes playback, ignoring pause | `src/features/messaging/ui/VideoCirclePlayer.vue` | open |
+| W2C-03 | P2 | 6 | Ai | Video-circle (video note) player force-loops and force-resumes playback, ignoring pause | `src/features/messaging/ui/VideoCirclePlayer.vue` | fixed |
 | S1-05 | P2 | 6 | WAiD | Derived per-recipient AES key caches are keyed by identity+block, not by the actual public-key bytes — a peer's key rotation can leave a stale shared secret cached for the rest of a group's key-generation lifetime | `src/entities/matrix/model/matrix-crypto.ts` | open |
 | S4-05 | P2 | 6 | Ai | Large media is fully materialized in memory at least twice (Blob + base64 string) on save and on native disk-cache write | `src/features/messaging/model/use-file-download.ts` | open |
-| W2C-01 | P2 | 6 | A | Long-press context menu fires during native text selection, covering the message | `src/features/messaging/ui/MessageBubble.vue` | open |
+| W2C-01 | P2 | 6 | A | Long-press context menu fires during native text selection, covering the message | `src/features/messaging/ui/MessageBubble.vue` | fixed |
 | W2A-02 | P2 | 6 | WAD | `useLocalStorage` has no error handling — every appearance/theme setting can silently fail to persist | `src/shared/lib/browser/use-local-storage.ts` | fixed |
 | S10-08 | P2 | 6 | WAiD | Logout's Dexie deletion failure is silently swallowed — "clear data" guarantee not enforced | `src/entities/auth/model/stores.ts` | fixed |
 | W2D-03 | P2 | 6 | AiWD | Bug report submission is needlessly serial — screenshots upload one at a time, environment diagnostics fetch one native plugin at a time | `src/shared/lib/bug-report/bug-report-sender.ts` | fixed |
