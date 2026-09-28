@@ -3,7 +3,7 @@ import type { Message } from "@/entities/chat";
 import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
-import { useFileDownload } from "../model/use-file-download";
+import { useFileDownload, saveFailureMessageKey } from "../model/use-file-download";
 import { getMatrixClientService } from "@/entities/matrix";
 import { useLazyLoad } from "@/shared/lib/use-lazy-load";
 import { isMessageFailedForRetry } from "../model/message-failed-state";
@@ -735,7 +735,7 @@ const handleFileDownload = async () => {
       showToast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
     } catch (e) {
       console.error("[MessageBubble] save failed:", e);
-      showToast(t("media.saveFailed"), "error");
+      showToast(t(saveFailureMessageKey(e)), "error");
     }
   } finally {
     isSavingFile.value = false;

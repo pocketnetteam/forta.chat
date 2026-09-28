@@ -9,7 +9,7 @@ let mediaViewerInstanceCounter = 0;
 import { ref, computed, watch, onBeforeUnmount } from "vue";
 import type { Message } from "@/entities/chat";
 import { useChatStore, MessageType } from "@/entities/chat";
-import { useFileDownload, invalidateDownloadCache } from "../model/use-file-download";
+import { useFileDownload, invalidateDownloadCache, saveFailureMessageKey } from "../model/use-file-download";
 import {
   videoPlaybackErrorFromMediaError,
   VIDEO_LOAD_TIMEOUT_MS,
@@ -368,7 +368,7 @@ const handleSaveCurrent = async () => {
     toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
   } catch (e) {
     console.error("[MediaViewer] save failed:", e);
-    toast(t("media.saveFailed"), "error");
+    toast(t(saveFailureMessageKey(e)), "error");
   } finally {
     saving.value = false;
   }

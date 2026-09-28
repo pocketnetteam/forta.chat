@@ -70,7 +70,9 @@ describe("WEE-25 / MessageBubble — file/audio save toast + guard", () => {
     // Success branch: must call the cached toast reference (alias `showToast`
     // or destructured `toast`) with the savedToGallery/Downloads key.
     expect(fn).toMatch(/\b(showToast|toast)\(.*media\.savedTo(Gallery|Downloads)/);
-    expect(fn).toMatch(/\b(showToast|toast)\(.*media\.saveFailed.*"error"/);
+    // Error branch: the key comes from saveFailureMessageKey (media.saveFailed,
+    // or media.savePermissionDenied on Android 7-9 — audit S4-04).
+    expect(fn).toMatch(/\b(showToast|toast)\(t\(saveFailureMessageKey\(e\)\), "error"\)/);
     // Audio messages travel through the same file/audio download path —
     // not branching on mime here means audio files now save through the
     // same flow as PDFs, archives, etc. (forta-bugs#753).

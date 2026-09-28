@@ -1,5 +1,6 @@
 package com.forta.chat.plugins.savemedia
 
+import android.Manifest
 import android.content.ContentValues
 import android.net.Uri
 import android.os.Build
@@ -9,10 +10,13 @@ import android.util.Base64
 import androidx.annotation.RequiresApi
 import androidx.annotation.VisibleForTesting
 import com.getcapacitor.JSObject
+import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 import java.io.File
 import java.io.FileOutputStream
 
@@ -25,12 +29,28 @@ import java.io.FileOutputStream
  * to a Share dialog on Android 14+ scoped storage).
  *
  * On API 29+ (Q+) MediaStore RELATIVE_PATH avoids any runtime permission
- * grant. On API 28- the manifest already declares WRITE_EXTERNAL_STORAGE.
+ * grant. On API 24-28 the manifest entry alone is not a grant: every save threw
+ * SecurityException until the permission is asked for at run time, which
+ * save() now does (audit S4-04).
  */
-@CapacitorPlugin(name = "SaveMedia")
+@CapacitorPlugin(
+    name = "SaveMedia",
+    permissions = [
+        Permission(alias = SaveMediaPlugin.STORAGE_ALIAS, strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE]),
+    ],
+)
 class SaveMediaPlugin : Plugin() {
 
     companion object {
+        const val STORAGE_ALIAS = "storage"
+
+        /** Rejection message the JS side turns into "allow storage access". */
+        const val PERMISSION_DENIED = "STORAGE_PERMISSION_DENIED"
+
+        /** Legacy public storage (API 28 and below) needs the runtime grant. */
+        @VisibleForTesting
+        fun needsLegacyStoragePermission(sdkInt: Int): Boolean = sdkInt < 29
+
         private const val MAX_NAME_LENGTH = 200
         private const val FALLBACK_NAME = "file"
 
@@ -110,6 +130,25 @@ class SaveMediaPlugin : Plugin() {
 
     @PluginMethod
     fun save(call: PluginCall) {
+        if (needsLegacyStoragePermission(Build.VERSION.SDK_INT) &&
+            getPermissionState(STORAGE_ALIAS) != PermissionState.GRANTED
+        ) {
+            requestPermissionForAlias(STORAGE_ALIAS, call, "storagePermissionCallback")
+            return
+        }
+        saveGranted(call)
+    }
+
+    @PermissionCallback
+    private fun storagePermissionCallback(call: PluginCall) {
+        if (getPermissionState(STORAGE_ALIAS) == PermissionState.GRANTED) {
+            saveGranted(call)
+        } else {
+            call.reject(PERMISSION_DENIED, PERMISSION_DENIED)
+        }
+    }
+
+    private fun saveGranted(call: PluginCall) {
         val base64 = call.getString("base64")
             ?: return call.reject("base64 required")
         val rawFileName = call.getString("fileName")

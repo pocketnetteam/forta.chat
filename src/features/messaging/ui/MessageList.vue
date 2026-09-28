@@ -10,7 +10,7 @@ import { stripMentionAddresses } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
 import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "@/entities/chat/lib/dedupe-call-events";
-import { useFileDownload } from "../model/use-file-download";
+import { useFileDownload, saveFailureMessageKey } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
 import { isCacheLikelyStale, shouldWaitForSyncedMessages } from "../model/room-open-plan";
@@ -233,7 +233,7 @@ const handleSaveMedia = async (message: import("@/entities/chat").Message) => {
       toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
     } catch (e) {
       console.error("[MessageList] save failed:", e);
-      toast(t("media.saveFailed"), "error");
+      toast(t(saveFailureMessageKey(e)), "error");
     }
   } finally {
     savingInFlight.delete(cacheKey);

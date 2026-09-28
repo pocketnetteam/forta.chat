@@ -463,6 +463,7 @@ export const en = {
   "media.savedToGallery": "Saved to gallery",
   "media.savedToDownloads": "Saved to Downloads",
   "media.saveFailed": "Failed to save file",
+  "media.savePermissionDenied": "Allow Forta Chat to access storage in the system settings to save files.",
 
   // ── Drop overlay ──
   "drop.title": "Drop files here to send",

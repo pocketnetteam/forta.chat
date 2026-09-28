@@ -794,6 +794,17 @@ function guessMime(fileName: string): string {
   return MIME_BY_EXT[ext] ?? "application/octet-stream";
 }
 
+/** i18n key for a failed save. Android 7-9 needs the storage permission and
+ *  the plugin rejects with STORAGE_PERMISSION_DENIED when it was refused, so
+ *  the user learns what to allow instead of a bare "failed" (audit S4-04). */
+export function saveFailureMessageKey(error: unknown): "media.savePermissionDenied" | "media.saveFailed" {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  const code = (error as { code?: unknown } | null)?.code;
+  return text.includes("STORAGE_PERMISSION_DENIED") || code === "STORAGE_PERMISSION_DENIED"
+    ? "media.savePermissionDenied"
+    : "media.saveFailed";
+}
+
 /** Save media to the Android gallery / Downloads folder via the native
  *  SaveMediaPlugin (MediaStore.insert). Session 58 replaces the prior
  *  FileOpener + Share fallback path that silently degraded to a Share

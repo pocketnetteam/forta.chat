@@ -464,6 +464,7 @@ export const ru: Record<TranslationKey, string> = {
   "media.save": "Сохранить",
   "media.savedToGallery": "Сохранено в галерею",
   "media.savedToDownloads": "Сохранено в Загрузки",
+  "media.savePermissionDenied": "Чтобы сохранять файлы, разрешите Forta Chat доступ к памяти в настройках системы.",
   "media.saveFailed": "Не удалось сохранить файл",
 
   // ── Drop overlay ──
