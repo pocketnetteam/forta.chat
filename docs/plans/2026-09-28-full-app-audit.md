@@ -76,5 +76,5 @@ D desktop (Electron).
 | S5-04 | P3 | 5 | WAiD | Captcha SVG is sanitized with hand-rolled regexes before `v-html` (defense-in-depth gap, not currently exploitable from an attacker-controlled source) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | fixed |
 | S6-04 | P3 | 6 | Ai | Switching accounts leaks native PushData listeners — every future push and notification tap is handled once per prior account switch | `src/shared/lib/push/push-service.ts` | open |
 | W2A-05 | P3 | 6 | WAiD | `editUserData` skips the unspents preload that registration has — profile save can silently hit `actions_noinputs` on a low-balance account | `src/app/providers/initializers/app-initializer.ts` | fixed |
-| W2B-04 | P3 | 6 | A | Bug-report textarea has no draft persistence — rotation text-loss report could not be reproduced from `AndroidManifest`/component code | `android/app/src/main/AndroidManifest.xml` | open |
+| W2B-04 | P3 | 6 | A | Bug-report textarea has no draft persistence — rotation text-loss report could not be reproduced from `AndroidManifest`/component code | `android/app/src/main/AndroidManifest.xml` | fixed |
 | S10-07 | P3 | 5 | D | Bug reports from Electron always show `OS: n/a` (P3, explicitly requested) | `src/shared/lib/bug-report/collect-environment.ts` | fixed |

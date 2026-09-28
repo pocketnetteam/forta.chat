@@ -16,6 +16,7 @@ import { isNative } from "@/shared/lib/platform";
 import { useAuthStore } from "@/entities/auth";
 import { collectAiDiagnostics } from "@/entities/local-ai";
 import { useBugReport } from "../model/use-bug-report";
+import { clearBugReportDraft, loadBugReportDraft, saveBugReportDraft } from "../model/bug-report-draft";
 
 const { isOpen, prefillContext, prefillError, close } = useBugReport();
 const authStore = useAuthStore();
@@ -43,7 +44,9 @@ watch(isOpen, async (val) => {
     if (prefillError.value) {
       parts.push(`\n${t("bugReport.errorLabel")}: ${prefillError.value}`);
     }
-    description.value = parts.join("");
+    // A report opened for a specific error starts from it; otherwise the
+    // draft the user was typing comes back (audit W2B-04).
+    description.value = parts.join("") || loadBugReportDraft();
 
     screenshots.value = [];
     sending.value = false;
@@ -63,6 +66,16 @@ watch(isOpen, async (val) => {
       collectEncryptionDiagnostics(),
     ]);
   }
+});
+
+watch(description, (text) => {
+  if (!sent.value) saveBugReportDraft(text);
+});
+
+// Remounted while open (the watch above only runs on a change of isOpen):
+// bring the draft back instead of an empty field.
+onMounted(() => {
+  if (isOpen.value && !description.value) description.value = loadBugReportDraft();
 });
 
 const addScreenshot = (base64: string, format: string) => {
@@ -142,6 +155,7 @@ const handleSend = async () => {
       console.log("[BugReport] tracked locally for", authStore.address);
     }
     sent.value = true;
+    clearBugReportDraft();
     if (result.screenshotsFailed > 0) {
       errorMsg.value = `${t("bugReport.screenshotUploadFailed")} (${result.uploadError ?? "unknown"})`;
     }
