@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { WriteBuffer, type BufferedWrite, type WriteBufferOptions } from "./write-buffer";
+import { WriteBuffer, WRITE_BUFFER_MAX_RETRIES, type BufferedWrite, type WriteBufferOptions } from "./write-buffer";
 
 function makeItem(roomId = "!room:server", eventId = "evt1"): BufferedWrite {
   return {
@@ -113,28 +113,53 @@ describe("WriteBuffer", () => {
     buf.dispose();
   });
 
-  it("handles flush errors without crashing", async () => {
+  // Audit S3-01: a failed batch used to be dropped at once, losing the
+  // incoming messages it held. It is now retried, in order, then dropped.
+  it("retries a failed batch in order, then succeeds", async () => {
+    const flushed: string[][] = [];
+    const flaky = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("DB busy"))
+      .mockImplementation(async (items: BufferedWrite[]) => {
+        flushed.push(items.map((i) => i.localMsg.eventId as string));
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const buf = new WriteBuffer(flaky, { delayMs: 100 });
+    buf.enqueue(makeItem("!r1", "e1"));
+    buf.enqueue(makeItem("!r1", "e2"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(flaky).toHaveBeenCalledTimes(1);
+
+    buf.enqueue(makeItem("!r1", "e3"));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(flushed).toEqual([["e1", "e2", "e3"]]);
+    warn.mockRestore();
+    await buf.dispose();
+  });
+
+  it("drops a batch that keeps failing, without crashing", async () => {
     const errorFlush = vi.fn().mockRejectedValue(new Error("DB error"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const buf = new WriteBuffer(errorFlush, { delayMs: 100 });
-
     buf.enqueue(makeItem("!r1", "e1"));
-    buf.enqueue(makeItem("!r1", "e2"));
+    await vi.advanceTimersByTimeAsync(60_000);
 
-    await vi.advanceTimersByTimeAsync(100);
-
-    expect(errorFlush).toHaveBeenCalledTimes(1);
+    // First try + WRITE_BUFFER_MAX_RETRIES retries, then dropped.
+    expect(errorFlush).toHaveBeenCalledTimes(1 + WRITE_BUFFER_MAX_RETRIES);
     expect(consoleSpy).toHaveBeenCalled();
 
-    // Buffer should be drained even on error (items not re-queued silently)
-    // Enqueue more — should work fine
-    buf.enqueue(makeItem("!r1", "e3"));
+    // The buffer still works afterwards.
+    buf.enqueue(makeItem("!r1", "e2"));
     await vi.advanceTimersByTimeAsync(100);
-    expect(errorFlush).toHaveBeenCalledTimes(2);
+    expect(errorFlush).toHaveBeenCalledTimes(2 + WRITE_BUFFER_MAX_RETRIES);
 
+    warn.mockRestore();
     consoleSpy.mockRestore();
-    buf.dispose();
+    await buf.dispose();
   });
 
   it("dispose() flushes remaining items and stops timers", async () => {

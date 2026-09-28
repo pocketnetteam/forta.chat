@@ -3599,6 +3599,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  // Incoming messages and reactions wait up to 150/500 ms in the event
+  // writer's buffers; an app closed or killed in that window lost them
+  // (audit S3-01). Write them out as soon as the app goes to the background.
+  const flushIncomingWrites = () => {
+    chatDbKitRef.value?.eventWriter.flushWriteBuffer().catch((e) => {
+      console.warn("[chat-store] flushing incoming writes on background failed:", e);
+    });
+  };
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushIncomingWrites();
+    });
+    window.addEventListener("pagehide", flushIncomingWrites);
+  }
+
   // Listen for visibility changes to send pending read receipts
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
@@ -3641,6 +3656,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
           // 4. Self-heal unread counts — fix any drift accumulated during suspension
           syncAllUnreadFromMatrix();
+        } else {
+          flushIncomingWrites();
         }
       });
     }).catch(() => {});

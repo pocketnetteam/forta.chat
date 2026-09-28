@@ -22,6 +22,11 @@ export interface WriteBufferOptions {
 
 type FlushCallback<T> = (items: T[]) => Promise<void>;
 
+/** A batch whose write failed is put back and tried again this many times
+ *  (with a growing delay) before it is dropped. It used to be dropped at once,
+ *  losing the incoming messages it held (audit S3-01). */
+export const WRITE_BUFFER_MAX_RETRIES = 3;
+
 // ---------------------------------------------------------------------------
 // WriteBuffer — accumulates DB writes and flushes them in a single batch
 // ---------------------------------------------------------------------------
@@ -36,6 +41,8 @@ export class WriteBuffer<T = BufferedWrite> {
    *  flushNow() callers get a real "everything enqueued before this call
    *  is committed" guarantee even when a maxSize force-flush is running. */
   private inFlight: Promise<void> | null = null;
+  /** Failed flushes in a row. */
+  private failures = 0;
 
   constructor(
     private readonly onFlush: FlushCallback<T>,
@@ -100,8 +107,18 @@ export class WriteBuffer<T = BufferedWrite> {
     const run = prev.then(async () => {
       try {
         await this.onFlush(items);
+        this.failures = 0;
       } catch (err) {
-        console.error("[WriteBuffer] flush failed:", err);
+        this.failures++;
+        if (!this.disposed && this.failures <= WRITE_BUFFER_MAX_RETRIES) {
+          console.warn(`[WriteBuffer] flush failed, will retry (${this.failures}/${WRITE_BUFFER_MAX_RETRIES}):`, err);
+          // Back in front of anything enqueued meanwhile, so order holds.
+          this.buffer = items.concat(this.buffer);
+          this.scheduleRetry();
+        } else {
+          console.error(`[WriteBuffer] flush failed, dropping ${items.length} item(s):`, err);
+          this.failures = 0;
+        }
       }
     });
     this.inFlight = run;
@@ -109,6 +126,14 @@ export class WriteBuffer<T = BufferedWrite> {
     if (this.inFlight === run) {
       this.inFlight = null;
     }
+  }
+
+  private scheduleRetry(): void {
+    this.clearTimer();
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.flush();
+    }, this.delayMs * 2 ** this.failures);
   }
 
   private clearTimer(): void {
