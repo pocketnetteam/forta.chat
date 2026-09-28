@@ -7,6 +7,7 @@ const {
   net,
   session,
   dialog,
+  Menu,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -24,6 +25,8 @@ const {
   registerProtocolClient,
 } = require("./deep-links.cjs");
 const { createAppTray } = require("./tray.cjs");
+const { guardWindowNavigation } = require("./navigation.cjs");
+const { wireContextMenuAndReload } = require("./context-menu.cjs");
 const { initAutoUpdater } = require("./auto-updater.cjs");
 const {
   isElectronSmokeMode,
@@ -258,9 +261,10 @@ function bootElectronApp() {
       if (mainWindow === win) mainWindow = null;
     });
 
-    // Close → tray (when enabled); Quit from tray sets isQuitting.
+    // Close → tray (when enabled); Quit from tray sets isQuitting. Without a
+    // tray icon there is no way back to a hidden window, so close normally.
     win.on("close", (event) => {
-      if (isQuitting || !desktopSettings.closeToTray) return;
+      if (isQuitting || !desktopSettings.closeToTray || !tray) return;
       event.preventDefault();
       win.hide();
       // macOS: hiding leaves the app in dock; fine for messenger UX.
@@ -301,11 +305,15 @@ function bootElectronApp() {
 
     registerWindowIpc();
     wireZoomShortcuts(win);
+    wireContextMenuAndReload(win, Menu);
 
-    // Open external links in the default browser
-    win.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url);
-      return { action: "deny" };
+    const appUrl = isDev ? process.env.VITE_DEV_SERVER_URL : "app://chat/index.html";
+
+    // Links open in the default browser (http/https/mailto only); the window
+    // itself never leaves the app.
+    guardWindowNavigation(win.webContents, {
+      appUrl,
+      openExternal: (url) => shell.openExternal(url),
     });
 
     // Mic / camera for calls
@@ -316,11 +324,7 @@ function bootElectronApp() {
       },
     );
 
-    if (isDev) {
-      win.loadURL(process.env.VITE_DEV_SERVER_URL);
-    } else {
-      win.loadURL("app://chat/index.html");
-    }
+    win.loadURL(appUrl);
 
     if (wantDevTools) {
       win.webContents.openDevTools({ mode: "detach" });
@@ -440,7 +444,7 @@ function bootElectronApp() {
     // With close-to-tray the window is hidden, not destroyed — this only
     // fires when the last window is actually closed (quit / closeToTray off).
     if (process.platform !== "darwin") {
-      if (!desktopSettings.closeToTray || isQuitting) app.quit();
+      if (!desktopSettings.closeToTray || isQuitting || !tray) app.quit();
     }
   });
 }

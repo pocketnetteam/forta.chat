@@ -43,15 +43,28 @@ function createAppTray({ onShow, onQuit }) {
   return tray;
 }
 
+/**
+ * Where the tray icon may be. electron-builder packs only dist/ and electron/,
+ * so build/ and public/ exist in a dev run alone; dist/forta-icon.png (Vite's
+ * copy of public/) is what a packaged app finds. Without it the tray never
+ * appeared and "close to tray" hid the window for good (audit S8-03).
+ * @param {string} baseDir the electron/ directory
+ * @returns {string[]}
+ */
+function trayIconCandidates(baseDir) {
+  return [
+    path.join(baseDir, "..", "build", "icons", "tray-16.png"),
+    path.join(baseDir, "..", "build", "icons", "tray-32.png"),
+    path.join(baseDir, "..", "build", "icons", "512x512.png"),
+    path.join(baseDir, "..", "build", "icon.png"),
+    path.join(baseDir, "..", "public", "forta-icon.png"),
+    path.join(baseDir, "..", "dist", "forta-icon.png"),
+  ];
+}
+
 /** @returns {import("electron").NativeImage | null} */
 function loadTrayIcon() {
-  const candidates = [
-    path.join(__dirname, "..", "build", "icons", "tray-16.png"),
-    path.join(__dirname, "..", "build", "icons", "tray-32.png"),
-    path.join(__dirname, "..", "build", "icons", "512x512.png"),
-    path.join(__dirname, "..", "build", "icon.png"),
-    path.join(__dirname, "..", "public", "forta-icon.png"),
-  ];
+  const candidates = trayIconCandidates(__dirname);
 
   for (const file of candidates) {
     try {
@@ -70,4 +83,4 @@ function loadTrayIcon() {
   return null;
 }
 
-module.exports = { createAppTray };
+module.exports = { createAppTray, trayIconCandidates };
