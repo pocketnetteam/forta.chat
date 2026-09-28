@@ -24,7 +24,7 @@ D desktop (Electron).
 | S3b-01 | P1 | 2 | AiWD | Active room silently vanishes when `getRoom()` transiently misses — matches #1390 | `src/entities/chat/model/chat-store.ts` | fixed |
 | S5-01 | P1 | 3 | WAiD | Secondary accounts never get their encryption keys verified/republished — and the one manual recovery path the code refers to doesn't exist in the UI | `src/entities/auth/model/stores.ts` | fixed |
 | S7-03 | P1 | 1 | AiWD | Adding a member without published encryption keys to a group breaks sending for the whole group, with no warning anywhere in the UI | `src/widgets/chat-window/ChatWindow.vue` | fixed |
-| S8-01 | P1 | 4 | A | Homeserver mirror failover is fully disabled while Tor is on — a dead primary is never rotated away from | `src/entities/matrix/model/matrix-client.ts` | open |
+| S8-01 | P1 | 4 | A | Homeserver mirror failover is fully disabled while Tor is on — a dead primary is never rotated away from | `src/entities/matrix/model/matrix-client.ts` | fixed |
 | W2B-02 | P1 | 1 | Ai | `crypto.randomUUID()` unguarded and unpolyfilled on the attachment/voice send paths — silently swallowed by `Promise.allSettled` | `public/legacy-polyfills.js` | fixed |
 | S10-02 | P1 | 5 | WAiD | SVG XSS sanitizer bypass on the registration captcha (`v-html` with untrusted content) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | open |
 | S3b-02 | P1 | 2 | AiWD | Invalid/expired Matrix session (M_UNKNOWN_TOKEN) is never detected — sync dies silently and the banner then LIES "up to date" | `src/entities/matrix/model/matrix-client.ts` | fixed |

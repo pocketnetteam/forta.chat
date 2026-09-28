@@ -9,6 +9,8 @@ import {
   findLiveMatrixHost,
   failoverProbeOrder,
   SyncWatchdog,
+  PING_TIMEOUT_MS,
+  PING_TIMEOUT_TOR_MS,
   type SyncWatchdogDeps,
 } from "../sync-failover";
 import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
@@ -383,5 +385,20 @@ describe("matrix-client.ts wiring", () => {
     const pingIdx = source.indexOf("async pingServers(");
     const pingBody = source.slice(pingIdx, pingIdx + 400);
     expect(pingBody).toMatch(/torProxyUrl/);
+  });
+
+  // Audit S8-01: under Tor findLiveHost answered "the current host" without a
+  // probe, so a dead primary was never rotated away from.
+  it("the watchdog's failover really probes under Tor, with the Tor budget", () => {
+    const probeIdx = source.indexOf("private async probeHost(");
+    const probeBody = source.slice(probeIdx, source.indexOf("\n  }", probeIdx));
+    expect(probeBody).not.toMatch(/if \(this\.torProxyUrl\) return/);
+    expect(probeBody).toContain("this.torProxyUrl ? PING_TIMEOUT_TOR_MS : PING_TIMEOUT_MS");
+
+    const findIdx = source.indexOf("private async findLiveHost(");
+    const findBody = source.slice(findIdx, source.indexOf("\n  }", findIdx));
+    expect(findBody).not.toContain("torProxyUrl");
+    expect(findBody).toContain("findLiveMatrixHost(");
+    expect(PING_TIMEOUT_TOR_MS).toBeGreaterThan(PING_TIMEOUT_MS);
   });
 });

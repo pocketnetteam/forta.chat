@@ -26,6 +26,7 @@ import {
   failoverProbeOrder,
   SyncWatchdog,
   PING_TIMEOUT_MS,
+  PING_TIMEOUT_TOR_MS,
   ERROR_RETRY_BASE_MS,
   ERROR_RETRY_MAX_MS,
   CLIENT_RECOVERY_BASE_MS,
@@ -653,29 +654,31 @@ export class MatrixClientService {
    *  Used before connecting so a dead/throttled primary doesn't strand /sync
    *  (WEE-105 H1). Honours primary priority so a healthy primary is untouched. */
   async pingServers(): Promise<string> {
-    // Under Tor the SDK routes through the local reverse proxy; a bare axios
-    // ping would always fail and just burn 2×PING_TIMEOUT_MS of dead boot
-    // latency. Tor is out of scope here (it isn't a working transport for us),
-    // so keep the current host and skip probing entirely.
+    // Under Tor keep the current host at boot: probing over fresh circuits
+    // would add seconds to every start. The watchdog probes the mirrors (with
+    // the Tor budget) once sync is actually stuck — see findLiveHost.
     if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
     return pickLiveMatrixHost((host) => this.probeHost(host));
   }
 
-  /** Single-host /versions probe. Tor skips network and treats the current
-   *  baseUrl host as live. */
+  /** Single-host /versions probe. Under Tor it travels the way the SDK's own
+   *  requests do (the service worker hands it to the local Tor proxy), with a
+   *  longer budget. */
   private async probeHost(host: string): Promise<boolean> {
-    if (this.torProxyUrl) return host === hostFromBaseUrl(this.baseUrl);
     try {
-      await axios.get(`https://${host}/_matrix/client/versions`, { timeout: PING_TIMEOUT_MS });
+      await axios.get(`https://${host}/_matrix/client/versions`, {
+        timeout: this.torProxyUrl ? PING_TIMEOUT_TOR_MS : PING_TIMEOUT_MS,
+      });
       return true;
     } catch {
       return false;
     }
   }
 
-  /** First live host in `order`, or null when every probe fails (no primary fallback). */
+  /** First live host in `order`, or null when every probe fails (no primary fallback).
+   *  Probes under Tor too: answering "the current host" without asking kept the
+   *  watchdog failing over to the same dead host for hours (audit S8-01). */
   private async findLiveHost(order: readonly string[]): Promise<string | null> {
-    if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
     return findLiveMatrixHost((host) => this.probeHost(host), order);
   }
 
