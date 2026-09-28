@@ -26,7 +26,7 @@ D desktop (Electron).
 | S7-03 | P1 | 1 | AiWD | Adding a member without published encryption keys to a group breaks sending for the whole group, with no warning anywhere in the UI | `src/widgets/chat-window/ChatWindow.vue` | fixed |
 | S8-01 | P1 | 4 | A | Homeserver mirror failover is fully disabled while Tor is on — a dead primary is never rotated away from | `src/entities/matrix/model/matrix-client.ts` | fixed |
 | W2B-02 | P1 | 1 | Ai | `crypto.randomUUID()` unguarded and unpolyfilled on the attachment/voice send paths — silently swallowed by `Promise.allSettled` | `public/legacy-polyfills.js` | fixed |
-| S10-02 | P1 | 5 | WAiD | SVG XSS sanitizer bypass on the registration captcha (`v-html` with untrusted content) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | open |
+| S10-02 | P1 | 5 | WAiD | SVG XSS sanitizer bypass on the registration captcha (`v-html` with untrusted content) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | fixed |
 | S3b-02 | P1 | 2 | AiWD | Invalid/expired Matrix session (M_UNKNOWN_TOKEN) is never detected — sync dies silently and the banner then LIES "up to date" | `src/entities/matrix/model/matrix-client.ts` | fixed |
 | S4-01 | P1 | 4 | A | Native Tor media download has no connect/read timeout — hangs forever and permanently exhausts the app-wide 3-slot download gate | `android/app/src/main/java/com/forta/chat/plugins/filetransfer/TorFilePlugin.kt` | fixed |
 | S7-01 | P1 | 4 | AiWD | Leaving/deleting a group silently no-ops on any network hiccup, and the tombstone auto-revives — the group reappears with zero explanation | `src/entities/chat/model/chat-store.ts` | fixed |
@@ -73,7 +73,7 @@ D desktop (Electron).
 | W2D-01 | P2 | 6 | WDAi | Connection-status indicator freezes forever after the first ChatSidebar remount (orphaned singleton watcher) | `src/features/sync-status/model/use-sync-status.ts` | open |
 | W2D-02 | P2 | 6 | WAiD | Channels/Bastyon-post browsing accumulates unbounded memory and DOM over a session | `src/entities/channel/model/channel-store.ts` | open |
 | W2B-03 | P2 | 6 | A | `isFcmAvailable()` reflects build-time Firebase config, not runtime Google Play Services — push silently never works on Huawei/GMS-less devices (boot itself is NOT blocked — verified) | `android/app/src/main/java/com/forta/chat/plugins/push/PushDataPlugin.kt` | open |
-| S5-04 | P3 | 5 | WAiD | Captcha SVG is sanitized with hand-rolled regexes before `v-html` (defense-in-depth gap, not currently exploitable from an attacker-controlled source) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | open |
+| S5-04 | P3 | 5 | WAiD | Captcha SVG is sanitized with hand-rolled regexes before `v-html` (defense-in-depth gap, not currently exploitable from an attacker-controlled source) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | fixed |
 | S6-04 | P3 | 6 | Ai | Switching accounts leaks native PushData listeners — every future push and notification tap is handled once per prior account switch | `src/shared/lib/push/push-service.ts` | open |
 | W2A-05 | P3 | 6 | WAiD | `editUserData` skips the unspents preload that registration has — profile save can silently hit `actions_noinputs` on a low-balance account | `src/app/providers/initializers/app-initializer.ts` | open |
 | W2B-04 | P3 | 6 | A | Bug-report textarea has no draft persistence — rotation text-loss report could not be reproduced from `AndroidManifest`/component code | `android/app/src/main/AndroidManifest.xml` | open |
