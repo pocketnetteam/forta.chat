@@ -33,7 +33,7 @@ D desktop (Electron).
 | S8-02 | P1 | owner | AD | Android and Electron auto-updaters never route through Tor — update checks/downloads silently fail wherever GitHub is blocked | `android/app/src/main/java/com/forta/chat/updater/AppUpdater.kt` | open |
 | W2A-01 | P1 | 3 | WAiD | Self-missing encryption keys permanently block 1:1 messaging; UI blames the peer; the only fix path is dead code | `src/entities/matrix/model/matrix-crypto.ts` | open |
 | S10-04 | P1 | 5 | D | Electron: unrestricted top-level navigation + `shell.openExternal` called with no scheme check — privileged preload bridge reachable from any origin | `electron/main.cjs` | open |
-| S3-04 | P1 | 2 | AiWD | Dexie open/upgrade failure has no guaranteed user-visible recovery path | `src/shared/lib/local-db/index.ts` | open |
+| S3-04 | P1 | 2 | AiWD | Dexie open/upgrade failure has no guaranteed user-visible recovery path | `src/shared/lib/local-db/index.ts` | fixed |
 | S4-02 | P1 | 4 | Ai | Feed/channel native video player has no timeout on the initial load — spinner forever, no error, no fallback | `src/shared/lib/use-feed-video-player.ts` | open |
 | S7-02 | P1 | 4 | AWD | Contact search reports "user not found" when the real cause is an RPC/network failure | `src/features/contacts/model/use-contacts.ts` | open |
 | W2C-06 | P1 | 6 | Ai | Voice messages recorded with one MIME/codec are not guaranteed playable where the other platform's default codec differs (no cross-platform transcoding) | `src/features/messaging/model/use-voice-recorder.ts` | open |
@@ -48,7 +48,7 @@ D desktop (Electron).
 | S6-01 | P2 | 6 | A | Push notification title/sender name bypasses local aliases and the raw-ID guard, can downgrade a good native title to a hex ID | `src/shared/lib/push/push-service.ts` | open |
 | S8-03 | P2 | 5 | D | Packaged Electron app never shows a tray icon — "minimise to tray" hides the window with no way back except relaunching | `electron/tray.cjs` | open |
 | W2A-04 | P2 | 3 | WAiD | Profile save failure reason is computed but discarded — every failure shows the same generic "failed to save profile" | `src/app/providers/initializers/app-initializer.ts` | open |
-| S2-03 | P2 | 2 | WAiD | Once a queued op in a room permanently fails, later messages in the same room are sent out of order (FIFO invariant silently broken) | `src/shared/lib/local-db/sync-engine.ts` | open |
+| S2-03 | P2 | 2 | WAiD | Once a queued op in a room permanently fails, later messages in the same room are sent out of order (FIFO invariant silently broken) | `src/shared/lib/local-db/sync-engine.ts` | kept (by design: a failed message keeps its retry, later ones still go, as in Telegram/WhatsApp) |
 | S3-02 | P2 | 6 | AiWD | Live reaction to a not-yet-persisted message is silently and permanently dropped | `src/shared/lib/local-db/event-writer.ts` | open |
 | S5-02 | P2 | 3 | A | `likelyBastyonUser` is a session-wide singleton that leaks from one account into another after `switchAccount` | `src/entities/auth/model/stores.ts` | open |
 | S7-04 | P2 | 4 | AiWD | Kick / ban / promote-to-admin / mute failures are silently swallowed in the chat-info member menu | `src/features/chat-info/ui/ChatInfoPanel.vue` | open |
@@ -61,7 +61,7 @@ D desktop (Electron).
 | W2A-03 | P2 | 6 | WAiD | "Font Size" appearance setting has no effect on real chat messages — only the settings-page preview responds | `src/entities/theme/model/stores.ts` | open |
 | S2-04 | P2 | 6 | WAiD | Legacy localStorage offline-queue path marks a message "sent" while it is only queued on-device, with no reconnect trigger beyond a browser `online` event | `src/features/messaging/model/use-messages.ts` | open |
 | S3-03 | P2 | 6 | AiWD | Bulk timeline parse drops edits/reactions whose target isn't in the same parsed batch (no Dexie fallback, unlike replies) | `src/entities/chat/model/chat-store.ts` | open |
-| S5-03 | P2 | 2 | WAiD | `bootStatus` reaches `"ready"` before Matrix ever starts connecting — the dedicated "matrix unreachable" boot-error screen can never render | `src/app/index.ts` | open |
+| S5-03 | P2 | 2 | WAiD | `bootStatus` reaches `"ready"` before Matrix ever starts connecting — the dedicated "matrix unreachable" boot-error screen can never render | `src/app/index.ts` | covered by S2-01 (timed Matrix retry + connection header) |
 | W2C-03 | P2 | 6 | Ai | Video-circle (video note) player force-loops and force-resumes playback, ignoring pause | `src/features/messaging/ui/VideoCirclePlayer.vue` | open |
 | S1-05 | P2 | 6 | WAiD | Derived per-recipient AES key caches are keyed by identity+block, not by the actual public-key bytes — a peer's key rotation can leave a stale shared secret cached for the rest of a group's key-generation lifetime | `src/entities/matrix/model/matrix-crypto.ts` | open |
 | S4-05 | P2 | 6 | Ai | Large media is fully materialized in memory at least twice (Blob + base64 string) on save and on native disk-cache write | `src/features/messaging/model/use-file-download.ts` | open |

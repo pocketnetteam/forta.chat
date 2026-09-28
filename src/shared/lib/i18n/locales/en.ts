@@ -941,6 +941,7 @@ export const en = {
   "sync.catchingUp": "Updating...",
   "sync.upToDate": "Up to date",
   "sync.error": "Failed to connect",
+  "sync.localDbOpenFailed": "Couldn't open the app's local storage. Free up space on the device or restart the app — retrying automatically.",
 
   // ── Push notifications ──
   "push.newMessage": "New message",

@@ -20,6 +20,9 @@ import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto"
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
+import { openChatDb } from "@/shared/lib/local-db/open-chat-db";
+import { useToast } from "@/shared/lib/use-toast";
+import { tRaw } from "@/shared/lib/i18n";
 import { initMediaCache, clearMediaCache, closeMediaCache } from "@/shared/lib/media-cache";
 import { clearAllDrafts } from "@/shared/lib/drafts";
 import { clearQueue } from "@/shared/lib/offline-queue";
@@ -600,6 +603,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           return fetchPreview(url);
         },
       );
+      // Dexie opens lazily, so a database that could not open (no space, Safari
+      // private mode, a corrupted or blocked store) used to leave an empty chat
+      // list with no error. Open it now: say so, and let the failed start be
+      // retried by the reconnect timer (audit S3-04).
+      try {
+        await openChatDb(chatDbKit.db);
+      } catch (e) {
+        console.error("[auth] local database did not open:", e);
+        useToast().toast(tRaw("sync.localDbOpenFailed"), "error", 10_000);
+        throw e;
+      }
       chatStore.setChatDbKit(chatDbKit);
       useAiChatStore().setChatDbKit(chatDbKit);
 

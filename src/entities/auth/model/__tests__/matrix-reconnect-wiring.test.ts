@@ -49,6 +49,16 @@ describe("auth store: Matrix start retried after a failure", () => {
     expect(start).toContain("const startedOffline = !useConnectivity().isOnline.value;");
   });
 
+  // Audit S3-04: a local database that could not open left an empty chat list
+  // with no error; the start now opens it, tells the user, and fails so the
+  // reconnect timer retries.
+  it("opens the local database before using it and reports a failure", () => {
+    const init = sliceBetween("const chatDbKit = initChatDb(", "chatStore.setChatDbKit(chatDbKit);");
+    expect(init).toContain("await openChatDb(chatDbKit.db);");
+    expect(init).toContain('useToast().toast(tRaw("sync.localDbOpenFailed"), "error"');
+    expect(init).toMatch(/catch \(e\) \{[\s\S]*throw e;/);
+  });
+
   it("starts the backoff over after a successful start", () => {
     const ready = sliceBetween("if (connectResult.ready) {", "matrixError.value = null;");
     expect(ready).toContain("_matrixStartFailures = 0;");

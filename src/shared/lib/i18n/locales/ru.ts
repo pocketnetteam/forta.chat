@@ -943,6 +943,7 @@ export const ru: Record<TranslationKey, string> = {
   "sync.catchingUp": "Обновление...",
   "sync.upToDate": "Обновлено",
   "sync.error": "Не удалось подключиться",
+  "sync.localDbOpenFailed": "Не удалось открыть локальное хранилище приложения. Освободите место на устройстве или перезапустите приложение — пробуем снова автоматически.",
 
   // ── Push notifications ──
   "push.newMessage": "Новое сообщение",
