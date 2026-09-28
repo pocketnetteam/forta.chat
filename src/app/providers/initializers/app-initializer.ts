@@ -390,24 +390,7 @@ export class AppInitializer {
       }
     }
 
-    // Warm Actions unspent cache so makeTransaction does not hit
-    // actions_noinputs → requestUnspents → platform.ui.captcha (absent in chat).
-    try {
-      const account = (
-        this.actions as unknown as {
-          addAccount(addr: string): { loadUnspents?: () => Promise<unknown> };
-        }
-      ).addAccount(address);
-      if (typeof account?.loadUnspents === "function") {
-        await withTimeout(
-          account.loadUnspents(),
-          REGISTRATION_RPC_TIMEOUT,
-          "loadUnspents",
-        );
-      }
-    } catch (e) {
-      console.warn("[appInit] preload unspents before UserInfo broadcast failed:", e);
-    }
+    await this.warmUnspents(address, "UserInfo broadcast");
 
     const queued = (await this.actions!.addActionAndSendIfCan(
       userInfo,
@@ -437,6 +420,29 @@ export class AppInitializer {
 
   /** Extract the node address from a completed action's transaction via global txidnodestorage.
    *  txidnodestorage is populated by api.js after every sendrawtransaction. */
+  /** Warm the Actions unspent cache so makeTransaction does not hit
+   *  actions_noinputs → requestUnspents → platform.ui.captcha, a stub that
+   *  always rejects in the chat. Registration always did this; a profile save
+   *  did not, so on a low balance it could fail that way (audit W2A-05). */
+  private async warmUnspents(address: string, before: string): Promise<void> {
+    try {
+      const account = (
+        this.actions as unknown as {
+          addAccount(addr: string): { loadUnspents?: () => Promise<unknown> };
+        }
+      ).addAccount(address);
+      if (typeof account?.loadUnspents === "function") {
+        await withTimeout(
+          account.loadUnspents(),
+          REGISTRATION_RPC_TIMEOUT,
+          "loadUnspents",
+        );
+      }
+    } catch (e) {
+      console.warn(`[appInit] preload unspents before ${before} failed:`, e);
+    }
+  }
+
   private extractNodeFromAction(action: unknown): string | null {
     try {
       const txid = (action as Record<string, unknown>)?.transaction as string | undefined;
@@ -467,6 +473,8 @@ export class AppInitializer {
     userInfo.addresses.set(userData.addresses);
     userInfo.ref.set(userData.ref);
     userInfo.keys.set(userData.keys);
+
+    await this.warmUnspents(address, "a profile edit");
 
     try {
       // 30s timeout: UserInfo broadcast may queue on proxy; without a timeout
