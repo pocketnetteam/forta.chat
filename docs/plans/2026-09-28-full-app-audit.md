@@ -38,8 +38,8 @@ D desktop (Electron).
 | S7-02 | P1 | 4 | AWD | Contact search reports "user not found" when the real cause is an RPC/network failure | `src/features/contacts/model/use-contacts.ts` | fixed |
 | W2C-06 | P1 | 6 | Ai | Voice messages recorded with one MIME/codec are not guaranteed playable where the other platform's default codec differs (no cross-platform transcoding) | `src/features/messaging/model/use-voice-recorder.ts` | open |
 | S10-05 | P1 | owner | WAiD | No Content-Security-Policy anywhere in the app | `index.html` | open |
-| S6-02 | P1 | 5 | W | Web/Electron never request `Notification` permission — the OS banner can never appear | `src/shared/lib/notifications/web-notifier.ts` | open |
-| W2C-05 | P1 | 4 | AiWD | A stuck large media upload blocks all further sends in that room, and every retry re-uploads the whole file | `src/shared/lib/local-db/sync-engine.ts` | open |
+| S6-02 | P1 | 5 | W | Web/Electron never request `Notification` permission — the OS banner can never appear | `src/shared/lib/notifications/web-notifier.ts` | fixed |
+| W2C-05 | P1 | 4 | AiWD | A stuck large media upload blocks all further sends in that room, and every retry re-uploads the whole file | `src/shared/lib/local-db/sync-engine.ts` | owner decision: let text overtake a stuck media upload (changes message order) |
 | S10-06 | P1 | owner | WAiD | Bug-report GitHub token bundled into the client with write scope; extensive PII shipped to a PUBLIC repo | `src/shared/lib/bug-report/bug-report-sender.ts` | open |
 | W2B-05 | P1 | 1 | A | Found while fixing W2B-01: the Bastyon SDK in public/js is copied verbatim with `?.` / `??`, so WebView < 80 cannot parse sdk.js, actions.js, kit.js … and login/registration have no SDK | `vite.config.ts` | fixed |
 | S1-03 | P2 | 3 | WAiD | "Peer hasn't published keys" verdict never self-heals automatically — only a manual Retry bypasses the stale profile cache | `src/widgets/chat-window/ChatWindow.vue` | fixed |
