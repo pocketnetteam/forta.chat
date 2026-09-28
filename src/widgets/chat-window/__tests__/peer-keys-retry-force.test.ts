@@ -49,13 +49,18 @@ describe("ChatWindow peer-keys retry — forced vs automatic refresh", () => {
     expect(source.split("republishKeysFromUi").length - 1).toBe(1);
   });
 
-  it("the 30s auto-recheck does NOT force a refresh: prepare() with no args", () => {
+  // Audit S1-03: an unforced recheck never escapes a peer profile cached before
+  // the peer published keys, so the banner stayed until the manual Retry. The
+  // timer now forces one network refresh per room, then stays on the cache.
+  it("the 30s auto-recheck forces one refresh per room, then stays on the cache", () => {
     const source = getSource();
     const timerStart = source.indexOf("peerKeyRecheckTimer = setInterval(async () => {");
     expect(timerStart).toBeGreaterThan(-1);
     const timerEnd = source.indexOf("}, 30_000);", timerStart);
     const section = source.slice(timerStart, timerEnd);
-    expect(section).toContain("await roomCrypto.prepare();");
+    expect(section).toContain("const force = !forcedPeerKeyRecheck.has(roomId);");
+    expect(section).toContain("forcedPeerKeyRecheck.add(roomId);");
+    expect(section).toContain("await roomCrypto.prepare(force);");
     expect(section).not.toContain("prepare(true)");
   });
 

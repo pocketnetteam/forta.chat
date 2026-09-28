@@ -190,6 +190,10 @@ watch(() => chatStore.activeRoomId, async (roomId) => {
 }, { immediate: true });
 
 let peerKeyRecheckTimer: ReturnType<typeof setInterval> | null = null;
+// Rooms whose automatic recheck already did its one forced (network) refresh.
+// A peer profile cached before they published keys never expires otherwise, so
+// "hasn't published keys" stayed up until the manual Retry (audit S1-03).
+const forcedPeerKeyRecheck = new Set<string>();
 
 watch(() => chatStore.activeRoomId, (roomId) => {
   if (peerKeyRecheckTimer) { clearInterval(peerKeyRecheckTimer); peerKeyRecheckTimer = null; }
@@ -205,8 +209,12 @@ watch(() => chatStore.activeRoomId, (roomId) => {
     if (status === "missing") {
       const roomCrypto = authStore.pcrypto?.rooms[roomId];
       if (roomCrypto) {
+        // The first tick for a room forces one network refresh; later ticks
+        // stay on the cache so a stuck room does not hit the network every 30 s.
+        const force = !forcedPeerKeyRecheck.has(roomId);
+        forcedPeerKeyRecheck.add(roomId);
         try {
-          await roomCrypto.prepare();
+          await roomCrypto.prepare(force);
           await chatStore.checkPeerKeys(roomId);
         } catch { /* ignore */ }
       }
