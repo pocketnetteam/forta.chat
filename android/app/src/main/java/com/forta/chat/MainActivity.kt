@@ -226,23 +226,14 @@ class MainActivity : BridgeActivity() {
         }
 
         // Read system bar + IME insets and inject as CSS custom properties.
-        // Edge-to-edge: adjustResize does not shrink the window for the soft
-        // keyboard, so the content view is padded by the IME inset here and the
-        // WebView ends above the keyboard (see KeyboardInsetPolicy).
+        // With adjustNothing the system does not resize the WebView — we handle
+        // ALL keyboard adaptation via --app-bottom-inset in CSS.
         val rootView = findViewById<View>(android.R.id.content)
-        ViewCompat.setOnApplyWindowInsetsListener(rootView) { view, insets ->
+        ViewCompat.setOnApplyWindowInsetsListener(rootView) { _, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val displayCutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             val density = resources.displayMetrics.density
-
-            val bottomPadding = KeyboardInsetPolicy.contentBottomPadding(
-                insets.isVisible(WindowInsetsCompat.Type.ime()),
-                ime.bottom,
-            )
-            if (view.paddingBottom != bottomPadding) {
-                view.setPadding(view.paddingLeft, view.paddingTop, view.paddingRight, bottomPadding)
-            }
 
             // Android 16 (Pixel 9/10) with notch/cutout: top inset must equal
             // the max of system bars and display cutout so content clears both.

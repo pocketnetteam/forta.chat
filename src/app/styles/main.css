@@ -8,38 +8,43 @@
   .safe-top {
     padding-top: var(--safe-area-inset-top, 0px);
   }
-  /* Bottom safe-area padding (status bar / nav bar) */
+  /*
+   * Bottom padding for the blocks that hold a text field (composer, chat
+   * window, auth screen) — the only blocks that have to move for the soft
+   * keyboard. Neither WebView resizes when the keyboard opens: on Android
+   * MainActivity is edge-to-edge and returns `WindowInsetsCompat.CONSUMED`,
+   * on iOS `Keyboard.resize: 'none'` does the same. Both publish the same two
+   * variables instead, so one expression covers every platform:
+   *
+   *   --app-bottom-inset      Android: max(IME, nav bar)  iOS: keyboard height
+   *   --safe-area-inset-bottom  nav bar / home indicator, zeroed while the
+   *                             keyboard is up (it is behind the keyboard)
+   *
+   *   keyboard down: max(navBar, navBar) = navBar
+   *   keyboard up:   max(ime, 0)         = ime
+   *
+   * Taking --app-bottom-inset rather than --keyboardheight matters on Android:
+   * --keyboardheight is the IME minus the nav bar, and the IME covers the nav
+   * bar too, so it would leave the field short by the nav bar's height.
+   */
   .safe-bottom {
-    padding-bottom: var(--safe-area-inset-bottom, 0px);
+    padding-bottom: max(var(--app-bottom-inset, 0px), var(--safe-area-inset-bottom, 0px));
   }
   /* Both top + bottom — for full-screen overlays/panels */
   .safe-y {
     padding-top: var(--safe-area-inset-top, 0px);
-    padding-bottom: var(--safe-area-inset-bottom, 0px);
+    padding-bottom: max(var(--app-bottom-inset, 0px), var(--safe-area-inset-bottom, 0px));
   }
   /* All four sides — for modals teleported to body */
   .safe-all {
     padding-top: var(--safe-area-inset-top, 0px);
     padding-right: var(--safe-area-inset-right, 0px);
-    padding-bottom: var(--safe-area-inset-bottom, 0px);
+    padding-bottom: max(var(--app-bottom-inset, 0px), var(--safe-area-inset-bottom, 0px));
     padding-left: var(--safe-area-inset-left, 0px);
   }
   /* Bottom-only padding for safe area (no keyboard) — for bottom sheets */
   .pb-safe {
     padding-bottom: var(--safe-area-inset-bottom, 0px);
-  }
-  /*
-   * iOS only: WebView does not resize (Keyboard.resize: 'none'), so the shell
-   * must lift above the soft keyboard via --keyboardheight. Android keeps the
-   * default .safe-* rules above — do not change those without coordinating
-   * with the Android keyboard workstream.
-   */
-  .is-ios .safe-bottom,
-  .is-ios .safe-y {
-    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
-  }
-  .is-ios .safe-all {
-    padding-bottom: max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px));
   }
   /* Hide element when soft keyboard shrinks the viewport (FAB etc.) */
   .hide-on-keyboard {

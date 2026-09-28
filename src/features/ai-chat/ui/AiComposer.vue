@@ -11,8 +11,8 @@
  * every Matrix-only affordance, this is a small dedicated component —
  * genuinely "not copying the whole component". It reuses the SAME shared,
  * global keyboard-safety mechanism `MessageInput.vue`'s own parent
- * (`ChatWindow.vue`) uses — the `safe-bottom` CSS class + `--keyboardheight`
- * custom property set by the app-wide keyboard composable — so it stays in
+ * (`ChatWindow.vue`) uses — the `safe-bottom` CSS class + the
+ * `--app-bottom-inset` custom property native code publishes — so it stays in
  * sync with the parallel keyboard work without touching any of its files. */
 import { ref, computed } from "vue";
 import { shouldSendOnEnter } from "@/features/messaging/model/enter-key-behavior";

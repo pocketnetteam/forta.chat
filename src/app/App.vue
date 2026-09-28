@@ -434,8 +434,10 @@ onMounted(async () => {
   // Initialize Android Share Target listener
   initShareTargetListener((data) => processExternalShare(data));
 
-  // Mark platform on <html> for CSS adjustments (iOS keyboard padding,
-  // Electron drag regions / traffic light padding).
+  // Mark platform on <html> for CSS adjustments (Electron drag regions /
+  // traffic light padding). The keyboard padding is no longer per-platform:
+  // `.safe-bottom` reads --app-bottom-inset, which Android and iOS both
+  // publish with the same meaning.
   if (isIOS) {
     document.documentElement.classList.add("is-ios");
   }

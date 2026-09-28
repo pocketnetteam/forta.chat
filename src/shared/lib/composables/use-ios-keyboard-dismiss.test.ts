@@ -1,8 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 
 let mockIsIOS = false;
 vi.mock("@/shared/lib/platform", () => ({
@@ -108,35 +106,5 @@ describe("useIOSKeyboardDismiss", () => {
     expect(blurSpy).toHaveBeenCalledTimes(1);
 
     wrapper.unmount();
-  });
-});
-
-describe("iOS safe-bottom CSS contract (Android unchanged)", () => {
-  const css = readFileSync(
-    resolve(__dirname, "../../../app/styles/main.css"),
-    "utf8",
-  );
-
-  it("keeps default .safe-bottom on safe-area only (no keyboardheight)", () => {
-    // Default rule must not include keyboardheight — Android path.
-    const defaultBlock = css.match(
-      /\.safe-bottom\s*\{[^}]+\}/,
-    );
-    expect(defaultBlock?.[0]).toBeTruthy();
-    expect(defaultBlock![0]).toContain(
-      "padding-bottom: var(--safe-area-inset-bottom, 0px)",
-    );
-    expect(defaultBlock![0]).not.toContain("--keyboardheight");
-  });
-
-  it("lifts .is-ios .safe-bottom with max(keyboardheight, safe-area)", () => {
-    expect(css).toMatch(
-      /\.is-ios\s+\.safe-bottom[\s\S]*?padding-bottom:\s*max\(\s*var\(--keyboardheight/,
-    );
-    expect(css).toMatch(/\.is-ios\s+\.safe-all[\s\S]*?--keyboardheight/);
-    // pb-safe stays keyboard-free for bottom sheets.
-    const pbSafe = css.match(/\.pb-safe\s*\{[^}]+\}/);
-    expect(pbSafe?.[0]).toContain("var(--safe-area-inset-bottom");
-    expect(pbSafe?.[0]).not.toContain("--keyboardheight");
   });
 });

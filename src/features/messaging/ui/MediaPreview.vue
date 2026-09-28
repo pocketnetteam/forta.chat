@@ -98,7 +98,7 @@ const toggleCaptionPosition = () => {
         </div>
 
         <!-- Caption input + send -->
-        <div class="caption-bar shrink-0 border-t border-white/10 px-4 py-3">
+        <div class="shrink-0 border-t border-white/10 px-4 py-3" style="padding-bottom: calc(max(var(--app-bottom-inset, 0px), var(--safe-area-inset-bottom, 0px)) + 12px)">
           <div class="flex items-end gap-3">
             <input
               :value="props.caption"
@@ -149,16 +149,6 @@ const toggleCaptionPosition = () => {
 </template>
 
 <style scoped>
-/* The caption bar ends above the keyboard. Android shrinks the window for the
-   keyboard itself (MainActivity pads the content view by the IME inset), so
-   adding --keyboardheight there lifted the bar a second time, a keyboard's
-   height above it. Only iOS, whose WebView does not resize, needs it. */
-.caption-bar {
-  padding-bottom: calc(var(--safe-area-inset-bottom, 0px) + 12px);
-}
-:global(.is-ios) .caption-bar {
-  padding-bottom: calc(max(var(--keyboardheight, 0px), var(--safe-area-inset-bottom, 0px)) + 12px);
-}
 .media-preview-enter-active { transition: opacity 0.2s ease; }
 .media-preview-leave-active { transition: opacity 0.15s ease; }
 .media-preview-enter-from,
