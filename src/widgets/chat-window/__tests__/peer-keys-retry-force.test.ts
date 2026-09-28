@@ -62,6 +62,8 @@ describe("ChatWindow peer-keys retry — forced vs automatic refresh", () => {
     expect(section).toContain("forcedPeerKeyRecheck.add(roomId);");
     expect(section).toContain("await roomCrypto.prepare(force);");
     expect(section).not.toContain("prepare(true)");
+    // A forced refresh that failed (network down at that tick) must not use up the room's one force.
+    expect(section).toContain("if (force) forcedPeerKeyRecheck.delete(roomId);");
   });
 
   it("the 30s auto-recheck bails out while a forced retry is in flight", () => {

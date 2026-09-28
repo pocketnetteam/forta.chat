@@ -23,9 +23,12 @@ function slice(from: string, to: string): string {
 describe("own key check (audit S5-01, S5-02, W2A-01)", () => {
   it("checks the keys once per account per app session", () => {
     const once = slice("const verifyOwnKeysOnce = async", "\n  };");
-    expect(once).toContain("_keysVerifiedFor === current");
-    expect(once).toContain("_keysVerifiedFor = current;");
+    expect(once).toContain("_keysVerifiedFor.has(current)");
+    expect(once).toContain("_keysVerifiedFor.add(current);");
     expect(once).toContain("await verifyAndRepublishKeys();");
+    // Every checked account is remembered, not only the last one: A → B → A must
+    // not check A again and broadcast a second republish before the first lands.
+    expect(source).toContain("const _keysVerifiedFor = new Set<string>();");
   });
 
   it("checks when Matrix is ready, so restored sessions and switched accounts are covered", () => {
@@ -37,7 +40,7 @@ describe("own key check (audit S5-01, S5-02, W2A-01)", () => {
 
   it("forgets the checked account on logout", () => {
     const teardown = slice("// ── 3. Clean up listeners & intervals ──", "if (_blockHeightInterval)");
-    expect(teardown).toContain("_keysVerifiedFor = null;");
+    expect(teardown).toContain("_keysVerifiedFor.clear();");
   });
 
   it("does not carry one account's key verdicts into the next", () => {

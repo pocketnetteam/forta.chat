@@ -216,7 +216,10 @@ watch(() => chatStore.activeRoomId, (roomId) => {
         try {
           await roomCrypto.prepare(force);
           await chatStore.checkPeerKeys(roomId);
-        } catch { /* ignore */ }
+        } catch {
+          // A forced refresh that failed has not refreshed anything; force the next tick again.
+          if (force) forcedPeerKeyRecheck.delete(roomId);
+        }
       }
     }
   }, 30_000);

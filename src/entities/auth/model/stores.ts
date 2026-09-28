@@ -148,9 +148,10 @@ let _appStateHandle: { remove: () => Promise<void> } | null = null;
 let _matrixReconnectUnsub: (() => void) | null = null;
 // Failed Matrix starts in a row; spaces the scheduled retries (matrixRetryDelayMs).
 let _matrixStartFailures = 0;
-// Account whose own encryption keys were already checked in this app session —
-// keeps an explicit login (which also checks) from republishing twice.
-let _keysVerifiedFor: string | null = null;
+// Accounts whose own encryption keys were already checked in this app session —
+// keeps an explicit login (which also checks), or a switch back to an account
+// whose republish is not on the chain yet, from republishing twice.
+const _keysVerifiedFor = new Set<string>();
 function stopMatrixReconnect(): void {
   if (_matrixReconnectUnsub) { _matrixReconnectUnsub(); _matrixReconnectUnsub = null; }
 }
@@ -1501,8 +1502,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  (audit S5-01). */
   const verifyOwnKeysOnce = async (): Promise<void> => {
     const current = address.value;
-    if (!current || _keysVerifiedFor === current) return;
-    _keysVerifiedFor = current;
+    if (!current || _keysVerifiedFor.has(current)) return;
+    _keysVerifiedFor.add(current);
     try {
       await verifyAndRepublishKeys();
     } catch (e) {
@@ -1599,7 +1600,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     stopMatrixReconnect();
     _matrixStartFailures = 0;
-    _keysVerifiedFor = null;
+    _keysVerifiedFor.clear();
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
