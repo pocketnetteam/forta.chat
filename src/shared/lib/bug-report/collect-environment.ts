@@ -54,43 +54,49 @@ export function parseOsVersionFromUserAgent(ua: string): string {
 export async function collectEnvironment(): Promise<AppEnvironment> {
   let appVersion = '';
   let buildNumber = '';
-
-  if (isNative) {
-    try {
-      const { App } = await import('@capacitor/app');
-      const info = await App.getInfo();
-      appVersion = info.version ?? '';
-      buildNumber = info.build ?? '';
-    } catch {
-      // Capacitor App unavailable
-    }
-  }
-
   let webViewVersion = '';
   let osVersion = '';
   let deviceModel = '';
 
   if (isNative) {
-    try {
-      const { Device } = await import('@capacitor/device');
-      const info = await Device.getInfo();
-      osVersion = info.osVersion ?? '';
-      deviceModel = [info.manufacturer, info.model].filter(Boolean).join(' ');
-    } catch {
-      // Capacitor Device unavailable
-    }
+    // The three native lookups are independent; ask them at once instead of
+    // one after another (audit W2D-03).
+    await Promise.all([
+      (async () => {
+        try {
+          const { App } = await import('@capacitor/app');
+          const info = await App.getInfo();
+          appVersion = info.version ?? '';
+          buildNumber = info.build ?? '';
+        } catch {
+          // Capacitor App unavailable
+        }
+      })(),
+      (async () => {
+        try {
+          const { Device } = await import('@capacitor/device');
+          const info = await Device.getInfo();
+          osVersion = info.osVersion ?? '';
+          deviceModel = [info.manufacturer, info.model].filter(Boolean).join(' ');
+        } catch {
+          // Capacitor Device unavailable
+        }
+      })(),
+      (async () => {
+        if (!isAndroid) return;
+        try {
+          const { WebviewVersionChecker } = await import(
+            '@capgo/capacitor-webview-version-checker'
+          );
+          const result = await WebviewVersionChecker.check();
+          webViewVersion = result.currentVersion ?? '';
+        } catch {
+          // Plugin unavailable
+        }
+      })(),
+    ]);
 
-    if (isAndroid) {
-      try {
-        const { WebviewVersionChecker } = await import(
-          '@capgo/capacitor-webview-version-checker'
-        );
-        const result = await WebviewVersionChecker.check();
-        webViewVersion = result.currentVersion ?? '';
-      } catch {
-        // Plugin unavailable
-      }
-    } else if (isIOS) {
+    if (isIOS) {
       // WKWebView is pinned to the OS version on iOS; expose a label that
       // bug-report consumers can group on without a separate plugin.
       webViewVersion = osVersion ? `WKWebView (iOS ${osVersion})` : '';

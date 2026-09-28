@@ -112,3 +112,35 @@ describe('collectEnvironment — Android branch (regression)', () => {
     expect(env.webViewVersion).toBe('124.0.6367.82');
   });
 });
+
+// Audit W2D-03: the three native lookups ran one after another.
+describe('collectEnvironment — native lookups run at once', () => {
+  beforeEach(() => {
+    mockPlatform = 'android';
+    mockIsNative = true;
+    mockIsAndroid = true;
+    mockIsIOS = false;
+  });
+
+  it('asks the device and the WebView while the app info is still pending', async () => {
+    let releaseApp: (v: { version: string; build: string }) => void = () => {};
+    mockAppGetInfo.mockReturnValue(new Promise((r) => { releaseApp = r; }));
+    mockDeviceGetInfo.mockResolvedValue({ osVersion: '14', manufacturer: 'Google', model: 'Pixel 7' });
+    mockWebviewCheck.mockResolvedValue({ currentVersion: '124.0' });
+
+    vi.resetModules();
+    const { collectEnvironment } = await import('../collect-environment');
+    const pending = collectEnvironment();
+    await vi.waitFor(() => {
+      expect(mockDeviceGetInfo).toHaveBeenCalled();
+      expect(mockWebviewCheck).toHaveBeenCalled();
+    });
+    expect(mockAppGetInfo).toHaveBeenCalled();
+
+    releaseApp({ version: '0.1.0', build: '42' });
+    const env = await pending;
+    expect(env.appVersion).toBe('0.1.0');
+    expect(env.osVersion).toBe('14');
+    expect(env.webViewVersion).toBe('124.0');
+  });
+});
