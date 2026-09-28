@@ -224,3 +224,52 @@ describe('downloadMediaViaTorFile', () => {
     expect(blob.size).toBeGreaterThan(0);
   });
 });
+
+/** Audit S4-01: a Tor download that never answered held its media slot forever. */
+describe('downloadMediaViaTorFile when the native call never answers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockDownload.mockReturnValue(new Promise(() => {}));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('gives up after the ceiling instead of waiting forever', async () => {
+    const { downloadMediaViaTorFile, TOR_DOWNLOAD_CEILING_MS } = await import('./tor-media-transfer');
+    expect(TOR_DOWNLOAD_CEILING_MS).toBeLessThanOrEqual(10 * 60_000);
+
+    const result = downloadMediaViaTorFile('https://matrix.example/media');
+    const settled = vi.fn();
+    result.then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(TOR_DOWNLOAD_CEILING_MS - 1);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).rejects.toThrow(/timed out/);
+  });
+
+  it('stops waiting as soon as the caller cancels', async () => {
+    const { downloadMediaViaTorFile } = await import('./tor-media-transfer');
+    const controller = new AbortController();
+
+    const result = downloadMediaViaTorFile('https://matrix.example/media', undefined, { signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('does not start when the caller has already cancelled', async () => {
+    const { downloadMediaViaTorFile } = await import('./tor-media-transfer');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      downloadMediaViaTorFile('https://matrix.example/media', undefined, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockDownload).not.toHaveBeenCalled();
+  });
+});

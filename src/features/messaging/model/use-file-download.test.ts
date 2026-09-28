@@ -101,6 +101,14 @@ vi.mock("@/shared/lib/use-toast", () => ({
   }),
 }));
 
+// --- Tor media transfer mock: off unless a test turns it on ---
+let mockTorDownloadActive = false;
+const mockTorDownload: Mock = vi.fn();
+vi.mock("@/shared/lib/file-transfer/tor-media-transfer", () => ({
+  shouldUseNativeTorDownload: () => mockTorDownloadActive,
+  downloadMediaViaTorFile: (...args: unknown[]) => mockTorDownload(...args),
+}));
+
 // --- Global fetch mock ---
 const mockFetchResponse = {
   ok: true,
@@ -1246,6 +1254,45 @@ describe("useFileDownload", () => {
         global.fetch = originalFetch;
       }
     }, 15_000);
+
+    // Audit S4-01: a Tor download that never ended kept its permit, and after
+    // three of them no media in the app loaded at all.
+    it("frees the permit when a Tor download fails, and hands the Tor path the caller's signal", async () => {
+      mockTorDownloadActive = true;
+      mockTorDownload.mockRejectedValue(new Error("Tor download timed out after 600000ms"));
+      vi.useFakeTimers();
+      const scope = effectScope();
+      try {
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+          const controller = new AbortController();
+          const done = download({
+            id: "$evt_tor_stall",
+            _key: "client_tor_stall",
+            roomId: "!room:server",
+            senderId: "@u:server",
+            content: "photo.jpg",
+            timestamp: Date.now(),
+            status: "sent",
+            type: "image",
+            fileInfo: { name: "photo.jpg", type: "image/jpeg", size: 1024, url: "https://example.com/tor_stall.jpg" },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any, controller.signal);
+          await vi.runAllTimersAsync();
+          await done;
+
+          expect(mockTorDownload).toHaveBeenCalled();
+          const [, , options] = mockTorDownload.mock.calls[0] as [string, unknown, { signal?: AbortSignal }];
+          expect(options.signal).toBe(controller.signal);
+          expect(_mediaGateActiveForTests()).toBe(0);
+        });
+      } finally {
+        scope.stop();
+        vi.useRealTimers();
+        mockTorDownloadActive = false;
+        mockTorDownload.mockReset();
+      }
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -613,7 +613,7 @@ async function downloadAndDecrypt(
       const fetchUrl = appendCacheBust(hostUrl, attempt);
       let blob: Blob;
       if (shouldUseNativeTorDownload()) {
-        blob = await downloadMediaViaTorFile(fetchUrl);
+        blob = await downloadMediaViaTorFile(fetchUrl, undefined, { signal });
       } else {
         const response = await fetchWithTimeout(fetchUrl, signal);
         if (!response.ok) {
