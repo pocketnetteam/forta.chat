@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { syncProfileToMatrix, type MatrixProfileSync } from "../sync-profile-to-matrix";
+import { syncProfileToMatrix, AVATAR_FETCH_TIMEOUT_MS, type MatrixProfileSync } from "../sync-profile-to-matrix";
 
 /**
  * Behavioral tests for syncProfileToMatrix — best-effort Matrix profile sync
@@ -60,7 +60,7 @@ describe("syncProfileToMatrix", () => {
 
     await syncProfileToMatrix(matrix(), { image: "https://cdn/avatar.png" });
 
-    expect(globalThis.fetch).toHaveBeenCalledWith("https://cdn/avatar.png");
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe("https://cdn/avatar.png");
     expect(uploadAvatar).toHaveBeenCalledTimes(1);
     expect(uploadAvatar).toHaveBeenCalledWith(blob);
     expect(setAvatarMxc).toHaveBeenCalledTimes(1);
@@ -91,6 +91,28 @@ describe("syncProfileToMatrix", () => {
     await syncProfileToMatrix(matrix(), { image: "https://cdn/atlimit.png" });
 
     expect(uploadAvatar).toHaveBeenCalledTimes(1);
+  });
+
+  // Audit S6-03: the image server often never answers; the fetch had no limit.
+  it("gives up on an avatar download that never answers, and aborts it", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      globalThis.fetch = vi.fn((_url: string, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        return new Promise(() => {});
+      }) as unknown as typeof fetch;
+
+      const done = syncProfileToMatrix(matrix(), { image: "https://slow/avatar.png" });
+      await vi.advanceTimersByTimeAsync(AVATAR_FETCH_TIMEOUT_MS);
+      await expect(done).resolves.toBeUndefined();
+
+      expect(signal?.aborted).toBe(true);
+      expect(uploadAvatar).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("swallows avatar fetch errors so Pocketnet save still succeeds", async () => {
