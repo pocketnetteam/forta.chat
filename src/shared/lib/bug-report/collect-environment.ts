@@ -25,6 +25,28 @@ function getMemoryMb(): string {
 }
 
 /**
+ * OS and version from a user agent, for when no native API answers. Android and
+ * iOS give the bare version, as before; desktop names the OS too, since the
+ * report's platform (electron / web) does not. Desktop used to fall through to
+ * "n/a" in every Electron report (audit S10-07). Chrome freezes the macOS
+ * version at 10.15.7 and Windows 11 still says NT 10.0; better than nothing.
+ */
+export function parseOsVersionFromUserAgent(ua: string): string {
+  const android = ua.match(/Android\s+([\d.]+)/);
+  if (android) return android[1];
+  const ios = ua.match(/(?:iPhone|iPad|iPod).*?\bOS\s+([\d_]+)/);
+  if (ios) return ios[1].replace(/_/g, '.');
+  const windows = ua.match(/Windows NT\s+([\d.]+)/);
+  if (windows) return `Windows NT ${windows[1]}`;
+  const mac = ua.match(/Mac OS X\s+([\d_.]+)/);
+  if (mac) return `macOS ${mac[1].replace(/_/g, '.')}`;
+  if (/CrOS/.test(ua)) return 'ChromeOS';
+  const linux = ua.match(/Linux\s*([\w-]*)/);
+  if (linux) return linux[1] ? `Linux ${linux[1]}` : 'Linux';
+  return '';
+}
+
+/**
  * Collect device environment for bug reports.
  * Reuses the same approach as collectTelemetry() from the About screen.
  * Non-throwing — all native calls are wrapped in try/catch.
@@ -84,13 +106,7 @@ export async function collectEnvironment(): Promise<AppEnvironment> {
   }
 
   if (!osVersion) {
-    const androidMatch = ua.match(/Android\s+([\d.]+)/);
-    const iosMatch = ua.match(/OS\s+([\d_]+)/);
-    if (androidMatch) {
-      osVersion = androidMatch[1];
-    } else if (iosMatch) {
-      osVersion = iosMatch[1].replace(/_/g, '.');
-    }
+    osVersion = parseOsVersionFromUserAgent(ua);
   }
 
   if (!deviceModel) {
