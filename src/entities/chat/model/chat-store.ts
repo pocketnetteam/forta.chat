@@ -5795,8 +5795,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Step 1: Find unresolved replies in Dexie (source of truth for UI)
     const clearedAtTs = db.eventWriter.getClearedAtTs(roomId);
     const roomMsgs = await db.messages.getMessages(roomId, 200, undefined, clearedAtTs);
+    // A quote stored as "[encrypted]" was resolved while its original was still
+    // undecrypted; treat it as unresolved so it heals (audit S1-04).
     const unresolved = roomMsgs.filter(
-      m => m.replyTo && !m.replyTo.deleted && !m.replyTo.senderId && !m.replyTo.content,
+      m => m.replyTo && !m.replyTo.deleted
+        && ((!m.replyTo.senderId && !m.replyTo.content) || m.replyTo.content === "[encrypted]"),
     );
     if (unresolved.length === 0) return;
 
@@ -5831,7 +5834,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
                   const decrypted = await roomCrypto.decryptEvent(raw as Record<string, unknown>);
                   body = decrypted.body ?? "";
                 } catch {
-                  body = "";
+                  // Not decryptable yet: leave the reply for a later pass
+                  // instead of quoting an empty text forever (audit S1-04).
+                  return;
                 }
               } else {
                 body = (content?.body as string) ?? "";
@@ -5874,6 +5879,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             eventId: msg.eventId,
             replyTo: { id: replyTo.id, senderId: "", content: "", deleted: true },
           });
+        } else if (
+          original.decryptionStatus === "pending"
+          || original.decryptionStatus === "failed"
+          || original.content === "[encrypted]"
+        ) {
+          // The original is still being decrypted: quoting it now baked
+          // "[encrypted]" into the reply for good (audit S1-04). Leave it
+          // unresolved; the next pass after the decrypt fills it in.
+          continue;
         } else {
           patches.push({
             eventId: msg.eventId,
