@@ -1370,6 +1370,22 @@ export class SyncEngine {
     return this.retryFailedWhere((op) => op.errorMessage === MATRIX_NOT_READY_FAILURE);
   }
 
+  /** Re-queue the failed op of one message (the per-message Retry). Returns
+   *  false when the message has no failed op, so the caller can enqueue one.
+   *  Re-queueing the existing op instead of adding a new one keeps a later
+   *  retryAllFailed from sending the message twice, and SyncEngine waits for
+   *  the Matrix client itself (audit batch-2 review). */
+  async retryFailedFor(clientId: string): Promise<boolean> {
+    const failed = await this.db.pendingOps
+      .where("clientId")
+      .equals(clientId)
+      .filter((op) => op.status === "failed")
+      .count();
+    if (failed === 0) return false;
+    await this.retryFailedWhere((op) => op.clientId === clientId);
+    return true;
+  }
+
   private async retryFailedWhere(match: (op: PendingOperation) => boolean): Promise<void> {
     // Snapshot the failed ops BEFORE resetting them so we can mirror the
     // reset onto each room's preview status (WEE-64).

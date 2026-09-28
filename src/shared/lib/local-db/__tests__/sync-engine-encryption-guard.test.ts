@@ -188,7 +188,8 @@ describe("shared error tag ensures consistent log grep", () => {
     const source = getUseMessagesSource();
     const throws = source.match(/throw new Error\(`\$\{ENCRYPTION_REQUIRED_NO_KEYS\}/g) ?? [];
     // sendMessage legacy, drainOfflineQueue, sendForward legacy, editMessage
-    // legacy, forwardMessages bulk, sendTransferMessage legacy — 6 sites.
-    expect(throws.length).toBe(6);
+    // legacy, forwardMessages bulk, sendTransferMessage legacy, retryMediaUpload
+    // (audit batch-2 review: it used to send files in the clear) — 7 sites.
+    expect(throws.length).toBe(7);
   });
 });

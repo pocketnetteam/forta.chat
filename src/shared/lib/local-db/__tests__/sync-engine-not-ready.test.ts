@@ -239,6 +239,33 @@ describe("SyncEngine — WEE-85: queue while Matrix not ready", () => {
     }
   });
 
+  // Batch-2 review: the per-message Retry re-sent a text as a NEW op next to its
+  // failed one (a later retryAllFailed then sent it twice) and did nothing for
+  // media while Matrix was not ready. retryFailedFor re-queues the message's own
+  // failed op, and SyncEngine waits for Matrix itself.
+  it("re-queues one message's failed op and reports whether it had one", async () => {
+    await seedRoom(h.db);
+    const target = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "retry me" });
+    const other = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "leave me" });
+    const targetOp = await seedOp(h.db, target.clientId);
+    const otherOp = await seedOp(h.db, other.clientId);
+    await h.db.pendingOps.update(targetOp, { status: "failed", retries: 5, errorMessage: "Error: boom" });
+    await h.db.pendingOps.update(otherOp, { status: "failed", retries: 5, errorMessage: "Error: boom" });
+    setNotReady(true);
+
+    try {
+      expect(await h.engine.retryFailedFor(target.clientId)).toBe(true);
+      expect(await h.engine.retryFailedFor("no-such-client")).toBe(false);
+
+      const reset = await h.db.pendingOps.get(targetOp);
+      expect(reset?.status).not.toBe("failed");
+      expect(reset?.retries).toBe(0);
+      expect((await h.db.pendingOps.get(otherOp))?.status).toBe("failed");
+    } finally {
+      setNotReady(false);
+    }
+  });
+
   it("puts ops that failed only because Matrix was not ready back in the queue", async () => {
     await seedRoom(h.db);
     const waited = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "waited" });

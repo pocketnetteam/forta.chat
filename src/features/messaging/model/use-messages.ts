@@ -1870,7 +1870,6 @@ export function useMessages() {
 
     const roomId = message.roomId;
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
     if (!isChatDbReady()) return;
 
     const dbKit = getChatDb();
@@ -1881,6 +1880,20 @@ export function useMessages() {
 
     const localMsg = await dbKit.messages.getByClientId(mKey);
     if (!localMsg) return;
+
+    // A send that failed in SyncEngine still has its op and persisted blob:
+    // re-queue it, and SyncEngine waits for the Matrix client itself. The Retry
+    // tap used to do nothing at all while Matrix was not ready (audit batch-2
+    // review). The direct pipeline below is only for sends without an op.
+    if (await dbKit.syncEngine.retryFailedFor(mKey)) {
+      await dbKit.messages.updateStatus({ clientId: mKey }, "pending");
+      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
+      return;
+    }
+    if (!matrixService.isReady()) {
+      useToast().toast(tRaw("sync.connecting"), "info");
+      return;
+    }
 
     // Try to recover the blob from the still-alive blob URL
     const blobUrl = localMsg.localBlobUrl || localMsg.fileInfo?.url;
@@ -1934,6 +1947,11 @@ export function useMessages() {
         );
         secrets = encrypted.secrets;
         fileToUpload = encrypted.file;
+      } else if (roomCrypto?.requiresEncryption()) {
+        // Same guard as SyncEngine: a private room never gets a file in the
+        // clear. This retry pipeline used to upload and send it unencrypted
+        // whenever canBeEncrypt() was false (audit batch-2 review).
+        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — media retry`);
       }
 
       // Phase 2: Upload
@@ -2068,15 +2086,11 @@ export function useMessages() {
     // to the still-last-message case inside the repository.
     await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
 
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      console.error("[retryMessage] Matrix client still not ready", { roomId, clientId: mKey });
-      await dbKit.messages.markFailed(mKey);
-      // WEE-64: this retry never reaches SyncEngine.markMessageFailed, so mirror
-      // the failed badge onto the preview here (still-last guard in the repo).
-      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
-      return;
-    }
+    // Re-queue the message's own failed op: a new op next to it would send the
+    // message twice once the old one is retried too. No Matrix-readiness gate:
+    // SyncEngine holds the op until the client is ready (it used to flip the
+    // message straight back to failed here — audit batch-2 review).
+    if (await dbKit.syncEngine.retryFailedFor(mKey)) return;
 
     try {
       await dbKit.syncEngine.enqueue(

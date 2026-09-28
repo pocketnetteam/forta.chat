@@ -1,6 +1,8 @@
 import { withTimeout } from "@/shared/lib/with-timeout";
 
-const OPEN_TIMEOUT_MS = 15_000;
+// Generous: a large local history on an old phone can take a while to run a
+// schema upgrade, and that is a healthy open (audit batch-2 review).
+const OPEN_TIMEOUT_MS = 60_000;
 
 /**
  * Open the local chat database explicitly, bounded in time (audit S3-04).
