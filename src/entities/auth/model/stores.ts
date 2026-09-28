@@ -666,6 +666,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           }
           _onSyncStatusCallback?.(state);
         },
+        // Not gated on roomsInitialized: a limited sync during the catch-up
+        // sync is exactly where holes in stored history come from.
+        onTimelineReset: (roomId: string, backToken: string | null) => {
+          chatStore.handleTimelineReset(roomId, backToken);
+        },
         onTimeline: (event: unknown, room: unknown) => {
           const roomId = typeof room === "string" ? room : (room as any)?.roomId;
           if (roomId) chatStore.markRoomChanged(roomId);

@@ -55,11 +55,14 @@ describe("MessageList — room open", () => {
     expect(template).toMatch(/v-if="!networkTimedOut && !isCachedEmissionPending && !loading/);
   });
 
-  it("skips the background reload when the SDK timeline is already in Dexie (stage 2)", () => {
+  it("a cached open only queues a backfill when Dexie history is not continuous (stage 3)", () => {
     const body = source.slice(source.indexOf("const refreshInBackground = async"));
-    const check = body.indexOf("await chatStore.isRoomInSyncWithSdk(roomId)");
-    const load = body.indexOf("loadMessages(roomId)");
-    expect(check).toBeGreaterThan(-1);
-    expect(load).toBeGreaterThan(check);
+    const branch = body.slice(0, body.indexOf("if (isStale()) return;\n    if (isCacheLikelyStale"));
+    expect(branch).toMatch(/await chatStore\.refreshOpenedRoom\(roomId\)/);
+    expect(branch).not.toMatch(/loadMessages\(roomId\)/);
+  });
+
+  it("shows the updating pill while the backfill works on the open room", () => {
+    expect(template).toMatch(/!!chatStore\.activeRoomId && chatStore\.backfillActiveRoomId === chatStore\.activeRoomId/);
   });
 });

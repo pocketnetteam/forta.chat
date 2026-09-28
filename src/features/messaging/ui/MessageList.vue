@@ -808,9 +808,21 @@ const openRoom = async (roomId: string | null) => {
   };
   const refreshInBackground = async () => {
     if (!openResult || openResult.branch === "network" || isStale()) return;
-    // Nothing to load when the SDK timeline is already in Dexie — the usual
-    // re-entry: no parse, no network, no writes (plan 2026-09-28, stage 2).
-    if (await chatStore.isRoomInSyncWithSdk(roomId)) return;
+    if (usingDexie) {
+      // Dexie knows its holes (plan 2026-09-28, stage 3): a continuous room
+      // needs nothing — no parse, no network, no writes. Events the SDK holds
+      // but Dexie lacks are written now; a marked hole goes first in the
+      // backfill queue, with the "updating" pill while it runs.
+      refreshingStaleCache.value = chatStore.initialSyncStatus === "loading";
+      try {
+        await chatStore.refreshOpenedRoom(roomId);
+      } catch (e) {
+        console.warn("[MessageList] refreshOpenedRoom failed:", e);
+      } finally {
+        if (!isStale()) refreshingStaleCache.value = false;
+      }
+      return;
+    }
     if (isStale()) return;
     if (isCacheLikelyStale({
       usingDexie,
@@ -1307,7 +1319,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
     <!-- Stale cache refresh indicator -->
     <transition name="fade-refresh">
       <div
-        v-if="refreshingStaleCache"
+        v-if="refreshingStaleCache || (!!chatStore.activeRoomId && chatStore.backfillActiveRoomId === chatStore.activeRoomId)"
         class="absolute inset-x-0 top-0 z-30 flex justify-center pt-2"
       >
         <span class="flex items-center gap-1.5 rounded-full bg-neutral-grad-0/90 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">

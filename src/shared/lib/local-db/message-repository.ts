@@ -163,6 +163,16 @@ export class MessageRepository {
     return sortLocalMessagesTimelineAsc(msgs);
   }
 
+  /** The room's oldest stored message that the server knows (has an
+   *  eventId), after the clear-history cutoff. Scroll-up pages back from it. */
+  async getOldestServerMessage(roomId: string, clearedAtTs?: number): Promise<LocalMessage | undefined> {
+    return this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, clearedAtTs ?? Dexie.minKey], [roomId, Dexie.maxKey], !clearedAtTs, true)
+      .filter((m) => !!m.eventId && m.eventId.startsWith("$"))
+      .first();
+  }
+
   /** Get a single message by server eventId */
   async getByEventId(eventId: string): Promise<LocalMessage | undefined> {
     return this.db.messages.where("eventId").equals(eventId).first();
