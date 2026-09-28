@@ -376,12 +376,9 @@ export function useMessages() {
     // the two send paths symmetric.
     const processedFile = await convertHeicToJpeg(file);
 
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      sendDiag("file:matrix-not-ready");
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
-      return false;
-    }
+    // No Matrix-readiness gate here: like text (WEE-85), the file is queued and
+    // SyncEngine holds the op until the client is ready. Returning early used
+    // to drop the attachment outright (audit S2-02, forta-bugs#1387).
 
     // Determine message type from MIME (with fallback for HEIC/extension-only files).
     // Audio MIME deliberately routes to MessageType.file: voice recordings have
@@ -474,13 +471,7 @@ export function useMessages() {
     // decode HEIC at all, so reading naturalWidth/Height on the original blob
     // would produce zeros and corrupt the m.image event payload.
     const processedFile = await convertHeicToJpeg(file);
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      sendDiag("image:matrix-not-ready");
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "image" }));
-      return false;
-    }
+    // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const dimensions = await getImageDimensions(processedFile);
     const imageMime = resolveMime(processedFile);
@@ -564,13 +555,7 @@ export function useMessages() {
       sendDiag("audio:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
       return false;
     }
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      sendDiag("audio:matrix-not-ready");
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "audio" }));
-      return false;
-    }
+    // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
@@ -670,12 +655,7 @@ export function useMessages() {
     sendDiag("videoCircle:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
-      return false;
-    }
+    // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const videoMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
