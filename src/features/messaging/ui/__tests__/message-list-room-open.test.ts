@@ -54,4 +54,12 @@ describe("MessageList — room open", () => {
     expect(template).toMatch(/<MessageSkeleton\s+v-if="[^"]*isCachedEmissionPending/);
     expect(template).toMatch(/v-if="!networkTimedOut && !isCachedEmissionPending && !loading/);
   });
+
+  it("skips the background reload when the SDK timeline is already in Dexie (stage 2)", () => {
+    const body = source.slice(source.indexOf("const refreshInBackground = async"));
+    const check = body.indexOf("await chatStore.isRoomInSyncWithSdk(roomId)");
+    const load = body.indexOf("loadMessages(roomId)");
+    expect(check).toBeGreaterThan(-1);
+    expect(load).toBeGreaterThan(check);
+  });
 });

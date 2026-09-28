@@ -113,6 +113,7 @@ function makeKit() {
       getClearedAtTs: vi.fn(() => CLEARED_AT_TS),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages,
       writeEdit: vi.fn(async () => {}),

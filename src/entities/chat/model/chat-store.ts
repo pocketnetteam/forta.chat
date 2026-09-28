@@ -15,6 +15,14 @@ import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib
 import { getModeratorChange, isServiceRoomName, isWithinCreationBurst, isCreationBurstMemberEvent } from "../lib/system-event-filter";
 import { preservePendingRooms } from "../lib/preserve-pending-rooms";
 import { indexCallEvents, isMissedCallHangup, type CallEventIndex } from "../lib/call-outcome";
+import {
+  classifyTimelineEvent,
+  describeTimeline,
+  isTimelineStoredInDexie,
+  pageEventIds,
+  selectEventIdsToParse,
+} from "../lib/timeline-parse-plan";
+import { collectTimelineReactions } from "../lib/timeline-reactions";
 import { unreadPeerHangupCount, unreadCountWithoutHangups, hasCallEvent } from "../lib/call-hangup-unread";
 import { createHangupGapCounter } from "./hangup-gap-counter";
 import { callHangupRuleSince } from "@/shared/lib/push/call-hangup-push-rule";
@@ -533,6 +541,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // the `forwarded_from` attribution (Telegram "hide sender" option).
   const bulkForwardWithSenderInfo = ref(true);
   const isDetachedFromLatest = ref(false);
+  /** Bumped by setActiveRoom whenever the active room changes (leaving and
+   *  re-entering the same room included). History work started for the
+   *  active room compares it to stop parsing/writing for a visit that ended. */
+  let roomVisitGeneration = 0;
 
   // Shared counter: yields to main thread every 5 decryption calls across ALL
   // decrypt paths (edits, timeline events, etc.) to keep UI responsive.
@@ -1059,7 +1071,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const pinnedMessageIndex = ref(0);
 
   /** Load pinned messages from room state (m.room.pinned_events) */
+  let pinnedLoadSeq = 0;
   const loadPinnedMessages = async (roomId: string) => {
+    // Several callers overlap (room entry, history load, pin events): only
+    // the latest call may publish its result.
+    const seq = ++pinnedLoadSeq;
     try {
       const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1072,12 +1088,28 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         pinnedMessageIndex.value = 0;
         return;
       }
-      // Resolve event IDs to Message objects from loaded messages
-      const roomMsgs = messages.value[roomId] ?? [];
+      // Resolve event IDs to Message objects — from Dexie (the in-memory list
+      // is only filled by history loads, which a cached room open skips),
+      // falling back to the in-memory list without Dexie.
       const resolved: Message[] = [];
-      for (const eventId of pinnedIds) {
-        const msg = roomMsgs.find(m => m.id === eventId);
-        if (msg) resolved.push(msg);
+      if (chatDbKitRef.value) {
+        const rows = await chatDbKitRef.value.messages.getByEventIds(pinnedIds);
+        if (seq !== pinnedLoadSeq || activeRoomId.value !== roomId) return;
+        const byId = new Map(rows.map((r) => [r.eventId!, r]));
+        const watermark = dexieRoomMap.get(roomId)?.lastReadOutboundTs ?? 0;
+        const myAddr = useAuthStore().address ?? undefined;
+        const inMemory = messages.value[roomId] ?? [];
+        for (const eventId of pinnedIds) {
+          const row = byId.get(eventId);
+          const msg = row ? localToMessage(row, watermark, myAddr) : inMemory.find((m) => m.id === eventId);
+          if (msg) resolved.push(msg);
+        }
+      } else {
+        const roomMsgs = messages.value[roomId] ?? [];
+        for (const eventId of pinnedIds) {
+          const msg = roomMsgs.find(m => m.id === eventId);
+          if (msg) resolved.push(msg);
+        }
       }
       pinnedMessages.value = resolved;
       pinnedMessageIndex.value = Math.min(pinnedMessageIndex.value, Math.max(0, resolved.length - 1));
@@ -3809,6 +3841,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const setActiveRoom = (roomId: string | null) => {
     perfMark("setActiveRoom-start");
+    const previousRoomId = activeRoomId.value;
     // Exit multi-select when leaving the room — selection is bound to the
     // active room's messages, carrying it over to the next chat is never
     // what the user expects.
@@ -3820,7 +3853,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // After flush completes, bump _liveQueryGen to force liveQuery re-subscribe.
     // This closes the race where buffered messages land in Dexie during the
     // re-subscription gap and would otherwise be missed until the next mutation.
-    const flushPromise = chatDbKitRef.value?.eventWriter.flushWriteBuffer();
+    // Only when entering a room with its own events still in the buffer:
+    // leaving must not drain every room's buffer at once, and other rooms'
+    // events reach the liveQuery on the buffer's regular flush anyway.
+    const flushPromise = roomId && chatDbKitRef.value?.eventWriter.hasBufferedWritesFor(roomId)
+      ? chatDbKitRef.value.eventWriter.flushWriteBuffer()
+      : undefined;
     // WEE-95: synchronously drop the previous room's liveQuery snapshot and force
     // a re-subscribe. useLiveQuery re-subscribes asynchronously (deps watcher) and
     // intentionally keeps stale data, so without this reset the OLD room's messages
@@ -3829,6 +3867,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (roomId !== activeRoomId.value) {
       resetDexieMessages([]);
       _liveQueryGen.value++;
+      roomVisitGeneration++;
     }
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
@@ -3836,6 +3875,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       flushPromise.then(() => {
         if (activeRoomId.value === roomId) _liveQueryGen.value++;
       }).catch(() => {});
+    }
+    if (roomId !== previousRoomId) {
+      // Pins of the room being entered — a Dexie read, no longer tied to the
+      // history reload a cached open now skips.
+      pinnedMessages.value = [];
+      pinnedMessageIndex.value = 0;
+      if (roomId) void loadPinnedMessages(roomId);
     }
     if (roomId) {
       // Recover any messages stuck as "[encrypted]" from a prior key/RPC outage
@@ -4927,6 +4973,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Upsert `msgs` into the room's in-memory list, keeping messages not in
+   *  `msgs`. For history loads that parse only events missing from Dexie:
+   *  setMessages would shrink the list to that subset. */
+  const mergeMessages = (roomId: string, msgs: Message[]) => {
+    const existing = messages.value[roomId] ?? [];
+    if (msgs.length === 0 && existing.length > 0) return;
+    const incoming = new Set(msgs.map((m) => m.id));
+    // setMessages reuses the existing objects for ids present in `msgs`.
+    setMessages(roomId, sortMessagesTimelineAsc([...existing.filter((m) => !incoming.has(m.id)), ...msgs]));
+  };
+
   /** Enter detached mode: replace active messages with a context window around a target message. */
   const enterDetachedMode = (roomId: string, msgs: Message[]) => {
     messages.value[roomId] = msgs;
@@ -5490,9 +5547,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Parse timeline events into Message array — decrypts in parallel, collects reactions */
+  // `parseOnly`: parse (decrypt) only these message events; relations —
+  // reactions, edits, poll votes — and the call index still see the whole timeline.
   const parseTimelineEvents = async (
     timelineEvents: unknown[],
     roomId: string,
+    { parseOnly }: { parseOnly?: ReadonlySet<string> } = {},
   ): Promise<Message[]> => {
     // Ensure room crypto is initialized before parsing
     const roomCrypto = await ensureRoomCrypto(roomId);
@@ -5504,48 +5564,31 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const pollResponseEvents: Record<string, unknown>[] = [];
     const pollEndEvents: Record<string, unknown>[] = [];
 
-    const stateEventTypes = ["m.room.member", "m.room.name", "m.room.power_levels", "m.room.avatar", "m.room.topic", "m.room.pinned_events"];
+    // One classification shared with the parse plan (timeline-parse-plan.ts):
+    // redacted messages and state events stay message events (placeholders /
+    // system rows), `m.replace` edits and reactions/poll votes are relations.
     for (const event of timelineEvents) {
       const raw = getRawEvent(event);
       if (!raw) continue;
-      if (raw.type === "m.reaction" && raw.content) {
-        reactionEvents.push(raw);
-      } else if (raw.type === "org.matrix.msc3381.poll.response" && raw.content) {
-        pollResponseEvents.push(raw);
-      } else if (raw.type === "org.matrix.msc3381.poll.end" && raw.content) {
-        pollEndEvents.push(raw);
-      } else if (raw.type === "m.room.message" && raw.content) {
-        // Check if this message has been redacted (content cleared by server)
-        const contentKeys = Object.keys(raw.content as Record<string, unknown>);
-        const isRedacted = contentKeys.length === 0 || (raw.unsigned as any)?.redacted_because;
-        if (isRedacted) {
-          // Still include as a deleted placeholder
-          messageEvents.push(event);
-        } else {
-          const rel = (raw.content as Record<string, unknown>)["m.relates_to"] as Record<string, unknown> | undefined;
-          if (rel?.rel_type === "m.replace" && rel?.event_id) {
-            editEvents.push(raw);
-          } else {
-            messageEvents.push(event);
-          }
-        }
-      } else if (raw.type === "m.room.message") {
-        // Redacted message with empty/null content — include as deleted placeholder
-        messageEvents.push(event);
-      } else if (stateEventTypes.includes(raw.type as string) && raw.content) {
-        // State events: membership changes, room name changes, power level changes
-        messageEvents.push(event);
-      } else {
-        messageEvents.push(event);
+      switch (classifyTimelineEvent(raw)) {
+        case "reaction": reactionEvents.push(raw); break;
+        case "poll-response": pollResponseEvents.push(raw); break;
+        case "poll-end": pollEndEvents.push(raw); break;
+        case "edit": editEvents.push(raw); break;
+        default: messageEvents.push(event);
       }
     }
 
     // A hangup reads as missed by the invite and answers around it (call-outcome.ts).
     const callEvents = indexCallEvents(timelineEvents.map(getRawEvent));
 
+    const toParse = parseOnly
+      ? messageEvents.filter((event) => parseOnly.has(getRawEvent(event)?.event_id as string))
+      : messageEvents;
+
     // Decrypt all messages in parallel
     const results = await Promise.all(
-      messageEvents.map((event) => parseSingleEvent(event, roomId, roomCrypto, callEvents).catch(() => null))
+      toParse.map((event) => parseSingleEvent(event, roomId, roomCrypto, callEvents).catch(() => null))
     );
 
     const msgs = results.filter((m): m is Message => m !== null && (m.content !== "" || m.deleted === true || m.type === MessageType.system));
@@ -5592,30 +5635,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Apply reactions to messages
     const matrixService = getMatrixClientService();
-    for (const raw of reactionEvents) {
-      const content = raw.content as Record<string, unknown>;
-      const relatesTo = content?.["m.relates_to"] as Record<string, unknown> | undefined;
-      if (!relatesTo) continue;
-      const targetId = relatesTo.event_id as string;
-      const emoji = relatesTo.key as string;
-      if (!targetId || !emoji) continue;
-
+    const reactionsByTarget = collectTimelineReactions(reactionEvents, (id) => matrixService.isMe(id));
+    for (const [targetId, reactions] of reactionsByTarget) {
       const targetMsg = msgMap.get(targetId);
-      if (!targetMsg) continue;
-
-      if (!targetMsg.reactions) targetMsg.reactions = {};
-      if (!targetMsg.reactions[emoji]) {
-        targetMsg.reactions[emoji] = { count: 0, users: [] };
-      }
-      const reactionSenderId = matrixIdToAddress(raw.sender as string);
-      const rd = targetMsg.reactions[emoji];
-      if (!rd.users.includes(reactionSenderId)) {
-        rd.users.push(reactionSenderId);
-        rd.count++;
-        if (matrixService.isMe(raw.sender as string)) {
-          rd.myEventId = raw.event_id as string;
-        }
-      }
+      if (targetMsg) targetMsg.reactions = { ...targetMsg.reactions, ...reactions };
     }
 
     // Apply poll responses (votes) to poll messages
@@ -5721,7 +5744,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  Also updates in-memory message statuses for the fallback path. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const applyExistingReceipts = (matrixRoom: any, timelineEvents: unknown[], msgs: Message[], myUserId: string | null) => {
-    if (!myUserId || msgs.length === 0) return;
+    // No early return on an empty `msgs`: the Dexie watermark comes from the
+    // receipts alone, and a history load that skips already-stored events
+    // (plan 2026-09-28, stage 2) often parses nothing at all.
+    if (!myUserId) return;
     try {
       const myAddr = matrixIdToAddress(myUserId);
       const roomId = (matrixRoom.roomId ?? matrixRoom.room_id) as string;
@@ -5750,6 +5776,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (chatDbKitRef.value && roomId && readUpToTimestamp > 0) {
         chatDbKitRef.value.rooms.updateOutboundWatermark(roomId, readUpToTimestamp).catch(() => {});
       }
+      if (msgs.length === 0) return;
 
       // Also update in-memory message statuses (for non-Dexie fallback path)
       const readUpToIdx = msgs.findIndex(m => m.id === readUpToEventId);
@@ -5791,6 +5818,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    * to fill them from Dexie. If found, updates in-memory state + triggers reactivity.
    * Called after initial load and loadMore to handle cross-batch references.
    */
+  const replyFetchAttempted = new Set<string>();
   const enrichUnresolvedReplies = async (roomId: string): Promise<void> => {
     if (!chatDbKitRef.value) return;
     const db = chatDbKitRef.value;
@@ -5808,8 +5836,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const stored = await db.messages.getByEventIds(ids);
     const storedMap = new Map(stored.map(m => [m.eventId!, m]));
 
-    // Step 3: For IDs not found in Dexie, fetch from Matrix server
-    const missingIds = ids.filter(id => !storedMap.has(id));
+    // Step 3: For IDs not found in Dexie, fetch from Matrix server — once per
+    // session each once the server answered: several replies quote the same
+    // event, and a quoted event the server has no usable content for was
+    // refetched on every room open. Network errors are retried next time.
+    const missingIds = [...new Set(ids)].filter(id => !storedMap.has(id) && !replyFetchAttempted.has(id));
     if (missingIds.length > 0) {
       try {
         const matrixService = getMatrixClientService();
@@ -5820,6 +5851,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             try {
               perfCount("net:event");
               const raw = await matrixService.client!.fetchRoomEvent(roomId, eventId);
+              replyFetchAttempted.add(eventId);
               if (!raw) return;
 
               let body = "";
@@ -5856,7 +5888,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
                   type: msgType,
                 } as import("@/shared/lib/local-db/schema").LocalMessage);
               }
-            } catch {
+            } catch (e) {
+              // The server says the event is gone or hidden: don't ask again.
+              const status = (e as { httpStatus?: number } | null)?.httpStatus;
+              if (status === 404 || status === 403) replyFetchAttempted.add(eventId);
               // Server fetch failed for this event — skip
             }
           });
@@ -5915,6 +5950,31 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Ids among `candidateIds` a history load has to parse, given what
+   *  Dexie holds: one indexed read for the candidates and edit targets. */
+  const planTimelineParse = async (
+    rawEvents: ReadonlyArray<Record<string, unknown> | null>,
+    timeline: ReturnType<typeof describeTimeline>,
+    candidateIds: readonly string[],
+  ): Promise<Set<string>> => {
+    const lookupIds = [...new Set([...candidateIds, ...timeline.edits.map((e) => e.targetId)])];
+    const storedRows = await chatDbKitRef.value!.messages.getByEventIds(lookupIds);
+    const callIndex = indexCallEvents(rawEvents);
+    const rawById = new Map(rawEvents.filter((r): r is Record<string, unknown> => !!r).map((r) => [r.event_id as string, r]));
+    return selectEventIdsToParse({
+      messageEventIds: candidateIds,
+      stored: new Map(storedRows.map((r) => [r.eventId!, r])),
+      edits: timeline.edits,
+      hangupReadsMissed: (id) => {
+        const raw = rawById.get(id);
+        return raw?.type === "m.call.hangup" && isMissedCallHangup(raw, callIndex);
+      },
+    });
+  };
+
+  /** Below this many timeline events loadRoomMessages scrolls back for more. */
+  const MIN_TIMELINE_EVENTS = 20;
+
   /** Load timeline events for a room and convert to Messages */
   /** Resolves to the number of messages parsed from the SDK timeline, or
    *  undefined when it bailed out before parsing (room not in the SDK, user
@@ -5926,6 +5986,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // navigated TO this room and then switched away (stale scrollback).
       // Viewport-fetch rooms are never the active room — they must not bail.
       const wasActiveRoom = activeRoomId.value === roomId;
+      const visit = roomVisitGeneration;
+      const isAborted = () => wasActiveRoom && roomVisitGeneration !== visit;
 
       const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -5959,7 +6021,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // decide whether it's even worth *trying* — it doesn't need to be
       // exact, just "clearly not enough to fill a chat view yet".
       let timelineEvents = getTimelineEvents(matrixRoom);
-      const MIN_TIMELINE_EVENTS = 20;
       const MAX_SCROLLBACK_ATTEMPTS = 5;
       // Undefined oldState (not yet populated) deliberately reads as "keep
       // trying", same as a real token — an unknown state must never look
@@ -5986,7 +6047,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           attempt < MAX_SCROLLBACK_ATTEMPTS && timelineEvents.length < MIN_TIMELINE_EVENTS && hasMoreHistory();
           attempt++
         ) {
-          if (wasActiveRoom && activeRoomId.value !== roomId) return;
+          if (isAborted()) return;
           const prevCount = timelineEvents.length;
           try {
             perfCount("net:scrollback");
@@ -6002,10 +6063,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       }
 
-      // Bail if user already switched to another room — no point parsing/writing
+      // Bail if user already left this visit — no point parsing/writing
       // stale data that will saturate Dexie transactions and block the active room.
       // Only applies when the room WAS active (viewport-fetch rooms were never active).
-      if (wasActiveRoom && activeRoomId.value !== roomId) return;
+      if (isAborted()) return;
 
       // Cut the raw timeline down to post-clear events BEFORE parsing/decrypting.
       // "Clear history" (clearHistory() in room-repository.ts) is a display-only
@@ -6023,7 +6084,23 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           })
         : timelineEvents;
 
-      const msgs = await parseTimelineEvents(eventsToParse, roomId);
+      // Parse only what Dexie does not hold yet (plan 2026-09-28, stage 2):
+      // the SDK timeline only grows while the app runs, and decrypting all of
+      // it on every open made each open heavier than the last.
+      const rawEvents = eventsToParse.map(getRawEvent);
+      const timeline = describeTimeline(rawEvents);
+      let parseOnly: Set<string> | undefined;
+      if (chatDbKitRef.value) {
+        parseOnly = await planTimelineParse(rawEvents, timeline, timeline.messageEventIds);
+        if (isAborted()) return;
+      }
+      const skippedCount = parseOnly ? timeline.messageEventIds.filter((id) => !parseOnly!.has(id)).length : 0;
+
+      const msgs = parseOnly && parseOnly.size === 0
+        ? []
+        : await parseTimelineEvents(eventsToParse, roomId, { parseOnly });
+      // No abort check from here on: the decryption is paid, its result is
+      // written even if the user already left (plan 2026-09-28, stage 2, p. 7).
 
       // Apply existing read receipts to determine message status.
       // Walk timeline backwards, find the latest read receipt from a non-self user,
@@ -6036,40 +6113,58 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // receipt entirely and leave own messages stuck as "sent".
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
 
-      setMessages(roomId, msgs);
+      if (skippedCount > 0) mergeMessages(roomId, msgs);
+      else setMessages(roomId, msgs);
 
-      // Dual-write: persist all parsed messages to Dexie.
+      // Reactions from the timeline, for every message in it — stored rows
+      // included, since bulkInsert skips rows that already exist. Written in
+      // one transaction and only where they differ from Dexie.
+      const timelineMessageIds = new Set(timeline.messageEventIds);
+      const reactionEntries = [
+        ...collectTimelineReactions(
+          rawEvents.filter((raw): raw is Record<string, unknown> => !!raw && classifyTimelineEvent(raw) === "reaction"),
+          (id) => matrixService.isMe(id),
+        ),
+      ]
+        .filter(([targetId]) => timelineMessageIds.has(targetId) && !targetId.startsWith("msg_"))
+        .map(([eventId, reactions]) => ({ eventId, reactions }));
+
+      // Dual-write: persist parsed messages to Dexie.
       // WEE-95: fire-and-forget for ALL rooms — never block the render-critical
       // path on a 100+ message Dexie transaction (200-800ms on slow devices,
       // competing with background writes of other rooms). The active room's UI
-      // is fed by the liveQuery as soon as the write commits; if a refresh races
-      // the write, messages are re-fetched from Matrix on next open.
-      if (chatDbKitRef.value && msgs.length > 0) {
+      // is fed by the liveQuery as soon as the write commits. Once started, the
+      // write runs to the end even if the user leaves: the decryption is paid.
+      if (chatDbKitRef.value) {
+        const dbKit = chatDbKitRef.value;
         const parsedMessages = toParsedMessages(msgs, indexRawEvents(eventsToParse));
         const dexieWriteWork = async () => {
-          perfCount("dexie:rw:open");
-          await chatDbKitRef.value!.eventWriter.writeMessages(parsedMessages);
+          if (parsedMessages.length > 0) {
+            perfCount("dexie:rw:open");
+            await dbKit.eventWriter.writeMessages(parsedMessages);
 
-          // Patch Dexie records where parseTimelineEvents resolved a reply
-          // but bulkInsert skipped the message (already existed with empty replyTo).
-          const resolvedReplies = parsedMessages
-            .filter(m => m.replyTo?.senderId && m.eventId)
-            .map(m => ({ eventId: m.eventId!, replyTo: m.replyTo! }));
-          if (resolvedReplies.length > 0) {
-            await chatDbKitRef.value!.messages.patchUnresolvedReplies(resolvedReplies);
+            // Patch Dexie records where parseTimelineEvents resolved a reply
+            // but bulkInsert skipped the message (already existed with empty replyTo).
+            const resolvedReplies = parsedMessages
+              .filter(m => m.replyTo?.senderId && m.eventId)
+              .map(m => ({ eventId: m.eventId!, replyTo: m.replyTo! }));
+            if (resolvedReplies.length > 0) {
+              await dbKit.messages.patchUnresolvedReplies(resolvedReplies);
+            }
           }
 
-          // Also try to resolve any remaining unresolved replies from Dexie
+          // Resolve reply previews still empty in Dexie — also for rows that
+          // were not re-parsed (their quoted message may have arrived since).
+          // Reads; writes only when a preview resolves.
           await enrichUnresolvedReplies(roomId);
 
-          // Sync reactions to Dexie for messages that already existed (bulkInsert skips duplicates).
-          // This ensures Dexie has up-to-date reactions from the timeline.
-          const dbKit = chatDbKitRef.value!;
-          for (const m of msgs) {
-            if (m.reactions && Object.keys(m.reactions).length > 0 && m.id && !m.id.startsWith("msg_")) {
-              perfCount("dexie:rw:open");
-              dbKit.messages.updateReactions(m.id, m.reactions).catch(() => {});
-            }
+          if (await dbKit.messages.bulkUpdateReactions(reactionEntries) > 0) {
+            perfCount("dexie:rw:open");
+          }
+
+          // Pins may point at messages this load just wrote (first open of a room).
+          if (parsedMessages.length > 0 && roomId === activeRoomId.value) {
+            await loadPinnedMessages(roomId);
           }
         };
 
@@ -6078,17 +6173,43 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         });
       }
 
-      // Load server-synced pinned messages after messages are available
-      if (roomId === activeRoomId.value) {
-        await loadPinnedMessages(roomId);
-      }
-
-      return msgs.length;
+      return msgs.length + skippedCount;
     } catch (e) {
       console.error("[chat-store] loadRoomMessages fatal error for room %s:", roomId, e);
       // Set empty messages so UI doesn't hang
       setMessages(roomId, []);
       return undefined;
+    }
+  };
+
+  /** Would loadRoomMessages have nothing to add for this room? True when
+   *  every message event of the SDK's in-memory timeline is already in Dexie
+   *  and the timeline needs no scrollback (see isTimelineStoredInDexie). One
+   *  indexed read, no parsing — a cached room open checks this instead of
+   *  reloading the room's history every time (plan 2026-09-28, stage 2). */
+  const isRoomInSyncWithSdk = async (roomId: string): Promise<boolean> => {
+    if (!chatDbKitRef.value) return false;
+    try {
+      const matrixRoom = getMatrixClientService().getRoom(roomId) as
+        | { oldState?: { paginationToken?: string | null } }
+        | null;
+      if (!matrixRoom) return false;
+      const clearedAtTs = chatDbKitRef.value.eventWriter.getClearedAtTs(roomId);
+      const allEvents = getTimelineEvents(matrixRoom);
+      const rawEvents = allEvents.map(getRawEvent).filter((raw) => {
+        const ts = raw?.origin_server_ts as number | undefined;
+        return !clearedAtTs || ts === undefined || ts > clearedAtTs;
+      });
+      const timeline = describeTimeline(rawEvents);
+      return isTimelineStoredInDexie({
+        timelineLength: allEvents.length,
+        hasMoreHistory: matrixRoom.oldState?.paginationToken !== null,
+        minTimelineEvents: MIN_TIMELINE_EVENTS,
+        pendingIds: await planTimelineParse(rawEvents, timeline, timeline.rowEventIds),
+      });
+    } catch (e) {
+      console.warn("[chat-store] isRoomInSyncWithSdk failed:", e);
+      return false;
     }
   };
 
@@ -6113,10 +6234,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const newCount = getTimelineEvents(matrixRoom).length;
       if (newCount <= prevCount) return false; // no more messages
 
+      // Parse only the page scrollback prepended; relations and the call
+      // index still see the whole timeline.
       const timelineEvents = getTimelineEvents(matrixRoom);
-      const msgs = await parseTimelineEvents(timelineEvents, roomId);
+      const msgs = await parseTimelineEvents(timelineEvents, roomId, {
+        parseOnly: pageEventIds(timelineEvents.map(getRawEvent), newCount - prevCount),
+      });
       applyExistingReceipts(matrixRoom, timelineEvents, msgs, matrixService.getUserId());
-      setMessages(roomId, msgs);
+      mergeMessages(roomId, msgs);
 
       // Dual-write: persist scrollback messages to Dexie so that
       // expandMessageWindow() can serve older messages from local cache
@@ -6144,6 +6269,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  until expandMessageWindow() reads it on scroll-up.
    *  Returns true if there are more messages to fetch. */
   let prefetchInFlight = false;
+  const PREFETCH_LOOKAHEAD_ROWS = 50;
   const prefetchNextBatch = async (roomId: string): Promise<boolean> => {
     if (prefetchInFlight) return true;
     prefetchInFlight = true;
@@ -6153,6 +6279,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) return false;
       if (activeRoomId.value !== roomId) return false;
+      const visit = roomVisitGeneration;
+      const isAborted = () => roomVisitGeneration !== visit;
+
+      // Dexie already holds at least a page of history older than the
+      // window: the next scroll-ups are served locally, page the server later.
+      // Fewer rows left → prefetch now, so the network page is there before
+      // Dexie runs out.
+      const dbKit = chatDbKitRef.value;
+      const oldestInWindow = dexieMessages.value[0]?.timestamp;
+      if (dbKit && oldestInWindow !== undefined) {
+        const older = await dbKit.messages.getMessages(
+          roomId, PREFETCH_LOOKAHEAD_ROWS, oldestInWindow, dbKit.eventWriter.getClearedAtTs(roomId),
+        );
+        if (older.length >= PREFETCH_LOOKAHEAD_ROWS) return true;
+        if (isAborted()) return false;
+      }
 
       const prevCount = getTimelineEvents(matrixRoom).length;
       try {
@@ -6164,10 +6306,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       const newCount = getTimelineEvents(matrixRoom).length;
       if (newCount <= prevCount) return false; // no more history
+      if (isAborted()) return true;
 
-      // Write ONLY to Dexie — no reactive state changes
+      // Write ONLY to Dexie — no reactive state changes. Parse only the page
+      // scrollback prepended, not the whole (ever-growing) timeline.
       const events = getTimelineEvents(matrixRoom);
-      const msgs = await parseTimelineEvents(events, roomId);
+      const msgs = await parseTimelineEvents(events, roomId, {
+        parseOnly: pageEventIds(events.map(getRawEvent), newCount - prevCount),
+      });
+      if (isAborted()) return true;
 
       if (chatDbKitRef.value && msgs.length > 0) {
         const parsedMessages = toParsedMessages(msgs, indexRawEvents(events));
@@ -7687,6 +7834,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     hasMessage,
     dexieMessagesReady,
     activeMessagesRoomId,
+    isRoomInSyncWithSdk,
     dexieRoomMap,
     getPreOpenUnreadCount,
     dexieRoomsReady,

@@ -804,10 +804,14 @@ const openRoom = async (roomId: string | null) => {
     if (afterRevealDone) return;
     afterRevealDone = true;
     trace.settle();
-    refreshInBackground();
+    void refreshInBackground();
   };
-  const refreshInBackground = () => {
+  const refreshInBackground = async () => {
     if (!openResult || openResult.branch === "network" || isStale()) return;
+    // Nothing to load when the SDK timeline is already in Dexie — the usual
+    // re-entry: no parse, no network, no writes (plan 2026-09-28, stage 2).
+    if (await chatStore.isRoomInSyncWithSdk(roomId)) return;
+    if (isStale()) return;
     if (isCacheLikelyStale({
       usingDexie,
       initialSyncStatus: chatStore.initialSyncStatus,

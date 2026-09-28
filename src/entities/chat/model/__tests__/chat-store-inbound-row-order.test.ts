@@ -107,6 +107,7 @@ function makeKit(capture: { cb?: (changes: RoomChange[]) => void }) {
       getClearedAtTs: vi.fn(() => undefined),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages: vi.fn(async () => {}),
       writeEdit: vi.fn(async () => {}),
