@@ -45,7 +45,7 @@ D desktop (Electron).
 | S1-03 | P2 | 3 | WAiD | "Peer hasn't published keys" verdict never self-heals automatically — only a manual Retry bypasses the stale profile cache | `src/widgets/chat-window/ChatWindow.vue` | fixed |
 | S3-01 | P2 | 6 | AiWD | Buffered inbound writes (150ms/500ms) have no flush-on-background hook — message loss on app kill | `src/shared/lib/local-db/write-buffer.ts` | fixed |
 | S4-03 | P2 | 4 | AiW | MediaViewer (full-screen / gallery) video lacks the timeout + codec-unsupported handling the inline chat bubble already has | `src/features/messaging/ui/MediaViewer.vue` | fixed |
-| S6-01 | P2 | 6 | A | Push notification title/sender name bypasses local aliases and the raw-ID guard, can downgrade a good native title to a hex ID | `src/shared/lib/push/push-service.ts` | open |
+| S6-01 | P2 | 6 | A | Push notification title/sender name bypasses local aliases and the raw-ID guard, can downgrade a good native title to a hex ID | `src/shared/lib/push/push-service.ts` | fixed |
 | S8-03 | P2 | 5 | D | Packaged Electron app never shows a tray icon — "minimise to tray" hides the window with no way back except relaunching | `electron/tray.cjs` | fixed |
 | W2A-04 | P2 | 3 | WAiD | Profile save failure reason is computed but discarded — every failure shows the same generic "failed to save profile" | `src/app/providers/initializers/app-initializer.ts` | fixed |
 | S2-03 | P2 | 2 | WAiD | Once a queued op in a room permanently fails, later messages in the same room are sent out of order (FIFO invariant silently broken) | `src/shared/lib/local-db/sync-engine.ts` | kept (by design: a failed message keeps its retry, later ones still go, as in Telegram/WhatsApp) |
@@ -72,9 +72,9 @@ D desktop (Electron).
 | W2C-02 | P2 | 6 | AiW | Unread-banner scroll-to-position races the (unawaited) window expansion — falls back to "scroll to bottom" | `src/features/messaging/ui/MessageList.vue` | fixed |
 | W2D-01 | P2 | 6 | WDAi | Connection-status indicator freezes forever after the first ChatSidebar remount (orphaned singleton watcher) | `src/features/sync-status/model/use-sync-status.ts` | fixed |
 | W2D-02 | P2 | 6 | WAiD | Channels/Bastyon-post browsing accumulates unbounded memory and DOM over a session | `src/entities/channel/model/channel-store.ts` | open |
-| W2B-03 | P2 | 6 | A | `isFcmAvailable()` reflects build-time Firebase config, not runtime Google Play Services — push silently never works on Huawei/GMS-less devices (boot itself is NOT blocked — verified) | `android/app/src/main/java/com/forta/chat/plugins/push/PushDataPlugin.kt` | open |
+| W2B-03 | P2 | 6 | A | `isFcmAvailable()` reflects build-time Firebase config, not runtime Google Play Services — push silently never works on Huawei/GMS-less devices (boot itself is NOT blocked — verified) | `android/app/src/main/java/com/forta/chat/plugins/push/PushDataPlugin.kt` | fixed |
 | S5-04 | P3 | 5 | WAiD | Captcha SVG is sanitized with hand-rolled regexes before `v-html` (defense-in-depth gap, not currently exploitable from an attacker-controlled source) | `src/features/auth/ui/register-form/steps/CaptchaStep.vue` | fixed |
-| S6-04 | P3 | 6 | Ai | Switching accounts leaks native PushData listeners — every future push and notification tap is handled once per prior account switch | `src/shared/lib/push/push-service.ts` | open |
+| S6-04 | P3 | 6 | Ai | Switching accounts leaks native PushData listeners — every future push and notification tap is handled once per prior account switch | `src/shared/lib/push/push-service.ts` | fixed |
 | W2A-05 | P3 | 6 | WAiD | `editUserData` skips the unspents preload that registration has — profile save can silently hit `actions_noinputs` on a low-balance account | `src/app/providers/initializers/app-initializer.ts` | fixed |
 | W2B-04 | P3 | 6 | A | Bug-report textarea has no draft persistence — rotation text-loss report could not be reproduced from `AndroidManifest`/component code | `android/app/src/main/AndroidManifest.xml` | fixed |
 | S10-07 | P3 | 5 | D | Bug reports from Electron always show `OS: n/a` (P3, explicitly requested) | `src/shared/lib/bug-report/collect-environment.ts` | fixed |

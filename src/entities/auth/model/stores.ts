@@ -5,6 +5,7 @@ import {
 import { PocketnetInstance } from "@/app/providers/chat-scripts/config/pocketnetinstance";
 import { blockchainWs } from "@/shared/lib/blockchain-ws";
 import { useChatStore } from "@/entities/chat";
+import { matrixIdToAddress } from "@/entities/chat/lib/chat-helpers";
 import { useUserStore } from "@/entities/user/model";
 import { useCallStore } from "@/entities/call/model/call-store";
 import { useChannelStore } from "@/entities/channel/model/channel-store";
@@ -1039,6 +1040,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               return map;
             });
 
+            // Push titles use the chat's own names, contact aliases first
+            // (audit S6-01), both in JS and in the cache native reads.
+            const pushSenderName = (userId: string): string | null => {
+              const address = matrixIdToAddress(userId);
+              return address ? chatStore.getDisplayName(address) : null;
+            };
+            pushService.setSenderNameResolver(pushSenderName);
+
             pushService.setAllSenderNamesGetter(() => {
               const senders: Record<string, string> = {};
               const client = matrixService.client;
@@ -1046,7 +1055,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               for (const room of client.getRooms()) {
                 for (const member of room.getJoinedMembers()) {
                   const userId = member.userId;
-                  const name = member.name;
+                  const name = pushSenderName(userId) || member.name;
                   if (name && name !== userId && !senders[userId]) {
                     senders[userId] = name;
                   }

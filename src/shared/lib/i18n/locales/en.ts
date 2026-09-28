@@ -303,6 +303,7 @@ export const en = {
   "chat.accept": "Accept",
   "chat.acceptInviteFailed": "Couldn't join the chat. Check your connection and try again.",
   "chat.acceptInviteBanned": "You are banned from this chat.",
+  "push.noPlayServices": "Push notifications need Google Play Services, which this device does not have. New messages will show while Forta Chat is open.",
   "chat.search": "Search",
   "chat.videoCall": "Video call",
   "chat.more": "More",

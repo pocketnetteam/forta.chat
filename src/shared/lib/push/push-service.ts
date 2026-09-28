@@ -1,4 +1,5 @@
 import { PushNotifications } from '@capacitor/push-notifications';
+import type { PluginListenerHandle } from '@capacitor/core';
 import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
 import { isIncomingCallsEnabled, syncIncomingCallsSettingToNative } from './incoming-calls-setting';
@@ -19,6 +20,7 @@ import {
   findCallSelectAnswerPushRule,
 } from './call-select-answer-push-rule';
 import { tRaw } from '@/shared/lib/i18n';
+import { useToast } from '@/shared/lib/use-toast';
 import { interopLog } from '@/shared/lib/interop';
 
 /**
@@ -130,6 +132,10 @@ class PushService {
    *  login could register the very token that is being deleted. */
   private tokenReset: Promise<unknown> = Promise.resolve();
   private matrixClient: any = null;
+  /** PushData listeners added by init(). Every init() (a login, an account
+   *  switch) added another pair without removing the last, so one push ran
+   *  its handlers once per past session (audit S6-04). */
+  private pushDataListeners: Array<Promise<PluginListenerHandle>> = [];
   private onCallPush: ((data: { callId: string; callerName: string; roomId: string; hasVideo: boolean }) => void) | null = null;
   private getRoomInfo: ((roomId: string) => { roomName: string } | null) | null = null;
   private getActiveRoomId: (() => string | null) | null = null;
@@ -157,6 +163,28 @@ class PushService {
 
   setAllSenderNamesGetter(getter: () => Record<string, string>) {
     this.getAllSenderNames = getter;
+  }
+
+  private senderNameResolver: ((matrixUserId: string) => string | null) | null = null;
+  private noPlayServicesNoticeShown = false;
+
+  /** Resolve a sender's name the way the chat does (the contact's local alias
+   *  first). Push titles took the Matrix member name or even the raw Matrix ID,
+   *  bypassing aliases (audit S6-01). */
+  setSenderNameResolver(resolver: ((matrixUserId: string) => string | null) | null) {
+    this.senderNameResolver = resolver;
+  }
+
+  private senderNameFor(senderId: string | undefined, fallback: string | undefined): string {
+    if (senderId && this.senderNameResolver) {
+      try {
+        const name = this.senderNameResolver(senderId);
+        if (name) return name;
+      } catch (e) {
+        console.warn('[PushService] sender name resolver failed:', e);
+      }
+    }
+    return fallback || tRaw('push.unknownSender');
   }
 
   /** Set the callback for optimistic room preview updates from push notifications.
@@ -435,7 +463,7 @@ class PushService {
           const senderId = raw.sender as string;
           const room = this.matrixClient?.getRoom(roomId);
           const member = room?.getMember(senderId);
-          const senderName = member?.name || senderId || tRaw('push.unknownSender');
+          const senderName = this.senderNameFor(senderId, member?.name || senderId);
           return { senderName, body: this.formatBody(content) };
         }
       }
@@ -503,7 +531,7 @@ class PushService {
         if (!body || typeof body !== 'string') return null;
         // Skip if body is still ciphertext (base64 blob)
         if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
-        const senderName = event.sender?.name || event.getSender?.() || tRaw('push.unknownSender');
+        const senderName = this.senderNameFor(event.getSender?.(), event.sender?.name || event.getSender?.());
         return { senderName, body: this.formatBody(content) };
       };
 
@@ -551,7 +579,7 @@ class PushService {
       const body = content?.body;
       if (!body || typeof body !== 'string') continue;
       if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) continue;
-      const senderName = ev.sender?.name || ev.getSender?.() || tRaw('push.unknownSender');
+      const senderName = this.senderNameFor(ev.getSender?.(), ev.sender?.name || ev.getSender?.());
       return { senderName, body: this.formatBody(content) };
     }
     return null;
@@ -669,19 +697,20 @@ class PushService {
 
 
     // 3. Listen for push data forwarded from native service
-    PushData.addListener('pushReceived', (data) => {
+    await this.removePushDataListeners();
+    this.pushDataListeners.push(PushData.addListener('pushReceived', (data) => {
       this.handlePushFromNative(data as PushPayload);
-    });
+    }));
 
     // Listen for notification tap (Android source: PushDataPlugin emits
     // pushOpenRoom directly; on iOS the native PushData plugin no longer
     // emits this — see iOS handler below).
-    PushData.addListener('pushOpenRoom', (data) => {
+    this.pushDataListeners.push(PushData.addListener('pushOpenRoom', (data) => {
       // push tap → open room
       window.dispatchEvent(new CustomEvent('push:openRoom', {
         detail: { roomId: data.roomId, eventId: data.eventId },
       }));
-    });
+    }));
 
     // iOS-specific tap source. UNUserNotificationCenter.delegate is owned
     // by Capacitor's runtime; foreground/background taps surface as the
@@ -726,6 +755,12 @@ class PushService {
       try {
         const status = await PushData.isFcmAvailable();
         fcmAvailable = status.available;
+        // No Google Play Services (Huawei and other GMS-less phones): say so
+        // once instead of pushes silently never arriving (audit W2B-03).
+        if (status.playServices === false && !this.noPlayServicesNoticeShown) {
+          this.noPlayServicesNoticeShown = true;
+          useToast().toast(tRaw('push.noPlayServices'), 'info', 8000);
+        }
       } catch (e) {
         console.warn('[PushService] isFcmAvailable check failed, assuming FCM disabled:', e);
         fcmAvailable = false;
@@ -828,8 +863,22 @@ class PushService {
    *     offline, or left by an older build — dies at FCM on its next send.
    * Waits at most LOGOUT_UNREGISTER_TIMEOUT_MS; never throws.
    */
+  /** Remove the PushData listeners this service added; never throws. */
+  private async removePushDataListeners(): Promise<void> {
+    const pending = this.pushDataListeners;
+    this.pushDataListeners = [];
+    await Promise.all(
+      pending.map((handle) =>
+        Promise.resolve(handle).then((h) => h?.remove()).catch((e) => {
+          console.warn('[PushService] removing a PushData listener failed:', e);
+        }),
+      ),
+    );
+  }
+
   async unregisterForLogout(): Promise<void> {
     if (!isNative) return;
+    await this.removePushDataListeners();
     const matrixClient = this.matrixClient;
     const fcmToken = this.fcmToken;
     const voipToken = this.voipToken;

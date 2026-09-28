@@ -12,6 +12,8 @@ import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailabilityLight
 
 /**
  * Bridges push data between native FCM service and JS:
@@ -156,12 +158,21 @@ class PushDataPlugin : Plugin() {
         }
     }
 
-    /** True when google-services.json was present at build time (FCM safe to register). */
+    /** True when FCM can deliver here: google-services.json was present at build
+     *  time and Google Play Services is on the device ([FcmAvailability]). */
     @PluginMethod
     fun isFcmAvailable(call: PluginCall) {
+        val status = playServicesStatus()
         val result = JSObject()
-        result.put("available", com.forta.chat.BuildConfig.FIREBASE_ENABLED)
+        result.put("available", FcmAvailability.fcmUsable(com.forta.chat.BuildConfig.FIREBASE_ENABLED, status))
+        result.put("playServices", FcmAvailability.playServicesUsable(status))
         call.resolve(result)
+    }
+
+    private fun playServicesStatus(): Int = try {
+        GoogleApiAvailabilityLight.getInstance().isGooglePlayServicesAvailable(context)
+    } catch (_: Throwable) {
+        ConnectionResult.SUCCESS // unknown: do not block registration
     }
 
     /** JS is signed in: pushes are delivered (see [PushSessionPolicy]). */

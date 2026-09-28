@@ -305,6 +305,7 @@ export const ru: Record<TranslationKey, string> = {
   "chat.accept": "Принять",
   "chat.acceptInviteFailed": "Не удалось вступить в чат. Проверьте подключение и попробуйте ещё раз.",
   "chat.acceptInviteBanned": "Вы заблокированы в этом чате.",
+  "push.noPlayServices": "Для push-уведомлений нужны сервисы Google Play, а на этом устройстве их нет. Новые сообщения будут видны, пока Forta Chat открыт.",
   "chat.search": "Поиск",
   "chat.videoCall": "Видеозвонок",
   "chat.more": "Ещё",
