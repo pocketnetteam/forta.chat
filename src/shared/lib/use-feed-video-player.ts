@@ -66,6 +66,15 @@ const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 3000, 6000];
 const IDLE_TIMEOUT = 10_000;
 
+/**
+ * Longest wait for a source's metadata, and for playback to start once asked.
+ * A connection that stalls after connecting fires neither `loadedmetadata` nor
+ * `error`, so without it the spinner spun forever and every later tap was
+ * ignored (audit S4-02). A stall counts as a load error and goes through the
+ * same retries, then the host's fallback.
+ */
+export const FEED_VIDEO_LOAD_TIMEOUT_MS = 20_000;
+
 export function useFeedVideoPlayer(options: FeedPlayerOptions) {
   const {
     videoRef,
@@ -88,6 +97,9 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let loadTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Ends the wait of a play() in progress when its load fails or stalls. */
+  let rejectPendingLoad: ((err: Error) => void) | null = null;
   let visibilityObserver: IntersectionObserver | null = null;
   let preloadObserver: IntersectionObserver | null = null;
   let isInViewport = false;
@@ -107,6 +119,26 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     el.src = url;
     el.load();
     state.value = "loading";
+    armLoadTimer();
+  }
+
+  function armLoadTimer() {
+    clearLoadTimer();
+    loadTimer = setTimeout(() => {
+      loadTimer = null;
+      if (state.value !== "loading") return;
+      console.warn("[FeedPlayer] load stalled: no metadata in", FEED_VIDEO_LOAD_TIMEOUT_MS, "ms");
+      state.value = "error";
+      rejectPendingLoad?.(new Error("Video load timed out"));
+      scheduleRetry();
+    }, FEED_VIDEO_LOAD_TIMEOUT_MS);
+  }
+
+  function clearLoadTimer() {
+    if (loadTimer) {
+      clearTimeout(loadTimer);
+      loadTimer = null;
+    }
   }
 
   function detachSource() {
@@ -120,6 +152,7 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     state.value = "idle";
     releaseActivePlayer(playerHandle);
     clearIdleTimer();
+    clearLoadTimer();
   }
 
   // --- Position persistence (WEE-82 / forta-bugs#964) ---
@@ -150,18 +183,25 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
       if (state.value === "idle") {
         attachSource();
         await new Promise<void>((resolve, reject) => {
-          const onMeta = () => {
+          const cleanup = () => {
             el.removeEventListener("loadedmetadata", onMeta);
             el.removeEventListener("error", onErr);
+            rejectPendingLoad = null;
+          };
+          const onMeta = () => {
+            cleanup();
             resolve();
           };
           const onErr = () => {
-            el.removeEventListener("loadedmetadata", onMeta);
-            el.removeEventListener("error", onErr);
+            cleanup();
             reject(new Error("Video load failed"));
           };
           el.addEventListener("loadedmetadata", onMeta);
           el.addEventListener("error", onErr);
+          rejectPendingLoad = (err) => {
+            cleanup();
+            reject(err);
+          };
         });
       }
 
@@ -169,7 +209,24 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
       clearIdleTimer();
 
       el.muted = isMuted.value;
-      await el.play();
+      // play() stays pending while no data arrives: bound it, and end it as
+      // soon as the load fails or stalls so the next tap is not ignored.
+      let playTimer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          el.play(),
+          new Promise<never>((_, reject) => {
+            playTimer = setTimeout(
+              () => reject(new Error("Video play timed out")),
+              FEED_VIDEO_LOAD_TIMEOUT_MS,
+            );
+            rejectPendingLoad = reject;
+          }),
+        ]);
+      } finally {
+        if (playTimer) clearTimeout(playTimer);
+        rejectPendingLoad = null;
+      }
       state.value = "playing";
       errorCount.value = 0;
     } catch (err: unknown) {
@@ -240,6 +297,9 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
   // --- Error recovery ---
 
   function scheduleRetry() {
+    // A failed load reaches here from both the element's error listener and the
+    // play() that waited on it; one failure is one retry.
+    if (retryTimer) return;
     if (errorCount.value >= MAX_RETRIES) {
       onFatalError?.();
       return;
@@ -249,6 +309,7 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     errorCount.value++;
 
     retryTimer = setTimeout(() => {
+      retryTimer = null;
       detachSource();
       attachSource();
     }, delay);
@@ -259,6 +320,7 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
   function onLoadedMetadata() {
     const el = videoRef.value;
     if (!el) return;
+    clearLoadTimer();
     duration.value = el.duration;
 
     // Restore the saved position (WEE-82 / forta-bugs#964). The store already
@@ -304,7 +366,9 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
 
   function onError() {
     if (state.value === "idle") return;
+    clearLoadTimer();
     state.value = "error";
+    rejectPendingLoad?.(new Error("Video load failed"));
     scheduleRetry();
   }
 
@@ -386,6 +450,7 @@ export function useFeedVideoPlayer(options: FeedPlayerOptions) {
     unbindListeners();
     detachSource();
     clearIdleTimer();
+    clearLoadTimer();
     if (retryTimer) clearTimeout(retryTimer);
     preloadObserver?.disconnect();
     visibilityObserver?.disconnect();
