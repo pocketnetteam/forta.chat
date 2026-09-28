@@ -62,11 +62,13 @@ const getState = (key: string): MockState => {
   return state;
 };
 
-const download = vi.fn(async (message: typeof videoMessage) => {
+const mint = async (message: typeof videoMessage): Promise<string> => {
   const state = getState(message._key);
   state.objectUrl = `blob:${message._key}/${++mintCounter}`;
   return state.objectUrl;
-});
+};
+
+const download = vi.fn(mint);
 
 const saveFile = vi.fn(async () => {});
 
@@ -98,7 +100,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   states.clear();
   mintCounter = 0;
-  download.mockClear();
+  download.mockReset().mockImplementation(mint);
   saveFile.mockClear();
 });
 
@@ -144,6 +146,33 @@ describe("MediaViewer — gallery video errors (audit S4-03)", () => {
     await wrapper.find('[data-testid="media-video-retry"]').trigger("click");
     await flushPromises();
     expect(download).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('[data-testid="media-video-error"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  // Batch-4 review: a failed download leaves no URL, so the player never mounts.
+  it("offers a retry when the download itself failed, instead of a spinner", async () => {
+    download.mockImplementation(async (message: typeof videoMessage) => {
+      const state = getState(message._key);
+      state.error = "network";
+      state.errorKind = "network";
+      return null as unknown as string;
+    });
+    const wrapper = await openVideo();
+
+    expect(wrapper.find("video").exists()).toBe(false);
+    const overlay = wrapper.find('[data-testid="media-video-error"]');
+    expect(overlay.exists()).toBe(true);
+    expect(overlay.text()).toContain("message.videoLoadFailed");
+    expect(wrapper.find('[data-testid="media-video-download"]').exists()).toBe(false);
+
+    // The network is back: the retry fetches again and the player mounts.
+    const callsBefore = download.mock.calls.length;
+    download.mockImplementation(mint);
+    await wrapper.find('[data-testid="media-video-retry"]').trigger("click");
+    await flushPromises();
+    expect(download.mock.calls.length).toBe(callsBefore + 1);
+    expect(wrapper.find("video").exists()).toBe(true);
     expect(wrapper.find('[data-testid="media-video-error"]').exists()).toBe(false);
     wrapper.unmount();
   });

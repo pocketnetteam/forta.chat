@@ -469,7 +469,10 @@ const handleAcceptInvite = async () => {
   if (!roomId) return;
   inviteLoading.value = true;
   try {
-    if (!(await chatStore.acceptInvite(roomId))) toast(t("chat.acceptInviteFailed"), "error");
+    const result = await chatStore.acceptInvite(roomId);
+    if (result !== "joined") {
+      toast(t(result === "banned" ? "chat.acceptInviteBanned" : "chat.acceptInviteFailed"), "error");
+    }
   } finally {
     inviteLoading.value = false;
   }

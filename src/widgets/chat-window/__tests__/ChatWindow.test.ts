@@ -23,7 +23,9 @@ const fakeActiveRoom = computed(() => {
 });
 
 const peerKeysStatusMap = new Map<string, string>();
-const fakeAcceptInvite = vi.hoisted(() => vi.fn(async (_roomId: string) => true));
+const fakeAcceptInvite = vi.hoisted(() =>
+  vi.fn(async (_roomId: string): Promise<"joined" | "banned" | "failed"> => "joined"),
+);
 const fakeToast = vi.hoisted(() => vi.fn());
 const activeMessagesRef = ref<unknown[]>([]);
 const selectedMessageIdsRef = ref<Set<string>>(new Set());
@@ -428,14 +430,21 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     const accept = wrapper.findAll("button").find((b) => b.text() === "chat.accept");
     expect(accept).toBeDefined();
 
-    fakeAcceptInvite.mockResolvedValueOnce(false);
+    fakeAcceptInvite.mockResolvedValueOnce("failed");
     await accept!.trigger("click");
     await flushPromises();
     expect(fakeAcceptInvite).toHaveBeenCalledWith("!inv:matrix.org");
     expect(fakeToast).toHaveBeenCalledWith("chat.acceptInviteFailed", "error");
 
+    // A ban is not a connection problem; say what it is.
     fakeToast.mockClear();
-    fakeAcceptInvite.mockResolvedValueOnce(true);
+    fakeAcceptInvite.mockResolvedValueOnce("banned");
+    await accept!.trigger("click");
+    await flushPromises();
+    expect(fakeToast).toHaveBeenCalledWith("chat.acceptInviteBanned", "error");
+
+    fakeToast.mockClear();
+    fakeAcceptInvite.mockResolvedValueOnce("joined");
     await accept!.trigger("click");
     await flushPromises();
     expect(fakeToast).not.toHaveBeenCalled();

@@ -4079,10 +4079,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Accept an invite: join the room and update membership */
-  /** Join an invited room. Resolves false when the join did not happen, so the
-   *  caller can say so: the invite screen used to just come back with no word
-   *  of what went wrong (audit S3b-03). */
-  const acceptInvite = async (roomId: string): Promise<boolean> => {
+  /** Join an invited room. Resolves why the join did not happen, so the caller
+   *  can say so: the invite screen used to just come back with no word of what
+   *  went wrong (audit S3b-03). */
+  const acceptInvite = async (roomId: string): Promise<"joined" | "banned" | "failed"> => {
     try {
       const matrixService = getMatrixClientService();
       // Security (best-effort): block join if local state shows user is banned.
@@ -4090,7 +4090,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const myUserId = matrixService.getUserId() ?? "";
       if (isUserBanned(roomId, myUserId)) {
         console.warn("[chat-store] acceptInvite blocked: user is banned from room", roomId);
-        return false;
+        return "banned";
       }
       await matrixService.joinRoom(roomId);
 
@@ -4120,10 +4120,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         profilesRequestedForRooms.delete(roomId);
         setActiveRoom(roomId);
       }
-      return true;
+      return "joined";
     } catch (e) {
       console.warn("[chat-store] acceptInvite error:", e);
-      return false;
+      return "failed";
     }
   };
 
@@ -4224,14 +4224,34 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return previous?.membership;
   };
 
-  /** The server refused the leave: bring the room back now and say so. It used
-   *  to vanish, then quietly return at a later sync with no explanation, since
-   *  the SDK still counted the user as joined (audit S7-01). */
+  /** Whether the SDK already counts the user out of the room. */
+  const sdkSaysLeft = (roomId: string): boolean => {
+    try {
+      const room = getMatrixClientService().getRoom(roomId) as
+        | { selfMembership?: string; getMyMembership?: () => string }
+        | null;
+      const membership = room?.selfMembership ?? room?.getMyMembership?.();
+      return membership === "leave" || membership === "ban";
+    } catch {
+      return false;
+    }
+  };
+
+  /** The leave failed: bring the room back now and say so. It used to vanish,
+   *  then quietly return at a later sync with no explanation, since the SDK
+   *  still counted the user as joined (audit S7-01). Resolves false, restoring
+   *  nothing, when /sync already reported the user out: the leave reached the
+   *  server and only its answer was lost. (If that /sync comes later, it
+   *  tombstones the room again through the membership handler.) */
   const restoreRoomAfterFailedLeave = async (
     roomId: string,
     membership: LocalRoom["membership"] | undefined,
     messageKey: "chat.leaveFailed" | "chat.deleteFailed",
-  ): Promise<void> => {
+  ): Promise<boolean> => {
+    if (sdkSaysLeft(roomId)) {
+      console.warn("[chat-store] leave reported an error, but the user is already out of", roomId);
+      return false;
+    }
     try {
       await chatDbKitRef.value?.rooms.reviveRoom(roomId, membership);
     } catch (e) {
@@ -4240,6 +4260,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     markRoomChanged(roomId);
     refreshRooms();
     useToast().toast(tRaw(messageKey), "error");
+    return true;
   };
 
   /** Remove a room: kick other members → leave → forget → remove from local state.
@@ -4296,8 +4317,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await matrixService.leaveRoom(roomId);
     } catch (e) {
       console.warn("[chat-store] removeRoom leave error:", e);
-      await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.deleteFailed");
-      return false;
+      return !(await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.deleteFailed"));
     }
     try {
       await getMatrixClientService().forgetRoom(roomId);
@@ -4361,8 +4381,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       await matrixService.leaveRoom(roomId);
     } catch (e) {
       console.warn("[chat-store] leaveGroup error:", e);
-      await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.leaveFailed");
-      return false;
+      return !(await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.leaveFailed"));
     }
     try {
       await matrixService.forgetRoom(roomId);

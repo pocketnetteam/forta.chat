@@ -37,7 +37,7 @@ describe("a leave the server refused (audit S7-01)", () => {
     const leave = body("const leaveGroup = async");
     expect(leave).toContain('tombstoneForLeave(roomId, "left")');
     expect(leave).toMatch(
-      /await matrixService\.leaveRoom\(roomId\);\s*\} catch \(e\) \{[\s\S]*restoreRoomAfterFailedLeave\(roomId, previousMembership, "chat\.leaveFailed"\);\s*return false;/,
+      /await matrixService\.leaveRoom\(roomId\);\s*\} catch \(e\) \{[\s\S]*return !\(await restoreRoomAfterFailedLeave\(roomId, previousMembership, "chat\.leaveFailed"\)\);/,
     );
     // A failed forget after a successful leave is not a failed leave.
     expect(leave).toMatch(/await matrixService\.forgetRoom\(roomId\);\s*\} catch/);
@@ -48,12 +48,14 @@ describe("a leave the server refused (audit S7-01)", () => {
     const remove = body("const removeRoom = async");
     expect(remove).toContain('tombstoneForLeave(roomId, "removed")');
     expect(remove).toMatch(
-      /await matrixService\.leaveRoom\(roomId\);\s*\} catch \(e\) \{[\s\S]*restoreRoomAfterFailedLeave\(roomId, previousMembership, "chat\.deleteFailed"\);\s*return false;/,
+      /await matrixService\.leaveRoom\(roomId\);\s*\} catch \(e\) \{[\s\S]*return !\(await restoreRoomAfterFailedLeave\(roomId, previousMembership, "chat\.deleteFailed"\)\);/,
     );
   });
 
   it("the restore revives the tombstone, refreshes the room and shows the error", () => {
     const restore = body("const restoreRoomAfterFailedLeave = async");
+    // A leave whose answer was lost but that /sync already confirmed is not undone.
+    expect(restore).toMatch(/if \(sdkSaysLeft\(roomId\)\) \{[\s\S]*?return false;/);
     expect(restore).toContain("rooms.reviveRoom(roomId, membership)");
     expect(restore).toContain("markRoomChanged(roomId);");
     expect(restore).toContain("refreshRooms();");
@@ -61,7 +63,13 @@ describe("a leave the server refused (audit S7-01)", () => {
   });
 
   it("has both messages in both locales", () => {
-    for (const key of ["chat.leaveFailed", "chat.deleteFailed", "info.memberActionFailed"] as const) {
+    for (const key of [
+      "chat.leaveFailed",
+      "chat.deleteFailed",
+      "info.memberActionFailed",
+      "chat.acceptInviteFailed",
+      "chat.acceptInviteBanned",
+    ] as const) {
       expect(en[key], key).toBeTruthy();
       expect(ru[key], key).toBeTruthy();
     }

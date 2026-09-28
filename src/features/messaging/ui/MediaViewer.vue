@@ -180,9 +180,26 @@ const handleVideoMetadata = () => {
   if (videoError.value === "timeout") videoError.value = null;
 };
 
-const videoErrorMessage = computed(() =>
-  videoError.value === "codec-unsupported" ? t("message.videoUnsupportedFormat") : t("message.videoLoadFailed"),
+// A download that failed leaves no URL, so the player never mounts and its
+// deadline never starts: the spinner used to stay for good (photos too).
+const currentDownloadFailed = computed(() => {
+  const key = currentKey.value;
+  if (!key || currentUrl.value) return false;
+  const state = getState(key);
+  return !state.loading && !!state.error;
+});
+
+const showMediaError = computed(
+  () => currentDownloadFailed.value || (videoError.value !== null && currentMessage.value?.type === MessageType.video),
 );
+
+const videoErrorMessage = computed(() => {
+  if (videoError.value === "codec-unsupported") return t("message.videoUnsupportedFormat");
+  if (currentDownloadFailed.value && currentMessage.value?.type !== MessageType.video) {
+    return t("errors.mediaUnavailable");
+  }
+  return t("message.videoLoadFailed");
+});
 
 const retryVideo = () => {
   const key = currentKey.value;
@@ -423,7 +440,7 @@ const handleSaveCurrent = async () => {
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
           </div>
           <div
-            v-if="videoError && currentMessage.type === 'video'"
+            v-if="showMediaError"
             data-testid="media-video-error"
             class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 px-6 text-center text-white"
             @click.stop
@@ -431,7 +448,7 @@ const handleSaveCurrent = async () => {
             <span class="text-sm font-medium">{{ videoErrorMessage }}</span>
             <div class="flex gap-2">
               <button
-                v-if="videoError !== 'codec-unsupported'"
+                v-if="videoError !== 'codec-unsupported' || currentDownloadFailed"
                 type="button"
                 data-testid="media-video-retry"
                 class="rounded-md bg-white/15 px-3 py-1.5 text-sm font-medium transition-colors hover:bg-white/25"
@@ -440,6 +457,7 @@ const handleSaveCurrent = async () => {
                 {{ t('message.retry') }}
               </button>
               <button
+                v-if="currentUrl"
                 type="button"
                 data-testid="media-video-download"
                 class="rounded-md bg-color-bg-ac px-3 py-1.5 text-sm font-medium text-text-on-bg-ac-color transition-opacity hover:opacity-90 disabled:opacity-60"
