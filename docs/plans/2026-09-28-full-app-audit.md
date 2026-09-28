@@ -21,7 +21,7 @@ D desktop (Electron).
 | S1-02 | P0 | 1 | WAiD | "Peer hasn't published keys — you can send unencrypted" banner is false: the send path refuses to ever send plaintext to a private room, and the button becomes a silent no-op | `src/shared/lib/i18n/locales/en.ts` | fixed |
 | S10-01 | P1 | owner | WAiD | Private key and Matrix access token stored in plaintext `localStorage` on every platform | `src/entities/auth/model/session-manager.ts` | open |
 | S2-02 | P1 | 2 | WAiD | Photo/video/voice/file sends are dropped outright (not queued) when the Matrix client is briefly not ready — text sends were fixed for this, media sends were not | `src/features/messaging/model/use-messages.ts` | fixed |
-| S3b-01 | P1 | 2 | AiWD | Active room silently vanishes when `getRoom()` transiently misses — matches #1390 | `src/entities/chat/model/chat-store.ts` | open |
+| S3b-01 | P1 | 2 | AiWD | Active room silently vanishes when `getRoom()` transiently misses — matches #1390 | `src/entities/chat/model/chat-store.ts` | fixed |
 | S5-01 | P1 | 3 | WAiD | Secondary accounts never get their encryption keys verified/republished — and the one manual recovery path the code refers to doesn't exist in the UI | `src/entities/auth/model/stores.ts` | open |
 | S7-03 | P1 | 1 | AiWD | Adding a member without published encryption keys to a group breaks sending for the whole group, with no warning anywhere in the UI | `src/widgets/chat-window/ChatWindow.vue` | fixed |
 | S8-01 | P1 | 4 | A | Homeserver mirror failover is fully disabled while Tor is on — a dead primary is never rotated away from | `src/entities/matrix/model/matrix-client.ts` | open |

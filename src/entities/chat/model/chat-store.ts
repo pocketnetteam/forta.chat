@@ -2899,6 +2899,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const roomId of changed) {
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) {
+        // Keep the open room, as fullRoomRefresh does: getRoom() also misses
+        // rooms the SDK has not materialised yet and every room while the
+        // client is being rebuilt, and dropping the active one showed
+        // "select a chat" inside an open chat (audit S3b-01, forta-bugs#1390).
+        if (roomId === activeRoomId.value) continue;
         // Room gone from SDK — collect for batch removal
         if (roomsMap.has(roomId)) {
           roomsMap.delete(roomId);
