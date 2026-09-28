@@ -15,7 +15,7 @@ D desktop (Electron).
 
 | ID | Priority | Batch | Platforms | Finding | Main file | Status |
 |---|---|---|---|---|---|---|
-| S2-01 | P0 | 2 | WAiD | Message send can queue "sending" forever with zero user-visible error when the Matrix client stays not-ready | `src/shared/lib/local-db/sync-engine.ts` | fixed |
+| S2-01 | P0 | 2 | WAiD | Message send can queue "sending" forever with zero user-visible error when the Matrix client stays not-ready | `src/shared/lib/local-db/sync-engine.ts` | fixed; bench 2026-09-28 :5174 TEST4: block lifted at ~180 s, timed retry reconnected at ~240 s, queued message sent 1 s later, no reload |
 | W2B-01 | P0 | 1 | A | Old Android WebView (< 71) shows a permanent white screen: matrix-js-sdk-bastyon uses `globalThis` at module load, before any app code or error handler runs | `index.html` | fixed |
 | S1-01 | P0 | 1 | WAiD | Group common-key creation silently excludes members whose key info hasn't loaded yet — they can never read any message under that key generation | `src/entities/matrix/model/matrix-crypto.ts` | fixed |
 | S1-02 | P0 | 1 | WAiD | "Peer hasn't published keys — you can send unencrypted" banner is false: the send path refuses to ever send plaintext to a private room, and the button becomes a silent no-op | `src/shared/lib/i18n/locales/en.ts` | fixed |
