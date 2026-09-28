@@ -24,6 +24,7 @@ useAndroidBackHandler(bsId, 90, () => {
 });
 
 const sheetRef = ref<HTMLElement>();
+const scrollRef = ref<HTMLElement>();
 let startY = 0;
 let currentY = 0;
 const translateY = ref(0);
@@ -31,6 +32,10 @@ const dragging = ref(false);
 
 const onDragStart = (e: TouchEvent) => {
   if (!props.dragDismiss) return;
+  // A finger on a list that is scrolled away from its top scrolls the list;
+  // pulling the sheet from there dragged it down under the content.
+  const target = e.target as Node | null;
+  if (target && scrollRef.value?.contains(target) && scrollRef.value.scrollTop > 0) return;
   startY = e.touches[0].clientY;
   dragging.value = true;
 };
@@ -48,10 +53,16 @@ const onDragEnd = () => {
   const sheetHeight = sheetRef.value?.offsetHeight ?? 300;
   if (translateY.value > sheetHeight * 0.3) {
     emit("close");
-    // Don't reset — let the leave transition handle slide-out
+    // Keep the offset for the slide-out; the next open starts from 0 (watch below).
   } else {
     translateY.value = 0;
   }
+};
+
+/** The system took the touch (a gesture, the notification shade): snap back. */
+const onDragCancel = () => {
+  dragging.value = false;
+  translateY.value = 0;
 };
 
 const onKeydown = (e: KeyboardEvent) => {
@@ -63,6 +74,11 @@ const onKeydown = (e: KeyboardEvent) => {
 
 watch(() => props.show, (val) => {
   if (val) {
+    // A sheet closed by dragging kept its offset, and the inline transform
+    // below outranks the enter transition: the next sheet opened pushed down,
+    // only partly on screen (the message menu "opens not fully").
+    translateY.value = 0;
+    dragging.value = false;
     document.addEventListener("keydown", onKeydown);
   } else {
     document.removeEventListener("keydown", onKeydown);
@@ -99,11 +115,12 @@ onUnmounted(() => {
             @touchstart="onDragStart"
             @touchmove="onDragMove"
             @touchend="onDragEnd"
+            @touchcancel="onDragCancel"
           >
             <div class="flex justify-center py-3">
               <div class="h-1 w-10 rounded-full bg-neutral-grad-2" />
             </div>
-            <div class="overflow-y-auto px-4 pb-4" :style="{ maxHeight: 'calc(85vh - 40px)' }">
+            <div ref="scrollRef" class="overflow-y-auto px-4 pb-4" :style="{ maxHeight: 'calc(85vh - 40px)' }">
               <slot />
             </div>
           </div>
