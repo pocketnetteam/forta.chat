@@ -53,7 +53,7 @@ D desktop (Electron).
 | S5-02 | P2 | 3 | A | `likelyBastyonUser` is a session-wide singleton that leaks from one account into another after `switchAccount` | `src/entities/auth/model/stores.ts` | fixed |
 | S7-04 | P2 | 4 | AiWD | Kick / ban / promote-to-admin / mute failures are silently swallowed in the chat-info member menu | `src/features/chat-info/ui/ChatInfoPanel.vue` | fixed |
 | S8-04 | P2 | 5 | D | Electron window has no application menu and no context menu — no right-click Copy/Paste, no discoverable Reload | `electron/main.cjs (весь файл — нет импорта Menu)` | fixed |
-| W2C-04 | P2 | 6 | AWD | HEIC photos show no preview in the composer/attachment picker before sending | `src/features/messaging/model/use-media-upload.ts` | open |
+| W2C-04 | P2 | 6 | AWD | HEIC photos show no preview in the composer/attachment picker before sending | `src/features/messaging/model/use-media-upload.ts` | fixed |
 | S1-04 | P2 | 3 | WAiD | Reply preview text is resolved once and permanently baked in — if resolved while the quoted message is still mid-decrypt, the reply shows "[encrypted]" forever even after the original decrypts fine | `src/entities/chat/model/chat-store.ts` | fixed |
 | S3b-03 | P2 | 4 | AiWD | `acceptInvite` swallows `joinRoom` failures — user sees the invite screen again with no explanation | `src/entities/chat/model/chat-store.ts` | fixed |
 | S4-04 | P2 | 6 | A | Save-to-gallery on Android 7–9 (API 24-28) never requests the runtime WRITE_EXTERNAL_STORAGE permission | `android/app/src/main/java/com/forta/chat/plugins/savemedia/SaveMediaPlugin.kt` | open |
@@ -69,7 +69,7 @@ D desktop (Electron).
 | W2A-02 | P2 | 6 | WAD | `useLocalStorage` has no error handling — every appearance/theme setting can silently fail to persist | `src/shared/lib/browser/use-local-storage.ts` | fixed |
 | S10-08 | P2 | 6 | WAiD | Logout's Dexie deletion failure is silently swallowed — "clear data" guarantee not enforced | `src/entities/auth/model/stores.ts` | fixed |
 | W2D-03 | P2 | 6 | AiWD | Bug report submission is needlessly serial — screenshots upload one at a time, environment diagnostics fetch one native plugin at a time | `src/shared/lib/bug-report/bug-report-sender.ts` | fixed |
-| W2C-02 | P2 | 6 | AiW | Unread-banner scroll-to-position races the (unawaited) window expansion — falls back to "scroll to bottom" | `src/features/messaging/ui/MessageList.vue` | open |
+| W2C-02 | P2 | 6 | AiW | Unread-banner scroll-to-position races the (unawaited) window expansion — falls back to "scroll to bottom" | `src/features/messaging/ui/MessageList.vue` | fixed |
 | W2D-01 | P2 | 6 | WDAi | Connection-status indicator freezes forever after the first ChatSidebar remount (orphaned singleton watcher) | `src/features/sync-status/model/use-sync-status.ts` | fixed |
 | W2D-02 | P2 | 6 | WAiD | Channels/Bastyon-post browsing accumulates unbounded memory and DOM over a session | `src/entities/channel/model/channel-store.ts` | open |
 | W2B-03 | P2 | 6 | A | `isFcmAvailable()` reflects build-time Firebase config, not runtime Google Play Services — push silently never works on Huawei/GMS-less devices (boot itself is NOT blocked — verified) | `android/app/src/main/java/com/forta/chat/plugins/push/PushDataPlugin.kt` | open |

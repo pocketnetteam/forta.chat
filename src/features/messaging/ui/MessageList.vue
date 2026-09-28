@@ -450,6 +450,12 @@ const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().r
  *  Cached so per-frame scroll handlers don't repeat the linear scan. */
 const bannerIdx = computed(() => reversedItems.value.findIndex(item => item.type === "unread-banner"));
 
+/** How long the first scroll to the unread banner waits for the message window
+ *  expansion that brings the banner in (the expansion itself may take 5 s). */
+const BANNER_WINDOW_WAIT_MS = 500;
+const waitForBannerWindow = (expand: Promise<boolean>): Promise<unknown> =>
+  Promise.race([expand.catch(() => false), new Promise((r) => setTimeout(r, BANNER_WINDOW_WAIT_MS))]);
+
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
   return scrollerRef.value?.getContainerEl?.() ?? listRef.value ?? null;
@@ -709,6 +715,8 @@ watch(
     // ═══ PHASE 2: DETERMINE ANCHOR ═══
     let anchorItemIndex = -1;
     let scrollToBanner = false;
+    /** The window expansion that brings the last-read message in, if one started. */
+    let bannerWindowExpand: Promise<boolean> | null = null;
 
     if (isChatDbReady()) {
       const dbKit = getChatDb();
@@ -752,7 +760,7 @@ watch(
         // last-read message so the banner can match it in virtualItems.
         const neededWindow = plan.unreadCount + 20;
         if (neededWindow > chatStore.messageWindowSize) {
-          void chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
+          bannerWindowExpand = chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
         }
 
         scrollToBanner = true;
@@ -881,6 +889,21 @@ watch(
           if (reversedIdx >= 0) {
             scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
           }
+        } else if (bannerWindowExpand) {
+          // More than a window of unread: the expansion that brings the
+          // banner in had not landed yet, and the view used to fall back to
+          // the newest message (audit W2C-02). Give it a moment, then retry.
+          const expand = bannerWindowExpand;
+          void waitForBannerWindow(expand).then(async () => {
+            if (isStale()) return;
+            await nextTick();
+            const idx = reversedItems.value.findIndex(item => item.type === "unread-banner");
+            if (idx >= 0) scrollerRef.value?.scrollToIndex(idx, { align: "start" });
+            else {
+              const container = getScrollContainer();
+              if (container) container.scrollTop = 0;
+            }
+          });
         } else if (el) {
           el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
         }
