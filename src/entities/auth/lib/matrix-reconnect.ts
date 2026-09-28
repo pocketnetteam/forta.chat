@@ -3,10 +3,21 @@ import { isNative } from "@/shared/lib/platform";
 /**
  * Retry a Matrix start that failed — typically an app launched without network. By then the chat
  * list has rendered from Dexie and the boot screen is gone, so nothing else calls `initMatrix()`
- * again. Retries follow events (network back, app back in the foreground), plus at most one
- * scheduled retry the caller asks for: each `MatrixClientService.init()` opens another storage
- * handle, so a periodic timer would pile them up while the server stays unreachable.
+ * again. Retries follow events (network back, app back in the foreground), plus one scheduled
+ * retry per failure that the caller asks for, spaced by `matrixRetryDelayMs`. A timer is needed
+ * even while "online": with the homeserver unreachable behind a VPN, DNS or provider block,
+ * `navigator.onLine` never changes, so no event ever fires (audit S2-01).
  */
+
+const FIRST_RETRY_MS = 15_000;
+const MAX_RETRY_MS = 5 * 60_000;
+
+/** Delay before the next scheduled retry after `failures` failed starts in a row:
+ *  15 s, 30 s, 1 min, 2 min, 4 min, then every 5 min. */
+export function matrixRetryDelayMs(failures: number): number {
+  const n = Math.max(1, Math.floor(failures));
+  return Math.min(MAX_RETRY_MS, FIRST_RETRY_MS * 2 ** (n - 1));
+}
 
 export interface MatrixReconnectTriggers {
   /** Network transitions, as `onConnectivityChange` reports them. */
@@ -19,8 +30,7 @@ export interface MatrixReconnectOptions {
   /** Whether a retry makes sense right now (signed in, not ready, no start in flight). */
   canRetry: () => boolean;
   retry: () => void;
-  /** Also retry once after this many ms without waiting for a trigger — for a start that failed
-   *  while the network came back, whose transition has already been reported. */
+  /** Also retry once after this many ms without waiting for a trigger. */
   retryAfterMs?: number;
 }
 

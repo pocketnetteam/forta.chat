@@ -62,7 +62,7 @@ import {
   REQUIRED_ENCRYPTION_KEYS,
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
-import { armMatrixReconnect, onForeground } from "../lib/matrix-reconnect";
+import { armMatrixReconnect, matrixRetryDelayMs, onForeground } from "../lib/matrix-reconnect";
 import { createKeyPair } from "./key-pair";
 import { generateEncryptionKeys, clearEncryptionKeysCache } from "./encryption-keys";
 
@@ -143,6 +143,8 @@ let _appStateHandle: { remove: () => Promise<void> } | null = null;
 // launched without network); retries initMatrix() when the network or the app
 // comes back. See armMatrixReconnectAfterFailure.
 let _matrixReconnectUnsub: (() => void) | null = null;
+// Failed Matrix starts in a row; spaces the scheduled retries (matrixRetryDelayMs).
+let _matrixStartFailures = 0;
 function stopMatrixReconnect(): void {
   if (_matrixReconnectUnsub) { _matrixReconnectUnsub(); _matrixReconnectUnsub = null; }
 }
@@ -425,6 +427,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     stopMatrixReconnect();
     // Signed out while the start was failing: logout already tore down.
     if (!address.value || !privateKey.value) return;
+    _matrixStartFailures += 1;
     _matrixReconnectUnsub = armMatrixReconnect(
       { onConnectivityChange, onForeground },
       {
@@ -433,10 +436,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           console.info("[auth] network or app is back, retrying the Matrix start");
           void initMatrix();
         },
-        // The network came back while this start was still failing, so its
-        // transition has already been reported. Only a start that began offline
-        // gets this, which keeps an unreachable server from looping.
-        retryAfterMs: startedOffline && useConnectivity().isOnline.value ? 2_000 : undefined,
+        // A start that began offline and failed with the network back retries
+        // at once (its transition was already reported). Every other failure
+        // still gets a timed retry: with the homeserver unreachable behind a
+        // VPN, DNS or provider block `navigator.onLine` never changes, so no
+        // event would ever fire (audit S2-01, forta-bugs#1398).
+        retryAfterMs: startedOffline && useConnectivity().isOnline.value
+          ? 2_000
+          : matrixRetryDelayMs(_matrixStartFailures),
       },
     );
   };
@@ -817,9 +824,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       if (connectResult.ready) {
         stopMatrixReconnect();
+        _matrixStartFailures = 0;
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+        // Messages that gave up waiting for Matrix while it was down go out
+        // now, without a manual retry (audit S2-01).
+        chatDbKit.syncEngine.retryNotReadyFailures().catch((e) => {
+          console.warn("[auth] retrying messages that waited for Matrix failed:", e);
+        });
 
         // Sync Pocketnet name → Matrix displayname when it changed since last push.
         // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
@@ -1534,6 +1547,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // ── 3. Clean up listeners & intervals ──
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     stopMatrixReconnect();
+    _matrixStartFailures = 0;
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
     _peerKeysRecheckTimers.clear();
@@ -2395,6 +2409,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // Cleanup listeners
       if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
       stopMatrixReconnect();
+      _matrixStartFailures = 0;
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
       for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
       _peerKeysRecheckTimers.clear();

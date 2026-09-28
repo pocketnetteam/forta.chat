@@ -175,3 +175,31 @@ describe("MatrixClientService — a superseded init() does not start its own cli
     expect(s.error).toBe(false);
   });
 });
+
+describe("MatrixClientService — init() retried while the homeserver is unreachable", () => {
+  beforeEach(() => {
+    created.length = 0;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  // Audit S2-01: the auth store now retries a failed start on a timer, so each
+  // init() must not open another file-storage handle that nothing closes.
+  it("opens the file storage once across failed attempts", async () => {
+    const { createChatStorage } = await import("@/shared/lib/matrix/chat-storage");
+    const opened = vi.mocked(createChatStorage);
+    opened.mockClear();
+    loginImpl = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    const s = service();
+
+    await s.init();
+    await s.init();
+    await s.init();
+
+    expect(s.isReady()).toBe(false);
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+});

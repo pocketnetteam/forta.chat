@@ -22,7 +22,7 @@ function sliceBetween(from: string, to: string, start = 0): string {
 
 describe("auth store: Matrix start retried after a failure", () => {
   it("imports the reconnect helper", () => {
-    expect(source).toMatch(/import \{ armMatrixReconnect, onForeground \} from "\.\.\/lib\/matrix-reconnect";/);
+    expect(source).toMatch(/import \{ armMatrixReconnect, matrixRetryDelayMs, onForeground \} from "\.\.\/lib\/matrix-reconnect";/);
   });
 
   it("retries only while signed in, not ready and no start is in flight", () => {
@@ -38,11 +38,20 @@ describe("auth store: Matrix start retried after a failure", () => {
     expect(arm).toContain("initMatrix()");
   });
 
-  it("retries on its own only when a start that began offline failed with the network back", () => {
+  // Audit S2-01 / forta-bugs#1398: a start that began "online" against an
+  // unreachable homeserver (VPN, DNS, provider block) armed no timer at all, and
+  // `navigator.onLine` never changed, so the app never retried until restarted.
+  it("always schedules the next retry, backing off after repeated failures", () => {
     const arm = sliceBetween("const armMatrixReconnectAfterFailure = (startedOffline: boolean) => {", "\n  };");
-    expect(arm).toMatch(/retryAfterMs: startedOffline && useConnectivity\(\)\.isOnline\.value \? \d[\d_]* : undefined/);
+    expect(arm).toContain("_matrixStartFailures += 1;");
+    expect(arm).toMatch(/retryAfterMs: startedOffline && useConnectivity\(\)\.isOnline\.value\s*\?\s*\d[\d_]*\s*:\s*matrixRetryDelayMs\(_matrixStartFailures\)/);
     const start = sliceBetween("const initMatrixInner = async () => {", "matrixReady.value = false;");
     expect(start).toContain("const startedOffline = !useConnectivity().isOnline.value;");
+  });
+
+  it("starts the backoff over after a successful start", () => {
+    const ready = sliceBetween("if (connectResult.ready) {", "matrixError.value = null;");
+    expect(ready).toContain("_matrixStartFailures = 0;");
   });
 
   it("arms after the connection gives up and after an init error", () => {

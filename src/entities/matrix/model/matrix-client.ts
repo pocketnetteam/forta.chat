@@ -939,10 +939,14 @@ export class MatrixClientService {
       if (attempt === this.initGeneration) this.building = false;
     }
 
-    // Init file storage
-    try {
-      this.db = await createChatStorage("files", 1);
-    } catch { /* ignore */ }
+    // Init file storage once: init() now runs again on a timer while the
+    // homeserver is unreachable (audit S2-01), and every createChatStorage()
+    // opened another handle that nothing closed.
+    if (!this.db) {
+      try {
+        this.db = await createChatStorage("files", 1);
+      } catch { /* ignore */ }
+    }
   }
 
   isReady(): boolean {

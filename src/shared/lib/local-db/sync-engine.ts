@@ -26,6 +26,13 @@ const MAX_CONCURRENT_ROOMS = 3;
  *  window queue up and flush once the client is ready instead of failing
  *  instantly or exhausting maxRetries during a slow boot (WEE-85). */
 const MATRIX_NOT_READY_RETRY_MS = 1_000;
+/** How long an op may wait for the Matrix client before it is marked failed
+ *  (audit S2-01). Generous on purpose: the client's own recovery can take
+ *  several minutes of backoff through an ordinary outage. */
+export const MATRIX_NOT_READY_CEILING_MS = 5 * 60_000;
+/** errorMessage of an op failed only by that ceiling; retryNotReadyFailures()
+ *  re-queues exactly these once Matrix is ready again. */
+export const MATRIX_NOT_READY_FAILURE = "matrix client not ready";
 
 /** Outbound message-creating ops whose transport status is mirrored onto the
  *  room's `lastMessageLocalStatus` (chat-list preview, WEE-64). Edit/reaction/
@@ -636,6 +643,21 @@ export class SyncEngine {
     if (!this.isMatrixReady()) {
       if (this.disposed) return;
       try {
+        // The wait has a ceiling: with the homeserver unreachable the client
+        // may never become ready, and the message used to show its clock
+        // forever with no error (audit S2-01, forta-bugs#1398). Past the
+        // ceiling it is marked failed (red retry); retryNotReadyFailures()
+        // re-queues it as soon as Matrix is ready again.
+        if (Date.now() - (op.createdAt ?? Date.now()) > MATRIX_NOT_READY_CEILING_MS) {
+          await this.db.pendingOps.update(op.id!, {
+            status: "failed",
+            errorMessage: MATRIX_NOT_READY_FAILURE,
+            lastAttemptAt: Date.now(),
+          });
+          await this.markMessageFailed(op);
+          this.onChange?.(op.roomId);
+          return;
+        }
         await this.db.pendingOps.update(op.id!, {
           status: "pending",
           nextAttemptAt: Date.now() + MATRIX_NOT_READY_RETRY_MS,
@@ -1338,12 +1360,24 @@ export class SyncEngine {
 
   /** Retry all failed operations */
   async retryAllFailed(): Promise<void> {
+    return this.retryFailedWhere(() => true);
+  }
+
+  /** Re-queue the ops that failed only because the Matrix client stayed not
+   *  ready past MATRIX_NOT_READY_CEILING_MS — called once Matrix is ready
+   *  again, so those messages go out without a manual retry (audit S2-01). */
+  async retryNotReadyFailures(): Promise<void> {
+    return this.retryFailedWhere((op) => op.errorMessage === MATRIX_NOT_READY_FAILURE);
+  }
+
+  private async retryFailedWhere(match: (op: PendingOperation) => boolean): Promise<void> {
     // Snapshot the failed ops BEFORE resetting them so we can mirror the
     // reset onto each room's preview status (WEE-64).
-    const failedOps = await this.db.pendingOps.where("status").equals("failed").toArray();
+    const failedOps = (await this.db.pendingOps.where("status").equals("failed").toArray()).filter(match);
     await this.db.pendingOps
       .where("status")
       .equals("failed")
+      .filter(match)
       .modify({ status: "pending", retries: 0, errorMessage: undefined, nextAttemptAt: 0 });
 
     // WEE-64: a failed send returning to the queue must reset its chat-list
