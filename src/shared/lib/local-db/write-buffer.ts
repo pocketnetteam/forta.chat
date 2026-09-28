@@ -43,6 +43,10 @@ export class WriteBuffer<T = BufferedWrite> {
   private inFlight: Promise<void> | null = null;
   /** Failed flushes in a row. */
   private failures = 0;
+  /** A failed batch sits at the front of the buffer waiting for its retry;
+   *  `requeuedHead` items there belong to it and any batch chained behind it. */
+  private retryPending = false;
+  private requeuedHead = 0;
 
   constructor(
     private readonly onFlush: FlushCallback<T>,
@@ -101,10 +105,19 @@ export class WriteBuffer<T = BufferedWrite> {
 
     const items = this.buffer;
     this.buffer = [];
+    this.retryPending = false;
+    this.requeuedHead = 0;
 
     // Chain on any in-flight flush so batches commit in enqueue order.
     const prev = this.inFlight ?? Promise.resolve();
     const run = prev.then(async () => {
+      // A batch taken before an older one failed must not land ahead of it:
+      // go back into the buffer right behind the failed batch and retry with it.
+      if (this.retryPending) {
+        this.buffer.splice(this.requeuedHead, 0, ...items);
+        this.requeuedHead += items.length;
+        return;
+      }
       try {
         await this.onFlush(items);
         this.failures = 0;
@@ -114,6 +127,8 @@ export class WriteBuffer<T = BufferedWrite> {
           console.warn(`[WriteBuffer] flush failed, will retry (${this.failures}/${WRITE_BUFFER_MAX_RETRIES}):`, err);
           // Back in front of anything enqueued meanwhile, so order holds.
           this.buffer = items.concat(this.buffer);
+          this.requeuedHead = items.length;
+          this.retryPending = true;
           this.scheduleRetry();
         } else {
           console.error(`[WriteBuffer] flush failed, dropping ${items.length} item(s):`, err);

@@ -5669,7 +5669,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // this batch (an older message) this is the only way it gets applied:
       // writeEdit updates the stored row, or keeps the edit until the row
       // lands. It used to be skipped until a later scroll re-parsed both
-      // events together (audit S3-03).
+      // events together (audit S3-03). An edit that could not be read yet
+      // (crypto not ready) is not written over an unseen message: the
+      // placeholder has no retry path, and a later parse will read it.
+      if (!target && editBody === "[encrypted]") continue;
       await chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
         targetEventId: targetId,
         newContent: editedContent,

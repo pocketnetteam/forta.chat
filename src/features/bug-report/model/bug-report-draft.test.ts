@@ -36,8 +36,10 @@ describe("bug report draft", () => {
 
   it("is what the report form restores and clears", () => {
     const modal = readFileSync(resolve(__dirname, "../ui/BugReportModal.vue"), "utf-8");
-    expect(modal).toContain('description.value = parts.join("") || loadBugReportDraft();');
-    expect(modal).toContain("if (!sent.value) saveBugReportDraft(text);");
+    expect(modal).toContain("description.value = prefilled || loadBugReportDraft();");
+    // A prefilled report (an error, a context) is not the user's draft and must not replace it.
+    expect(modal).toContain("isPrefilled.value = prefilled.length > 0;");
+    expect(modal).toContain("if (!sent.value && !isPrefilled.value) saveBugReportDraft(text);");
     expect(modal).toMatch(/sent\.value = true;\s*clearBugReportDraft\(\);/);
   });
 });

@@ -26,4 +26,10 @@ describe("MessageList — scroll to the unread banner", () => {
     expect(retry).toMatch(/void waitForBannerWindow\(expand\)\.then\(async \(\) => \{\s*if \(isStale\(\)\) return;/);
     expect(retry).toMatch(/scrollerRef\.value\?\.scrollToIndex\(idx, \{ align: "start" \}\)/);
   });
+
+  it("leaves a user who already scrolled alone (batch-6 review)", () => {
+    const retry = source.slice(source.indexOf("} else if (bannerWindowExpand) {"));
+    expect(retry).toContain("const scrollAtOpen = el?.scrollTop ?? 0;");
+    expect(retry).toMatch(/if \(now && Math\.abs\(now\.scrollTop - scrollAtOpen\) > 2\) return;/);
+  });
 });

@@ -30,7 +30,7 @@ vi.mock("dexie", async (importOriginal) => {
 });
 
 const event = (e: Record<string, unknown>) => ({ event: e });
-const TIMELINE = [
+const BASE_TIMELINE = [
   event({
     type: "m.room.message",
     content: { msgtype: "m.text", body: "new message" },
@@ -58,6 +58,7 @@ const TIMELINE = [
     origin_server_ts: 2200,
   }),
 ];
+let TIMELINE = BASE_TIMELINE;
 
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
@@ -127,6 +128,38 @@ describe("loadRoomMessages — edits and reactions to a message outside the batc
     setActivePinia(createTestingPinia({ stubActions: false }));
     writeEdit.mockClear();
     writeReaction.mockClear();
+  });
+
+  // Batch-6 review: without room crypto an encrypted edit reads "[encrypted]",
+  // and that placeholder has no retry path once written over a stored message.
+  it("does not write an unreadable edit over a message outside the batch", async () => {
+    TIMELINE = [
+      BASE_TIMELINE[0],
+      event({
+        type: "m.room.message",
+        content: {
+          msgtype: "m.encrypted",
+          body: "ciphertext",
+          "m.relates_to": { rel_type: "m.replace", event_id: "$old" },
+        },
+        event_id: "$edit2",
+        sender: "@peer:s",
+        origin_server_ts: 2300,
+      }),
+    ];
+    try {
+      const store = useChatStore();
+      store.rooms = [makeRoom({ id: "!a:s" })];
+      store.activeRoomId = "!a:s";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      store.setChatDbKit(makeKit() as any);
+
+      await store.loadRoomMessages("!a:s");
+
+      expect(writeEdit).not.toHaveBeenCalled();
+    } finally {
+      TIMELINE = BASE_TIMELINE;
+    }
   });
 
   it("hands both to the event writer instead of skipping them", async () => {

@@ -139,6 +139,33 @@ describe("WriteBuffer", () => {
     await buf.dispose();
   });
 
+  // Batch-6 review: a batch taken while an older one was still failing used to
+  // land in Dexie before the older one's retry.
+  it("does not let a newer batch land before an older one that failed", async () => {
+    const written: string[] = [];
+    let failFirst!: (e: Error) => void;
+    const onFlushSpy = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<void>((_, reject) => { failFirst = reject; }))
+      .mockImplementation(async (items: BufferedWrite[]) => {
+        for (const i of items) written.push(i.localMsg.eventId as string);
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const buf = new WriteBuffer(onFlushSpy, { delayMs: 100, maxSize: 2 });
+    buf.enqueue(makeItem("!r1", "old1"));
+    buf.enqueue(makeItem("!r1", "old2")); // maxSize: flush #1 starts, stays pending
+    buf.enqueue(makeItem("!r1", "new1"));
+    buf.enqueue(makeItem("!r1", "new2")); // maxSize: flush #2 chained behind #1
+    await vi.advanceTimersByTimeAsync(0); // flush #1 reaches onFlush
+    failFirst(new Error("DB busy"));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(written).toEqual(["old1", "old2", "new1", "new2"]);
+    warn.mockRestore();
+    await buf.dispose();
+  });
+
   it("drops a batch that keeps failing, without crashing", async () => {
     const errorFlush = vi.fn().mockRejectedValue(new Error("DB error"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

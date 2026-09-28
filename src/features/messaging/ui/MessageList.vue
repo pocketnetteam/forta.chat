@@ -894,8 +894,12 @@ watch(
           // banner in had not landed yet, and the view used to fall back to
           // the newest message (audit W2C-02). Give it a moment, then retry.
           const expand = bannerWindowExpand;
+          const scrollAtOpen = el?.scrollTop ?? 0;
           void waitForBannerWindow(expand).then(async () => {
             if (isStale()) return;
+            // The user already scrolled: do not move the view under them.
+            const now = getScrollContainer();
+            if (now && Math.abs(now.scrollTop - scrollAtOpen) > 2) return;
             await nextTick();
             const idx = reversedItems.value.findIndex(item => item.type === "unread-banner");
             if (idx >= 0) scrollerRef.value?.scrollToIndex(idx, { align: "start" });

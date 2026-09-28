@@ -23,6 +23,7 @@ const authStore = useAuthStore();
 const { t } = useI18n();
 
 const description = ref("");
+const isPrefilled = ref(false);
 const screenshots = ref<{ base64: string; preview: string }[]>([]);
 const sending = ref(false);
 const sent = ref(false);
@@ -45,8 +46,11 @@ watch(isOpen, async (val) => {
       parts.push(`\n${t("bugReport.errorLabel")}: ${prefillError.value}`);
     }
     // A report opened for a specific error starts from it; otherwise the
-    // draft the user was typing comes back (audit W2B-04).
-    description.value = parts.join("") || loadBugReportDraft();
+    // draft the user was typing comes back (audit W2B-04). A prefilled
+    // report is not the user's draft and must not replace it.
+    const prefilled = parts.join("");
+    isPrefilled.value = prefilled.length > 0;
+    description.value = prefilled || loadBugReportDraft();
 
     screenshots.value = [];
     sending.value = false;
@@ -69,7 +73,7 @@ watch(isOpen, async (val) => {
 });
 
 watch(description, (text) => {
-  if (!sent.value) saveBugReportDraft(text);
+  if (!sent.value && !isPrefilled.value) saveBugReportDraft(text);
 });
 
 // Remounted while open (the watch above only runs on a change of isOpen):
