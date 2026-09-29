@@ -10,7 +10,9 @@ import { resolve } from "path";
  * source — `initMatrix` needs the SDK, Pcrypto and Dexie — and the trigger logic by behaviour in
  * `matrix-reconnect.test.ts`.
  */
-const source = readFileSync(resolve(__dirname, "../stores.ts"), "utf-8");
+// Normalised to LF: a Windows checkout (core.autocrlf) has CRLF line endings,
+// and the slices below match on "\n".
+const source = readFileSync(resolve(__dirname, "../stores.ts"), "utf-8").replace(/\r\n/g, "\n");
 
 function sliceBetween(from: string, to: string, start = 0): string {
   const a = source.indexOf(from, start);

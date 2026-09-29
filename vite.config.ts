@@ -31,6 +31,20 @@ export default defineConfig({
   },
   plugins: [
     vue(),
+    // Tests import Node CLI scripts (scripts/*.mjs) that start with
+    // `#!/usr/bin/env node`. Vitest's transform puts its import-interop lines
+    // above the shebang, and the module no longer parses ("Invalid character
+    // `!`"). Turn the shebang into a comment — same line count, so stack
+    // traces keep their line numbers. Test runs only; builds never see it.
+    {
+      name: "test-strip-shebang",
+      enforce: "pre",
+      apply: () => !!process.env.VITEST,
+      transform(code, id) {
+        if (!code.startsWith("#!") || !/\.[cm]?js$/.test(id.split("?")[0])) return null;
+        return { code: `//${code.slice(2)}`, map: null };
+      },
+    },
     // Strip `crossorigin` from HTML — breaks Electron's file:// protocol
     {
       name: "strip-crossorigin",

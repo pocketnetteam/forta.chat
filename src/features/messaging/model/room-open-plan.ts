@@ -3,6 +3,27 @@
  * screen yet. Kept pure so the timing-sensitive watcher stays testable.
  */
 
+/** How a room open gets its first screen of messages.
+ *  - `cached`: Dexie has rows — show them, the network is never on the path.
+ *  - `network`: nothing local — load from the SDK/server under a time budget.
+ *  - `empty`: nothing local and history was cleared — show the empty state. */
+export type RoomOpenBranch = "cached" | "network" | "empty";
+
+/**
+ * Pick the room-open branch from what Dexie actually holds (a 1-row peek),
+ * not from whether the liveQuery managed to answer within a timeout: a slow
+ * read behind a queue of write transactions used to send a fully cached room
+ * down the network path and park it on a skeleton.
+ */
+export function decideRoomOpen(opts: {
+  localRowCount: number;
+  hasClearedHistory: boolean;
+}): RoomOpenBranch {
+  if (opts.localRowCount > 0) return "cached";
+  if (opts.hasClearedHistory) return "empty";
+  return "network";
+}
+
 /**
  * After the network load of a room with nothing in the local cache: keep the
  * skeleton up while sync delivers messages into Dexie?

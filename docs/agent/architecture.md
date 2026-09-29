@@ -62,6 +62,12 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### EventWriter
 - Parses and atomically writes Matrix events to Dexie: messages, reactions, edits, redactions, read receipts; transactional writes
 
+### Opening a chat and history continuity
+- Opening a room reads Dexie only: `MessageList` branches on a 1-row peek (`room-open-plan.ts`, `room-open-load.ts`); the network is awaited only for a room with no rows, under an 8 s budget with "Retry". A recent room shows its last liveQuery emission in the first frame (`chatStore` room snapshots).
+- Dexie knows where its history has holes: a limited `/sync` (`Room.timelineReset`) marks `LocalRoom.gapToken` (+ `gapBeforeTs`, `gapAnchorTs`); `entities/chat/model/history-backfill.ts` pages `/messages` back in the background until the anchor. Scroll-up pages from `LocalRoom.paginationToken`, not SDK scrollback, so the SDK's in-memory timeline does not grow.
+- History loads parse only events Dexie lacks (`entities/chat/lib/timeline-parse-plan.ts`); one event classifier serves the parser and the plan. `loadRoomMessages` stays for rooms with no rows and list previews.
+- Diagnostics: `localStorage["forta-chat:perf"]="1"` logs one `[room-open]` line per open; `scripts/device-e2e/measure-room-open.mjs` measures on a device. Plan: `docs/plans/2026-09-28-chat-open-local-first.md`.
+
 ### SyncEngine
 - FIFO outbound queue with exponential backoff + jitter (up to 30s, then "failed")
 - `processQueue()` runs after DB recovery; `setOnline(true/false)` pauses/resumes

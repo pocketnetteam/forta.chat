@@ -1273,9 +1273,13 @@ export function useMessages() {
       fileInfo?: FileInfo;
       roomId: string;
     }> = [];
-    for (const roomMessages of Object.values(chatStore.messages)) {
+    // The active room's rendered list first: a room opened from Dexie has no
+    // in-memory copy in chatStore.messages unless a history load ran.
+    const seen = new Set<string>();
+    for (const roomMessages of [chatStore.activeMessages ?? [], ...Object.values(chatStore.messages)]) {
       for (const m of roomMessages) {
-        if (idSet.has(m.id)) {
+        if (idSet.has(m.id) && !seen.has(m.id)) {
+          seen.add(m.id);
           collected.push({
             id: m.id,
             content: m.content,

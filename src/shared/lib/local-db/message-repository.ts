@@ -96,6 +96,23 @@ function missedCallRepairPatch(existing: LocalMessage, incoming: LocalMessage): 
   };
 }
 
+/** Order-insensitive equality of two reaction maps (users compared as sets;
+ *  emojis with a zero count ignored). */
+export function reactionsEqual(a: LocalMessage["reactions"], b: LocalMessage["reactions"]): boolean {
+  const live = (m: LocalMessage["reactions"]) => Object.entries(m ?? {}).filter(([, r]) => (r?.count ?? 0) > 0);
+  const ea = live(a);
+  const eb = new Map(live(b));
+  if (ea.length !== eb.size) return false;
+  for (const [emoji, x] of ea) {
+    const y = eb.get(emoji);
+    if (!y || x.count !== y.count || (x.myEventId ?? null) !== (y.myEventId ?? null)) return false;
+    if (x.users.length !== y.users.length) return false;
+    const users = new Set(y.users);
+    if (!x.users.every((u) => users.has(u))) return false;
+  }
+  return true;
+}
+
 /** A local-only phantom: a pending message the user deleted before it ever
  *  reached the server. It has no `eventId` (never synced) and is deleted
  *  locally, so it must vanish from the timeline without a placeholder — there
@@ -144,6 +161,16 @@ export class MessageRepository {
       .toArray();
 
     return sortLocalMessagesTimelineAsc(msgs);
+  }
+
+  /** The room's oldest stored message that the server knows (has an
+   *  eventId), after the clear-history cutoff. Scroll-up pages back from it. */
+  async getOldestServerMessage(roomId: string, clearedAtTs?: number): Promise<LocalMessage | undefined> {
+    return this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, clearedAtTs ?? Dexie.minKey], [roomId, Dexie.maxKey], !clearedAtTs, true)
+      .filter((m) => !!m.eventId && m.eventId.startsWith("$"))
+      .first();
   }
 
   /** Get a single message by server eventId */
@@ -516,6 +543,30 @@ export class MessageRepository {
       .where("eventId")
       .equals(eventId)
       .modify({ reactions });
+  }
+
+  /** Set the reactions of many messages at once, writing only rows whose
+   *  reactions actually differ — one read, and one rw transaction only when
+   *  something changed. A history reload used to open a transaction per
+   *  message with reactions on every room open, changed or not.
+   *  Returns the number of rows written. */
+  async bulkUpdateReactions(
+    entries: ReadonlyArray<{ eventId: string; reactions: LocalMessage["reactions"] }>,
+  ): Promise<number> {
+    if (entries.length === 0) return 0;
+    const rows = await this.getByEventIds(entries.map((e) => e.eventId));
+    const byEventId = new Map(rows.map((r) => [r.eventId!, r]));
+    const changed = entries.filter((e) => {
+      const row = byEventId.get(e.eventId);
+      return row?.localId != null && !reactionsEqual(row.reactions, e.reactions);
+    });
+    if (changed.length === 0) return 0;
+    await this.db.transaction("rw", this.db.messages, async () => {
+      for (const e of changed) {
+        await this.db.messages.update(byEventId.get(e.eventId)!.localId!, { reactions: e.reactions });
+      }
+    });
+    return changed.length;
   }
 
   /** Overwrite the fileInfo of a message identified by eventId. Used by

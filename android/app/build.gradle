@@ -20,8 +20,8 @@ android {
         applicationId "com.forta.chat"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 11303
-        versionName "1.13.3"
+        versionCode 11304
+        versionName "1.13.4"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "boolean", "FIREBASE_ENABLED", "${hasGoogleServices}"
         aaptOptions {

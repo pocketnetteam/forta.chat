@@ -152,3 +152,28 @@ describe("WriteBuffer", () => {
     expect(onFlush).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("WriteBuffer.hasPending", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("sees a buffered item of the room", () => {
+    const buf = new WriteBuffer<BufferedWrite>(async () => {});
+    buf.enqueue(makeItem("!a:s"));
+    expect(buf.hasPending((i) => i.roomId === "!a:s")).toBe(true);
+    expect(buf.hasPending((i) => i.roomId === "!b:s")).toBe(false);
+  });
+
+  it("still sees an item whose flush is committing, until the commit ends", async () => {
+    let finish!: () => void;
+    const buf = new WriteBuffer<BufferedWrite>(() => new Promise<void>((r) => { finish = r; }), { delayMs: 150 });
+    buf.enqueue(makeItem("!a:s"));
+    await vi.advanceTimersByTimeAsync(150); // timer moved the item into the in-flight flush
+
+    expect(buf.hasPending((i) => i.roomId === "!a:s")).toBe(true);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(buf.hasPending((i) => i.roomId === "!a:s")).toBe(false);
+  });
+});
+

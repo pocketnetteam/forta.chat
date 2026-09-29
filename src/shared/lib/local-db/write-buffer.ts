@@ -36,6 +36,8 @@ export class WriteBuffer<T = BufferedWrite> {
    *  flushNow() callers get a real "everything enqueued before this call
    *  is committed" guarantee even when a maxSize force-flush is running. */
   private inFlight: Promise<void> | null = null;
+  /** Batches taken off the buffer whose onFlush has not finished yet. */
+  private readonly flushing = new Set<T[]>();
 
   constructor(
     private readonly onFlush: FlushCallback<T>,
@@ -63,6 +65,16 @@ export class WriteBuffer<T = BufferedWrite> {
         void this.flush();
       }, this.delayMs);
     }
+  }
+
+  /** True if any item not yet committed matches `predicate` — still
+   *  buffered, or in a flush that is running or queued. */
+  hasPending(predicate: (item: T) => boolean): boolean {
+    if (this.buffer.some(predicate)) return true;
+    for (const batch of this.flushing) {
+      if (batch.some(predicate)) return true;
+    }
+    return false;
   }
 
   /** Immediately drain the buffer (returns when flush completes — including
@@ -94,6 +106,7 @@ export class WriteBuffer<T = BufferedWrite> {
 
     const items = this.buffer;
     this.buffer = [];
+    this.flushing.add(items);
 
     // Chain on any in-flight flush so batches commit in enqueue order.
     const prev = this.inFlight ?? Promise.resolve();
@@ -102,6 +115,8 @@ export class WriteBuffer<T = BufferedWrite> {
         await this.onFlush(items);
       } catch (err) {
         console.error("[WriteBuffer] flush failed:", err);
+      } finally {
+        this.flushing.delete(items);
       }
     });
     this.inFlight = run;

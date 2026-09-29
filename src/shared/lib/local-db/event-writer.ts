@@ -199,6 +199,11 @@ export class EventWriter {
     });
   }
 
+  /** True if the message buffer still holds events of `roomId`. */
+  hasBufferedWritesFor(roomId: string): boolean {
+    return this.writeBuffer?.hasPending((item) => item.roomId === roomId) ?? false;
+  }
+
   /** Force-flush the write buffer immediately. No-op if batching not enabled. */
   async flushWriteBuffer(): Promise<void> {
     await this.writeBuffer?.flushNow();

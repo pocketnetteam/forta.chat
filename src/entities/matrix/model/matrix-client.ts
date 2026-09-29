@@ -101,6 +101,7 @@ export class MatrixClientService {
   private onRoomAccountData: RoomAccountDataCallback | null = null;
   private onAccountData: ((event: unknown) => void) | null = null;
   private onEncryptionKeyArrived: ((roomId: string) => void) | null = null;
+  private onTimelineReset: ((roomId: string, backToken: string | null) => void) | null = null;
 
   constructor(domain?: string) {
     this.baseUrl = `https://${domain ?? MATRIX_SERVER}`;
@@ -124,6 +125,9 @@ export class MatrixClientService {
     onRoomAccountData?: RoomAccountDataCallback;
     onAccountData?: (event: unknown) => void;
     onEncryptionKeyArrived?: (roomId: string) => void;
+    /** A limited sync replaced a room's live timeline: `backToken` pages back
+     *  into the hole between it and what was there before. */
+    onTimelineReset?: (roomId: string, backToken: string | null) => void;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
     if (handlers.onTimeline) this.onTimeline = handlers.onTimeline;
@@ -137,6 +141,7 @@ export class MatrixClientService {
     if (handlers.onRoomAccountData) this.onRoomAccountData = handlers.onRoomAccountData;
     if (handlers.onAccountData) this.onAccountData = handlers.onAccountData;
     if (handlers.onEncryptionKeyArrived) this.onEncryptionKeyArrived = handlers.onEncryptionKeyArrived;
+    if (handlers.onTimelineReset) this.onTimelineReset = handlers.onTimelineReset;
   }
 
   /** Custom request function using axios (matching bastyon-chat pattern) */
@@ -494,6 +499,20 @@ export class MatrixClientService {
     if (!this.client) return;
 
     const userId = this.client.credentials?.userId;
+
+    // Not gated on chatsReady: limited syncs happen during the catch-up sync,
+    // and a hole missed here is a hole Dexie never learns about.
+    this.client.on("Room.timelineReset", (room: unknown, timelineSet: unknown) => {
+      const r = room as {
+        roomId?: string;
+        getUnfilteredTimelineSet?: () => unknown;
+        getLiveTimeline?: () => { getPaginationToken?: (dir: string) => string | null };
+      } | null;
+      // Only the room's main timeline — threads and the notification set re-emit too.
+      if (!r?.roomId || r.getUnfilteredTimelineSet?.() !== timelineSet) return;
+      const backToken = r.getLiveTimeline?.()?.getPaginationToken?.("b") ?? null;
+      this.onTimelineReset?.(r.roomId, backToken);
+    });
 
     this.client.on("RoomMember.membership", (event: unknown, member: unknown) => {
       if (!this.chatsReady) return;
@@ -1279,6 +1298,40 @@ export class MatrixClientService {
       console.warn("[matrix-client] fetchRoomHangups error:", e);
       return null;
     }
+  }
+
+  /** One page of a room's history, newest first, backwards from `fromToken`
+   *  (plan 2026-09-28, stage 3). Unlike scrollback it does not grow the
+   *  SDK's in-memory timeline. Throws on network errors; `end: null` means
+   *  the start of the room. */
+  async fetchMessagesPage(
+    roomId: string,
+    fromToken: string,
+    limit: number,
+  ): Promise<{ chunk: Record<string, unknown>[]; end: string | null }> {
+    if (!this.client) throw new Error("Client not initialized");
+    const res = await this.client.createMessagesRequest(roomId, fromToken, limit, sdk.Direction.Backward);
+    const chunk = (res?.chunk ?? []) as Record<string, unknown>[];
+    // Same body → pbody parse the live timeline handler does for m.file.
+    for (const raw of chunk) {
+      const content = raw.content as Record<string, unknown> | undefined;
+      if (content?.msgtype === "m.file" && typeof content.body === "string" && content.pbody === undefined) {
+        try { content.pbody = JSON.parse(content.body); } catch { /* not JSON */ }
+      }
+    }
+    return { chunk, end: res?.end ?? null };
+  }
+
+  /** `/messages` token that pages back from just before `eventId` (the
+   *  `start` of a zero-size /context), or null if the server has none. */
+  async fetchTokenBefore(roomId: string, eventId: string): Promise<string | null> {
+    if (!this.client) return null;
+    const path = `/rooms/${encodeURIComponent(roomId)}/context/${encodeURIComponent(eventId)}`;
+    const client = this.client as unknown as {
+      http: { authedRequest: (method: string, path: string, query?: Record<string, string>) => Promise<{ start?: string }> };
+    };
+    const res = await client.http.authedRequest("GET", path, { limit: "0" });
+    return res?.start ?? null;
   }
 
   /** Fetch a specific event and its surrounding context from the server.
