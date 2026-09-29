@@ -37,6 +37,25 @@ describe("global selection lock (main.css)", () => {
   });
 });
 
+describe("mobile long-press selection (main.css)", () => {
+  const css = readSrc("../main.css");
+
+  it("turns selection back off inside message bubbles on coarse-pointer devices", () => {
+    const mq = css.match(
+      /@media \(hover: none\) and \(pointer: coarse\)\s*\{[\s\S]*?\n\}/,
+    );
+    expect(mq).toBeTruthy();
+    expect(mq![0]).toMatch(/\.message-bubble \.select-text/);
+    expect(mq![0]).toMatch(/user-select:\s*none/);
+    expect(mq![0]).toMatch(/-webkit-touch-callout:\s*none/);
+  });
+
+  it("MessageBubble root carries the .message-bubble hook the rule targets", () => {
+    const src = readSrc("../../../features/messaging/ui/MessageBubble.vue");
+    expect(src).toMatch(/class="message-bubble group relative flex/);
+  });
+});
+
 describe("select-text applied to message/publication body text only", () => {
   it("MessageContent: both the block-embed and plain-inline text roots are selectable", () => {
     const src = readSrc("../../../features/messaging/ui/MessageContent.vue");

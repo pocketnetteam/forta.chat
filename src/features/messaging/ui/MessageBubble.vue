@@ -795,7 +795,7 @@ const replyPreviewSender = computed(() => {
 
 <template>
   <div
-    class="group relative flex gap-2 transition-opacity"
+    class="message-bubble group relative flex gap-2 transition-opacity"
     :class="props.isOwn ? 'flex-row-reverse' : 'flex-row'"
     :style="swipeStyle"
     @pointerdown="onPointerdown"

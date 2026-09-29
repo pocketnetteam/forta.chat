@@ -21,6 +21,10 @@ interface PushDataPlugin extends Plugin {
   cacheRoomName(options: { roomId: string; name: string }): Promise<void>;
   cacheRoomNames(options: { rooms: Record<string, string> }): Promise<void>;
   cacheSenderNames(options: { senders: Record<string, string> }): Promise<void>;
+  /** roomId -> isGroup. The push payload has no group marker, so the native
+   *  cold-start notification builder reads this cache to decide whether to
+   *  title the notification with the room name. */
+  cacheGroupRooms(options: { rooms: Record<string, boolean> }): Promise<void>;
   cancelNotification(options: { roomId: string }): Promise<void>;
   /** WEE-44 / forta-bugs#764: clear all message-channel notifications so the
    *  launcher icon badge resets after the user has demonstrably seen unread

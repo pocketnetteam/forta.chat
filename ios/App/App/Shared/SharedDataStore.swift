@@ -8,6 +8,7 @@ import Foundation
 /// Schema (string-typed for easy bridging to JS):
 ///   - `roomNames`:   `[roomId: String]   -> displayName: String`
 ///   - `senderNames`: `[userId: String]   -> displayName: String`
+///   - `groupRooms`:  `[roomId: String]   -> isGroup: Bool`
 ///
 /// All writes are performed atomically against a snapshot of the dictionary
 /// to avoid losing concurrent updates from the main app and the NSE.
@@ -16,6 +17,7 @@ public enum SharedDataStore {
 
     private static let roomNamesKey = "roomNames"
     private static let senderNamesKey = "senderNames"
+    private static let groupRoomsKey = "groupRooms"
 
     private static var defaults: UserDefaults? {
         UserDefaults(suiteName: appGroup)
@@ -59,5 +61,24 @@ public enum SharedDataStore {
 
     public static func senderName(_ userId: String) -> String? {
         (defaults?.dictionary(forKey: senderNamesKey) as? [String: String])?[userId]
+    }
+
+    // MARK: - Group rooms
+
+    /// Mirror of Dexie's `rooms.isGroup`, written by the main app. The APNs
+    /// payload carries no group marker, so this cache is the only way the
+    /// Notification Service Extension can tell a group message from a direct
+    /// one and title the notification with the room name.
+    public static func cacheGroupRooms(_ rooms: [String: Bool]) {
+        guard let defaults, !rooms.isEmpty else { return }
+        var dict = (defaults.dictionary(forKey: groupRoomsKey) as? [String: Bool]) ?? [:]
+        for (id, isGroup) in rooms { dict[id] = isGroup }
+        defaults.set(dict, forKey: groupRoomsKey)
+    }
+
+    /// Unknown rooms read as `false` so a never-synced room keeps the previous
+    /// direct-chat layout instead of being guessed at.
+    public static func isGroupRoom(_ roomId: String) -> Bool {
+        (defaults?.dictionary(forKey: groupRoomsKey) as? [String: Bool])?[roomId] ?? false
     }
 }

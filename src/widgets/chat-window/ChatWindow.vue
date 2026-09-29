@@ -37,11 +37,58 @@ const emit = defineEmits<{ back: [] }>();
 
 const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
 
+/**
+ * How long a room named by a push tap / deep link may stay unresolved before
+ * the window gives up and falls back to the select-prompt.
+ *
+ * A notification can point at a room the app does not hold yet (first message
+ * in a group the user was just added to, a room the cold-start sync has not
+ * delivered). `roomsInitialized` says the room LIST is ready, not that THIS
+ * room is — so gating the skeleton on it alone dropped the push-tap user on
+ * "Select a chat to start messaging" with the sidebar hidden: a dead end that
+ * reads as "the tap did nothing". Keep the skeleton while sync catches up, but
+ * bounded, so a room that never arrives still leaves a way out.
+ */
+const PENDING_ROOM_GRACE_MS = 15_000;
+
+const pendingRoomTimedOut = ref(false);
+let pendingRoomTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** The room we are waiting on, or null when there is nothing to wait for.
+ *  A plain id (not a tuple) so the watcher below re-arms its timer only when
+ *  the waited-for room actually changes — `activeRoom` is invalidated by every
+ *  Dexie room delta, and re-arming on those would push the deadline out
+ *  indefinitely while sync churns. */
+const pendingRoomId = computed(() =>
+  chatStore.activeRoomId && !chatStore.activeRoom ? chatStore.activeRoomId : null,
+);
+
+watch(
+  pendingRoomId,
+  (roomId) => {
+    if (pendingRoomTimer !== null) {
+      clearTimeout(pendingRoomTimer);
+      pendingRoomTimer = null;
+    }
+    pendingRoomTimedOut.value = false;
+    if (!roomId) return;
+    pendingRoomTimer = setTimeout(() => {
+      pendingRoomTimer = null;
+      pendingRoomTimedOut.value = true;
+    }, PENDING_ROOM_GRACE_MS);
+  },
+  { immediate: true },
+);
+
+onUnmounted(() => {
+  if (pendingRoomTimer !== null) clearTimeout(pendingRoomTimer);
+});
+
 const isRoomLoading = computed(() =>
   Boolean(
     chatStore.activeRoomId &&
     !chatStore.activeRoom &&
-    !chatStore.roomsInitialized,
+    (!chatStore.roomsInitialized || !pendingRoomTimedOut.value),
   ),
 );
 

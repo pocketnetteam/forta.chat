@@ -29,6 +29,15 @@ allprojects {
             languageVersion = JavaLanguageVersion.of(21)
         }
     }
+    // Unit tests run on the daemon JVM unless told otherwise; on a JDK 17
+    // machine that JVM cannot load the Java-21 bytecode the toolchain above
+    // produced, and every test fails with UnsupportedClassVersionError before
+    // it runs. Point the test launcher at the same toolchain.
+    tasks.withType(Test).configureEach {
+        javaLauncher = javaToolchains.launcherFor {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
 }
 
 task clean(type: Delete) {

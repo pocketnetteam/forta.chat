@@ -51,6 +51,7 @@ import { createPatchScheduler } from "@/shared/lib/patch-scheduler";
 import { createBurstCoalescer } from "@/shared/lib/burst-coalescer";
 import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
+import { buildMessageNotificationContent } from "@/shared/lib/notifications/message-notification-content";
 import { tRaw } from "@/shared/lib/i18n";
 import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
@@ -1536,7 +1537,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const activeRoom = computed(() => {
     // Access rooms.value to register Vue reactive dependency
     void rooms.value;
-    return activeRoomId.value ? getRoomById(activeRoomId.value) : undefined;
+    const roomId = activeRoomId.value;
+    if (!roomId) return undefined;
+    const fromMatrix = getRoomById(roomId);
+    if (fromMatrix) return fromMatrix;
+    // A push tap / deep link names a room directly, and `rooms` is rebuilt from
+    // the Matrix SDK, which materializes Room objects lazily (cold start, slow
+    // WebView, many rooms). Dexie — the source of truth the sidebar renders
+    // from — already holds that room, so resolve it from there instead of
+    // reporting "no room" and dropping the user on the "select a chat" prompt
+    // for a chat they just tapped in a notification.
+    void _dexieRoomMapVersion.value;
+    const local = dexieRoomMap.get(roomId);
+    return local ? mapLocalRoomToChatRoom(local) : undefined;
   });
 
   // Convert Dexie LocalMessage[] → Message[] for UI, fallback to old shallowRef during migration.
@@ -3952,6 +3965,85 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Generation token for the active-room SDK-materialization watcher. Every
+   *  room switch invalidates the previous watcher instead of leaving it to
+   *  poll for a room the user has already navigated away from. */
+  let _sdkRoomRecoveryGen = 0;
+  /** Poll cadence while waiting for the SDK to materialize the active room. */
+  const SDK_ROOM_RECOVERY_POLL_MS = 1_000;
+  /** Head start given to the open path before the watcher takes over.
+   *  `loadRoomMessages({ waitForSdk: true })` parks ~3s for the same room, so
+   *  a room that arrives that quickly needs no recovery at all. Overlap is
+   *  harmless either way — loads of the same room are coalesced — this just
+   *  keeps the watcher out of the case the open path already covers. */
+  const SDK_ROOM_RECOVERY_INITIAL_DELAY_MS = 4_000;
+  /** Upper bound on the watch. Past this the room is not "late", it is absent
+   *  (left elsewhere, or sync is down), and a user-visible error beats an
+   *  invisible poll running for the rest of the session. */
+  const SDK_ROOM_RECOVERY_BUDGET_MS = 60_000;
+
+  const cancelSdkRoomRecovery = () => { _sdkRoomRecoveryGen++; };
+
+  /** Replay the room-open path once the Matrix SDK materializes the room.
+   *
+   *  matrix-js-sdk creates Room objects lazily, so `getRoom()` returning null
+   *  for a room the user just opened is a normal cold-start / slow-WebView /
+   *  many-rooms state (WEE-84), not proof the room is gone. The whole
+   *  SDK-backed half of a chat no-ops in that state: `loadRoomMessages` bails
+   *  after its 3s wait with "room not found" and `ensureRoomCrypto` returns
+   *  undefined, so `pcrypto.rooms[roomId]` is never populated and every media
+   *  decrypt fails with CryptoNotReadyError ("encryption keys are still
+   *  loading"). Meanwhile the Dexie-backed half — room list, name, avatar —
+   *  renders normally, so the chat looks open and simply never fills.
+   *
+   *  Nothing re-ran those paths when the room finally arrived: they are only
+   *  triggered by opening a room. Leaving and re-entering hit the same dead
+   *  end, which is what made the state look permanent to the user. This
+   *  watcher closes the gap by retrying once the room shows up. */
+  const scheduleSdkRoomRecovery = (roomId: string): void => {
+    const gen = ++_sdkRoomRecoveryGen;
+    const stale = () => gen !== _sdkRoomRecoveryGen || activeRoomId.value !== roomId;
+
+    const sdkRoom = (): unknown => {
+      try {
+        return getMatrixClientService().getRoom(roomId);
+      } catch {
+        // Matrix service not constructed yet — treat as "not there", retry.
+        return null;
+      }
+    };
+
+    // Already materialized: the normal open path handles it.
+    if (sdkRoom()) return;
+
+    void (async () => {
+      const deadline = Date.now() + SDK_ROOM_RECOVERY_BUDGET_MS;
+      await new Promise((r) => setTimeout(r, SDK_ROOM_RECOVERY_INITIAL_DELAY_MS));
+      while (Date.now() < deadline) {
+        if (stale()) return;
+        if (!sdkRoom()) {
+          await new Promise((r) => setTimeout(r, SDK_ROOM_RECOVERY_POLL_MS));
+          continue;
+        }
+
+        console.info("[chat-store] sdk room materialized, replaying open path:", roomId);
+        try {
+          // Crypto first: messages parsed without it would be written to
+          // Dexie as "[encrypted]" and need a second decryption pass.
+          await ensureRoomCrypto(roomId);
+          if (stale()) return;
+          await loadRoomMessages(roomId);
+          if (stale()) return;
+          await checkPeerKeys(roomId);
+        } catch (e) {
+          console.warn("[chat-store] sdk room recovery failed for", roomId, e);
+        }
+        return;
+      }
+      console.warn("[chat-store] sdk room never materialized within budget:", roomId);
+    })();
+  };
+
   const setActiveRoom = (roomId: string | null) => {
     perfMark("setActiveRoom-start");
     const previousRoomId = activeRoomId.value;
@@ -3985,6 +4077,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
     activeRoomId.value = roomId;
     messageWindowSize.value = 50; // Reset pagination window
+    // Drop the previous room's SDK-materialization watcher — it must not fire
+    // against a room the user has already left.
+    cancelSdkRoomRecovery();
     if (flushPromise && roomId) {
       flushPromise.then(() => {
         if (activeRoomId.value === roomId) _liveQueryGen.value++;
@@ -4031,6 +4126,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } catch {
         // Matrix service not ready yet — members will load on next sync
       }
+
+      // If the SDK has no Room object yet, every SDK-backed path below and in
+      // MessageList silently no-ops. Watch for it to arrive and replay them.
+      scheduleSdkRoomRecovery(roomId);
 
       // Bootstrap clearedAtTs from Matrix account_data (cross-device sync)
       if (chatDbKitRef.value) {
@@ -5258,6 +5357,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return typing.value[roomId] ?? [];
   };
 
+  /** In-flight ensureRoomCrypto calls, keyed by roomId. `pcrypto.addRoom`
+   *  awaits `createPcryptoRoom` BEFORE assigning `rooms[roomId]`, so two
+   *  concurrent callers both find an empty slot and both build an instance —
+   *  the loser's is dropped from the map while its caller keeps decrypting
+   *  through an orphan that no later key refresh (peer-keys Retry,
+   *  onKeysLoaded) will ever reach. Concurrent callers are routine: several
+   *  media downloads run in parallel, each ensuring the same room. */
+  const _roomCryptoInFlight = new Map<string, Promise<PcryptoRoomInstance | undefined>>();
+
   /** Ensure a PcryptoRoom instance exists for the given room */
   const ensureRoomCrypto = async (roomId: string): Promise<PcryptoRoomInstance | undefined> => {
     const pcrypto = pcryptoRef.value;
@@ -5266,20 +5374,28 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Already exists
     if (pcrypto.rooms[roomId]) return pcrypto.rooms[roomId];
 
-    // Create: get the Matrix room object
-    const matrixService = getMatrixClientService();
-    const matrixRoom = matrixService.getRoom(roomId);
-    if (!matrixRoom) return undefined;
+    const pending = _roomCryptoInFlight.get(roomId);
+    if (pending) return pending;
 
-    // Skip encryption setup for public rooms (matches Bastyon's prepareChat behavior)
-    if (isRoomPublic(roomId)) return undefined;
+    const work = (async (): Promise<PcryptoRoomInstance | undefined> => {
+      // Create: get the Matrix room object
+      const matrixService = getMatrixClientService();
+      const matrixRoom = matrixService.getRoom(roomId);
+      if (!matrixRoom) return undefined;
 
-    try {
-      return await pcrypto.addRoom(matrixRoom as Record<string, unknown>);
-    } catch (e) {
-      console.warn("[chat-store] ensureRoomCrypto failed for", roomId, e);
-      return undefined;
-    }
+      // Skip encryption setup for public rooms (matches Bastyon's prepareChat behavior)
+      if (isRoomPublic(roomId)) return undefined;
+
+      try {
+        return await pcrypto.addRoom(matrixRoom as Record<string, unknown>);
+      } catch (e) {
+        console.warn("[chat-store] ensureRoomCrypto failed for", roomId, e);
+        return undefined;
+      }
+    })().finally(() => { _roomCryptoInFlight.delete(roomId); });
+
+    _roomCryptoInFlight.set(roomId, work);
+    return work;
   };
 
   /** origin_server_ts of the room's m.room.create event (null if unknown).
@@ -6497,9 +6613,32 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Resolves to the number of messages parsed from the SDK timeline, or
    *  undefined when it bailed out before parsing (room not in the SDK, user
    *  switched away, fatal error). 0 means the room genuinely has no messages. */
-  const loadRoomMessages = async (
+  /** In-flight loadRoomMessages calls, keyed by room and options — see the wrapper below. */
+  const _roomLoadInFlight = new Map<string, Promise<number | undefined>>();
+
+  type LoadRoomMessagesOptions = { waitForSdk?: boolean; scrollback?: boolean; awaitWrite?: boolean };
+
+  /** Coalesce concurrent loads of the same room onto one run. The room-open
+   *  path, the viewport preloader and the SDK-materialization watcher can all
+   *  target the same room at once, and each run paginates the timeline and
+   *  decrypts it before racing the others on `setMessages` and the Dexie
+   *  write. Same room, same work — one run, shared result. The key includes
+   *  `scrollback` / `awaitWrite`: a caller that must not page the server, or
+   *  that needs the write committed, cannot ride on a run that behaves
+   *  differently. */
+  const loadRoomMessages = (roomId: string, opts: LoadRoomMessagesOptions = {}): Promise<number | undefined> => {
+    const key = `${roomId}|${opts.scrollback !== false}|${!!opts.awaitWrite}`;
+    const pending = _roomLoadInFlight.get(key);
+    if (pending) return pending;
+    const work = loadRoomMessagesUncoalesced(roomId, opts)
+      .finally(() => { _roomLoadInFlight.delete(key); });
+    _roomLoadInFlight.set(key, work);
+    return work;
+  };
+
+  const loadRoomMessagesUncoalesced = async (
     roomId: string,
-    { waitForSdk = false, scrollback = true, awaitWrite = false } = {},
+    { waitForSdk = false, scrollback = true, awaitWrite = false }: LoadRoomMessagesOptions = {},
   ): Promise<number | undefined> => {
     try {
       // Capture whether this room is the active room RIGHT NOW.
@@ -7088,9 +7227,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const myAddr = useAuthStore().address ?? "";
     if (msg.senderId && myAddr && msg.senderId === myAddr) return;
     const room = getRoomById(roomId);
-    const title = room?.name || getDisplayName(msg.senderId) || undefined;
     const fallbackBody = tRaw("notifications.newMessage");
-    const body = msg.content && msg.content !== "[encrypted]" ? msg.content : fallbackBody;
+    const rawBody = msg.content && msg.content !== "[encrypted]" ? msg.content : fallbackBody;
+    // Group chats: the room name is the title and the author moves into the
+    // body, so the banner shows which group the message came from.
+    const { title, body } = buildMessageNotificationContent({
+      senderName: getDisplayName(msg.senderId),
+      roomName: room?.name,
+      isGroup: room?.isGroup === true,
+      body: rawBody,
+      fallbackTitle: tRaw("titleBar.appName"),
+      directTitlePrefers: "room",
+    });
     notifyNewMessage({ roomId, body, title, fallbackTitle: tRaw("titleBar.appName") });
   };
 
@@ -8153,8 +8301,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return "not-encrypted";
     }
 
+    // For the room the user actually has open, register the crypto instance if
+    // it isn't there yet instead of merely observing `pcrypto.rooms`. Reading
+    // the map alone made opening a chat a no-op for crypto: `ensureRoomCrypto`
+    // is the ONLY code that populates it, and nothing on the room-open path
+    // called it, so the instance appeared only as a side effect of timeline
+    // parsing. When the SDK had not materialized the room yet that side effect
+    // never ran, the status stayed "unknown" forever and every media decrypt
+    // failed with CryptoNotReadyError ("encryption keys are still loading").
+    //
+    // Gated on the active room because the other callers are bulk: the
+    // member-event recheck in the auth store fires for EVERY room emitting a
+    // membership event, and registering each one would turn an initial sync
+    // into dozens of addRoom → prepare() → getusersinfo round-trips for rooms
+    // the user never opened. Those callers keep the old cheap map read, which
+    // is all they ever needed — they only refresh a banner.
     const authStore = useAuthStore();
-    const roomCrypto = authStore.pcrypto?.rooms[roomId];
+    const roomCrypto = roomId === activeRoomId.value
+      ? (await ensureRoomCrypto(roomId)) ?? authStore.pcrypto?.rooms[roomId]
+      : authStore.pcrypto?.rooms[roomId];
     if (!roomCrypto) {
       peerKeysStatus.set(roomId, "unknown");
       return "unknown";
@@ -8218,6 +8383,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     mutedRoomIds.value = new Set();
     matrixKitRef.value = null;
     pcryptoRef.value = null;
+    _roomCryptoInFlight.clear();
+    _roomLoadInFlight.clear();
+    cancelSdkRoomRecovery();
     chatDbKitRef.value = null;
     decryptedPreviewCache.clear();
     changedRoomIds.clear();
@@ -8248,6 +8416,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     addRoom,
     advanceInboundWatermark,
     checkPeerKeys,
+    ensureRoomCrypto,
     cleanup,
     clearDeletedRoom,
     deletingMessage,
