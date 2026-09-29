@@ -37,6 +37,17 @@ export async function parseEditBody({
       const decrypted = await decryptEvent(raw);
       return decrypted.body;
     } catch {
+      // Edits sent from a group room before the sender was fixed carry an outer content
+      // without `hash`, which cannot be decrypted; the whole encrypted event is in
+      // `m.new_content` (`shared/lib/local-db/edit-content.ts`).
+      if (newContent?.msgtype === "m.encrypted") {
+        try {
+          const decrypted = await decryptEvent({ ...raw, content: newContent });
+          return decrypted.body;
+        } catch {
+          return encryptedPlaceholder;
+        }
+      }
       return encryptedPlaceholder;
     }
   }

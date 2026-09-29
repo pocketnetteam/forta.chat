@@ -1,4 +1,4 @@
-import { isNative } from "@/shared/lib/platform";
+import { isAndroid } from "@/shared/lib/platform";
 import { nativeCallBridge, retirePendingMarkers } from "@/shared/lib/native-calls";
 import { NativeWebRTC } from "@/shared/lib/native-webrtc";
 import { withTimeout } from "@/shared/lib/with-timeout";
@@ -163,14 +163,16 @@ async function runSteps(reason: FinalizeReason, callId: string, roomId?: string)
     // releases wake lock). Named, so native stops the service against this
     // call's own start generation: issued after the next call's launchCallUI,
     // an unnamed stop matched the current generation and ended that call.
-    if (isNative) {
+    // Steps 3 and 4 are NativeWebRTC's, an Android-only plugin: on iOS both
+    // rejected with UNIMPLEMENTED on every call.
+    if (isAndroid) {
       await safeStep("dismissCallUI", callId, () => NativeWebRTC.dismissCallUI({ callId }));
     }
 
     // Step 4: close peer connections + dispose media (release mic AudioRecord).
     // Named: reaching native after the next call's launchCallUI, this close
     // would take the new call's connections down with the old one's.
-    if (isNative) {
+    if (isAndroid) {
       await safeStep("closeAllPeerConnections", callId, () => NativeWebRTC.closeAllPeerConnections({ callId }));
     }
 

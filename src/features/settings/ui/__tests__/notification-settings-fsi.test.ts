@@ -13,6 +13,8 @@ const state = {
   fullScreenIntentAllowed: ref<boolean | null>(null),
   detectFullScreenIntent: vi.fn().mockResolvedValue(undefined),
   openFullScreenIntentSettings: vi.fn().mockResolvedValue(true),
+  incomingCallsEnabled: ref(true),
+  setIncomingCallsEnabled: vi.fn().mockResolvedValue(undefined),
 };
 vi.mock("../../model/use-notification-settings", () => ({
   useNotificationSettings: () => ({
@@ -23,6 +25,8 @@ vi.mock("../../model/use-notification-settings", () => ({
     fullScreenIntentAllowed: state.fullScreenIntentAllowed,
     detectFullScreenIntent: state.detectFullScreenIntent,
     openFullScreenIntentSettings: state.openFullScreenIntentSettings,
+    incomingCallsEnabled: state.incomingCallsEnabled,
+    setIncomingCallsEnabled: state.setIncomingCallsEnabled,
   }),
 }));
 
@@ -119,5 +123,29 @@ describe("NotificationSettings — full-screen intent banner (O10)", () => {
     wrapper.unmount();
     await flushPromises();
     expect(app.remove).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("NotificationSettings — incoming calls switch (#1388)", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    state.incomingCallsEnabled.value = true;
+    state.setIncomingCallsEnabled.mockClear();
+    vi.stubGlobal("useI18n", () => ({ t: (k: string) => k }));
+  });
+
+  it("shows the switch on and turns calls off when it is flipped", async () => {
+    const { default: NotificationSettings } = await import("../NotificationSettings.vue");
+    const { Toggle } = await import("@/shared/ui/toggle");
+    const wrapper = mount(NotificationSettings);
+    const toggle = wrapper.findComponent(Toggle);
+
+    expect(toggle.exists()).toBe(true);
+    expect(toggle.props("modelValue")).toBe(true);
+
+    toggle.vm.$emit("update:modelValue", false);
+    await flushPromises();
+
+    expect(state.setIncomingCallsEnabled).toHaveBeenCalledWith(false);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { collapsedCallEventIds, dedupeCallEvents } from "./dedupe-call-events";
+import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "./dedupe-call-events";
 
 type Row = {
   id: string;
@@ -93,5 +93,42 @@ describe("collapsedCallEventIds", () => {
     const collapsed = collapsedCallEventIds(rows);
     expect(collapsed.has("ev1")).toBe(false);
     expect(collapsed.has("m1")).toBe(false);
+  });
+});
+
+describe("planCallRecordDeletion (#1091)", () => {
+  const me = "me";
+  const mine = { id: "$mine", senderId: me, callInfo: { callType: "voice" as const, missed: false, callId: "c1" } };
+  const theirs = { id: "$theirs", senderId: "peer", callInfo: { callType: "voice" as const, missed: false, callId: "c1" } };
+  const other = { id: "$other", senderId: "peer", callInfo: { callType: "voice" as const, missed: false, callId: "c2" } };
+
+  it("deletes every event of the call, so the other side's hangup does not take the card's place", () => {
+    const plan = planCallRecordDeletion([mine, other, theirs], theirs, me, false);
+    expect(plan).toEqual([
+      { id: "$mine", forEveryone: false },
+      { id: "$theirs", forEveryone: false },
+    ]);
+  });
+
+  it("redacts for everyone only the user's own events", () => {
+    const plan = planCallRecordDeletion([mine, theirs], mine, me, true);
+    expect(plan).toEqual([
+      { id: "$mine", forEveryone: true },
+      { id: "$theirs", forEveryone: false },
+    ]);
+  });
+
+  it("deletes just the record when it has no call id", () => {
+    const legacy = { id: "$old", senderId: me, callInfo: { callType: "voice" as const, missed: true } };
+    expect(planCallRecordDeletion([legacy, mine], legacy, me, true)).toEqual([{ id: "$old", forEveryone: true }]);
+  });
+});
+
+describe("dedupeCallEvents — deleted call records (#1091)", () => {
+  it("drops a deleted call record instead of showing its card", () => {
+    const kept = { id: "$a", callInfo: { callType: "voice" as const, missed: false, callId: "c1" } };
+    const deleted = { id: "$b", deleted: true, callInfo: { callType: "voice" as const, missed: false, callId: "c2" } };
+    const text = { id: "$t", deleted: true };
+    expect(dedupeCallEvents([kept, deleted, text]).map((m) => m.id)).toEqual(["$a", "$t"]);
   });
 });

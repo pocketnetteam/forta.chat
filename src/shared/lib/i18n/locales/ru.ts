@@ -167,6 +167,9 @@ export const ru: Record<TranslationKey, string> = {
   "settings.about": "О приложении",
   "settings.downloadApps": "Скачать приложения",
   // ── Настройки уведомлений (WEE-75) ──
+  "notificationsSettings.callsTitle": "Звонки",
+  "notificationsSettings.incomingCalls": "Входящие звонки",
+  "notificationsSettings.incomingCallsDesc": "Выключите, чтобы Forta не звонила. Звонок можно будет принять в Bastyon или на другом устройстве.",
   "notificationsSettings.soundTitle": "Звук сообщений",
   "notificationsSettings.soundDesc": "Как уведомления о новых сообщениях привлекают внимание.",
   "notificationsSettings.soundOnHint": "Новые сообщения теперь сразу воспроизводят звук уведомления.",
@@ -337,6 +340,7 @@ export const ru: Record<TranslationKey, string> = {
   // ── Message input ──
   "message.editing": "Редактирование",
   "message.placeholder": "Сообщение",
+  "message.sendButton": "Отправить",
   "message.emoji": "Эмодзи",
   "message.attach": "Прикрепить",
   "message.photo": "Фото",
@@ -377,6 +381,7 @@ export const ru: Record<TranslationKey, string> = {
   "messageList.typingTwo": "{name1} и {name2} печатают",
   "messageList.typingMany": "{name} и ещё {count} печатают",
   "messageList.deleteMessage": "Удалить сообщение?",
+  "messageList.deleteCall": "Удалить звонок",
   "messageList.deleteMessagesTitle": "Удалить выбранные сообщения ({count})?",
   "messageList.deleteResultSummary": "Удалено {succeeded}, не удалось {failed}",
   "messageList.deleteForEveryone": "Удалить у всех",

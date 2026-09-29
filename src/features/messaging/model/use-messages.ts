@@ -1,3 +1,4 @@
+import { buildEditContent } from "@/shared/lib/local-db/edit-content";
 import { onScopeDispose } from "vue";
 import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime, MSC3245_VIDEO_NOTE_KEY } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
@@ -1170,27 +1171,11 @@ export function useMessages() {
     try {
       const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
 
-      const editContent: Record<string, unknown> = {
-        body: `* ${trimmed}`,
-        msgtype: "m.text",
-        "m.new_content": {
-          body: trimmed,
-          msgtype: "m.text",
-        },
-        "m.relates_to": {
-          rel_type: "m.replace",
-          event_id: messageId,
-        },
-      };
-
       if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await roomCrypto.encryptEvent(trimmed);
-        const encContent = {
-          ...encrypted,
-          "m.new_content": { body: trimmed, msgtype: "m.text" },
-          "m.relates_to": editContent["m.relates_to"],
-        };
-        await matrixService.sendEncryptedText(roomId, encContent);
+        // The same content the SyncEngine sends: `m.new_content` is the encrypted event, never
+        // the text — this path used to put the cleartext there, next to the ciphertext.
+        const encrypted = (await roomCrypto.encryptEvent(trimmed)) as Record<string, unknown>;
+        await matrixService.sendEncryptedText(roomId, buildEditContent(messageId, trimmed, encrypted));
       } else {
         // Defense in depth: a plaintext edit retroactively exposes the
         // original ciphertext bubble. Refuse to replace a ciphertext with
@@ -1199,7 +1184,7 @@ export function useMessages() {
         if (roomCrypto?.requiresEncryption()) {
           throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — editMessage legacy path`);
         }
-        await matrixService.sendEncryptedText(roomId, editContent);
+        await matrixService.sendEncryptedText(roomId, buildEditContent(messageId, trimmed, null));
       }
 
       // Update local message

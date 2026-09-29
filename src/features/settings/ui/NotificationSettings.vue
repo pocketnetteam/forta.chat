@@ -3,6 +3,7 @@ import { onMounted, onUnmounted } from "vue";
 import { App as CapApp } from "@capacitor/app";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { SettingsSection } from "@/shared/ui/settings-section";
+import { Toggle } from "@/shared/ui/toggle";
 import { isNative } from "@/shared/lib/platform";
 import { useNotificationSettings } from "../model/use-notification-settings";
 
@@ -25,6 +26,8 @@ const {
   fullScreenIntentAllowed,
   detectFullScreenIntent,
   openFullScreenIntentSettings,
+  incomingCallsEnabled,
+  setIncomingCallsEnabled,
 } = useNotificationSettings();
 
 // The banner's button leaves the app for a system screen where the user flips
@@ -60,6 +63,21 @@ onUnmounted(() => {
 
 <template>
   <div class="mx-auto max-w-2xl space-y-6 p-6 pb-safe">
+    <!-- #1388: switch Forta's ringing off; Bastyon and other devices still ring -->
+    <SettingsSection
+      :title="t('notificationsSettings.callsTitle')"
+      :description="t('notificationsSettings.incomingCallsDesc')"
+    >
+      <div class="flex items-center justify-between rounded-lg p-3">
+        <span class="text-sm text-text-color">{{ t("notificationsSettings.incomingCalls") }}</span>
+        <Toggle
+          data-testid="incoming-calls-toggle"
+          :model-value="incomingCallsEnabled"
+          @update:model-value="setIncomingCallsEnabled"
+        />
+      </div>
+    </SettingsSection>
+
     <!-- What changed -->
     <SettingsSection
       :title="t('notificationsSettings.soundTitle')"

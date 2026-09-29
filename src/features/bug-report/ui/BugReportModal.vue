@@ -2,12 +2,14 @@
 import {
   collectEnvironment,
   collectCallDiagnostics,
+  collectEncryptionDiagnostics,
   sendBugReport,
   trackCreatedIssue,
 } from "@/shared/lib/bug-report";
 import type {
   AppEnvironment,
   BugReportCallDiagnostics,
+  BugReportEncryptionDiagnostics,
 } from "@/shared/lib/bug-report";
 import Modal from "@/shared/ui/modal/Modal.vue";
 import { isNative } from "@/shared/lib/platform";
@@ -28,6 +30,7 @@ const fileInput = ref<HTMLInputElement>();
 const environment = ref<AppEnvironment>();
 const callDiagnostics = ref<BugReportCallDiagnostics>();
 const aiDiagnostics = ref<{ logs: string }>();
+const encryptionDiagnostics = ref<BugReportEncryptionDiagnostics>();
 const showExamples = ref(false);
 
 watch(isOpen, async (val) => {
@@ -53,10 +56,11 @@ watch(isOpen, async (val) => {
     // latency further). Both call/AI diagnostics are non-throwing — they
     // swallow native-plugin/no-client failures so a missing snapshot can
     // never block the bug-report flow itself.
-    [environment.value, callDiagnostics.value, aiDiagnostics.value] = await Promise.all([
+    [environment.value, callDiagnostics.value, aiDiagnostics.value, encryptionDiagnostics.value] = await Promise.all([
       collectEnvironment(),
       collectCallDiagnostics(),
       collectAiDiagnostics(),
+      collectEncryptionDiagnostics(),
     ]);
   }
 });
@@ -127,6 +131,7 @@ const handleSend = async () => {
       reporterAddress: authStore.address ?? undefined,
       callDiagnostics: callDiagnostics.value,
       aiDiagnostics: aiDiagnostics.value,
+      encryptionDiagnostics: encryptionDiagnostics.value,
     });
     console.log("[BugReport] created issue #", result.issueNumber, "url:", result.issueUrl);
     if (authStore.address && result.issueNumber) {

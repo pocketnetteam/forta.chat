@@ -68,6 +68,10 @@ watch(() => props.show, (val) => {
           v-model="credential"
           :placeholder="t('auth.keyPlaceholder')"
           rows="3"
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
           class="w-full resize-none rounded-lg border border-neutral-grad-0 bg-background-secondary-theme p-3 text-sm text-text-color outline-none transition-colors focus:border-color-bg-ac"
           :disabled="loading"
         />

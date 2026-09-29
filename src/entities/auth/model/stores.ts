@@ -1505,6 +1505,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     try { blockchainWs.stop(); } catch { /* ignore */ }
     clearWalletRefreshSchedule();
 
+    // ── 1.7. Stop this device's pushes for the account. Needs the Matrix
+    //         client's access token, so before the teardown below; without it
+    //         a signed-out phone kept ringing for the account (Pixel, TEST3,
+    //         2026-09-24). Bounded and never throws. ──
+    try {
+      const { pushService } = await import('@/shared/lib/push');
+      await pushService.unregisterForLogout();
+    } catch (e) {
+      console.warn('[auth] push unregister on logout failed:', e);
+    }
+
     // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
     matrixReady.value = false;

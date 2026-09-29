@@ -19,6 +19,16 @@ vi.mock('matrix-js-sdk-bastyon/lib/browser-index.js', () => ({
 vi.mock('@/shared/lib/file-transfer/tor-media-transfer', () => ({
   shouldUseNativeTorUpload: vi.fn((size: number) => size >= 5 * 1024 * 1024),
   uploadMediaViaTorFile: vi.fn().mockResolvedValue('mxc://server/native'),
+  parseMatrixUploadResponse: (body: string) => (JSON.parse(body) as { content_uri: string }).content_uri,
+}));
+
+vi.mock('@/shared/lib/transport/direct-upload', () => ({
+  routeUploadUrl: async (url: string) => url,
+}));
+
+const mockXhrUpload = vi.fn();
+vi.mock('@/shared/lib/file-transfer/xhr-upload', () => ({
+  uploadBlobWithProgress: (...args: unknown[]) => mockXhrUpload(...args),
 }));
 
 describe('MatrixClientService.uploadContent Tor routing', () => {
@@ -61,5 +71,33 @@ describe('MatrixClientService.uploadContent Tor routing', () => {
 
     expect(uploadMediaViaTorFile).not.toHaveBeenCalled();
     expect(mockSdkUpload).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: the SDK uploads through fetch, so a progress handler never
+  // fired and every bubble sat at 0 % until the file was sent.
+  it('uploads over XMLHttpRequest when the caller wants progress', async () => {
+    mockXhrUpload.mockResolvedValue('{"content_uri":"mxc://server/xhr"}');
+    const service = new MatrixClientService('matrix.example');
+    (service as unknown as { client: unknown }).client = {
+      uploadContent: mockSdkUpload,
+      mxcUrlToHttp: mockMxcUrlToHttp,
+      getAccessToken: () => 'test-token',
+    };
+    const onProgress = vi.fn();
+    const signal = new AbortController().signal;
+
+    const blob = new Blob(['small'], { type: 'image/png' });
+    const url = await service.uploadContent(blob, onProgress, signal);
+
+    expect(mockSdkUpload).not.toHaveBeenCalled();
+    expect(mockXhrUpload).toHaveBeenCalledWith({
+      url: 'https://matrix.example/_matrix/media/v3/upload',
+      authorization: 'Bearer test-token',
+      blob,
+      contentType: 'image/png',
+      onProgress,
+      signal,
+    });
+    expect(url).toContain('xhr');
   });
 });

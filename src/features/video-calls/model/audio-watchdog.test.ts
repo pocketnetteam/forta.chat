@@ -55,6 +55,9 @@ vi.mock("@/shared/lib/native-calls/native-call-bridge.ios", () => ({
   IOSCallAudio: {
     addListener: mockIOSCallAudioAddListener,
   },
+  // No CallKit release in these cases: every interruption here is a real
+  // phone call taking the session, so the watchdog must hang up.
+  isRecentCallKitRelease: () => false,
 }));
 
 // `vi.hoisted` so the spy survives `vi.resetModules()` — without this,

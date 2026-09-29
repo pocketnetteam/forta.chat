@@ -75,7 +75,14 @@ function loadCapacitorWorker(torActive: boolean) {
       });
     });
 
-  return { dispatch, calls };
+  /** Whether the worker answered the request at all (called respondWith). */
+  const answers = (request: Request): boolean => {
+    let answered = false;
+    onFetch({ request, respondWith: () => { answered = true; } });
+    return answered;
+  };
+
+  return { dispatch, answers, calls };
 }
 
 describe("service worker on Capacitor, Tor route", () => {
@@ -117,5 +124,16 @@ describe("service worker on Capacitor, Tor route", () => {
     expect(response.status).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0].input).toBe(request);
+  });
+
+  // The page flags an upload it already knows goes direct, so the XHR keeps
+  // its upload progress (respondWith hides it).
+  it("does not answer a flagged direct upload", () => {
+    const { answers, calls } = loadCapacitorWorker(false);
+    const upload = "https://matrix.pocketnet.app/_matrix/media/v3/upload";
+
+    expect(answers(new Request(`${upload}?forta_direct=1`, { method: "POST", body: "x" }))).toBe(false);
+    expect(answers(new Request(upload, { method: "POST", body: "x" }))).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });

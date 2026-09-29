@@ -1002,7 +1002,7 @@ export class MatrixClientService {
   ): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
 
-    const { shouldUseNativeTorUpload, uploadMediaViaTorFile } = await import(
+    const { shouldUseNativeTorUpload, uploadMediaViaTorFile, parseMatrixUploadResponse } = await import(
       "@/shared/lib/file-transfer/tor-media-transfer"
     );
 
@@ -1017,10 +1017,27 @@ export class MatrixClientService {
       return this.client.mxcUrlToHttp(contentUri) ?? contentUri;
     }
 
-    const opts: Record<string, unknown> = {};
-    if (progressHandler) {
-      opts.progressHandler = progressHandler;
+    // The SDK uploads through fetch, which reports no upload progress: a
+    // caller that shows progress gets the same POST over XMLHttpRequest.
+    if (progressHandler && typeof XMLHttpRequest !== "undefined") {
+      const [{ uploadBlobWithProgress }, { routeUploadUrl }] = await Promise.all([
+        import("@/shared/lib/file-transfer/xhr-upload"),
+        import("@/shared/lib/transport/direct-upload"),
+      ]);
+      const { url, authorization } = this.getMediaUploadEndpoint();
+      const body = await uploadBlobWithProgress({
+        url: await routeUploadUrl(url),
+        authorization,
+        blob: file,
+        contentType: file.type || "application/octet-stream",
+        onProgress: progressHandler,
+        signal,
+      });
+      const contentUri = parseMatrixUploadResponse(body);
+      return this.client.mxcUrlToHttp(contentUri) ?? contentUri;
     }
+
+    const opts: Record<string, unknown> = {};
     if (signal) {
       opts.abortSignal = signal;
     }

@@ -1,6 +1,7 @@
 import { PushNotifications } from '@capacitor/push-notifications';
 import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
+import { isIncomingCallsEnabled, syncIncomingCallsSettingToNative } from './incoming-calls-setting';
 import { IOSVoIPPush } from './ios-voip-push';
 import { shouldRingForCallPush } from './call-push-dedup';
 import {
@@ -119,8 +120,15 @@ export function shouldRunJsPushDecryption(opts: { isIOS: boolean }): boolean {
   return !opts.isIOS;
 }
 
+/** Logout waits no longer than this for the homeserver: offline it would hang. */
+export const LOGOUT_UNREGISTER_TIMEOUT_MS = 3_000;
+
 class PushService {
   private fcmToken: string | null = null;
+  private voipToken: string | null = null;
+  /** The last FCM token deletion; the next register() waits for it, or a quick
+   *  login could register the very token that is being deleted. */
+  private tokenReset: Promise<unknown> = Promise.resolve();
   private matrixClient: any = null;
   private onCallPush: ((data: { callId: string; callerName: string; roomId: string; hasVideo: boolean }) => void) | null = null;
   private getRoomInfo: ((roomId: string) => { roomName: string } | null) | null = null;
@@ -325,6 +333,7 @@ class PushService {
    */
   private async registerVoipPusher(matrixClient: any, voipToken: string): Promise<void> {
     if (!matrixClient) return;
+    this.voipToken = voipToken;
     const payload = buildVoipPusherPayload(voipToken);
     try {
       await matrixClient.setPusher(payload);
@@ -570,6 +579,12 @@ class PushService {
 
     // Handle calls
     if (data.msg_type === 'm.call.invite') {
+      // "Incoming calls" off: no ringer (#1388). Native drops these pushes
+      // too; a build whose native copy lags still must not ring.
+      if (!isIncomingCallsEnabled()) {
+        interopLog('push', 'call push ignored: incoming calls off', { roomId });
+        return;
+      }
       // Prefer the stable Matrix call_id over event_id: caller clients
       // resend m.call.invite with a new event_id each retry while keeping
       // the call_id constant. Session 41.
@@ -635,6 +650,12 @@ class PushService {
     if (!isNative) return;
 
     this.matrixClient = matrixClient;
+    try {
+      await PushData.markSessionActive();
+    } catch (e) {
+      console.warn('[PushService] markSessionActive failed:', e);
+    }
+    void syncIncomingCallsSettingToNative();
     // init push service
 
     // 1. Request notification permission (Android 13+ shows OS dialog)
@@ -693,14 +714,22 @@ class PushService {
       console.warn('[PushService] Failed to check pending intent:', e);
     }
 
-    // 4. Register for FCM (skip when google-services.json was not bundled — crashes otherwise)
+    // 4. Register for FCM (skip when google-services.json was not bundled — crashes otherwise).
+    // The probe is an Android plugin method: on iOS `PushData` is
+    // IOSPushIntentPlugin, which has no `isFcmAvailable`, so the call rejects
+    // with UNIMPLEMENTED and every iOS build used to bail out here — no APNs
+    // registration and no VoIP pusher, ever (iPhone XR, 2026-09-24). Firebase
+    // on iOS is configured from GoogleService-Info.plist and aborts at launch
+    // when it is missing, so an iOS build that got this far has it.
     let fcmAvailable = true;
-    try {
-      const status = await PushData.isFcmAvailable();
-      fcmAvailable = status.available;
-    } catch (e) {
-      console.warn('[PushService] isFcmAvailable check failed, assuming FCM disabled:', e);
-      fcmAvailable = false;
+    if (!isIOS) {
+      try {
+        const status = await PushData.isFcmAvailable();
+        fcmAvailable = status.available;
+      } catch (e) {
+        console.warn('[PushService] isFcmAvailable check failed, assuming FCM disabled:', e);
+        fcmAvailable = false;
+      }
     }
 
     if (!fcmAvailable) {
@@ -735,6 +764,7 @@ class PushService {
       console.error('[PushService] Registration error:', error);
     });
 
+    await this.tokenReset;
     await PushNotifications.register();
 
     // 5. iOS-only: register a SECOND pusher for VoIP (PushKit). The
@@ -762,6 +792,91 @@ class PushService {
       } catch (e) {
         console.warn('[PushService] IOSVoIPPush wiring failed:', e);
       }
+    }
+  }
+
+  /**
+   * The app started with nobody signed in. An install that signed out before
+   * logout removed pushers still has them on the homeserver, and kept ringing
+   * for that account (Pixel, TEST3, 2026-09-24): tell native to drop pushes
+   * (iOS: report and end VoIP calls at once) and, on Android, delete the FCM
+   * token, so those pushers die at FCM and a later login gets a token no old
+   * pusher knows. Never throws.
+   */
+  settleSignedOutLaunch(): void {
+    if (!isNative) return;
+    Promise.resolve()
+      .then(() => PushData.markLoggedOut())
+      .catch((e) => console.warn('[PushService] markLoggedOut failed:', e));
+    if (isIOS) return;
+    this.tokenReset = Promise.resolve()
+      .then(() => PushNotifications.unregister())
+      .catch((e) => console.warn('[PushService] FCM token delete failed:', e));
+  }
+
+  /**
+   * Stop this device's pushes for the account that is logging out. Must run
+   * while the Matrix client still holds its access token.
+   *
+   * Logout used to leave the pusher on the homeserver, and the Pixel kept
+   * ringing for the account it had signed out of (TEST3, 2026-09-24). Three
+   * layers, the local one first because it needs no network:
+   *  1. Native is told the account is gone: Android's FCM service drops every
+   *     push (PushSessionPolicy); iOS reports a VoIP push and ends it at once.
+   *  2. The homeserver deletes this device's pushers (`kind: null`).
+   *  3. Android: the FCM token is deleted, so a pusher that step 2 missed —
+   *     offline, or left by an older build — dies at FCM on its next send.
+   * Waits at most LOGOUT_UNREGISTER_TIMEOUT_MS; never throws.
+   */
+  async unregisterForLogout(): Promise<void> {
+    if (!isNative) return;
+    const matrixClient = this.matrixClient;
+    const fcmToken = this.fcmToken;
+    const voipToken = this.voipToken;
+    this.matrixClient = null;
+    this.fcmToken = null;
+    this.voipToken = null;
+
+    try {
+      await PushData.markLoggedOut();
+    } catch (e) {
+      console.warn('[PushService] markLoggedOut failed:', e);
+    }
+
+    // A registration that lands after this point must not put the pusher back.
+    try {
+      await PushNotifications.removeAllListeners();
+    } catch (e) {
+      console.warn('[PushService] removeAllListeners failed:', e);
+    }
+
+    // Promise.resolve().then: a call that throws synchronously still settles.
+    const removals: Promise<unknown>[] = [];
+    if (matrixClient && fcmToken) {
+      const payload = { ...buildPusherPayload(fcmToken, { isIOS }), kind: null };
+      removals.push(Promise.resolve().then(() => matrixClient.setPusher(payload)));
+    }
+    if (matrixClient && voipToken) {
+      const payload = { ...buildVoipPusherPayload(voipToken), kind: null };
+      removals.push(Promise.resolve().then(() => matrixClient.setPusher(payload)));
+    }
+    if (!isIOS) {
+      this.tokenReset = Promise.resolve().then(() => PushNotifications.unregister()).catch(() => undefined);
+      removals.push(this.tokenReset);
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), LOGOUT_UNREGISTER_TIMEOUT_MS);
+    });
+    const outcome = await Promise.race([Promise.allSettled(removals), timeout]);
+    clearTimeout(timer);
+    if (outcome === 'timeout') {
+      console.warn('[PushService] Pusher removal did not finish before logout went on');
+      return;
+    }
+    for (const r of outcome) {
+      if (r.status === 'rejected') console.warn('[PushService] Pusher removal failed:', r.reason);
     }
   }
 }

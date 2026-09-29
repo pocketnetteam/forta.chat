@@ -52,7 +52,13 @@ const isSavable = computed(() => {
   return msg.type === MessageType.image || msg.type === MessageType.video;
 });
 
+/** A call card (#1091): only deletion applies — no reply, copy, reactions. */
+const isCallRecord = computed(() => !!props.message?.callInfo);
+
 const menuItems = computed<ContextMenuItem[]>(() => {
+  if (isCallRecord.value) {
+    return [{ label: t("contextMenu.delete"), icon: ICONS.delete, action: "delete", danger: true }];
+  }
   const items: ContextMenuItem[] = [
     { label: t("contextMenu.reply"), icon: ICONS.reply, action: "reply" },
     { label: t("contextMenu.copy"), icon: ICONS.copy, action: "copy" },
@@ -126,7 +132,7 @@ const onBottomSheetAction = (action: string) => {
     @close="emit('close')"
   >
     <!-- Quick reactions row -->
-    <div class="flex items-center gap-1 px-2 pb-3 border-b border-neutral-grad-1/30 mb-2">
+    <div v-if="!isCallRecord" class="flex items-center gap-1 px-2 pb-3 border-b border-neutral-grad-1/30 mb-2">
       <button
         v-for="emoji in themeStore.quickReactions"
         :key="emoji"
@@ -172,7 +178,7 @@ const onBottomSheetAction = (action: string) => {
     @close="emit('close')"
     @select="handleAction"
   >
-    <template #header>
+    <template v-if="!isCallRecord" #header>
       <div class="flex items-center gap-1 border-b border-neutral-grad-0 px-2 py-2">
         <ReactionPicker @select="handleReaction" />
         <button

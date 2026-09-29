@@ -164,6 +164,27 @@ class PushDataPlugin : Plugin() {
         call.resolve(result)
     }
 
+    /** JS is signed in: pushes are delivered (see [PushSessionPolicy]). */
+    @PluginMethod
+    fun markSessionActive(call: PluginCall) {
+        PushSessionStore.write(context, PushSessionPolicy.ACTIVE)
+        call.resolve()
+    }
+
+    /** JS is logging out: from now on the FCM service drops every push. */
+    @PluginMethod
+    fun markLoggedOut(call: PluginCall) {
+        PushSessionStore.write(context, PushSessionPolicy.LOGGED_OUT)
+        call.resolve()
+    }
+
+    /** The "Incoming calls" switch (see IncomingCallsStore). */
+    @PluginMethod
+    fun setIncomingCallsEnabled(call: PluginCall) {
+        IncomingCallsStore.write(context, call.getBoolean("enabled", true) ?: true)
+        call.resolve()
+    }
+
     @PluginMethod
     fun cacheRoomName(call: PluginCall) {
         val roomId = call.getString("roomId") ?: run {

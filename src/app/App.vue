@@ -467,6 +467,11 @@ onMounted(async () => {
   } else if (authStore.isAuthenticated && !authStore.matrixReady) {
     // Initialize Matrix on reload if already logged in
     await authStore.initMatrix();
+  } else if (!authStore.isAuthenticated) {
+    // Signed out: pushers an older build left behind must not ring here.
+    import("@/shared/lib/push")
+      .then(({ pushService }) => pushService.settleSignedOutLaunch())
+      .catch((e) => console.warn("[App] push settle for signed-out launch failed:", e));
   }
 
   // Process referral / join links after Matrix is ready

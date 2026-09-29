@@ -11,6 +11,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         FirebaseApp.configure()
+        // The VoIP push registry must exist from launch: iOS delivers a pending
+        // VoIP push as soon as it is created and expects the CallKit report in
+        // that same run-loop turn (see VoIPPushCoordinator).
+        VoIPPushCoordinator.shared.start()
         Messaging.messaging().delegate = self
         return true
     }

@@ -9,7 +9,7 @@ import { formatDate } from "@/shared/lib/format";
 import { stripMentionAddresses } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
-import { collapsedCallEventIds, dedupeCallEvents } from "@/entities/chat/lib/dedupe-call-events";
+import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "@/entities/chat/lib/dedupe-call-events";
 import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
@@ -89,10 +89,29 @@ const handleDeleteForMe = async () => {
     return;
   }
   if (chatStore.deletingMessage) {
-    deleteMessage(chatStore.deletingMessage.id, false);
+    deleteSingle(chatStore.deletingMessage, false);
     chatStore.deletingMessage = null;
   }
 };
+
+/** One message, or every event of a call card (#1091, see planCallRecordDeletion). */
+const deleteSingle = (message: import("@/entities/chat").Message, forEveryone: boolean) => {
+  if (!message.callInfo) {
+    void deleteMessage(message.id, forEveryone);
+    return;
+  }
+  for (const step of planCallRecordDeletion(chatStore.activeMessages, message, authStore.address, forEveryone)) {
+    void deleteMessage(step.id, step.forEveryone);
+  }
+};
+
+/** A call card can go for everyone only when one of its events is the user's own. */
+const canDeleteForEveryone = computed(() => {
+  const message = chatStore.deletingMessage;
+  if (isBulkDelete.value || !message?.callInfo) return true;
+  return planCallRecordDeletion(chatStore.activeMessages, message, authStore.address, true)
+    .some((step) => step.forEveryone);
+});
 
 const handleDeleteForEveryone = async () => {
   if (isBulkDelete.value) {
@@ -107,7 +126,7 @@ const handleDeleteForEveryone = async () => {
     return;
   }
   if (chatStore.deletingMessage) {
-    deleteMessage(chatStore.deletingMessage.id, true);
+    deleteSingle(chatStore.deletingMessage, true);
     chatStore.deletingMessage = null;
   }
 };
@@ -1371,6 +1390,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
                 :message="item.message"
                 :is-own="item.message.senderId === authStore.address"
                 :tail-class="item.message.senderId === authStore.address ? 'rounded-br-bubble-sm' : 'rounded-bl-bubble-sm'"
+                @contextmenu="openContextMenu"
               />
             </div>
           </div>
@@ -1387,11 +1407,15 @@ defineExpose({ scrollToMessage, setSearchQuery });
           </span>
         </div>
 
-        <!-- Message (v-memo skips re-render when message identity + context unchanged) -->
+        <!-- Message. v-memo keys on the Message object itself: activeMessages
+             hands a new one whenever any mapped field changes (upload progress,
+             decrypted text) and the same one otherwise. A hand-picked field list
+             missed uploadProgress and content, so an uploading file sat at 0 %
+             and a late-decrypted message kept its old text. -->
         <div
           v-else-if="item.type === 'message' && item.message"
           v-track-read
-          v-memo="[item.id, item.message.timestamp, item.message.deleted, item.message.reactions, item.message.pollInfo, item.message.edited, item.message.status, contextMenu.show && contextMenu.message?.id === item.message.id]"
+          v-memo="[item.id, item.message, item.message.timestamp, item.message.deleted, item.message.reactions, item.message.pollInfo, item.message.edited, item.message.status, contextMenu.show && contextMenu.message?.id === item.message.id]"
           :class="[getMsgEnterClass(item.message), { 'context-highlight': contextMenu.show && contextMenu.message?.id === item.message.id }]"
           :style="(item.index ?? 0) > 0 ? { paddingTop: 'var(--message-spacing)' } : {}"
           :data-message-id="item.message.id"
@@ -1514,10 +1538,13 @@ defineExpose({ scrollToMessage, setSearchQuery });
         >
           <div class="w-full max-w-xs rounded-xl bg-background-total-theme p-5 shadow-xl">
             <h3 class="mb-4 text-base font-semibold text-text-color">
-              {{ isBulkDelete ? t("messageList.deleteMessagesTitle", { count: deleteCount }) : t("messageList.deleteMessage") }}
+              {{ isBulkDelete
+                ? t("messageList.deleteMessagesTitle", { count: deleteCount })
+                : chatStore.deletingMessage?.callInfo ? t("messageList.deleteCall") : t("messageList.deleteMessage") }}
             </h3>
             <div class="flex flex-col gap-2">
               <button
+                v-if="canDeleteForEveryone"
                 class="rounded-lg bg-color-bad px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-color-bad/90"
                 @click="handleDeleteForEveryone"
               >
