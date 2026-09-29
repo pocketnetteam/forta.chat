@@ -819,6 +819,8 @@ const openRoom = async (roomId: string | null) => {
   const afterReveal = () => {
     if (afterRevealDone) return;
     afterRevealDone = true;
+    // The room is on screen: list previews and other rooms' backfill may run.
+    chatStore.endRoomOpenQuiet();
     trace.settle();
     void refreshInBackground();
   };

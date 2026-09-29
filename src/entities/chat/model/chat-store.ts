@@ -2412,6 +2412,51 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  // ── Quiet window while a room opens ────────────────────────────────────────
+  // Background history work (list previews, backfill of other rooms) writes
+  // to the messages table and decrypts on the main thread; while the user's
+  // room is being opened that work holds up the one read the screen waits
+  // for. It waits until the room is revealed (MessageList ends the window)
+  // or ROOM_OPEN_QUIET_MS at most.
+  const ROOM_OPEN_QUIET_MS = 1_500;
+  let roomOpenQuietUntil = 0;
+  let quietEndTimer: ReturnType<typeof setTimeout> | null = null;
+  const quietWaiters: Array<() => void> = [];
+  const isRoomOpenQuiet = () => Date.now() < roomOpenQuietUntil;
+  const releaseQuietWaiters = () => {
+    if (quietEndTimer) { clearTimeout(quietEndTimer); quietEndTimer = null; }
+    const waiters = quietWaiters.splice(0);
+    for (const run of waiters) run();
+  };
+  const beginRoomOpenQuiet = () => {
+    roomOpenQuietUntil = Date.now() + ROOM_OPEN_QUIET_MS;
+    if (quietEndTimer) clearTimeout(quietEndTimer);
+    quietEndTimer = setTimeout(() => {
+      quietEndTimer = null;
+      // Reset first: a timer may fire a hair before Date.now() reaches the
+      // deadline, and a waiter that still saw the window would re-queue itself
+      // with nothing left to release it.
+      roomOpenQuietUntil = 0;
+      releaseQuietWaiters();
+    }, ROOM_OPEN_QUIET_MS);
+  };
+  /** The opened room is on screen: background work may resume. */
+  const endRoomOpenQuiet = () => {
+    roomOpenQuietUntil = 0;
+    releaseQuietWaiters();
+  };
+  /** Logout: drop the paused work — it belongs to the account going away. */
+  const discardRoomOpenQuiet = () => {
+    roomOpenQuietUntil = 0;
+    if (quietEndTimer) { clearTimeout(quietEndTimer); quietEndTimer = null; }
+    quietWaiters.length = 0;
+  };
+  /** Run `fn` now, or once the current room open is revealed. */
+  const afterRoomOpenQuiet = (fn: () => void) => {
+    if (isRoomOpenQuiet()) quietWaiters.push(fn);
+    else fn();
+  };
+
   /** Fetch room data for viewport preview: cache first, then network (loadRoomMessages).
    *  Checks generation between async steps — if the user scrolled away, aborts early. */
   const fetchRoomPreview = async (roomId: string, generation: number): Promise<void> => {
@@ -2437,8 +2482,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       if (generation !== currentViewportGeneration) return;
 
-      // Phase 2: network — loadRoomMessages fetches from Matrix SDK (scrollback)
-      await loadRoomMessages(roomId);
+      // Phase 2: the list only needs a preview. Dexie already has one for
+      // almost every room (live sync writes it) — then there is nothing to
+      // fetch. Otherwise write what the SDK holds in memory, and page the
+      // server (SDK scrollback) only when that gives the room no messages.
+      // This used to scroll back, decrypt and rewrite up to 250 events of
+      // every visible room, 5 at a time, right when a chat was being opened.
+      if (!dexieRoomMap.get(roomId)?.lastMessagePreview) {
+        const stored = await loadRoomMessages(roomId, { scrollback: false, awaitWrite: true });
+        if (generation !== currentViewportGeneration) return;
+        if (!stored) await loadRoomMessages(roomId);
+      }
 
       if (generation !== currentViewportGeneration) return;
 
@@ -2463,6 +2517,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Drain the pending fetch queue, respecting concurrency limit. */
   const drainFetchQueue = () => {
+    if (isRoomOpenQuiet()) {
+      afterRoomOpenQuiet(drainFetchQueue);
+      return;
+    }
     while (pendingFetchQueue.length > 0 && viewportFetchActiveCount < VIEWPORT_FETCH_MAX_CONCURRENT) {
       const item = pendingFetchQueue.shift()!;
 
@@ -3933,6 +3991,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }).catch(() => {});
     }
     if (roomId !== previousRoomId) {
+      if (roomId) beginRoomOpenQuiet();
+      else endRoomOpenQuiet();
       // Pins of the room being entered — a Dexie read, no longer tied to the
       // history reload a cached open now skips.
       pinnedMessages.value = [];
@@ -6247,7 +6307,14 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const backfillActiveRoomId = ref<string | null>(null);
   const makeHistoryBackfill = () => {
     const instance = createHistoryBackfill({
-      canRun: () => initialSyncStatus.value !== "loading" && !!chatDbKitRef.value && getMatrixClientService().isReady(),
+      canRun: () => {
+        if (initialSyncStatus.value === "loading" || !chatDbKitRef.value || !getMatrixClientService().isReady()) return false;
+        if (isRoomOpenQuiet()) {
+          afterRoomOpenQuiet(() => historyBackfill.kick());
+          return false;
+        }
+        return true;
+      },
       startPass: startBackfillPass,
       // A stopped instance (logout) finishing its last page must not touch
       // the state of the one that replaced it.
@@ -8115,6 +8182,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** Reset all in-memory state and account-specific localStorage (called on logout) */
   const cleanup = () => {
+    discardRoomOpenQuiet();
     roomSnapshots.clear();
     historyBackfill.stop();
     historyBackfill = makeHistoryBackfill();
@@ -8319,6 +8387,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     handleTimelineReset,
     checkHistoryContinuity,
     refreshOpenedRoom,
+    endRoomOpenQuiet,
     backfillRoom,
     backfillActiveRoomId,
     dexieRoomMap,
