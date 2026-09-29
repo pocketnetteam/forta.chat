@@ -48,6 +48,9 @@ vi.mock("@/shared/lib/image-url", () => ({
   normalizePocketnetImageUrl: (x: string) => x,
 }));
 
+const { openExternalUrl } = vi.hoisted(() => ({ openExternalUrl: vi.fn() }));
+vi.mock("@/shared/lib/open-external-url", () => ({ openExternalUrl }));
+
 vi.stubGlobal("useI18n", () => ({ t: (k: string) => k }));
 
 import PostCard from "../PostCard.vue";
@@ -244,5 +247,59 @@ describe("PostCard channel feed video expand (WEE-74)", () => {
 
     // Playback is routed to the modal instead of embedding in the feed.
     expect(w.findComponent({ name: "PostPlayerModal" }).exists()).toBe(true);
+  });
+});
+
+describe("PostCard message links", () => {
+  const textPost: BastyonPostData = {
+    ...videoPost,
+    url: "",
+    caption: "",
+    message: "Details at https://example.com/article and more",
+  };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockVideoInfo = null;
+    openExternalUrl.mockReset();
+    getCachedPost.mockReturnValue(textPost);
+  });
+
+  it("renders URLs in the post text as highlighted links", async () => {
+    const w = mountCard();
+    await flushPromises();
+    const link = w.find('a[href="https://example.com/article"]');
+    expect(link.exists()).toBe(true);
+    expect(link.text()).toBe("https://example.com/article");
+    expect(w.text()).toContain("Details at");
+    expect(w.text()).toContain("and more");
+  });
+
+  it("opens the link externally and does not bubble to the bubble/card", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const onParentClick = vi.fn();
+    host.addEventListener("click", onParentClick);
+    const w = mount(PostCard, {
+      props: { txid: "tx123", isOwn: false },
+      global: { stubs },
+      attachTo: host,
+    });
+    await flushPromises();
+    await w.find('a[href="https://example.com/article"]').trigger("click");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/article");
+    expect(onParentClick).not.toHaveBeenCalled();
+    w.unmount();
+    host.remove();
+  });
+
+  it("keeps the full href when the preview truncates through a link", async () => {
+    const longUrl = `https://example.com/${"a".repeat(300)}`;
+    getCachedPost.mockReturnValue({ ...textPost, message: `x ${longUrl}` });
+    const w = mountCard();
+    await flushPromises();
+    const link = w.find("a[href^='https://example.com/']");
+    expect(link.attributes("href")).toBe(longUrl);
+    expect(link.text().endsWith("...")).toBe(true);
   });
 });

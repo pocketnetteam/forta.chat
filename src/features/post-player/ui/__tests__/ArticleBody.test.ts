@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount } from "@vue/test-utils";
+
+const { openExternalUrl } = vi.hoisted(() => ({ openExternalUrl: vi.fn() }));
+vi.mock("@/shared/lib/open-external-url", () => ({ openExternalUrl }));
+
 import ArticleBody from "../ArticleBody.vue";
 
 const json = (blocks: unknown[]): string => JSON.stringify({ blocks });
@@ -89,5 +93,33 @@ describe("ArticleBody", () => {
     expect(w.html()).toMatch(/<blockquote[^>]*>/);
     expect(w.text()).toContain("wisdom");
     expect(w.text()).toContain("sage");
+  });
+});
+
+describe("ArticleBody links", () => {
+  beforeEach(() => openExternalUrl.mockReset());
+
+  it("highlights bare URLs in plain-text posts", () => {
+    const w = mount(ArticleBody, { props: { raw: "Read https://example.com/a please" } });
+    const a = w.find("a");
+    expect(a.exists()).toBe(true);
+    expect(a.attributes("href")).toBe("https://example.com/a");
+    expect(a.attributes("target")).toBe("_blank");
+  });
+
+  it("opens http(s) links through openExternalUrl, not the WebView", async () => {
+    const w = mount(ArticleBody, {
+      props: { raw: json([{ type: "paragraph", data: { text: 'x <a href="https://x.com"><b>go</b></a>' } }]) },
+    });
+    await w.find("b").trigger("click");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://x.com");
+  });
+
+  it("leaves mailto links to the default handler", async () => {
+    const w = mount(ArticleBody, {
+      props: { raw: json([{ type: "paragraph", data: { text: '<a href="mailto:a@b.c">m</a>' } }]) },
+    });
+    await w.find("a").trigger("click");
+    expect(openExternalUrl).not.toHaveBeenCalled();
   });
 });
