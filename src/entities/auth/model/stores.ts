@@ -986,8 +986,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             pushService.setRoomInfoGetter((roomId) => {
               // Use Dexie-backed store (has resolved names) instead of Matrix SDK (may return hash)
               const chatRoom = chatStore.rooms.find(r => r.id === roomId);
-              if (chatRoom?.name) return { roomName: chatRoom.name };
-              // Fallback to Matrix SDK
+              if (chatRoom?.name) return { roomName: chatRoom.name, isGroup: chatRoom.isGroup };
+              // Fallback to Matrix SDK. Group-ness is unknown here, so the
+              // notification degrades to the direct-chat layout rather than
+              // guessing from the member count.
               const room = matrixService.client?.getRoom(roomId);
               if (!room) return null;
               return { roomName: room.name || 'Forta Chat' };
@@ -997,6 +999,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               const map: Record<string, string> = {};
               for (const room of chatStore.rooms) {
                 if (room.name) map[room.id] = room.name;
+              }
+              return map;
+            });
+
+            pushService.setAllGroupRoomsGetter(() => {
+              const map: Record<string, boolean> = {};
+              for (const room of chatStore.rooms) {
+                map[room.id] = room.isGroup;
               }
               return map;
             });

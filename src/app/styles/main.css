@@ -293,6 +293,23 @@ a {
   color: inherit;
 }
 
+/*
+ * Mobile long-press: on touch devices a long press over a bubble opens the
+ * message context menu, and the browser simultaneously started a native text
+ * selection (plus the iOS callout) under the menu. Selection is pointless
+ * there — the menu has its own "Copy" — so on coarse-pointer devices the
+ * `.select-text` opt-in inside a message bubble is switched back off.
+ * Desktop keeps normal selection.
+ */
+@media (hover: none) and (pointer: coarse) {
+  .message-bubble,
+  .message-bubble .select-text {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
+
 ::-moz-selection {
   background: rgb(var(--color-bg-selection));
   color: #fff;

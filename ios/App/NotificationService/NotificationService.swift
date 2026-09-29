@@ -14,6 +14,12 @@ import UserNotifications
 ///      `m.room.message` pushes using the offline name cache stored in the
 ///      shared App Group (`SharedDataStore`), falling back to whatever the
 ///      server-provided `room_name` / `sender_display_name` keys carry.
+///      Group chats are titled with the room name and carry the author in the
+///      subtitle, so the user can see which group a push came from; direct
+///      chats are titled with the sender and have no subtitle (it would only
+///      repeat the title). Group-ness comes from `SharedDataStore` — the APNs
+///      payload has no such field. The same rule is applied on Android in
+///      `FortaFirebaseMessagingService.buildMessageNotification`.
 ///   2. Caches `room_name` and `sender_display_name` from each delivery so
 ///      future pushes can be rendered even when those fields are absent
 ///      (Sygnal occasionally omits them on retry).
@@ -94,18 +100,21 @@ final class NotificationService: UNNotificationServiceExtension {
         // Title / subtitle / body for normal `m.room.message` (and any other
         // event type that falls through to here). Falls back to whatever the
         // server populated when caches are empty.
-        if let roomId {
-            content.title = SharedDataStore.roomName(roomId)
-                ?? providedRoomName
-                ?? content.title
-            content.threadIdentifier = roomId
-        }
-
-        if let resolved = NotificationService.resolveSenderName(
+        let roomName = roomId.flatMap { SharedDataStore.roomName($0) } ?? providedRoomName
+        let senderName = NotificationService.resolveSenderName(
             providedSenderName: providedSenderName,
             senderId: senderId
-        ) {
-            content.subtitle = resolved
+        )
+        let heading = NotificationService.renderHeading(
+            roomName: roomName,
+            senderName: senderName,
+            isGroup: roomId.map { SharedDataStore.isGroupRoom($0) } ?? false,
+            fallbackTitle: content.title
+        )
+        content.title = heading.title
+        content.subtitle = heading.subtitle
+        if let roomId {
+            content.threadIdentifier = roomId
         }
 
         let plaintextBody = userInfo["content_body"] as? String
@@ -147,6 +156,47 @@ final class NotificationService: UNNotificationServiceExtension {
             return cached
         }
         return senderId
+    }
+
+    /// Title + subtitle of a message notification.
+    struct Heading: Equatable {
+        let title: String
+        /// Empty string clears the subtitle — iOS renders no extra line then.
+        let subtitle: String
+    }
+
+    /// Does `value` look like a raw Matrix user ID (`@PXXX...:server`)?
+    /// Sygnal sends one as `sender_display_name` when the account has no
+    /// homeserver-side displayname, and an opaque ID is never worth showing.
+    /// Mirrors `FortaFirebaseMessagingService.isMatrixId` on Android.
+    static func isMatrixId(_ value: String) -> Bool {
+        value.hasPrefix("@") && value.contains(":")
+    }
+
+    /// Decide what goes on the two heading lines.
+    ///
+    /// Group chat: the room name is the title and the author is the subtitle,
+    /// which is what tells the user the message came from a group at all.
+    /// Direct chat: the room name is the title and there is no subtitle — the
+    /// room name of a DM is the peer's name, so showing both repeated it, and
+    /// the cached room name is the one the main app resolved (local contact
+    /// aliases included), which the APNs `sender_display_name` is not.
+    /// A group whose name was never cached has nothing to put in the title,
+    /// so it degrades to the direct layout rather than inventing a placeholder.
+    static func renderHeading(
+        roomName: String?,
+        senderName: String?,
+        isGroup: Bool,
+        fallbackTitle: String
+    ) -> Heading {
+        let room = roomName.flatMap { $0.isEmpty ? nil : $0 }
+        // An unresolved sender is a raw Matrix ID; the room name reads better.
+        let sender = senderName.flatMap { $0.isEmpty || isMatrixId($0) ? nil : $0 }
+
+        if isGroup, let room {
+            return Heading(title: room, subtitle: sender ?? "")
+        }
+        return Heading(title: room ?? sender ?? fallbackTitle, subtitle: "")
     }
 
     /// Map a Matrix `m.room.message` content msgtype to a user-facing body.
