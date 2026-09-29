@@ -165,6 +165,9 @@ export const en = {
   "settings.about": "About",
   "settings.downloadApps": "Download apps",
   // ── Notification settings (WEE-75) ──
+  "notificationsSettings.callsTitle": "Calls",
+  "notificationsSettings.incomingCalls": "Incoming calls",
+  "notificationsSettings.incomingCallsDesc": "Turn off so Forta does not ring. You can still take the call in Bastyon or on another device.",
   "notificationsSettings.soundTitle": "Message sound",
   "notificationsSettings.soundDesc": "How new-message notifications alert you.",
   "notificationsSettings.soundOnHint": "New messages now play a notification sound out of the box.",
@@ -335,6 +338,7 @@ export const en = {
   // ── Message input ──
   "message.editing": "Editing",
   "message.placeholder": "Message",
+  "message.sendButton": "Send",
   "message.emoji": "Emoji",
   "message.attach": "Attach",
   "message.photo": "Photo",
@@ -377,6 +381,7 @@ export const en = {
   "messageList.typingTwo": "{name1} and {name2} are typing",
   "messageList.typingMany": "{name} and {count} more are typing",
   "messageList.deleteMessage": "Delete message?",
+  "messageList.deleteCall": "Delete call",
   "messageList.deleteMessagesTitle": "Delete {count} selected messages?",
   "messageList.deleteResultSummary": "Deleted {succeeded}, failed {failed}",
   "messageList.deleteForEveryone": "Delete for everyone",

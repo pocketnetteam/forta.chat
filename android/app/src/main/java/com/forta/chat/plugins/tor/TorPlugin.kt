@@ -158,13 +158,23 @@ class TorPlugin : Plugin() {
 
         torCommands.execute {
             try {
+                // The ports go back to JS as from startDaemon: without them a
+                // Tor switched on in settings never routed files through
+                // TorFile, and uploads went via the service worker at 0 %.
                 if (mode == TorMode.NEVER) {
                     torManager.persistSettings(TorMode.NEVER, bridgeType)
                     torManager.stopTor()
+                    call.resolve(JSObject().apply {
+                        put("socksPort", 0)
+                        put("proxyPort", 0)
+                    })
                 } else {
                     torManager.restartTor(mode, bridgeType, bridges)
+                    call.resolve(JSObject().apply {
+                        put("socksPort", config.torDefaultSocksPort)
+                        put("proxyPort", config.reverseProxyDefaultPort)
+                    })
                 }
-                call.resolve()
             } catch (e: Exception) {
                 call.reject("Failed to configure Tor: ${e.message}", e)
             }

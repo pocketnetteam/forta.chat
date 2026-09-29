@@ -33,6 +33,7 @@ import { ensureCallPermissions, PermissionDeniedError, callPermissionError } fro
 import { finalizeCall, waitForFinalizeSettled, FINALIZE_SETTLE_WAIT_MS } from "./finalize-call";
 import { holdPageAwake } from "./page-awake-tone";
 import { waitUntil } from "@/shared/lib/wait-until";
+import { isIncomingCallsEnabled } from "@/shared/lib/push/incoming-calls-setting";
 import {
   isLegacyWebView,
   shouldWarnLegacyWebView,
@@ -452,8 +453,8 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // Defensive: remove any prior handlers first
   unwireCallEvents();
 
-  // A restart offer or candidates that fail to send during a network change
-  // are retried instead of ending the call (voip-send-retry.ts).
+  // An answer, a restart offer or candidates that fail to send for lack of a
+  // connection are retried instead of ending the call (voip-send-retry.ts).
   installVoipSendRetry(call as unknown as Parameters<typeof installVoipSendRetry>[0]);
 
   const callStore = useCallStore();
@@ -1008,7 +1009,10 @@ async function warnIfCallBypassesTor(): Promise<void> {
  * NativeWebRTC call screen to cover the page.
  */
 function launchNativeCallScreen(options: Parameters<typeof NativeWebRTC.launchCallUI>[0]): Promise<void> {
-  if (isAndroid) holdPageAwake(options.callId);
+  // iOS has no NativeWebRTC plugin: the call rejected with UNIMPLEMENTED on
+  // every call. CallKit is its call screen.
+  if (!isAndroid) return Promise.resolve();
+  holdPageAwake(options.callId);
   return NativeWebRTC.launchCallUI(options);
 }
 
@@ -1332,6 +1336,14 @@ export function useCallService() {
       return;
     }
     if (matrixCall.callId) markIncomingCallSeen(matrixCall.callId);
+
+    // "Incoming calls" off (#1388): no ringer and no reject, so Bastyon and
+    // the account's other devices keep ringing. The SDK drops the call when
+    // the caller hangs up or the invite expires.
+    if (!isIncomingCallsEnabled()) {
+      console.info("[call-service] incoming call ignored, incoming calls are off:", matrixCall.callId);
+      return;
+    }
 
     // Check FIRST whether the user already declined this call in the
     // native ringer (before JS was running). If so, send the rejection

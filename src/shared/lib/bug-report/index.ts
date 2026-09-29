@@ -10,6 +10,8 @@ export type {
   CallIceDiagnostics,
   CallTorDiagnostics,
 } from './collect-call-diagnostics';
+export { collectEncryptionDiagnostics } from './collect-encryption-diagnostics';
+export type { BugReportEncryptionDiagnostics } from './collect-encryption-diagnostics';
 export { sendBugReport } from './bug-report-sender';
 export {
   computeReporterHash,

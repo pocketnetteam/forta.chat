@@ -36,6 +36,9 @@ import AVFoundation
 ///     input/output. Without these the user has no way to switch to AirPods.
 ///   - .defaultToSpeaker — voice calls without a headset go to the loud
 ///     speaker instead of the earpiece, matching Android's defaults.
+///   - .mixWithOthers — keeps this session from interrupting the WebKit GPU
+///     process's own session, which does the microphone capture: see
+///     `callOptions` below.
 ///
 /// Step 6 Task 6 will add AVAudioSession interruption handling
 /// (`AVAudioSession.interruptionNotification`) on top of this plugin.
@@ -64,7 +67,37 @@ public class IOSCallAudioPlugin: CAPPlugin {
             name: AVAudioSession.interruptionNotification,
             object: nil
         )
+        // CallKit activates this process's session on the Answer tap, before
+        // JS reaches `start()`. Whatever category it finds then is what gets
+        // activated — with the default (SoloAmbient, non-mixable) that
+        // activation interrupted the WebKit GPU process's session, which
+        // does the microphone capture, and it stayed inactive for the whole
+        // call (iPhone XR, iOS 17.3, `audiomxd` log 2026-09-23). Preset the
+        // call category so the activation is a mixable PlayAndRecord instead.
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playAndRecord, mode: .voiceChat, options: Self.callOptions)
+        } catch {
+            CAPLog.print("[IOSCallAudio] preset category failed: \(error.localizedDescription)")
+        }
     }
+
+    /// Category options for a call. `.mixWithOthers` is load-bearing, not a
+    /// nicety: WKWebView records the microphone in the WebKit GPU process,
+    /// which has an audio session of its own. A non-mixable PlayAndRecord
+    /// activation from this process (ours in `start()`, or CallKit's on
+    /// answer) interrupts that session for the rest of the call. Mixable
+    /// sessions coexist (verified in the device log: WebKit's session is no
+    /// longer interrupted). Note that on the XR the microphone still sent
+    /// nothing afterwards — WebKit mutes the capture 0.4 s after it starts
+    /// for a reason not yet found; see the iPhone section of
+    /// docs/plans/2026-09-18-calls-handoff.md.
+    private static let callOptions: AVAudioSession.CategoryOptions = [
+        .allowBluetooth,
+        .allowBluetoothA2DP,
+        .defaultToSpeaker,
+        .mixWithOthers,
+    ]
 
     deinit {
         NotificationCenter.default.removeObserver(self)
@@ -131,18 +164,10 @@ public class IOSCallAudioPlugin: CAPPlugin {
         let isVideo = call.getString("callType") == "video"
         let session = AVAudioSession.sharedInstance()
 
-        // Build the option set explicitly so the compiler catches typos
-        // and the diff is readable. Order does not matter; iOS unions
-        // the bits internally.
-        let options: AVAudioSession.CategoryOptions = [
-            .allowBluetooth,
-            .allowBluetoothA2DP,
-            .defaultToSpeaker,
-        ]
         let mode: AVAudioSession.Mode = isVideo ? .videoChat : .voiceChat
 
         do {
-            try session.setCategory(.playAndRecord, mode: mode, options: options)
+            try session.setCategory(.playAndRecord, mode: mode, options: Self.callOptions)
             try session.setActive(true, options: [.notifyOthersOnDeactivation])
             call.resolve()
         } catch {

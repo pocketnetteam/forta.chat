@@ -101,7 +101,13 @@ fi
 }
 
 echo "[e2e] installing APK"
-adb -s "$DEVICE" install -r "$APK" >/dev/null
+# A silent failure here (a release build with another signature on the device)
+# used to leave the old app in place and every flow failing on its first screen.
+if ! install_out=$(adb -s "$DEVICE" install -r "$APK" 2>&1); then
+  echo "[e2e] install failed: $install_out" >&2
+  echo "[e2e] a release build on the device? uninstall it first: adb -s $DEVICE uninstall com.forta.chat" >&2
+  exit 1
+fi
 
 # Which flows will actually run — needed both for the tag filter and for the
 # preflight below.
@@ -142,6 +148,17 @@ if [ -n "$missing" ]; then
   for var in $missing; do echo "[e2e]   - $var"; done
   echo "[e2e] see .env.example for what each one holds"
 fi
+
+# Maestro writes every `inputText` value into ~/.maestro/tests/<run>/…/maestro.log,
+# the private key included. Scrub those lines once the run is over, pass or fail.
+scrub_maestro_logs() {
+  local dir="$HOME/.maestro/tests"
+  [ -d "$dir" ] || return 0
+  find "$dir" -name 'maestro.log' -newer "$APK" -print0 2>/dev/null | while IFS= read -r -d '' log; do
+    sed -i '' -E 's/(Inputting text: ).*/\1<redacted by e2e-android.sh>/' "$log" 2>/dev/null || true
+  done
+}
+trap scrub_maestro_logs EXIT
 
 echo "[e2e] running $TARGET${EXCLUDE_TAGS:+ (excluding tag: $EXCLUDE_TAGS)}"
 if [ -n "$EXCLUDE_TAGS" ]; then

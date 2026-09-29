@@ -5,6 +5,10 @@ import {
   type VendorEnergySaverId,
 } from "@/shared/lib/push/vendor-energy-saver";
 import { isAndroid, isNative } from "@/shared/lib/platform";
+import {
+  isIncomingCallsEnabled,
+  setIncomingCallsEnabled as storeIncomingCallsEnabled,
+} from "@/shared/lib/push/incoming-calls-setting";
 
 /**
  * Notification settings surface (WEE-75 / forta-bugs#942).
@@ -40,6 +44,9 @@ export interface UseNotificationSettings {
   detectFullScreenIntent: () => Promise<void>;
   /** Open the system screen that grants it. False when unavailable. */
   openFullScreenIntentSettings: () => Promise<boolean>;
+  /** "Incoming calls" switch (#1388): off, Forta does not ring at all. */
+  incomingCallsEnabled: Ref<boolean>;
+  setIncomingCallsEnabled: (enabled: boolean) => Promise<void>;
 }
 
 export function useNotificationSettings(): UseNotificationSettings {
@@ -94,7 +101,15 @@ export function useNotificationSettings(): UseNotificationSettings {
     }
   };
 
+  const incomingCallsEnabled = ref(isIncomingCallsEnabled());
+  const setIncomingCallsEnabled = async (enabled: boolean): Promise<void> => {
+    incomingCallsEnabled.value = enabled;
+    await storeIncomingCallsEnabled(enabled);
+  };
+
   return {
+    incomingCallsEnabled,
+    setIncomingCallsEnabled,
     canOpenSystemSettings,
     vendorGuidanceId,
     openSystemNotificationSettings,

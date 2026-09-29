@@ -310,7 +310,11 @@ describe("SyncEngine — marks message failed after maxRetries", () => {
 
   it("respects maxRetries and marks the message failed", async () => {
     mockMatrix.sendEncryptedText.mockRejectedValue(new Error("permanent"));
-    await seedOp(h.db, { clientId: "op_max", maxRetries: 2 });
+    // Seeded one retry short of the cap, so the next failure is the last one.
+    // Seeding it fresh made the test sit out a real 2-3 s backoff (jitter
+    // included) and time out under a loaded full run; the backoff itself is
+    // covered by "schedules retry via nextAttemptAt".
+    await seedOp(h.db, { clientId: "op_max", retries: 1, maxRetries: 2 });
 
     h.engine.processQueue();
 
@@ -323,5 +327,8 @@ describe("SyncEngine — marks message failed after maxRetries", () => {
     );
 
     expect(h.messageRepo.updateStatus).toHaveBeenCalledWith({ clientId: "op_max" }, "failed");
+    expect(mockMatrix.sendEncryptedText).toHaveBeenCalledOnce();
+    const op = await h.db.pendingOps.where("clientId").equals("op_max").first();
+    expect(op?.retries).toBe(2);
   });
 });

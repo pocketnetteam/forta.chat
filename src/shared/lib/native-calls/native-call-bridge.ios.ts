@@ -160,6 +160,20 @@ function unwrapEvent(e: IncomingCallEvent): { callId: string; roomId?: string } 
  * IOSCallAudio. Returned object is plain (no `this`) so it can be
  * assigned to `bridge.nativePlugin` without `bind()` headaches.
  */
+/**
+ * When this adapter last ended a CallKit record itself (see
+ * `releasedToWebKit` inside the adapter). CallKit deactivates the session it
+ * activated for that call, which reaches the app as an AVAudioSession
+ * interruption; the audio watchdog must not read that one as a phone call
+ * taking over.
+ */
+let lastCallKitReleaseAt = 0;
+
+/** True while an interruption could still be the echo of our own CallKit release. */
+export function isRecentCallKitRelease(now: number = Date.now()): boolean {
+  return now - lastCallKitReleaseAt < 5_000;
+}
+
 export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
   // Tracks every active call so endCall() can be no-throw idempotent
   // and so we can derive a CallKit handle (CallKit needs SOMETHING
@@ -190,6 +204,37 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
    * the reject marker must not inherit the accept's moment.
    */
   const markerFirstSeen = new Map<string, number>();
+
+  /**
+   * Calls whose CallKit record this adapter ended itself, right after the
+   * answer, to hand the audio hardware to WebKit.
+   *
+   * Experiment 2026-09-24 (iPhone XR, iOS 17.3): in a CallKit-answered call
+   * the peer's RTP arrives and ours is sent, but neither is heard — the
+   * audio session CallKit activates for this process (PhoneCall priority)
+   * starves the WebKit GPU process's own session, which does both the
+   * playback and the microphone capture. An outgoing call from the open
+   * app, with no CallKit record, carries audio both ways. Ending the CallKit
+   * call once the WebRTC call is answered releases that session; CallKit
+   * then only ever served as the ringer. The plugin reports the end with
+   * `source: "api"`, and the `callEnded` mapping below drops those events
+   * for the ids listed here so the release does not hang up the call.
+   */
+  const releasedToWebKit = new Set<string>();
+
+  async function releaseCallKitAudio(): Promise<void> {
+    try {
+      const { calls } = await IncomingCallKit.getActiveCalls();
+      const accepted = calls.find((c) => c.state === 'accepted');
+      if (!accepted) return;
+      releasedToWebKit.add(accepted.callId);
+      lastCallKitReleaseAt = Date.now();
+      await IncomingCallKit.endCall({ callId: accepted.callId, reason: 'audio-handoff' });
+      console.log('[NativeCallBridge.iOS] CallKit call released to WebKit audio:', accepted.callId);
+    } catch (e) {
+      console.warn('[NativeCallBridge.iOS] releaseCallKitAudio failed:', e);
+    }
+  }
 
   /** Stamp for `callId` in `state`, minted once and stable thereafter. */
   function markerStamp(callId: string, state: string): number {
@@ -260,11 +305,17 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
         const roomIdRaw = accepted.extra?.roomId;
         const roomId =
           typeof roomIdRaw === 'string' && roomIdRaw.length > 0 ? roomIdRaw : null;
-        return {
+        const pending = {
           callId: accepted.callId,
           roomId,
           atMs: markerStamp(accepted.callId, accepted.state),
         };
+        // Cold start: the accept happened before this adapter's listeners
+        // existed, so this read is the first chance to release CallKit before
+        // the answer (see releasedToWebKit). The bridge treats this read as
+        // read-and-clear anyway and keeps its own copy of the marker.
+        await releaseCallKitAudio();
+        return pending;
       } catch (e) {
         console.warn('[NativeCallBridge.iOS] getPendingAnswer failed:', e);
         return { callId: null, roomId: null };
@@ -379,6 +430,7 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
       } catch (e) {
         console.warn('[NativeCallBridge.iOS] startAudioRouting failed:', e);
       }
+      await releaseCallKitAudio();
     },
 
     async stopAudioRouting() {
@@ -429,7 +481,11 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
       switch (event) {
         case 'callAnswered':
           return IncomingCallKit.addListener('callAccepted', (e) => {
-            cb(unwrapEvent(e));
+            // Release CallKit before the answer, i.e. before getUserMedia:
+            // releasing after it (call 17, 2026-09-24) left the capture as
+            // dead as with CallKit alive — WebKit's audio started under the
+            // CallKit session and did not recover once it was gone.
+            void releaseCallKitAudio().finally(() => cb(unwrapEvent(e)));
           });
         case 'callDeclined':
           return IncomingCallKit.addListener('callDeclined', (e) => {
@@ -437,7 +493,11 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
           });
         case 'callEnded':
           return IncomingCallKit.addListener('callEnded', (e) => {
-            cb(unwrapEvent(e));
+            const ev = unwrapEvent(e);
+            // Our own release of the CallKit record (see releasedToWebKit):
+            // the WebRTC call goes on, so this is not a hangup.
+            if (e.source === 'api' && releasedToWebKit.delete(ev.callId)) return;
+            cb(ev);
           });
         case 'audioDevicesChanged':
           // No iOS-side equivalent in v1 (we expose only the synthetic

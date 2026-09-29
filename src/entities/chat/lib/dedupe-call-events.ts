@@ -13,14 +13,18 @@ import type { Message } from "../model/types";
  * entry is the earliest one and nothing else in the timeline shifts. Records
  * from before `callId` was stored have no id to group on and are all kept —
  * dropping them on some other heuristic would silently rewrite old history.
+ *
+ * A deleted call record goes too (#1091): a card has no "deleted" placeholder,
+ * so without this a call deleted for oneself stayed on screen.
  */
-export function dedupeCallEvents<T extends { callInfo?: Message["callInfo"] }>(
+export function dedupeCallEvents<T extends { callInfo?: Message["callInfo"]; deleted?: boolean }>(
   messages: readonly T[],
 ): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
 
   for (const message of messages) {
+    if (message.callInfo && message.deleted) continue;
     const callId = message.callInfo?.callId;
     if (!callId) {
       out.push(message);
@@ -67,4 +71,28 @@ export function collapsedCallEventIds(
   }
 
   return collapsed;
+}
+
+type CallRecordOwner = Pick<Message, "id" | "senderId" | "callInfo">;
+
+/**
+ * Which events to delete for one call record, and which of them may be deleted
+ * for everyone (forta-bugs#1091).
+ *
+ * The timeline shows one card per call ({@link dedupeCallEvents}), but the room
+ * can hold a hangup from each side: deleting only the card's own event would
+ * just bring the other one up in its place. So the whole call goes. Only the
+ * user's own events are redacted on the server — the other side's hangup is
+ * theirs, and a redaction of it would be refused — the rest is hidden here.
+ */
+export function planCallRecordDeletion(
+  messages: readonly CallRecordOwner[],
+  record: CallRecordOwner,
+  myAddress: string | null | undefined,
+  forEveryone: boolean,
+): Array<{ id: string; forEveryone: boolean }> {
+  const callId = record.callInfo?.callId;
+  const events = callId ? messages.filter((m) => m.callInfo?.callId === callId) : [record];
+  if (!events.some((m) => m.id === record.id)) events.push(record);
+  return events.map((m) => ({ id: m.id, forEveryone: forEveryone && !!myAddress && m.senderId === myAddress }));
 }

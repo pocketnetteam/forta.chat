@@ -12,10 +12,11 @@ import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
  *     the matching Matrix `fortaios.voip` pusher.
  *   * `voipPushReceived` — a VoIP push arrived. By the time this fires,
  *     the Swift side has ALREADY reported a CallKit incoming call to
- *     the OS (mandatory per Apple guidelines) and forwarded the payload
- *     to `@capgo/capacitor-incoming-call-kit` via NotificationCenter.
- *     The JS event is for telemetry / pre-warming the Matrix client
- *     before the user accepts.
+ *     the OS (mandatory per Apple guidelines) by calling
+ *     `@capgo/capacitor-incoming-call-kit`'s `showIncomingCall` on the
+ *     plugin instance; the later `reportIncomingCall` from JS resolves to
+ *     that same CallKit entry. The JS event is for telemetry /
+ *     pre-warming the Matrix client before the user accepts.
  *
  * Used by `push-service.ts` to register a SECOND Matrix pusher with
  * `app_id: 'fortaios.voip'`, separate from the regular `'fortaios'`

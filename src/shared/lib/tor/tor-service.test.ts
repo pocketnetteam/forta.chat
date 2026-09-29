@@ -111,6 +111,12 @@ describe('TorService — iOS branch', () => {
   });
 });
 
+/** The `stateChanged` handler of the service instance created last. */
+function lastStateListener(): (e: { state: string }) => void {
+  const calls = mockAddListener.mock.calls.filter(([name]) => name === 'stateChanged');
+  return calls[calls.length - 1][1] as (e: { state: string }) => void;
+}
+
 describe('TorService — Android branch (regression)', () => {
   beforeEach(() => {
     mockIsNative = true;
@@ -125,6 +131,33 @@ describe('TorService — Android branch (regression)', () => {
     expect(mockStartDaemon).toHaveBeenCalledWith({ mode: 'always', bridgeType: 'NONE' });
     expect(torService.isReady.value).toBe(true);
     expect(torService.matrixBaseUrl).toBe('http://127.0.0.1:9080');
+  });
+
+  // Regression: a Tor switched on in settings (off at app start) left the proxy
+  // port at 0, so files skipped the TorFile plugin and the upload progress
+  // sat at 0 %.
+  it('reconfigure(always) takes the proxy port and exposes it once Tor runs', async () => {
+    mockConfigure.mockResolvedValue({ socksPort: 9050, proxyPort: 9080 });
+    const torService = await importFreshService();
+    await torService.ensureListeners();
+    await torService.reconfigure({ mode: 'always', bridgeType: 'NONE' });
+
+    expect(torService.matrixBaseUrl).toBe('');
+    lastStateListener()({ state: 'RUNNING' });
+    expect(torService.matrixBaseUrl).toBe('http://127.0.0.1:9080');
+  });
+
+  it('reconfigure(neveruse) drops the proxy port', async () => {
+    mockConfigure.mockResolvedValue({ socksPort: 9050, proxyPort: 9080 });
+    const torService = await importFreshService();
+    await torService.ensureListeners();
+    await torService.reconfigure({ mode: 'always', bridgeType: 'NONE' });
+    lastStateListener()({ state: 'RUNNING' });
+
+    mockConfigure.mockResolvedValue({ socksPort: 0, proxyPort: 0 });
+    await torService.reconfigure({ mode: 'neveruse' });
+
+    expect(torService.matrixBaseUrl).toBe('');
   });
 
   it('verify() proxies to the native plugin and returns a result without error', async () => {

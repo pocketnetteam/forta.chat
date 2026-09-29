@@ -118,6 +118,23 @@ export const setupProviders = async (app: App) => {
     const torStore = useTorStore();
     await torStore.init();
 
+    // The Matrix client follows the Tor proxy for the whole session, so a
+    // Tor switched on or off in settings reaches it without a restart.
+    if (isNative) {
+      const [{ torService }, { syncMatrixTorProxy }] = await Promise.all([
+        import('@/shared/lib/tor'),
+        import('./initializers/tor-matrix-proxy'),
+      ]);
+      syncMatrixTorProxy(
+        () => torService.matrixBaseUrl,
+        (url) => {
+          import('@/entities/matrix')
+            .then(({ getMatrixClientService }) => getMatrixClientService().setTorProxyUrl(url))
+            .catch((e) => console.warn('[TOR] Matrix proxy update failed:', e));
+        },
+      );
+    }
+
     // Start Tor as soon as settings say so. Deferral competed with censorship
     // bootstraps and made "stuck at 10%" look like a cold-start bug; Always/Auto
     // users need the daemon hunting Snowflake proxies immediately.
@@ -136,28 +153,6 @@ export const setupProviders = async (app: App) => {
           mode: torStore.mode,
           bridgeType: toNativeBridgeType(torStore.bridgeType),
         });
-
-        // Once the daemon is bootstrapped, route the live Matrix session
-        // through the local reverse proxy. The proxy flag is consulted
-        // per-request in MatrixClientService, so this takes effect on the
-        // next /sync long-poll — previously a session that connected before
-        // Tor was ready stayed clearnet forever.
-        const applyMatrixProxy = () => {
-          if (!torService.matrixBaseUrl) return false;
-          import('@/entities/matrix').then(({ getMatrixClientService }) => {
-            getMatrixClientService().setTorProxyUrl(torService.matrixBaseUrl);
-            console.info('[TOR] Matrix proxy applied to live session');
-          }).catch((e) => console.warn('[TOR] Matrix proxy re-apply failed:', e));
-          return true;
-        };
-        if (!applyMatrixProxy()) {
-          const proxyWatch = watch(
-            () => torService.isReady.value,
-            (ready) => {
-              if (ready && applyMatrixProxy()) proxyWatch();
-            },
-          );
-        }
 
         // Notify user if Tor fails to start
         const torWatch = watch(

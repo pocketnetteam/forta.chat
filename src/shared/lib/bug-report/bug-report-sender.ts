@@ -262,6 +262,23 @@ async function formatBody(
     }
   }
 
+  const enc = input.encryptionDiagnostics;
+  if (enc) {
+    const counts = Object.entries(enc.queue).map(([status, n]) => `${status}=${n}`).join(' ');
+    lines.push(
+      '',
+      '## Encryption diagnostics',
+      '| Field | Value |',
+      '|-------|-------|',
+      `| Undecrypted messages | ${counts} |`,
+      `| Rooms affected | ${enc.roomsAffected} |`,
+      `| Oldest | ${enc.oldestHours} h |`,
+    );
+    for (const { error, count } of enc.topErrors) {
+      lines.push(`| Error ×${count} | ${error.replace(/\|/g, '/')} |`);
+    }
+  }
+
   // Roadmap 7.6 (docs/plans/llama2): `local-ai` log export — collapsed by
   // default, same as the invite-history block above, so a non-AI report
   // stays short.

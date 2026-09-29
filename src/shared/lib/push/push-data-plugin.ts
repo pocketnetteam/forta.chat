@@ -48,6 +48,14 @@ interface PushDataPlugin extends Plugin {
   getFullScreenIntentStatus(): Promise<{ allowed: boolean; manageable: boolean }>;
   /** Open the system screen that grants the full-screen intent (Android 14+). */
   openFullScreenIntentSettings(): Promise<void>;
+  /** The account is signed in: pushes ring (Android FCM service, iOS PushKit). */
+  markSessionActive(): Promise<void>;
+  /** The account is signing out. From now on Android's FCM service drops every
+   *  push and iOS reports each VoIP push to CallKit and ends it at once, even
+   *  one from a pusher the logout could not remove. */
+  markLoggedOut(): Promise<void>;
+  /** "Incoming calls" switch: off, a call push neither rings nor shows (see incoming-calls-setting). */
+  setIncomingCallsEnabled(options: { enabled: boolean }): Promise<void>;
   addListener(event: 'pushReceived', handler: (data: PushPayload) => void): Promise<PluginListenerHandle>;
   addListener(event: 'pushOpenRoom', handler: (data: { roomId: string; eventId?: string }) => void): Promise<PluginListenerHandle>;
 }

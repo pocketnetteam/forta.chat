@@ -1,3 +1,4 @@
+import { buildEditContent } from "./edit-content";
 import type { ChatDatabase, PendingOperation, LocalMessage } from "./schema";
 import type { MessageRepository } from "./message-repository";
 import type { RoomRepository } from "./room-repository";
@@ -1101,21 +1102,10 @@ export class SyncEngine {
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
 
-    let body: string | Record<string, unknown> = payload.newContent;
-    const content: Record<string, unknown> = {
-      "m.relates_to": {
-        rel_type: "m.replace",
-        event_id: payload.eventId,
-      },
-    };
-
+    let content: Record<string, unknown>;
     if (roomCrypto?.canBeEncrypt()) {
-      const encrypted = await roomCrypto.encryptEvent(payload.newContent);
-      content.msgtype = "m.encrypted";
-      content.body = (encrypted as Record<string, unknown>).body;
-      content.block = (encrypted as Record<string, unknown>).block;
-      content.version = (encrypted as Record<string, unknown>).version;
-      content["m.new_content"] = encrypted;
+      const encrypted = (await roomCrypto.encryptEvent(payload.newContent)) as Record<string, unknown>;
+      content = buildEditContent(payload.eventId, payload.newContent, encrypted);
     } else {
       // Defense in depth: a plaintext edit would replace a ciphertext
       // bubble with the original text (server-visible), leaking the
@@ -1123,12 +1113,7 @@ export class SyncEngine {
       if (roomCrypto?.requiresEncryption()) {
         throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncEditMessage`);
       }
-      content.msgtype = "m.text";
-      content.body = `* ${payload.newContent}`;
-      content["m.new_content"] = {
-        msgtype: "m.text",
-        body: payload.newContent,
-      };
+      content = buildEditContent(payload.eventId, payload.newContent, null);
     }
 
     // Idempotent edit: use clientId as txnId so an edit is never applied twice

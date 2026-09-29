@@ -23,6 +23,9 @@ import com.forta.chat.plugins.calls.InviteThrottleTracker
 import com.forta.chat.plugins.calls.RemoteHangupPolicy
 import com.forta.chat.plugins.calls.SecondRingPolicy
 import com.forta.chat.plugins.calls.SelectAnswerPolicy
+import com.forta.chat.plugins.push.IncomingCallsStore
+import com.forta.chat.plugins.push.PushSessionPolicy
+import com.forta.chat.plugins.push.PushSessionStore
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -134,6 +137,15 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             "content_msgtype=${data["content_msgtype"]}")
 
         val roomId = data["room_id"] ?: return
+
+        // Signed out: a pusher the logout could not remove (offline, or a push
+        // already in flight) must neither ring nor show anything. See
+        // PushSessionPolicy.
+        if (!PushSessionPolicy.shouldDeliver(PushSessionStore.read(this))) {
+            Log.i(TAG, "Push dropped: signed out (msg_type=${data["msg_type"]})")
+            return
+        }
+
         val eventId = data["event_id"]
         val msgType = data["msg_type"] ?: ""
         val contentMsgtype = data["content_msgtype"]
@@ -266,6 +278,12 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
 
         // Handle calls
         if (msgType == "m.call.invite") {
+            // "Incoming calls" off (#1388): no ringer and no reject, so
+            // Bastyon and the account's other devices keep ringing.
+            if (!IncomingCallsStore.isEnabled(this)) {
+                Log.i(TAG, "Call push dropped: incoming calls are off")
+                return
+            }
             // Telecom creates this call's connection only after the push is
             // handled; until then the idle check must not end the process.
             com.forta.chat.plugins.calls.IdleProcessExit.noteCallPush()

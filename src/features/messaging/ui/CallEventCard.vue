@@ -4,11 +4,16 @@ import { formatTime } from "@/shared/lib/format";
 import { useCallStore } from "@/entities/call";
 import { useChatStore } from "@/entities/chat";
 import { useCallLauncher, CallProviderPicker } from "@/features/video-calls";
+import { useLongPress } from "@/shared/lib/gestures";
 
 const props = defineProps<{
   message: Message;
   isOwn: boolean;
   tailClass: string;
+}>();
+
+const emit = defineEmits<{
+  contextmenu: [payload: { message: Message; x: number; y: number }];
 }>();
 
 const { t } = useI18n();
@@ -55,7 +60,29 @@ const timeStr = computed(() => formatTime(new Date(props.message.timestamp)));
 // the existing call is still tearing down.
 const isClickable = computed(() => !callStore.isInCall);
 
+// #1091: a long press or right-click opens the message menu (Delete), as on
+// any bubble. The press that opened it must not also call back.
+let longPressTriggered = false;
+const openMenu = (e: { clientX: number; clientY: number }) => {
+  if (chatStore.selectionMode) return;
+  emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
+};
+const longPress = useLongPress({
+  onTrigger: (e) => {
+    longPressTriggered = true;
+    openMenu(e);
+  },
+});
+const onPointerdown = (e: PointerEvent) => {
+  longPressTriggered = false;
+  longPress.onPointerdown(e);
+};
+
 const handleCallback = (event?: MouseEvent) => {
+  if (longPressTriggered) {
+    longPressTriggered = false;
+    return;
+  }
   if (!isClickable.value) return;
   const callType = props.message.callInfo?.callType ?? "voice";
   // DM vs group decides native-only vs picker. Unknown room (not yet synced)
@@ -80,6 +107,12 @@ const handleCallback = (event?: MouseEvent) => {
     ]"
     :aria-label="`${callTypeLabel} — ${statusLabel} — ${t('call.callBack')}`"
     @click="handleCallback($event)"
+    @contextmenu.prevent="openMenu"
+    @pointerdown="onPointerdown"
+    @pointermove="longPress.onPointermove"
+    @pointerup="longPress.onPointerup"
+    @pointerleave="longPress.onPointerleave"
+    @pointercancel="longPress.onPointerleave"
   >
     <!-- Phone / video icon in circle -->
     <div

@@ -52,21 +52,25 @@ function initFetchRetranslator() {
   };
 }
 
+/** The service worker's own question for a URL: does it go through Tor? Throws when the platform cannot answer. */
+export function resolveUsesTor(url: string): Promise<boolean> {
+  return shouldRouteThroughTor(url, async (targetUrl) => {
+    if (isNative && isAndroid) {
+      const { torService } = await import('@/shared/lib/tor');
+      return torService.isUseWithTor(targetUrl);
+    }
+
+    const result = await requireFetchBridge().invoke('AltTransportActive', targetUrl);
+    return !!result;
+  });
+}
+
 async function handleAltTransportActive(
   url: string,
   resolve: (useTor: boolean) => void,
 ): Promise<void> {
   try {
-    const useTor = await shouldRouteThroughTor(url, async (targetUrl) => {
-      if (isNative && isAndroid) {
-        const { torService } = await import('@/shared/lib/tor');
-        return torService.isUseWithTor(targetUrl);
-      }
-
-      const result = await requireFetchBridge().invoke('AltTransportActive', targetUrl);
-      return !!result;
-    });
-    resolve(useTor);
+    resolve(await resolveUsesTor(url));
   } catch {
     resolve(false);
   }

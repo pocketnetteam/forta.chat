@@ -4,9 +4,13 @@
  * after a few quick retries, while ICE itself waits 30 s. Samsung `wifioff-vpn2`: Wi-Fi went off, the
  * restart offer went out at once, the VPN needed longer to carry traffic, `PUT m.call.negotiate` failed
  * after 5 s and the call ended.
+ *
+ * Regression: the SDK fails the call on the first failed send of `m.call.answer`. iPhone XR 2026-09-24:
+ * WebKit dropped the answer's PUT while the app switched to the CallKit screen
+ * (`ConnectionError: fetch failed: Load failed`) and the call ended with `send_answer`.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { installVoipSendRetry, VOIP_SEND_RETRY_WINDOW_MS } from "./voip-send-retry";
+import { ANSWER_RETRY_POLICY, installVoipSendRetry, VOIP_SEND_RETRY_WINDOW_MS } from "./voip-send-retry";
 
 class ConnectionError extends Error {
   get name(): string {
@@ -129,5 +133,72 @@ describe("installVoipSendRetry", () => {
     await call.sendVoipEvent("m.call.negotiate", {});
 
     expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  describe("m.call.answer", () => {
+    /** What matrix-js-sdk's fetch throws when WKWebView drops the request. */
+    const loadFailed = (): ConnectionError => new ConnectionError("fetch failed: Load failed");
+
+    it("resends an answer that WebKit dropped", async () => {
+      const { call, send } = fakeCall([loadFailed(), "ok"]);
+      const d = deps();
+      installVoipSendRetry(call, d.value);
+
+      await expect(call.sendVoipEvent("m.call.answer", { answer: {} })).resolves.toBeUndefined();
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls.every(([type]) => type === "m.call.answer")).toBe(true);
+      expect(d.sleeps).toEqual([ANSWER_RETRY_POLICY.firstDelayMs]);
+    });
+
+    it("gets through on the last attempt", async () => {
+      const { call, send } = fakeCall([loadFailed(), loadFailed(), "ok"]);
+      installVoipSendRetry(call, deps().value);
+
+      await call.sendVoipEvent("m.call.answer", {});
+
+      expect(send).toHaveBeenCalledTimes(ANSWER_RETRY_POLICY.maxAttempts);
+    });
+
+    it("gives up after a few quick attempts and rethrows the SDK's error", async () => {
+      const first = loadFailed();
+      const { call, send } = fakeCall([loadFailed(), loadFailed(), first, loadFailed(), "ok"]);
+      const d = deps();
+      installVoipSendRetry(call, d.value);
+
+      await expect(call.sendVoipEvent("m.call.answer", {})).rejects.toBe(first);
+
+      expect(send).toHaveBeenCalledTimes(ANSWER_RETRY_POLICY.maxAttempts);
+      const waited = d.sleeps.reduce((a, b) => a + b, 0);
+      expect(waited).toBeLessThanOrEqual(ANSWER_RETRY_POLICY.windowMs);
+    });
+
+    it("does not resend on a server error", async () => {
+      const unknownDevices = Object.assign(new Error("unknown devices"), { name: "UnknownDeviceError" });
+      const { call, send } = fakeCall([unknownDevices, "ok"]);
+      installVoipSendRetry(call, deps().value);
+
+      await expect(call.sendVoipEvent("m.call.answer", {})).rejects.toBe(unknownDevices);
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not resend once the call has ended", async () => {
+      const { call, send, end } = fakeCall([loadFailed(), "ok"]);
+      installVoipSendRetry(call, deps({ sleep: vi.fn(async () => { end(); }) }).value);
+
+      await expect(call.sendVoipEvent("m.call.answer", {})).rejects.toThrow("Load failed");
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits offline no longer than the answer's budget", async () => {
+      const { call, send } = fakeCall([loadFailed(), "ok"]);
+      const d = deps({ isOnline: () => false });
+      installVoipSendRetry(call, d.value);
+
+      await call.sendVoipEvent("m.call.answer", {});
+
+      expect(d.value.waitForOnline).toHaveBeenCalledWith(ANSWER_RETRY_POLICY.windowMs);
+      expect(send).toHaveBeenCalledTimes(2);
+    });
   });
 });

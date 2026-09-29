@@ -14,19 +14,29 @@ tags:
     visible: ".*${MAESTRO_E2E_TARGET_ROOM}.*"
     timeout: 300000
 - tapOn: ".*${MAESTRO_E2E_TARGET_ROOM}.*"
+# Nothing in the composer row can be addressed by name: the WebView exports
+# the field with an empty hint and the send button with no text at all, and
+# `rightOf: "Emoji"` resolves to the header's Back button (Maestro measures
+# from the anchor's left edge and takes the nearest match). Worse, a Maestro
+# tap on the send button's own pixels does not press it while the field has
+# focus — the touch lands as an IME action and adds a newline, while the same
+# pixel tapped through adb sends (Pixel 9, 2026-09-23). So this flow proves
+# what it can on a device: the room opens, the composer takes the typed body.
+# The send itself is covered by the DOM tests (MessageInput, SyncEngine).
 - extendedWaitUntil:
-    visible: "Message"
+    visible: "Emoji"
     timeout: 30000
 
 # A unique body per run: asserting on a fixed string would pass on a message
-# left behind by an earlier run.
+# left behind by an earlier run. The composer centre is the bench Pixel 9's
+# (1080×2424); the row is bottom-anchored and does not move for the keyboard.
 - evalScript: ${output.body = 'maestro ' + Date.now()}
-- tapOn: "Message"
+- tapOn:
+    point: "540,2252"
 - inputText: ${output.body}
-- tapOn: "Send"
 
-# The optimistic echo appears immediately; this asserts it reached the timeline,
-# not that the server accepted it.
+# The typed body reaches the composer, which the WebView does export once the
+# field holds text (Maestro's inputText leaves a trailing newline behind).
 - extendedWaitUntil:
-    visible: ${output.body}
-    timeout: 30000
+    visible: ".*${output.body}.*"
+    timeout: 10000

@@ -15,7 +15,7 @@ interface TorNativePlugin {
     mode: string;
     bridgeType?: string;
     bridges?: string[];
-  }): Promise<void>;
+  }): Promise<{ socksPort: number; proxyPort: number }>;
   verifyTor(): Promise<{ isTor: boolean; ip: string; error?: string }>;
   clearTorCache(): Promise<void>;
   isUseWithTor(options: { url: string }): Promise<{ redirect: boolean }>;
@@ -251,11 +251,16 @@ class TorService {
       return;
     }
 
-    await TorNative.configure({
+    const result = await TorNative.configure({
       mode: toNativeMode(mode),
       bridgeType: options.bridgeType ?? this._bridgeType.value,
       bridges: options.bridges,
     });
+    // As init() does with startDaemon's result. Without the port a Tor
+    // switched on in settings left matrixBaseUrl empty, so files never went
+    // through the TorFile plugin and the upload progress sat at 0 %.
+    // matrixBaseUrl still waits for the daemon to report RUNNING.
+    this._proxyPort.value = result?.proxyPort ?? 0;
   }
 
   /** The daemon's state as the native plugin reports it, or null where Tor does not run. */

@@ -143,6 +143,31 @@ describe('sendBugReport — ICE and Tor rows (O05/O14)', () => {
     expect(body).toContain('| Full-screen intent | REVOKED |');
   });
 
+  it('renders the encryption diagnostics, and nothing when there are none', async () => {
+    const fetchMock = mockIssueCreate(13);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendBugReport({
+      description: 'сообщения приходят зашифрованными',
+      environment: fakeEnv,
+      screenshots: [],
+      encryptionDiagnostics: {
+        queue: { dead: 4, waiting: 1 },
+        roomsAffected: 2,
+        oldestHours: 30,
+        topErrors: [{ error: 'No common key event found for hash=<hex>', count: 4 }],
+      },
+    });
+    const withDiag = JSON.parse(fetchMock.mock.calls.at(-1)![1].body as string).body as string;
+    expect(withDiag).toContain('## Encryption diagnostics');
+    expect(withDiag).toContain('| Undecrypted messages | dead=4 waiting=1 |');
+    expect(withDiag).toContain('| Error ×4 | No common key event found for hash=<hex> |');
+
+    await sendBugReport({ description: 'other', environment: fakeEnv, screenshots: [] });
+    const without = JSON.parse(fetchMock.mock.calls.at(-1)![1].body as string).body as string;
+    expect(without).not.toContain('Encryption diagnostics');
+  });
+
   it('omits the rows when the facts are unknown', async () => {
     const fetchMock = mockIssueCreate(12);
     vi.stubGlobal('fetch', fetchMock);

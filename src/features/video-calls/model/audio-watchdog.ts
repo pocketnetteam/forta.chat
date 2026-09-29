@@ -1,7 +1,10 @@
 import { App as CapApp } from "@capacitor/app";
 import { isIOS, isNative } from "@/shared/lib/platform";
 import { nativeCallBridge } from "@/shared/lib/native-calls";
-import { IOSCallAudio } from "@/shared/lib/native-calls/native-call-bridge.ios";
+import {
+  IOSCallAudio,
+  isRecentCallKitRelease,
+} from "@/shared/lib/native-calls/native-call-bridge.ios";
 import { useCallStore } from "@/entities/call";
 
 /**
@@ -109,6 +112,14 @@ export async function setupAudioWatchdog(): Promise<void> {
         try {
           const callStore = useCallStore();
           if (!callStore.activeCall && !callStore.matrixCall) return;
+          // The adapter ends the CallKit record right after the answer to
+          // hand the audio hardware to WebKit; CallKit then deactivates the
+          // session it had activated, and that arrives here as an
+          // interruption. It is our own doing, not a phone call.
+          if (isRecentCallKitRelease()) {
+            console.log("[audio-watchdog] interruption follows our CallKit release — ignoring");
+            return;
+          }
           console.warn(
             "[audio-watchdog] AVAudioSession interruption began → hanging up active call",
           );

@@ -29,6 +29,8 @@ export interface BugReportInput {
    * throttle), and S4 (stale invite) without a repro.
    */
   callDiagnostics?: import('./collect-call-diagnostics').BugReportCallDiagnostics;
+  /** Why messages could not be decrypted on this device: counts and scrubbed error texts, no content. */
+  encryptionDiagnostics?: import('./collect-encryption-diagnostics').BugReportEncryptionDiagnostics;
   /**
    * Roadmap 7.6 (docs/plans/llama2): `local-ai`'s persisted log export,
    * collected whenever a `local-ai` client exists this session (feature

@@ -345,7 +345,38 @@ describe('createIOSNativeCallAdapter — addListener event mapping', () => {
       call: { callId: 'cid', extra: { roomId: '!r:m' } },
       source: 'user',
     });
-    expect(cb).toHaveBeenCalledWith({ callId: 'cid', roomId: '!r:m' });
+    // The callback follows the CallKit release, which is asynchronous.
+    await vi.waitFor(() => expect(cb).toHaveBeenCalledWith({ callId: 'cid', roomId: '!r:m' }));
+  });
+
+  it('ends the accepted CallKit record before handing the answer on, and swallows the callEnded that release produces', async () => {
+    // A CallKit-answered call carried no audio either way on the iPhone XR
+    // (iOS 17.3): the session CallKit activates starves the WebKit GPU
+    // process's session, which does playback and capture. Ending the record
+    // before the answer (before getUserMedia) gave audio both ways; ending
+    // it after the answer did not.
+    const adapter = await loadAdapter();
+    const answered = vi.fn();
+    const ended = vi.fn();
+    await adapter.addListener('callAnswered', answered);
+    await adapter.addListener('callEnded', ended);
+    const acceptedHandler = ickAddListenerSpy.mock.calls.find(([n]) => n === 'callAccepted')?.[1];
+    const endedHandler = ickAddListenerSpy.mock.calls.find(([n]) => n === 'callEnded')?.[1];
+    getActiveCallsSpy.mockResolvedValue({
+      calls: [{ callId: 'cid', state: 'accepted', extra: { roomId: '!r:m' } }],
+    });
+
+    acceptedHandler({ call: { callId: 'cid', extra: { roomId: '!r:m' } }, source: 'user' });
+    await vi.waitFor(() => expect(answered).toHaveBeenCalledOnce());
+    expect(endCallSpy).toHaveBeenCalledWith({ callId: 'cid', reason: 'audio-handoff' });
+    expect(endCallSpy.mock.invocationCallOrder[0]).toBeLessThan(answered.mock.invocationCallOrder[0]);
+
+    // The plugin reports our own endCall with source "api": not a hangup.
+    endedHandler({ call: { callId: 'cid', extra: { roomId: '!r:m' } }, source: 'api', reason: 'audio-handoff' });
+    expect(ended).not.toHaveBeenCalled();
+    // A later end of the same id by the user or the system still counts.
+    endedHandler({ call: { callId: 'cid', extra: { roomId: '!r:m' } }, source: 'user' });
+    expect(ended).toHaveBeenCalledWith({ callId: 'cid', roomId: '!r:m' });
   });
 
   it('maps "callDeclined" 1:1 (same name on both sides) but still unwraps event.call', async () => {

@@ -42,6 +42,13 @@ function onFetch(event) {
     return;
   }
 
+  // The page already asked the Tor routing about this upload and was told
+  // "direct" (src/shared/lib/transport/direct-upload.ts): leave it to the
+  // network. Answering it here hides the XMLHttpRequest's upload progress.
+  if (request.method === 'POST' && new URL(request.url).searchParams.has('forta_direct')) {
+    return;
+  }
+
   async function torAnswerElectron() {
     if (!nodeFetch) {
       return;
@@ -215,6 +222,18 @@ function onFetch(event) {
 
 async function onInstall(event) {
   console.log('Service Worker was successfully installed');
+  // A flagged direct upload (see onFetch) must skip the worker entirely:
+  // even unanswered, a request the worker intercepts reports no upload
+  // progress. Static routing (Chromium 123+) sends it straight to the
+  // network; older engines keep the fetch-handler pass-through.
+  if (typeof event.addRoutes === 'function' && typeof URLPattern === 'function') {
+    event.waitUntil(
+      event.addRoutes({
+        condition: { urlPattern: new URLPattern({ search: '*forta_direct=1*' }) },
+        source: 'network',
+      }).catch((err) => console.warn('Service Worker static route failed:', err)),
+    );
+  }
   self.skipWaiting();
 }
 

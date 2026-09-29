@@ -86,4 +86,39 @@ describe("parseEditBody", () => {
     });
     expect(body).toBe("");
   });
+
+  // forta-bugs #1300, #1320 and nine more: an edit sent from a group room lost `hash` in its
+  // outer content, so nobody could decrypt it; the whole encrypted event sits in m.new_content.
+  it("recovers an edit whose outer content cannot be decrypted from m.new_content", async () => {
+    const newContent = { msgtype: "m.encrypted", body: "ab12", block: 7, hash: "h1" };
+    const decrypt = vi.fn(async (event: Record<string, unknown>) => {
+      const content = event.content as Record<string, unknown>;
+      if (!content.hash) throw new Error("no common key for a one-to-one body");
+      return { body: "Edited in a group", msgtype: "m.text" };
+    });
+    const raw = { type: "m.room.message", event_id: "$edit", sender: "@a:s", content: { msgtype: "m.encrypted", body: "ab12", block: 7 } };
+    const body = await parseEditBody({
+      raw,
+      content: raw.content,
+      newContent,
+      decryptEvent: decrypt,
+      encryptedPlaceholder: "[зашифровано]",
+    });
+    expect(body).toBe("Edited in a group");
+    expect(decrypt).toHaveBeenCalledTimes(2);
+    expect(decrypt.mock.calls[1][0]).toEqual({ ...raw, content: newContent });
+  });
+
+  it("does not retry with a plaintext m.new_content", async () => {
+    const decrypt = makeDecrypt(new Error("MAC mismatch"));
+    const body = await parseEditBody({
+      raw: {},
+      content: { msgtype: "m.encrypted", body: "<CIPHER>" },
+      newContent: { msgtype: "m.text", body: "leaked" },
+      decryptEvent: decrypt,
+      encryptedPlaceholder: "[зашифровано]",
+    });
+    expect(body).toBe("[зашифровано]");
+    expect(decrypt).toHaveBeenCalledTimes(1);
+  });
 });

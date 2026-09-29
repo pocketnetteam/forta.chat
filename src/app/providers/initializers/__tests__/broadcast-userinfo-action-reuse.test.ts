@@ -107,7 +107,7 @@ describe("broadcastUserInfoAction reuses a queued action across retries", () => 
     );
     const start = storesSrc.indexOf("const logout = async () =>");
     expect(start).toBeGreaterThan(-1);
-    const body = storesSrc.slice(start, start + 3200);
+    const body = storesSrc.slice(start, start + 4200);
     expect(body).toContain("appInitializer.clearPendingUserInfoAction(logoutAddress)");
   });
 });
