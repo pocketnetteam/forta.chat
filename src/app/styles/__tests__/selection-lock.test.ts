@@ -72,7 +72,7 @@ describe("select-text applied to message/publication body text only", () => {
   it("PostCard: caption and truncated message are selectable", () => {
     const src = readSrc("../../../features/post-player/ui/PostCard.vue");
     expect(src).toMatch(/v-if="post\.caption"[\s\S]{0,40}class="select-text/);
-    expect(src).toMatch(/v-if="truncatedMessage"[\s\S]{0,40}class="select-text/);
+    expect(src).toMatch(/v-if="messageSegments.length"[\s\S]{0,40}class="select-text/);
   });
 
   it("PostPlayerModal: caption heading and article body are selectable", () => {

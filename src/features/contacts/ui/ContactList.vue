@@ -28,6 +28,7 @@ import { useSelectionStore } from "@/features/selection";
 import RenameContactDialog from "@/features/chat-info/ui/RenameContactDialog.vue";
 import { hapticImpact } from "@/shared/lib/haptics";
 import { lastMessageRowKey } from "@/features/contacts/lib/last-message-row-key";
+import { reuseIfSameKeys } from "@/features/contacts/lib/stable-scroller-items";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
@@ -530,6 +531,17 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
 });
 
 const filteredRooms = computed(() => allFilteredRooms.value.slice(0, displayLimit.value));
+
+// RecycleScroller gets the same array while the row order holds (see reuseIfSameKeys);
+// each row reads its current data from liveItemByKey.
+let _prevScrollerItems: UnifiedItem[] | null = null;
+const scrollerItems = computed(() => {
+  _prevScrollerItems = reuseIfSameKeys(_prevScrollerItems, filteredRooms.value);
+  return _prevScrollerItems;
+});
+const liveItemByKey = computed(() => new Map(filteredRooms.value.map(i => [i._key, i])));
+const liveItem = (viewItem: UnifiedItem): UnifiedItem => liveItemByKey.value.get(viewItem._key) ?? viewItem;
+
 const hasMoreRooms = computed(() => displayLimit.value < allFilteredRooms.value.length);
 
 // Reset page when filter changes and reload visible profiles
@@ -864,13 +876,15 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
     <RecycleScroller
       v-if="filteredRooms.length > 0"
       ref="scrollerRef"
-      :items="filteredRooms"
+      :items="scrollerItems"
       :item-size="ITEM_HEIGHT"
       :style="{ '--recycle-item-size': `${ITEM_HEIGHT}px` }"
       key-field="_key"
       class="h-full"
     >
-      <template #default="{ item }">
+      <template #default="{ item: viewItem }">
+      <!-- The scroller's item can be stale (scrollerItems); bind the live row as `item`. -->
+      <template v-for="item in [liveItem(viewItem)]">
         <!-- Channel item (same layout as chat room) -->
         <button
           v-if="isChannel(item)"
@@ -1077,6 +1091,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
             </div>
           </div>
         </button>
+      </template>
       </template>
     </RecycleScroller>
 

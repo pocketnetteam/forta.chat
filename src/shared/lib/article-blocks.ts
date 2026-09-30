@@ -12,6 +12,7 @@
  * (DOMParser, available in browser + happy-dom test env). Falls back
  * to a regex strip when DOMParser is unavailable.
  */
+import { linkifyToHtml } from "./linkify";
 
 export interface RenderTextOptions {
   /** Truncate output to this length (adds "..." marker if cut). */
@@ -217,9 +218,8 @@ const ALLOWED_INLINE_TAGS = new Set([
 ]);
 
 /**
- * Per-tag attribute whitelist. Note: `rel` is NOT in the whitelist for <a> —
- * we control it ourselves to force `noopener noreferrer` for `target="_blank"`,
- * preventing tabnabbing via `window.opener`.
+ * Per-tag attribute whitelist. `target` is listed only so it is consumed:
+ * `serializeNode` drops it and sets `target`/`rel` itself for external links.
  */
 const ALLOWED_ATTRS: Record<string, ReadonlySet<string>> = {
   A: new Set(["href", "target", "class"]),
@@ -271,10 +271,12 @@ function escapeAttr(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Recursively serialize an element with whitelist filtering. */
-function serializeNode(node: Node): string {
+/** Recursively serialize an element with whitelist filtering. Bare URLs in
+ *  text outside an existing <a> become links (nested anchors are invalid). */
+function serializeNode(node: Node, insideAnchor = false): string {
   if (node.nodeType === 3 /* TEXT */) {
-    return escapeHtml(node.textContent ?? "");
+    const text = node.textContent ?? "";
+    return insideAnchor ? escapeHtml(text) : linkifyToHtml(text);
   }
   if (node.nodeType !== 1 /* ELEMENT */) return "";
 
@@ -287,11 +289,10 @@ function serializeNode(node: Node): string {
   }
   if (!ALLOWED_INLINE_TAGS.has(tag)) {
     // Drop the tag, keep its inner content
-    return Array.from(el.childNodes).map(serializeNode).join("");
+    return Array.from(el.childNodes).map((c) => serializeNode(c, insideAnchor)).join("");
   }
 
   const attrParts: string[] = [];
-  let isTargetBlank = false;
   const allowedAttrs = ALLOWED_ATTRS[tag];
   if (allowedAttrs) {
     for (const attr of Array.from(el.attributes)) {
@@ -299,21 +300,22 @@ function serializeNode(node: Node): string {
       if (!allowedAttrs.has(name)) continue;
       const value = attr.value;
       if (name === "href" && !SAFE_URL_RE.test(value)) continue;
-      if (name === "target") {
-        if (value !== "_blank" && value !== "_self") continue;
-        if (value === "_blank") isTargetBlank = true;
-      }
+      // Author-supplied target is ignored; external links are forced below.
+      if (name === "target") continue;
       attrParts.push(`${name}="${escapeAttr(value)}"`);
     }
   }
 
-  // Force rel="noopener noreferrer" on anchors that open new tabs to prevent
-  // tabnabbing (window.opener.location hijacks). User-supplied rel is ignored.
-  if (tag === "A" && isTargetBlank) {
-    attrParts.push('rel="noopener noreferrer"');
+  // http(s) links always open outside the app WebView (new window / in-app
+  // browser). Force rel="noopener noreferrer" to prevent tabnabbing via
+  // window.opener; user-supplied rel is ignored.
+  if (tag === "A" && /^https?:\/\//i.test(el.getAttribute("href") ?? "")) {
+    attrParts.push('target="_blank"', 'rel="noopener noreferrer"');
   }
 
-  const innerHtml = Array.from(el.childNodes).map(serializeNode).join("");
+  const innerHtml = Array.from(el.childNodes)
+    .map((c) => serializeNode(c, insideAnchor || tag === "A"))
+    .join("");
   if (tag === "BR") return "<br/>";
   const lower = tag.toLowerCase();
   const attrStr = attrParts.length ? " " + attrParts.join(" ") : "";
@@ -324,12 +326,12 @@ function serializeNode(node: Node): string {
 function sanitizeInline(html: string): string {
   if (!html) return "";
   if (typeof DOMParser === "undefined") {
-    return escapeHtml(stripHtml(html));
+    return linkifyToHtml(stripHtml(html));
   }
   const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
   const root = doc.body.firstChild as Element | null;
   if (!root) return "";
-  return Array.from(root.childNodes).map(serializeNode).join("");
+  return Array.from(root.childNodes).map((c) => serializeNode(c)).join("");
 }
 
 function renderHeaderLevel(raw: unknown): number {
@@ -346,7 +348,7 @@ export function renderArticleHtml(input: string): string {
   if (!input) return "";
 
   const parsed = tryParseBlocks(input);
-  if (!parsed) return `<p class="article-p">${escapeHtml(input)}</p>`;
+  if (!parsed) return `<p class="article-p">${linkifyToHtml(input)}</p>`;
 
   const parts: string[] = [];
   for (const block of parsed.blocks) {

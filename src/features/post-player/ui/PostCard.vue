@@ -10,6 +10,8 @@ import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
 import { renderArticleText } from "@/shared/lib/article-blocks";
+import { parseTextLinks, truncateLinkSegments } from "@/shared/lib/linkify";
+import { openExternalUrl } from "@/shared/lib/open-external-url";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import { useChatStore } from "@/entities/chat";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
@@ -58,11 +60,13 @@ const firstImage = computed(() => {
   return normalizePocketnetImageUrl(post.value.images[0]);
 });
 
-/** Plain-text preview that handles both Editor.js JSON (articles) and plain messages. */
-const truncatedMessage = computed(() => {
+/** Plain-text preview that handles both Editor.js JSON (articles) and plain
+ *  messages, split into text/link segments. Truncated after linkifying so a
+ *  cut-off link still points at its full URL. */
+const messageSegments = computed(() => {
   const raw = post.value?.message ?? "";
-  if (!raw) return "";
-  return renderArticleText(raw, { maxLength: 200 });
+  if (!raw) return [];
+  return truncateLinkSegments(parseTextLinks(renderArticleText(raw)), 200);
 });
 
 const authorAvatarError = ref(false);
@@ -90,7 +94,7 @@ const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
 const hasOwnContent = computed(() =>
-  !!(post.value?.caption || truncatedMessage.value || firstImage.value || videoInfo.value),
+  !!(post.value?.caption || messageSegments.value.length || firstImage.value || videoInfo.value),
 );
 
 /** WEE-101: a repost wrapper whose original txid could not be resolved has no
@@ -123,6 +127,10 @@ function onVote(value: number) {
   if (submitVote(value)) {
     toast(t("postPlayer.rated"), "success");
   }
+}
+
+function onLinkClick(href: string) {
+  void openExternalUrl(href);
 }
 
 function onShare() {
@@ -291,10 +299,18 @@ onMounted(loadPostData);
 
       <!-- Message -->
       <div
-        v-if="truncatedMessage"
+        v-if="messageSegments.length"
         class="select-text break-words text-xs leading-relaxed sm:text-[13px]"
         :class="isOwn ? 'text-white/80' : 'text-text-color/80'"
-      >{{ truncatedMessage }}</div>
+      ><template v-for="(seg, i) in messageSegments" :key="i"><a
+        v-if="seg.type === 'link'"
+        :href="seg.href"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="break-all underline hover:no-underline"
+        :class="isOwn ? 'text-white' : 'text-color-txt-ac'"
+        @click.stop.prevent="onLinkClick(seg.href)"
+      >{{ seg.content }}</a><template v-else>{{ seg.content }}</template></template></div>
 
       <!-- Tags -->
       <div v-if="visibleTags.length" class="flex flex-wrap gap-1">

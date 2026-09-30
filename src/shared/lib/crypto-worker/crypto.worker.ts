@@ -237,8 +237,14 @@ async function aesSivEncrypt(
 const keyCache = new Map<string, Record<string, Uint8Array>>();
 const KEY_CACHE_MAX = 128;
 
-function cacheKeyFor(users: CryptoUser[], block: number): string {
-  return `${block}|${users.map((u) => u.id).join(",")}`;
+/** The derived keys depend on WHO derives them (myId → our private keys) and
+ *  on every participant's published keys, not just on the id list: without
+ *  myId, a second account in the same session got the first account's map
+ *  (`{peer: K}` instead of `{us: K}`) and failed with `emptykey` for good;
+ *  without the keys, a re-published key set kept serving the stale derivation.
+ *  The original's persistent cache is per account too (lcachekey + user id). */
+function cacheKeyFor(users: CryptoUser[], myId: string, block: number): string {
+  return `${myId}|${block}|${users.map((u) => `${u.id}:${u.keys.join(",")}`).join(";")}`;
 }
 
 function getCachedKeys(
@@ -247,7 +253,7 @@ function getCachedKeys(
   privateKeys: string[],
   block: number,
 ): Record<string, Uint8Array> {
-  const cacheKey = cacheKeyFor(users, block);
+  const cacheKey = cacheKeyFor(users, myId, block);
   const cached = keyCache.get(cacheKey);
   if (cached) return cached;
 
@@ -269,8 +275,8 @@ function getCachedKeys(
  *  the production incident this addresses: a wrong derived key silently
  *  cached here would fail every retry identically until the worker itself
  *  restarted or the LRU cap cycled it out. */
-function evictCachedKeys(users: CryptoUser[], block: number): void {
-  keyCache.delete(cacheKeyFor(users, block));
+function evictCachedKeys(users: CryptoUser[], myId: string, block: number): void {
+  keyCache.delete(cacheKeyFor(users, myId, block));
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +358,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         } catch (decryptErr) {
           // A wrong/stale cached key must not poison every future retry —
           // evict it here (outer catch below still reports the failure).
-          evictCachedKeys(msg.users, msg.block);
+          evictCachedKeys(msg.users, msg.myId, msg.block);
           throw decryptErr;
         }
         (self as unknown as Worker).postMessage({

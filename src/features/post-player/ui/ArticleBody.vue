@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { renderArticleHtml, isArticleJson } from "@/shared/lib/article-blocks";
+import { linkifyToHtml } from "@/shared/lib/linkify";
+import { openExternalUrl } from "@/shared/lib/open-external-url";
 
 interface Props {
   /** Raw post.message — either Editor.js JSON or plain text. */
@@ -11,27 +13,29 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), { forceWrap: false });
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 const html = computed(() => {
   const raw = props.raw;
   if (!raw) return "";
   if (isArticleJson(raw)) return renderArticleHtml(raw);
-  // Non-JSON: always escape; forceWrap only affects whether to wrap in <p>
-  const safe = escapeHtml(raw);
+  // Non-JSON: always escape (URLs become links); forceWrap only affects <p> wrapping
+  const safe = linkifyToHtml(raw);
   return props.forceWrap ? `<p class="article-p">${safe}</p>` : safe;
 });
+
+// Capacitor WebView ignores target="_blank", so route external links through
+// openExternalUrl (in-app browser on native, new window on web / Electron).
+function handleClick(event: MouseEvent): void {
+  const anchor = (event.target as Element | null)?.closest?.("a[href]");
+  const href = anchor?.getAttribute("href") ?? "";
+  if (!/^https?:\/\//i.test(href)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void openExternalUrl(href);
+}
 </script>
 
 <template>
-  <div class="article-body" v-html="html" />
+  <div class="article-body" @click="handleClick" v-html="html" />
 </template>
 
 <style scoped>
@@ -104,6 +108,7 @@ const html = computed(() => {
 .article-body :deep(a) {
   color: var(--color-bg-ac, #4a90e2);
   text-decoration: underline;
+  overflow-wrap: anywhere;
 }
 .article-body :deep(a:hover) {
   text-decoration: none;
