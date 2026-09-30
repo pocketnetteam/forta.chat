@@ -50,7 +50,7 @@ describe("eaa.aeskeys — no longer self-caches", () => {
 
   it("aeskeys() is a pure derivation with no cache lookup/store", () => {
     const source = getSource();
-    const fn = extractFunction(source, "aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number) {");
+    const fn = extractFunction(source, "aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number | undefined) {");
     expect(fn).not.toMatch(/cache/i);
   });
 });
@@ -106,7 +106,8 @@ describe("orderedIdsHash — order-independent hash of an explicit user list", (
     const end = source.indexOf("\n    }\n", start);
     const fn = source.slice(start, end);
 
-    expect(fn).toMatch(/\.sort\(/);
+    // underscore sortBy — the same call the original pcrypto.js makes
+    expect(fn).toMatch(/_\.sortBy\(/);
     expect(fn).toMatch(/md5\(/);
   });
 });

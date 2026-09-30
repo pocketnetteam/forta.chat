@@ -1538,9 +1538,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     matrixKit.value = null;
 
     if (pcrypto.value) {
-      for (const room of Object.values(pcrypto.value.rooms)) {
-        room.destroy();
-      }
+      // destroy() also terminates the crypto worker (per-account key cache)
+      pcrypto.value.destroy();
       pcrypto.value = null;
     }
     // WEE-97: drop memoized BIP32 key material with the rest of the session
@@ -2401,9 +2400,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       matrixKit.value = null;
 
       if (pcrypto.value) {
-        for (const room of Object.values(pcrypto.value.rooms)) {
-          room.destroy();
-        }
+        // destroy() also terminates the crypto worker (per-account key cache)
+        pcrypto.value.destroy();
         pcrypto.value = null;
       }
 

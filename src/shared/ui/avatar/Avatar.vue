@@ -58,6 +58,9 @@ const imgError = ref(false);
 
 const fixedSrc = computed(() => normalizePocketnetImageUrl(props.src));
 
+// Virtual lists reuse this instance for other rows: a failure on one src must not hide the next.
+watch(fixedSrc, () => { imgError.value = false; });
+
 const hasImage = computed(() => !!props.src && !imgError.value);
 </script>
 

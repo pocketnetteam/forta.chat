@@ -84,6 +84,7 @@
     "stream-browserify": "^3.0.0",
     "tar": "^7.5.9",
     "tree-kill": "^1.2.2",
+    "underscore": "^1.13.8",
     "vee-validate": "^4.13.2",
     "virtua": "^0.48.8",
     "vue": "^3.4.31",
@@ -94,6 +95,7 @@
   "devDependencies": {
     "@pinia/testing": "~0.1.7",
     "@types/node": "^20.14.12",
+    "@types/underscore": "^1.13.0",
     "@vitejs/plugin-vue": "^5.0.5",
     "@vue/test-utils": "^2.4.6",
     "autoprefixer": "^10.4.19",
