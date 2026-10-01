@@ -351,8 +351,6 @@ export class Pcrypto {
     // ---- getusersbytime — EXACT match of original lines 294-307 ----
     function getusersbytime(time: number): { id: string; life: { start: number; end?: number }[] }[] {
       
-      console.log("users", users)
-      
       return _.filter(users, function (ui) {
         const l = _.find(ui.life, function (l) {
           if (!time) {
