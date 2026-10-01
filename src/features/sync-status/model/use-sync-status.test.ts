@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 
 // Keep the composable isolated from real connectivity / i18n side effects.
 vi.mock("@/shared/lib/connectivity", () => ({
@@ -68,5 +68,49 @@ describe("use-sync-status — bounded reconnect banner (WEE-105 H4)", () => {
     // Timer was cleared — no later flip surprises.
     vi.advanceTimersByTime(ERROR_STALE_TIMEOUT * 2);
     expect(rawStatus.value).toBe("up_to_date");
+  });
+});
+
+describe("use-sync-status — routine SYNCING does not spin the header", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetSyncStatus();
+  });
+
+  afterEach(() => {
+    resetSyncStatus();
+    vi.useRealTimers();
+  });
+
+  it("SYNCING через 30с после PREPARED (обычный long-poll) — это syncing, не catching_up", async () => {
+    const { rawStatus, displayStatus } = useSyncStatus();
+
+    handleSdkSync("PREPARED");
+    await nextTick();
+    vi.advanceTimersByTime(STALE_TIMEOUT);
+
+    handleSdkSync("SYNCING");
+    await nextTick();
+    expect(rawStatus.value).toBe("syncing");
+
+    // Past the 1.5s show delay of an active phase: nothing must surface.
+    vi.advanceTimersByTime(5_000);
+    expect(displayStatus.value).not.toBe("catching_up");
+    expect(displayStatus.value).not.toBe("connecting");
+  });
+
+  it("SYNCING после RECONNECTING гасит статус и снимает stale-таймер", () => {
+    const { rawStatus } = useSyncStatus();
+
+    handleSdkSync("PREPARED");
+    handleSdkSync("RECONNECTING");
+    expect(rawStatus.value).toBe("connecting");
+
+    handleSdkSync("SYNCING");
+    expect(rawStatus.value).toBe("syncing");
+
+    // The stale timer was cleared — it must not flip the state later.
+    vi.advanceTimersByTime(STALE_TIMEOUT * 2);
+    expect(rawStatus.value).toBe("syncing");
   });
 });

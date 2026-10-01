@@ -350,6 +350,9 @@ export class Pcrypto {
 
     // ---- getusersbytime — EXACT match of original lines 294-307 ----
     function getusersbytime(time: number): { id: string; life: { start: number; end?: number }[] }[] {
+      
+      console.log("users", users)
+      
       return _.filter(users, function (ui) {
         const l = _.find(ui.life, function (l) {
           if (!time) {
@@ -418,6 +421,7 @@ export class Pcrypto {
       const curState = (chatAny.currentState?.getStateEvents?.("m.room.member") ?? []) as MemberStateEvent[];
       const oldState = (chatAny.oldState?.getStateEvents?.("m.room.member") ?? []) as MemberStateEvent[];
 
+
       const allevents = _.uniq(
         _.filter(([] as MemberStateEvent[]).concat(curState, oldState), function (e) { return !!e?.event; }),
         false,
@@ -437,10 +441,7 @@ export class Pcrypto {
             return {
               time: event.origin_server_ts || 1,
               membership: membership,
-              id:
-                membership == "invite"
-                  ? getmatrixid(event.state_key)
-                  : getmatrixid(event.sender),
+              id: getmatrixid(event.state_key || event.sender),
             };
           }
 
@@ -1485,7 +1486,10 @@ export class Pcrypto {
           keyindex = sender;
         }
 
+        
+
         if (!bodyindex || !body[bodyindex]) {
+
           throw new Error("emptyforme");
         }
 

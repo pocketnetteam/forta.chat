@@ -23,6 +23,12 @@ import { useSidebarTab } from "./model/use-sidebar-tab";
 import type { SidebarTab } from "./model/use-sidebar-tab";
 import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions";
 import { getSidebarFabMode } from "./model/sidebar-fab";
+import {
+  isAlwaysVisibleFilter,
+  loadSidebarFilter,
+  saveSidebarFilter,
+  type SidebarFilter,
+} from "./model/sidebar-filter-storage";
 
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
@@ -31,7 +37,7 @@ const aiChatStore = useAiChatStore();
 const localAiStore = useLocalAiStore();
 const authStore = useAuthStore();
 const selectionStore = useSelectionStore();
-const tabProgress = ref<number | undefined>(undefined);
+const tabProgress = ref<number | null>(null);
 
 useAndroidBackHandler("chat-selection", 92, () => {
   if (selectionStore.isSelectionMode) {
@@ -75,7 +81,9 @@ const searchPlaceholder = computed(() => {
   const shortcut = isMac ? "⌘K" : "Ctrl+K";
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
-const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels" | "ai">("all");
+const restoredFilter = loadSidebarFilter();
+const activeFilter = ref<SidebarFilter>(isAlwaysVisibleFilter(restoredFilter) ? restoredFilter : "all");
+watch(activeFilter, saveSidebarFilter);
 
 // Android Back inside the Chats tab cascades before the app is allowed to
 // minimize (forta-bugs#877): clear an active search first, then collapse a
@@ -143,6 +151,33 @@ const visibleTabValues = computed(() => {
   if (isLocalAiFeatureEnabled && isNativePlatform()) tabs.push("ai");
   return tabs;
 });
+
+// Invites / channels tabs only appear once their data loads from Dexie, so a
+// restored filter pointing at one of them is applied when the tab shows up.
+// The wait is bounded: a tab that appears much later (a new invite arriving)
+// must not yank the user away from where they are, nor must a tab they have
+// already left by hand.
+const RESTORE_FILTER_WINDOW_MS = 15_000;
+let pendingRestoreFilter: SidebarFilter | null = isAlwaysVisibleFilter(restoredFilter) ? null : restoredFilter;
+const restoreFilterTimer = setTimeout(() => { pendingRestoreFilter = null; }, RESTORE_FILTER_WINDOW_MS);
+onBeforeUnmount(() => clearTimeout(restoreFilterTimer));
+watch(
+  [visibleTabValues, activeFilter],
+  ([tabs, filter], prev) => {
+    if (!pendingRestoreFilter) return;
+    // Any filter change other than our own restore means the user moved on.
+    if (prev && filter !== prev[1]) {
+      pendingRestoreFilter = null;
+      return;
+    }
+    if (tabs.includes(pendingRestoreFilter)) {
+      const target = pendingRestoreFilter;
+      pendingRestoreFilter = null;
+      activeFilter.value = target;
+    }
+  },
+  { immediate: true },
+);
 
 // The room-list skeleton must not hide channels that are already hydrated from
 // Dexie: channels are a separate local-first pipeline and shouldn't wait on the
