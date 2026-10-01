@@ -8,13 +8,24 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:modelValue": [tab: string];
-  scrollProgress: [progress: number];
+  /** Live swipe position in tab units; null once the swipe has settled, so
+   *  the tab indicator goes back to following `modelValue`. */
+  scrollProgress: [progress: number | null];
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
 let programmaticScroll = false;
 let scrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 let programmaticTimer: ReturnType<typeof setTimeout> | null = null;
+
+const armProgrammaticGuard = (ms: number) => {
+  programmaticScroll = true;
+  if (programmaticTimer) clearTimeout(programmaticTimer);
+  programmaticTimer = setTimeout(() => {
+    programmaticScroll = false;
+    programmaticTimer = null;
+  }, ms);
+};
 
 onBeforeUnmount(() => {
   if (scrollEndTimer) clearTimeout(scrollEndTimer);
@@ -23,7 +34,14 @@ onBeforeUnmount(() => {
 
 const onScroll = () => {
   const el = containerRef.value;
-  if (!el || programmaticScroll) return;
+  if (!el) return;
+  if (programmaticScroll) {
+    // A smooth scroll across several tabs can outlast the initial guard;
+    // keep ignoring it until the events stop, or its tail would drag the
+    // indicator back from the tapped tab.
+    armProgrammaticGuard(150);
+    return;
+  }
 
   const progress = el.scrollLeft / el.clientWidth;
   emit("scrollProgress", progress);
@@ -36,6 +54,7 @@ const onScroll = () => {
     if (tab && tab !== props.modelValue) {
       emit("update:modelValue", tab);
     }
+    emit("scrollProgress", null);
   }, 100);
 };
 
@@ -50,12 +69,11 @@ watch(
     const targetLeft = idx * el.clientWidth;
     if (Math.abs(el.scrollLeft - targetLeft) < 2) return;
 
-    programmaticScroll = true;
+    // A tap supersedes any swipe still settling.
+    if (scrollEndTimer) { clearTimeout(scrollEndTimer); scrollEndTimer = null; }
+    emit("scrollProgress", null);
+    armProgrammaticGuard(400);
     el.scrollTo({ left: targetLeft, behavior: "smooth" });
-    if (programmaticTimer) clearTimeout(programmaticTimer);
-    programmaticTimer = setTimeout(() => {
-      programmaticScroll = false;
-    }, 400);
   },
 );
 

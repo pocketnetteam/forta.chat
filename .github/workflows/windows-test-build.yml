@@ -1,0 +1,99 @@
+name: Windows Test Build
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-test-build
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy-test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron
+            ~\AppData\Local\electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install Node dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build web assets
+        run: npx vite build
+        env:
+          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
+
+      - name: Resolve test version
+        id: version
+        # Semver prerelease of package.json version: electron-updater treats it as
+        # older than the matching stable release, so a test install still upgrades.
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          echo "version=${PKG}-test.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows installer and zip
+        # Unsigned test build; Windows signing stays a manual step of the release flow.
+        run: |
+          npx electron-builder --config electron-builder.json --win --publish never \
+            -c.extraMetadata.version="${{ steps.version.outputs.version }}"
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Prepare test build for deploy
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          EXE="release/Forta Chat-${VERSION}-win-x64.exe"
+          ZIP="release/Forta Chat-${VERSION}-win-x64.zip"
+          for f in "$EXE" "$ZIP"; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: expected build output not found: $f" >&2
+              ls -la release || true
+              exit 1
+            fi
+          done
+          mkdir -p desktoptests
+          cp "$EXE" desktoptests/latest-win.exe
+          cp "$ZIP" desktoptests/latest-win.zip
+          printf '{"version":"%s","commit":"%s","exe":"latest-win.exe","zip":"latest-win.zip"}\n' \
+            "$VERSION" "$SHORT_SHA" > desktoptests/version-win.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-${{ steps.version.outputs.version }}
+          path: desktoptests/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Deploy test build to server via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./desktoptests/
+          server-dir: ${{ secrets.FTP_SERVER_DIR }}/desktoptests/
+          dangerous-clean-slate: false

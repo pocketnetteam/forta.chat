@@ -19,12 +19,10 @@ export interface SyncStatusReturn {
   bannerVariant: ComputedRef<"warning" | "info" | "success" | "error">;
 }
 
-const RECONNECT_THRESHOLD = 5_000;
 const STALE_TIMEOUT = 30_000;
 const ERROR_STALE_TIMEOUT = 60_000;
 
 const rawStatus = ref<SyncPhase>("connecting");
-let lastUpToDateAt = 0;
 let initialized = false;
 let staleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -73,19 +71,19 @@ export function handleSdkSync(sdkState: string): void {
   }
 
   switch (sdkState) {
-    case "PREPARED": {
-      lastUpToDateAt = Date.now();
+    case "PREPARED":
       rawStatus.value = "up_to_date";
       clearStaleTimer();
       break;
-    }
-    case "SYNCING": {
-      const gap = Date.now() - lastUpToDateAt;
-      rawStatus.value = gap > RECONNECT_THRESHOLD ? "catching_up" : "syncing";
-      if (rawStatus.value === "catching_up") startStaleTimer();
-      else clearStaleTimer();
+    case "SYNCING":
+      // The SDK emits SYNCING after every completed /sync, including routine
+      // long-poll returns every ~30s and the first sync after a reconnect.
+      // Either way the data is already in, so it is a healthy state. Measuring
+      // the time since PREPARED flagged every routine poll as catch-up and kept
+      // the header spinner on permanently.
+      rawStatus.value = "syncing";
+      clearStaleTimer();
       break;
-    }
     case "ERROR":
     case "STOPPED":
       rawStatus.value = "error";
@@ -100,7 +98,6 @@ export function handleSdkSync(sdkState: string): void {
 
 export function resetSyncStatus(): void {
   rawStatus.value = "connecting";
-  lastUpToDateAt = 0;
   clearStaleTimer();
 }
 

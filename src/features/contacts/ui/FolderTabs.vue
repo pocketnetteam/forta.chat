@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useChatStore } from "@/entities/chat";
 import { useChannelStore } from "@/entities/channel";
 import { isNativePlatform, isLocalAiFeatureEnabled } from "@/shared/lib/platform";
@@ -8,7 +8,7 @@ type FilterValue = "all" | "personal" | "groups" | "invites" | "channels" | "ai"
 
 interface Props {
   modelValue: FilterValue;
-  scrollProgress?: number;
+  scrollProgress?: number | null;
 }
 
 const props = defineProps<Props>();
@@ -41,22 +41,32 @@ const visibleTabs = computed(() =>
 
 const tabRefs = ref<HTMLElement[]>([]);
 const scrollContainer = ref<HTMLElement | null>(null);
-const indicatorStyle = ref<{ left: string; width: string }>({ left: "0px", width: "0px" });
 
-const updateIndicator = () => {
+// Tab geometry is read from the DOM, which Vue cannot track. Bumped whenever a
+// tab's box may have moved (mount, tab set change, font load, badge count,
+// resize) so the indicator styles below re-measure instead of keeping the
+// geometry of the first render.
+const layoutVersion = ref(0);
+const remeasure = () => { layoutVersion.value++; };
+
+const tabGeometry = (el: HTMLElement) => ({
+  left: el.offsetLeft + el.offsetWidth * 0.25,
+  width: el.offsetWidth * 0.5,
+});
+
+/** Indicator under the selected tab — the resting state. */
+const indicatorStyle = computed(() => {
+  void layoutVersion.value;
   const idx = visibleTabs.value.findIndex(t => t.value === props.modelValue);
   const el = tabRefs.value[idx];
-  if (el) {
-    indicatorStyle.value = {
-      left: `${el.offsetLeft + el.offsetWidth * 0.25}px`,
-      width: `${el.offsetWidth * 0.5}px`,
-    };
-    // Scroll active tab into view like Telegram
-    el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
-  }
-};
+  if (!el) return { left: "0px", width: "0px" };
+  const { left, width } = tabGeometry(el);
+  return { left: `${left}px`, width: `${width}px` };
+});
 
+/** Indicator following a live swipe of the list below. */
 const interpolatedStyle = computed(() => {
+  void layoutVersion.value;
   if (props.scrollProgress == null) return null;
   const tabs = visibleTabs.value;
   const idx = Math.floor(props.scrollProgress);
@@ -65,22 +75,49 @@ const interpolatedStyle = computed(() => {
   const rightEl = tabRefs.value[Math.min(idx + 1, tabs.length - 1)];
   if (!leftEl || !rightEl) return null;
 
-  const leftCenter = leftEl.offsetLeft + leftEl.offsetWidth * 0.25;
-  const rightCenter = rightEl.offsetLeft + rightEl.offsetWidth * 0.25;
-  const leftWidth = leftEl.offsetWidth * 0.5;
-  const rightWidth = rightEl.offsetWidth * 0.5;
-
+  const from = tabGeometry(leftEl);
+  const to = tabGeometry(rightEl);
   return {
-    left: `${leftCenter + (rightCenter - leftCenter) * frac}px`,
-    width: `${leftWidth + (rightWidth - leftWidth) * frac}px`,
+    left: `${from.left + (to.left - from.left) * frac}px`,
+    width: `${from.width + (to.width - from.width) * frac}px`,
   };
 });
 
+const isFollowingSwipe = computed(() => interpolatedStyle.value !== null);
 const activeIndicatorStyle = computed(() => interpolatedStyle.value ?? indicatorStyle.value);
 
-watch(() => props.modelValue, () => nextTick(updateIndicator));
-watch(visibleTabs, () => nextTick(updateIndicator));
-onMounted(() => nextTick(updateIndicator));
+const scrollActiveTabIntoView = () => {
+  const idx = visibleTabs.value.findIndex(t => t.value === props.modelValue);
+  // Scroll active tab into view like Telegram
+  tabRefs.value[idx]?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+};
+
+watch(() => props.modelValue, () => nextTick(scrollActiveTabIntoView));
+watch(visibleTabs, () => nextTick(() => {
+  remeasure();
+  scrollActiveTabIntoView();
+}));
+
+let resizeObserver: ResizeObserver | null = null;
+const observeTabs = () => {
+  if (!resizeObserver) return;
+  resizeObserver.disconnect();
+  if (scrollContainer.value) resizeObserver.observe(scrollContainer.value);
+  for (const el of tabRefs.value) if (el) resizeObserver.observe(el);
+};
+watch(visibleTabs, () => nextTick(observeTabs));
+
+onMounted(() => {
+  nextTick(() => {
+    remeasure();
+    scrollActiveTabIntoView();
+  });
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(remeasure);
+    observeTabs();
+  }
+});
+onBeforeUnmount(() => resizeObserver?.disconnect());
 
 // Only scroll tab strip into view when near a snap point (avoid competing smooth-scrolls)
 watch(() => props.scrollProgress, (val) => {
@@ -113,7 +150,8 @@ watch(() => props.scrollProgress, (val) => {
     </button>
     <!-- Sliding indicator -->
     <div
-      class="absolute bottom-0 h-0.5 rounded-full bg-color-bg-ac transition-all duration-200 ease-out"
+      class="absolute bottom-0 h-0.5 rounded-full bg-color-bg-ac"
+      :class="isFollowingSwipe ? '' : 'transition-all duration-200 ease-out'"
       :style="activeIndicatorStyle"
     />
   </div>
