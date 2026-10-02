@@ -70,7 +70,7 @@ describe("chat-store — retryEncryptedPreviews (WEE-96 cold-start latch)", () =
 
     store.addRoom(makeRoom({
       id: ROOM_ID,
-      lastMessage: makeMsg({ roomId: ROOM_ID, content: "[encrypted]" }),
+      lastMessage: makeMsg({ id: "$e1", roomId: ROOM_ID, content: "[encrypted]" }),
     }));
   });
 

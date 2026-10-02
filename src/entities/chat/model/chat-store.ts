@@ -654,8 +654,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  degrade watchdog, so this still bounds the genuine first-load skeleton. */
   const isSyncing = computed(() => initialSyncStatus.value === "loading");
 
-  // Cache for decrypted room previews — persists across refreshRooms() rebuilds
-  const decryptedPreviewCache = new Map<string, string>();
+  // Cache for decrypted room previews — persists across refreshRooms() rebuilds.
+  // Keyed by room but bound to the event it was decrypted from: a newer
+  // message's placeholder must not show the previous message's text, nor be
+  // skipped as "already decrypted".
+  const decryptedPreviewCache = new Map<string, { eventId: string; body: string }>();
+  /** Cached decrypted body for the room's preview event, if it is that event's.
+   *  An unknown eventId on either side (legacy rows) is accepted. */
+  const cachedPreviewFor = (roomId: string, eventId: string | undefined): string | undefined => {
+    const entry = decryptedPreviewCache.get(roomId);
+    if (!entry) return undefined;
+    if (eventId && entry.eventId && entry.eventId !== eventId) return undefined;
+    return entry.body;
+  };
 
   // Debounce timer for refreshRooms
   let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -722,6 +733,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // covers RPC/Tor warm-up failures during the very first preview pass
   const PREVIEW_RETRY_PASS_DELAYS_MS = [10_000, 30_000, 90_000] as const;
   const previewRetryTimers: ReturnType<typeof setTimeout>[] = [];
+  // Sidebar rows on screen, top to bottom (ContactList.loadVisibleRooms).
+  // null until the list first reports: preview passes then cover every room.
+  let visibleSidebarRoomIds: Set<string> | null = null;
+  let visibleSidebarOrder: string[] = [];
+  // Which list instance reported last (SwipeableTabs keeps every tab mounted)
+  let visibleSidebarOwner: symbol | undefined;
+  // Rooms whose preview decrypt is running — a new pass skips them.
+  const previewDecryptInFlight = new Set<string>();
+  // Keys arrived while these were in flight — retry if the running attempt fails.
+  const previewRetryRequested = new Set<string>();
+  /** Raw Dexie preview values that stand for an undecrypted message
+   *  (same set resolveLastMessagePreview replaces). */
+  const isPreviewPlaceholder = (preview: string | undefined): boolean =>
+    preview === "[encrypted]" || preview === "m.bad.encrypted" || !!preview?.startsWith("** Unable to decrypt");
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -1702,7 +1727,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // + sidebar re-renders + visible badge flicker on neighboring rooms.
     const effectiveSortKey = ts > 0 ? ts : (lr.updatedAt ?? 0);
     // Resolve effective preview: prefer decrypted cache over raw Dexie value
-    const decryptedPreview = decryptedPreviewCache.get(lr.id);
+    const decryptedPreview = cachedPreviewFor(lr.id, lr.lastMessageEventId);
     const effectivePreview = resolveLastMessagePreview(lr.lastMessagePreview, decryptedPreview);
 
     const localStatus = lr.lastMessageLocalStatus;
@@ -2741,6 +2766,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     perfMark("fullRoomRefresh-start");
     // Retry previously failed decryptions on full refresh
     decryptFailedRooms.clear();
+    // The rows on screen need not wait for the whole refresh (35s observed on
+    // a large account) — their Dexie rows are already there.
+    decryptVisiblePreviews();
 
     // Preserve existing room data — addRoom/addMessage/cache may have set data that Matrix can't resolve yet.
     // Single pass instead of 4 × O(n) map() calls — significant at 100k rooms.
@@ -3246,7 +3274,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Apply cached decrypted previews
     if (chatRoom.lastMessage?.content === "[encrypted]") {
-      const cached = decryptedPreviewCache.get(chatRoom.id);
+      const cached = cachedPreviewFor(chatRoom.id, chatRoom.lastMessage.id);
       if (cached) {
         chatRoom.lastMessage = { ...chatRoom.lastMessage, content: cached };
       }
@@ -3506,37 +3534,64 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const decryptRoomPreviews = async (matrixRooms: any[], onlyRoomIds?: Set<string>) => {
     // Collect rooms that need decryption
     const toDecrypt: Array<{ roomId: string; matrixRoom: unknown }> = [];
+    const visible = visibleSidebarRoomIds;
     for (const matrixRoom of matrixRooms) {
       const roomId = matrixRoom.roomId as string;
       if (onlyRoomIds && !onlyRoomIds.has(roomId)) continue;
-      if (decryptedPreviewCache.has(roomId)) continue; // already decrypted
+      // Once the sidebar reported its rows, only what is on screen (and the
+      // open chat) is decrypted; the rest waits until scrolled into view.
+      if (visible && !visible.has(roomId) && roomId !== activeRoomId.value) continue;
+      if (previewDecryptInFlight.has(roomId)) continue;
+      // Already decrypted — for the event the row shows now, not an older one
+      const previewEventId = dexieRoomMap.get(roomId)?.lastMessageEventId ?? getRoomById(roomId)?.lastMessage?.id;
+      if (cachedPreviewFor(roomId, previewEventId) !== undefined) continue;
       const failInfo = decryptFailedRooms.get(roomId);
       if (failInfo) {
         if (failInfo.count >= DECRYPT_MAX_RETRIES) continue;
         if (Date.now() - failInfo.lastAttempt < DECRYPT_RETRY_DELAY) continue;
       }
-      const room = getRoomById(roomId);
-      const lmc = room?.lastMessage?.content;
-      if (!lmc || lmc !== "[encrypted]") continue;
+      // The sidebar renders the Dexie row, which can carry the placeholder
+      // before rooms.value is built (cold start) — check both.
+      const lmc = getRoomById(roomId)?.lastMessage?.content;
+      if (lmc !== "[encrypted]" && !isPreviewPlaceholder(dexieRoomMap.get(roomId)?.lastMessagePreview)) continue;
       toDecrypt.push({ roomId, matrixRoom });
     }
     if (toDecrypt.length === 0) return;
 
-    // Cap rooms per cycle to avoid blocking; rotate the window so repeated
-    // passes (incl. fresh-budget retry passes) eventually reach every room.
+    // Open chat first, then sidebar rows top to bottom.
+    if (visible || activeRoomId.value) {
+      const rank = (roomId: string) => {
+        if (roomId === activeRoomId.value) return -1;
+        const idx = visibleSidebarOrder.indexOf(roomId);
+        return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+      };
+      toDecrypt.sort((a, b) => rank(a.roomId) - rank(b.roomId));
+    }
+
+    // Cap rooms per cycle to avoid blocking. Visible rows are already in
+    // priority order — take the top. Otherwise rotate the window so repeated
+    // passes (incl. fresh-budget retry passes) eventually reach every room,
+    // keeping the open chat in every window.
     let capped = toDecrypt;
     if (toDecrypt.length > PREVIEW_DECRYPT_MAX_PER_CYCLE) {
-      const start = previewCapCursor % toDecrypt.length;
-      capped = [...toDecrypt.slice(start), ...toDecrypt.slice(0, start)]
-        .slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
-      previewCapCursor = (start + PREVIEW_DECRYPT_MAX_PER_CYCLE) % toDecrypt.length;
+      if (visible) {
+        capped = toDecrypt.slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
+      } else {
+        const activeIdx = toDecrypt.findIndex((r) => r.roomId === activeRoomId.value);
+        const pinned = activeIdx >= 0 ? [toDecrypt[activeIdx]] : [];
+        const rest = activeIdx >= 0 ? toDecrypt.filter((_, i) => i !== activeIdx) : toDecrypt;
+        const take = PREVIEW_DECRYPT_MAX_PER_CYCLE - pinned.length;
+        const start = previewCapCursor % rest.length;
+        capped = [...pinned, ...[...rest.slice(start), ...rest.slice(0, start)].slice(0, take)];
+        previewCapCursor = (start + take) % rest.length;
+      }
     }
 
     /** Decrypt one room's preview. Never throws — failures are recorded in
      *  decryptFailedRooms so the retry/backoff bookkeeping stays per-room. */
     const decryptOnePreview = async (
       { roomId, matrixRoom }: { roomId: string; matrixRoom: unknown },
-    ): Promise<{ roomId: string; body: string } | null> => {
+    ): Promise<{ roomId: string; eventId: string; body: string } | null> => {
       try {
         const roomCrypto = await ensureRoomCrypto(roomId);
         if (!roomCrypto) return null;
@@ -3550,15 +3605,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (!timelineEvents.length) timelineEvents = (matrixRoom as any).timeline ?? [];
         } catch { /* ignore */ }
 
-        for (let j = timelineEvents.length - 1; j >= 0; j--) {
+        // Decrypt the event the sidebar row points at when the SDK holds it;
+        // otherwise the newest encrypted message — but never one older than
+        // the row (cold start: the SDK timeline may not reach the row's event
+        // yet, and an older body would stick as the preview).
+        const row = dexieRoomMap.get(roomId);
+        const targetEventId = row?.lastMessageEventId;
+        const isEncryptedMessage = (raw: Record<string, unknown> | null): raw is Record<string, unknown> =>
+          !!raw?.content && raw.type === "m.room.message"
+          && (raw.content as Record<string, unknown>).msgtype === "m.encrypted";
+        const targetIdx = targetEventId
+          ? timelineEvents.findIndex((e) => isEncryptedMessage(getRawEvent(e)) && getRawEvent(e)?.event_id === targetEventId)
+          : -1;
+        for (let j = targetIdx >= 0 ? targetIdx : timelineEvents.length - 1; j >= 0; j--) {
           const raw = getRawEvent(timelineEvents[j]);
-          if (!raw?.content || raw.type !== "m.room.message") continue;
-          const content = raw.content as Record<string, unknown>;
-          if (content.msgtype !== "m.encrypted") continue;
+          if (!isEncryptedMessage(raw)) continue;
+          if (targetIdx < 0 && targetEventId
+            && ((raw.origin_server_ts as number | undefined) ?? 0) < (row?.lastMessageTimestamp ?? 0)) {
+            return null; // the row's event is not loaded yet — nothing to decrypt
+          }
 
           try {
             const decrypted = await roomCrypto.decryptEvent(raw);
-            if (decrypted.body) return { roomId, body: decrypted.body };
+            if (decrypted.body) return { roomId, eventId: (raw.event_id as string) ?? "", body: decrypted.body };
           } catch {
             decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
           }
@@ -3579,15 +3648,41 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // batch=1 keeps the old per-room yield — 5 synchronous pbkdf2 chains
     // back-to-back would recreate the 370ms+ long tasks this code once had.
     const batchSize = isCryptoWorkerSupported() ? PREVIEW_DECRYPT_BATCH_SIZE : 1;
-    const batched = await runInBatches(capped, batchSize, decryptOnePreview, yieldToMain);
-    const decryptedResults = batched.filter((r): r is { roomId: string; body: string } => r !== null);
+    // In-flight marks let a scroll start newly visible rows right away
+    // without re-queuing the ones still being decrypted.
+    // A failed room is released at once — a key-arrival retry must not be
+    // skipped because the rest of its batch is still running. Successes stay
+    // marked until their result is applied below.
+    for (const { roomId } of capped) previewDecryptInFlight.add(roomId);
+    const heldUntilApplied: string[] = [];
+    const decryptAndRelease = async (item: { roomId: string; matrixRoom: unknown }) => {
+      const result = await decryptOnePreview(item);
+      if (result) {
+        heldUntilApplied.push(item.roomId);
+      } else {
+        previewDecryptInFlight.delete(item.roomId);
+        // Keys arrived while this attempt ran with the old ones
+        if (previewRetryRequested.delete(item.roomId)) queueMicrotask(() => retryRoomPreview(item.roomId));
+      }
+      return result;
+    };
+    let batched: Array<{ roomId: string; eventId: string; body: string } | null>;
+    try {
+      batched = await runInBatches(capped, batchSize, decryptAndRelease, yieldToMain);
+    } finally {
+      for (const roomId of heldUntilApplied) {
+        previewDecryptInFlight.delete(roomId);
+        previewRetryRequested.delete(roomId);
+      }
+    }
+    const decryptedResults = batched.filter((r): r is { roomId: string; eventId: string; body: string } => r !== null);
 
     // Apply ALL decrypted results in one pass with a single triggerRef
     if (decryptedResults.length > 0) {
-      for (const { roomId, body } of decryptedResults) {
-        decryptedPreviewCache.set(roomId, body);
+      for (const { roomId, eventId, body } of decryptedResults) {
+        decryptedPreviewCache.set(roomId, { eventId, body });
         const room = getRoomById(roomId);
-        if (room?.lastMessage) {
+        if (room?.lastMessage?.content === "[encrypted]" && (!room.lastMessage.id || room.lastMessage.id === eventId)) {
           room.lastMessage = { ...room.lastMessage, content: body };
         }
       }
@@ -3608,6 +3703,62 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         else patchSortedRooms(changes);
       }
     }
+  };
+
+  /** Decrypt the previews of the sidebar rows currently on screen. */
+  const decryptVisiblePreviews = () => {
+    if (!visibleSidebarRoomIds) return;
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const matrixRooms: any[] = [];
+    for (const id of visibleSidebarOrder) {
+      const mr = matrixService.getRoom(id);
+      if (mr) matrixRooms.push(mr);
+    }
+    if (matrixRooms.length > 0) decryptRoomPreviews(matrixRooms).then(() => debouncedCacheRooms());
+  };
+
+  /** The sidebar reports which rows are on screen (scroll, tab switch). Their
+   *  previews decrypt right away — ahead of the full room refresh, which can
+   *  take tens of seconds on large accounts — and from then on preview passes
+   *  skip rows that are not visible. */
+  const setVisibleSidebarRooms = (roomIds: string[], owner?: symbol) => {
+    visibleSidebarOwner = owner;
+    visibleSidebarOrder = roomIds;
+    visibleSidebarRoomIds = new Set(roomIds);
+    decryptVisiblePreviews();
+  };
+
+  /** The list that last reported its rows went off screen ("hidden": nothing
+   *  of it is visible any more) or was unmounted ("unmounted": no list to ask —
+   *  back to covering every room, e.g. while search results replace the list).
+   *  No-op when another list reported since. */
+  const releaseVisibleSidebarRooms = (owner: symbol, mode: "hidden" | "unmounted") => {
+    if (visibleSidebarOwner !== owner) return;
+    visibleSidebarOrder = [];
+    if (mode === "unmounted") {
+      visibleSidebarRoomIds = null;
+      visibleSidebarOwner = undefined;
+    } else {
+      visibleSidebarRoomIds = new Set();
+    }
+  };
+
+  /** Keys for a room just arrived: its preview may decrypt now — retry it
+   *  with a fresh budget (the failure count was spent while keys were missing). */
+  const retryRoomPreview = (roomId: string) => {
+    // An attempt is running with the old keys: re-run once it fails. Only key
+    // arrival requests this — ordinary passes keep the retry delay/cap.
+    if (previewDecryptInFlight.has(roomId)) {
+      previewRetryRequested.add(roomId);
+      return;
+    }
+    decryptFailedRooms.delete(roomId);
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    const mr = matrixService.getRoom(roomId);
+    if (mr) decryptRoomPreviews([mr]).then(() => debouncedCacheRooms());
   };
 
   /** Cold-start retry for encrypted previews (WEE-96 follow-up).
@@ -5155,7 +5306,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Update decrypted preview cache so refreshRoomsImmediate() preserves this preview
     if (message.content && message.content !== "[encrypted]") {
-      decryptedPreviewCache.set(roomId, message.content);
+      decryptedPreviewCache.set(roomId, { eventId: message.id, body: message.content });
     }
   };
 
@@ -8231,7 +8382,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         unreadCount: lr.unreadCount,
         topic: lr.topic,
         updatedAt: lr.updatedAt,
-        lastMessage: buildLastMessage(lr, decryptedPreviewCache.get(lr.id)),
+        lastMessage: buildLastMessage(lr, cachedPreviewFor(lr.id, lr.lastMessageEventId)),
         lastMessageReaction: lr.lastMessageReaction ?? undefined,
       } as ChatRoom));
 
@@ -8464,6 +8615,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     decryptFailedRooms.clear();
     for (const timer of previewRetryTimers) clearTimeout(timer);
     previewRetryTimers.length = 0;
+    visibleSidebarRoomIds = null;
+    visibleSidebarOrder = [];
+    visibleSidebarOwner = undefined;
+    previewDecryptInFlight.clear();
+    previewRetryRequested.clear();
     peerKeysStatus.clear();
     clearActiveRoomKeysRetries();
     matrixRoomAddresses.clear();
@@ -8597,6 +8753,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     setActiveRoom,
     setHelpers,
     retryEncryptedPreviews,
+    retryRoomPreview,
+    setVisibleSidebarRooms,
+    releaseVisibleSidebarRooms,
     muteMember,
     setMemberPowerLevel,
     setMessages,

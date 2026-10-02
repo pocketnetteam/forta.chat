@@ -630,6 +630,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (cryptoInstance) {
         cryptoInstance.onKeysLoaded = (roomId: string) => {
           chatDbKit.retryRoomDecryption?.(roomId);
+          chatStore.retryRoomPreview(roomId);
           chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
         };
         // A failed key request must not leave a stale "missing" banner; the

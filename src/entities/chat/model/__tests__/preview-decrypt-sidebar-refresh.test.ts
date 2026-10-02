@@ -81,11 +81,16 @@ function makeLocalRoom(): LocalRoom {
   } as LocalRoom;
 }
 
+let emitRoomChanges: (changes: RoomChange[]) => void = () => {};
+
 function makeKit() {
   return {
     rooms: {
       getAllRooms: vi.fn(async () => [makeLocalRoom()]),
-      observeRoomChanges: vi.fn((_cb: (changes: RoomChange[]) => void) => () => {}),
+      observeRoomChanges: vi.fn((cb: (changes: RoomChange[]) => void) => {
+        emitRoomChanges = cb;
+        return () => {};
+      }),
       bulkSyncRooms: vi.fn(async () => {}),
       getRoom: vi.fn(async () => undefined),
       updateOutboundWatermark: vi.fn(async () => {}),
@@ -122,6 +127,7 @@ describe("chat-store — decrypted preview reaches the Dexie-backed sidebar", ()
     mockMatrixService.isReady.mockReturnValue(true);
     mockMatrixService.getRooms.mockImplementation(() => [mxRoom]);
     mockMatrixService.getRoom.mockImplementation(() => mxRoom);
+    mxRoom.getLiveTimeline = () => ({ getEvents: () => [ENCRYPTED_EVENT] });
 
     decryptEvent = vi.fn();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -141,6 +147,64 @@ describe("chat-store — decrypted preview reaches the Dexie-backed sidebar", ()
     store.retryEncryptedPreviews();
 
     await vi.waitFor(() => expect(sidebarPreview(store)).toBe("real preview"));
+  });
+
+  it("decrypts a row whose placeholder is only in Dexie (cold start, rooms.value not built)", async () => {
+    const room = store.rooms.find((r) => r.id === ROOM_ID)!;
+    room.lastMessage = { ...room.lastMessage!, content: "older text" };
+    decryptEvent.mockResolvedValue({ body: "real preview", msgtype: "m.text" });
+    store.setVisibleSidebarRooms([ROOM_ID]);
+
+    await vi.waitFor(() => expect(sidebarPreview(store)).toBe("real preview"));
+  });
+
+  it("decrypts the event the Dexie row points at, not just the newest one", async () => {
+    const OLDER = { event: { ...ENCRYPTED_EVENT.event, event_id: "$e1" } };
+    const NEWER = { event: { ...ENCRYPTED_EVENT.event, event_id: "$e2", origin_server_ts: 2000 } };
+    mxRoom.getLiveTimeline = () => ({ getEvents: () => [OLDER, NEWER] });
+    decryptEvent.mockImplementation(async (raw: Record<string, unknown>) =>
+      ({ body: `plain ${raw.event_id as string}`, msgtype: "m.text" }));
+    store.setVisibleSidebarRooms([ROOM_ID]);
+
+    await vi.waitFor(() => expect(sidebarPreview(store)).toBe("plain $e1"));
+  });
+
+  it("does not decrypt an older event when the row's event is not in the SDK timeline yet", async () => {
+    // Dexie row points at $e1 @1000 (makeLocalRoom); the SDK only holds an older one
+    const OLDER = { event: { ...ENCRYPTED_EVENT.event, event_id: "$e0", origin_server_ts: 500 } };
+    mxRoom.getLiveTimeline = () => ({ getEvents: () => [OLDER] });
+    decryptEvent.mockResolvedValue({ body: "stale text", msgtype: "m.text" });
+    store.setVisibleSidebarRooms([ROOM_ID]);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(decryptEvent).not.toHaveBeenCalled();
+    expect(sidebarPreview(store)).toBe("[encrypted]");
+  });
+
+  it("a newer message's placeholder never shows the previous message's text", async () => {
+    decryptEvent.mockImplementation(async (raw: Record<string, unknown>) =>
+      ({ body: `plain ${raw.event_id as string}`, msgtype: "m.text" }));
+    store.setVisibleSidebarRooms([ROOM_ID]);
+    await vi.waitFor(() => expect(sidebarPreview(store)).toBe("plain $e1"));
+
+    // A new encrypted message lands in the row before its decrypt
+    let releaseNew!: () => void;
+    const newGate = new Promise<void>((r) => { releaseNew = r; });
+    decryptEvent.mockImplementation(async (raw: Record<string, unknown>) => {
+      await newGate;
+      return { body: `plain ${raw.event_id as string}`, msgtype: "m.text" };
+    });
+    const NEWER = { event: { ...ENCRYPTED_EVENT.event, event_id: "$e2", origin_server_ts: 2000 } };
+    mxRoom.getLiveTimeline = () => ({ getEvents: () => [ENCRYPTED_EVENT, NEWER] });
+    emitRoomChanges([{
+      type: "upsert",
+      room: { ...makeLocalRoom(), lastMessageEventId: "$e2", lastMessageTimestamp: 2000 },
+    }]);
+
+    await vi.waitFor(() => expect(sidebarPreview(store)).toBe("[encrypted]"));
+    store.setVisibleSidebarRooms([ROOM_ID]);
+    releaseNew();
+    await vi.waitFor(() => expect(sidebarPreview(store)).toBe("plain $e2"));
   });
 
   it("leaves the sidebar row untouched when decryption fails", async () => {

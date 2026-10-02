@@ -32,9 +32,12 @@ import { reuseIfSameKeys } from "@/features/contacts/lib/stable-scroller-items";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
+  /** This list's tab is the one on screen (SwipeableTabs keeps every tab
+   *  mounted) — only the active list reports its rows for preview decrypt. */
+  active?: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), { filter: "all" });
+const props = withDefaults(defineProps<Props>(), { filter: "all", active: true });
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -561,6 +564,44 @@ const loadMoreRooms = () => {
 let viewportGeneration = 0;
 let _layoutRetries = 0;
 
+/** Rows in the viewport + small overscan (1 above, 2 below); channels excluded. */
+const visibleRange = (scrollTop: number, clientHeight: number) => {
+  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 1);
+  const lastIdx = Math.min(
+    filteredRooms.value.length - 1,
+    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + 2,
+  );
+  const visibleIds: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const item = filteredRooms.value[i];
+    if (item && !isChannel(item)) visibleIds.push((item as ChatRoom).id);
+  }
+  return { firstIdx, lastIdx, visibleIds };
+};
+
+// Identifies this list instance to the store's visible-rows report.
+const visibleRowsOwner = Symbol("ContactList");
+
+/** Re-report the visible rows after the list reordered (a new message moves
+ *  a room to the top without any scroll) — cheap, no profile/message loads. */
+let reportVisibleTimer: ReturnType<typeof setTimeout> | null = null;
+const reportVisibleRoomsSoon = () => {
+  if (reportVisibleTimer || !props.active) return;
+  reportVisibleTimer = setTimeout(() => {
+    reportVisibleTimer = null;
+    const el = scrollerRef.value?.$el as HTMLElement | undefined;
+    if (!props.active || !el || el.clientHeight === 0) return;
+    chatStore.setVisibleSidebarRooms(visibleRange(el.scrollTop, el.clientHeight).visibleIds, visibleRowsOwner);
+  }, 150);
+};
+
+// Tab switched: the list now on screen reports; the one leaving gives up its
+// rows (no-op if the new tab already reported).
+watch(() => props.active, (isActive) => {
+  if (isActive) nextTick(loadVisibleRooms);
+  else chatStore.releaseVisibleSidebarRooms(visibleRowsOwner, "hidden");
+});
+
 /** Calculate which rooms are visible, load profiles + messages for them.
  *  On scroll: cancels previous batch, loads only new visible rooms. */
 const loadVisibleRooms = () => {
@@ -577,18 +618,14 @@ const loadVisibleRooms = () => {
   }
   _layoutRetries = 0;
 
-  // Only the actual viewport + small overscan (1 above, 2 below)
-  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 1);
-  const lastIdx = Math.min(
-    filteredRooms.value.length - 1,
-    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + 2,
-  );
+  const { firstIdx, lastIdx, visibleIds } = visibleRange(scrollTop, clientHeight);
 
-  const visibleIds: string[] = [];
-  for (let i = firstIdx; i <= lastIdx; i++) {
-    const item = filteredRooms.value[i];
-    if (item && !isChannel(item)) visibleIds.push((item as ChatRoom).id);
-  }
+  // Encrypted previews of what is on screen decrypt first. Reported even
+  // when empty (empty filter) — otherwise the store would keep stale rows.
+  // Not while the list has no height (hidden behind an open chat on mobile):
+  // that would report just the overscan rows; the ResizeObserver below
+  // reports once the list is shown again.
+  if (props.active && clientHeight > 0) chatStore.setVisibleSidebarRooms(visibleIds, visibleRowsOwner);
 
   if (visibleIds.length === 0) return;
 
@@ -643,10 +680,19 @@ const onScrollerScroll = () => {
 
 // Attach native scroll listener to RecycleScroller's root element
 let scrollEl: HTMLElement | null = null;
+// Re-report the visible rows when the list's size changes: shown again after
+// an open chat hid it (mobile), or a taller window shows more rows.
+const resizeObserver = typeof ResizeObserver !== "undefined"
+  ? new ResizeObserver(() => reportVisibleRoomsSoon())
+  : null;
 const attachScrollListener = () => {
-  if (scrollEl) scrollEl.removeEventListener("scroll", onScrollerScroll);
+  if (scrollEl) {
+    scrollEl.removeEventListener("scroll", onScrollerScroll);
+    resizeObserver?.unobserve(scrollEl);
+  }
   scrollEl = (scrollerRef.value?.$el as HTMLElement) ?? null;
   scrollEl?.addEventListener("scroll", onScrollerScroll, { passive: true });
+  if (scrollEl) resizeObserver?.observe(scrollEl);
 };
 
 onMounted(() => {
@@ -678,6 +724,7 @@ watch(
     if (roomIds.length > 0) {
       chatStore.loadProfilesForRoomIds(roomIds);
     }
+    reportVisibleRoomsSoon();
   },
   { immediate: true },
 );
@@ -698,6 +745,9 @@ watch(
 onUnmounted(() => {
   scrollEl?.removeEventListener("scroll", onScrollerScroll);
   longPressCache.clear();
+  if (reportVisibleTimer) { clearTimeout(reportVisibleTimer); reportVisibleTimer = null; }
+  resizeObserver?.disconnect();
+  chatStore.releaseVisibleSidebarRooms(visibleRowsOwner, "unmounted");
 });
 
 // Context menu
