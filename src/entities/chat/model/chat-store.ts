@@ -8741,6 +8741,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     restoreForwardDraft,
     getDisplayName,
     getCanonicalDisplayName,
+    /** Read-only: lets name caches track getDisplayName's Matrix-name source. */
+    userDisplayNames,
     getLocalAlias,
     hasLocalAlias,
     localAliases,

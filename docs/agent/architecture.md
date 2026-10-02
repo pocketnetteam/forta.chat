@@ -76,6 +76,10 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 - Wrapper around the Matrix SDK and E2E crypto: client service, per-room crypto instances, key management
 - `decryptEvent()`, `encryptEvent()`, `getRoomMembers()`, `fetchEventContext()`
 
+### Vendored Pocketnet SDK (`public/js/lib/client/sdk.js`)
+- Loaded as a classic `<script>`, not bundled; edited in place. Mark each local change with a `Forta Chat:` comment and cover it in `src/app/providers/initializers/__tests__/sdk-*.test.ts` (sdk.js runs in a `vm` sandbox there).
+- `userInfo.load(addresses, light, update)` always sends `getuserprofile` in the short form (`[addresses, "1"]`), own profile included. The full form only adds `subscribes[]` / `subscribers[]` / `blocking[]` / `content`, which the chat never reads and which grow with the account's audience. The short form still carries every field the UserInfo transaction re-publishes on a profile edit (`a`, `s`, `l`, `b`, `r`, `k`), plus `reputation` and the `*_count` fields. `light` now selects only the cache: `userInfoFull` (10 min TTL, `userInfoFullFB` offline fallback) for the logged-in account, `userInfoLight` (~14 days) for peers. Subscriptions and blocks have their own SDK loaders (`getusersubscribes`, `self.blocking`) if they are ever needed.
+
 ### Pinia stores
 - `useAuthStore()` (auth, sessions, Matrix init), `useChatStore()` (rooms, active room, metadata), `useUserStore()`, `useCallStore()` (WebRTC), `useChannelStore()`, `useThemeStore()`, `useLocaleStore()`, `useTorStore()`, `useMediaStore()`, local-ai and ai-chat stores
 

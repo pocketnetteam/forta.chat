@@ -845,7 +845,13 @@ var pSDK = function ({ app, api, actions }) {
 
                 var parameters = [addresses];
 
-                if (light) { parameters.push('1') }
+                // Forta Chat: always request the short form. The full form only
+                // adds subscribes[] / subscribers[] / blocking[] / content, which
+                // the chat never reads; every field UserInfo re-publishes on a
+                // profile edit (a, s, l, b, r, k) is in the short form too.
+                // `light` still picks the cache (TTL, userInfoFullFB fallback).
+                // See docs/agent/architecture.md, "Vendored Pocketnet SDK".
+                parameters.push('1')
 
                 return api.rpc('getuserprofile', parameters).then((data) => {
 
