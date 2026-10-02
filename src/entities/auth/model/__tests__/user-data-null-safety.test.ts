@@ -49,7 +49,8 @@ describe("UserData null-safety in registration/login flow", () => {
     // Window widened (WEE-XX): fetchUserInfo's network call is now wrapped in
     // its own try/catch (proxy 408s observed in production must not fail the
     // whole login()/register() chain), pushing the userData guard further in.
-    const fn = src.slice(fnStart, fnStart + 2000);
+    // Widened again: configureSdkUser() now runs before the network call.
+    const fn = src.slice(fnStart, fnStart + 2400);
     // Must guard against undefined userData before dereferencing any field.
     // Old buggy version: `if (userData.name)` — crashes on undefined.
     // Fixed version: `if (userData && userData.name)` or an early guard.
