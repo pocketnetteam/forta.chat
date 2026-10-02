@@ -1326,6 +1326,7 @@ var pSDK = function ({ app, api, actions }) {
                         if(item.type == 'share'){ i.type = 'share'; i.key = item.txid || item.id }
                         if(item.type == 'video'){ i.type = 'share'; i.key = item.txid || item.id }
                         if(item.type == 100 || item.k){ i.type = 'channel'; i.key = i.address }
+                        if(item.type == 'collection'){ i.type = 'collection'; i.key = item.txid || item.id }
 
                         if(!i.type){ 
                             i.type = 'comment'; 
@@ -2152,16 +2153,36 @@ var pSDK = function ({ app, api, actions }) {
                 if(!c) return false
 
                 try {
+                    // getrawtransactionwithmessagebyid returns a collection in the share format:
+                    // contentIds in repost, cover in m, settings in t (getprofilecollections: contentIds, i, s)
+                    if (typeof c.contentIds == 'undefined' && typeof c.repost != 'undefined') c.contentIds = c.repost
+                    if (typeof c.i == 'undefined' && typeof c.m != 'undefined') c.i = c.m
+                    if (typeof c.s == 'undefined' && typeof c.t != 'undefined') c.s = c.t
+
                     c.caption = clearStringXss(trydecode(c.c || '')).replace(/&nbsp;/g, ' ');
                     c.image = clearStringXss(trydecode(c.i || ''));
 
-                    
-                    c.message = trimrn((superXSS(trydecode(c.message || ''), {
-                        whiteList: [],
-                        stripIgnoreTag: true,
-                    }))).replace(/\n{2,}/g, '\n\n')
 
-                    c.contentIds = _.filter(_.map(c.contentIds || [], function(i){return (clearStringXss(i))}), function(i){return i});
+                    // the node has no message field for collections, the description is settings.m (payload s)
+                    var settings = collectionSettings.parse(c.s)
+
+                    if (_.isString(settings.m)) {
+                        settings.m = trimrn((superXSS(trydecode(settings.m), {
+                            whiteList: [],
+                            stripIgnoreTag: true,
+                        }))).replace(/\n{2,}/g, '\n\n')
+                    }
+
+                    c.s = collectionSettings.clean(settings)
+
+                    // getprofilecollections may return contentIds as a JSON string
+                    if (_.isString(c.contentIds)) {
+                        try { c.contentIds = JSON.parse(c.contentIds) } catch (e) { c.contentIds = [] }
+                    }
+
+                    if (!_.isArray(c.contentIds)) c.contentIds = []
+
+                    c.contentIds = _.filter(_.map(c.contentIds, function(i){return (clearStringXss(i))}), function(i){return i});
 
                 }
                 catch (e) {
@@ -2176,7 +2197,6 @@ var pSDK = function ({ app, api, actions }) {
             }), c => c)
         },
 
-        //? TODO COLL
         load: function (txids, update) {
             
 
@@ -2237,7 +2257,7 @@ var pSDK = function ({ app, api, actions }) {
 
                 if (exp.txid == object.txid) {
 
-                    object.message = exp.message
+                    object.settings = _.clone(exp.settings || {})
                     object.image = exp.image
                     object.contentIds = exp.contentIds
                     object.caption = exp.caption
@@ -2262,8 +2282,8 @@ var pSDK = function ({ app, api, actions }) {
 
         tempExtend: function (object, txid) {
 
-            return extendFromActions('collection', 
-                ['collection'],
+            return extendFromActions('collection',
+                ['collection', 'contentDelete'],
                 object,
                 txid
             )
@@ -2274,8 +2294,6 @@ var pSDK = function ({ app, api, actions }) {
 
             _.each(actions.getAccounts(), (account) => {
                 var actions = _.filter(account.getTempActions('collection'), filter)
-
-                console.log('actions', actions)
 
                 _.each(actions, (a) => {
                     objects.unshift(a)
@@ -2883,20 +2901,27 @@ var pSDK = function ({ app, api, actions }) {
         listener: function (exp, address, status) {
             if (status == 'completed') {
 
-                objects['share'][exp.txidEdit] = this.applyAction(objects['share'][exp.txidEdit], exp)
+                if (objects['share'][exp.txidEdit]) {
+                    objects['share'][exp.txidEdit] = this.applyAction(objects['share'][exp.txidEdit], exp)
+                }
+
+                if (objects['collection'][exp.txidEdit]) {
+                    objects['collection'][exp.txidEdit] = this.applyAction(objects['collection'][exp.txidEdit], exp)
+                }
 
                 clearallfromdb('shareRequest')
+                clearfromdb('collection', [exp.txidEdit])
             }
         },
-        applyAction: function (share, exp) {
+        applyAction: function (object, exp) {
 
-            if (share) {
-                if (share.txid == exp.txidEdit) { /// for me
-                    share.deleted = true
+            if (object) {
+                if (object.txid == exp.txidEdit) { /// for me
+                    object.deleted = true
                 }
             }
 
-            return share
+            return object
         }
     }
 

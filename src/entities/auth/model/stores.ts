@@ -2294,6 +2294,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const getCachedPost = (txid: string) => appInitializer.getCachedPost(txid);
   const cachePost = (raw: Record<string, unknown>) => appInitializer.cachePost(raw);
 
+  /** Load a shared Bastyon collection preview by txid (psdk + cache, without its publications) */
+  const loadCollection = (txid: string) => appInitializer.loadCollection(txid);
+  const getCachedCollection = (txid: string) => appInitializer.getCachedCollection(txid);
+
   const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }) =>
     appInitializer.getProfileFeed(authorAddress, options);
 
@@ -2461,6 +2465,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     hydrateLocalAliasesEarly,
     cachePost,
     getCachedPost,
+    getCachedCollection,
     getBastyonUserData,
     getProfileFeed,
     getSubscribesChannels,
@@ -2468,6 +2473,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     isAuthenticated,
     isEditingUserData,
     isLoggingIn,
+    loadCollection,
     loadMyPostScore,
     loadPost,
     loadPostComments,

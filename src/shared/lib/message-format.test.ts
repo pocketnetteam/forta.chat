@@ -368,3 +368,32 @@ describe("applyLocalAlias (WEE-39 follow-up)", () => {
     expect(receivedId).toBe("deadbeef");
   });
 });
+
+describe("Bastyon collection links (shared collections)", () => {
+  const txid = "c".repeat(64);
+
+  it("parses a collection link into a bastyonCollection block segment", () => {
+    const segs = parseMessage(`Look: https://bastyon.com/collection?c=${txid}`);
+    expect(segs).toEqual([
+      { type: "text", content: "Look: " },
+      { type: "bastyonCollection", content: `https://bastyon.com/collection?c=${txid}`, txid },
+    ]);
+  });
+
+  it("does not duplicate the collection link as a generic link", () => {
+    const segs = parseMessage(`https://bastyon.com/collection?c=${txid}`);
+    expect(segs.filter((s) => s.type === "link")).toHaveLength(0);
+  });
+
+  it("keeps post links as bastyonLink next to a collection", () => {
+    const post = "d".repeat(64);
+    const types = parseMessage(`bastyon://post?s=${post} bastyon://collection?c=${txid}`)
+      .map((s) => s.type)
+      .filter((t) => t !== "text");
+    expect(types).toEqual(["bastyonLink", "bastyonCollection"]);
+  });
+
+  it("stripBastyonLinks replaces collection links with a label", () => {
+    expect(stripBastyonLinks(`bastyon://collection?c=${txid}`)).toBe("🗂 Bastyon collection");
+  });
+});

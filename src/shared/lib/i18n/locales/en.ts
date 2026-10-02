@@ -798,7 +798,15 @@ export const en = {
   "post.article": "Article",
   "post.openInBastyon": "Open in Forta",
   "post.subscribe": "Subscribe",
+
   "post.views": "Views",
+
+  // ── Collection embeds ──
+  "collection.label": "Collection",
+  "collection.publicationsCount": "Publications: {count}",
+  "collection.notFound": "Collection not found",
+  "collection.deleted": "Collection was deleted",
+  "collection.open": "Open in Bastyon",
 
   // Post player
   "postPlayer.boost": "Boost",
