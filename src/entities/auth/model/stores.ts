@@ -60,6 +60,7 @@ import {
   countCachedKeys,
   countPublishedKeys,
   REQUIRED_ENCRYPTION_KEYS,
+  createBackoffRetry,
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { armMatrixReconnect, onForeground } from "../lib/matrix-reconnect";
@@ -629,6 +630,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (cryptoInstance) {
         cryptoInstance.onKeysLoaded = (roomId: string) => {
           chatDbKit.retryRoomDecryption?.(roomId);
+          chatStore.retryRoomPreview(roomId);
+          chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
+        };
+        // A failed key request must not leave a stale "missing" banner; the
+        // re-check reports "loading" and retries for the open chat.
+        cryptoInstance.onKeysFailed = (roomId: string) => {
           chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
         };
       }
@@ -1161,6 +1168,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Give the Pocketnet SDK the account's address and key pair (signed
+   *  requests, wallet). Both are known locally — this used to run only inside
+   *  a successful own-profile load, so one failed getuserprofile at boot left
+   *  the SDK without a signer for the whole session. */
+  const configureSdkUser = (addr: string, key: string) => {
+    PocketnetInstanceConfigurator.setUserAddress(addr);
+    PocketnetInstanceConfigurator.setUserGetKeyPairFc(() => createKeyPair(key));
+  };
+
+  // A failed own-profile load was never retried (only logged as non-fatal),
+  // so the session ran without the profile until a manual reload. Retry in
+  // the background; one request per minute at most once backed off.
+  const ownProfileRetry = createBackoffRetry([3_000, 10_000, 30_000, 60_000]);
+  const cancelOwnProfileRetry = () => ownProfileRetry.cancel();
+  const scheduleOwnProfileRetry = (requestAddress: string) => {
+    // Registration runs its own poll for the profile.
+    if (registrationPending.value) return;
+    ownProfileRetry.schedule(() => {
+      if (address.value !== requestAddress) return;
+      void fetchUserInfo();
+    });
+  };
+
   const fetchUserInfo = async () => {
     if (!address.value || !privateKey.value) {
       return;
@@ -1171,6 +1201,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // second account's cache slot.
     const requestAddress = address.value;
     const requestPrivateKey = privateKey.value;
+    configureSdkUser(requestAddress, requestPrivateKey);
 
     // During registration the local SDK may still hold an empty profile from
     // the first post-login getuserprofile — always hit the network.
@@ -1186,7 +1217,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // preloader hangs after registration until manual reload"). 15s matches
     // REGISTRATION_RPC_TIMEOUT for this class of proxy call.
     try {
-      await withTimeout(
+      const loaded = await withTimeout(
         appInitializer.initializeAndFetchUserData(
           requestAddress,
           (userData: UserData) => {
@@ -1211,10 +1242,6 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             const merged = mergeSelfProfileWithRemote(cached, userData);
 
             setUserInfo(merged);
-            PocketnetInstanceConfigurator.setUserAddress(requestAddress);
-            PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-              createKeyPair(requestPrivateKey)
-            );
 
             writeSelfProfile({
               address: requestAddress,
@@ -1244,8 +1271,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         RPC_CALL_TIMEOUT,
         "fetchUserInfo",
       );
+      // null without an error = API not ready (no reachable proxy) or no
+      // profile row — the same "failed at boot" case, so keep retrying.
+      if (address.value === requestAddress) {
+        if (loaded) cancelOwnProfileRetry();
+        else scheduleOwnProfileRetry(requestAddress);
+      }
     } catch (e) {
       console.warn("[auth] fetchUserInfo: initializeAndFetchUserData failed (non-fatal):", e);
+      if (address.value === requestAddress) scheduleOwnProfileRetry(requestAddress);
     }
   };
 
@@ -1503,6 +1537,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     // ── 0. Clear in-memory auth state ──
     userInfo.value = undefined;
+    cancelOwnProfileRetry();
 
     // ── 1. Reset Pinia stores (in-memory state) ──
     useChatStore().cleanup();
@@ -2426,6 +2461,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       sessionManager.setActive(targetAddress);
       syncSessionsFromStorage();
       userInfo.value = undefined;
+      cancelOwnProfileRetry();
 
       // 4. INIT new context (reuses the existing initMatrix which reads from computed address/privateKey)
       await fetchUserInfo();

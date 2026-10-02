@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach } from "vitest";
 import { enqueue, dequeue, getQueue, clearQueue } from "./offline-queue";
 import type { QueuedMessage } from "./offline-queue";

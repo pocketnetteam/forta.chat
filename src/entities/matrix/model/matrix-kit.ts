@@ -424,6 +424,9 @@ export class MatrixKit {
 
   /** Find existing 1:1 room between two users */
   findOneToOneRoom(user1Id: string, user2Id: string): string | undefined {
+
+    return undefined;
+    
     const rooms = this.matrixService.getRooms() as Record<string, unknown>[];
     const targetUserIds = [
       this.matrixId(user1Id),

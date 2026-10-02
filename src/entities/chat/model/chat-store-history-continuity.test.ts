@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * History continuity in Dexie (plan docs/plans/2026-09-28-chat-open-local-first.md,
  * stage 3): holes left by limited syncs are marked on the room and closed by

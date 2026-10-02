@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * History loads parse only what Dexie lacks (plan
  * docs/plans/2026-09-28-chat-open-local-first.md, stage 2). Re-parsing the

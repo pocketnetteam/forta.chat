@@ -571,7 +571,13 @@ export class MatrixClientService {
     });
 
     // Fires when MY membership changes in a room (join→leave = kicked, join→ban, etc.)
+    // Gated like the other room handlers: while the SDK replays its cached sync,
+    // every room goes undefined→join/invite once (thousands of calls with many
+    // invites), and each debounced refreshRooms() could start a full refresh over a
+    // half-loaded room list. The PREPARED full refresh covers all of those rooms, and
+    // kick handling waits for roomsInitialized anyway.
     this.client.on("Room.myMembership", (room: unknown, membership: string, prevMembership: string | undefined) => {
+      if (!this.chatsReady) return;
       this.onMyMembership?.(room, membership, prevMembership);
     });
 

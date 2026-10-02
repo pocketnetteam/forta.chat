@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: enterDetachedMode() ("jump to message" for a target outside
  * the loaded tail window — search results, quoted replies, pinned messages)

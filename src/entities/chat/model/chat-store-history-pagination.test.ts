@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression tests for loadRoomMessages()'s "do we need scrollback" gate.
  *

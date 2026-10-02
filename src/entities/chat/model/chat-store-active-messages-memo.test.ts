@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression (audit A1): activeMessages reused the previous Message object
  * whenever a hand-picked field list matched. `content` and

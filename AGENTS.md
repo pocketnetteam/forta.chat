@@ -46,6 +46,7 @@ Layers, data flow, key abstractions, cross-cutting concerns: [docs/agent/archite
 - Tailwind utilities and CSS design tokens; no ad-hoc CSS.
 - Errors: explicit `try-catch`, module-prefixed logs (`[App]`), user-facing text through i18n keys, no `console.log` in production code.
 - Tests co-located with source (`*.test.ts`). Target 200-400 lines per file, split at 800.
+- Tests run in Node by default; a file that needs a DOM starts with `// @vitest-environment happy-dom`. While iterating run single files (`npx vitest run <file>`); run the full suite in the background or with a 10-minute timeout, never two at once (details in conventions.md, "Tests").
 - No ESLint/Prettier in the repo; `vue-tsc` is the type gate.
 
 Full list with examples and the quality checklist: [docs/agent/conventions.md](docs/agent/conventions.md).

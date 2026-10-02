@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression (audit A2): loadRoomMessages / loadMoreMessages /
  * prefetchNextBatch built their EventWriter input without `encryptedRaw`.

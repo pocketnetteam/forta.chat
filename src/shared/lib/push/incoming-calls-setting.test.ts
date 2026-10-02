@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const { mockPlatform, mockSetEnabled } = vi.hoisted(() => ({

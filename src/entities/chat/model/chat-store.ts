@@ -41,7 +41,7 @@ import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/l
 import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
-import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
+import { computed, reactive, ref, shallowRef, toRaw, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { signalChatsInteractive } from "@/shared/lib/boot-signals";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
@@ -133,19 +133,45 @@ const hangupGapCounter = createHangupGapCounter({
   onResolved: () => onHangupGapCounted?.(),
 });
 
+/** When the call push rules started counting (see callHangupRuleSince). The same
+ *  for every room — loops over all rooms read them once, not per room (each read
+ *  scans the push rules and touches localStorage). */
+interface CallRuleSinces {
+  hangupSince: number | null;
+  selectAnswerSince: number | null;
+}
+
+/** null when the push rules or storage cannot be read: counts stay the server's. */
+function readCallRuleSinces(myUserId: string): CallRuleSinces | null {
+  try {
+    // Read even at zero unread: the first sight of the rule dates the hangups it counts.
+    const pushRules = getMatrixClientService().client?.pushRules;
+    const now = Date.now();
+    return {
+      hangupSince: callHangupRuleSince(myUserId, pushRules, now, localStorage),
+      selectAnswerSince: callSelectAnswerRuleSince(myUserId, pushRules, now, localStorage),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The room's unread count for the chat list: the server's count without the call
  * hangups a peer sent, which the server counts once the account has the hangup push
  * rule (`../lib/call-hangup-unread.ts`). Any failure leaves the server's count as is.
+ * Pass `callRules` from readCallRuleSinces when counting many rooms.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function roomUnreadCount(room: any, myUserId: string): number {
+function roomUnreadCount(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  room: any,
+  myUserId: string,
+  callRules: CallRuleSinces | null = readCallRuleSinces(myUserId),
+): number {
   const total = (room.getUnreadNotificationCount?.("total") as number) ?? 0;
+  if (!callRules) return total;
   try {
-    // Read even at zero: the first sight of the rule dates the hangups it counts.
-    const pushRules = getMatrixClientService().client?.pushRules;
-    const hangupSince = callHangupRuleSince(myUserId, pushRules, Date.now(), localStorage);
-    const selectAnswerSince = callSelectAnswerRuleSince(myUserId, pushRules, Date.now(), localStorage);
+    const { hangupSince, selectAnswerSince } = callRules;
     if ((hangupSince === null && selectAnswerSince === null) || total <= 0) return total;
     // A rule that is off counts nothing: no event is as late as Infinity.
     const since = hangupSince ?? Infinity;
@@ -188,9 +214,23 @@ function roomUnreadCount(room: any, myUserId: string): number {
   }
 }
 
+/** Per-pass inputs a loop over many rooms reads once and hands in, instead of
+ *  each room re-reading them: the room's members (also needed by the caller)
+ *  and the call push-rule dates (identical for every room). */
+interface RoomBuildInputs {
+  members?: Record<string, unknown>[];
+  callRules?: CallRuleSinces | null;
+}
+
 /** Convert a Matrix SDK room object into our ChatRoom type */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameHints?: Record<string, string>): ChatRoom {
+function matrixRoomToChatRoom(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  room: any,
+  kit: MatrixKit,
+  myUserId: string,
+  nameHints?: Record<string, string>,
+  inputs?: RoomBuildInputs,
+): ChatRoom {
   const roomId = room.roomId as string;
   const name = (room.name as string) ?? roomId;
   const isGroup = !kit.isTetatetChat(room);
@@ -209,7 +249,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   // Without the split, kick of an invited member appeared to "do nothing"
   // because the next `matrixRoomToChatRoom` pass would re-add him from
   // his still-`invite` membership state. See Session 29 research.
-  const members = kit.getRoomMembers(room);
+  const members = inputs?.members ?? kit.getRoomMembers(room);
   const memberIds: string[] = [];
   const invitedMemberIds: string[] = [];
   for (const m of members) {
@@ -221,7 +261,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   }
 
   // Unread notification count, peer call hangups taken out
-  const unreadCount = roomUnreadCount(room, myUserId);
+  const unreadCount = roomUnreadCount(room, myUserId, inputs?.callRules);
 
   // Get timeline events
   let timelineEvents: unknown[] = [];
@@ -654,8 +694,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  degrade watchdog, so this still bounds the genuine first-load skeleton. */
   const isSyncing = computed(() => initialSyncStatus.value === "loading");
 
-  // Cache for decrypted room previews — persists across refreshRooms() rebuilds
-  const decryptedPreviewCache = new Map<string, string>();
+  // Cache for decrypted room previews — persists across refreshRooms() rebuilds.
+  // Keyed by room but bound to the event it was decrypted from: a newer
+  // message's placeholder must not show the previous message's text, nor be
+  // skipped as "already decrypted".
+  const decryptedPreviewCache = new Map<string, { eventId: string; body: string }>();
+  /** Cached decrypted body for the room's preview event, if it is that event's.
+   *  An unknown eventId on either side (legacy rows) is accepted. */
+  const cachedPreviewFor = (roomId: string, eventId: string | undefined): string | undefined => {
+    const entry = decryptedPreviewCache.get(roomId);
+    if (!entry) return undefined;
+    if (eventId && entry.eventId && entry.eventId !== eventId) return undefined;
+    return entry.body;
+  };
 
   // Debounce timer for refreshRooms
   let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -722,6 +773,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // covers RPC/Tor warm-up failures during the very first preview pass
   const PREVIEW_RETRY_PASS_DELAYS_MS = [10_000, 30_000, 90_000] as const;
   const previewRetryTimers: ReturnType<typeof setTimeout>[] = [];
+  // Sidebar rows on screen, top to bottom (ContactList.loadVisibleRooms).
+  // null until the list first reports: preview passes then cover every room.
+  let visibleSidebarRoomIds: Set<string> | null = null;
+  let visibleSidebarOrder: string[] = [];
+  // Which list instance reported last (SwipeableTabs keeps every tab mounted)
+  let visibleSidebarOwner: symbol | undefined;
+  // Rooms whose preview decrypt is running — a new pass skips them.
+  const previewDecryptInFlight = new Set<string>();
+  // Keys arrived while these were in flight — retry if the running attempt fails.
+  const previewRetryRequested = new Set<string>();
+  /** Raw Dexie preview values that stand for an undecrypted message
+   *  (same set resolveLastMessagePreview replaces). */
+  const isPreviewPlaceholder = (preview: string | undefined): boolean =>
+    preview === "[encrypted]" || preview === "m.bad.encrypted" || !!preview?.startsWith("** Unable to decrypt");
 
   // Edit/delete state (Batch 3)
   const editingMessage = ref<{ id: string; content: string } | null>(null);
@@ -1702,7 +1767,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // + sidebar re-renders + visible badge flicker on neighboring rooms.
     const effectiveSortKey = ts > 0 ? ts : (lr.updatedAt ?? 0);
     // Resolve effective preview: prefer decrypted cache over raw Dexie value
-    const decryptedPreview = decryptedPreviewCache.get(lr.id);
+    const decryptedPreview = cachedPreviewFor(lr.id, lr.lastMessageEventId);
     const effectivePreview = resolveLastMessagePreview(lr.lastMessagePreview, decryptedPreview);
 
     const localStatus = lr.lastMessageLocalStatus;
@@ -2741,6 +2806,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     perfMark("fullRoomRefresh-start");
     // Retry previously failed decryptions on full refresh
     decryptFailedRooms.clear();
+    // The rows on screen need not wait for the whole refresh (35s observed on
+    // a large account) — their Dexie rows are already there.
+    decryptVisiblePreviews();
 
     // Preserve existing room data — addRoom/addMessage/cache may have set data that Matrix can't resolve yet.
     // Single pass instead of 4 × O(n) map() calls — significant at 100k rooms.
@@ -2768,11 +2836,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     const ROOM_CHUNK = 50;
     const newRooms: ChatRoom[] = [];
+    // Read once per pass, not per room: the call push-rule dates are the same
+    // for every room, and each room's members feed both the build and
+    // updateDisplayNames / loadMissingMembers below.
+    const callRules = readCallRuleSinces(myUserId);
+    const membersByRoom = new Map<string, Record<string, unknown>[]>();
 
     for (let i = 0; i < interactiveRooms.length; i += ROOM_CHUNK) {
       const slice = interactiveRooms.slice(i, i + ROOM_CHUNK);
       for (const r of slice) {
-        const room = buildChatRoom(r, kit, myUserId, prevNameMap, prevLastMessageMap);
+        const members = kit.getRoomMembers(r);
+        membersByRoom.set(r.roomId as string, members);
+        const room = buildChatRoom(r, kit, myUserId, prevNameMap, prevLastMessageMap, { members, callRules });
         const prevMembers = prevMembersMap.get(room.id);
         if (prevMembers && prevMembers.length > room.members.length) {
           room.members = prevMembers;
@@ -2908,7 +2983,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Build user display name cache from room members (sync — no API calls)
     // Only run loadMissingMembers once AND only when we have actual rooms
     const willLoadMembers = !membersLoadedOnce && interactiveRooms.length > 0;
-    updateDisplayNames(interactiveRooms, kit, willLoadMembers);
+    updateDisplayNames(interactiveRooms, kit, willLoadMembers, membersByRoom);
 
     // Load profiles only for the first viewport of rooms (top ~15).
     // Remaining rooms get profiles on-demand via ContactList.loadVisibleRooms()
@@ -2925,7 +3000,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const viewportMatrixRooms = interactiveRooms.filter(
         (mr: any) => viewportRoomIds.has(mr.roomId as string),
       );
-      loadMissingMembers(viewportMatrixRooms, kit, myUserId);
+      loadMissingMembers(viewportMatrixRooms, kit, myUserId, membersByRoom);
     }
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
@@ -2958,14 +3033,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** One-time: load members from server for rooms with only self as member.
    *  Updates room member lists + avatars. Profile loading is handled lazily by loadProfilesForRoomIds. */
-  const loadMissingMembers = async (matrixRooms: any[], kit: MatrixKit, myUserId: string) => {
+  const loadMissingMembers = async (
+    matrixRooms: any[],
+    kit: MatrixKit,
+    myUserId: string,
+    membersByRoom?: ReadonlyMap<string, Record<string, unknown>[]>,
+  ) => {
     const myHexId = getmatrixid(myUserId);
     const toLoad: any[] = [];
 
     // Find rooms that need member loading (only self as member from SDK).
     // Skip rooms where Dexie/roomsMap already has resolved members (e.g. from cache).
     for (const mr of matrixRooms) {
-      const members = kit.getRoomMembers(mr);
+      const members = membersByRoom?.get(mr.roomId as string) ?? kit.getRoomMembers(mr);
       const memberIds = members.map((m: Record<string, unknown>) => getmatrixid(m.userId as string));
       const others = memberIds.filter(id => id !== myHexId);
 
@@ -3057,6 +3137,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Rebuild only changed rooms — fetch each individually from SDK
     const changedMatrixRooms: any[] = [];
     const removedIds = new Set<string>();
+    const callRules = readCallRuleSinces(myUserId);
+    const membersByRoom = new Map<string, Record<string, unknown>[]>();
     for (const roomId of changed) {
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) {
@@ -3078,7 +3160,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (createContent?.type === "m.space") continue;
       } catch { /* ignore */ }
 
-      const chatRoom = buildChatRoom(matrixRoom, kit, myUserId);
+      const members = kit.getRoomMembers(matrixRoom);
+      membersByRoom.set(roomId, members);
+      const chatRoom = buildChatRoom(matrixRoom, kit, myUserId, undefined, undefined, { members, callRules });
       const existing = roomsMap.get(roomId);
       if (existing) {
         // Preserve richer members list from cache/previous load
@@ -3150,7 +3234,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     // Update display names only for changed rooms
-    updateDisplayNames(changedMatrixRooms, kit);
+    updateDisplayNames(changedMatrixRooms, kit, false, membersByRoom);
 
     // Load profiles for changed rooms (lazy — skips already-requested)
     if (changedMatrixRooms.length > 0) {
@@ -3189,8 +3273,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     myUserId: string,
     prevNameMap?: Map<string, string>,
     prevLastMessageMap?: Map<string, Message | undefined>,
+    inputs?: RoomBuildInputs,
   ): ChatRoom => {
-    const chatRoom = matrixRoomToChatRoom(r, kit, myUserId, userDisplayNames.value);
+    const chatRoom = matrixRoomToChatRoom(r, kit, myUserId, userDisplayNames.value, inputs);
     if (chatRoom.id === activeRoomId.value) chatRoom.unreadCount = 0;
 
     // Use provided maps (full refresh) or fall back to roomsMap (incremental)
@@ -3246,7 +3331,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Apply cached decrypted previews
     if (chatRoom.lastMessage?.content === "[encrypted]") {
-      const cached = decryptedPreviewCache.get(chatRoom.id);
+      const cached = cachedPreviewFor(chatRoom.id, chatRoom.lastMessage.id);
       if (cached) {
         chatRoom.lastMessage = { ...chatRoom.lastMessage, content: cached };
       }
@@ -3262,17 +3347,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Update display name cache from Matrix SDK room members.
    *  Collects addresses per room for later viewport-based profile loading.
    *  @param skipNamesReady — if true, don't set namesReady (loadMissingMembers will do it) */
-  const updateDisplayNames = (matrixRooms: any[], kit: MatrixKit, skipNamesReady = false) => {
+  const updateDisplayNames = (
+    matrixRooms: any[],
+    kit: MatrixKit,
+    skipNamesReady = false,
+    membersByRoom?: ReadonlyMap<string, Record<string, unknown>[]>,
+  ) => {
+    // Collect into a plain object and publish once: writing each member's name
+    // through the reactive proxy cost a proxy set + trigger per member — tens
+    // of thousands on a large account's full refresh.
+    const current = toRaw(userDisplayNames.value);
+    let changed: Record<string, string> | null = null;
     for (const r of matrixRooms) {
       const roomId = r.roomId as string;
-      const members = kit.getRoomMembers(r);
+      const members = membersByRoom?.get(roomId) ?? kit.getRoomMembers(r);
       const roomAddrs: string[] = [];
       for (const m of members) {
         const addr = matrixIdToAddress((m as Record<string, unknown>).userId as string);
         const dn = (m as Record<string, unknown>).rawDisplayName as string
           || (m as Record<string, unknown>).name as string;
         if (addr && dn && dn !== addr) {
-          userDisplayNames.value[addr] = dn;
+          // Last write wins across rooms, as with the per-member writes before
+          const effective = changed && addr in changed ? changed[addr] : current[addr];
+          if (effective !== dn) (changed ??= {})[addr] = dn;
         }
         if (addr && /^[A-Za-z0-9]+$/.test(addr)) {
           roomAddrs.push(addr);
@@ -3280,6 +3377,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       if (roomAddrs.length > 0) matrixRoomAddresses.set(roomId, roomAddrs);
     }
+    if (changed) userDisplayNames.value = { ...current, ...changed };
     if (!skipNamesReady && rooms.value.length > 0) {
       namesReady.value = true;
     }
@@ -3506,37 +3604,64 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const decryptRoomPreviews = async (matrixRooms: any[], onlyRoomIds?: Set<string>) => {
     // Collect rooms that need decryption
     const toDecrypt: Array<{ roomId: string; matrixRoom: unknown }> = [];
+    const visible = visibleSidebarRoomIds;
     for (const matrixRoom of matrixRooms) {
       const roomId = matrixRoom.roomId as string;
       if (onlyRoomIds && !onlyRoomIds.has(roomId)) continue;
-      if (decryptedPreviewCache.has(roomId)) continue; // already decrypted
+      // Once the sidebar reported its rows, only what is on screen (and the
+      // open chat) is decrypted; the rest waits until scrolled into view.
+      if (visible && !visible.has(roomId) && roomId !== activeRoomId.value) continue;
+      if (previewDecryptInFlight.has(roomId)) continue;
+      // Already decrypted — for the event the row shows now, not an older one
+      const previewEventId = dexieRoomMap.get(roomId)?.lastMessageEventId ?? getRoomById(roomId)?.lastMessage?.id;
+      if (cachedPreviewFor(roomId, previewEventId) !== undefined) continue;
       const failInfo = decryptFailedRooms.get(roomId);
       if (failInfo) {
         if (failInfo.count >= DECRYPT_MAX_RETRIES) continue;
         if (Date.now() - failInfo.lastAttempt < DECRYPT_RETRY_DELAY) continue;
       }
-      const room = getRoomById(roomId);
-      const lmc = room?.lastMessage?.content;
-      if (!lmc || lmc !== "[encrypted]") continue;
+      // The sidebar renders the Dexie row, which can carry the placeholder
+      // before rooms.value is built (cold start) — check both.
+      const lmc = getRoomById(roomId)?.lastMessage?.content;
+      if (lmc !== "[encrypted]" && !isPreviewPlaceholder(dexieRoomMap.get(roomId)?.lastMessagePreview)) continue;
       toDecrypt.push({ roomId, matrixRoom });
     }
     if (toDecrypt.length === 0) return;
 
-    // Cap rooms per cycle to avoid blocking; rotate the window so repeated
-    // passes (incl. fresh-budget retry passes) eventually reach every room.
+    // Open chat first, then sidebar rows top to bottom.
+    if (visible || activeRoomId.value) {
+      const rank = (roomId: string) => {
+        if (roomId === activeRoomId.value) return -1;
+        const idx = visibleSidebarOrder.indexOf(roomId);
+        return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+      };
+      toDecrypt.sort((a, b) => rank(a.roomId) - rank(b.roomId));
+    }
+
+    // Cap rooms per cycle to avoid blocking. Visible rows are already in
+    // priority order — take the top. Otherwise rotate the window so repeated
+    // passes (incl. fresh-budget retry passes) eventually reach every room,
+    // keeping the open chat in every window.
     let capped = toDecrypt;
     if (toDecrypt.length > PREVIEW_DECRYPT_MAX_PER_CYCLE) {
-      const start = previewCapCursor % toDecrypt.length;
-      capped = [...toDecrypt.slice(start), ...toDecrypt.slice(0, start)]
-        .slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
-      previewCapCursor = (start + PREVIEW_DECRYPT_MAX_PER_CYCLE) % toDecrypt.length;
+      if (visible) {
+        capped = toDecrypt.slice(0, PREVIEW_DECRYPT_MAX_PER_CYCLE);
+      } else {
+        const activeIdx = toDecrypt.findIndex((r) => r.roomId === activeRoomId.value);
+        const pinned = activeIdx >= 0 ? [toDecrypt[activeIdx]] : [];
+        const rest = activeIdx >= 0 ? toDecrypt.filter((_, i) => i !== activeIdx) : toDecrypt;
+        const take = PREVIEW_DECRYPT_MAX_PER_CYCLE - pinned.length;
+        const start = previewCapCursor % rest.length;
+        capped = [...pinned, ...[...rest.slice(start), ...rest.slice(0, start)].slice(0, take)];
+        previewCapCursor = (start + take) % rest.length;
+      }
     }
 
     /** Decrypt one room's preview. Never throws — failures are recorded in
      *  decryptFailedRooms so the retry/backoff bookkeeping stays per-room. */
     const decryptOnePreview = async (
       { roomId, matrixRoom }: { roomId: string; matrixRoom: unknown },
-    ): Promise<{ roomId: string; body: string } | null> => {
+    ): Promise<{ roomId: string; eventId: string; body: string } | null> => {
       try {
         const roomCrypto = await ensureRoomCrypto(roomId);
         if (!roomCrypto) return null;
@@ -3550,15 +3675,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (!timelineEvents.length) timelineEvents = (matrixRoom as any).timeline ?? [];
         } catch { /* ignore */ }
 
-        for (let j = timelineEvents.length - 1; j >= 0; j--) {
+        // Decrypt the event the sidebar row points at when the SDK holds it;
+        // otherwise the newest encrypted message — but never one older than
+        // the row (cold start: the SDK timeline may not reach the row's event
+        // yet, and an older body would stick as the preview).
+        const row = dexieRoomMap.get(roomId);
+        const targetEventId = row?.lastMessageEventId;
+        const isEncryptedMessage = (raw: Record<string, unknown> | null): raw is Record<string, unknown> =>
+          !!raw?.content && raw.type === "m.room.message"
+          && (raw.content as Record<string, unknown>).msgtype === "m.encrypted";
+        const targetIdx = targetEventId
+          ? timelineEvents.findIndex((e) => isEncryptedMessage(getRawEvent(e)) && getRawEvent(e)?.event_id === targetEventId)
+          : -1;
+        for (let j = targetIdx >= 0 ? targetIdx : timelineEvents.length - 1; j >= 0; j--) {
           const raw = getRawEvent(timelineEvents[j]);
-          if (!raw?.content || raw.type !== "m.room.message") continue;
-          const content = raw.content as Record<string, unknown>;
-          if (content.msgtype !== "m.encrypted") continue;
+          if (!isEncryptedMessage(raw)) continue;
+          if (targetIdx < 0 && targetEventId
+            && ((raw.origin_server_ts as number | undefined) ?? 0) < (row?.lastMessageTimestamp ?? 0)) {
+            return null; // the row's event is not loaded yet — nothing to decrypt
+          }
 
           try {
             const decrypted = await roomCrypto.decryptEvent(raw);
-            if (decrypted.body) return { roomId, body: decrypted.body };
+            if (decrypted.body) return { roomId, eventId: (raw.event_id as string) ?? "", body: decrypted.body };
           } catch {
             decryptFailedRooms.set(roomId, { count: (decryptFailedRooms.get(roomId)?.count ?? 0) + 1, lastAttempt: Date.now() });
           }
@@ -3579,20 +3718,117 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // batch=1 keeps the old per-room yield — 5 synchronous pbkdf2 chains
     // back-to-back would recreate the 370ms+ long tasks this code once had.
     const batchSize = isCryptoWorkerSupported() ? PREVIEW_DECRYPT_BATCH_SIZE : 1;
-    const batched = await runInBatches(capped, batchSize, decryptOnePreview, yieldToMain);
-    const decryptedResults = batched.filter((r): r is { roomId: string; body: string } => r !== null);
+    // In-flight marks let a scroll start newly visible rows right away
+    // without re-queuing the ones still being decrypted.
+    // A failed room is released at once — a key-arrival retry must not be
+    // skipped because the rest of its batch is still running. Successes stay
+    // marked until their result is applied below.
+    for (const { roomId } of capped) previewDecryptInFlight.add(roomId);
+    const heldUntilApplied: string[] = [];
+    const decryptAndRelease = async (item: { roomId: string; matrixRoom: unknown }) => {
+      const result = await decryptOnePreview(item);
+      if (result) {
+        heldUntilApplied.push(item.roomId);
+      } else {
+        previewDecryptInFlight.delete(item.roomId);
+        // Keys arrived while this attempt ran with the old ones
+        if (previewRetryRequested.delete(item.roomId)) queueMicrotask(() => retryRoomPreview(item.roomId));
+      }
+      return result;
+    };
+    let batched: Array<{ roomId: string; eventId: string; body: string } | null>;
+    try {
+      batched = await runInBatches(capped, batchSize, decryptAndRelease, yieldToMain);
+    } finally {
+      for (const roomId of heldUntilApplied) {
+        previewDecryptInFlight.delete(roomId);
+        previewRetryRequested.delete(roomId);
+      }
+    }
+    const decryptedResults = batched.filter((r): r is { roomId: string; eventId: string; body: string } => r !== null);
 
     // Apply ALL decrypted results in one pass with a single triggerRef
     if (decryptedResults.length > 0) {
-      for (const { roomId, body } of decryptedResults) {
-        decryptedPreviewCache.set(roomId, body);
+      for (const { roomId, eventId, body } of decryptedResults) {
+        decryptedPreviewCache.set(roomId, { eventId, body });
         const room = getRoomById(roomId);
-        if (room?.lastMessage) {
+        if (room?.lastMessage?.content === "[encrypted]" && (!room.lastMessage.id || room.lastMessage.id === eventId)) {
           room.lastMessage = { ...room.lastMessage, content: body };
         }
       }
       triggerRef(rooms);
+
+      // The sidebar renders from Dexie rows (mapLocalRoomToChatRoom), and once
+      // Dexie is active a rooms.value change no longer rebuilds it. Re-map the
+      // decrypted rooms so their rows pick up decryptedPreviewCache now —
+      // otherwise the preview stayed "[encrypted]" until an unrelated Dexie
+      // write touched the room (typically opening the chat).
+      const changes: RoomChange[] = [];
+      for (const { roomId } of decryptedResults) {
+        const lr = dexieRoomMap.get(roomId);
+        if (lr) changes.push({ type: "upsert", room: lr });
+      }
+      if (changes.length > 0) {
+        if (_suppressDexieRecompute) _deferredChanges.push(...changes);
+        else patchSortedRooms(changes);
+      }
     }
+  };
+
+  /** Decrypt the previews of the sidebar rows currently on screen. */
+  const decryptVisiblePreviews = () => {
+    if (!visibleSidebarRoomIds) return;
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const matrixRooms: any[] = [];
+    for (const id of visibleSidebarOrder) {
+      const mr = matrixService.getRoom(id);
+      if (mr) matrixRooms.push(mr);
+    }
+    if (matrixRooms.length > 0) decryptRoomPreviews(matrixRooms).then(() => debouncedCacheRooms());
+  };
+
+  /** The sidebar reports which rows are on screen (scroll, tab switch). Their
+   *  previews decrypt right away — ahead of the full room refresh, which can
+   *  take tens of seconds on large accounts — and from then on preview passes
+   *  skip rows that are not visible. */
+  const setVisibleSidebarRooms = (roomIds: string[], owner?: symbol) => {
+    visibleSidebarOwner = owner;
+    visibleSidebarOrder = roomIds;
+    visibleSidebarRoomIds = new Set(roomIds);
+    decryptVisiblePreviews();
+  };
+
+  /** The list that last reported its rows went off screen ("hidden": nothing
+   *  of it is visible any more) or was unmounted ("unmounted": no list to ask —
+   *  back to covering every room, e.g. while search results replace the list).
+   *  No-op when another list reported since. */
+  const releaseVisibleSidebarRooms = (owner: symbol, mode: "hidden" | "unmounted") => {
+    if (visibleSidebarOwner !== owner) return;
+    visibleSidebarOrder = [];
+    if (mode === "unmounted") {
+      visibleSidebarRoomIds = null;
+      visibleSidebarOwner = undefined;
+    } else {
+      visibleSidebarRoomIds = new Set();
+    }
+  };
+
+  /** Keys for a room just arrived: its preview may decrypt now — retry it
+   *  with a fresh budget (the failure count was spent while keys were missing). */
+  const retryRoomPreview = (roomId: string) => {
+    // An attempt is running with the old keys: re-run once it fails. Only key
+    // arrival requests this — ordinary passes keep the retry delay/cap.
+    if (previewDecryptInFlight.has(roomId)) {
+      previewRetryRequested.add(roomId);
+      return;
+    }
+    decryptFailedRooms.delete(roomId);
+    const matrixService = getMatrixClientService();
+    if (!matrixService.isReady()) return;
+    const mr = matrixService.getRoom(roomId);
+    if (mr) decryptRoomPreviews([mr]).then(() => debouncedCacheRooms());
   };
 
   /** Cold-start retry for encrypted previews (WEE-96 follow-up).
@@ -3668,10 +3904,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const matrixRooms = matrixService.getRooms() as any[];
       const myUserId = matrixService.getUserId() ?? "";
       const updates: Array<{ id: string; count: number }> = [];
+      const callRules = readCallRuleSinces(myUserId);
 
       for (const mxRoom of matrixRooms) {
         const roomId = mxRoom.roomId as string;
-        const unreadCount = roomUnreadCount(mxRoom, myUserId);
+        const unreadCount = roomUnreadCount(mxRoom, myUserId, callRules);
         const localRoom = dexieRoomMap.get(roomId);
         if (localRoom && localRoom.unreadCount !== unreadCount) {
           updates.push({ id: roomId, count: unreadCount });
@@ -5140,7 +5377,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Update decrypted preview cache so refreshRoomsImmediate() preserves this preview
     if (message.content && message.content !== "[encrypted]") {
-      decryptedPreviewCache.set(roomId, message.content);
+      decryptedPreviewCache.set(roomId, { eventId: message.id, body: message.content });
     }
   };
 
@@ -5845,9 +6082,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       ? messageEvents.filter((event) => parseOnly.has(getRawEvent(event)?.event_id as string))
       : messageEvents;
 
-    // Decrypt all messages in parallel
-    const results = await Promise.all(
-      toParse.map((event) => parseSingleEvent(event, roomId, roomCrypto, callEvents).catch(() => null))
+    // Decrypt all messages in parallel, submitting newest first: the crypto
+    // worker serves requests in arrival order, so chronological submission
+    // made the messages the user is looking at (the bottom of the chat)
+    // decrypt last. `results` stays in timeline order.
+    const results: Array<Message | null> = new Array(toParse.length).fill(null);
+    await Promise.all(
+      toParse.map((_, k) => {
+        const i = toParse.length - 1 - k;
+        const event = toParse[i];
+        return parseSingleEvent(event, roomId, roomCrypto, callEvents)
+          .then((m) => { results[i] = m; }, () => {});
+      }),
     );
 
     const msgs = results.filter((m): m is Message => m !== null && (m.content !== "" || m.deleted === true || m.type === MessageType.system));
@@ -8207,7 +8453,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         unreadCount: lr.unreadCount,
         topic: lr.topic,
         updatedAt: lr.updatedAt,
-        lastMessage: buildLastMessage(lr, decryptedPreviewCache.get(lr.id)),
+        lastMessage: buildLastMessage(lr, cachedPreviewFor(lr.id, lr.lastMessageEventId)),
         lastMessageReaction: lr.lastMessageReaction ?? undefined,
       } as ChatRoom));
 
@@ -8337,12 +8583,60 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         peerKeysStatus.set(roomId, "not-encrypted");
         return "not-encrypted";
       }
+      // Keys not received yet (request in flight, or it timed out) is not
+      // "the peer has no keys": showing that banner here was a false alarm
+      // on every cold open. A failed request for the open chat is retried.
+      const keysState = roomCrypto.getKeysLoadState?.();
+      if (keysState === "loading" || keysState === "failed") {
+        let status: PeerKeysStatus = "loading";
+        if (keysState === "failed" && roomId === activeRoomId.value) {
+          // After a few failed attempts, surface it: the banner's Retry forces
+          // a network refetch, which the automatic retries never do.
+          if ((activeRoomKeysRetryAttempts.get(roomId) ?? 0) >= ACTIVE_ROOM_KEYS_FAILED_AFTER) status = "load-failed";
+          scheduleActiveRoomKeysRetry(roomId);
+        }
+        peerKeysStatus.set(roomId, status);
+        return status;
+      }
       peerKeysStatus.set(roomId, "missing");
       return "missing";
     }
 
+    activeRoomKeysRetryAttempts.delete(roomId);
     peerKeysStatus.set(roomId, "available");
     return "available";
+  };
+
+  // Retry for the open chat's failed key request: backs off 3s → 6s → … → 30s
+  // while the chat stays open. Success re-checks via onKeysLoaded, failure via
+  // onKeysFailed, which lands back in checkPeerKeys and reschedules.
+  const ACTIVE_ROOM_KEYS_RETRY_BASE_MS = 3_000;
+  const ACTIVE_ROOM_KEYS_RETRY_MAX_MS = 30_000;
+  // Failed automatic retries before the open chat reports "load-failed"
+  const ACTIVE_ROOM_KEYS_FAILED_AFTER = 3;
+  const activeRoomKeysRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const activeRoomKeysRetryAttempts = new Map<string, number>();
+  const scheduleActiveRoomKeysRetry = (roomId: string) => {
+    if (activeRoomKeysRetryTimers.has(roomId)) return;
+    const attempt = activeRoomKeysRetryAttempts.get(roomId) ?? 0;
+    activeRoomKeysRetryAttempts.set(roomId, attempt + 1);
+    const delay = Math.min(ACTIVE_ROOM_KEYS_RETRY_BASE_MS * 2 ** attempt, ACTIVE_ROOM_KEYS_RETRY_MAX_MS);
+    activeRoomKeysRetryTimers.set(roomId, setTimeout(() => {
+      activeRoomKeysRetryTimers.delete(roomId);
+      if (activeRoomId.value !== roomId) {
+        activeRoomKeysRetryAttempts.delete(roomId);
+        return;
+      }
+      const roomCrypto = useAuthStore().pcrypto?.rooms[roomId];
+      roomCrypto?.prepare().catch((e) => {
+        console.warn("[chat-store] peer keys retry failed:", e);
+      });
+    }, delay));
+  };
+  const clearActiveRoomKeysRetries = () => {
+    for (const timer of activeRoomKeysRetryTimers.values()) clearTimeout(timer);
+    activeRoomKeysRetryTimers.clear();
+    activeRoomKeysRetryAttempts.clear();
   };
 
   /** Reset all in-memory state and account-specific localStorage (called on logout) */
@@ -8392,7 +8686,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     decryptFailedRooms.clear();
     for (const timer of previewRetryTimers) clearTimeout(timer);
     previewRetryTimers.length = 0;
+    visibleSidebarRoomIds = null;
+    visibleSidebarOrder = [];
+    visibleSidebarOwner = undefined;
+    previewDecryptInFlight.clear();
+    previewRetryRequested.clear();
     peerKeysStatus.clear();
+    clearActiveRoomKeysRetries();
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
     roomFetchStates.clear();
@@ -8441,6 +8741,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     restoreForwardDraft,
     getDisplayName,
     getCanonicalDisplayName,
+    /** Read-only: lets name caches track getDisplayName's Matrix-name source. */
+    userDisplayNames,
     getLocalAlias,
     hasLocalAlias,
     localAliases,
@@ -8524,6 +8826,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     setActiveRoom,
     setHelpers,
     retryEncryptedPreviews,
+    retryRoomPreview,
+    setVisibleSidebarRooms,
+    releaseVisibleSidebarRooms,
     muteMember,
     setMemberPowerLevel,
     setMessages,

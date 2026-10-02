@@ -123,10 +123,14 @@ export class DecryptionWorker {
 
       // Pick + bulk "processing" mark in ONE transaction so a concurrent
       // retryForRoom reset can't be clobbered between read and mark.
+      // Latest-due first (`reverse`): a backlog is enqueued oldest -> newest,
+      // so ascending order spent the first ticks on the oldest history while
+      // the newest messages (sidebar preview, bottom of the open chat) waited.
       const jobs = await this.db.transaction("rw", this.db.decryptionQueue, async () => {
         const queuedJobs = await this.db.decryptionQueue
           .where("[status+nextAttemptAt]")
           .between(["queued", 0], ["queued", now], true, true)
+          .reverse()
           .limit(BATCH_SIZE)
           .toArray();
 
@@ -135,6 +139,7 @@ export class DecryptionWorker {
           ? await this.db.decryptionQueue
               .where("[status+nextAttemptAt]")
               .between(["waiting", 0], ["waiting", now], true, true)
+              .reverse()
               .limit(remaining)
               .toArray()
           : [];

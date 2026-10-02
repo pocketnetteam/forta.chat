@@ -9,11 +9,20 @@ export default defineConfig({
   base: "./",
   test: {
     globals: true,
-    environment: "happy-dom",
+    // Building a happy-dom window costs ~0.7 s per file, so files run in plain
+    // Node by default. A file that needs browser APIs (document, window,
+    // localStorage, location, @vue/test-utils mount) opts in with a first line
+    // `// @vitest-environment happy-dom`.
+    environment: "node",
     include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
     setupFiles: ["./src/test-setup.ts"],
-    // Prevent cross-file mock/timer pollution (call-service, sync-engine races).
-    fileParallelism: false,
+    // Files run in parallel, each in its own forked process (isolate is on),
+    // so mocks and fake timers cannot leak between files.
+    // Many tests `await import()` a heavy module graph (chat-store, call-service,
+    // .vue components) inside the test or hook. A cold import under parallel
+    // load can take several seconds, so the defaults (5 s / 10 s) flake.
+    testTimeout: 15_000,
+    hookTimeout: 30_000,
     // entities/local-ai's tests construct a real `local-ai` LocalAiClient
     // against `local-ai/adapters/node-testing`'s NodeSqliteAdapter (node:sqlite),
     // which is still experimental on Node 22 — mirrors local-ai's own

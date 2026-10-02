@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: on Android an ICE restart from both ends at once never completed. libwebrtc's native API has no
  * implicit rollback, unlike a browser: the polite side's setRemoteDescription(offer) while its own offer was out

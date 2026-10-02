@@ -440,6 +440,7 @@ const walletStore = useWalletStore();
               <template #all>
                 <ContactList
                   filter="all"
+                  :active="activeFilter === 'all'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                   @select-channel="handleSelectRoom"
@@ -448,6 +449,7 @@ const walletStore = useWalletStore();
               <template #personal>
                 <ContactList
                   filter="personal"
+                  :active="activeFilter === 'personal'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                 />
@@ -455,6 +457,7 @@ const walletStore = useWalletStore();
               <template #groups>
                 <ContactList
                   filter="groups"
+                  :active="activeFilter === 'groups'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                 />
@@ -462,6 +465,7 @@ const walletStore = useWalletStore();
               <template #invites>
                 <ContactList
                   filter="invites"
+                  :active="activeFilter === 'invites'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                 />

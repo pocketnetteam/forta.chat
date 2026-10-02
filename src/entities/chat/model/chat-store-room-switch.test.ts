@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * WEE-95 regression tests — chat opens slowly:
  *  A1: loadRoomMessages must NOT await the Dexie write in the render-critical path

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Instant re-entry (plan docs/plans/2026-09-28-chat-open-local-first.md,
  * stage 4): re-entering a recent room shows its last liveQuery emission in

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { PushPayload } from './push-data-plugin';
 

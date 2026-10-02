@@ -538,6 +538,34 @@ describe("DecryptionWorker", () => {
       expect(order).toEqual(["c", "b", "a"]);
       worker.dispose();
     });
+
+    it("picks the newest backlog jobs for the first batch, not the oldest", async () => {
+      // A catch-up backlog is enqueued oldest -> newest, so nextAttemptAt
+      // ascends with message age. 25 ready jobs, BATCH_SIZE 20: the first
+      // tick must take the 20 newest, leaving the 5 oldest for later.
+      const decrypted: number[] = [];
+      const { worker } = makeWorker(db, async (raw: any) => {
+        decrypted.push(raw.n);
+        return { body: "x" };
+      });
+      const msgs = [];
+      const jobs = [];
+      for (let n = 1; n <= 25; n++) {
+        msgs.push({ eventId: `$m${n}`, roomId: "!r", timestamp: n, content: "[encrypted]", decryptionStatus: "pending" });
+        jobs.push({ eventId: `$m${n}`, roomId: "!r", encryptedBody: JSON.stringify({ n }), status: "queued" as const, attempts: 0, nextAttemptAt: n, createdAt: n });
+      }
+      await db.messages.bulkAdd(msgs as any);
+      await db.decryptionQueue.bulkAdd(jobs);
+
+      await worker.tick();
+
+      expect(decrypted).toHaveLength(20);
+      expect(Math.min(...decrypted)).toBe(6);
+      expect(decrypted[0]).toBe(25);
+      const left = (await db.decryptionQueue.toArray()).map((j) => j.eventId).sort();
+      expect(left).toEqual(["$m1", "$m2", "$m3", "$m4", "$m5"]);
+      worker.dispose();
+    });
   });
 
   // ── WEE-93: tick commits all results in a single transaction ──

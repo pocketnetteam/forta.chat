@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: two Matrix clients synced side by side after a slow start. connectMatrixWithRetry gives each
  * init() 45 s, and a timeout does not stop the attempt: its login kept waiting, the retry started a client,

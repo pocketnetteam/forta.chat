@@ -573,6 +573,13 @@ export class SyncEngine {
           this.kickScheduler(0);
         });
       }
+    } catch (e) {
+      // processTick runs from a bare setTimeout, so a rejection here would be
+      // unhandled. The DB closing mid-claim (logout, dispose) is expected; any
+      // other failure leaves the ops queued for the watchdog to re-kick.
+      if (!this.disposed && !isDbClosedError(e)) {
+        console.warn("[SyncEngine] queue tick failed:", e);
+      }
     } finally {
       this.processing = false;
       if (this.online && !this.disposed) {

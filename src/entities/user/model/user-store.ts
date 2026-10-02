@@ -17,6 +17,11 @@ const LS_KEY = "bastyon-chat-users";
  *  from its own IndexedDB cache without hitting the network. */
 const USER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** How long an address the server twice returned no profile for is not re-requested. */
+const MISSING_PROFILE_TTL_MS = 5 * 60 * 1000;
+/** Pause after the first empty answer before asking again (may be a flaky node). */
+const MISSING_PROFILE_RECHECK_MS = 30 * 1000;
+
 /** Shared app initializer instance for loading user profiles on demand */
 let _appInit: ReturnType<typeof createAppInitializer> | null = null;
 function getAppInit() {
@@ -114,6 +119,30 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   // This debounce collapses them into 1 trigger, eliminating the 2-minute freeze.
   // When ProfileLoader batch is active, skip entirely — the onFlushComplete
   // callback fires a single triggerRef after ALL batches complete.
+  // Addresses the server ANSWERED with no usable profile (unregistered,
+  // deleted, empty name). Neither the SDK nor this store caches empty
+  // profiles, so every caller refetched them — and the sidebar asks for all
+  // rooms' members on every list change, so one such peer cost a
+  // getuserprofile per new message. Network errors are not recorded, and a
+  // single empty answer only buys a short pause: a flaky node can answer
+  // without the row, and a real user's name must not vanish for minutes.
+  const missingProfiles = new Map<string, { emptyAnswers: number; at: number }>();
+  const isProfileMissing = (address: string): boolean => {
+    const entry = missingProfiles.get(address);
+    if (!entry) return false;
+    const ttl = entry.emptyAnswers >= 2 ? MISSING_PROFILE_TTL_MS : MISSING_PROFILE_RECHECK_MS;
+    return Date.now() - entry.at < ttl;
+  };
+  /** Record the server's answer for an address after a successful load. */
+  const noteLoadResult = (address: string, userData: { name?: string } | null | undefined) => {
+    if (!isEmptyUserProfile(userData)) {
+      missingProfiles.delete(address);
+      return;
+    }
+    const emptyAnswers = (missingProfiles.get(address)?.emptyAnswers ?? 0) + 1;
+    missingProfiles.set(address, { emptyAnswers, at: Date.now() });
+  };
+
   let _triggerTimer: ReturnType<typeof setTimeout> | null = null;
   function debouncedTrigger(): void {
     if (PROFILE_LOADER_BATCH_ACTIVE.active) return; // suppress during batch
@@ -175,7 +204,9 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       }
       return;
     }
-    // Empty stubs are not kept in cache — always fetch.
+    // Empty stubs are not kept in cache — fetch, unless the server just said
+    // there is no profile.
+    if (isProfileMissing(address)) return;
     if (profilePool.has(address)) return;
 
     profilePool.dedupe(address, async () => {
@@ -187,6 +218,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         // userInfoFull store reserved for the logged-in account.
         await appInit.loadUsersInfo([address]);
         const userData = appInit.getUserData(address);
+        noteLoadResult(address, userData);
         if (userData && applyFetchedProfile(address, users.value, userData)) {
           debouncedTrigger();
           debouncedCacheUsers(users.value);
@@ -213,6 +245,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
       if (!a) continue;
       const cached = users.value[a];
       if (!cached || isEmptyUserProfile(cached)) {
+        if (isProfileMissing(a)) continue; // server just said there is none
         toLoad.push(a); // not cached / empty — must fetch
       } else if (cached.cachedAt && now - cached.cachedAt > USER_TTL_MS) {
         toRevalidate.push(a); // has data but stale — revalidate in background
@@ -237,6 +270,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
         let updated = false;
         for (const addr of uncached) {
           const userData = appInit.getUserData(addr);
+          noteLoadResult(addr, userData);
           if (userData && applyFetchedProfile(addr, users.value, userData)) {
             updated = true;
           }
@@ -384,6 +418,7 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     if (_revalidateTimer) { clearTimeout(_revalidateTimer); _revalidateTimer = null; }
     _revalidateQueue = new Set();
+    missingProfiles.clear();
     localStorage.removeItem(LS_KEY);
   };
 

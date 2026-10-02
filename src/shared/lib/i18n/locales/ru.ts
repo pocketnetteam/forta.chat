@@ -990,6 +990,7 @@ export const ru: Record<TranslationKey, string> = {
   "chat.messageNotFound": "Сообщение не найдено",
   "chat.peerKeysMissing": "Собеседник ещё не опубликовал ключи шифрования — пока не опубликует, сообщения отправятся без шифрования. Можно попробовать снова.",
   "chat.peerKeysRetry": "Повторить",
+  "chat.peerKeysLoadFailed": "Не удалось загрузить ключи шифрования — проверьте соединение. Пробуем снова автоматически, можно повторить сейчас.",
   "chat.unencryptedRoom": "Сообщения в этой комнате не шифруются",
   "tor.disable": "Отключить Tor",
   "register.registrationFailed": "Ошибка регистрации",

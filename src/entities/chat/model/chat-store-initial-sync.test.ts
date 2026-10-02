@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * WEE-55 — post-update Matrix sync hang regression tests.
  *

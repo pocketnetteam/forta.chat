@@ -1,7 +1,11 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ref, defineComponent } from "vue";
 import { mount, flushPromises } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
+import CallEventCard from "../CallEventCard.vue";
+import MessageContextMenu from "../MessageContextMenu.vue";
+import { ContextMenu } from "@/shared/ui/context-menu";
 
 /**
  * forta-bugs#1091: a call card in the timeline had no menu at all, so a call
@@ -51,7 +55,6 @@ describe("call card menu (#1091)", () => {
   });
 
   it("opens the menu on right-click", async () => {
-    const { default: CallEventCard } = await import("../CallEventCard.vue");
     const wrapper = mount(CallEventCard, { props: { message: callMessage, isOwn: false, tailClass: "" } });
 
     await wrapper.find("button").trigger("contextmenu", { clientX: 10, clientY: 20 });
@@ -62,7 +65,6 @@ describe("call card menu (#1091)", () => {
 
   it("opens the menu on a long press and does not call back on the release", async () => {
     vi.useFakeTimers();
-    const { default: CallEventCard } = await import("../CallEventCard.vue");
     const wrapper = mount(CallEventCard, { props: { message: callMessage, isOwn: false, tailClass: "" } });
     const button = wrapper.find("button");
 
@@ -85,7 +87,6 @@ describe("call card menu (#1091)", () => {
   // armed timer must not open the menu mid-scroll.
   it("does not open the menu when the press turns into a scroll", async () => {
     vi.useFakeTimers();
-    const { default: CallEventCard } = await import("../CallEventCard.vue");
     const wrapper = mount(CallEventCard, { props: { message: callMessage, isOwn: false, tailClass: "" } });
     const button = wrapper.find("button");
 
@@ -97,8 +98,6 @@ describe("call card menu (#1091)", () => {
   });
 
   it("offers only Delete for a call card, without the reactions row", async () => {
-    const { default: MessageContextMenu } = await import("../MessageContextMenu.vue");
-    const { ContextMenu } = await import("@/shared/ui/context-menu");
     const wrapper = mount(MessageContextMenu, {
       props: { show: true, x: 0, y: 0, message: callMessage, isOwn: false },
       global: { stubs: { teleport: true } },

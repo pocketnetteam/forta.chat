@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Tests for the NativeRTCPeerConnection proxy.
  *

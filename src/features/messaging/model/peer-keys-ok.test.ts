@@ -42,6 +42,15 @@ describe("isPeerKeysOk", () => {
     expect(isPeerKeysOk({ ...base, status: "unknown" })).toBe(true);
   });
 
+  it("private 1:1 while keys are still loading allows send", () => {
+    expect(isPeerKeysOk({ ...base, status: "loading" })).toBe(true);
+  });
+
+  it("private 1:1 whose key request keeps failing blocks send after grace", () => {
+    expect(isPeerKeysOk({ ...base, status: "load-failed" })).toBe(false);
+    expect(isPeerKeysOk({ ...base, status: "load-failed", inGracePeriod: true })).toBe(true);
+  });
+
   it("undefined status (peerKeysStatus not yet set) allows send", () => {
     expect(isPeerKeysOk({ ...base, status: undefined })).toBe(true);
   });
