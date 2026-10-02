@@ -7,6 +7,7 @@ import {
   clearSelfProfile,
   purgeEmptySelfProfiles,
   mergeSelfProfileWithRemote,
+  writeSelfCryptoIdentity,
   SELF_PROFILE_GRACE_MS,
   type SelfProfileSnapshot,
 } from "../self-profile-cache";
@@ -209,5 +210,48 @@ describe("self-profile-cache (WEE-26)", () => {
       expect(merged.site).toBe("https://remote.site");
       expect(merged.language).toBe("ru");
     });
+  });
+});
+
+describe("self-profile crypto identity (keys + numeric id)", () => {
+  const KEYS = Array.from({ length: 12 }, (_, i) => `pub${i}`);
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("stores keys and id in the existing snapshot", () => {
+    writeSelfProfile(makeSnapshot());
+    writeSelfCryptoIdentity(ADDR, { keys: KEYS, id: 29561667 }, 12);
+    const read = readSelfProfile(ADDR);
+    expect(read?.keys).toEqual(KEYS);
+    expect(read?.id).toBe(29561667);
+    expect(read?.name).toBe("Alice");
+  });
+
+  it("creates a minimal snapshot from the SDK name when none exists", () => {
+    writeSelfCryptoIdentity(ADDR, { keys: KEYS, id: 7, name: "maxim" }, 12);
+    expect(readSelfProfile(ADDR)).toMatchObject({ name: "maxim", keys: KEYS, id: 7, image: "" });
+  });
+
+  it("ignores an incomplete key set", () => {
+    writeSelfProfile(makeSnapshot());
+    writeSelfCryptoIdentity(ADDR, { keys: KEYS.slice(0, 11), id: 7 }, 12);
+    expect(readSelfProfile(ADDR)?.keys).toBeUndefined();
+  });
+
+  it("keeps keys and id when a display-field writer saves the profile", () => {
+    writeSelfProfile(makeSnapshot());
+    writeSelfCryptoIdentity(ADDR, { keys: KEYS, id: 7 }, 12);
+    writeSelfProfile(makeSnapshot({ name: "Alice 2", localEditedAt: 123 }));
+    expect(readSelfProfile(ADDR)).toMatchObject({ name: "Alice 2", keys: KEYS, id: 7 });
+  });
+
+  it("reads snapshots written before keys existed", () => {
+    localStorage.setItem(`forta-chat-self-profile:${ADDR}`, JSON.stringify(makeSnapshot()));
+    const read = readSelfProfile(ADDR);
+    expect(read?.name).toBe("Alice");
+    expect(read?.keys).toBeUndefined();
+    expect(read?.id).toBeUndefined();
   });
 });

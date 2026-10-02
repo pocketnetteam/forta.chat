@@ -266,8 +266,11 @@ describe("pcrypto getUsersInfo profile load", () => {
     const source = getSource();
     const idx = source.indexOf("getUsersInfo: async");
     expect(idx).toBeGreaterThan(-1);
-    const section = source.slice(idx, idx + 4500);
-    expect(section).toContain("loadUsersInfo(rawAddresses, { update: options?.forceUpdate ?? false })");
+    const section = source.slice(idx, idx + 1500);
+    // Batching / update / own-address rules live in resolveCryptoUsersInfo
+    // (behaviour covered in lib/__tests__/crypto-users-info.test.ts).
+    expect(section).toContain("resolveCryptoUsersInfo(ids, options,");
+    expect(section).toContain("appInitializer.loadUsersInfo(addrs, opts)");
     expect(section).toContain("getUserData");
     expect(section).not.toContain("loadUsersInfoRaw");
   });
