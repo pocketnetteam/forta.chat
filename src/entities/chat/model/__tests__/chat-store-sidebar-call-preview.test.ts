@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: the chat list kept a last-message preview that Dexie had already changed.
  * A hangup record can be rewritten in place — same event, same timestamp, same

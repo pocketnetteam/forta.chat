@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Roadmap stage 3: encrypted sidebar previews decrypt what is on screen
  * first. Preview passes used to walk every room in SDK order, 20 at a time,

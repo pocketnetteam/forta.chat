@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression (audit B3/B4): MessageList waited 300ms for
  * `activeMessages.length` to change after expandMessageWindow(), while the

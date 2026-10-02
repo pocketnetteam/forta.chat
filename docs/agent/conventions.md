@@ -53,6 +53,14 @@ Detail reference for [AGENTS.md](../../AGENTS.md).
 - Composables typically 40-100 lines; store modules 100-300 lines
 - Tests co-located with implementation
 
+## Tests
+
+- Files run in parallel, one forked process per file; the default environment is plain Node. A file that needs browser APIs (`document`, `window`, `localStorage`, `location`, `@vue/test-utils` `mount`) starts with `// @vitest-environment happy-dom`. `document is not defined` and similar errors mean the line is missing.
+- Keep files that don't need a DOM in Node: building a happy-dom window costs ~0.7 s per file.
+- Fake timers (`vi.useFakeTimers()`) instead of real waits: a test that sleeps for seconds slows every run.
+- While iterating, run only the test files you touch: `npx vitest run path/to/a.test.ts path/to/b.test.ts` (seconds). Run the full `npm run test` (~2 min) once before commit. `vitest related` / `--changed` do not help here: almost every module reaches `chat-store`, so they select ~100 files.
+- From an agent's shell, run the full suite in the background or with a 10-minute timeout. A shell killed by a short timeout leaves `vitest` orphaned; such a run never finishes (its pool keeps restarting the worker). Don't start a second full run while one is going; check for leftover `node ... vitest.mjs run` processes first.
+
 ## Comments
 
 - Minimal; code should be self-documenting. Explain "why", not "what"

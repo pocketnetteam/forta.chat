@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 
 import { makeUser, type TestUser } from "@/entities/matrix/model/__tests__/pcrypto-harness";

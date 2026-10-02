@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // On web path, nativeCallBridge is not invoked at all — ensureCallPermissions

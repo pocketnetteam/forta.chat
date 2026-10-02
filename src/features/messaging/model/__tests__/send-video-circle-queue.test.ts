@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Video circle (video note) send — crash-safe regression (WEE-62 / forta-bugs#852, #718).
  *

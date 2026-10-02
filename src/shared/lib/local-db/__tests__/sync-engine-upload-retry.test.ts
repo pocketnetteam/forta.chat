@@ -209,7 +209,9 @@ describe("SyncEngine.syncSendFile — upload retry (WEE-50)", () => {
     await seedFileOp(h.db, "cli_too_large", attachmentId);
 
     await h.engine.processQueue();
-    // Give the queue scheduler a tick to record the failure.
+    // Wait for the attempt itself (a fixed 50 ms is not enough when files run
+    // in parallel), then give a retry the chance to show up.
+    await vi.waitFor(() => expect(mockMatrix.uploadContent).toHaveBeenCalled(), { timeout: 5_000 });
     await new Promise((r) => setTimeout(r, 50));
 
     // Only one upload attempt — fatal error short-circuits the retry loop.

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: the sidebar renders from Dexie rows (sortedRooms), but
  * decryptRoomPreviews only wrote decryptedPreviewCache + rooms.value. Once

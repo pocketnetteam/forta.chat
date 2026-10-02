@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: opening a chat decrypts its timeline through one crypto worker
  * that serves requests in arrival order. Submitting events chronologically

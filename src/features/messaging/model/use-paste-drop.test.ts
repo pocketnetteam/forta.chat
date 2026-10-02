@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ref, nextTick } from "vue";
 import { usePasteDrop } from "./use-paste-drop";

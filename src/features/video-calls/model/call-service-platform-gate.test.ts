@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { APP_NAME } from '@/shared/config';
 import {

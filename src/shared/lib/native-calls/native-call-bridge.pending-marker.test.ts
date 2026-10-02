@@ -173,6 +173,13 @@ describe('markers seeded by wire()', () => {
     answer.mockResolvedValue({ callId: null, roomId: null, atMs: 0 });
 
     await expect(mod.consumePendingAnswerCallId(MATRIX_CALL_ID, ROOM)).resolves.toBe(false);
+
+    // The second wire() armed a 30 s poll on real timers for 'later-call',
+    // which no matrixCall here ever satisfies. Left running, its ticks import
+    // modules in the middle of later tests, and under load that import can
+    // re-register an older test's vi.doMock factory over a newer one — the
+    // next test then reads a marker it never set up.
+    await mod.retirePendingMarkers('later-call');
   });
 
   it('still honours a fresh reject marker that wire() carried over', async () => {

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: an address the server answers with no profile (unregistered,
  * deleted, empty name) was never cached — neither by the SDK nor by the

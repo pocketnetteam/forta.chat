@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: for a moment the chat list row showed a new message's unread count next to the
  * previous message's preview and reaction (Samsung, `order2`: ~400 ms). addMessage bumped the

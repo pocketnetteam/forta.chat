@@ -41,7 +41,7 @@ import { getCachedRooms, getCachedMessages, getCacheTimestamp } from "@/shared/l
 import { useAuthStore } from "@/entities/auth/model/stores";
 import { useUserStore } from "@/entities/user/model";
 import { defineStore } from "pinia";
-import { computed, reactive, ref, shallowRef, triggerRef, watch } from "vue";
+import { computed, reactive, ref, shallowRef, toRaw, triggerRef, watch } from "vue";
 import { perfMark, perfMeasure, perfCount } from "@/shared/lib/perf-markers";
 import { signalChatsInteractive } from "@/shared/lib/boot-signals";
 import { yieldToMain, yieldEveryN } from "@/shared/lib/yield-to-main";
@@ -133,19 +133,45 @@ const hangupGapCounter = createHangupGapCounter({
   onResolved: () => onHangupGapCounted?.(),
 });
 
+/** When the call push rules started counting (see callHangupRuleSince). The same
+ *  for every room — loops over all rooms read them once, not per room (each read
+ *  scans the push rules and touches localStorage). */
+interface CallRuleSinces {
+  hangupSince: number | null;
+  selectAnswerSince: number | null;
+}
+
+/** null when the push rules or storage cannot be read: counts stay the server's. */
+function readCallRuleSinces(myUserId: string): CallRuleSinces | null {
+  try {
+    // Read even at zero unread: the first sight of the rule dates the hangups it counts.
+    const pushRules = getMatrixClientService().client?.pushRules;
+    const now = Date.now();
+    return {
+      hangupSince: callHangupRuleSince(myUserId, pushRules, now, localStorage),
+      selectAnswerSince: callSelectAnswerRuleSince(myUserId, pushRules, now, localStorage),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The room's unread count for the chat list: the server's count without the call
  * hangups a peer sent, which the server counts once the account has the hangup push
  * rule (`../lib/call-hangup-unread.ts`). Any failure leaves the server's count as is.
+ * Pass `callRules` from readCallRuleSinces when counting many rooms.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function roomUnreadCount(room: any, myUserId: string): number {
+function roomUnreadCount(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  room: any,
+  myUserId: string,
+  callRules: CallRuleSinces | null = readCallRuleSinces(myUserId),
+): number {
   const total = (room.getUnreadNotificationCount?.("total") as number) ?? 0;
+  if (!callRules) return total;
   try {
-    // Read even at zero: the first sight of the rule dates the hangups it counts.
-    const pushRules = getMatrixClientService().client?.pushRules;
-    const hangupSince = callHangupRuleSince(myUserId, pushRules, Date.now(), localStorage);
-    const selectAnswerSince = callSelectAnswerRuleSince(myUserId, pushRules, Date.now(), localStorage);
+    const { hangupSince, selectAnswerSince } = callRules;
     if ((hangupSince === null && selectAnswerSince === null) || total <= 0) return total;
     // A rule that is off counts nothing: no event is as late as Infinity.
     const since = hangupSince ?? Infinity;
@@ -188,9 +214,23 @@ function roomUnreadCount(room: any, myUserId: string): number {
   }
 }
 
+/** Per-pass inputs a loop over many rooms reads once and hands in, instead of
+ *  each room re-reading them: the room's members (also needed by the caller)
+ *  and the call push-rule dates (identical for every room). */
+interface RoomBuildInputs {
+  members?: Record<string, unknown>[];
+  callRules?: CallRuleSinces | null;
+}
+
 /** Convert a Matrix SDK room object into our ChatRoom type */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameHints?: Record<string, string>): ChatRoom {
+function matrixRoomToChatRoom(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  room: any,
+  kit: MatrixKit,
+  myUserId: string,
+  nameHints?: Record<string, string>,
+  inputs?: RoomBuildInputs,
+): ChatRoom {
   const roomId = room.roomId as string;
   const name = (room.name as string) ?? roomId;
   const isGroup = !kit.isTetatetChat(room);
@@ -209,7 +249,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   // Without the split, kick of an invited member appeared to "do nothing"
   // because the next `matrixRoomToChatRoom` pass would re-add him from
   // his still-`invite` membership state. See Session 29 research.
-  const members = kit.getRoomMembers(room);
+  const members = inputs?.members ?? kit.getRoomMembers(room);
   const memberIds: string[] = [];
   const invitedMemberIds: string[] = [];
   for (const m of members) {
@@ -221,7 +261,7 @@ function matrixRoomToChatRoom(room: any, kit: MatrixKit, myUserId: string, nameH
   }
 
   // Unread notification count, peer call hangups taken out
-  const unreadCount = roomUnreadCount(room, myUserId);
+  const unreadCount = roomUnreadCount(room, myUserId, inputs?.callRules);
 
   // Get timeline events
   let timelineEvents: unknown[] = [];
@@ -2796,11 +2836,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     const ROOM_CHUNK = 50;
     const newRooms: ChatRoom[] = [];
+    // Read once per pass, not per room: the call push-rule dates are the same
+    // for every room, and each room's members feed both the build and
+    // updateDisplayNames / loadMissingMembers below.
+    const callRules = readCallRuleSinces(myUserId);
+    const membersByRoom = new Map<string, Record<string, unknown>[]>();
 
     for (let i = 0; i < interactiveRooms.length; i += ROOM_CHUNK) {
       const slice = interactiveRooms.slice(i, i + ROOM_CHUNK);
       for (const r of slice) {
-        const room = buildChatRoom(r, kit, myUserId, prevNameMap, prevLastMessageMap);
+        const members = kit.getRoomMembers(r);
+        membersByRoom.set(r.roomId as string, members);
+        const room = buildChatRoom(r, kit, myUserId, prevNameMap, prevLastMessageMap, { members, callRules });
         const prevMembers = prevMembersMap.get(room.id);
         if (prevMembers && prevMembers.length > room.members.length) {
           room.members = prevMembers;
@@ -2936,7 +2983,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Build user display name cache from room members (sync — no API calls)
     // Only run loadMissingMembers once AND only when we have actual rooms
     const willLoadMembers = !membersLoadedOnce && interactiveRooms.length > 0;
-    updateDisplayNames(interactiveRooms, kit, willLoadMembers);
+    updateDisplayNames(interactiveRooms, kit, willLoadMembers, membersByRoom);
 
     // Load profiles only for the first viewport of rooms (top ~15).
     // Remaining rooms get profiles on-demand via ContactList.loadVisibleRooms()
@@ -2953,7 +3000,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const viewportMatrixRooms = interactiveRooms.filter(
         (mr: any) => viewportRoomIds.has(mr.roomId as string),
       );
-      loadMissingMembers(viewportMatrixRooms, kit, myUserId);
+      loadMissingMembers(viewportMatrixRooms, kit, myUserId, membersByRoom);
     }
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
@@ -2986,14 +3033,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   /** One-time: load members from server for rooms with only self as member.
    *  Updates room member lists + avatars. Profile loading is handled lazily by loadProfilesForRoomIds. */
-  const loadMissingMembers = async (matrixRooms: any[], kit: MatrixKit, myUserId: string) => {
+  const loadMissingMembers = async (
+    matrixRooms: any[],
+    kit: MatrixKit,
+    myUserId: string,
+    membersByRoom?: ReadonlyMap<string, Record<string, unknown>[]>,
+  ) => {
     const myHexId = getmatrixid(myUserId);
     const toLoad: any[] = [];
 
     // Find rooms that need member loading (only self as member from SDK).
     // Skip rooms where Dexie/roomsMap already has resolved members (e.g. from cache).
     for (const mr of matrixRooms) {
-      const members = kit.getRoomMembers(mr);
+      const members = membersByRoom?.get(mr.roomId as string) ?? kit.getRoomMembers(mr);
       const memberIds = members.map((m: Record<string, unknown>) => getmatrixid(m.userId as string));
       const others = memberIds.filter(id => id !== myHexId);
 
@@ -3085,6 +3137,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Rebuild only changed rooms — fetch each individually from SDK
     const changedMatrixRooms: any[] = [];
     const removedIds = new Set<string>();
+    const callRules = readCallRuleSinces(myUserId);
+    const membersByRoom = new Map<string, Record<string, unknown>[]>();
     for (const roomId of changed) {
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) {
@@ -3106,7 +3160,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (createContent?.type === "m.space") continue;
       } catch { /* ignore */ }
 
-      const chatRoom = buildChatRoom(matrixRoom, kit, myUserId);
+      const members = kit.getRoomMembers(matrixRoom);
+      membersByRoom.set(roomId, members);
+      const chatRoom = buildChatRoom(matrixRoom, kit, myUserId, undefined, undefined, { members, callRules });
       const existing = roomsMap.get(roomId);
       if (existing) {
         // Preserve richer members list from cache/previous load
@@ -3178,7 +3234,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     // Update display names only for changed rooms
-    updateDisplayNames(changedMatrixRooms, kit);
+    updateDisplayNames(changedMatrixRooms, kit, false, membersByRoom);
 
     // Load profiles for changed rooms (lazy — skips already-requested)
     if (changedMatrixRooms.length > 0) {
@@ -3217,8 +3273,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     myUserId: string,
     prevNameMap?: Map<string, string>,
     prevLastMessageMap?: Map<string, Message | undefined>,
+    inputs?: RoomBuildInputs,
   ): ChatRoom => {
-    const chatRoom = matrixRoomToChatRoom(r, kit, myUserId, userDisplayNames.value);
+    const chatRoom = matrixRoomToChatRoom(r, kit, myUserId, userDisplayNames.value, inputs);
     if (chatRoom.id === activeRoomId.value) chatRoom.unreadCount = 0;
 
     // Use provided maps (full refresh) or fall back to roomsMap (incremental)
@@ -3290,17 +3347,29 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   /** Update display name cache from Matrix SDK room members.
    *  Collects addresses per room for later viewport-based profile loading.
    *  @param skipNamesReady — if true, don't set namesReady (loadMissingMembers will do it) */
-  const updateDisplayNames = (matrixRooms: any[], kit: MatrixKit, skipNamesReady = false) => {
+  const updateDisplayNames = (
+    matrixRooms: any[],
+    kit: MatrixKit,
+    skipNamesReady = false,
+    membersByRoom?: ReadonlyMap<string, Record<string, unknown>[]>,
+  ) => {
+    // Collect into a plain object and publish once: writing each member's name
+    // through the reactive proxy cost a proxy set + trigger per member — tens
+    // of thousands on a large account's full refresh.
+    const current = toRaw(userDisplayNames.value);
+    let changed: Record<string, string> | null = null;
     for (const r of matrixRooms) {
       const roomId = r.roomId as string;
-      const members = kit.getRoomMembers(r);
+      const members = membersByRoom?.get(roomId) ?? kit.getRoomMembers(r);
       const roomAddrs: string[] = [];
       for (const m of members) {
         const addr = matrixIdToAddress((m as Record<string, unknown>).userId as string);
         const dn = (m as Record<string, unknown>).rawDisplayName as string
           || (m as Record<string, unknown>).name as string;
         if (addr && dn && dn !== addr) {
-          userDisplayNames.value[addr] = dn;
+          // Last write wins across rooms, as with the per-member writes before
+          const effective = changed && addr in changed ? changed[addr] : current[addr];
+          if (effective !== dn) (changed ??= {})[addr] = dn;
         }
         if (addr && /^[A-Za-z0-9]+$/.test(addr)) {
           roomAddrs.push(addr);
@@ -3308,6 +3377,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
       if (roomAddrs.length > 0) matrixRoomAddresses.set(roomId, roomAddrs);
     }
+    if (changed) userDisplayNames.value = { ...current, ...changed };
     if (!skipNamesReady && rooms.value.length > 0) {
       namesReady.value = true;
     }
@@ -3834,10 +3904,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const matrixRooms = matrixService.getRooms() as any[];
       const myUserId = matrixService.getUserId() ?? "";
       const updates: Array<{ id: string; count: number }> = [];
+      const callRules = readCallRuleSinces(myUserId);
 
       for (const mxRoom of matrixRooms) {
         const roomId = mxRoom.roomId as string;
-        const unreadCount = roomUnreadCount(mxRoom, myUserId);
+        const unreadCount = roomUnreadCount(mxRoom, myUserId, callRules);
         const localRoom = dexieRoomMap.get(roomId);
         if (localRoom && localRoom.unreadCount !== unreadCount) {
           updates.push({ id: roomId, count: unreadCount });

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: on Android the local ICE candidates gathered before the SDK sent its answer (or offer) never
  * reached the peer. The native SDP from createAnswer carries no candidates and the proxy's localDescription

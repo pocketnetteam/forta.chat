@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: opening a chat while its key request was still in flight (or
  * had timed out) reported "missing" — "Peer hasn't published encryption keys"

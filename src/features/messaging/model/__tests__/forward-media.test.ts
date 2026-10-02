@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Forward media regression — internal forward (ForwardPicker) for media
  * messages must re-upload and arrive as `m.image` / `m.file` / `m.audio` events

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Background history work must not get in the way of opening a chat:
  * - list previews need no history load when Dexie already has the preview,

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: opening a chat after being away streams a backlog of messages,
  * each surfacing as a Dexie room delta. The sidebar (sortedRooms) must NOT

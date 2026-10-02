@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ref } from "vue";
 import { useReadTracker } from "./use-read-tracker";

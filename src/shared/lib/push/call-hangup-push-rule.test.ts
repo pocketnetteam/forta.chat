@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   CALL_HANGUP_PUSH_RULE_ID,
