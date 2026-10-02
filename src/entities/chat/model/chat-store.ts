@@ -3592,6 +3592,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
       }
       triggerRef(rooms);
+
+      // The sidebar renders from Dexie rows (mapLocalRoomToChatRoom), and once
+      // Dexie is active a rooms.value change no longer rebuilds it. Re-map the
+      // decrypted rooms so their rows pick up decryptedPreviewCache now —
+      // otherwise the preview stayed "[encrypted]" until an unrelated Dexie
+      // write touched the room (typically opening the chat).
+      const changes: RoomChange[] = [];
+      for (const { roomId } of decryptedResults) {
+        const lr = dexieRoomMap.get(roomId);
+        if (lr) changes.push({ type: "upsert", room: lr });
+      }
+      if (changes.length > 0) {
+        if (_suppressDexieRecompute) _deferredChanges.push(...changes);
+        else patchSortedRooms(changes);
+      }
     }
   };
 
@@ -5845,9 +5860,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       ? messageEvents.filter((event) => parseOnly.has(getRawEvent(event)?.event_id as string))
       : messageEvents;
 
-    // Decrypt all messages in parallel
-    const results = await Promise.all(
-      toParse.map((event) => parseSingleEvent(event, roomId, roomCrypto, callEvents).catch(() => null))
+    // Decrypt all messages in parallel, submitting newest first: the crypto
+    // worker serves requests in arrival order, so chronological submission
+    // made the messages the user is looking at (the bottom of the chat)
+    // decrypt last. `results` stays in timeline order.
+    const results: Array<Message | null> = new Array(toParse.length).fill(null);
+    await Promise.all(
+      toParse.map((_, k) => {
+        const i = toParse.length - 1 - k;
+        const event = toParse[i];
+        return parseSingleEvent(event, roomId, roomCrypto, callEvents)
+          .then((m) => { results[i] = m; }, () => {});
+      }),
     );
 
     const msgs = results.filter((m): m is Message => m !== null && (m.content !== "" || m.deleted === true || m.type === MessageType.system));
