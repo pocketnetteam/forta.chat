@@ -4,6 +4,11 @@ import {
   toBasytonUrl,
   toBasytonHttpsUrl,
   BASTYON_LINK_RE,
+  BASTYON_COLLECTION_LINK_RE,
+  parseBastyonCollectionLink,
+  toBastyonCollectionUrl,
+  toBastyonCollectionHttpsUrl,
+  isBastyonBlockUrl,
 } from "./bastyon-link";
 
 const TXID = "a".repeat(64);
@@ -252,5 +257,75 @@ describe("BASTYON_LINK_RE", () => {
   it("matches forta.chat links", () => {
     const matches = matchAll(`https://forta.chat/post?s=${TXID}`);
     expect(matches).toHaveLength(1);
+  });
+});
+
+// ─── Collections ─────────────────────────────────────────────────
+
+describe("parseBastyonCollectionLink", () => {
+  it("parses https://bastyon.com/collection?c=txid", () => {
+    expect(parseBastyonCollectionLink(`https://bastyon.com/collection?c=${TXID}`)).toEqual({ txid: TXID });
+  });
+
+  it("parses bastyon://collection?c=txid", () => {
+    expect(parseBastyonCollectionLink(`bastyon://collection?c=${TXID}`)).toEqual({ txid: TXID });
+  });
+
+  it("parses pocketnet.app / forta.chat hosts, trailing slash and extra params", () => {
+    expect(parseBastyonCollectionLink(`https://pocketnet.app/collection/?ref=x&c=${TXID}`)).toEqual({ txid: TXID });
+    expect(parseBastyonCollectionLink(`https://forta.chat/collection?c=${TXID}&ref=x`)).toEqual({ txid: TXID });
+  });
+
+  it("lowercases the txid", () => {
+    expect(parseBastyonCollectionLink(`https://bastyon.com/collection?c=${"A".repeat(64)}`)).toEqual({ txid: TXID });
+  });
+
+  it("rejects other paths, hosts and malformed txids", () => {
+    expect(parseBastyonCollectionLink(`https://bastyon.com/collections?c=${TXID}`)).toBeNull();
+    expect(parseBastyonCollectionLink(`https://bastyon.com/post?c=${TXID}`)).toBeNull();
+    expect(parseBastyonCollectionLink(`https://evil.com/collection?c=${TXID}`)).toBeNull();
+    expect(parseBastyonCollectionLink(`https://bastyon.com/collection?c=${"a".repeat(63)}`)).toBeNull();
+    expect(parseBastyonCollectionLink(`https://bastyon.com/collection?s=${TXID}`)).toBeNull();
+  });
+
+  it("builds canonical urls", () => {
+    expect(toBastyonCollectionUrl(TXID)).toBe(`bastyon://collection?c=${TXID}`);
+    expect(toBastyonCollectionHttpsUrl(TXID)).toBe(`https://bastyon.com/collection?c=${TXID}`);
+  });
+});
+
+describe("BASTYON_COLLECTION_LINK_RE", () => {
+  function matchAll(text: string): string[] {
+    BASTYON_COLLECTION_LINK_RE.lastIndex = 0;
+    return [...text.matchAll(BASTYON_COLLECTION_LINK_RE)].map((m) => m[0]);
+  }
+
+  it("finds a collection link inside text", () => {
+    expect(matchAll(`Look https://bastyon.com/collection?c=${TXID} here`)).toEqual([
+      `https://bastyon.com/collection?c=${TXID}`,
+    ]);
+  });
+
+  it("does not match post links and post links do not match collections", () => {
+    expect(matchAll(`bastyon://post?s=${TXID}&c=${COMMENT_ID}`)).toHaveLength(0);
+    BASTYON_LINK_RE.lastIndex = 0;
+    expect([...`bastyon://collection?c=${TXID}`.matchAll(BASTYON_LINK_RE)]).toHaveLength(0);
+  });
+
+  it("does not match unknown host", () => {
+    expect(matchAll(`https://evil.com/collection?c=${TXID}`)).toHaveLength(0);
+  });
+});
+
+describe("isBastyonBlockUrl", () => {
+  it("is true for post and collection links rendered as cards", () => {
+    expect(isBastyonBlockUrl(`https://bastyon.com/post?s=${TXID}`)).toBe(true);
+    expect(isBastyonBlockUrl(`https://bastyon.com/collection?c=${TXID}`)).toBe(true);
+  });
+
+  it("is false for other urls and empty input", () => {
+    expect(isBastyonBlockUrl("https://bastyon.com/author?address=PX")).toBe(false);
+    expect(isBastyonBlockUrl("https://example.com/collection?c=" + TXID)).toBe(false);
+    expect(isBastyonBlockUrl("")).toBe(false);
   });
 });

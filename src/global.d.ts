@@ -198,6 +198,11 @@ declare var pSDK: new (opts: {
       update?: boolean,
     ): Promise<Record<string, { posttxid?: string; cmntid?: string; value?: number | string } | undefined>>;
   };
+  /** Collections (vendor sdk.js `self.collection`, objects are kit.js pCollection) */
+  collection: {
+    load(txids: string[], update?: boolean): Promise<unknown>;
+    get(txid: string): import("@/shared/lib/bastyon-collection").BastyonCollectionRaw | null;
+  };
 };
 declare var UserInfo: new () => {
   name: { set(v: string): void };

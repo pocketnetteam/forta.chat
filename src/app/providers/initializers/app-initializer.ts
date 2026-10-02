@@ -3,6 +3,7 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { toBastyonCollectionData, type BastyonCollectionData } from "@/shared/lib/bastyon-collection";
 import {
   ensureActionBroadcast,
   type BroadcastableAction,
@@ -103,6 +104,7 @@ export class AppInitializer {
   private pocketnetInstance: PocketnetInstanceType | null = null;
   private _available = false;
   private postCache = new Map<string, BastyonPostData>();
+  private collectionCache = new Map<string, BastyonCollectionData>();
 
   // Coalesce per-post getpagescores requests into a single psdk.myScore.load
   // call (the SDK batches + caches, but only when all txids share one call).
@@ -759,6 +761,35 @@ export class AppInitializer {
   /** Synchronous cache lookup — returns immediately or null */
   getCachedPost(txid: string): BastyonPostData | null {
     return this.postCache.get(txid) ?? null;
+  }
+
+  /** Collection preview for a shared collection link. Publications of the
+   *  collection are not loaded — only its own data (cover, caption,
+   *  description, author, publications count). Goes through psdk so the
+   *  payload is cleaned exactly like in Bastyon. */
+  async loadCollection(txid: string): Promise<BastyonCollectionData | null> {
+    const cached = this.collectionCache.get(txid);
+    if (cached) return cached;
+    if (!this.psdk) {
+      console.warn("[appInit] loadCollection: psdk not available");
+      return null;
+    }
+    try {
+      await this.psdk.collection.load([txid]);
+      const raw = this.psdk.collection.get(txid);
+      if (!raw || !raw.address) return null;
+
+      const collection = toBastyonCollectionData(txid, raw);
+      this.collectionCache.set(txid, collection);
+      return collection;
+    } catch (e) {
+      console.error("[appInit] loadCollection error:", e);
+      return null;
+    }
+  }
+
+  getCachedCollection(txid: string): BastyonCollectionData | null {
+    return this.collectionCache.get(txid) ?? null;
   }
 
   /** Cache a post from external source (e.g. channel feed) so PostCard finds it */

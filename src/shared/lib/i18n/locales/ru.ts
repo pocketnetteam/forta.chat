@@ -800,7 +800,15 @@ export const ru: Record<TranslationKey, string> = {
   "post.article": "Статья",
   "post.openInBastyon": "Открыть в Forta",
   "post.subscribe": "Подписаться",
+
   "post.views": "Просмотры",
+
+  // ── Collection embeds ──
+  "collection.label": "Коллекция",
+  "collection.publicationsCount": "Публикаций: {count}",
+  "collection.notFound": "Коллекция не найдена",
+  "collection.deleted": "Коллекция удалена",
+  "collection.open": "Открыть в Bastyon",
 
   // Post player
   "postPlayer.boost": "Поддержать",

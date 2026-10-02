@@ -4,6 +4,8 @@ import { Capacitor } from "@capacitor/core";
 import { parseMessage, applyLocalAlias } from "@/shared/lib/message-format";
 import type { Segment } from "@/shared/lib/message-format";
 import { PostCard } from "@/features/post-player";
+import { CollectionCard } from "@/features/collection-preview";
+import { isBastyonBlockUrl } from "@/shared/lib/bastyon-link";
 import { splitByQuery, type TextPart } from "@/shared/lib/utils/highlight";
 import type { LinkPreview } from "@/entities/chat";
 import { useChatStore } from "@/entities/chat";
@@ -32,8 +34,18 @@ const segments = computed<Segment[]>(() =>
 );
 const activeQuery = computed(() => searchQuery.value?.trim() ?? "");
 
-/** Inline segments (text, link, mention) vs block segments (bastyonLink) */
-const hasBlockSegments = computed(() => segments.value.some(s => s.type === "bastyonLink"));
+/** Inline segments (text, link, mention) vs block segments (bastyonLink, bastyonCollection) */
+const hasBlockSegments = computed(() =>
+  segments.value.some(s => s.type === "bastyonLink" || s.type === "bastyonCollection"),
+);
+
+/** An OG preview of a Bastyon post/collection link would duplicate its block card */
+const visibleLinkPreview = computed(() => {
+  const preview = props.linkPreview;
+  if (!preview) return null;
+  if (hasBlockSegments.value && isBastyonBlockUrl(preview.url)) return null;
+  return preview;
+});
 
 // Capacitor Android WebView treats `<a target="_blank">` as a no-op (there is
 // no concept of a new tab), so a plain anchor leaves the user stuck. Intercept
@@ -93,8 +105,13 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
         :is-own="props.isOwn"
         :initial-comment-id="seg.commentId"
       />
+      <CollectionCard
+        v-else-if="seg.type === 'bastyonCollection'"
+        :txid="seg.txid"
+        :is-own="props.isOwn"
+      />
     </template>
-    <LinkPreviewCard v-if="props.linkPreview" :preview="props.linkPreview" :is-own="props.isOwn" />
+    <LinkPreviewCard v-if="visibleLinkPreview" :preview="visibleLinkPreview" :is-own="props.isOwn" />
   </div>
 
   <!-- Default: pure inline content (no block embeds) -->

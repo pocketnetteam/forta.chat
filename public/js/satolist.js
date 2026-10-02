@@ -714,6 +714,8 @@ Platform = function (app, listofnodes) {
         unblocking: function (alias, status) {},
         userInfo: function (alias, status) {},
         contentDelete: function (alias, status) {},
+        // without a listener actionFiltered stops here and module actionListeners never get collection updates
+        collection: function (alias, status) {},
         accSet: function () {},
         accDel: function () {},
         transaction: function () {}
@@ -3151,6 +3153,48 @@ Platform = function (app, listofnodes) {
                 },
 
                 clbk: clbk
+            })
+        },
+
+        collection: function (txid, el, clbk, p) {
+
+            if (!p) p = {}
+
+            app.nav.api.load({
+                open: true,
+                id: 'collection',
+                el: el,
+                eid: txid,
+                animation: false,
+                clbk: clbk,
+                essenseData: {
+                    txid: txid,
+                    openapi: typeof p.openapi === 'undefined' ? true : p.openapi,
+                    comments: p.comments,
+                    fullscreenvideo: p.fullscreenvideo,
+                    jury: p.jury
+                }
+            })
+        },
+
+        // shared collection in chat: header only (cover, caption, description, author, count), publications are not loaded
+        collectionpreview: function (txid, el, clbk, p) {
+
+            var id = 'collectionpreview' + makeid()
+
+            app.nav.api.load({
+                open: true,
+                id: 'collection',
+                el: el,
+                eid: id,
+                mid: id,
+                animation: false,
+                clbk: clbk,
+                essenseData: {
+                    txid: txid,
+                    openapi: true,
+                    preview: true
+                }
             })
         },
 
@@ -6562,7 +6606,9 @@ Platform = function (app, listofnodes) {
                 self.sdk.collections.wnd = null
             },
 
-            opennewcollectionwindow : function(editing){
+            // editing : txid of the collection, newcollection loads it from psdk itself
+            // addContent : txid of a publication to put at the first place of the collection
+            opennewcollectionwindow : function(editing, addContent){
 
                 var type = editing ? 'edit' : 'new'
 
@@ -6579,6 +6625,8 @@ Platform = function (app, listofnodes) {
                         else{
                             var external = self.sdk.collections.wnd.element
 
+                            if (addContent && external.addcontent) external.addcontent(addContent)
+
 						    external.show()
 
                             return
@@ -6594,10 +6642,11 @@ Platform = function (app, listofnodes) {
 					inWnd : true,
 
 					essenseData : {
-                        collection : editing
+                        txid : editing || null,
+                        addContent : addContent || null
 					},
 
-                    clbk : function( element){
+                    clbk : function(e, element){
 
 						self.sdk.collections.wnd = {
                             element, 
@@ -6608,6 +6657,72 @@ Platform = function (app, listofnodes) {
 				})
             },
 
+            // post menu "add to collection": no collections - new one with the publication,
+            // otherwise choose a collection and edit it with the publication at the first place
+            addcontent : function(txid){
+
+                var address = app.user.address.value
+
+                if (!txid || !address) return
+
+                globalpreloader(true)
+
+                self.sdk.collections.load.profile(address, (r, e) => {
+
+                    globalpreloader(false)
+
+                    if (e) {
+                        self.app.platform.errorHandler(e, true)
+
+                        return
+                    }
+
+                    var collections = _.filter(r && r.contents ? r.contents : [], (c) => {
+                        return c && !c.deleted
+                    })
+
+                    if (!collections.length){
+                        self.sdk.collections.opennewcollectionwindow(null, txid)
+
+                        return
+                    }
+
+                    app.nav.api.load({
+                        open : true,
+                        id : 'collections',
+                        inWnd : true,
+                        history : true,
+
+                        essenseData : {
+                            address : address,
+                            preview : false,
+                            count : 100,
+                            select : true,
+                            addContent : txid,
+
+                            onselect : function(collectionTxid){
+                                self.sdk.collections.opennewcollectionwindow(collectionTxid, txid)
+                            },
+
+                            oncreate : function(){
+                                self.sdk.collections.opennewcollectionwindow(null, txid)
+                            }
+                        }
+                    })
+
+                }, 100)
+            },
+
+            showwindow : function(){
+                var wnd = self.sdk.collections.wnd
+
+                if(!wnd || !wnd.element || !wnd.element.show) return false
+
+                wnd.element.show()
+
+                return true
+            },
+
             addItem : function(id){
                 if(!self.sdk.collections.current) return
 
@@ -6616,15 +6731,36 @@ Platform = function (app, listofnodes) {
                 if(self.sdk.collections.clbks.change) self.sdk.collections.clbks.change(self.sdk.collections.current)
 
                 app.el.html.find('.share_common#' + id).addClass('incollection')
+
+                self.sdk.collections.feedback(id, 'collectionadded')
             },
 
             removeItem : function(id){
+                if(!self.sdk.collections.current) return
+
                 self.sdk.collections.current.contentIds.remove(id)
 
                 if(self.sdk.collections.clbks.change) self.sdk.collections.clbks.change(self.sdk.collections.current)
 
                 app.el.html.find('.share_common#' + id).removeClass('incollection')
-                
+
+                self.sdk.collections.feedback(id, 'collectionremoved')
+            },
+
+            // short visual response on the publication in the feed (animations: css/common.less)
+            feedback : function(id, cls){
+                var share = app.el.html.find('.share_common#' + id)
+
+                share.removeClass('collectionadded collectionremoved')
+
+                // restart the animation if the user clicks again quickly
+                if (share[0]) void share[0].offsetWidth
+
+                share.addClass(cls)
+
+                setTimeout(function(){
+                    share.removeClass(cls)
+                }, 700)
             },
 
             enableEditMode : function(collection, clbks = {}){
@@ -6670,7 +6806,7 @@ Platform = function (app, listofnodes) {
 
             load : {
                 byid : function(txid, clbk, refresh){
-                    self.sdk.collections.load([txid], function(collections, error, p){
+                    self.sdk.collections.load.byids([txid], function(collections, error, p){
 
                         if(!collections.length && !error){
                             error = 'collectionNotFound'
@@ -6696,7 +6832,7 @@ Platform = function (app, listofnodes) {
 
                     self.psdk.collection.load(txids, refresh).then(() => {
 
-                        var collections = self.psdk.share.gets(txids)
+                        var collections = self.psdk.collection.gets(txids)
 
                        
 
@@ -6721,8 +6857,6 @@ Platform = function (app, listofnodes) {
 
                     var method = 'getprofilecollections'
                     var parameters = [self.currentBlock, '', count, '', [], [], [], [], [], '', address]
-
-                    console.log('load profile collections')
 
                     /*
 
@@ -6775,8 +6909,9 @@ Platform = function (app, listofnodes) {
                             return s.txid
                         }))
 
+                        // new collections that are still being published; edits are applied to loaded ones by psdk tempExtend
                         collections = self.psdk.collection.tempAdd(collections, (alias) => {
-                            return alias.actor == address
+                            return alias.actor == address && !alias.editing
                         })
 
                         d.contents = collections
@@ -6793,6 +6928,27 @@ Platform = function (app, listofnodes) {
 
                     })
                 }
+            },
+
+            delete: function (txid, clbk) {
+
+                var rm = new Remove()
+                rm.txidEdit.set(txid);
+
+                self.app.platform.actions.addActionAndSendIfCan(rm).then(action => {
+
+                    successCheck()
+
+                    if (clbk) clbk(null, action.get())
+
+                }).catch(e => {
+
+                    self.app.platform.errorHandler(e, true)
+
+                    if (clbk)
+                        clbk(e, null)
+
+                })
             }
         },
 

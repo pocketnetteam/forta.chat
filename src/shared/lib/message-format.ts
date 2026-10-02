@@ -1,4 +1,9 @@
-import { BASTYON_LINK_RE, parseBasytonLink } from "./bastyon-link";
+import {
+  BASTYON_LINK_RE,
+  BASTYON_COLLECTION_LINK_RE,
+  parseBasytonLink,
+  parseBastyonCollectionLink,
+} from "./bastyon-link";
 
 /**
  * Maximum allowed message body length (bytes).
@@ -60,7 +65,8 @@ export type Segment =
   | { type: "text"; content: string }
   | { type: "link"; content: string; href: string }
   | { type: "mention"; content: string; userId: string }
-  | { type: "bastyonLink"; content: string; txid: string; commentId?: string; isVideo: boolean };
+  | { type: "bastyonLink"; content: string; txid: string; commentId?: string; isVideo: boolean }
+  | { type: "bastyonCollection"; content: string; txid: string };
 
 const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
 // Bastyon mention format: @<34-68 hex-char address>:<display_name>
@@ -112,12 +118,14 @@ export function stripMentionAddresses(
 }
 
 /**
- * Replace bastyon:// and bastyon.com post links with a short label for previews.
+ * Replace bastyon:// and bastyon.com post and collection links with a short label for previews.
  * "Check this bastyon://index?s=abc123...def" → "Check this [Bastyon post]"
  */
 export function stripBastyonLinks(text: string): string {
   if (!text) return "";
-  return text.replace(BASTYON_LINK_RE, "📝 Bastyon post");
+  return text
+    .replace(BASTYON_LINK_RE, "📝 Bastyon post")
+    .replace(BASTYON_COLLECTION_LINK_RE, "🗂 Bastyon collection");
 }
 
 /**
@@ -151,7 +159,21 @@ export function parseMessage(text: string): Segment[] {
     });
   }
 
-  // Links (skip ranges already claimed by bastyonLink)
+  // Bastyon collection links (also before generic URLs)
+  for (const m of text.matchAll(BASTYON_COLLECTION_LINK_RE)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    const target = parseBastyonCollectionLink(m[0]);
+    if (!target) continue;
+    bastyonRanges.push([start, end]);
+    matches.push({
+      start,
+      end,
+      segment: { type: "bastyonCollection", content: m[0], txid: target.txid },
+    });
+  }
+
+  // Links (skip ranges already claimed by bastyonLink / bastyonCollection)
   for (const m of text.matchAll(URL_RE)) {
     const start = m.index!;
     const end = start + m[0].length;

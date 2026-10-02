@@ -134,3 +134,71 @@ export function toBasytonHttpsUrl(target: BastyonLinkTarget): string {
   if (target.commentId) url += `&c=${target.commentId}`;
   return url;
 }
+
+// ─── Collections ──────────────────────────────────────────────────
+
+/**
+ * Bastyon collection link (shared from the collection page in Bastyon):
+ *   - bastyon://collection?c={txid}
+ *   - https://(bastyon.com|pocketnet.app|forta.chat)/collection?c={txid}
+ *
+ * Captures group 1: the 64-char hex collection txid.
+ */
+export const BASTYON_COLLECTION_LINK_RE = new RegExp(
+  "(?:" +
+    "bastyon:\\/\\/" +
+    "|" +
+    "https?:\\/\\/(?:" +
+    BASTYON_HOSTS.map((h) => h.replace(/\./g, "\\.")).join("|") +
+    ")\\/" +
+    ")" +
+    "collection\\/?" +
+    "\\?" +
+    "(?:[\\w]+=(?:[\\w%-]*?)&)*" +
+    "c=([a-fA-F0-9]{64})" +
+    "(?:&[\\w]+=(?:[\\w%-]*))*" +
+    "(?:#[\\w-]*)?",
+  "gi",
+);
+
+/**
+ * Parse a Bastyon collection URL. Returns the collection txid or null
+ * when the URL is not a valid collection link.
+ */
+export function parseBastyonCollectionLink(url: string): { txid: string } | null {
+  const lower = url.toLowerCase();
+  const isScheme = lower.startsWith("bastyon://");
+  if (!isScheme && !BASTYON_HOSTS.some((h) => lower.includes(h))) return null;
+
+  try {
+    const parsed = new URL(isScheme ? url.replace(/^bastyon:\/\//i, "https://bastyon.com/") : url);
+    if (!isScheme && !BASTYON_HOSTS.includes(parsed.hostname)) return null;
+
+    const path = parsed.pathname.replace(/^\/|\/$/g, "");
+    if (path !== "collection") return null;
+
+    const txid = parsed.searchParams.get("c")?.toLowerCase();
+    if (!txid || !HEX64_RE.test(txid)) return null;
+
+    return { txid };
+  } catch {
+    return null;
+  }
+}
+
+/** True for links rendered as block cards in messages (post or collection) —
+ *  an OG link preview of such a URL would duplicate the card. */
+export function isBastyonBlockUrl(url: string): boolean {
+  if (!url) return false;
+  return !!(parseBasytonLink(url) || parseBastyonCollectionLink(url));
+}
+
+/** Canonical bastyon:// URL of a collection (deep link into the Bastyon app). */
+export function toBastyonCollectionUrl(txid: string): string {
+  return `bastyon://collection?c=${txid}`;
+}
+
+/** HTTPS URL of a collection on bastyon.com. */
+export function toBastyonCollectionHttpsUrl(txid: string): string {
+  return `https://bastyon.com/collection?c=${txid}`;
+}
