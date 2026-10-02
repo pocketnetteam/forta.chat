@@ -29,7 +29,9 @@ import RenameContactDialog from "@/features/chat-info/ui/RenameContactDialog.vue
 import { hapticImpact } from "@/shared/lib/haptics";
 import { lastMessageRowKey } from "@/features/contacts/lib/last-message-row-key";
 import { reuseIfSameKeys } from "@/features/contacts/lib/stable-scroller-items";
-import { createRoomNameIndex, sameSet } from "@/features/contacts/lib/room-name-index";
+import { sameSet } from "@/features/contacts/lib/room-name-index";
+import { mergeRoomsAndChannels } from "@/features/contacts/lib/merge-rooms-and-channels";
+import { useRoomNamesStore } from "@/features/contacts/model/room-names-store";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
@@ -75,116 +77,12 @@ function isChannel(item: ChatRoom | Channel): item is Channel {
   return "address" in item && !("id" in item);
 }
 
-/** Get unified sort timestamp for a list item */
-function getItemTimestamp(item: ChatRoom | Channel): number {
-  if (isChannel(item)) {
-    return item.lastContent ? item.lastContent.time * 1000 : 0;
-  }
-  return item.lastMessage?.timestamp ?? item.updatedAt;
-}
-
-/** Global sources of member names. A new object whenever any of them changes —
- *  that identity change is what invalidates the per-room name memo below. */
-interface NameContext {
-  users: Record<string, any>;
-  aliases: Record<string, string>;
-  myHexId: string;
-}
-const nameContext = computed<NameContext>(() => {
-  // getDisplayName reads the Matrix display names; track them here, because a
-  // memo hit skips the call and with it the dependency.
-  void chatStore.userDisplayNames;
-  return {
-    users: userStore.users,
-    aliases: chatStore.localAliases,
-    myHexId: authStore.address ? hexEncode(authStore.address) : "",
-  };
-});
-
-const buildRoomNameIndex = createRoomNameIndex<NameContext>((room, ctx) => {
-  const memberNames = _resolveMemberNames(room, ctx);
-  return { name: _resolveRoomName(room, memberNames), hasMemberNames: memberNames.length > 0 };
-});
-
-/** Room names and unresolved rooms in one pass over the list; both keep their
- *  reference while nothing changed, so allFilteredRooms / RecycleScroller and the
- *  name-retry watcher don't re-run on every room patch. */
-const roomNameIndex = computed(() => buildRoomNameIndex(chatStore.sortedRooms, nameContext.value));
+const roomNamesStore = useRoomNamesStore();
+/** Shared across all mounted tabs — see room-names-store.ts. */
+const roomNameIndex = computed(() => roomNamesStore.roomNameIndex);
 
 /** Reactive map of room ID → resolved display name. */
 const roomNameMap = computed(() => roomNameIndex.value.names);
-
-/** Resolve room display name — matches original bastyon-chat name.vue exactly:
- *  1. For 1:1: get other members → hexDecode(hexId) → look up name in userStore → join with ", "
- *  2. If no names found → "-"
- *  3. If room name starts with "@" → strip "@"
- *  4. For groups/public: use room name as-is */
-
-// Cache hexDecode results to avoid repeated computation
-const hexDecodeCache = new Map<string, string>();
-function cachedHexDecode(hex: string): string {
-  let result = hexDecodeCache.get(hex);
-  if (result === undefined) {
-    result = hexDecode(hex);
-    hexDecodeCache.set(hex, result);
-  }
-  return result;
-}
-
-/** Resolve member names — checks Pocketnet profiles first, then Matrix displaynames.
- *  Matrix displaynames come from m.room.member state events (free, already in sync)
- *  and are available instantly without any RPC call.
- *
- *  Walks BOTH joined and invited, otherwise the contact list shows a blank
- *  name for DMs whose peer hasn't accepted the invite yet (`members` would
- *  only contain the inviter). */
-function _resolveMemberNames(room: ChatRoom, ctx: NameContext): string[] {
-  const { users: allUsers, aliases, myHexId } = ctx;
-  const otherMembers = [
-    ...room.members,
-    ...(room.invitedMembers ?? []),
-  ].filter(m => m !== myHexId);
-
-  const names: string[] = [];
-  for (const hexId of otherMembers) {
-    const addr = cachedHexDecode(hexId);
-    if (/^[A-Za-z0-9]+$/.test(addr)) {
-      // Priority 0: User-set local alias — overrides everything below.
-      const alias = aliases[addr];
-      if (alias) { names.push(alias); continue; }
-      // Priority 1: Pocketnet profile (richest data)
-      const user = allUsers[addr];
-      if (user?.name && !isUnresolvedName(user.name) && user.name !== addr) {
-        names.push(user.name); continue;
-      }
-      // Priority 2: Matrix m.room.member displayname (free, from sync)
-      const matrixName = chatStore.getDisplayName(addr);
-      if (matrixName && matrixName !== addr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-        names.push(matrixName); continue;
-      }
-    }
-  }
-
-  // Fallback: try avatar address
-  if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
-    const avatarAddr = room.avatar.slice("__pocketnet__:".length);
-    const alias = aliases[avatarAddr];
-    if (alias) { names.push(alias); }
-    else {
-      const user = allUsers[avatarAddr];
-      if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
-        names.push(user.name);
-      } else {
-        const matrixName = chatStore.getDisplayName(avatarAddr);
-        if (matrixName && matrixName !== avatarAddr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-          names.push(matrixName);
-        }
-      }
-    }
-  }
-
-  return names;
-}
 
 /** Rooms where name resolution permanently failed — stop showing skeleton for these */
 const gaveUpRooms = ref(new Set<string>());
@@ -204,17 +102,6 @@ const unresolvedRoomSet = computed(() => {
   return _prevUnresolved;
 });
 
-
-function _resolveRoomName(room: ChatRoom, memberNames: string[]): string {
-  if (!room.isGroup) {
-    if (memberNames.length > 0) return memberNames.join(", ");
-    return cleanMatrixIds(room.name);
-  }
-  if (room.name?.startsWith("@")) return room.name.slice(1);
-  if (!isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
-  if (memberNames.length > 0) return memberNames.join(", ");
-  return cleanMatrixIds(room.name);
-}
 
 const resolveRoomName = (room: ChatRoom): string => {
   return roomNameMap.value[room.id] ?? cleanMatrixIds(room.name);
@@ -462,8 +349,22 @@ type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult
 // stale titles that were computed before profiles arrived.
 const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; preview: string; resolvedName: string; decryptionStatus: string; senderId: string; avatar: string; lastMessageKey: string; item: UnifiedItem }>();
 
-const allFilteredRooms = computed<UnifiedItem[]>(() => {
+/** Every row of this tab, in display order, as raw rooms / channels. Rows are built
+ *  only for the displayed page (filteredRooms): the invites tab alone can hold
+ *  thousands of rooms, and building a row per room on every list change cost
+ *  each mounted tab tens of milliseconds for rows nobody sees. */
+const allFilteredRooms = computed<(ChatRoom | Channel)[]>(() => {
   const rooms = chatStore.sortedRooms;
+  if (props.filter === "personal") return filterRoomsForTab(rooms, "personal");
+  if (props.filter === "groups") return filterRoomsForTab(rooms, "groups");
+  if (props.filter === "invites") return filterRoomsForTab(rooms, "invites");
+  // "all": joined rooms AND pending invites (WEE-59) interleaved with channels by activity.
+  // Only empty placeholder rooms are filtered out to prevent blank stripes in
+  // RecycleScroller (each slot reserves ITEM_HEIGHT even when its content is empty).
+  return mergeRoomsAndChannels(filterRoomsForTab(rooms, "all"), channelStore.channels);
+});
+
+const filteredRooms = computed<UnifiedItem[]>(() => {
   // Read roomNameMap eagerly to maintain reactive dependency even on cache-hit paths.
   // Without this, Vue drops the dependency after first all-hit evaluation.
   const nameMap = roomNameMap.value;
@@ -492,52 +393,10 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
     return item;
   };
 
-  if (props.filter === "personal") return filterRoomsForTab(rooms, "personal").map(toItem);
-  if (props.filter === "groups") return filterRoomsForTab(rooms, "groups").map(toItem);
-  if (props.filter === "invites") return filterRoomsForTab(rooms, "invites").map(toItem);
-
-  // "all": merge-sort rooms + channels (both already sorted by time desc).
-  // O(n+m) instead of O((n+m) log(n+m)).
-  // Joined rooms AND pending invites are shown here (WEE-59), interleaved by
-  // activity — their relative order comes from the upstream sortedRooms sort
-  // (membershipRank below only tie-breaks room-vs-channel at equal timestamps).
-  // Only empty placeholder rooms are filtered out to prevent blank stripes in
-  // RecycleScroller (each slot reserves ITEM_HEIGHT even when its content is empty).
-  const roomItems: UnifiedItem[] = filterRoomsForTab(rooms, "all").map(toItem);
-  const channelItems: UnifiedItem[] = channelStore.channels
-    .map(c => ({ ...c, _key: `ch:${c.address}` }))
-    .sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
-
-  // Membership rank for tie-breaking: joined rooms > invites > channels
-  const membershipRank = (item: ChatRoom | Channel): number => {
-    if (isChannel(item)) return 2;
-    return (item as ChatRoom).membership === "invite" ? 1 : 0;
-  };
-
-  const merged: UnifiedItem[] = [];
-  let ri = 0, ci = 0;
-  while (ri < roomItems.length && ci < channelItems.length) {
-    const rTs = getItemTimestamp(roomItems[ri]);
-    const cTs = getItemTimestamp(channelItems[ci]);
-    if (rTs > cTs) {
-      merged.push(roomItems[ri++]);
-    } else if (cTs > rTs) {
-      merged.push(channelItems[ci++]);
-    } else {
-      // Same timestamp: rooms before channels
-      if (membershipRank(roomItems[ri]) <= membershipRank(channelItems[ci])) {
-        merged.push(roomItems[ri++]);
-      } else {
-        merged.push(channelItems[ci++]);
-      }
-    }
-  }
-  while (ri < roomItems.length) merged.push(roomItems[ri++]);
-  while (ci < channelItems.length) merged.push(channelItems[ci++]);
-  return merged;
+  return allFilteredRooms.value
+    .slice(0, displayLimit.value)
+    .map(it => (isChannel(it) ? { ...it, _key: `ch:${it.address}` } : toItem(it)));
 });
-
-const filteredRooms = computed(() => allFilteredRooms.value.slice(0, displayLimit.value));
 
 // RecycleScroller gets the same array while the row order holds (see reuseIfSameKeys);
 // each row reads its current data from liveItemByKey.

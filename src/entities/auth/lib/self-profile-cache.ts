@@ -41,6 +41,12 @@ export interface SelfProfileSnapshot {
   localEditedAt: number;
   /** Epoch-ms of the last successful Pocketnet refresh. 0 means "never synced". */
   syncedAt: number;
+  /** Published encryption keys (12) and the Pocketnet numeric account id from
+   *  the last profile the SDK returned. Lets room crypto resolve the own
+   *  participant without a network round-trip when the SDK cache is cold or
+   *  its own-profile request hangs. Absent until the SDK returned them once. */
+  keys?: string[];
+  id?: number | string;
 }
 
 function keyFor(address: string): string {
@@ -84,6 +90,8 @@ export function readSelfProfile(address: string): SelfProfileSnapshot | null {
       language: isString(p.language) ? p.language : "",
       localEditedAt: isNumber(p.localEditedAt) ? p.localEditedAt : 0,
       syncedAt: isNumber(p.syncedAt) ? p.syncedAt : 0,
+      ...(Array.isArray(p.keys) && p.keys.every(isString) ? { keys: p.keys as string[] } : {}),
+      ...(isNumber(p.id) || (isString(p.id) && p.id) ? { id: p.id as number | string } : {}),
     };
   } catch {
     return null;
@@ -99,11 +107,59 @@ export function writeSelfProfile(snapshot: SelfProfileSnapshot): void {
   const storage = safeStorage();
   if (!storage) return;
   try {
-    storage.setItem(keyFor(snapshot.address), JSON.stringify(snapshot));
+    // Display-field writers (profile save, registration) don't know the crypto
+    // identity — keep the stored one instead of dropping it.
+    const prev = snapshot.keys && snapshot.id != null ? null : readSelfProfile(snapshot.address);
+    const next: SelfProfileSnapshot = {
+      ...snapshot,
+      keys: snapshot.keys ?? prev?.keys,
+      id: snapshot.id ?? prev?.id,
+    };
+    storage.setItem(keyFor(snapshot.address), JSON.stringify(next));
   } catch {
     // Quota / private-mode etc. — non-fatal; cache will simply not survive
     // this restart, falling back to remote-wins behaviour.
   }
+}
+
+/** Store the own encryption keys + numeric account id in the snapshot.
+ *  Without a snapshot yet, a minimal one is created from `name` (empty display
+ *  fields never override remote values in mergeSelfProfileWithRemote).
+ *  Incomplete keys are ignored — a partial set must never stand in for the
+ *  real one. */
+export function writeSelfCryptoIdentity(
+  address: string,
+  identity: { keys: string[]; id: number | string; name?: string },
+  requiredKeys: number,
+): void {
+  if (identity.keys.length < requiredKeys || identity.id == null || identity.id === "") return;
+  const prev = readSelfProfile(address) ?? {
+    address,
+    name: identity.name ?? "",
+    about: "",
+    image: "",
+    site: "",
+    language: "",
+    localEditedAt: 0,
+    syncedAt: 0,
+  };
+  if (
+    prev.id === identity.id
+    && prev.keys?.length === identity.keys.length
+    && prev.keys.every((k, i) => k === identity.keys[i])
+  ) return;
+  writeSelfProfile({
+    address: prev.address,
+    name: prev.name,
+    about: prev.about,
+    image: prev.image,
+    site: prev.site,
+    language: prev.language,
+    localEditedAt: prev.localEditedAt,
+    syncedAt: prev.syncedAt,
+    keys: [...identity.keys],
+    id: identity.id,
+  });
 }
 
 /** Drop empty-name self-profile snapshots left by older builds. */

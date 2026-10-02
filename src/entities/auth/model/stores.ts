@@ -54,6 +54,8 @@ import {
   syncDisplayNameAfterInit,
   readSelfProfile,
   writeSelfProfile,
+  writeSelfCryptoIdentity,
+  resolveCryptoUsersInfo,
   clearSelfProfile,
   mergeSelfProfileWithRemote,
   resolveKeyRepublishAction,
@@ -488,71 +490,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         getUsersInfo: async (ids: string[], options?: { forceUpdate?: boolean }) => {
           // ids are hex-encoded addresses; decode to raw for Pocketnet API
           try {
-            const rawAddresses = ids.map((id) => hexDecode(id));
-
-            // Single SDK load (getuserprofile once per batch); raw rows stored pre-cleanData in SDK.
-            // forceUpdate bypasses the SDK's in-memory profile cache — only set
-            // from an explicit user retry (peer-keys "Retry" button), never from
-            // an automatic recheck, so a stale cached peer profile (e.g. fetched
-            // before they had keys) can't get stuck for the rest of the session.
-            await appInitializer
-              .loadUsersInfo(rawAddresses, { update: options?.forceUpdate ?? false })
-              .catch((e) => {
-                console.warn("[pcrypto] loadUsersInfo failed:", e);
-              });
-
-            const rawProfileMap = new Map<string, Record<string, unknown>>();
-            for (const rawAddr of rawAddresses) {
-              const sdkRow = appInitializer.getUserData(rawAddr) as
-                | (Record<string, unknown> & { export?: (strip?: boolean) => Record<string, unknown> })
-                | null;
-
-              if (sdkRow && typeof sdkRow.address === "string") {
-                const exported = typeof sdkRow.export === "function"
-                  ? sdkRow.export(true)
-                  : sdkRow;
-                rawProfileMap.set(sdkRow.address, exported);
-              }
-            }
-
-            return ids.map((hexId, idx) => {
-              const rawAddr = rawAddresses[idx];
-              const sdkUser = appInitializer.getUserData(rawAddr);
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              let keys: string[] = (sdkUser as any)?.keys ?? [];
-              const rawProfile = rawProfileMap.get(rawAddr);
-              const sdkPath = keys.length > 0;
-
-              // Fallback: if SDK keys empty (e.g. filterXSS error in cleanData),
-              // extract keys directly from raw RPC response (k or keys field)
-              if (keys.length === 0 && rawProfile) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
-                if (Array.isArray(rawKeys)) {
-                  keys = rawKeys.filter((k: string) => k);
-                } else if (typeof rawKeys === "string" && rawKeys) {
-                  keys = rawKeys.split(",").filter((k: string) => k);
-                }
-              }
-
-              // Ensure source always has a numeric `id` field for deterministic
-              // sort order in preparedUsers (must match lodash _.sortBy(u => u.source.id)
-              // used by the old bastyon-chat client).
-              // Priority: rawProfile (has Pocketnet numeric id) > sdkUser > empty.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const rawSource: Record<string, unknown> = rawProfile
-                ? rawProfile
-                : (sdkUser ? { ...(sdkUser as any), address: rawAddr } : { address: rawAddr });
-
-              // If source still has no `id`, try to extract from SDK user data.
-              // Without a numeric id the sort order diverges from the old client
-              // (lodash _.sortBy places undefined at end; missing id would break ECDH).
-              const source: Record<string, unknown> = rawSource;
-              if (source.id == null && sdkUser && (sdkUser as any).id != null) {
-                source.id = (sdkUser as any).id;
-              }
-
-              return { id: hexId, keys, source };
+            const selfAddress = address.value ?? "";
+            return await resolveCryptoUsersInfo(ids, options, {
+              selfAddress,
+              requiredKeys: REQUIRED_ENCRYPTION_KEYS,
+              loadUsersInfo: (addrs, opts) => appInitializer.loadUsersInfo(addrs, opts),
+              getUserData: (addr) => appInitializer.getUserData(addr),
+              readSelfIdentity: () => {
+                const cached = readSelfProfile(selfAddress);
+                return cached?.keys && cached.id != null ? { keys: cached.keys, id: cached.id } : null;
+              },
+              writeSelfIdentity: (identity) =>
+                writeSelfCryptoIdentity(selfAddress, identity, REQUIRED_ENCRYPTION_KEYS),
             });
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
@@ -1253,6 +1202,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               localEditedAt: cached?.localEditedAt ?? 0,
               syncedAt: Date.now(),
             });
+            // Keys + numeric id let room crypto resolve the own participant
+            // offline next time (see resolveCryptoUsersInfo).
+            const selfId = (userData as { id?: number | string }).id;
+            if (Array.isArray(userData.keys) && selfId != null) {
+              writeSelfCryptoIdentity(
+                requestAddress,
+                { keys: userData.keys as string[], id: selfId },
+                REQUIRED_ENCRYPTION_KEYS,
+              );
+            }
 
             // Sync own profile to userStore so Avatar components show correct name/initial
             if (merged.name) {
