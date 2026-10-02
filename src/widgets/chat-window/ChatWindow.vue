@@ -164,11 +164,18 @@ const peerKeysMissing = computed(() => {
   // an enabled send button next to a "messaging unavailable" warning.
   if (chatStore.activeRoom?.isGroup) return false;
   if (chatStore.isRoomPublic(roomId)) return false;
-  return status === "missing";
+  return status === "missing" || status === "load-failed";
 });
 
 const { toast } = useToast();
 const { t } = useI18n();
+
+// "load-failed" = we could not fetch the keys, not that the peer has none.
+const peerKeysBannerText = computed(() =>
+  chatStore.activeRoomId && chatStore.peerKeysStatus.get(chatStore.activeRoomId) === "load-failed"
+    ? t("chat.peerKeysLoadFailed")
+    : t("chat.peerKeysMissing"),
+);
 
 // Retry handler for the peer-keys banner. The banner is no longer a hard
 // blocker (regression #597/#598/#639) — it offers an escape hatch so a stuck
@@ -708,7 +715,7 @@ onUnmounted(() => {
             <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
           </svg>
           <div class="flex-1 min-w-0">
-            <p class="leading-snug">{{ t("chat.peerKeysMissing") }}</p>
+            <p class="leading-snug">{{ peerKeysBannerText }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
                 type="button"

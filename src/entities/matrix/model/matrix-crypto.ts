@@ -231,6 +231,10 @@ export interface PcryptoRoomInstance {
    *  for fresh keys. Set only from an explicit user retry — never from an
    *  automatic/periodic recheck, to avoid hammering the network. */
   prepare(forceRefresh?: boolean): Promise<PcryptoRoomInstance>;
+  /** Where the participants' key request stands. "loading"/"failed" mean the
+   *  keys are not known yet — NOT that the peer has none. Optional so test
+   *  stubs need not implement it. */
+  getKeysLoadState?(): KeysLoadState;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _encrypt(userid: string, text: string, v?: number): Promise<{ encrypted: string; nonce: string }>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -248,6 +252,10 @@ export interface PcryptoRoomInstance {
   clear(): void;
   destroy(): void;
 }
+
+/** State of a room's participant key request (getusersinfo).
+ *  idle: never requested (no helper, or a ≥50-member room that skips it). */
+export type KeysLoadState = "idle" | "loading" | "loaded" | "failed";
 
 // ---- Main Pcrypto class ----
 
@@ -274,6 +282,8 @@ export class Pcrypto {
 
   /** Called when user crypto keys are successfully loaded for a room */
   onKeysLoaded?: (roomId: string) => void;
+  /** Called when a room's key request times out or fails */
+  onKeysFailed?: (roomId: string) => void;
 
   init(user: UserWithPrivateKeys) {
     this.user = user;
@@ -333,6 +343,10 @@ export class Pcrypto {
     // unforced (cached) call started before the forced one — silently
     // clobbering freshly-fetched keys with stale data.
     let usersinfoGeneration = 0;
+    // Outcome of the latest getusersinfo() call. Lets callers tell "keys not
+    // received yet" apart from "the peer has no keys" — canBeEncrypt() is
+    // false in both cases.
+    let keysLoadState: KeysLoadState = "idle";
 
     const version = 2;
     // Bumped (10 -> 11) to invalidate any decrypted-plaintext entries cached
@@ -521,6 +535,7 @@ export class Pcrypto {
       const us = Object.values(users).map(function (uh) { return uh.id; });
       if (!pcrypto.getUsersInfoCb) return;
       const myGeneration = ++usersinfoGeneration;
+      keysLoadState = "loading";
       let _usersinfo: CryptoUserInfo[];
       try {
         // Bound the key-resolution RPC: a stalled Pocketnet node must never
@@ -535,6 +550,11 @@ export class Pcrypto {
         );
       } catch (e) {
         console.warn("[pcrypto] getusersinfo timed out/failed:", e);
+        // A newer call is in flight — its outcome decides the state.
+        if (myGeneration === usersinfoGeneration) {
+          keysLoadState = "failed";
+          pcrypto.onKeysFailed?.(roomId);
+        }
         return;
       }
       // Discard a stale response: a newer getusersinfo() call (e.g. a forced
@@ -545,6 +565,7 @@ export class Pcrypto {
       for (const ui of _usersinfo) {
         usersinfo[ui.id] = ui;
       }
+      keysLoadState = "loaded";
       // Notify that keys are loaded — triggers decryption retry
       pcrypto.onKeysLoaded?.(roomId);
     }
@@ -881,6 +902,10 @@ export class Pcrypto {
         }
 
         return room;
+      },
+
+      getKeysLoadState(): KeysLoadState {
+        return keysLoadState;
       },
 
       // ---- encryptEvent — routes to group or 1:1 path ----

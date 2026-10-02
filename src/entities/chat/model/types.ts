@@ -217,5 +217,9 @@ export interface TransferInfo {
   message?: string;
 }
 
-/** Peer encryption key status for a room */
-export type PeerKeysStatus = "unknown" | "available" | "missing" | "not-encrypted";
+/** Peer encryption key status for a room.
+ *  "loading": the key request is in flight or failed and will be retried —
+ *  the peer may well have keys; never show the "peer has no keys" banner.
+ *  "load-failed": the open chat's key request keeps failing — offer a forced
+ *  retry instead of reporting the peer as keyless. */
+export type PeerKeysStatus = "unknown" | "loading" | "load-failed" | "available" | "missing" | "not-encrypted";

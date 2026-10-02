@@ -435,3 +435,37 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     __resetCallFeedbackPromptForTests();
   });
 });
+
+describe("ChatWindow — peer-keys banner", () => {
+  const ROOM = "!dm:matrix.org";
+  const mountDm = async (status: string | undefined) => {
+    fakeActiveRoomId.value = ROOM;
+    fakeRooms.value = [{ id: ROOM, name: "Peer", isGroup: false, members: [] }];
+    fakeRoomsInitialized.value = true;
+    if (status) peerKeysStatusMap.set(ROOM, status);
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+    return wrapper;
+  };
+
+  it("hides the banner while keys are still loading", async () => {
+    const wrapper = await mountDm("loading");
+    expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+    expect(wrapper.text()).not.toContain("chat.peerKeysLoadFailed");
+    wrapper.unmount();
+  });
+
+  it("says the peer has no keys only for 'missing'", async () => {
+    const wrapper = await mountDm("missing");
+    expect(wrapper.text()).toContain("chat.peerKeysMissing");
+    wrapper.unmount();
+  });
+
+  it("says the keys could not be loaded for 'load-failed', with Retry", async () => {
+    const wrapper = await mountDm("load-failed");
+    expect(wrapper.text()).toContain("chat.peerKeysLoadFailed");
+    expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+    expect(wrapper.text()).toContain("chat.peerKeysRetry");
+    wrapper.unmount();
+  });
+});

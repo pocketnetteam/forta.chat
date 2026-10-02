@@ -631,6 +631,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           chatDbKit.retryRoomDecryption?.(roomId);
           chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
         };
+        // A failed key request must not leave a stale "missing" banner; the
+        // re-check reports "loading" and retries for the open chat.
+        cryptoInstance.onKeysFailed = (roomId: string) => {
+          chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
+        };
       }
 
       let _lastSyncState: string | null = null;

@@ -8361,12 +8361,60 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         peerKeysStatus.set(roomId, "not-encrypted");
         return "not-encrypted";
       }
+      // Keys not received yet (request in flight, or it timed out) is not
+      // "the peer has no keys": showing that banner here was a false alarm
+      // on every cold open. A failed request for the open chat is retried.
+      const keysState = roomCrypto.getKeysLoadState?.();
+      if (keysState === "loading" || keysState === "failed") {
+        let status: PeerKeysStatus = "loading";
+        if (keysState === "failed" && roomId === activeRoomId.value) {
+          // After a few failed attempts, surface it: the banner's Retry forces
+          // a network refetch, which the automatic retries never do.
+          if ((activeRoomKeysRetryAttempts.get(roomId) ?? 0) >= ACTIVE_ROOM_KEYS_FAILED_AFTER) status = "load-failed";
+          scheduleActiveRoomKeysRetry(roomId);
+        }
+        peerKeysStatus.set(roomId, status);
+        return status;
+      }
       peerKeysStatus.set(roomId, "missing");
       return "missing";
     }
 
+    activeRoomKeysRetryAttempts.delete(roomId);
     peerKeysStatus.set(roomId, "available");
     return "available";
+  };
+
+  // Retry for the open chat's failed key request: backs off 3s → 6s → … → 30s
+  // while the chat stays open. Success re-checks via onKeysLoaded, failure via
+  // onKeysFailed, which lands back in checkPeerKeys and reschedules.
+  const ACTIVE_ROOM_KEYS_RETRY_BASE_MS = 3_000;
+  const ACTIVE_ROOM_KEYS_RETRY_MAX_MS = 30_000;
+  // Failed automatic retries before the open chat reports "load-failed"
+  const ACTIVE_ROOM_KEYS_FAILED_AFTER = 3;
+  const activeRoomKeysRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const activeRoomKeysRetryAttempts = new Map<string, number>();
+  const scheduleActiveRoomKeysRetry = (roomId: string) => {
+    if (activeRoomKeysRetryTimers.has(roomId)) return;
+    const attempt = activeRoomKeysRetryAttempts.get(roomId) ?? 0;
+    activeRoomKeysRetryAttempts.set(roomId, attempt + 1);
+    const delay = Math.min(ACTIVE_ROOM_KEYS_RETRY_BASE_MS * 2 ** attempt, ACTIVE_ROOM_KEYS_RETRY_MAX_MS);
+    activeRoomKeysRetryTimers.set(roomId, setTimeout(() => {
+      activeRoomKeysRetryTimers.delete(roomId);
+      if (activeRoomId.value !== roomId) {
+        activeRoomKeysRetryAttempts.delete(roomId);
+        return;
+      }
+      const roomCrypto = useAuthStore().pcrypto?.rooms[roomId];
+      roomCrypto?.prepare().catch((e) => {
+        console.warn("[chat-store] peer keys retry failed:", e);
+      });
+    }, delay));
+  };
+  const clearActiveRoomKeysRetries = () => {
+    for (const timer of activeRoomKeysRetryTimers.values()) clearTimeout(timer);
+    activeRoomKeysRetryTimers.clear();
+    activeRoomKeysRetryAttempts.clear();
   };
 
   /** Reset all in-memory state and account-specific localStorage (called on logout) */
@@ -8417,6 +8465,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const timer of previewRetryTimers) clearTimeout(timer);
     previewRetryTimers.length = 0;
     peerKeysStatus.clear();
+    clearActiveRoomKeysRetries();
     matrixRoomAddresses.clear();
     profilesRequestedForRooms.clear();
     roomFetchStates.clear();
