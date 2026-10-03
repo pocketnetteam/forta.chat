@@ -807,6 +807,15 @@ export const en = {
   "collection.notFound": "Collection not found",
   "collection.deleted": "Collection was deleted",
   "collection.open": "Open in Bastyon",
+  "profileLink.label": "Bastyon channel",
+  "profileLink.subscribers": "Subscribers: {count}",
+  "profileLink.open": "Open profile",
+  "roomLink.label": "Group chat",
+  "roomLink.unknown": "Invitation to a group chat",
+  "roomLink.members": "Members: {count}",
+  "roomLink.open": "Open chat",
+  "txLink.label": "PKOIN transaction",
+  "txLink.open": "Open in explorer",
 
   // Post player
   "postPlayer.boost": "Boost",

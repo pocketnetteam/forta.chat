@@ -6,6 +6,8 @@ import {
   parseMessage,
   stripMentionAddresses,
   stripBastyonLinks,
+  formatMessageForCopy,
+  isBlockSegment,
   isSafeUrl,
   truncateMessage,
   applyLocalAlias,
@@ -395,5 +397,88 @@ describe("Bastyon collection links (shared collections)", () => {
 
   it("stripBastyonLinks replaces collection links with a label", () => {
     expect(stripBastyonLinks(`bastyon://collection?c=${txid}`)).toBe("🗂 Bastyon collection");
+  });
+});
+
+describe("bastyon:// deep links", () => {
+  const REF = "pagmrr7irwgghwe3xusfvumdaedwtwrdn2";
+  const post = "c".repeat(64);
+
+  it("turns a username deep link into a profile segment", () => {
+    expect(parseMessage(`Hi bastyon://kleine_viogelein?ref=${REF}!`)).toEqual([
+      { type: "text", content: "Hi " },
+      {
+        type: "bastyonProfile",
+        content: `bastyon://kleine_viogelein?ref=${REF}`,
+        href: `https://bastyon.com/kleine_viogelein?ref=${REF}`,
+        name: "kleine_viogelein",
+      },
+      { type: "text", content: "!" },
+    ]);
+  });
+
+  it("turns a bastyon.com username URL into a profile segment", () => {
+    expect(parseMessage("https://bastyon.com/kleine_viogelein")[0])
+      .toMatchObject({ type: "bastyonProfile", name: "kleine_viogelein" });
+  });
+
+  it("renders other deep links as https links", () => {
+    expect(parseMessage("bastyon://faq")).toEqual([
+      { type: "link", content: "https://bastyon.com/faq", href: "https://bastyon.com/faq" },
+    ]);
+  });
+
+  it("keeps post links as post cards next to profile links", () => {
+    const types = parseMessage(`bastyon://post?s=${post} bastyon://kleine_viogelein`).map((s) => s.type);
+    expect(types).toEqual(["bastyonLink", "text", "bastyonProfile"]);
+  });
+
+  it("keeps ordinary URLs as links", () => {
+    expect(parseMessage("https://example.com/name")[0]).toMatchObject({ type: "link" });
+  });
+
+  it("keeps a deep link inside an https URL as part of that URL", () => {
+    const url = "https://example.com/redirect?to=bastyon://john";
+    expect(parseMessage(url)).toEqual([{ type: "link", content: url, href: url }]);
+    expect(formatMessageForCopy(`see ${url}`)).toBe(`see ${url}`);
+  });
+
+  it("turns publicroom= links into room segments", () => {
+    const room = "!AbC123:matrix.pocketnet.app";
+    expect(parseMessage(`join bastyon://welcome?publicroom=${room}`)[1]).toEqual({
+      type: "bastyonRoom",
+      content: `bastyon://welcome?publicroom=${room}`,
+      href: `https://bastyon.com/welcome?publicroom=${room}`,
+      roomId: room,
+    });
+    expect(parseMessage(`https://bastyon.com/welcome?publicroom=${room}`)[0])
+      .toMatchObject({ type: "bastyonRoom", roomId: room });
+  });
+
+  it("turns stx= links into transaction segments", () => {
+    expect(parseMessage(`bastyon://i?stx=${post}`)[0]).toMatchObject({ type: "bastyonTransaction", txid: post });
+  });
+
+  it("turns connect= links into profile segments by address", () => {
+    const address = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
+    expect(parseMessage(`https://bastyon.com/welcome?connect=${address}`)[0])
+      .toMatchObject({ type: "bastyonProfile", address });
+  });
+
+  it("isBlockSegment marks only Bastyon cards as blocks", () => {
+    const types = parseMessage(`a https://example.com bastyon://kleine_viogelein bastyon://i?stx=${post}`)
+      .filter(isBlockSegment)
+      .map((s) => s.type);
+    expect(types).toEqual(["bastyonProfile", "bastyonTransaction"]);
+  });
+
+  it("stripBastyonLinks shows profile deep links in https form", () => {
+    expect(stripBastyonLinks("see bastyon://kleine_viogelein")).toBe("see https://bastyon.com/kleine_viogelein");
+  });
+
+  it("formatMessageForCopy uses the real domain and cleans mentions", () => {
+    const addr = "a".repeat(40);
+    expect(formatMessageForCopy(`@${addr}:Bob look bastyon://kleine_viogelein?ref=${REF} and bastyon://post?s=${post}`))
+      .toBe(`@Bob look https://bastyon.com/kleine_viogelein?ref=${REF} and https://bastyon.com/post?s=${post}`);
   });
 });

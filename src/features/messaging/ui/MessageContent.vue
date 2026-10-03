@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, type Ref, ref } from "vue";
 import { Capacitor } from "@capacitor/core";
-import { parseMessage, applyLocalAlias } from "@/shared/lib/message-format";
+import { parseMessage, applyLocalAlias, isBlockSegment } from "@/shared/lib/message-format";
 import type { Segment } from "@/shared/lib/message-format";
 import { PostCard } from "@/features/post-player";
 import { CollectionCard } from "@/features/collection-preview";
+import { ProfileLinkCard, RoomLinkCard, TransactionLinkCard } from "@/features/bastyon-link-preview";
 import { isBastyonBlockUrl } from "@/shared/lib/bastyon-link";
 import { splitByQuery, type TextPart } from "@/shared/lib/utils/highlight";
 import type { LinkPreview } from "@/entities/chat";
@@ -34,12 +35,10 @@ const segments = computed<Segment[]>(() =>
 );
 const activeQuery = computed(() => searchQuery.value?.trim() ?? "");
 
-/** Inline segments (text, link, mention) vs block segments (bastyonLink, bastyonCollection) */
-const hasBlockSegments = computed(() =>
-  segments.value.some(s => s.type === "bastyonLink" || s.type === "bastyonCollection"),
-);
+/** Inline segments (text, link, mention) vs block segments (Bastyon cards) */
+const hasBlockSegments = computed(() => segments.value.some(isBlockSegment));
 
-/** An OG preview of a Bastyon post/collection link would duplicate its block card */
+/** An OG preview of a Bastyon link would duplicate its block card */
 const visibleLinkPreview = computed(() => {
   const preview = props.linkPreview;
   if (!preview) return null;
@@ -107,6 +106,23 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
       />
       <CollectionCard
         v-else-if="seg.type === 'bastyonCollection'"
+        :txid="seg.txid"
+        :is-own="props.isOwn"
+      />
+      <ProfileLinkCard
+        v-else-if="seg.type === 'bastyonProfile'"
+        :href="seg.href"
+        :name="seg.name"
+        :address="seg.address"
+        :is-own="props.isOwn"
+      />
+      <RoomLinkCard
+        v-else-if="seg.type === 'bastyonRoom'"
+        :room-id="seg.roomId"
+        :is-own="props.isOwn"
+      />
+      <TransactionLinkCard
+        v-else-if="seg.type === 'bastyonTransaction'"
         :txid="seg.txid"
         :is-own="props.isOwn"
       />

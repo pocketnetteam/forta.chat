@@ -6,7 +6,7 @@ import { useThemeStore } from "@/entities/theme";
 import { isConsecutiveMessage } from "@/entities/chat/lib/message-utils";
 import { cleanMatrixIds, resolveSystemText } from "@/entities/chat/lib/chat-helpers";
 import { formatDate } from "@/shared/lib/format";
-import { stripMentionAddresses } from "@/shared/lib/message-format";
+import { formatMessageForCopy } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
 import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "@/entities/chat/lib/dedupe-call-events";
@@ -173,11 +173,12 @@ const handleContextAction = (action: string, message: import("@/entities/chat").
             ?.closest(`[data-message-id="${message.id}"]`) != null;
       // Copying the whole bubble must yield readable text — strip the
       // `@hexaddr:Name` mention wire-syntax down to `@Name` (renamed contacts
-      // resolved via local alias), matching what the bubble renders (#897).
+      // resolved via local alias), matching what the bubble renders (#897),
+      // and turn bastyon:// deep links into https://bastyon.com links.
       // A manual in-bubble selection is copied verbatim.
       const payload = isSelectionInBubble
         ? selectedText
-        : stripMentionAddresses(message.content, (userId) => chatStore.getLocalAlias(userId));
+        : formatMessageForCopy(message.content, (userId) => chatStore.getLocalAlias(userId));
       navigator.clipboard.writeText(payload)
         .then(() => toast(t("chat.copiedToClipboard")))
         .catch((e) => {
@@ -616,6 +617,9 @@ const recentMessageIds = ref(new Set<string>());
 // --- Floating date header (declared early so watches below can reference it) ---
 const currentDateLabel = ref("");
 const showDateHeader = ref(false);
+// Width of the scroller's vertical scrollbar: the floating header sits outside
+// the scroller, so it must be inset by the same amount to center identically.
+const dateHeaderScrollbarWidth = ref(0);
 let dateHideTimer: ReturnType<typeof setTimeout> | undefined;
 
 // Version counter: increments on every watch invocation. After each await,
@@ -1072,6 +1076,7 @@ const updateFloatingDate = () => {
   // Find the first date separator that's visible or just above viewport
   const dateSeps = scrollEl.querySelectorAll("[data-date-label]");
   const containerTop = scrollEl.getBoundingClientRect().top;
+  dateHeaderScrollbarWidth.value = Math.max(0, scrollEl.offsetWidth - scrollEl.clientWidth);
   let bestLabel = "";
   let bestTop = -Infinity;
 
@@ -1335,14 +1340,20 @@ defineExpose({ scrollToMessage, setSearchQuery });
 <template>
   <div ref="listRef" class="relative min-h-0 flex-1" :style="listStyle">
     <!-- Floating date header (single, non-stacking) -->
+    <!-- Mirrors the scroller padding (px-4 py-3) and the in-list date separator
+         layout so the label lands exactly where separators render. -->
     <div
       v-if="currentDateLabel && !loading"
-      class="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center pt-2 transition-opacity duration-150"
+      data-testid="floating-date-header"
+      class="pointer-events-none absolute left-0 top-0 z-20 px-4 py-3 transition-opacity duration-150"
       :class="showDateHeader ? 'opacity-100' : 'opacity-0'"
+      :style="{ right: `${dateHeaderScrollbarWidth}px` }"
     >
-      <span class="rounded-full bg-neutral-grad-0/80 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">
-        {{ currentDateLabel }}
-      </span>
+      <div class="mx-auto flex max-w-6xl justify-center py-3">
+        <span class="rounded-full bg-neutral-grad-0/80 px-3 py-1 text-xs text-text-on-main-bg-color backdrop-blur-sm">
+          {{ currentDateLabel }}
+        </span>
+      </div>
     </div>
 
     <!-- Network wait shimmer — subtle 2px bar when Dexie cache exhausted and fetching from server -->

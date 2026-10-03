@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { toBastyonPostHttpsUrl } from "@/shared/lib/bastyon-link";
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
 import { usePostScores } from "../model/use-post-scores";
@@ -68,7 +69,7 @@ const handleBoost = () => {
 
 const handleShare = () => {
   chatStore.initPostForward(
-    `bastyon://post?s=${props.post.txid}`,
+    toBastyonPostHttpsUrl(props.post.txid),
     props.authorName || undefined,
   );
 };

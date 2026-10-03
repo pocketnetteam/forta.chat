@@ -12,6 +12,7 @@ import SelectionBar from "@/features/messaging/ui/SelectionBar.vue";
 import ForwardPicker from "@/features/messaging/ui/ForwardPicker.vue";
 import ChatSearch from "@/features/messaging/ui/ChatSearch.vue";
 import { useToast } from "@/shared/lib/use-toast";
+import { formatMessageForCopy } from "@/shared/lib/message-format";
 import { ChatInfoPanel, UserProfilePanel } from "@/features/chat-info";
 import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
@@ -384,7 +385,7 @@ watch(() => chatStore.forwardPickerRequested, (v) => {
 const handleSelectionCopy = () => {
   const ids = chatStore.selectedMessageIds;
   const msgs = chatStore.activeMessages.filter(m => ids.has(m.id));
-  const text = msgs.map(m => m.content).join("\n");
+  const text = msgs.map(m => formatMessageForCopy(m.content, (id) => chatStore.getLocalAlias(id))).join("\n");
   navigator.clipboard.writeText(text).then(() => toast(t("chat.copiedToClipboard")));
   chatStore.exitSelectionMode();
 };

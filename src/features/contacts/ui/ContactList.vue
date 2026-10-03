@@ -18,6 +18,7 @@ import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 import { getRoomTitleForUI, getMessagePreviewForUI, type DisplayResult } from "@/entities/chat";
 import { useLongPress } from "@/shared/lib/gestures";
 import { ContextMenu } from "@/shared/ui/context-menu";
+import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
@@ -774,8 +775,16 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
          The "no conversations" hint is authoritative only when the whole list is empty
          after a real SYNCING sync (isRoomListAuthoritativeEmpty) OR when this specific
          tab is empty while other tabs have rooms (sortedRooms.length > 0). -->
+    <!-- First sync not landed and Dexie holds no rooms: ChatSidebar skips its own
+         skeleton once channels are cached, so a room tab (personal, groups) would
+         render blank. Show the loader here until rooms arrive or empty is accepted. -->
+    <RoomListSkeleton
+      v-if="filteredRooms.length === 0 && chatStore.isRoomListLoading"
+      :first-load="true"
+      :slow="chatStore.isRoomListLoadingSlow"
+    />
     <div
-      v-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
+      v-else-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
       class="flex flex-col items-center gap-3 px-6 py-12 text-center"
     >
       <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">
@@ -786,6 +795,15 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
       <p class="text-sm text-text-on-main-bg-color">{{ t("contactList.noConversations") }}</p>
     </div>
 
+    <!-- "all" with cached channels but no rooms yet: channels render, chats still
+         come with the first sync — keep the loading header above the channels. -->
+    <RoomListSkeleton
+      v-if="filteredRooms.length > 0 && chatStore.isRoomListLoading"
+      :first-load="true"
+      :slow="chatStore.isRoomListLoadingSlow"
+      :rows="0"
+      class="shrink-0"
+    />
     <RecycleScroller
       v-if="filteredRooms.length > 0"
       ref="scrollerRef"
@@ -793,7 +811,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
       :item-size="ITEM_HEIGHT"
       :style="{ '--recycle-item-size': `${ITEM_HEIGHT}px` }"
       key-field="_key"
-      class="h-full"
+      class="min-h-0 flex-1"
     >
       <template #default="{ item: viewItem }">
       <!-- The scroller's item can be stale (scrollerItems); bind the live row as `item`. -->

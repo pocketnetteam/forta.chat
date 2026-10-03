@@ -809,6 +809,15 @@ export const ru: Record<TranslationKey, string> = {
   "collection.notFound": "Коллекция не найдена",
   "collection.deleted": "Коллекция удалена",
   "collection.open": "Открыть в Bastyon",
+  "profileLink.label": "Канал Bastyon",
+  "profileLink.subscribers": "Подписчиков: {count}",
+  "profileLink.open": "Открыть профиль",
+  "roomLink.label": "Групповой чат",
+  "roomLink.unknown": "Приглашение в групповой чат",
+  "roomLink.members": "Участников: {count}",
+  "roomLink.open": "Открыть чат",
+  "txLink.label": "Транзакция PKOIN",
+  "txLink.open": "Открыть в обозревателе",
 
   // Post player
   "postPlayer.boost": "Поддержать",
