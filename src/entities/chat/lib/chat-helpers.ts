@@ -359,6 +359,11 @@ export function resolveSystemText(
   return result;
 }
 
+/** Members that make up a room title built from member names (an unnamed group).
+ *  More can't be read in a title anyway, and walking every member of a big room
+ *  cost ~35 ms per room. Taken in room state order, which is roughly join order. */
+export const MAX_TITLE_MEMBERS = 10;
+
 /** Check if a name looks like an unresolved hash/hex ID — not human-readable.
  *  Used to decide when to show a skeleton placeholder instead of a raw ID. */
 export function isUnresolvedName(name: string): boolean {

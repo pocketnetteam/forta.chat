@@ -793,6 +793,9 @@ export const en = {
   "post.notFound": "Post not found",
   "post.openOriginal": "Open in Bastyon",
   "post.retry": "Retry",
+  "post.commentNotFound": "Comment not found",
+  "post.commentDeleted": "Comment deleted",
+  "post.inReplyTo": "Reply to {name}'s comment",
   "post.readMore": "Read more",
   "post.video": "Video",
   "post.article": "Article",
@@ -827,6 +830,7 @@ export const en = {
   "postPlayer.rated": "You rated this post",
   "postPlayer.ratingRestricted": "Rating restricted",
   "postPlayer.openPost": "Open",
+  "postPlayer.goToComment": "Go to comment",
   "postPlayer.searchChats": "Search chats...",
 
   // ── Registration ──

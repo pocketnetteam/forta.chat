@@ -53,6 +53,7 @@ export default {
         "voice-message-fillStyle": withOpacity("--voice-message-fillStyle"),
         // Chat-specific colors
         "chat-bubble-own": withOpacity("--chat-bubble-own"),
+        "chat-link-own": withOpacity("--chat-link-own"),
         "chat-bubble-other": withOpacity("--chat-bubble-other"),
         "chat-sidebar": withOpacity("--chat-sidebar"),
         "chat-input-bg": withOpacity("--chat-input-bg"),

@@ -7,7 +7,12 @@
  *   - https://bastyon.com/post?s={txid}
  *   - https://pocketnet.app/post?s={txid}
  *   - https://forta.chat/post?s={txid}
- *   - All above with &c={commentId} or #comment-{commentId}
+ *   - https://bastyon.com/{username}?s={txid} — Bastyon shares posts and
+ *     comments under the author's channel path; like Bastyon's widgets.url(),
+ *     the path does not matter once s= / v= is present
+ *   - pocketnet://… — same as bastyon://
+ *   - All above with &commentid={commentId} (what Bastyon generates),
+ *     &c={commentId} or #comment-{commentId}
  */
 
 import { MATRIX_ROOM_ID_RE } from "./parse-invite-url";
@@ -22,12 +27,20 @@ const BASTYON_HOSTS = ["bastyon.com", "pocketnet.app", "forta.chat"];
 
 const HEX64_RE = /^[a-f0-9]{64}$/;
 
+/** Path of a post link: post, index, video or the author's username. */
+const POST_PATH_RE = /^[\w%-]{1,64}$/;
+
+/** Paths whose s= / v= does not name a post (profiles, collections, docs). */
+const NON_POST_PATHS = new Set([
+  "author", "authorn", "user", "userpage", "channel", "collection", "collections", "docs", "blockexplorer",
+]);
+
 /**
  * Regex for detecting Bastyon links inside message text.
  *
  * Matches:
- *   bastyon://(post|index)?...s|v=HEX64...
- *   https://(bastyon.com|pocketnet.app|forta.chat)/(post|index)?...s|v=HEX64...
+ *   (bastyon|pocketnet)://(post|index|username)?...s|v=HEX64...
+ *   https://(www.)?(bastyon.com|pocketnet.app|forta.chat)/(post|index|username)?...s|v=HEX64...
  *
  * Captures group 1: the 64-char hex txid (from the first s= or v= param).
  *
@@ -36,13 +49,13 @@ const HEX64_RE = /^[a-f0-9]{64}$/;
  */
 export const BASTYON_LINK_RE = new RegExp(
   "(?:" +
-    "bastyon:\\/\\/" +
+    "(?:bastyon|pocketnet):\\/\\/" +
     "|" +
-    "https?:\\/\\/(?:" +
+    "https?:\\/\\/(?:www\\.)?(?:" +
     BASTYON_HOSTS.map((h) => h.replace(/\./g, "\\.")).join("|") +
     ")\\/" +
     ")" +
-    "(?:index|post)" +
+    "[\\w%-]{1,64}" +
     "\\?" +
     "(?:[\\w]+=(?:[\\w%-]*?)&)*" +
     "[vs]=([a-fA-F0-9]{64})" +
@@ -57,32 +70,28 @@ export const BASTYON_LINK_RE = new RegExp(
  */
 export function parseBasytonLink(url: string): BastyonLinkTarget | null {
   const lower = url.toLowerCase();
-  if (
-    !lower.startsWith("bastyon://") &&
-    !BASTYON_HOSTS.some((h) => lower.includes(h))
-  ) {
+  const isScheme = SCHEME_PREFIX_RE.test(url);
+  if (!isScheme && !BASTYON_HOSTS.some((h) => lower.includes(h))) {
     return null;
   }
 
   try {
     // Normalize bastyon:// to parseable https:// URL
-    const normalizedUrl = url.startsWith("bastyon://")
-      ? url.replace("bastyon://", "https://bastyon.com/")
-      : url;
-
-    const parsed = new URL(normalizedUrl);
+    const parsed = new URL(bastyonSchemeToHttps(url));
 
     // Validate host (skip for bastyon:// — already normalized)
     if (
-      !url.startsWith("bastyon://") &&
-      !BASTYON_HOSTS.includes(parsed.hostname)
+      !isScheme &&
+      !BASTYON_HOSTS.includes(parsed.hostname.replace(/^www\./, ""))
     ) {
       return null;
     }
 
-    // Validate path
+    // Validate path: a single segment (post, index, username, …) that is not
+    // a profile / collection page
     const path = parsed.pathname.replace(/^\//, "");
-    if (path !== "post" && path !== "index") return null;
+    const pathLower = path.toLowerCase();
+    if (!POST_PATH_RE.test(path) || NON_POST_PATHS.has(pathLower)) return null;
 
     // Extract txid — try s= first, then v=
     const txid = (
@@ -90,8 +99,10 @@ export function parseBasytonLink(url: string): BastyonLinkTarget | null {
     )?.toLowerCase();
     if (!txid || !HEX64_RE.test(txid)) return null;
 
-    // Extract optional comment ID from &c= param
-    let commentId = parsed.searchParams.get("c")?.toLowerCase();
+    // Extract optional comment ID: &commentid= (Bastyon) or &c=
+    let commentId = (
+      parsed.searchParams.get("commentid") || parsed.searchParams.get("c")
+    )?.toLowerCase();
     if (commentId && !HEX64_RE.test(commentId)) {
       commentId = undefined;
     }
@@ -105,7 +116,7 @@ export function parseBasytonLink(url: string): BastyonLinkTarget | null {
     }
 
     const isVideo =
-      path === "index" ||
+      pathLower === "index" ||
       parsed.searchParams.has("v") ||
       parsed.searchParams.get("video") === "1";
 
@@ -122,7 +133,7 @@ export function toBasytonUrl(target: BastyonLinkTarget): string {
   const path = target.isVideo ? "index" : "post";
   const param = target.isVideo ? "v" : "s";
   let url = `bastyon://${path}?${param}=${target.txid}`;
-  if (target.commentId) url += `&c=${target.commentId}`;
+  if (target.commentId) url += `&commentid=${target.commentId}`;
   return url;
 }
 
@@ -133,7 +144,7 @@ export function toBasytonHttpsUrl(target: BastyonLinkTarget): string {
   const path = target.isVideo ? "index" : "post";
   const param = target.isVideo ? "v" : "s";
   let url = `https://bastyon.com/${path}?${param}=${target.txid}`;
-  if (target.commentId) url += `&c=${target.commentId}`;
+  if (target.commentId) url += `&commentid=${target.commentId}`;
   return url;
 }
 

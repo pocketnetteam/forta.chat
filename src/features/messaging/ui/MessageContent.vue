@@ -35,6 +35,9 @@ const segments = computed<Segment[]>(() =>
 );
 const activeQuery = computed(() => searchQuery.value?.trim() ?? "");
 
+/** Accent-coloured links vanish on the accent-coloured own bubble. */
+const linkColorClass = computed(() => (props.isOwn ? "text-chat-link-own" : "text-color-txt-ac"));
+
 /** Inline segments (text, link, mention) vs block segments (Bastyon cards) */
 const hasBlockSegments = computed(() => segments.value.some(isBlockSegment));
 
@@ -90,12 +93,14 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
         v-else-if="seg.type === 'link'"
         :href="seg.href"
         rel="noopener noreferrer"
-        class="text-color-txt-ac underline hover:no-underline"
+        class="underline hover:no-underline"
+        :class="linkColorClass"
         @click="handleLinkClick($event, seg.href)"
       >{{ seg.content }}</a>
       <span
         v-else-if="seg.type === 'mention'"
-        class="cursor-pointer font-medium text-color-txt-ac"
+        class="cursor-pointer font-medium"
+        :class="linkColorClass"
         @click.stop="emit('mentionClick', seg.userId)"
       >{{ seg.content }}</span>
       <PostCard
@@ -147,12 +152,14 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
           v-else-if="seg.type === 'link'"
           :href="seg.href"
           rel="noopener noreferrer"
-          class="text-color-txt-ac underline hover:no-underline"
+          class="underline hover:no-underline"
+        :class="linkColorClass"
           @click="handleLinkClick($event, seg.href)"
         >{{ seg.content }}</a>
         <span
           v-else-if="seg.type === 'mention'"
-          class="cursor-pointer font-medium text-color-txt-ac"
+          class="cursor-pointer font-medium"
+        :class="linkColorClass"
           @click.stop="emit('mentionClick', seg.userId)"
         >{{ seg.content }}</span>
       </template>

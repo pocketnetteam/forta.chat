@@ -112,7 +112,8 @@ const openVideo = (e: Event) => {
     :href="postUrl"
     target="_blank"
     rel="noopener noreferrer"
-    class="text-color-txt-ac underline hover:no-underline"
+    class="underline hover:no-underline"
+    :class="isOwn ? 'text-chat-link-own' : 'text-color-txt-ac'"
     @click.stop
   >{{ t("post.notFound") }}</a>
 

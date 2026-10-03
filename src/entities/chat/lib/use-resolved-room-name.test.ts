@@ -126,3 +126,20 @@ describe("useResolvedRoomName — Matrix display name fallback", () => {
     expect(resolve(room)).toBe("");
   });
 });
+
+describe("useResolvedRoomName — member cap for unnamed groups", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    setActivePinia(createTestingPinia({ stubActions: false }));
+  });
+
+  it("builds the title from the first 10 other members only", () => {
+    const user = useUserStore();
+    const addrs = Array.from({ length: 50 }, (_, i) => `PMember${i}`);
+    for (const [i, a] of addrs.entries()) user.users[a] = { name: `Name ${i}` } as any;
+
+    const room = { ...makeDmRoom(""), isGroup: true, name: "!abc:server", members: addrs.map(a => hexEncode(a)) };
+    const { resolve } = useResolvedRoomName();
+    expect(resolve(room)).toBe(Array.from({ length: 10 }, (_, i) => `Name ${i}`).join(", "));
+  });
+});

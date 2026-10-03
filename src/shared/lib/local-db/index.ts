@@ -159,7 +159,10 @@ export function initChatDb(
   const decryptionWorker = new DecryptionWorker(db, async (roomId: string) => {
     const crypto = await getRoomCrypto(roomId);
     if (!crypto) return undefined;
-    return { decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>) };
+    return {
+      decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>),
+      getKeysLoadState: () => crypto.getKeysLoadState?.() ?? "idle",
+    };
   }, rooms, fetchRawEventFromServer);
 
   // --- Event-driven decryption retry triggers ---

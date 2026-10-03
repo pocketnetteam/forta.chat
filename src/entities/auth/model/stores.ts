@@ -2275,6 +2275,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const loadPost = (txid: string) => appInitializer.loadPost(txid);
 
   const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
+  const loadCommentsByIds = (ids: string[]) => appInitializer.loadCommentsByIds(ids, address.value || undefined);
   const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
   const submitUpvote = (txid: string, value: number) => appInitializer.submitUpvote(txid, value, address.value!);
   const submitComment = (txid: string, message: string, parentId?: string) => appInitializer.submitComment(txid, message, parentId, address.value || undefined);
@@ -2472,6 +2473,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     loadMyPostScore,
     loadPost,
     loadPostComments,
+    loadCommentsByIds,
     loadUsersInfo: (addresses: string[], options?: { update?: boolean }) =>
       appInitializer.loadUsersInfo(addresses, options),
     login,

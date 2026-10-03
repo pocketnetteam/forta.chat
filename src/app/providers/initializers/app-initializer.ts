@@ -82,6 +82,62 @@ export interface PostComment {
   scoreUp: number;
   scoreDown: number;
   myScore?: number;
+  /** Image URLs attached to the comment. */
+  images?: string[];
+  /** The comment was deleted by its author (body is empty). */
+  deleted?: boolean;
+}
+
+function tryDecodeUri(value: string): string {
+  try { return decodeURIComponent(value); } catch { return value; }
+}
+
+/** Comment body: `msg` is a JSON string {"message","url","images","info"}
+ *  with URI-encoded fields (Bastyon's psdk.comment.cleanData trydecodes
+ *  them), sometimes URL-encoded plain text. */
+function parseCommentMsg(raw: string): { message: string; images: string[] } {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { message?: unknown; images?: unknown };
+      if (typeof parsed.message === "string") {
+        const images = Array.isArray(parsed.images)
+          ? parsed.images.filter((i): i is string => typeof i === "string" && !!i).map(tryDecodeUri)
+          : [];
+        return { message: tryDecodeUri(parsed.message), images };
+      }
+    } catch { /* not JSON, fall through */ }
+  }
+  return { message: tryDecodeUri(raw), images: [] };
+}
+
+/** Normalize a getcomments RPC response (flat array or {data|result: []}). */
+export function parseCommentsResponse(data: unknown, fallbackPostId: string): PostComment[] {
+  if (!data) return [];
+  const wrapped = data as { data?: unknown; result?: unknown };
+  const items = Array.isArray(data) ? data : wrapped.data ?? wrapped.result ?? [];
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+    .map((c) => {
+      const body = typeof c.msg === "string"
+        ? parseCommentMsg(c.msg)
+        : { message: typeof c.message === "string" ? c.message : "", images: [] };
+      return {
+        id: String(c.id ?? c.txid ?? ""),
+        postid: String(c.postid ?? fallbackPostId),
+        parentid: String(c.parentid ?? ""),
+        answerid: String(c.answerid ?? ""),
+        address: String(c.address ?? ""),
+        message: body.message,
+        images: body.images,
+        time: Number(c.time ?? 0),
+        scoreUp: Number(c.scoreUp ?? 0),
+        scoreDown: Number(c.scoreDown ?? 0),
+        myScore: c.myScore != null ? Number(c.myScore) : undefined,
+        deleted: c.deleted === true || c.deleted === 1 || undefined,
+      };
+    });
 }
 
 type OnLoadUserData = (userData: UserData) => void;
@@ -859,38 +915,7 @@ export class AppInitializer {
   async loadPostComments(txid: string, userAddress?: string): Promise<PostComment[]> {
     if (!this.api) return [];
 
-    const extractMessage = (raw: unknown): string => {
-      if (typeof raw !== "string") return "";
-      // msg may be a JSON string like {"message":"text","url":"","images":[],"info":""}
-      const trimmed = raw.trim();
-      if (trimmed.startsWith("{")) {
-        try {
-          const parsed = JSON.parse(trimmed);
-          if (typeof parsed.message === "string") return parsed.message;
-        } catch { /* not JSON, fall through */ }
-      }
-      // Otherwise try URL-decoding
-      try { return decodeURIComponent(raw); } catch { return raw; }
-    };
-
-    const parseComments = (data: unknown): PostComment[] => {
-      if (!data) return [];
-      // Response may be an object with nested data or a flat array
-      const items = Array.isArray(data) ? data : (data as any)?.data ?? (data as any)?.result ?? [];
-      if (!Array.isArray(items)) return [];
-      return items.map((c: any) => ({
-        id: c.id ?? c.txid ?? "",
-        postid: c.postid ?? txid,
-        parentid: c.parentid ?? "",
-        answerid: c.answerid ?? "",
-        address: c.address ?? "",
-        message: typeof c.msg === "string" ? extractMessage(c.msg) : (c.message ?? ""),
-        time: Number(c.time ?? 0),
-        scoreUp: Number(c.scoreUp ?? 0),
-        scoreDown: Number(c.scoreDown ?? 0),
-        myScore: c.myScore != null ? Number(c.myScore) : undefined,
-      }));
-    };
+    const parseComments = (data: unknown) => parseCommentsResponse(data, txid);
 
     try {
       const addr = userAddress || "";
@@ -908,6 +933,20 @@ export class AppInitializer {
       return parseComments(data2);
     } catch (e) {
       console.error("[appInit] loadPostComments error:", e);
+      return [];
+    }
+  }
+
+  /** Load comments by their own txids — Bastyon's psdk.comment.load:
+   *  getcomments(['', '', userAddress, ids]). Deleted comments come back
+   *  flagged `deleted`. */
+  async loadCommentsByIds(ids: string[], userAddress?: string): Promise<PostComment[]> {
+    if (!this.api || !ids.length) return [];
+    try {
+      const data = await this.api.rpc("getcomments", ["", "", userAddress || "", ids]);
+      return parseCommentsResponse(data, "");
+    } catch (e) {
+      console.error("[appInit] loadCommentsByIds error:", e);
       return [];
     }
   }

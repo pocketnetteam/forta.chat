@@ -610,18 +610,14 @@ const walletStore = useWalletStore();
   opacity: 0;
 }
 
-/* Invite FAB — gradient + subtle glow pulse.
-   Glow ring shrunk from 6px → 2px so it no longer overlaps the search input
-   on narrow layouts. z-index ensures the search input stays clickable. */
+/* Invite FAB — gradient + static glow. No infinite animation: a pulsing
+   box-shadow is not compositable and repainted the page every frame while
+   idle. z-index ensures the search input stays clickable. */
 .invite-fab {
   background: linear-gradient(135deg, rgb(var(--color-bg-ac-bright)), rgb(var(--color-bg-ac-2)));
-  animation: invite-pulse 2s ease-in-out infinite;
+  box-shadow: 0 4px 16px rgba(var(--color-bg-ac-bright), 0.4);
   position: relative;
   z-index: 10;
-}
-@keyframes invite-pulse {
-  0%, 100% { box-shadow: 0 4px 16px rgba(var(--color-bg-ac-bright), 0.4), 0 0 0 0 rgba(var(--color-bg-ac-2), 0); }
-  50% { box-shadow: 0 6px 24px rgba(var(--color-bg-ac-bright), 0.55), 0 0 0 2px rgba(var(--color-bg-ac-2), 0.15); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -632,9 +628,6 @@ const walletStore = useWalletStore();
   .sidebar-slide-right-enter-active,
   .sidebar-slide-right-leave-active {
     transition: none;
-  }
-  .invite-fab {
-    animation: none;
   }
 }
 </style>

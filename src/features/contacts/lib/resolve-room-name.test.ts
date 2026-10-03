@@ -57,4 +57,42 @@ describe("resolveRoomNameInfo", () => {
     expect(resolveRoomNameInfo(dm({ isGroup: true, name: "Team" }), ctx({ users })).name).toBe("Team");
     expect(resolveRoomNameInfo(dm({ isGroup: true, name: "@Public" }), ctx({ users })).name).toBe("Public");
   });
+
+  it("does not walk the members of a named group and treats it as resolved", () => {
+    const members = Array.from({ length: 5000 }, (_, i) => hexEncode(`PMember${i}`));
+    let lookups = 0;
+    const res = resolveRoomNameInfo(
+      dm({ isGroup: true, name: "Big public room", members }),
+      ctx({ getDisplayName: (a) => { lookups++; return a; } }),
+    );
+    expect(res).toEqual({ name: "Big public room", hasMemberNames: true });
+    expect(lookups).toBe(0);
+  });
+
+  it("builds an unnamed group's title from the first 10 other members only", () => {
+    const addrs = Array.from({ length: 5000 }, (_, i) => `PMember${i}`);
+    let lookups = 0;
+    const res = resolveRoomNameInfo(
+      dm({ isGroup: true, name: "!abc:server", members: [hexEncode(ME), ...addrs.map(a => hexEncode(a))] }),
+      ctx({ getDisplayName: (a) => { lookups++; return `Name ${a.slice(7)}`; } }),
+    );
+    expect(lookups).toBe(10);
+    expect(res.name).toBe(Array.from({ length: 10 }, (_, i) => `Name ${i}`).join(", "));
+  });
+
+  it("fills the 10 slots with invited members after joined ones", () => {
+    const room = dm({
+      isGroup: true,
+      name: "!abc:server",
+      members: [hexEncode(ME), hexEncode(BOB)],
+      invitedMembers: [hexEncode(CAROL)],
+    });
+    const users = { [BOB]: { name: "Bob" }, [CAROL]: { name: "Carol" } };
+    expect(resolveRoomNameInfo(room, ctx({ users })).name).toBe("Bob, Carol");
+  });
+
+  it("still names an unnamed group after its members", () => {
+    const room = dm({ isGroup: true, name: "!abc:server", members: [hexEncode(ME), hexEncode(BOB)] });
+    expect(resolveRoomNameInfo(room, ctx({ users: { [BOB]: { name: "Bob" } } }))).toEqual({ name: "Bob", hasMemberNames: true });
+  });
 });

@@ -512,6 +512,28 @@ describe("DecryptionWorker", () => {
       expect(queued.map((j) => j.eventId)).toEqual(["$new"]);
       worker.dispose();
     });
+
+    it("logs the previous failure reason of each re-queued message", async () => {
+      const { worker } = makeWorker(db);
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      await db.messages.bulkAdd([
+        { eventId: "$seen", roomId: "!r1", timestamp: 5, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+        { eventId: "$fresh", roomId: "!r2", timestamp: 6, content: "[encrypted]", decryptionStatus: "pending", encryptedBody: '{}' },
+      ] as any);
+      await db.decryptionQueue.add({
+        eventId: "$seen", roomId: "!r1", encryptedBody: '{}', status: "waiting",
+        attempts: 3, nextAttemptAt: Date.now() + 60_000, createdAt: Date.now(),
+        lastError: "Room crypto not available",
+      });
+
+      await worker.recoverLatestStuckMessages();
+
+      const line = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("re-queued"));
+      expect(line).toContain("$seen in !r1 (pending): Room crypto not available");
+      expect(line).toContain("$fresh in !r2 (pending): no previous attempt");
+      info.mockRestore();
+      worker.dispose();
+    });
   });
 
   // ── Newest-first decrypt order within a tick ──
@@ -733,5 +755,81 @@ describe("DecryptionWorker", () => {
     expect(msg?.decryptionStatus).toBe("ok");
 
     worker.dispose();
+  });
+
+  // ── emptykey: never encrypted for us — final once keys have loaded ──
+  describe("emptykey is permanent", () => {
+    const emptyKey = () => Promise.reject(new Error("emptykey"));
+
+    function makeEmptyKeyWorker(keysState: string) {
+      const decryptEvent = vi.fn(emptyKey);
+      const getRoomCrypto = vi.fn().mockResolvedValue({ decryptEvent, getKeysLoadState: () => keysState });
+      const worker = new DecryptionWorker(db as any, getRoomCrypto);
+      return { worker, decryptEvent };
+    }
+
+    const addStuckMessage = () =>
+      db.messages.add({
+        eventId: "$ev1", roomId: "!r1", timestamp: 1, content: "[encrypted]",
+        decryptionStatus: "pending", encryptedBody: "{}",
+      } as any);
+
+    it("kills the job on the first attempt when keys are loaded", async () => {
+      const { worker } = makeEmptyKeyWorker("loaded");
+      await addStuckMessage();
+      await worker.enqueue("$ev1", "!r1", "{}");
+      await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+      await worker.tick();
+
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("dead");
+      expect(job?.lastError).toBe("emptykey");
+      const msg = await db.messages.where("eventId").equals("$ev1").first();
+      expect(msg?.decryptionStatus).toBe("failed");
+      worker.dispose();
+    });
+
+    it("backs off normally while keys are not loaded yet", async () => {
+      const { worker } = makeEmptyKeyWorker("failed");
+      await worker.enqueue("$ev1", "!r1", "{}");
+      await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+      await worker.tick();
+
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("waiting");
+      worker.dispose();
+    });
+
+    it("recovery paths and key arrival never resurrect the job", async () => {
+      const { worker } = makeEmptyKeyWorker("loaded");
+      await addStuckMessage();
+      await db.decryptionQueue.add({
+        eventId: "$ev1", roomId: "!r1", encryptedBody: "{}", status: "dead",
+        attempts: 1, nextAttemptAt: 0, createdAt: Date.now(), lastError: "emptykey",
+      });
+
+      expect(await worker.recoverLatestStuckMessages("!r1")).toBe(0);
+      expect(await worker.recoverStuckMessages("!r1")).toBe(0);
+      expect(await worker.recoverAllStuckMessages()).toBe(0);
+      await worker.retryForRoom("!r1");
+
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("dead");
+      worker.dispose();
+    });
+
+    it("decryptMessageNow marks it undecryptable and stops trying", async () => {
+      const { worker, decryptEvent } = makeEmptyKeyWorker("loaded");
+      await addStuckMessage();
+
+      expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      const job = await db.decryptionQueue.where("eventId").equals("$ev1").first();
+      expect(job?.status).toBe("dead");
+      expect(job?.lastError).toBe("emptykey");
+
+      expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      expect(decryptEvent).toHaveBeenCalledTimes(1);
+      worker.dispose();
+    });
   });
 });

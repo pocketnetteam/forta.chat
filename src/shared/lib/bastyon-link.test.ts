@@ -69,6 +69,29 @@ describe("parseBasytonLink", () => {
     expect(r?.commentId).toBe(COMMENT_ID);
   });
 
+  it("extracts commentId from Bastyon's &commentid= param", () => {
+    const r = parseBasytonLink(`bastyon://post?s=${TXID}&commentid=${COMMENT_ID}&parentid=${"c".repeat(64)}`);
+    expect(r?.commentId).toBe(COMMENT_ID);
+  });
+
+  // ─── Posts under the author's channel path (Bastyon share format) ──
+  it("parses a comment link under the author's username", () => {
+    const url = `https://bastyon.com/daniel_satchkov?s=${TXID}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${COMMENT_ID}`;
+    expect(parseBasytonLink(url)).toEqual({ txid: TXID, commentId: COMMENT_ID, isVideo: false });
+  });
+
+  it("parses username-path posts on the deep link, pocketnet:// and www.", () => {
+    expect(parseBasytonLink(`bastyon://kleine_viogelein?s=${TXID}`)?.txid).toBe(TXID);
+    expect(parseBasytonLink(`pocketnet://post?s=${TXID}`)?.txid).toBe(TXID);
+    expect(parseBasytonLink(`https://www.bastyon.com/name?v=${TXID}`)?.isVideo).toBe(true);
+  });
+
+  it("rejects nested paths and other hosts with a username path", () => {
+    expect(parseBasytonLink(`https://bastyon.com/images/x?s=${TXID}`)).toBeNull();
+    expect(parseBasytonLink(`https://matrix.bastyon.com/name?s=${TXID}`)).toBeNull();
+    expect(parseBasytonLink(`https://bastyon.com/collection?s=${TXID}`)).toBeNull();
+  });
+
   it("extracts commentId from #comment- fragment", () => {
     const r = parseBasytonLink(
       `https://bastyon.com/post?s=${TXID}#comment-${COMMENT_ID}`,
@@ -164,10 +187,9 @@ describe("parseBasytonLink", () => {
     expect(parseBasytonLink("https://google.com")).toBeNull();
   });
 
-  it("rejects bastyon host with wrong path", () => {
-    expect(
-      parseBasytonLink(`https://bastyon.com/profile?s=${TXID}`),
-    ).toBeNull();
+  it("rejects Bastyon pages that are not post paths", () => {
+    expect(parseBasytonLink(`https://bastyon.com/author?s=${TXID}`)).toBeNull();
+    expect(parseBasytonLink(`https://bastyon.com/embedVideo.php?s=${TXID}`)).toBeNull();
   });
 });
 
@@ -189,7 +211,7 @@ describe("toBasytonUrl", () => {
   it("includes commentId", () => {
     expect(
       toBasytonUrl({ txid: TXID, commentId: COMMENT_ID, isVideo: false }),
-    ).toBe(`bastyon://post?s=${TXID}&c=${COMMENT_ID}`);
+    ).toBe(`bastyon://post?s=${TXID}&commentid=${COMMENT_ID}`);
   });
 });
 
@@ -215,7 +237,7 @@ describe("toBasytonHttpsUrl", () => {
         commentId: COMMENT_ID,
         isVideo: false,
       }),
-    ).toBe(`https://bastyon.com/post?s=${TXID}&c=${COMMENT_ID}`);
+    ).toBe(`https://bastyon.com/post?s=${TXID}&commentid=${COMMENT_ID}`);
   });
 });
 
@@ -265,6 +287,11 @@ describe("BASTYON_LINK_RE", () => {
   it("matches forta.chat links", () => {
     const matches = matchAll(`https://forta.chat/post?s=${TXID}`);
     expect(matches).toHaveLength(1);
+  });
+
+  it("matches a whole comment link under the author's username", () => {
+    const url = `https://bastyon.com/daniel_satchkov?s=${TXID}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${COMMENT_ID}`;
+    expect(matchAll(`see ${url} here`)).toEqual([url]);
   });
 });
 
