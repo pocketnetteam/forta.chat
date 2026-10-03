@@ -10,6 +10,10 @@
 Связанные планы: [2026-10-02-decrypt-priority-roadmap.md](2026-10-02-decrypt-priority-roadmap.md) (расшифровка
 превью и загрузка ключей — тот же путь `ensureRoomCrypto` → `pcrypto.addRoom` → `prepare()`).
 
+Связанный коммит: `eccf0a52` «perf: limit background history backfill to warm rooms, batch peer keys» —
+разбор волны одиночных `getuserprofile`. Ввёл `preloadBackfillKeys` в `chat-store.ts` и хук `beforePass` в
+`history-backfill.ts`. Этот план на него опирается (раздел 5.6, этап 2a).
+
 ---
 
 ## 1. Симптом
@@ -113,7 +117,83 @@
 отправитель всегда известен, а в 1:1 есть запасной путь через ключи из тела (`stillMissing` в
 `decryptEvent`/`decryptKey`).
 
-### 5.5 Крипта при загруженных участниках — эквивалентна
+### 5.6 Lazy loading вернёт волну одиночных `getuserprofile`
+
+Как устроено после `eccf0a52`:
+- Очередь `getuserprofile` в `public/js/lib/client/sdk.js` (`userInfo.load`, `light=true`) склеивает только
+  вызовы, попавшие в одно окно 300 мс. Профили без ключей SDK в IndexedDB не сохраняет → после перезапуска
+  снова промах.
+- `resolveCryptoUsersInfo` (`entities/auth/lib/crypto-users-info.ts`) не запрашивает тех, чьи ключи уже в
+  памяти SDK, а запрос на адрес, который уже в полёте, присоединяется к нему.
+- Поэтому пачка, запущенная **до** поштучных `getusersinfo`, превращает тысячи одиночных запросов в один на
+  ≤ 70 адресов. Так сейчас сделано только в фоновом доборе истории: `preloadBackfillKeys` вызывается из
+  `scheduleContinuityChecks` и из `beforePass` очереди.
+
+Что сломает lazy loading:
+- `preloadBackfillKeys` берёт адреса из `matrixRoomAddresses` (участники SDK, заполняет `updateDisplayNames`)
+  и **только если там пусто** — из `ChatRoom.members`. У 1:1 без загруженного собеседника в
+  `matrixRoomAddresses` будете только вы → список не пуст → фолбэк на `members` из Dexie не сработает → пачка
+  пустая.
+- Дальше каждая комната в `decryptEvent`/`decryptKey` упрётся в `hasMissing`, допишет собеседника из тела
+  события и вызовет `getusersinfo()` сама → одиночный запрос на комнату. Та же волна, что разбирали в
+  `eccf0a52`, только на шаг позже.
+- Порог «группа ≥ 50 — ключи не грузить» (`BACKFILL_KEYS_MAX_MEMBERS`) считается по числу адресов. При
+  неполном списке большая группа его пройдёт. Вреда мало (лишние адреса), но проверять надо по
+  `getJoinedMemberCount()`, как это делает Pcrypto.
+- Этап 4 (фоновая догрузка 1:1) на каждого пришедшего участника эмитит `RoomMember.membership` →
+  `onMembership` в `stores.ts` → у каждой комнаты свой таймер 500 мс → `roomCrypto.prepare()` →
+  `getusersinfo`. Таймеры срабатывают вразнобой → снова одиночные запросы. Касается только комнат, у которых
+  уже есть экземпляр крипты (`pcrypto.rooms[roomId]`), но после расшифровки превью таких много.
+
+Откуда брать собеседника без загрузки участников:
+- `content` зашифрованного события: тело Pcrypto (`body` / `secrets` → Base64 → JSON) — объект, ключи которого
+  hex-id получателей. Собеседник там есть и в ваших собственных сообщениях. Расшифровка сама так делает
+  (`stillMissing` → `users[uid] = …`).
+- Авторы событий из live timeline — их member-события приходят всегда.
+
+### 5.6.1 Карта: откуда грузится `getuserprofile` (проверено поиском 2026-10-03)
+
+Единственный сетевой выход — `psdk.userInfo.load` в `public/js/lib/client/sdk.js`. При `light=true` вызов
+идёт через очередь (окно 300 мс, ≤ 70 адресов), при `light=false` — сразу, ≤ 10 адресов. Нативный код
+(Android/iOS) `getuserprofile` не вызывает, `satolist.js` тоже. Один и тот же ответ несёт и имя, и ключи
+шифрования, поэтому загрузка профиля для имени заодно кладёт ключи в память SDK.
+
+Обёртки в `app-initializer.ts`:
+- `loadUsersInfo` (`light=true`) — почти все пути ниже;
+- `loadUserData` / `initializeAndFetchUserData` (`light=false`) — только свой профиль;
+- `loadUsersInfoRaw` (`update:true`) — только свой профиль (регистрация, проверка ключей);
+- `loadUsersBatch` (`light=false`) — вызовов нет, мёртвый код.
+
+**Путь ключей (крипта)**: `getusersinfo` (`matrix-crypto.ts`) → `getUsersInfo` (`stores.ts`) →
+`resolveCryptoUsersInfo` → `loadUsersInfo`. `getusersinfo` вызывается из `prepare()` (адреса = участники
+комнаты) и из запасного пути в `decryptEvent` / `decryptKey` (адреса = тело события + отправитель).
+
+| Кто вызывает `prepare` / расшифровку | Сколько комнат | Пачка сейчас | При lazy loading |
+|---|---|---|---|
+| Фоновый добор: `ingestRawHistory` ← `startBackfillPass` | Очередь по одной | `preloadBackfillKeys` | **Дыра**: адреса из участников (5.6) |
+| Превью: `decryptRoomPreviews` → `decryptOnePreview` | ≤ 20 за цикл, пул по 5 (без worker — по 1) | Нет | **Дыра**: без worker одиночные; собеседник только из тела |
+| `DecryptionWorker` (`shared/lib/local-db/decryption-worker.ts`): задания из Dexie `decryptionQueue` | До 20 заданий из разных комнат, **строго по очереди** | Нет | **Дыра**: у каждой комнаты свой запрос из запасного пути. Есть и сейчас, при lazy loading станет массовой |
+| `onMembership` → таймер 500 мс → `prepare()` (`stores.ts`) | По таймеру на каждую комнату | Нет | **Дыра** (этап 4 вызовет волну) |
+| Видимые строки без превью: `fetchRoomPreview` → `loadRoomMessages` | Параллельно до `VIEWPORT_FETCH_MAX_CONCURRENT` | Склеивается окном SDK | Терпимо; редкий путь (только строки без превью в Dexie) |
+| Живые события: `handleTimelineEvent` ← `onTimeline` (`stores.ts`) | Параллельно, после офлайна — сотни | Склеивается окном SDK | Терпимо; проверить на замере после офлайна |
+| Открытие/история чата: `loadRoomMessages`, `loadMoreMessagesViaSdk`, `prefetchNextBatch`, `loadAllMessages`, `refreshOpenedRoom`, `exitDetachedMode`, `parseSingleEvent`, `enrichUnresolvedReplies`, `applyPageRelationsToStored`, `scheduleSdkRoomRecovery` | Одна (открытая) | Один запрос на комнату | Нужен `ensureRoomMembers` только для шифрования |
+| `checkPeerKeys`, `scheduleActiveRoomKeysRetry`, `use-file-download` (`waitForRoomCrypto` → `decryptKey`) | Одна | Один запрос | То же |
+| Свой профиль: `cryptoInstance.prepare(address)`, `fetchUserInfo`, регистрация | — | — | Не затронуто |
+
+**Путь имён (профили)** — через `user-store.ts` (`loadUserIfMissing`, `loadUsersBatch` → `ProfileLoader`,
+`_scheduleBackgroundRevalidation`, `refreshStaleUsers`):
+
+| Кто | Откуда адреса | При lazy loading |
+|---|---|---|
+| `loadProfilesForRoomIds` (`chat-store.ts`) ← старт (первые 15), `ContactList.vue`, `ContactsPanel.vue`, открытие чата, инкрементальный refresh, `loadMissingMembers`, `loadMembersForRooms` | `matrixRoomAddresses`, **и только если там пусто** — `ChatRoom.members` | **Дыра**: у 1:1 без собеседника там только вы → вы в кэше → комната помечается в `profilesRequestedForRooms` как готовая, собеседник не запрошен. Снимает только `loadMembersForRooms` для строк с нераспознанным именем |
+| `ContactList.vue` `sysAddrs` (адреса из системных сообщений) | События | Не затронуто |
+| `use-mention-autocomplete.ts` | Участники открытой комнаты | Неполный список, пока не догрузятся участники при открытии (без await) |
+| `UserAvatar.vue`, `ChatWindow.vue`, `call-service.ts`, `ChatInfoPanel.vue`, `UserProfilePanel.vue` | Конкретный адрес | Не затронуто |
+| `refreshStaleUsers` (через 30 с, по 10 с паузой 1 с), фоновая ревалидация | Кэш `localStorage` | Не затронуто |
+| WebSocket `onUserInfo` (`update:true`) | Событие блокчейна | Не затронуто |
+| Посты, комментарии, превью ссылок, коллекции, переключатель аккаунтов, настройки | Не участники чатов | Вне плана |
+
+### 5.7 Крипта при загруженных участниках — эквивалентна
 
 Проверено: Pcrypto берёт только текущее member-событие каждого пользователя; вышедшие (`leave`) в группе дают
 пустую `life`, в 1:1 отфильтрованы. Поэтому `/members` без вышедших даёт тот же набор `users`, что и полный
@@ -188,6 +268,34 @@ state. Групповая расшифровка берёт хэш из собы
   `matrix-client.ts`.
 - Заменить `matrix-client-lazy-load-members.test.ts` (сейчас требует `false`).
 
+### Этап 2a. Общая пачечная загрузка ключей (риск 5.6)
+
+Делать вместе с этапом 2: без него включение флага вернёт волну одиночных `getuserprofile`. Часть пунктов
+полезна и без lazy loading (превью, `onMembership`), её можно сделать раньше.
+
+**Helper.** Обобщить `preloadBackfillKeys` в `preloadRoomKeys(roomIds)` (`chat-store.ts`; имя — по месту):
+- адреса комнаты = объединение `matrixRoomAddresses`, `ChatRoom.members` (Dexie, защищён от усыхания),
+  авторов событий live timeline и hex-id из тела зашифрованных событий live timeline (их ≤ 4 на комнату после
+  sync, парсинг Base64 + JSON дешёвый). Невалидное тело — пропустить молча;
+- пропуск комнаты, если `max(getJoinedMemberCount(), число адресов) >= 50`;
+- свой адрес исключить; один вызов `authStore.loadUsersInfo([...])` на все комнаты; fire-and-forget, как сейчас.
+
+**Правило.** Везде, где для **нескольких комнат подряд** вызывается `ensureRoomCrypto`/`prepare`/расшифровка,
+сначала вызвать `preloadRoomKeys` для всех этих комнат. Для одной комнаты не нужно: `prepare()` → `getusersinfo`
+и так отправляет всех её участников одним запросом.
+
+| Место | Сейчас | Что сделать |
+|---|---|---|
+| Фоновый добор истории: `scheduleContinuityChecks`, `beforePass` | `preloadBackfillKeys` | Перевести на `preloadRoomKeys` |
+| Расшифровка превью `decryptRoomPreviews` | Нет пачки. Пул по 5 комнат (`PREVIEW_DECRYPT_BATCH_SIZE`), без crypto worker — по 1; ≤ 20 за цикл | `preloadRoomKeys(capped)` перед пулом |
+| `DecryptionWorker`, фаза расшифровки тика | Нет пачки. До 20 заданий из разных комнат по очереди | Перед циклом собрать адреса из `encryptedBody` заданий (тело Pcrypto + `sender`) и вызвать один `loadUsersInfo`. Воркер живёт в `shared/` — передать загрузчик зависимостью в `initChatDb`, как `getRoomCrypto` |
+| Recheck ключей в `onMembership` (`stores.ts`) | Таймер 500 мс на каждую комнату | Общий debounce: собрать комнаты за окно → `preloadRoomKeys(все)` → `prepare` + `checkPeerKeys` по каждой |
+| `loadProfilesForRoomIds` (путь имён) | Адреса из `matrixRoomAddresses`, `ChatRoom.members` — только если первый пуст | Тот же источник адресов, что у `preloadRoomKeys` (объединение). Не помечать 1:1 в `profilesRequestedForRooms`, пока собеседник неизвестен |
+| Этап 4 (фоновая догрузка 1:1) | — | Закрывается пунктом выше; отдельный вызов не нужен |
+| Шифрование, `checkPeerKeys` открытого чата, звонок, удаление чата | Одна комната | Не нужно (`ensureRoomMembers` → `prepare` — один запрос) |
+| `handleTimelineEvent` (живые события по многим комнатам после офлайна) | Параллельные вызовы, склеиваются окном SDK | Не трогать; проверить на замере после офлайна |
+| `enrichUnresolvedReplies`, `applyPageRelationsToStored`, `scheduleSdkRoomRecovery`, `use-file-download` | Одна (открытая) комната | Не нужно |
+
 ### Этап 3. Сброс кэша при разрыве (риск 5.2)
 
 В обработчике `Room.timelineReset` (`matrix-client.ts`, main timeline) вызывать
@@ -198,7 +306,8 @@ state. Групповая расшифровка берёт хэш из собы
 После `PREPARED`, с низким приоритетом: для комнат, где `getJoinedMemberCount() <= 2` и собеседник неизвестен
 (`others.length === 0`, как в `loadMissingMembers`), — `loadMembersIfNeeded` по 3–4 параллельно, с паузами.
 Существующих пользователей с полным state не трогает. Кэш в IndexedDB → один раз за установку.
-Группы грузятся только при открытии.
+Группы грузятся только при открытии. Ключи для этих комнат здесь **не** грузить: догрузка нужна для имён,
+поиска, игнор-листа и typing. Recheck ключей, который она вызовет через `onMembership`, идёт пачкой (этап 2a).
 
 ### Этап 5. Имена для пушей (6.2)
 
@@ -212,6 +321,15 @@ state. Групповая расшифровка берёт хэш из собы
 - `checkPeerKeys` для нового 1:1 без member-события собеседника → после загрузки «available», не «missing»
   (регрессия бага из `ba89a056`).
 - Расшифровка превью **не** вызывает `loadMembersIfNeeded` (регрессия 5.4).
+- `preloadRoomKeys`: 1:1 без загруженного собеседника → адрес берётся из тела зашифрованного события и из
+  `ChatRoom.members`; группа с `getJoinedMemberCount() >= 50` пропускается при неполном списке; на N комнат —
+  один вызов `loadUsersInfo` (регрессия 5.6).
+- `decryptRoomPreviews` вызывает пачку до пула расшифровки.
+- `DecryptionWorker`: тик из заданий N комнат → один `loadUsersInfo` с адресами из тел событий до первой
+  расшифровки.
+- `loadProfilesForRoomIds`: 1:1, где `matrixRoomAddresses` = [свой адрес], а в `ChatRoom.members` есть
+  собеседник → собеседник запрошен, комната не помечена готовой раньше времени.
+- `onMembership` по нескольким комнатам в одном окне → один `loadUsersInfo`, затем `prepare` по каждой.
 - `timelineReset` → `clearLoadedMembersIfNeeded` (5.2).
 - Фоновая догрузка: только 1:1 без собеседника, ограничение параллельности, пропуск при полном state.
 - Исходящий звонок, удаление чата, список банов — ждут участников.
@@ -226,6 +344,8 @@ state. Групповая расшифровка берёт хэш из собы
 - Звонок из чата, который в этой сессии не открывали.
 - Заблокированный пользователь не появляется в списке после чистой установки.
 - Пуш из незапущенного приложения: в заголовке имя, не `#hash` и не Matrix ID.
+- Чистая установка на большом аккаунте с `[enqueue]`-логпоинтом в `sdk.js` (как в `eccf0a52`): после первого
+  sync и во время этапа 4 — несколько `userInfoLight` с десятками адресов, не поток записей с одним адресом.
 
 ## 10. Открытые вопросы
 
