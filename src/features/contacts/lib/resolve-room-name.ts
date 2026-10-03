@@ -1,6 +1,6 @@
 import type { ChatRoom } from "@/entities/chat";
 import { hexDecode } from "@/shared/lib/matrix/functions";
-import { cleanMatrixIds, isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
+import { cleanMatrixIds, isUnresolvedName, MAX_TITLE_MEMBERS } from "@/entities/chat/lib/chat-helpers";
 import type { RoomNameInfo } from "./room-name-index";
 
 /** Global sources of member names. A new object whenever any of them changes —
@@ -42,12 +42,16 @@ function resolveAddressName(addr: string, ctx: NameContext): string | null {
  *
  *  Walks BOTH joined and invited, otherwise the contact list shows a blank
  *  name for DMs whose peer hasn't accepted the invite yet (`members` would
- *  only contain the inviter). */
+ *  only contain the inviter). Only the first MAX_TITLE_MEMBERS other members
+ *  are taken, joined before invited, in room state order (roughly join order). */
 export function resolveMemberNames(room: ChatRoom, ctx: NameContext): string[] {
-  const otherMembers = [
-    ...room.members,
-    ...(room.invitedMembers ?? []),
-  ].filter(m => m !== ctx.myHexId);
+  const otherMembers: string[] = [];
+  for (const list of [room.members, room.invitedMembers ?? []]) {
+    for (const m of list) {
+      if (otherMembers.length >= MAX_TITLE_MEMBERS) break;
+      if (m !== ctx.myHexId) otherMembers.push(m);
+    }
+  }
 
   const names: string[] = [];
   for (const hexId of otherMembers) {
@@ -82,7 +86,16 @@ export function resolveRoomName(room: ChatRoom, memberNames: string[]): string {
   return cleanMatrixIds(room.name);
 }
 
+/** A group whose own name is shown as-is — member names would be discarded. */
+function hasOwnGroupName(room: ChatRoom): boolean {
+  return room.isGroup && (!!room.name?.startsWith("@") || !isUnresolvedName(room.name));
+}
+
 export function resolveRoomNameInfo(room: ChatRoom, ctx: NameContext): RoomNameInfo {
+  // Skip the member walk for named groups: a public room has thousands of members
+  // (~35 ms per room) and resolveRoomName ignores their names anyway. The title is
+  // final, so the room is not "unresolved" and needs no /members retry.
+  if (hasOwnGroupName(room)) return { name: resolveRoomName(room, []), hasMemberNames: true };
   const memberNames = resolveMemberNames(room, ctx);
   return { name: resolveRoomName(room, memberNames), hasMemberNames: memberNames.length > 0 };
 }

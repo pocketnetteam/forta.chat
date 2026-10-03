@@ -9,6 +9,7 @@ import { useToast } from "@/shared/lib/use-toast";
 import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
+import CommentPreview from "./CommentPreview.vue";
 import { renderArticleText } from "@/shared/lib/article-blocks";
 import { parseTextLinks, truncateLinkSegments } from "@/shared/lib/linkify";
 import { openExternalUrl } from "@/shared/lib/open-external-url";
@@ -26,6 +27,8 @@ interface Props {
   txid: string;
   isOwn: boolean;
   initialCommentId?: string;
+  /** Nested inside another card (repost original): full width, no outer margin. */
+  embedded?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -92,6 +95,11 @@ const visibleTags = computed(() => {
 });
 
 const postUrl = computed(() => toBastyonPostHttpsUrl(props.txid));
+
+/** Card frame; a nested repost card fills its parent instead of the fixed bubble width. */
+const frameClass = computed(() =>
+  props.embedded ? "w-full rounded-xl" : "my-1.5 w-[20rem] max-w-full rounded-2xl sm:w-[28rem]",
+);
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
 const hasOwnContent = computed(() =>
@@ -183,8 +191,8 @@ onMounted(loadPostData);
   <!-- Loading skeleton — matches loaded card dimensions to prevent layout shift -->
   <div
     v-if="loading"
-    class="post-card my-1.5 w-[20rem] max-w-full overflow-hidden rounded-2xl border sm:w-[28rem]"
-    :class="isOwn ? 'border-white/10 bg-white/10' : 'border-neutral-grad-1/50 bg-background-total-theme'"
+    class="post-card overflow-hidden border"
+    :class="[frameClass, isOwn ? 'border-white/10 bg-white/10' : 'border-neutral-grad-1/50 bg-background-total-theme']"
   >
     <!-- Author skeleton -->
     <div class="flex items-center gap-2 p-3 pb-2 sm:gap-3 sm:p-4 sm:pb-3">
@@ -221,7 +229,8 @@ onMounted(loadPostData);
       :href="postUrl"
       target="_blank"
       rel="noopener noreferrer"
-      class="text-color-txt-ac underline hover:no-underline"
+      class="underline hover:no-underline"
+      :class="isOwn ? 'text-chat-link-own' : 'text-color-txt-ac'"
       @click.stop.prevent="onLinkClick(postUrl)"
     >{{ t(isUnresolvedRepost ? "post.openOriginal" : "post.notFound") }}</a>
     <button
@@ -234,8 +243,8 @@ onMounted(loadPostData);
   <!-- Post card -->
   <div
     v-else-if="post"
-    class="post-card my-1.5 w-[20rem] max-w-full overflow-hidden rounded-2xl border sm:w-[28rem]"
-    :class="isOwn ? 'border-white/10 bg-white/[0.08]' : 'border-neutral-grad-1/50 bg-background-total-theme'"
+    class="post-card overflow-hidden border"
+    :class="[frameClass, isOwn ? 'border-white/10 bg-white/[0.08]' : 'border-neutral-grad-1/50 bg-background-total-theme']"
   >
     <!-- Author header — clickable to open profile -->
     <div
@@ -323,17 +332,18 @@ onMounted(loadPostData);
         >#{{ tag }}</span>
       </div>
 
-      <!-- Repost (shared post) -->
-      <div
-        v-if="post.repost"
-        class="mt-1 rounded-xl border p-2"
-        :class="[
-          isOwn ? 'border-white/10 bg-white/5' : 'border-neutral-grad-1/50 bg-neutral-grad-0/30',
-          isBareRepostWrapper ? 'mb-3' : '',
-        ]"
-      >
-        <PostCard :txid="post.repost.txid" :is-own="isOwn" />
+      <!-- Repost (shared post): the original's own card is the only frame -->
+      <div v-if="post.repost" class="mt-1" :class="isBareRepostWrapper ? 'mb-3' : ''">
+        <PostCard :txid="post.repost.txid" :is-own="isOwn" embedded />
       </div>
+
+      <!-- Shared comment link (…&commentid=): the comment under the post -->
+      <CommentPreview
+        v-if="props.initialCommentId"
+        :comment-id="props.initialCommentId"
+        :is-own="isOwn"
+        @open="showModal = true"
+      />
     </div>
 
     <!-- Rating + actions row — hidden for a bare repost wrapper, whose only
@@ -398,7 +408,7 @@ onMounted(loadPostData);
         :class="isOwn ? 'bg-white/20 hover:bg-white/30' : 'bg-color-bg-ac hover:bg-color-bg-ac-1'"
         @click.stop="showModal = true"
       >
-        {{ t("postPlayer.openPost") }}
+        {{ t(props.initialCommentId ? "postPlayer.goToComment" : "postPlayer.openPost") }}
       </button>
     </div>
   </div>

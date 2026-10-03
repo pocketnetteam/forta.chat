@@ -91,7 +91,8 @@ onMounted(loadProfile);
     v-else-if="!resolvedAddress"
     :href="href"
     rel="noopener noreferrer"
-    class="break-all text-color-txt-ac underline hover:no-underline"
+    class="break-all underline hover:no-underline"
+    :class="isOwn ? 'text-chat-link-own' : 'text-color-txt-ac'"
     @click.stop.prevent="onOpen"
   >{{ href }}</a>
 

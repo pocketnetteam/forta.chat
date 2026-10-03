@@ -623,17 +623,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    * Prevents post-registration infinite skeleton when SYNCING never arrives.
    */
   const PREPARED_EMPTY_GRACE_MS = 3000;
-  /**
-   * After the degrade watchdog (INITIAL_SYNC_TIMEOUT_MS) fires, keep the
-   * "taking longer" skeleton this long on an empty cache, then accept
-   * authoritative empty so new accounts are not stuck forever waiting for
-   * SYNCING.
-   */
-  const DEGRADED_EMPTY_ESCAPE_MS = 8000;
   let initialSyncTimer: ReturnType<typeof setTimeout> | null = null;
   let preparedEmptyTimer: ReturnType<typeof setTimeout> | null = null;
-  let degradedEmptyTimer: ReturnType<typeof setTimeout> | null = null;
-  /** True once a bounded empty-list escape timer has fired (PREPARED grace or degraded escape). */
+  /** True once the PREPARED empty-list grace timer has fired. */
   const roomListEmptyAccepted = ref(false);
 
   const clearInitialSyncTimer = () => {
@@ -647,10 +639,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (preparedEmptyTimer) {
       clearTimeout(preparedEmptyTimer);
       preparedEmptyTimer = null;
-    }
-    if (degradedEmptyTimer) {
-      clearTimeout(degradedEmptyTimer);
-      degradedEmptyTimer = null;
     }
   };
 
@@ -670,9 +658,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Release every skeleton/preloader that keys off roomsInitialized so the
       // cached room list becomes visible. When the cache is still empty the
       // room-list keeps a "taking longer than usual" placeholder (see
-      // isRoomListLoadingSlow) for DEGRADED_EMPTY_ESCAPE_MS, then accepts
-      // authoritative empty via roomListEmptyAccepted. A later PREPARED sync
-      // still runs a full refresh and upgrades back to "ready".
+      // isRoomListLoadingSlow) until the first sync lands: an empty cache has
+      // nothing to show, and declaring "no chats" while a slow initial /sync
+      // is still downloading is false. A later PREPARED sync still runs a full
+      // refresh and upgrades back to "ready".
       roomsInitialized.value = true;
       // WEE-97: release deferred boot work (recovery scans, Tor, telemetry)
       signalChatsInteractive();
@@ -2264,8 +2253,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // premature "no dialogs" empty state (see startInitialSyncWatch).
   //
   // Prefer SYNCING as the steady-state signal (rooms may still materialize at
-  // PREPARED). Bounded escapes (PREPARED_EMPTY_GRACE_MS / DEGRADED_EMPTY_ESCAPE_MS)
-  // accept empty for brand-new accounts when SYNCING never arrives.
+  // PREPARED). PREPARED_EMPTY_GRACE_MS accepts empty for brand-new accounts
+  // when SYNCING never arrives. Before the first sync lands there is no
+  // escape: an empty cache keeps the (slow) skeleton, never a false "no chats".
   const isRoomListAuthoritativeEmpty = computed(() =>
     sortedRooms.value.length === 0
     && (
@@ -2283,9 +2273,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     isRoomListLoading.value && initialSyncStatus.value === "degraded",
   );
 
-  // Arm / cancel empty-list escape timers. Large accounts get a short grace
-  // after PREPARED; stuck sync after degrade eventually shows empty instead of
-  // hanging forever (post-registration skeleton).
+  // Arm / cancel the empty-list escape timer. Large accounts get a short grace
+  // after PREPARED before an empty list is accepted (post-registration
+  // skeleton when SYNCING never arrives).
   watch(
     [() => sortedRooms.value.length, initialSyncStatus, syncState, roomListEmptyAccepted],
     () => {
@@ -2304,10 +2294,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
 
       if (initialSyncStatus.value === "ready" && syncState.value === "PREPARED") {
-        if (degradedEmptyTimer) {
-          clearTimeout(degradedEmptyTimer);
-          degradedEmptyTimer = null;
-        }
         if (!preparedEmptyTimer) {
           preparedEmptyTimer = setTimeout(() => {
             preparedEmptyTimer = null;
@@ -2319,25 +2305,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               roomListEmptyAccepted.value = true;
             }
           }, PREPARED_EMPTY_GRACE_MS);
-        }
-        return;
-      }
-
-      if (initialSyncStatus.value === "degraded") {
-        if (preparedEmptyTimer) {
-          clearTimeout(preparedEmptyTimer);
-          preparedEmptyTimer = null;
-        }
-        if (!degradedEmptyTimer) {
-          degradedEmptyTimer = setTimeout(() => {
-            degradedEmptyTimer = null;
-            if (
-              sortedRooms.value.length === 0
-              && initialSyncStatus.value === "degraded"
-            ) {
-              roomListEmptyAccepted.value = true;
-            }
-          }, DEGRADED_EMPTY_ESCAPE_MS);
         }
       }
     },

@@ -78,20 +78,29 @@ function isChannel(item: ChatRoom | Channel): item is Channel {
   return "address" in item && !("id" in item);
 }
 
+/** Shared across all mounted tabs — see room-names-store.ts. Resolves on demand,
+ *  so only rows of the displayed page are ever resolved. */
 const roomNamesStore = useRoomNamesStore();
-/** Shared across all mounted tabs — see room-names-store.ts. */
-const roomNameIndex = computed(() => roomNamesStore.roomNameIndex);
-
-/** Reactive map of room ID → resolved display name. */
-const roomNameMap = computed(() => roomNameIndex.value.names);
 
 /** Rooms where name resolution permanently failed — stop showing skeleton for these */
 const gaveUpRooms = ref(new Set<string>());
 
+/** Displayed rooms without any resolved member name (same Set while unchanged).
+ *  Retries only ever target visible rooms, so the displayed page is enough. */
+let _prevPageUnresolved: ReadonlySet<string> = new Set();
+const pageUnresolvedRooms = computed(() => {
+  const next = new Set<string>();
+  for (const it of filteredRooms.value) {
+    if (!isChannel(it) && !roomNamesStore.resolveInfo(it).hasMemberNames) next.add(it.id);
+  }
+  if (!sameSet(_prevPageUnresolved, next)) _prevPageUnresolved = next;
+  return _prevPageUnresolved;
+});
+
 /** Track which rooms have no real display name yet (same Set while unchanged) */
 let _prevUnresolved: ReadonlySet<string> = new Set();
 const unresolvedRoomSet = computed(() => {
-  const all = roomNameIndex.value.unresolved;
+  const all = pageUnresolvedRooms.value;
   const gaveUp = gaveUpRooms.value;
   let next = all;
   if (gaveUp.size > 0) {
@@ -104,9 +113,7 @@ const unresolvedRoomSet = computed(() => {
 });
 
 
-const resolveRoomName = (room: ChatRoom): string => {
-  return roomNameMap.value[room.id] ?? cleanMatrixIds(room.name);
-};
+const resolveRoomName = (room: ChatRoom): string => roomNamesStore.resolveInfo(room).name;
 
 /** Unified display state for room title: resolving → skeleton, failed → fallback, ready → text */
 function getRoomTitle(room: ChatRoom): DisplayResult {
@@ -281,17 +288,7 @@ const scheduleNameRetry = (set: ReadonlySet<string>) => {
   }, delay);
 };
 
-watch(unresolvedRoomSet, scheduleNameRetry, { immediate: true });
-
 onUnmounted(() => clearTimeout(nameRetryTimer));
-
-// If names arrive late (profiles from a background refresh, members, aliases), remove gave-up flag
-watch(() => roomNameIndex.value.unresolved, (unresolved) => {
-  if (gaveUpRooms.value.size === 0) return;
-  for (const roomId of [...gaveUpRooms.value]) {
-    if (!unresolved.has(roomId)) gaveUpRooms.value.delete(roomId);
-  }
-});
 
 /** Format last message preview — delegated to shared composable */
 
@@ -346,7 +343,7 @@ type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult
 // Cache UnifiedItem objects by room id + version to reduce GC pressure.
 // Only create a new object when the room's display-affecting fields change.
 // IMPORTANT: resolvedName is included in the cache key so that background profile
-// loading (triggerRef on userStore.users → roomNameMap recompute) invalidates
+// loading (triggerRef on userStore.users → new name context) invalidates
 // stale titles that were computed before profiles arrived.
 const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; preview: string; resolvedName: string; decryptionStatus: string; senderId: string; avatar: string; lastMessageKey: string; item: UnifiedItem }>();
 
@@ -366,14 +363,13 @@ const allFilteredRooms = computed<(ChatRoom | Channel)[]>(() => {
 });
 
 const filteredRooms = computed<UnifiedItem[]>(() => {
-  // Read roomNameMap eagerly to maintain reactive dependency even on cache-hit paths.
-  // Without this, Vue drops the dependency after first all-hit evaluation.
-  const nameMap = roomNameMap.value;
   const toItem = (r: ChatRoom): UnifiedItem => {
     const ts = r.lastMessage?.timestamp ?? r.updatedAt ?? 0;
     const msgStatus = r.lastMessage?.status ?? "";
     const preview = r.lastMessage?.content ?? "";
-    const resolvedName = nameMap[r.id] ?? "";
+    // Read on every call, cache hit or not: it keeps the dependency on the name
+    // sources, so a late profile re-renders the row.
+    const resolvedName = roomNamesStore.resolveInfo(r).name;
     const decryptionStatus = r.lastMessage?.decryptionStatus ?? "";
     const senderId = r.lastMessage?.senderId ?? "";
     const avatar = r.avatar ?? "";
@@ -406,6 +402,20 @@ const scrollerItems = computed(() => {
   _prevScrollerItems = reuseIfSameKeys(_prevScrollerItems, filteredRooms.value);
   return _prevScrollerItems;
 });
+// Watchers on the page's names sit below filteredRooms: an immediate watcher reads it
+// during setup.
+watch(unresolvedRoomSet, scheduleNameRetry, { immediate: true });
+
+// If names arrive late (profiles from a background refresh, members, aliases), remove
+// the gave-up flag of displayed rooms that now have a name.
+watch(pageUnresolvedRooms, (unresolved) => {
+  if (gaveUpRooms.value.size === 0) return;
+  const shown = new Set(filteredRooms.value.map(it => it._key));
+  for (const roomId of [...gaveUpRooms.value]) {
+    if (shown.has(roomId) && !unresolved.has(roomId)) gaveUpRooms.value.delete(roomId);
+  }
+});
+
 const liveItemByKey = computed(() => new Map(filteredRooms.value.map(i => [i._key, i])));
 const liveItem = (viewItem: UnifiedItem): UnifiedItem => liveItemByKey.value.get(viewItem._key) ?? viewItem;
 

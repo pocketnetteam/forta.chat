@@ -77,6 +77,7 @@ const stubs = {
   PostPlayerModal: true,
   DonateModal: true,
   PostCard: true,
+  CommentPreview: true,
 };
 
 function mountCard() {
@@ -314,5 +315,60 @@ describe("PostCard message links", () => {
     const link = w.find("a[href^='https://example.com/']");
     expect(link.attributes("href")).toBe(longUrl);
     expect(link.text().endsWith("...")).toBe(true);
+  });
+});
+
+describe("PostCard comment link and repost frame", () => {
+  const textPost: BastyonPostData = { ...videoPost, url: "", caption: "Title", message: "text" };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockVideoInfo = null;
+    getCachedPost.mockReturnValue(textPost);
+  });
+
+  afterEach(() => {
+    getCachedPost.mockReturnValue(null);
+  });
+
+  it("a comment link shows the comment and a 'go to comment' button instead of 'open post'", async () => {
+    const w = mount(PostCard, {
+      props: { txid: "tx123", isOwn: false, initialCommentId: "c".repeat(64) },
+      global: { stubs },
+    });
+    await flushPromises();
+
+    expect(w.findComponent({ name: "CommentPreview" }).props("commentId")).toBe("c".repeat(64));
+    const buttons = w.findAll("button").map((b) => b.text());
+    expect(buttons).toContain("Go to comment");
+    expect(buttons).not.toContain("Open");
+  });
+
+  it("a plain post link keeps 'open post' and no comment block", async () => {
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.findComponent({ name: "CommentPreview" }).exists()).toBe(false);
+    expect(w.findAll("button").map((b) => b.text())).toContain("Open");
+  });
+
+  it("a repost nests the original as an embedded card without an extra frame around it", async () => {
+    getCachedPost.mockReturnValue({ ...textPost, repost: { ...textPost, txid: "orig456" } });
+    const w = mountCard();
+    await flushPromises();
+
+    const nested = w.find("post-card-stub");
+    expect(nested.attributes("txid")).toBe("orig456");
+    expect(nested.attributes()).toHaveProperty("embedded");
+    expect(nested.element.parentElement?.className).not.toMatch(/border/);
+  });
+
+  it("an embedded card fills its parent instead of the fixed bubble width", async () => {
+    const w = mount(PostCard, { props: { txid: "tx123", isOwn: false, embedded: true }, global: { stubs } });
+    await flushPromises();
+
+    const classes = w.find(".post-card").classes();
+    expect(classes).toContain("w-full");
+    expect(classes).not.toContain("my-1.5");
   });
 });

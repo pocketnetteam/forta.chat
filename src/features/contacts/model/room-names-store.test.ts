@@ -37,32 +37,43 @@ describe("useRoomNamesStore", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     resolveSpy.mockClear();
-    chat.sortedRooms = [dm("!a", "PBobAddress222"), dm("!b", "PCarolAddress333")];
     user.users = { PBobAddress222: { name: "Bob" } };
   });
 
   // Regression (perf): every mounted chat-list tab resolved all room names itself.
-  it("resolves each room once for any number of list instances", () => {
+  it("resolves a room once for any number of list instances", () => {
+    const a = dm("!a", "PBobAddress222");
+    const b = dm("!b", "PCarolAddress333");
     const scope = effectScope();
     const lists = scope.run(() =>
       [0, 1, 2, 3].map(() => {
         const store = useRoomNamesStore();
-        return computed(() => store.roomNameIndex);
+        return computed(() => [a, b].map(r => store.resolveInfo(r)));
       }),
     )!;
-    const indexes = lists.map(l => l.value);
-    expect(new Set(indexes).size).toBe(1);
-    expect(indexes[0].names).toEqual({ "!a": "Bob", "!b": "!b" });
-    expect([...indexes[0].unresolved]).toEqual(["!b"]);
+    const results = lists.map(l => l.value);
+    expect(results[0]).toEqual([
+      { name: "Bob", hasMemberNames: true },
+      { name: "!b", hasMemberNames: false },
+    ]);
+    for (const r of results) expect(r[0]).toBe(results[0][0]);
     expect(resolveSpy).toHaveBeenCalledTimes(2);
     scope.stop();
   });
 
-  it("re-resolves when a profile arrives", () => {
+  it("re-runs the caller and re-resolves its room when a profile arrives", () => {
     const store = useRoomNamesStore();
-    expect(store.roomNameIndex.names["!b"]).toBe("!b");
+    const b = dm("!b", "PCarolAddress333");
+    const name = computed(() => store.resolveInfo(b).name);
+    expect(name.value).toBe("!b");
     user.users = { ...user.users, PCarolAddress333: { name: "Carol" } };
-    expect(store.roomNameIndex.names["!b"]).toBe("Carol");
-    expect(store.roomNameIndex.unresolved.size).toBe(0);
+    expect(name.value).toBe("Carol");
+  });
+
+  it("does not resolve rooms nobody asked for", () => {
+    const store = useRoomNamesStore();
+    chat.sortedRooms = Array.from({ length: 500 }, (_, i) => dm(`!r${i}`, "PBobAddress222"));
+    store.resolveInfo(chat.sortedRooms[0]);
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
   });
 });

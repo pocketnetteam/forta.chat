@@ -147,7 +147,7 @@ export function formatMessageForCopy(
 export function stripBastyonLinks(text: string): string {
   if (!text) return "";
   return text
-    .replace(BASTYON_LINK_RE, "📝 Bastyon post")
+    .replace(BASTYON_LINK_RE, (m) => (parseBasytonLink(m)?.commentId ? "💬 Bastyon comment" : "📝 Bastyon post"))
     .replace(BASTYON_COLLECTION_LINK_RE, "🗂 Bastyon collection")
     .replace(BASTYON_SCHEME_LINK_RE, (m) => bastyonSchemeToHttps(m));
 }

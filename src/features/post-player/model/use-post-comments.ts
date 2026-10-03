@@ -64,5 +64,22 @@ export function usePostComments(txid: string) {
     }
   };
 
-  return { comments, loading, submitting, error, load, submit };
+  /** Make sure a linked comment is in the list. The post's comment list holds
+   *  only top-level comments, so a reply from a shared link is loaded by id
+   *  and placed right after the comment it answers (or at the end). */
+  const ensureComment = async (commentId: string): Promise<void> => {
+    if (!commentId || comments.value.some((c) => c.id === commentId)) return;
+    try {
+      const [found] = (await authStore.loadCommentsByIds([commentId])).filter((c) => c.id === commentId);
+      if (!found || found.deleted || comments.value.some((c) => c.id === commentId)) return;
+      const list = [...comments.value];
+      const anchor = list.findIndex((c) => c.id === (found.answerid || found.parentid));
+      list.splice(anchor >= 0 ? anchor + 1 : list.length, 0, found);
+      comments.value = list;
+    } catch (e) {
+      console.error("[usePostComments] ensureComment error:", e);
+    }
+  };
+
+  return { comments, loading, submitting, error, load, submit, ensureComment };
 }

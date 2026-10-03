@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ChatRoom } from "@/entities/chat";
-import { createRoomNameIndex, sameSet } from "./room-name-index";
+import { createRoomNameResolver, sameSet } from "./room-name-index";
 
 const room = (id: string, over: Partial<ChatRoom> = {}): ChatRoom =>
   ({ id, name: id, members: [`m-${id}`], isGroup: false, ...over }) as ChatRoom;
@@ -12,66 +12,50 @@ const setup = () => {
     const name = ctx.names[r.members[0]];
     return { name: name ?? r.name, hasMemberNames: !!name };
   });
-  return { resolve, build: createRoomNameIndex<Ctx>(resolve) };
+  return { resolve, get: createRoomNameResolver<Ctx>(resolve) };
 };
 
-describe("createRoomNameIndex", () => {
-  it("resolves every room on the first build", () => {
-    const { resolve, build } = setup();
+describe("createRoomNameResolver", () => {
+  it("resolves only the rooms that are asked for", () => {
+    const { resolve, get } = setup();
     const ctx = { names: { "m-a": "Alice" } };
-    const res = build([room("a"), room("b")], ctx);
-    expect(res.names).toEqual({ a: "Alice", b: "b" });
-    expect([...res.unresolved]).toEqual(["b"]);
+    expect(get(room("a"), ctx)).toEqual({ name: "Alice", hasMemberNames: true });
+    expect(get(room("b"), ctx)).toEqual({ name: "b", hasMemberNames: false });
     expect(resolve).toHaveBeenCalledTimes(2);
   });
 
-  it("re-resolves only the room whose fields changed and keeps references", () => {
-    const { resolve, build } = setup();
+  it("reuses the entry for a patched room object with the same name fields", () => {
+    const { resolve, get } = setup();
     const ctx = { names: { "m-a": "Alice" } };
     const a = room("a");
-    const b = room("b");
-    const first = build([a, b], ctx);
+    const first = get(a, ctx);
     resolve.mockClear();
-
-    // A receipt-style patch: new array, new object for b that keeps its member list.
-    const second = build([a, { ...b, unreadCount: 3 }], ctx);
+    // A receipt-style patch: new object that keeps its member list.
+    expect(get({ ...a, unreadCount: 3 }, ctx)).toBe(first);
     expect(resolve).not.toHaveBeenCalled();
-    expect(second).toBe(first);
-    expect(second.names).toBe(first.names);
-    expect(second.unresolved).toBe(first.unresolved);
   });
 
   it("re-resolves a room when its member list is reassigned", () => {
-    const { resolve, build } = setup();
-    const ctx = { names: { "m-a": "Alice", "m-x": "Xavier" } };
-    const first = build([room("b")], ctx);
+    const { resolve, get } = setup();
+    const ctx = { names: { "m-x": "Xavier" } };
+    get(room("b"), ctx);
     resolve.mockClear();
-    const second = build([room("b", { members: ["m-x"] })], ctx);
+    expect(get(room("b", { members: ["m-x"] }), ctx).name).toBe("Xavier");
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(second.names).toEqual({ b: "Xavier" });
-    expect(second.unresolved.size).toBe(0);
-    expect(second.unresolved).not.toBe(first.unresolved);
   });
 
-  it("re-resolves everything when the context object changes", () => {
-    const { resolve, build } = setup();
-    const rooms = [room("a"), room("b")];
-    build(rooms, { names: {} });
+  // Regression (perf): a profile batch (new context) used to re-resolve every room in
+  // the list — thousands with invites — instead of the rows being displayed.
+  it("re-resolves after a context change only the rooms asked for again", () => {
+    const { resolve, get } = setup();
+    const rooms = Array.from({ length: 1000 }, (_, i) => room(`r${i}`));
+    const ctx1 = { names: {} };
+    for (const r of rooms) get(r, ctx1);
     resolve.mockClear();
-    const res = build(rooms, { names: { "m-b": "Bob" } });
-    expect(resolve).toHaveBeenCalledTimes(2);
-    expect(res.names.b).toBe("Bob");
-    expect([...res.unresolved]).toEqual(["a"]);
-  });
-
-  it("returns a new names map when a room is removed", () => {
-    const { build } = setup();
-    const ctx = { names: {} };
-    const a = room("a");
-    const first = build([a, room("b")], ctx);
-    const second = build([a], ctx);
-    expect(second.names).not.toBe(first.names);
-    expect(second.names).toEqual({ a: "a" });
+    const ctx2 = { names: { "m-r1": "Bob" } };
+    for (const r of rooms.slice(0, 50)) get(r, ctx2);
+    expect(resolve).toHaveBeenCalledTimes(50);
+    expect(get(rooms[1], ctx2).name).toBe("Bob");
   });
 });
 

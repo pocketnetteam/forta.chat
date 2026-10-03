@@ -795,6 +795,9 @@ export const ru: Record<TranslationKey, string> = {
   "post.notFound": "Пост не найден",
   "post.openOriginal": "Открыть в Bastyon",
   "post.retry": "Повторить",
+  "post.commentNotFound": "Комментарий не найден",
+  "post.commentDeleted": "Комментарий удалён",
+  "post.inReplyTo": "Ответ на комментарий {name}",
   "post.readMore": "Читать далее",
   "post.video": "Видео",
   "post.article": "Статья",
@@ -829,6 +832,7 @@ export const ru: Record<TranslationKey, string> = {
   "postPlayer.rated": "Вы оценили этот пост",
   "postPlayer.ratingRestricted": "Оценка ограничена",
   "postPlayer.openPost": "Открыть",
+  "postPlayer.goToComment": "Перейти к комментарию",
   "postPlayer.searchChats": "Поиск чатов...",
 
   // ── Registration ──

@@ -1,19 +1,18 @@
 import { computed } from "vue";
 import { defineStore } from "pinia";
-import { useChatStore } from "@/entities/chat";
+import { useChatStore, type ChatRoom } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { useUserStore } from "@/entities/user/model";
 import { hexEncode } from "@/shared/lib/matrix/functions";
-import { createRoomNameIndex } from "../lib/room-name-index";
+import { createRoomNameResolver, type RoomNameInfo } from "../lib/room-name-index";
 import { resolveRoomNameInfo, type NameContext } from "../lib/resolve-room-name";
 
 /**
  * Resolved chat-list titles, shared by every mounted ContactList.
  *
- * SwipeableTabs keeps all tabs (all / personal / groups / invites) mounted, and each list
- * used to build its own name index over the whole `sortedRooms` — thousands of rooms with
- * invites — so the cold-start resolution ran once per tab inside one long task. One store,
- * one memo, one pass.
+ * SwipeableTabs keeps all tabs (all / personal / groups / invites) mounted; they share one
+ * memo, so a room shown in several tabs is resolved once. Lists resolve only the rows they
+ * display — `sortedRooms` holds thousands of rooms with invites.
  */
 export const useRoomNamesStore = defineStore("roomNames", () => {
   const chatStore = useChatStore();
@@ -32,12 +31,12 @@ export const useRoomNamesStore = defineStore("roomNames", () => {
     };
   });
 
-  const buildRoomNameIndex = createRoomNameIndex<NameContext>(resolveRoomNameInfo);
+  const resolveRoom = createRoomNameResolver<NameContext>(resolveRoomNameInfo);
 
-  /** Room names and unresolved rooms in one pass over the list; both keep their
-   *  reference while nothing changed, so the lists / RecycleScroller and the
-   *  name-retry watchers don't re-run on every room patch. */
-  const roomNameIndex = computed(() => buildRoomNameIndex(chatStore.sortedRooms, nameContext.value));
+  /** Name of one room, memoized across every list. Call it from a computed / render:
+   *  reading the context there makes the caller re-run when a name source changes,
+   *  and only the rooms it asks for get resolved again. */
+  const resolveInfo = (room: ChatRoom): RoomNameInfo => resolveRoom(room, nameContext.value);
 
-  return { roomNameIndex };
+  return { resolveInfo };
 });

@@ -64,6 +64,15 @@ describe("parseMessage", () => {
     expect((bastyonLink as any).isVideo).toBe(false);
   });
 
+  it("turns a shared comment link into a post card with the comment id (regression: was a plain link)", () => {
+    const post = "a".repeat(64);
+    const comment = "b".repeat(64);
+    const url = `https://bastyon.com/daniel_satchkov?s=${post}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${comment}`;
+    expect(parseMessage(url)).toEqual([
+      { type: "bastyonLink", content: url, txid: post, commentId: comment, isVideo: false },
+    ]);
+  });
+
   it("detects bastyon:// video link (index?v=)", () => {
     const txid = "b".repeat(64);
     const segments = parseMessage(`Watch bastyon://index?v=${txid}`);
@@ -197,6 +206,11 @@ describe("stripBastyonLinks", () => {
   it("replaces bastyon.com links with label", () => {
     const txid = "f".repeat(64);
     expect(stripBastyonLinks(`https://bastyon.com/index?v=${txid}`)).toContain("Bastyon post");
+  });
+
+  it("labels a shared comment link (username path + commentid) as a comment", () => {
+    const url = `https://bastyon.com/daniel_satchkov?s=${"a".repeat(64)}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${"b".repeat(64)}`;
+    expect(stripBastyonLinks(`look ${url}`)).toBe("look 💬 Bastyon comment");
   });
 
   it("returns empty string for empty input", () => {

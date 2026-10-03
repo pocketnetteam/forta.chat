@@ -41,9 +41,14 @@ describe("ContactList row cache", () => {
     expect(page).toMatch(/allFilteredRooms\.value\s*\.slice\(0, displayLimit\.value\)\s*\.map\(/);
   });
 
-  // Perf: every mounted tab built its own name index over all rooms (4× the same work).
-  it("reads room names from the shared store instead of building its own index", () => {
-    expect(source).toContain("const roomNameIndex = computed(() => roomNamesStore.roomNameIndex);");
+  // Perf: every mounted tab built its own name index over all rooms (4× the same work),
+  // and later one shared index still re-resolved every room on each profile batch.
+  it("resolves names through the shared store, only for displayed rows", () => {
+    expect(source).toContain("const resolveRoomName = (room: ChatRoom): string => roomNamesStore.resolveInfo(room).name;");
     expect(source).not.toContain("createRoomNameIndex");
+    expect(source).not.toContain("createRoomNameResolver");
+    expect(source).not.toContain("roomNameIndex");
+    // Unresolved rooms come from the displayed page, not from every room.
+    expect(source).toMatch(/const pageUnresolvedRooms = computed\(\(\) => \{\s*const next = new Set<string>\(\);\s*for \(const it of filteredRooms\.value\)/);
   });
 });

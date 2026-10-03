@@ -37,7 +37,7 @@ const {
 
 const {
   comments, loading: commentsLoading, submitting: commentsSubmitting,
-  load: loadComments, submit: submitComment,
+  load: loadComments, submit: submitComment, ensureComment,
 } = usePostComments(props.post.txid);
 
 const { showDonateModal, boostAddress, openBoost, closeBoost } = usePostBoost();
@@ -86,25 +86,24 @@ const onKeydown = (e: KeyboardEvent) => {
   if (e.key === "Escape") emit("close");
 };
 
-// Scroll to target comment after comments load
-if (props.initialCommentId) {
-  watch(comments, (list) => {
-    if (list.length > 0) {
-      nextTick(() => {
-        const el = document.getElementById(`comment-${props.initialCommentId}`);
-        if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          el.classList.add("ring-2", "ring-color-bg-ac", "ring-offset-1");
-          setTimeout(() => el.classList.remove("ring-2", "ring-color-bg-ac", "ring-offset-1"), 3000);
-        }
-      });
-    }
-  }, { once: true });
+/** Load comments; for a shared comment link also load that comment (a reply
+ *  is not in the top-level list), then scroll to it and highlight it. */
+async function loadCommentsAndFocus(): Promise<void> {
+  await loadComments();
+  const target = props.initialCommentId;
+  if (!target) return;
+  await ensureComment(target);
+  await nextTick();
+  const el = document.getElementById(`comment-${target}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("ring-2", "ring-color-bg-ac", "ring-offset-1");
+  setTimeout(() => el.classList.remove("ring-2", "ring-color-bg-ac", "ring-offset-1"), 3000);
 }
 
 onMounted(() => {
   loadScores();
-  loadComments();
+  void loadCommentsAndFocus();
   document.addEventListener("keydown", onKeydown);
 });
 

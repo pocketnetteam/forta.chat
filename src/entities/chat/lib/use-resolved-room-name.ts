@@ -1,6 +1,6 @@
 import { computed } from "vue";
 import { hexDecode, hexEncode } from "@/shared/lib/matrix/functions";
-import { cleanMatrixIds, isUnresolvedName } from "./chat-helpers";
+import { cleanMatrixIds, isUnresolvedName, MAX_TITLE_MEMBERS } from "./chat-helpers";
 import { useChatStore } from "../model/chat-store";
 import { useUserStore } from "@/entities/user/model";
 import { useAuthStore } from "@/entities/auth";
@@ -30,7 +30,8 @@ function isAddressFallbackName(name: string, addr: string): boolean {
 /** Resolve member names for a room. Honors user-set local aliases (Session 51)
  *  before falling back to Pocketnet profile names — otherwise the alias gets
  *  silently overridden by the Pocketnet displayname in the chat list/header.
- *  `aliases` is read so Vue tracks reactivity at the calling computed. */
+ *  `aliases` is read so Vue tracks reactivity at the calling computed.
+ *  Only the first MAX_TITLE_MEMBERS other members are taken. */
 function resolveMemberNames(
   room: ChatRoom,
   allUsers: Record<string, any>,
@@ -38,7 +39,11 @@ function resolveMemberNames(
   aliases: Record<string, string>,
   getDisplayName: (address: string) => string,
 ): string[] {
-  const otherMembers = room.members.filter(m => m !== myHexId);
+  const otherMembers: string[] = [];
+  for (const m of room.members) {
+    if (otherMembers.length >= MAX_TITLE_MEMBERS) break;
+    if (m !== myHexId) otherMembers.push(m);
+  }
   const names: string[] = [];
   for (const hexId of otherMembers) {
     const addr = cachedHexDecode(hexId);
