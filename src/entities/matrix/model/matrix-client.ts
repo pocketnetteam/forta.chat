@@ -39,6 +39,7 @@ import {
   MATRIX_SYNC_HOSTS,
 } from "./sync-failover";
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
+import { markRoomMembersStale } from "./ensure-room-members";
 
 export type SyncCallback = (state: "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING") => void;
 export type TimelineCallback = (event: unknown, room: unknown) => void;
@@ -525,6 +526,10 @@ export class MatrixClientService {
       } | null;
       // Only the room's main timeline — threads and the notification set re-emit too.
       if (!r?.roomId || r.getUnfilteredTimelineSet?.() !== timelineSet) return;
+      // With lazy-loaded members a limited sync omits membership changes of
+      // users who didn't post in the gap: the next encryption reloads the
+      // room's member list (see markRoomMembersStale).
+      markRoomMembersStale(r.roomId);
       const backToken = r.getLiveTimeline?.()?.getPaginationToken?.("b") ?? null;
       this.onTimelineReset?.(r.roomId, backToken);
     });

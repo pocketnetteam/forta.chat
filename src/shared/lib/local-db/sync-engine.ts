@@ -838,6 +838,8 @@ export class SyncEngine {
     };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
+    // Recipients are decided from the member list — complete it first (lazy-loaded members).
+    await roomCrypto?.ensureMembers?.();
 
     let serverEventId: string;
     if (roomCrypto?.canBeEncrypt()) {
@@ -946,6 +948,8 @@ export class SyncEngine {
 
       // --- Phase 1: encrypt (fast, fails loudly) ----------------------------
       const roomCrypto = await this.getRoomCrypto(op.roomId);
+      // Recipients are decided from the member list — complete it first (lazy-loaded members).
+      await roomCrypto?.ensureMembers?.();
       let fileToUpload: Blob = attachment.localBlob;
       let secrets: Record<string, unknown> | undefined;
 
@@ -1108,6 +1112,8 @@ export class SyncEngine {
     const payload = op.payload as { eventId: string; newContent: string };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
+    // Recipients are decided from the member list — complete it first (lazy-loaded members).
+    await roomCrypto?.ensureMembers?.();
 
     let content: Record<string, unknown>;
     if (roomCrypto?.canBeEncrypt()) {
@@ -1209,6 +1215,8 @@ export class SyncEngine {
     };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
+    // Recipients are decided from the member list — complete it first (lazy-loaded members).
+    await roomCrypto?.ensureMembers?.();
 
     // Encode transfer as JSON body (same format as use-messages.ts)
     const transferBody = JSON.stringify({

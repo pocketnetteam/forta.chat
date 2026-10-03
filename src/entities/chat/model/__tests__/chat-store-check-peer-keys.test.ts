@@ -83,6 +83,54 @@ describe("onMembership triggers peer-keys recheck", () => {
   });
 });
 
+describe("onMembership rechecks rooms in one batch", () => {
+  const section = () => {
+    const start = storesSource.indexOf("onMembership:");
+    return storesSource.slice(start, storesSource.indexOf("onMyMembership", start));
+  };
+
+  /**
+   * Loading a room's members emits one member event per member, and the
+   * background 1:1 member fill (lazy-loaded members) touches many rooms. A
+   * timer per room fired each room's prepare() → getusersinfo() at its own
+   * moment: one getuserprofile request per room. Rooms are now collected
+   * over one window and their keys requested together first.
+   */
+  it("loads the collected rooms' keys in one request before preparing them", () => {
+    const body = section();
+    const preloadIdx = body.indexOf("chatStore.preloadRoomKeys(");
+    const prepareIdx = body.indexOf("roomCrypto.prepare()");
+    expect(preloadIdx).toBeGreaterThan(-1);
+    expect(prepareIdx).toBeGreaterThan(preloadIdx);
+  });
+
+  it("does not re-arm the window per event, so a stream of events cannot postpone it", () => {
+    const body = section();
+    expect(body).toContain("_peerKeysRecheckRooms.add(roomId)");
+    expect(body).toContain("if (!_peerKeysRecheckTimer) _peerKeysRecheckTimer = setTimeout");
+    expect(body).not.toContain("clearTimeout");
+  });
+});
+
+describe("push name caches without lazy-loaded members", () => {
+  it("adds profile names of stored room members to the native sender-name cache", () => {
+    const start = storesSource.indexOf("setAllSenderNamesGetter(");
+    const body = storesSource.slice(start, storesSource.indexOf("setSenderNameGetter(", start));
+    expect(body).toContain("chatStore.rooms");
+    expect(body).toContain("useUserStore().users");
+  });
+
+  it("does not push an unresolved 1:1 room name to native", () => {
+    const start = storesSource.indexOf("setAllRoomNamesGetter(");
+    const body = storesSource.slice(start, storesSource.indexOf("setAllGroupRoomsGetter(", start));
+    expect(body).toContain("!room.isGroup && !looksLikeProperName(room.name, peerAddr)");
+  });
+
+  it("wires a profile-name fallback for push senders", () => {
+    expect(storesSource).toContain("pushService.setSenderNameGetter(");
+  });
+});
+
 describe("getUsersInfo log noise", () => {
   it("does not spam Sentry on the success path", () => {
     // Regression: the success path used to log `[getUsersInfo] id=… sdkPath=…`

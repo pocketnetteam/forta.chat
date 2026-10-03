@@ -270,6 +270,27 @@ state. Групповая расшифровка берёт хэш из собы
 Флаг и фильтр (`lazy_load_members: false`, `lazyLoadMembers: false`) в `matrix-client.ts` не трогать.
 Тест `matrix-client-lazy-load-members.test.ts` (требует `false`) остаётся как есть.
 
+**Статус (2026-10-03): этапы 2, 2a, 3, 4, 5 сделаны, ждут контрольной точки. Этап 1B не делался** —
+владелец не меняет форк Matrix SDK ради производительности; из кода приложения таймаут первого sync не
+продлить (SDK не отличает обрыв по таймауту от остановки клиента). Остаётся A — на стороне сервера.
+Что где:
+- `entities/matrix/model/ensure-room-members.ts` — `ensureRoomMembers` (пропуск при `membersLoaded()`,
+  для приглашений и при `maxJoined`; таймаут 15 с). Все прямые вызовы `loadMembersIfNeeded` в
+  `chat-store.ts` идут через него.
+- `PcryptoRoomInstance.ensureMembers()` — вызывается до решения «шифровать или нет»: `SyncEngine` (4 операции),
+  `getSendCrypto` в `use-messages.ts`, `checkPeerKeys` открытого чата.
+- `shared/lib/matrix/pcrypto-recipients.ts` — получатели из тела Pcrypto; `entities/chat/lib/room-addresses.ts`
+  — объединение источников адресов; `preloadRoomKeys` в `chat-store.ts` (заменил `preloadBackfillKeys`).
+- Этап 4 — `fillDirectRoomMembers` после `loadMissingMembers` первого экрана; приглашения пропускаются
+  (`/members` для них — 403).
+- Этап 3 сделан иначе, чем описан ниже (по итогам ревью): `Room.timelineReset` не сбрасывает кэш сразу, а
+  помечает список устаревшим (`markRoomMembersStale`); перезагружает его только шифрование
+  (`ensureRoomMembers(…, { fresh: true })` из `ensureMembers`). Иначе при `timeline.limit: 4` 1:1 комнаты
+  после каждой пачки событий теряли бы собеседника для имён, звонка и фильтров.
+- `ensureMembers` бросает ошибку, если ключи новых участников не загрузились (иначе `canBeEncrypt()` по
+  старому `usersinfo` разрешил бы шифровать без них), и делает свой запрос принудительным, пока в полёте
+  принудительный Retry.
+
 ### Этап 1. Таймауты (A + B)
 
 - A — запрос админам сервера.

@@ -2,6 +2,7 @@ import type { ChatDatabase, DecryptionJob, LocalMessage } from "./schema";
 import type { RoomRepository } from "./room-repository";
 import { MessageType } from "@/entities/chat/model/types";
 import { cryptoDebug } from "@/shared/lib/utils/crypto-debug";
+import { eventKeyAddresses } from "@/shared/lib/matrix/pcrypto-recipients";
 
 type RoomCrypto = {
   decryptEvent(raw: unknown): Promise<{ body: string }>;
@@ -9,6 +10,8 @@ type RoomCrypto = {
 };
 type GetRoomCrypto = (roomId: string) => Promise<RoomCrypto | undefined>;
 type FetchRawEvent = (roomId: string, eventId: string) => Promise<Record<string, unknown> | undefined>;
+/** Starts one batched load of these users' encryption keys (fire-and-forget). */
+type PreloadKeys = (addresses: string[]) => void;
 
 const FAST_BACKOFF_MS = [2_000, 5_000, 10_000];
 const SLOW_BACKOFF_MS = [30_000, 120_000, 600_000, 3_600_000];
@@ -52,6 +55,7 @@ export class DecryptionWorker {
     private getRoomCrypto: GetRoomCrypto,
     private roomRepo?: RoomRepository,
     private fetchRawEvent?: FetchRawEvent,
+    private preloadKeys?: PreloadKeys,
   ) {}
 
   /** Enqueue a failed decryption for retry. Idempotent — skips if eventId already queued. */
@@ -218,12 +222,26 @@ export class DecryptionWorker {
       // the open chat / the sidebar preview) resolve before older history.
       jobs.sort((a, b) => b.createdAt - a.createdAt);
 
+      // One key request for the whole tick: the jobs span many rooms and are
+      // decrypted one by one, each loading its sender's keys on its own.
+      const parsed = jobs.map((job) => {
+        try {
+          return JSON.parse(job.encryptedBody) as Record<string, unknown>;
+        } catch {
+          return null; // reported per job below
+        }
+      });
+      if (this.preloadKeys) {
+        const addresses = eventKeyAddresses(parsed);
+        if (addresses.length > 0) this.preloadKeys(addresses);
+      }
+
       // Decrypt phase — pure crypto, no DB writes.
       const results: Array<{ job: DecryptionJob; ok: boolean; body?: string; error?: unknown; permanent?: boolean }> = [];
-      for (const job of jobs) {
+      for (const [i, job] of jobs.entries()) {
         let roomCrypto: RoomCrypto | undefined;
         try {
-          const raw = JSON.parse(job.encryptedBody);
+          const raw = parsed[i] ?? JSON.parse(job.encryptedBody);
           roomCrypto = await this.getRoomCrypto(job.roomId);
           if (!roomCrypto) throw new Error("Room crypto not available");
           const result = await roomCrypto.decryptEvent(raw);

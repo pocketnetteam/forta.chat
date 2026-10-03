@@ -2,6 +2,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import type { MatrixKit } from "@/entities/matrix";
 import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
+import { ensureRoomMembers, type LazyMembersRoom } from "@/entities/matrix/model/ensure-room-members";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
@@ -24,6 +25,7 @@ import {
 } from "../lib/timeline-parse-plan";
 import { collectTimelineReactions } from "../lib/timeline-reactions";
 import { createHistoryBackfill } from "./history-backfill";
+import { roomAddresses, roomsKeyAddresses } from "../lib/room-addresses";
 import { unreadPeerHangupCount, unreadCountWithoutHangups, hasCallEvent } from "../lib/call-hangup-unread";
 import { createHangupGapCounter } from "./hangup-gap-counter";
 import { callHangupRuleSince } from "@/shared/lib/push/call-hangup-push-rule";
@@ -2967,7 +2969,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const viewportMatrixRooms = interactiveRooms.filter(
         (mr: any) => viewportRoomIds.has(mr.roomId as string),
       );
-      loadMissingMembers(viewportMatrixRooms, kit, myUserId, membersByRoom);
+      loadMissingMembers(viewportMatrixRooms, kit, myUserId, membersByRoom)
+        .then(() => fillDirectRoomMembers(
+          interactiveRooms.filter((mr: any) => !viewportRoomIds.has(mr.roomId as string)),
+          kit,
+          myUserId,
+        ))
+        .catch((e) => console.warn("[chat-store] member load failed:", e));
     }
 
     // Decrypt [encrypted] previews asynchronously — results go to cache
@@ -3005,6 +3013,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     kit: MatrixKit,
     myUserId: string,
     membersByRoom?: ReadonlyMap<string, Record<string, unknown>[]>,
+    opts?: { batch?: number; directOnly?: boolean },
   ) => {
     const myHexId = getmatrixid(myUserId);
     const toLoad: any[] = [];
@@ -3012,6 +3021,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Find rooms that need member loading (only self as member from SDK).
     // Skip rooms where Dexie/roomsMap already has resolved members (e.g. from cache).
     for (const mr of matrixRooms) {
+      // Nothing the SDK could load: lazy loading is off (always "loaded") or done.
+      if (mr.membersLoaded?.() !== false) continue;
+      // /members needs a joined room — an invite would only get a 403.
+      if ((mr.selfMembership ?? mr.getMyMembership?.()) !== "join") continue;
+      if (opts?.directOnly && (mr.getJoinedMemberCount?.() ?? 0) > 2) continue;
       const members = membersByRoom?.get(mr.roomId as string) ?? kit.getRoomMembers(mr);
       const memberIds = members.map((m: Record<string, unknown>) => getmatrixid(m.userId as string));
       const others = memberIds.filter(id => id !== myHexId);
@@ -3026,11 +3040,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
     // Phase 1: Load missing members from server (no reactive updates)
     if (toLoad.length > 0) {
-      const BATCH = 20;
+      const BATCH = opts?.batch ?? 20;
       for (let i = 0; i < toLoad.length; i += BATCH) {
         const batch = toLoad.slice(i, i + BATCH);
         await Promise.all(batch.map(async (mr: any) => {
-          try { await mr.loadMembersIfNeeded(); } catch (e) {
+          try { await ensureRoomMembers(mr); } catch (e) {
             console.warn(`[chat-store] loadMembersIfNeeded failed for ${mr.roomId}:`, e);
           }
         }));
@@ -3089,6 +3103,32 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Persist and signal ready
     debouncedCacheRooms();
     namesReady.value = true;
+  };
+
+  /** Rooms per loadMissingMembers call of the background pass. */
+  const DIRECT_MEMBERS_CHUNK = 40;
+  /** Concurrent /members requests of the background pass. */
+  const DIRECT_MEMBERS_BATCH = 4;
+  const DIRECT_MEMBERS_PAUSE_MS = 500;
+
+  /** Background pass of the one-time member load over the remaining 1:1
+   *  rooms whose peer the SDK has not delivered (lazy-loaded members): names,
+   *  search, the ignored-user filter and typing need the peer. Small batches
+   *  with pauses; groups load when opened. The SDK caches loaded members, so
+   *  this runs once per install. No-op without lazy loading. */
+  const fillDirectRoomMembers = async (matrixRooms: LazyMembersRoom[], kit: MatrixKit, myUserId: string) => {
+    const candidates = matrixRooms.filter((mr) =>
+      mr.membersLoaded?.() === false
+      && mr.getMyMembership?.() === "join"
+      && (mr.getJoinedMemberCount?.() ?? 0) <= 2);
+    for (let i = 0; i < candidates.length; i += DIRECT_MEMBERS_CHUNK) {
+      if (matrixKitRef.value !== kit) return; // logged out or client replaced
+      await loadMissingMembers(candidates.slice(i, i + DIRECT_MEMBERS_CHUNK), kit, myUserId, undefined, {
+        batch: DIRECT_MEMBERS_BATCH,
+        directOnly: true,
+      });
+      await new Promise((r) => setTimeout(r, DIRECT_MEMBERS_PAUSE_MS));
+    }
   };
 
   /** Incremental room refresh — only processes changed rooms.
@@ -3307,9 +3347,57 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return chatRoom;
   };
 
-  /** Per-room addresses collected from Matrix SDK (most complete source).
-   *  Populated by updateDisplayNames, consumed by loadProfilesForRoomIds. */
+  /** Per-room addresses collected from Matrix SDK member lists.
+   *  Populated by updateDisplayNames, read through roomParticipantAddresses. */
   const matrixRoomAddresses = new Map<string, string[]>();
+
+  /** The SDK room members and live events, as read for participant addresses. */
+  type SdkRoomView = LazyMembersRoom & { getLiveTimeline?: () => { getEvents?: () => unknown[] } | null };
+
+  /** Live-timeline events read for participant addresses — enough for the
+   *  last few senders and recipients, cheap to parse. */
+  const PARTICIPANT_EVENTS_SCAN = 10;
+
+  /** Every participant address known for a room: the SDK member list, the
+   *  stored ChatRoom members and the recent events' senders and Pcrypto
+   *  recipients. With lazy-loaded members the SDK list of a 1:1 room may hold
+   *  only the own user, so no single source is enough. */
+  const roomParticipantAddresses = (roomId: string): string[] => {
+    let events: Record<string, unknown>[] = [];
+    try {
+      const live = (getMatrixClientService().getRoom(roomId) as SdkRoomView | null)?.getLiveTimeline?.()?.getEvents?.() ?? [];
+      events = live.slice(-PARTICIPANT_EVENTS_SCAN)
+        .map((e) => getRawEvent(e))
+        .filter((e): e is Record<string, unknown> => !!e);
+    } catch { /* SDK not ready — the other sources still apply */ }
+    return roomAddresses({
+      sdkAddresses: matrixRoomAddresses.get(roomId),
+      memberHexIds: getRoomById(roomId)?.members,
+      events,
+    });
+  };
+
+  /** Load the participants' keys of these rooms in one getuserprofile batch.
+   *  Callers then prepare/decrypt the rooms one by one; each room's own
+   *  getusersinfo would send one address per request, but started after this
+   *  one it joins it (or finds the keys in SDK memory). Call before any loop
+   *  over several rooms. Fire-and-forget: getusersinfo has its own timeout. */
+  const preloadRoomKeys = (roomIds: Iterable<string>) => {
+    const authStore = useAuthStore();
+    const rooms: { addresses: string[]; joinedCount: number }[] = [];
+    for (const roomId of roomIds) {
+      let joinedCount = 0;
+      try {
+        joinedCount = (getMatrixClientService().getRoom(roomId) as SdkRoomView | null)?.getJoinedMemberCount?.() ?? 0;
+      } catch { /* SDK not ready */ }
+      rooms.push({ addresses: roomParticipantAddresses(roomId), joinedCount });
+    }
+    const addrs = roomsKeyAddresses(rooms, authStore.address);
+    if (addrs.length === 0) return;
+    authStore.loadUsersInfo(addrs).catch((e) => {
+      console.warn("[chat-store] room key preload failed:", e);
+    });
+  };
 
   /** Update display name cache from Matrix SDK room members.
    *  Collects addresses per room for later viewport-based profile loading.
@@ -3361,6 +3449,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  sender is loaded, not every member — see comment inline. */
   const loadProfilesForRoomIds = (roomIds: string[]) => {
     const uStore = useUserStore();
+    const myAddr = useAuthStore().address;
     const addressesToLoad: string[] = [];
     for (const roomId of roomIds) {
       if (profilesRequestedForRooms.has(roomId)) continue;
@@ -3414,40 +3503,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         continue;
       }
 
-      const roomUncached: string[] = [];
-
-      // Prefer Matrix SDK addresses (populated by updateDisplayNames)
-      const sdkAddrs = matrixRoomAddresses.get(roomId);
-      if (sdkAddrs && sdkAddrs.length > 0) {
-        for (const addr of sdkAddrs) {
-          if (!uStore.users[addr]) roomUncached.push(addr);
-        }
-        if (roomUncached.length === 0) {
-          profilesRequestedForRooms.add(roomId);
-        } else {
-          addressesToLoad.push(...roomUncached);
-        }
-        continue;
-      }
-
-      // Fallback: decode from ChatRoom.members (for cached rooms without Matrix data)
-      const room = getRoomById(roomId);
-      if (!room) continue;
-      let foundAddrs = false;
-      for (const hexId of room.members) {
-        try {
-          const addr = hexDecode(hexId);
-          if (addr && /^[A-Za-z0-9]+$/.test(addr)) {
-            foundAddrs = true;
-            if (!uStore.users[addr]) roomUncached.push(addr);
-          }
-        } catch { /* ignore invalid hex */ }
-      }
-      if (!foundAddrs) continue;
-      if (roomUncached.length === 0) {
-        profilesRequestedForRooms.add(roomId);
-      } else {
+      // All sources at once: the SDK list alone may hold just the own user
+      // (lazy-loaded members) while the peer is in the stored room or events.
+      const addrs = roomParticipantAddresses(roomId);
+      if (addrs.length === 0) continue;
+      const roomUncached = addrs.filter((addr) => !uStore.users[addr]);
+      if (roomUncached.length > 0) {
         addressesToLoad.push(...roomUncached);
+      } else if (getRoomById(roomId)?.isGroup || addrs.some((addr) => addr !== myAddr)) {
+        // A 1:1 room with only the own address known is not done: keep it
+        // open so a later call (members loaded) resolves the peer.
+        profilesRequestedForRooms.add(roomId);
       }
     }
     if (addressesToLoad.length > 0) {
@@ -3691,6 +3757,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // skipped because the rest of its batch is still running. Successes stay
     // marked until their result is applied below.
     for (const { roomId } of capped) previewDecryptInFlight.add(roomId);
+    // One key request for the whole cycle: the batches below prepare rooms a
+    // few at a time (one by one without the worker), each with its own request.
+    preloadRoomKeys(capped.map((r) => r.roomId));
     const heldUntilApplied: string[] = [];
     const decryptAndRelease = async (item: { roomId: string; matrixRoom: unknown }) => {
       const result = await decryptOnePreview(item);
@@ -4316,20 +4385,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       // Lazy load members on demand — rooms outside viewport didn't load
       // members at startup, so load them now when user actually opens the room
-      try {
-        const matrixService = getMatrixClientService();
-        const matrixRoom = matrixService.getRoom(roomId);
-        if (matrixRoom && typeof (matrixRoom as any).loadMembersIfNeeded === "function") {
-          (matrixRoom as any).loadMembersIfNeeded().then(() => {
-            // After members load, ensure profiles are fetched for new members
-            if (!profilesRequestedForRooms.has(roomId)) {
-              loadProfilesForRoomIds([roomId]);
-            }
-          }).catch(() => {});
+      void ensureRoomMembersLoaded(roomId).then(() => {
+        // After members load, ensure profiles are fetched for new members
+        if (!profilesRequestedForRooms.has(roomId)) {
+          loadProfilesForRoomIds([roomId]);
         }
-      } catch {
-        // Matrix service not ready yet — members will load on next sync
-      }
+      });
 
       // If the SDK has no Room object yet, every SDK-backed path below and in
       // MessageList silently no-ops. Watch for it to arrive and replay them.
@@ -4674,6 +4735,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Complete the room's member list when the SDK lazy-loads members (no-op
+   *  otherwise). Never throws; true only when members were loaded just now. */
+  const ensureRoomMembersLoaded = async (roomId: string): Promise<boolean> => {
+    try {
+      return await ensureRoomMembers(getMatrixClientService().getRoom(roomId) as LazyMembersRoom | null);
+    } catch (e) {
+      console.warn("[chat-store] room members not loaded:", roomId, e);
+      return false;
+    }
+  };
+
   /** Remove a room: kick other members → leave → forget → remove from local state.
    *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups). */
   const removeRoom = async (roomId: string) => {
@@ -4695,6 +4767,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const matrixRoom = matrixService.getRoom(roomId) as any;
         if (matrixRoom) {
           const myUserId = matrixService.getUserId();
+          // A lazy-loaded member list may not hold the peer at all.
+          await ensureRoomMembersLoaded(roomId);
           const joinedMembers = matrixRoom.getJoinedMembers?.() ?? [];
           for (const member of joinedMembers) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -6435,8 +6509,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  all rooms of a large account that was thousands of serial requests on
    *  each start. Other rooms close their holes when opened (refreshOpenedRoom). */
   const BACKFILL_RECENT_ROOMS = 30;
-  /** Pcrypto does not encrypt rooms with this many members: no keys to preload. */
-  const BACKFILL_KEYS_MAX_MEMBERS = 50;
   /** Relations and call events from history pages already fetched this
    *  session, per room. Paging back delivers a message's reactions, edits and
    *  hangup context BEFORE the message itself; each page is parsed together
@@ -6655,7 +6727,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Rooms queue up while a pass runs (e.g. timeline resets after an
       // offline spell): their keys go out in one batch. Already loaded or
       // in-flight addresses cost the SDK no request.
-      beforePass: (roomId, queued) => preloadBackfillKeys([roomId, ...queued]),
+      beforePass: (roomId, queued) => preloadRoomKeys([roomId, ...queued]),
       // A stopped instance (logout) finishing its last page must not touch
       // the state of the one that replaced it.
       onActiveChange: (id) => { if (historyBackfill === instance) backfillActiveRoomId.value = id; },
@@ -6678,35 +6750,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const id of visibleSidebarOrder) ids.add(id);
     if (activeRoomId.value) ids.add(activeRoomId.value);
     return ids;
-  };
-
-  /** Load the peers' keys of these rooms in one getuserprofile batch. The
-   *  queue passes rooms one at a time, so each pass's own getusersinfo would
-   *  otherwise send one address per request; started first, those requests
-   *  join this one (or find the keys in SDK memory). Fire-and-forget:
-   *  getusersinfo has its own timeout. */
-  const preloadBackfillKeys = (roomIds: string[]) => {
-    const authStore = useAuthStore();
-    const myAddr = authStore.address;
-    const addrs = new Set<string>();
-    for (const roomId of roomIds) {
-      let roomAddrs = matrixRoomAddresses.get(roomId);
-      if (!roomAddrs?.length) {
-        roomAddrs = [];
-        for (const hexId of getRoomById(roomId)?.members ?? []) {
-          try {
-            const addr = hexDecode(hexId);
-            if (addr && /^[A-Za-z0-9]+$/.test(addr)) roomAddrs.push(addr);
-          } catch { /* ignore invalid hex */ }
-        }
-      }
-      if (roomAddrs.length >= BACKFILL_KEYS_MAX_MEMBERS) continue;
-      for (const addr of roomAddrs) if (addr !== myAddr) addrs.add(addr);
-    }
-    if (addrs.size === 0) return;
-    authStore.loadUsersInfo([...addrs]).catch((e) => {
-      console.warn("[chat-store] backfill key preload failed:", e);
-    });
   };
 
   /** Newest stored message before `beforeTs` — the anchor a hole closes at. */
@@ -6832,7 +6875,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (await checkHistoryContinuity(roomId)) toQueue.push(roomId);
       if (++i % 10 === 0) await yieldToMain();
     }
-    preloadBackfillKeys(toQueue);
+    preloadRoomKeys(toQueue);
     for (const roomId of toQueue) backfillRoom(roomId);
   };
 
@@ -8593,6 +8636,17 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return "unknown";
     }
 
+    // canBeEncrypt() reads the participant list: complete it for the open
+    // chat (lazy-loaded members). Only there — the bulk callers above would
+    // turn it into a /members request per room.
+    if (roomId === activeRoomId.value) {
+      try {
+        await roomCrypto.ensureMembers?.();
+      } catch (e) {
+        console.warn("[chat-store] checkPeerKeys: members not loaded:", e);
+      }
+    }
+
     const canEncrypt = roomCrypto.canBeEncrypt();
     if (!canEncrypt) {
       // canBeEncrypt returns false for rooms with ≥50 members or missing peer keys.
@@ -8791,6 +8845,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     bindAccountKeys,
     banMember,
     getBannedMembers,
+    ensureRoomMembersLoaded,
+    preloadRoomKeys,
     isMemberMuted,
     kickMember,
     clearHistory,
@@ -8905,14 +8961,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         const kit = matrixKitRef.value;
         await Promise.all(roomIds.map(async (roomId) => {
           const matrixRoom = matrixService.getRoom(roomId);
-          if (matrixRoom && typeof (matrixRoom as any).loadMembersIfNeeded === "function") {
-            try {
-              await (matrixRoom as any).loadMembersIfNeeded();
-              // Update display names from new member data
-              if (kit) updateDisplayNames([matrixRoom], kit);
-              profilesRequestedForRooms.delete(roomId);
-            } catch { /* ignore per-room failures */ }
-          }
+          if (!matrixRoom) return;
+          try {
+            await ensureRoomMembers(matrixRoom as LazyMembersRoom);
+            // Update display names from new member data
+            if (kit) updateDisplayNames([matrixRoom], kit);
+            profilesRequestedForRooms.delete(roomId);
+          } catch { /* ignore per-room failures */ }
         }));
         loadProfilesForRoomIds(roomIds);
       } catch { /* matrix service not ready */ }

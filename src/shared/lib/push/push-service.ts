@@ -136,6 +136,9 @@ class PushService {
   private getActiveRoomId: (() => string | null) | null = null;
   private getAllRoomNames: (() => Record<string, string>) | null = null;
   private getAllSenderNames: (() => Record<string, string>) | null = null;
+  /** Profile name for a Matrix user id when the room has no member for
+   *  them (lazy-loaded members); null when unknown. */
+  private getSenderName: ((matrixUserId: string) => string | null) | null = null;
   /** roomId -> isGroup. Mirrored into native storage next to the room-name
    *  cache so the cold-start notification (WebView not alive, JS never runs)
    *  can still mark a push as coming from a group chat. */
@@ -162,6 +165,10 @@ class PushService {
 
   setAllSenderNamesGetter(getter: () => Record<string, string>) {
     this.getAllSenderNames = getter;
+  }
+
+  setSenderNameGetter(getter: (matrixUserId: string) => string | null) {
+    this.getSenderName = getter;
   }
 
   setAllGroupRoomsGetter(getter: () => Record<string, boolean>) {
@@ -471,7 +478,9 @@ class PushService {
           const senderId = raw.sender as string;
           const room = this.matrixClient?.getRoom(roomId);
           const member = room?.getMember(senderId);
-          const senderName = member?.name || senderId || tRaw('push.unknownSender');
+          // Without a Matrix displayname the SDK names a member by their user id.
+          const memberName = member?.name && member.name !== senderId ? member.name : null;
+          const senderName = memberName || this.getSenderName?.(senderId) || senderId || tRaw('push.unknownSender');
           return { senderName, body: this.formatBody(content) };
         }
       }

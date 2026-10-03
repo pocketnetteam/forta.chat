@@ -153,7 +153,12 @@ onBeforeUnmount(() => {
 
 // Refresh encryption status when panel opens or room changes
 watch([room, () => props.show], async ([r, visible]) => {
-  if (r && visible) await chatStore.checkPeerKeys(r.id);
+  if (!r || !visible) return;
+  // Banned members come from the SDK member list — complete it when the SDK
+  // lazy-loads members, then re-read it (the SDK room isn't reactive;
+  // bannedMembers reads stateMarker for that).
+  if (await chatStore.ensureRoomMembersLoaded(r.id)) stateMarker.value++;
+  await chatStore.checkPeerKeys(r.id);
 }, { immediate: true });
 
 const togglePublic = async () => {
@@ -406,6 +411,8 @@ const isActionMemberMuted = computed(() => {
 
 // ── Banned members ──
 const bannedMembers = computed(() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  stateMarker.value;
   if (!room.value) return [];
   return chatStore.getBannedMembers(room.value.id);
 });

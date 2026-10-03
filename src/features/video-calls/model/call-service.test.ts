@@ -1841,6 +1841,35 @@ describe('call-service permission flow', () => {
   // loadUsersBatch against a 500ms timer for the initial setActiveCall and
   // patch the name in via a follow-up update once the network reply lands.
   // -------------------------------------------------------------------------
+  // Lazy-loaded members: a room that was not opened this session may hold
+  // only the own member, so the outgoing call had no peer (empty peerId).
+  describe('peer of a room with lazy-loaded members', () => {
+    it('loads the members before picking the peer', async () => {
+      const joined = [{ userId: '@me:matrix.org' }];
+      let loaded = false;
+      const loadMembersIfNeeded = vi.fn(async () => {
+        joined.push({ userId: '@peer:matrix.org' });
+        loaded = true;
+        return true;
+      });
+      matrixState.client!.getRoom.mockReturnValue({
+        getJoinedMembers: () => joined,
+        membersLoaded: () => loaded,
+        loadMembersIfNeeded,
+        getMyMembership: () => 'join',
+      } as never);
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+
+      expect(loadMembersIfNeeded).toHaveBeenCalledTimes(1);
+      const setCall = mockSetActiveCall.mock.calls.find(
+        ([info]) => (info as { peerId?: string }).peerId === '@peer:matrix.org',
+      );
+      expect(setCall).toBeTruthy();
+    });
+  });
+
   describe('peer profile resolution (#645)', () => {
     it('uses the cached profile name when the user is already in the store', async () => {
       mockGetUser.mockReturnValue({ name: 'Cached Peer' });

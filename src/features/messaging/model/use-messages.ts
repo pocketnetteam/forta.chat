@@ -157,6 +157,16 @@ export function useMessages() {
   const authStore = useAuthStore();
   const { isOnline } = useConnectivity();
 
+  /** The room's crypto with its participant list complete — canBeEncrypt()
+   *  and the recipients are decided from it (lazy-loaded members). Throws if
+   *  the members could not be loaded: the send fails instead of encrypting
+   *  for part of the room. */
+  const getSendCrypto = async (roomId: string): Promise<PcryptoRoomInstance | undefined> => {
+    const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+    await roomCrypto?.ensureMembers?.();
+    return roomCrypto;
+  };
+
   /** Extract width/height from an image file */
   const getImageDimensions = (file: File): Promise<{ w: number; h: number }> => {
     return new Promise((resolve) => {
@@ -277,7 +287,7 @@ export function useMessages() {
     }
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
@@ -315,7 +325,7 @@ export function useMessages() {
       try {
         const matrixService = getMatrixClientService();
         if (!matrixService.isReady()) break;
-        const roomCrypto = authStore.pcrypto?.rooms[msg.roomId] as PcryptoRoomInstance | undefined;
+        const roomCrypto = await getSendCrypto(msg.roomId);
         let serverEventId: string;
         if (roomCrypto?.canBeEncrypt()) {
           const encrypted = await roomCrypto.encryptEvent(msg.content);
@@ -923,7 +933,7 @@ export function useMessages() {
     }
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
 
       const msgContent: Record<string, unknown> = {
         body: trimmed,
@@ -1043,7 +1053,7 @@ export function useMessages() {
       const matrixService = getMatrixClientService();
       if (!matrixService.isReady()) return false;
 
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       const fwdMeta = forwardMeta
         ? { sender_id: forwardMeta.senderId, sender_name: forwardMeta.senderName }
         : undefined;
@@ -1169,7 +1179,7 @@ export function useMessages() {
     }
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
 
       if (roomCrypto?.canBeEncrypt()) {
         // The same content the SyncEngine sends: `m.new_content` is the encrypted event, never
@@ -1359,7 +1369,7 @@ export function useMessages() {
       }
 
       // Legacy fallback — direct encrypted/plaintext send to target room.
-      const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(targetRoomId);
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(src.content);
         if (withSenderInfo) {
@@ -1538,7 +1548,7 @@ export function useMessages() {
     chatStore.addMessage(roomId, optimistic);
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(transferBody);
@@ -1741,7 +1751,7 @@ export function useMessages() {
         (async () => {
           try {
             const gifMime = resolveMime(file);
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            const roomCrypto = await getSendCrypto(roomId);
 
             let fileToUpload: Blob = file;
             let secrets: Record<string, unknown> | undefined;
@@ -1850,7 +1860,7 @@ export function useMessages() {
     chatStore.addMessage(roomId, message);
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
 
       let fileToUpload: Blob = file;
       let secrets: Record<string, unknown> | undefined;
@@ -1946,7 +1956,7 @@ export function useMessages() {
       await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
         .modify({ uploadPhase: "encrypting" });
 
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       let fileToUpload: Blob = file;
       let secrets: Record<string, unknown> | undefined;
 

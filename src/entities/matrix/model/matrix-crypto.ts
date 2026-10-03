@@ -41,6 +41,7 @@ import {
 import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix/chat-storage";
 import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { ensureRoomMembers, type LazyMembersRoom } from "./ensure-room-members";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const m = 12;
@@ -235,6 +236,13 @@ export interface PcryptoRoomInstance {
    *  keys are not known yet — NOT that the peer has none. Optional so test
    *  stubs need not implement it. */
   getKeysLoadState?(): KeysLoadState;
+  /** Bring the participant list up to date before anything derives
+   *  recipients from it (canBeEncrypt, the 1:1 recipients, the group key
+   *  hash): loads lazy-loaded members, re-reads member state, and fetches
+   *  keys only for participants that changed. Call before deciding whether
+   *  to encrypt. Throws if the members could not be loaded. Optional so test
+   *  stubs need not implement it. */
+  ensureMembers?(): Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _encrypt(userid: string, text: string, v?: number): Promise<{ encrypted: string; nonce: string }>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -343,6 +351,10 @@ export class Pcrypto {
     // unforced (cached) call started before the forced one — silently
     // clobbering freshly-fetched keys with stale data.
     let usersinfoGeneration = 0;
+    // Forced (user Retry) getusersinfo calls still in flight. A later call
+    // makes their response stale; a call that must start meanwhile is forced
+    // too, so the newest generation still carries fresh keys.
+    let forcedRefreshesInFlight = 0;
     // Outcome of the latest getusersinfo() call. Lets callers tell "keys not
     // received yet" apart from "the peer has no keys" — canBeEncrypt() is
     // false in both cases.
@@ -536,6 +548,7 @@ export class Pcrypto {
       if (!pcrypto.getUsersInfoCb) return;
       const myGeneration = ++usersinfoGeneration;
       keysLoadState = "loading";
+      if (forceRefresh) forcedRefreshesInFlight++;
       let _usersinfo: CryptoUserInfo[];
       try {
         // Bound the key-resolution RPC: a stalled Pocketnet node must never
@@ -549,6 +562,7 @@ export class Pcrypto {
           "getusersinfo",
         );
       } catch (e) {
+        if (forceRefresh) forcedRefreshesInFlight--;
         console.warn("[pcrypto] getusersinfo timed out/failed:", e);
         // A newer call is in flight — its outcome decides the state.
         if (myGeneration === usersinfoGeneration) {
@@ -557,6 +571,7 @@ export class Pcrypto {
         }
         return;
       }
+      if (forceRefresh) forcedRefreshesInFlight--;
       // Discard a stale response: a newer getusersinfo() call (e.g. a forced
       // retry started while this unforced one was still in flight) already
       // wrote more current data — applying this one now would clobber it.
@@ -906,6 +921,23 @@ export class Pcrypto {
 
       getKeysLoadState(): KeysLoadState {
         return keysLoadState;
+      },
+
+      async ensureMembers(): Promise<void> {
+        // Rooms Pcrypto never encrypts need no recipients (same gate as prepare()).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (((chat as any).getJoinedMemberCount?.() ?? 0) >= 50) return;
+        // fresh: a list possibly stale after a limited sync is reloaded first.
+        await ensureRoomMembers(chat as LazyMembersRoom, { fresh: true });
+        // Local recompute from room state — members may also have arrived
+        // through sync or another caller since the last prepare().
+        const before = Object.keys(users).sort().join(",");
+        getusershistory();
+        if (Object.keys(users).sort().join(",") === before) return;
+        await getusersinfo(forcedRefreshesInFlight > 0);
+        // canBeEncrypt() reads usersinfo: after a failed request it still
+        // holds the old participants and would encrypt without the new ones.
+        if (keysLoadState === "failed") throw new Error("participant keys not loaded");
       },
 
       // ---- encryptEvent — routes to group or 1:1 path ----
