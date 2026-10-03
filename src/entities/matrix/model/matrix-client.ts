@@ -19,6 +19,12 @@ import { withTimeout } from "@/shared/lib/with-timeout";
 
 import { getStoredDeviceId, storeDeviceId } from "./device-id-storage";
 import {
+  isSyncStoreWorkerSupported,
+  releaseSyncStoreWorker,
+  startSyncStoreWorker,
+  trackSyncStoreWorker,
+} from "./sync-store-worker";
+import {
   pickLiveMatrixHost,
   nextMatrixHost,
   hostFromBaseUrl,
@@ -203,6 +209,8 @@ export class MatrixClientService {
   async getClient(): Promise<MatrixClient | null> {
     if (!this.credentials) throw new Error("No credentials set");
     const build = ++this.clientBuildGeneration;
+    // Probe in parallel with the login request; the verdict is cached per session.
+    const syncStoreWorkerSupported = isSyncStoreWorkerSupported();
 
     const opts: Record<string, unknown> = {
       baseUrl: this.baseUrl,
@@ -277,11 +285,16 @@ export class MatrixClientService {
     // indefinitely — canBeEncrypt() would still see it as incomplete — since
     // disabling lazy loading only changes what *future* /sync responses
     // contain, it doesn't retroactively backfill an already-populated store.
+    // The store runs in a Web Worker where the WebView supports it (see
+    // sync-store-worker.ts), on the main thread otherwise.
+    const useSyncStoreWorker = await syncStoreWorkerSupported;
     const indexedDBStore = new sdk.IndexedDBStore({
       indexedDB: window.indexedDB,
       dbName: "matrix-js-sdk-v7:" + this.credentials.username,
-      localStorage: window.localStorage
+      localStorage: window.localStorage,
+      ...(useSyncStoreWorker ? { workerFactory: startSyncStoreWorker } : {}),
     });
+    if (useSyncStoreWorker) trackSyncStoreWorker(indexedDBStore);
 
     const userClientData: Record<string, unknown> = {
       baseUrl: this.baseUrl,
@@ -320,6 +333,7 @@ export class MatrixClientService {
 
     if (build !== this.clientBuildGeneration) {
       console.warn("[matrix] a newer client build started during store startup, dropping this one");
+      releaseSyncStoreWorker(indexedDBStore);
       return null;
     }
     // Replacing a client that is still running (a late success of an attempt the
@@ -429,6 +443,7 @@ export class MatrixClientService {
       console.warn("[matrix] a newer client build started while this client was starting, stopping it");
       try { userClient.removeAllListeners(); } catch { /* ignore */ }
       try { userClient.stopClient(); } catch { /* ignore */ }
+      releaseSyncStoreWorker(userClient.store);
       if (this.client === userClient) this.client = null;
       return null;
     }
@@ -704,6 +719,7 @@ export class MatrixClientService {
     if (this.client) {
       try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { this.client.stopClient(); } catch { /* ignore */ }
+      releaseSyncStoreWorker(this.client.store);
     }
     this.client = null;
     this.chatsReady = false;
@@ -1542,6 +1558,7 @@ export class MatrixClientService {
     if (this.client) {
       this.client.removeAllListeners();
       this.client.stopClient();
+      releaseSyncStoreWorker(this.client.store);
     }
     this.chatsReady = false;
     this.ready = false;

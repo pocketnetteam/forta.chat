@@ -6430,6 +6430,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const RELATION_WINDOW_MAX = 1_000;
   /** Rooms whose window is kept at once (the open room plus recent passes). */
   const RELATION_WINDOW_ROOMS = 8;
+  /** Most recent sidebar rooms the background backfill covers. Every pass
+   *  parses and decrypts, which loads the peer's keys (getuserprofile): over
+   *  all rooms of a large account that was thousands of serial requests on
+   *  each start. Other rooms close their holes when opened (refreshOpenedRoom). */
+  const BACKFILL_RECENT_ROOMS = 30;
+  /** Pcrypto does not encrypt rooms with this many members: no keys to preload. */
+  const BACKFILL_KEYS_MAX_MEMBERS = 50;
   /** Relations and call events from history pages already fetched this
    *  session, per room. Paging back delivers a message's reactions, edits and
    *  hangup context BEFORE the message itself; each page is parsed together
@@ -6645,6 +6652,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return true;
       },
       startPass: startBackfillPass,
+      // Rooms queue up while a pass runs (e.g. timeline resets after an
+      // offline spell): their keys go out in one batch. Already loaded or
+      // in-flight addresses cost the SDK no request.
+      beforePass: (roomId, queued) => preloadBackfillKeys([roomId, ...queued]),
       // A stopped instance (logout) finishing its last page must not touch
       // the state of the one that replaced it.
       onActiveChange: (id) => { if (historyBackfill === instance) backfillActiveRoomId.value = id; },
@@ -6659,6 +6670,44 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   let historyBackfill = makeHistoryBackfill();
 
   const backfillRoom = (roomId: string, opts?: { front?: boolean }) => historyBackfill.enqueue(roomId, opts);
+
+  /** Rooms the background backfill works on: the open chat, the rows on
+   *  screen and the most recent ones. */
+  const backfillWarmRoomIds = (): Set<string> => {
+    const ids = new Set(sortedRooms.value.slice(0, BACKFILL_RECENT_ROOMS).map((r) => r.id));
+    for (const id of visibleSidebarOrder) ids.add(id);
+    if (activeRoomId.value) ids.add(activeRoomId.value);
+    return ids;
+  };
+
+  /** Load the peers' keys of these rooms in one getuserprofile batch. The
+   *  queue passes rooms one at a time, so each pass's own getusersinfo would
+   *  otherwise send one address per request; started first, those requests
+   *  join this one (or find the keys in SDK memory). Fire-and-forget:
+   *  getusersinfo has its own timeout. */
+  const preloadBackfillKeys = (roomIds: string[]) => {
+    const authStore = useAuthStore();
+    const myAddr = authStore.address;
+    const addrs = new Set<string>();
+    for (const roomId of roomIds) {
+      let roomAddrs = matrixRoomAddresses.get(roomId);
+      if (!roomAddrs?.length) {
+        roomAddrs = [];
+        for (const hexId of getRoomById(roomId)?.members ?? []) {
+          try {
+            const addr = hexDecode(hexId);
+            if (addr && /^[A-Za-z0-9]+$/.test(addr)) roomAddrs.push(addr);
+          } catch { /* ignore invalid hex */ }
+        }
+      }
+      if (roomAddrs.length >= BACKFILL_KEYS_MAX_MEMBERS) continue;
+      for (const addr of roomAddrs) if (addr !== myAddr) addrs.add(addr);
+    }
+    if (addrs.size === 0) return;
+    authStore.loadUsersInfo([...addrs]).catch((e) => {
+      console.warn("[chat-store] backfill key preload failed:", e);
+    });
+  };
 
   /** Newest stored message before `beforeTs` — the anchor a hole closes at. */
   const newestStoredBefore = async (roomId: string, beforeTs: number): Promise<number | undefined> => {
@@ -6692,7 +6741,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           }
           await new Promise((r) => setTimeout(r, 300));
         }
-        backfillRoom(roomId, { front: roomId === activeRoomId.value });
+        // The mark stays in Dexie: a room outside the warm set closes its
+        // hole when opened. After an offline spell a sync resets most rooms.
+        if (backfillWarmRoomIds().has(roomId)) backfillRoom(roomId, { front: roomId === activeRoomId.value });
       } catch (e) {
         console.warn("[chat-store] handleTimelineReset failed:", e);
       }
@@ -6767,18 +6818,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if ((await dbKit.rooms.getRoom(roomId))?.gapToken) backfillRoom(roomId, { front: true });
   };
 
-  /** After the first sync: queue every room whose history is not continuous
-   *  in Dexie (events dropped before roomsInitialized, holes). Background,
-   *  yielding between rooms. */
+  /** After the first sync: queue the warm rooms (backfillWarmRoomIds) whose
+   *  history is not continuous in Dexie (events dropped before
+   *  roomsInitialized, holes). Other rooms are checked when opened
+   *  (refreshOpenedRoom). Background, yielding between rooms. */
   const scheduleContinuityChecks = async () => {
     const matrixService = getMatrixClientService();
-    const matrixRooms = matrixService.getRooms() as Array<{ roomId?: string; getMyMembership?: () => string }>;
-    for (let i = 0; i < matrixRooms.length; i++) {
-      const roomId = matrixRooms[i]?.roomId;
-      if (!roomId || matrixRooms[i]?.getMyMembership?.() !== "join") continue;
-      if (await checkHistoryContinuity(roomId)) backfillRoom(roomId);
-      if (i % 10 === 9) await yieldToMain();
+    const toQueue: string[] = [];
+    let i = 0;
+    for (const roomId of backfillWarmRoomIds()) {
+      const matrixRoom = matrixService.getRoom(roomId) as { getMyMembership?: () => string } | null;
+      if (matrixRoom?.getMyMembership?.() !== "join") continue;
+      if (await checkHistoryContinuity(roomId)) toQueue.push(roomId);
+      if (++i % 10 === 0) await yieldToMain();
     }
+    preloadBackfillKeys(toQueue);
+    for (const roomId of toQueue) backfillRoom(roomId);
   };
 
   /**
@@ -8827,6 +8882,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     isRoomInSyncWithSdk,
     handleTimelineReset,
     checkHistoryContinuity,
+    scheduleContinuityChecks,
     refreshOpenedRoom,
     endRoomOpenQuiet,
     backfillRoom,
