@@ -19,6 +19,7 @@ import {
 import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto";
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
+import { looksLikeProperName } from "@/entities/chat/lib/chat-helpers";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
 import { initMediaCache, clearMediaCache, closeMediaCache } from "@/shared/lib/media-cache";
 import { clearAllDrafts } from "@/shared/lib/drafts";
@@ -150,8 +151,14 @@ function stopMatrixReconnect(): void {
   if (_matrixReconnectUnsub) { _matrixReconnectUnsub(); _matrixReconnectUnsub = null; }
 }
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
-// Per-room debounce timers for peer-keys recheck after member events.
-const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Peer-keys recheck after member events: rooms collected over one window,
+// then rechecked together (see onMembership).
+const _peerKeysRecheckRooms = new Set<string>();
+let _peerKeysRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+function clearPeerKeysRecheck(): void {
+  if (_peerKeysRecheckTimer) { clearTimeout(_peerKeysRecheckTimer); _peerKeysRecheckTimer = null; }
+  _peerKeysRecheckRooms.clear();
+}
 
 /** Trigger an immediate registration poll iteration. Set inside
  *  `startRegistrationPoll`, cleared inside `stopRegistrationPoll`.
@@ -542,6 +549,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           const { fetchPreview } = await import("@/features/messaging/model/use-link-preview");
           return fetchPreview(url);
         },
+        (addresses: string[]) => {
+          const others = addresses.filter((a) => a !== address.value);
+          if (others.length === 0) return;
+          appInitializer.loadUsersInfo(others).catch((e) => {
+            console.warn("[auth] decryption key preload failed:", e);
+          });
+        },
       );
       chatStore.setChatDbKit(chatDbKit);
       useAiChatStore().setChatDbKit(chatDbKit);
@@ -646,32 +660,39 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           const roomId = (member as any)?.roomId as string;
           if (roomId) {
             chatStore.markRoomChanged(roomId);
-            // Re-evaluate peer-keys after a member event (debounced) — fixes the
-            // stuck "peer hasn't published encryption keys" banner that used to
-            // wait until the next chat switch to clear.
-            const prev = _peerKeysRecheckTimers.get(roomId);
-            if (prev) clearTimeout(prev);
-            const t = setTimeout(() => {
-              _peerKeysRecheckTimers.delete(roomId);
-              // Refresh the room's cached crypto membership/key state
-              // (users/usersinfo) BEFORE checkPeerKeys — canBeEncrypt() only
-              // reads that cache, it never refetches on its own. Without this,
-              // a member added to an already-prepared room's crypto instance
-              // is silently and permanently excluded from the group common
-              // key: usershash() keeps hashing the OLD member set, so every
-              // future encryptEventGroup() keeps finding and reusing the
-              // pre-existing common-key event that was never wrapped for the
-              // new member (matrix-crypto.ts getOrCreateCommonKey/usershash).
-              // prepare() here is unforced — getusershistory() is a pure local
-              // recompute from already-synced room state (no network), and
-              // getusersinfo() only skips its *own* forceUpdate flag, so a
-              // genuinely new member's keys are still fetched.
-              const roomCrypto = pcrypto.value?.rooms[roomId];
-              (roomCrypto ? roomCrypto.prepare().catch(() => {}) : Promise.resolve())
-                .then(() => chatStore.checkPeerKeys(roomId))
-                .catch(() => { /* best-effort */ });
+            // Re-evaluate peer-keys after a member event — fixes the stuck
+            // "peer hasn't published encryption keys" banner that used to
+            // wait until the next chat switch to clear. Rooms are collected
+            // over one 500 ms window (not re-armed per event, so a steady
+            // stream of member events cannot postpone it) and rechecked
+            // together: their keys go out in one request instead of one per
+            // room (member list loads emit an event per loaded member).
+            _peerKeysRecheckRooms.add(roomId);
+            if (!_peerKeysRecheckTimer) _peerKeysRecheckTimer = setTimeout(() => {
+              _peerKeysRecheckTimer = null;
+              const roomIds = [..._peerKeysRecheckRooms];
+              _peerKeysRecheckRooms.clear();
+              chatStore.preloadRoomKeys(roomIds.filter((id) => pcrypto.value?.rooms[id]));
+              for (const roomId of roomIds) {
+                // Refresh the room's cached crypto membership/key state
+                // (users/usersinfo) BEFORE checkPeerKeys — canBeEncrypt() only
+                // reads that cache, it never refetches on its own. Without this,
+                // a member added to an already-prepared room's crypto instance
+                // is silently and permanently excluded from the group common
+                // key: usershash() keeps hashing the OLD member set, so every
+                // future encryptEventGroup() keeps finding and reusing the
+                // pre-existing common-key event that was never wrapped for the
+                // new member (matrix-crypto.ts getOrCreateCommonKey/usershash).
+                // prepare() here is unforced — getusershistory() is a pure local
+                // recompute from already-synced room state (no network), and
+                // getusersinfo() only skips its *own* forceUpdate flag, so a
+                // genuinely new member's keys are still fetched.
+                const roomCrypto = pcrypto.value?.rooms[roomId];
+                (roomCrypto ? roomCrypto.prepare().catch(() => {}) : Promise.resolve())
+                  .then(() => chatStore.checkPeerKeys(roomId))
+                  .catch(() => { /* best-effort */ });
+              }
             }, 500);
-            _peerKeysRecheckTimers.set(roomId, t);
           }
           chatStore.refreshRooms();
         },
@@ -959,7 +980,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             pushService.setAllRoomNamesGetter(() => {
               const map: Record<string, string> = {};
               for (const room of chatStore.rooms) {
-                if (room.name) map[room.id] = room.name;
+                // An unresolved 1:1 name (#hash, the peer's address) would become
+                // the notification title; skip it so native keeps its last good one.
+                const peerAddr = room.avatar?.startsWith("__pocketnet__:")
+                  ? room.avatar.slice("__pocketnet__:".length)
+                  : undefined;
+                if (!room.name || (!room.isGroup && !looksLikeProperName(room.name, peerAddr))) continue;
+                map[room.id] = room.name;
               }
               return map;
             });
@@ -985,7 +1012,26 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                   }
                 }
               }
+              // Lazy-loaded members leave peers out of the SDK lists; the
+              // stored rooms and the profile cache still name them.
+              const users = useUserStore().users;
+              for (const room of chatStore.rooms) {
+                for (const hexId of room.members) {
+                  const userId = matrixService.matrixId(hexId);
+                  if (senders[userId]) continue;
+                  const addr = hexDecode(hexId);
+                  const name = users[addr]?.name;
+                  if (name && looksLikeProperName(name, addr)) senders[userId] = name;
+                }
+              }
               return senders;
+            });
+
+            pushService.setSenderNameGetter((userId) => {
+              const hexId = getmatrixid(userId);
+              const addr = hexId ? hexDecode(hexId) : "";
+              const name = addr ? useUserStore().users[addr]?.name : "";
+              return name && looksLikeProperName(name, addr) ? name : null;
             });
 
             console.log('[auth] Initializing push service...');
@@ -1543,8 +1589,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     stopMatrixReconnect();
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
-    for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
-    _peerKeysRecheckTimers.clear();
+    clearPeerKeysRecheck();
     if (_appStateHandle) {
       await _appStateHandle.remove().catch(() => { /* ignore */ });
       _appStateHandle = null;
@@ -2408,8 +2453,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
       stopMatrixReconnect();
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
-      for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
-      _peerKeysRecheckTimers.clear();
+      clearPeerKeysRecheck();
 
       // Close Dexie without deleting
       closeChatDb();

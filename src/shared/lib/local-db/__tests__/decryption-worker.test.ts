@@ -108,6 +108,30 @@ describe("DecryptionWorker", () => {
     worker.dispose();
   });
 
+  it("loads the keys of every job in a tick with one request, before decrypting", async () => {
+    // Jobs from different rooms decrypt one by one; each would otherwise load
+    // its sender's keys on its own (one getuserprofile per room).
+    const hex = (a: string) => Buffer.from(a, "utf8").toString("hex");
+    const order: string[] = [];
+    const preloadKeys = vi.fn((addresses: string[]) => { order.push(`preload:${addresses.sort().join(",")}`); });
+    const getRoomCrypto = vi.fn().mockResolvedValue({
+      decryptEvent: async () => { order.push("decrypt"); return { body: "ok" }; },
+    });
+    const worker = new DecryptionWorker(db as any, getRoomCrypto, undefined, undefined, preloadKeys);
+    const body = Buffer.from(JSON.stringify({ [hex("PMe1")]: 1, [hex("PPeer2")]: 1 })).toString("base64");
+    await worker.enqueue("$a", "!room1", JSON.stringify({ sender: `@${hex("PPeer2")}:s`, content: { msgtype: "m.encrypted", body } }));
+    await worker.enqueue("$b", "!room2", JSON.stringify({ sender: `@${hex("PThird3")}:s`, content: { msgtype: "m.encrypted", hash: "h", body: "ff" } }));
+    await worker.enqueue("$c", "!room3", "not json");
+    await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+
+    await worker.tick();
+
+    expect(preloadKeys).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe("preload:PMe1,PPeer2,PThird3");
+    expect(order.filter((o) => o === "decrypt")).toHaveLength(2);
+    worker.dispose();
+  });
+
   it("failure moves job to 'waiting' with backoff", async () => {
     const failCrypto = vi.fn().mockRejectedValue(new Error("no key"));
     const { worker } = makeWorker(db, failCrypto);

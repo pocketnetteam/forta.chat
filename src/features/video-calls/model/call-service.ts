@@ -1,6 +1,7 @@
 import { createNewMatrixCall, CallEvent, CallState as SDKCallState, CallErrorCode } from "matrix-js-sdk-bastyon/lib/webrtc/call";
 import type { MatrixCall, CallEventHandlerMap } from "matrix-js-sdk-bastyon/lib/webrtc/call";
 import { getMatrixClientService } from "@/entities/matrix";
+import { ensureRoomMembers } from "@/entities/matrix/model/ensure-room-members";
 import { useCallStore, CallStatus } from "@/entities/call";
 import { ensureCallHangupContextProvider } from "./call-hangup-context";
 import type { CallType, CallInfo, CallHistoryEntry } from "@/entities/call";
@@ -816,6 +817,10 @@ async function applySavedDevicesExact(call: MatrixCall) {
  */
 const PEER_PROFILE_LOOKUP_TIMEOUT_MS = 500;
 
+/** Max wait for the room's lazy-loaded members before dialling; past it the
+ *  call goes out with whatever members are known. */
+const CALL_MEMBERS_TIMEOUT_MS = 5_000;
+
 /**
  * Resolve the opponent's display name for the call surfaces.
  *
@@ -1150,6 +1155,12 @@ export function useCallService() {
       return;
     }
 
+    // A lazy-loaded member list may not hold the peer yet. Loaded alongside
+    // the mic preflight and awaited before the call object exists, so a slow
+    // /members never leaves a created call without state or UI.
+    const membersReady = ensureRoomMembers(client.getRoom(roomId), { timeoutMs: CALL_MEMBERS_TIMEOUT_MS })
+      .catch((e) => console.warn("[call-service] startCall: room members not loaded:", e));
+
     // Preflight: mic (+ camera for video). Throws PermissionDeniedError
     // if the OS denied access, or if getUserMedia returns a stream with
     // empty tracks. If we skip this and let the SDK's getUserMedia fail
@@ -1183,6 +1194,7 @@ export function useCallService() {
       ? (client as any).supportsVoip()
       : (client as any).canSupportVoip === true;
 
+    await membersReady;
     const call = createNewMatrixCall(client, roomId);
     if (!call) {
       console.error("[call-service] createNewMatrixCall returned null — WebRTC not available (secure context + RTCPeerConnection required)");

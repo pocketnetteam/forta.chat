@@ -192,3 +192,22 @@ describe("shared error tag ensures consistent log grep", () => {
     expect(throws.length).toBe(6);
   });
 });
+
+describe("use-messages completes the participants before deciding to encrypt", () => {
+  // With lazy-loaded members canBeEncrypt() reads an incomplete list unless
+  // the room's members are loaded first (getSendCrypto → ensureMembers).
+  it("every legacy send takes its room crypto from getSendCrypto", () => {
+    const source = getUseMessagesSource();
+    const helperIdx = source.indexOf("const getSendCrypto = async");
+    expect(helperIdx).toBeGreaterThan(-1);
+    const helperEnd = source.indexOf("\n  };", helperIdx);
+    expect(source.slice(helperIdx, helperEnd)).toContain("ensureMembers");
+
+    const outside = source.slice(0, helperIdx) + source.slice(helperEnd);
+    expect(outside).not.toMatch(/pcrypto\?\.rooms\[/);
+    const decisions = (source.match(/roomCrypto\?\.canBeEncrypt\(\)/g) ?? []).length;
+    const lookups = (source.match(/await getSendCrypto\(/g) ?? []).length;
+    expect(lookups).toBeGreaterThan(0);
+    expect(decisions).toBeGreaterThanOrEqual(lookups);
+  });
+});
