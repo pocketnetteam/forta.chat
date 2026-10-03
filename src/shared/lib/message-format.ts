@@ -1,8 +1,14 @@
 import {
   BASTYON_LINK_RE,
   BASTYON_COLLECTION_LINK_RE,
+  BASTYON_SCHEME_LINK_RE,
+  bastyonLinksToHttps,
+  bastyonSchemeToHttps,
   parseBasytonLink,
   parseBastyonCollectionLink,
+  parseBastyonProfileLink,
+  parseBastyonRoomLink,
+  parseBastyonTransactionLink,
 } from "./bastyon-link";
 
 /**
@@ -66,7 +72,10 @@ export type Segment =
   | { type: "link"; content: string; href: string }
   | { type: "mention"; content: string; userId: string }
   | { type: "bastyonLink"; content: string; txid: string; commentId?: string; isVideo: boolean }
-  | { type: "bastyonCollection"; content: string; txid: string };
+  | { type: "bastyonCollection"; content: string; txid: string }
+  | { type: "bastyonProfile"; content: string; href: string; name?: string; address?: string }
+  | { type: "bastyonRoom"; content: string; href: string; roomId: string }
+  | { type: "bastyonTransaction"; content: string; href: string; txid: string };
 
 const URL_RE = /https?:\/\/[^\s<>]+|www\.[^\s<>]+/g;
 // Bastyon mention format: @<34-68 hex-char address>:<display_name>
@@ -118,14 +127,49 @@ export function stripMentionAddresses(
 }
 
 /**
- * Replace bastyon:// and bastyon.com post and collection links with a short label for previews.
+ * Text put on the clipboard when a whole message is copied: mentions read
+ * `@Name` (local alias when set), and bastyon:// deep links become their
+ * https://bastyon.com form so they open outside the Bastyon app — as the old
+ * Bastyon chat did (findAndReplaceLinkClear).
+ */
+export function formatMessageForCopy(
+  text: string,
+  getAlias?: (userId: string) => string | null | undefined,
+): string {
+  return bastyonLinksToHttps(stripMentionAddresses(text, getAlias));
+}
+
+/**
+ * Replace bastyon:// and bastyon.com post and collection links with a short label for previews;
+ * other bastyon:// links (profiles, pages) are shown in their https://bastyon.com form.
  * "Check this bastyon://index?s=abc123...def" → "Check this [Bastyon post]"
  */
 export function stripBastyonLinks(text: string): string {
   if (!text) return "";
   return text
     .replace(BASTYON_LINK_RE, "📝 Bastyon post")
-    .replace(BASTYON_COLLECTION_LINK_RE, "🗂 Bastyon collection");
+    .replace(BASTYON_COLLECTION_LINK_RE, "🗂 Bastyon collection")
+    .replace(BASTYON_SCHEME_LINK_RE, (m) => bastyonSchemeToHttps(m));
+}
+
+/** Bastyon profile / room / transaction links become cards, any other URL a plain link. */
+function toBastyonUrlSegment(content: string, href: string): Segment {
+  const room = parseBastyonRoomLink(content);
+  if (room) return { type: "bastyonRoom", content, href, roomId: room.roomId };
+  const tx = parseBastyonTransactionLink(content);
+  if (tx) return { type: "bastyonTransaction", content, href, txid: tx.txid };
+  const profile = parseBastyonProfileLink(content);
+  if (profile) return { type: "bastyonProfile", content, href, ...profile };
+  return { type: "link", content, href };
+}
+
+/** Segments rendered as block cards rather than inline text. */
+export function isBlockSegment(seg: Segment): boolean {
+  return seg.type === "bastyonLink"
+    || seg.type === "bastyonCollection"
+    || seg.type === "bastyonProfile"
+    || seg.type === "bastyonRoom"
+    || seg.type === "bastyonTransaction";
 }
 
 /**
@@ -173,6 +217,25 @@ export function parseMessage(text: string): Segment[] {
     });
   }
 
+  // Other bastyon:// / pocketnet:// deep links: a profile card, or a plain
+  // link opened through its https://bastyon.com form (WebView and browsers
+  // cannot open the custom scheme without the Bastyon app).
+  // A deep link inside an https URL (`…/redirect?to=bastyon://x`) is part of
+  // that URL, not a link of its own.
+  const httpRanges = [...text.matchAll(URL_RE)].map((m) => [m.index!, m.index! + m[0].length]);
+  for (const m of text.matchAll(BASTYON_SCHEME_LINK_RE)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    if (bastyonRanges.some(([bs, be]) => start < be && end > bs)) continue;
+    if (httpRanges.some(([hs, he]) => start > hs && start < he)) continue;
+    const href = bastyonSchemeToHttps(m[0]);
+    if (!isSafeUrl(href)) continue;
+    bastyonRanges.push([start, end]);
+    const segment = toBastyonUrlSegment(m[0], href);
+    // Shown as https://bastyon.com/…, like Bastyon's formatInternalLink.
+    matches.push({ start, end, segment: segment.type === "link" ? { ...segment, content: href } : segment });
+  }
+
   // Links (skip ranges already claimed by bastyonLink / bastyonCollection)
   for (const m of text.matchAll(URL_RE)) {
     const start = m.index!;
@@ -184,7 +247,7 @@ export function parseMessage(text: string): Segment[] {
     matches.push({
       start,
       end,
-      segment: { type: "link", content: m[0], href },
+      segment: toBastyonUrlSegment(m[0], href),
     });
   }
 

@@ -12,6 +12,7 @@ import PostPlayerModal from "./PostPlayerModal.vue";
 import { renderArticleText } from "@/shared/lib/article-blocks";
 import { parseTextLinks, truncateLinkSegments } from "@/shared/lib/linkify";
 import { openExternalUrl } from "@/shared/lib/open-external-url";
+import { toBastyonPostHttpsUrl } from "@/shared/lib/bastyon-link";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import { useChatStore } from "@/entities/chat";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
@@ -90,7 +91,7 @@ const visibleTags = computed(() => {
   return post.value.tags.slice(0, 5);
 });
 
-const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
+const postUrl = computed(() => toBastyonPostHttpsUrl(props.txid));
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
 const hasOwnContent = computed(() =>
@@ -135,7 +136,7 @@ function onLinkClick(href: string) {
 
 function onShare() {
   chatStore.initPostForward(
-    `bastyon://post?s=${props.txid}`,
+    postUrl.value,
     authorName.value || undefined,
   );
 }
@@ -221,7 +222,7 @@ onMounted(loadPostData);
       target="_blank"
       rel="noopener noreferrer"
       class="text-color-txt-ac underline hover:no-underline"
-      @click.stop
+      @click.stop.prevent="onLinkClick(postUrl)"
     >{{ t(isUnresolvedRepost ? "post.openOriginal" : "post.notFound") }}</a>
     <button
       v-if="!isUnresolvedRepost"

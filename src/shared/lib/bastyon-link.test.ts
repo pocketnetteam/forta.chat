@@ -9,6 +9,14 @@ import {
   toBastyonCollectionUrl,
   toBastyonCollectionHttpsUrl,
   isBastyonBlockUrl,
+  BASTYON_SCHEME_LINK_RE,
+  bastyonSchemeToHttps,
+  bastyonLinksToHttps,
+  parseBastyonProfileLink,
+  parseBastyonRoomLink,
+  parseBastyonTransactionLink,
+  toBastyonPostHttpsUrl,
+  toTransactionExplorerUrl,
 } from "./bastyon-link";
 
 const TXID = "a".repeat(64);
@@ -327,5 +335,143 @@ describe("isBastyonBlockUrl", () => {
     expect(isBastyonBlockUrl("https://bastyon.com/author?address=PX")).toBe(false);
     expect(isBastyonBlockUrl("https://example.com/collection?c=" + TXID)).toBe(false);
     expect(isBastyonBlockUrl("")).toBe(false);
+  });
+});
+
+// ─── Custom scheme ───────────────────────────────────────────────
+
+const ADDRESS = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
+const REF = "pagmrr7irwgghwe3xusfvumdaedwtwrdn2";
+
+describe("bastyonSchemeToHttps", () => {
+  it("maps bastyon:// and pocketnet:// to https://bastyon.com/", () => {
+    expect(bastyonSchemeToHttps(`bastyon://kleine_viogelein?ref=${REF}`))
+      .toBe(`https://bastyon.com/kleine_viogelein?ref=${REF}`);
+    expect(bastyonSchemeToHttps(`pocketnet://post?s=${TXID}`)).toBe(`https://bastyon.com/post?s=${TXID}`);
+    expect(bastyonSchemeToHttps("BASTYON://name")).toBe("https://bastyon.com/name");
+  });
+
+  it("leaves other URLs untouched", () => {
+    expect(bastyonSchemeToHttps("https://example.com/a")).toBe("https://example.com/a");
+  });
+});
+
+describe("bastyonLinksToHttps", () => {
+  it("rewrites every deep link in a text, keeping trailing punctuation", () => {
+    expect(bastyonLinksToHttps(`Look: bastyon://kleine_viogelein?ref=${REF}, and bastyon://post?s=${TXID}.`))
+      .toBe(`Look: https://bastyon.com/kleine_viogelein?ref=${REF}, and https://bastyon.com/post?s=${TXID}.`);
+  });
+
+  it("keeps text without deep links as is", () => {
+    expect(bastyonLinksToHttps("plain https://bastyon.com/x")).toBe("plain https://bastyon.com/x");
+    expect(bastyonLinksToHttps("")).toBe("");
+  });
+
+  it("leaves a deep link that is a parameter of another URL alone", () => {
+    expect(bastyonLinksToHttps("https://x.com/r?to=bastyon://john")).toBe("https://x.com/r?to=bastyon://john");
+    expect(bastyonLinksToHttps("(bastyon://john)")).toBe("(https://bastyon.com/john)");
+  });
+
+  it("does not match a bare scheme", () => {
+    expect([..."bastyon:// alone".matchAll(BASTYON_SCHEME_LINK_RE)]).toHaveLength(0);
+  });
+});
+
+describe("parseBastyonProfileLink", () => {
+  it("parses a username deep link with ref", () => {
+    expect(parseBastyonProfileLink(`bastyon://kleine_viogelein?ref=${REF}`)).toEqual({ name: "kleine_viogelein" });
+  });
+
+  it("parses a username on bastyon.com and pocketnet.app", () => {
+    expect(parseBastyonProfileLink("https://bastyon.com/kleine_viogelein")).toEqual({ name: "kleine_viogelein" });
+    expect(parseBastyonProfileLink("https://www.bastyon.com/Name_1/")).toEqual({ name: "Name_1" });
+    expect(parseBastyonProfileLink("https://pocketnet.app/name")).toEqual({ name: "name" });
+  });
+
+  it("parses a percent-encoded unicode username", () => {
+    expect(parseBastyonProfileLink(`bastyon://${encodeURIComponent("Пётр")}`)).toEqual({ name: "Пётр" });
+  });
+
+  it("parses author/user links by address", () => {
+    expect(parseBastyonProfileLink(`bastyon://author?address=${ADDRESS}`)).toEqual({ address: ADDRESS });
+    expect(parseBastyonProfileLink(`https://bastyon.com/user?address=${ADDRESS}`)).toEqual({ address: ADDRESS });
+    expect(parseBastyonProfileLink("https://bastyon.com/author?address=PX")).toBeNull();
+  });
+
+  it("rejects posts, collections and Bastyon pages", () => {
+    expect(parseBastyonProfileLink(`bastyon://post?s=${TXID}`)).toBeNull();
+    expect(parseBastyonProfileLink(`bastyon://index?v=${TXID}`)).toBeNull();
+    expect(parseBastyonProfileLink(`bastyon://collection?c=${TXID}`)).toBeNull();
+    expect(parseBastyonProfileLink("https://bastyon.com/faq")).toBeNull();
+    expect(parseBastyonProfileLink("https://bastyon.com/")).toBeNull();
+    expect(parseBastyonProfileLink("https://bastyon.com/images/abc")).toBeNull();
+    expect(parseBastyonProfileLink("https://bastyon.com/embedVideo.php?id=1")).toBeNull();
+  });
+
+  it("rejects foreign hosts, forta.chat routes and Bastyon subdomains", () => {
+    expect(parseBastyonProfileLink("https://example.com/name")).toBeNull();
+    expect(parseBastyonProfileLink("https://forta.chat/settings")).toBeNull();
+    expect(parseBastyonProfileLink("https://matrix.bastyon.com/name")).toBeNull();
+    expect(parseBastyonProfileLink("https://evil.com/bastyon.com/name")).toBeNull();
+  });
+
+  it("parses connect= invites as a profile by address, whatever the path", () => {
+    expect(parseBastyonProfileLink(`bastyon://welcome?connect=${ADDRESS}`)).toEqual({ address: ADDRESS });
+    expect(parseBastyonProfileLink(`https://bastyon.com/welcome?connect=${ADDRESS}`)).toEqual({ address: ADDRESS });
+    expect(parseBastyonProfileLink("https://bastyon.com/welcome?connect=bad!")).toBeNull();
+  });
+
+  it("leaves room and transaction links to their own parsers", () => {
+    expect(parseBastyonProfileLink("bastyon://welcome?publicroom=!abc:matrix.pocketnet.app")).toBeNull();
+    expect(parseBastyonProfileLink(`bastyon://i?stx=${TXID}`)).toBeNull();
+  });
+
+  it("makes profile links block URLs (no duplicate OG preview)", () => {
+    expect(isBastyonBlockUrl("https://bastyon.com/kleine_viogelein")).toBe(true);
+  });
+});
+
+describe("parseBastyonRoomLink", () => {
+  const ROOM = "!AbC123:matrix.pocketnet.app";
+
+  it("parses publicroom= on the deep link and on bastyon.com", () => {
+    expect(parseBastyonRoomLink(`bastyon://welcome?publicroom=${ROOM}`)).toEqual({ roomId: ROOM });
+    expect(parseBastyonRoomLink(`https://bastyon.com/welcome?publicroom=${encodeURIComponent(ROOM)}`))
+      .toEqual({ roomId: ROOM });
+  });
+
+  it("rejects malformed room ids and foreign hosts", () => {
+    expect(parseBastyonRoomLink("bastyon://welcome?publicroom=!../../evil:server/x")).toBeNull();
+    expect(parseBastyonRoomLink("bastyon://welcome?publicroom=abc")).toBeNull();
+    expect(parseBastyonRoomLink(`https://example.com/welcome?publicroom=${ROOM}`)).toBeNull();
+    expect(parseBastyonRoomLink("bastyon://kleine_viogelein")).toBeNull();
+  });
+
+  it("makes room links block URLs", () => {
+    expect(isBastyonBlockUrl(`https://bastyon.com/welcome?publicroom=${ROOM}`)).toBe(true);
+  });
+});
+
+describe("parseBastyonTransactionLink", () => {
+  it("parses stx= (case-insensitive txid)", () => {
+    expect(parseBastyonTransactionLink(`bastyon://i?stx=${TXID}`)).toEqual({ txid: TXID });
+    expect(parseBastyonTransactionLink(`https://bastyon.com/index?stx=${TXID.toUpperCase()}`)).toEqual({ txid: TXID });
+  });
+
+  it("rejects non-hex64 ids and foreign hosts", () => {
+    expect(parseBastyonTransactionLink("bastyon://i?stx=abc")).toBeNull();
+    expect(parseBastyonTransactionLink(`https://example.com/i?stx=${TXID}`)).toBeNull();
+  });
+
+  it("makes transaction links block URLs and builds the explorer URL", () => {
+    expect(isBastyonBlockUrl(`bastyon://i?stx=${TXID}`)).toBe(true);
+    expect(toTransactionExplorerUrl(TXID)).toBe(`https://explorer.pocketnet.app/tx/${TXID}`);
+  });
+});
+
+describe("toBastyonPostHttpsUrl", () => {
+  it("builds the https post link Forta shares and copies", () => {
+    expect(toBastyonPostHttpsUrl(TXID)).toBe(`https://bastyon.com/post?s=${TXID}`);
+    expect(parseBasytonLink(toBastyonPostHttpsUrl(TXID))).toEqual({ txid: TXID, commentId: undefined, isVideo: false });
   });
 });

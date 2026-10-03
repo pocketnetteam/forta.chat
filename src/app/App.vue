@@ -41,6 +41,7 @@ import { useUnreadDocumentTitle } from "@/shared/lib/composables/use-unread-docu
 import { useElectronUnreadBadge } from "@/shared/lib/composables/use-electron-unread-badge";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
 import { setNotificationClickHandler } from "@/shared/lib/notifications/web-notifier";
+import { JOIN_ROOM_REQUEST_EVENT } from "@/shared/lib/join-room-request";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
 import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
 import { PROXY_NODES } from "@/shared/config/constants";
@@ -385,9 +386,23 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
   }
 };
 
+const requestJoin = (roomId: string) => {
+  localStorage.setItem("bastyon-chat-join-room", roomId);
+  if (authStore.isAuthenticated && authStore.matrixReady) {
+    processJoinRoom();
+  }
+};
+
+// Room link cards in messages (requestJoinRoom) — same pipeline as /join links.
+const onJoinRoomRequest = (e: Event) => {
+  const roomId = (e as CustomEvent<{ roomId?: string }>).detail?.roomId;
+  if (roomId) requestJoin(roomId);
+};
+
 onMounted(async () => {
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener(JOIN_ROOM_REQUEST_EVENT, onJoinRoomRequest);
 
   // Deep-link handlers: Capacitor's appUrlOpen / Electron deep-link:open are
   // already wired from main.ts. Now that the router is mounted, install the
@@ -402,12 +417,7 @@ onMounted(async () => {
         processReferral();
       }
     },
-    onJoin: ({ roomId }) => {
-      localStorage.setItem("bastyon-chat-join-room", roomId);
-      if (authStore.isAuthenticated && authStore.matrixReady) {
-        processJoinRoom();
-      }
-    },
+    onJoin: ({ roomId }) => requestJoin(roomId),
     onMalformed: (rawUrl) => {
       console.warn("[App] malformed forta deep-link:", rawUrl);
       showToast(t("invite.malformed"), "error");
@@ -481,6 +491,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener("resize", onResize);
+  window.removeEventListener(JOIN_ROOM_REQUEST_EVENT, onJoinRoomRequest);
   window.removeEventListener("keydown", handleGlobalKeydown);
   setNotificationClickHandler(null);
 });

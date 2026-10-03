@@ -25,6 +25,18 @@ describe("RoomListSkeleton", () => {
     expect(wrapper.text()).toContain("contactList.loadingChatsSlowHint");
   });
 
+  it("renders only the loading header when rows=0", () => {
+    const wrapper = mount(RoomListSkeleton, { props: { firstLoad: true, rows: 0 } });
+    expect(wrapper.text()).toContain("contactList.loadingChats");
+    expect(wrapper.findAll(".animate-pulse")).toHaveLength(0);
+    expect(wrapper.classes()).not.toContain("h-full");
+  });
+
+  it("renders 6 skeleton rows by default", () => {
+    const wrapper = mount(RoomListSkeleton, { props: { firstLoad: true } });
+    expect(wrapper.findAll(".space-y-1 > div")).toHaveLength(6);
+  });
+
   it("does not render the loading message block when firstLoad is false", () => {
     const wrapper = mount(RoomListSkeleton, { props: { firstLoad: false } });
     expect(wrapper.text()).not.toContain("contactList.loadingChats");

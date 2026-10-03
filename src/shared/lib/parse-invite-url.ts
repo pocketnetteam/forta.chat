@@ -30,7 +30,7 @@ export const BASTYON_ADDRESS_RE = /^[A-Za-z0-9]{25,40}$/;
 /** Matrix room IDs: `!localpart:server`. Localpart uses the Matrix-specified
  *  charset (`[A-Za-z0-9._=+-]`); notably no `/`, to block traversal-style
  *  payloads like `!../../evil:server`. */
-const MATRIX_ROOM_ID_RE = /^![A-Za-z0-9._=+\-]+:[A-Za-z0-9.\-]+(:\d+)?$/;
+export const MATRIX_ROOM_ID_RE = /^![A-Za-z0-9._=+\-]+:[A-Za-z0-9.\-]+(:\d+)?$/;
 
 export interface InviteTarget {
   address: string;

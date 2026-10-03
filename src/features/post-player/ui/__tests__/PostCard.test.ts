@@ -170,6 +170,18 @@ describe("PostCard unresolved repost fallback (WEE-101)", () => {
     expect(w.find("button").exists()).toBe(false);
   });
 
+  it("fallback-ссылка ведёт на https://bastyon.com и открывается через openExternalUrl", async () => {
+    openExternalUrl.mockReset();
+    getCachedPost.mockReturnValue(emptyRepostWrapper);
+    const w = mountCard();
+    await flushPromises();
+
+    const link = w.find("a");
+    expect(link.attributes("href")).toBe("https://bastyon.com/post?s=tx123");
+    await link.trigger("click");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://bastyon.com/post?s=tx123");
+  });
+
   it("обёртка с разрешённым repost рендерит вложенный PostCard, а не fallback", async () => {
     getCachedPost.mockReturnValue({
       ...emptyRepostWrapper,
