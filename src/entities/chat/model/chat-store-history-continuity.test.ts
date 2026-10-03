@@ -18,6 +18,8 @@ import { RoomRepository } from "@/shared/lib/local-db/room-repository";
 import { UserRepository } from "@/shared/lib/local-db/user-repository";
 import { EventWriter } from "@/shared/lib/local-db/event-writer";
 import { MessageType } from "./types";
+import { useAuthStore } from "@/entities/auth/model/stores";
+import { hexEncode } from "@/shared/lib/matrix/functions";
 
 const ROOM = "!a:s";
 type Raw = Record<string, unknown>;
@@ -129,6 +131,7 @@ describe("marking holes", () => {
     liveEvents = [text("$n1", 1_000)];
     liveBackToken = "t0";
     pages = { t0: { chunk: [text("$g1", 500), text("$old", 100)], end: "t1" } };
+    store.setVisibleSidebarRooms([ROOM]);
 
     store.handleTimelineReset(ROOM, "t0");
 
@@ -308,6 +311,67 @@ describe("review follow-ups", () => {
     await store.refreshOpenedRoom(ROOM);
 
     expect(await storedIds()).toContain("$fresh");
+  });
+});
+
+describe("background backfill covers only warm rooms", () => {
+  const PEER = "PPeerAddressForBackfillKeys1";
+
+  beforeEach(async () => {
+    await db.messages.bulkAdd([storedRow("$old", 100), storedRow("$n1", 1_000)]);
+    liveEvents = [text("$n1", 1_000)];
+    await db.rooms.update(ROOM, { gapToken: "t0", gapBeforeTs: 1_000, gapAnchorTs: 100 });
+    pages = { t0: { chunk: [text("$g1", 500), text("$old", 100)], end: "t1" } };
+  });
+
+  /** 30 fresher rooms push ROOM out of the recent set. */
+  const makeRoomCold = async () => {
+    await db.rooms.bulkPut(Array.from({ length: 30 }, (_, i) => roomRow({ id: `!fresh${i}:s`, updatedAt: 10_000 + i })));
+    await vi.waitFor(() => expect(store.sortedRooms.length).toBeGreaterThanOrEqual(31));
+  };
+
+  it("marks the hole of a room that is not warm but does not page it", async () => {
+    await makeRoomCold();
+    await db.rooms.update(ROOM, { gapToken: null });
+    liveBackToken = "t0";
+
+    store.handleTimelineReset(ROOM, "t0");
+
+    await vi.waitFor(async () => expect((await room())?.gapToken).toBe("t0"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMessagesPage).not.toHaveBeenCalled();
+  });
+
+  it("the post-sync check skips rooms that are not warm", async () => {
+    await makeRoomCold();
+    await store.scheduleContinuityChecks();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMessagesPage).not.toHaveBeenCalled();
+    expect((await room())?.gapToken).toBe("t0");
+  });
+
+  it("the post-sync check backfills a visible room and preloads its peer keys in one batch", async () => {
+    store.rooms = [makeRoom({ id: ROOM, members: [hexEncode(PEER)] })];
+    const authStore = useAuthStore();
+    const loadUsersInfo = vi.spyOn(authStore, "loadUsersInfo").mockResolvedValue(undefined);
+    store.setVisibleSidebarRooms([ROOM]);
+
+    await store.scheduleContinuityChecks();
+
+    expect(loadUsersInfo).toHaveBeenCalledWith([PEER]);
+    await vi.waitFor(async () => expect((await room())?.gapToken).toBe(null));
+    expect(await storedIds()).toContain("$g1");
+  });
+
+  it("the queue preloads peer keys before a pass, whoever queued the room", async () => {
+    store.rooms = [makeRoom({ id: ROOM, members: [hexEncode(PEER)] })];
+    const loadUsersInfo = vi.spyOn(useAuthStore(), "loadUsersInfo").mockResolvedValue(undefined);
+
+    store.backfillRoom(ROOM);
+
+    expect(loadUsersInfo).toHaveBeenCalledWith([PEER]);
+    await vi.waitFor(async () => expect((await room())?.gapToken).toBe(null));
+    expect(await storedIds()).toContain("$g1");
   });
 });
 

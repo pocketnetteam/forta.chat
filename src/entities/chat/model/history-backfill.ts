@@ -34,6 +34,9 @@ export interface HistoryBackfillDeps {
   startPass: (roomId: string) => Promise<BackfillPass>;
   /** The room being worked on changed (null = idle). */
   onActiveChange?: (roomId: string | null) => void;
+  /** Before a pass: the room and the rooms still waiting behind it, so
+   *  shared work (the peers' keys) can be started for all of them at once. */
+  beforePass?: (roomId: string, queued: readonly string[]) => void;
   /** A pass over the room ended; `finished` = the hole is closed (not
    *  paused at the page limit, not failed). */
   onPassEnd?: (roomId: string, info: { finished: boolean }) => void;
@@ -111,6 +114,7 @@ export function createHistoryBackfill(deps: HistoryBackfillDeps): HistoryBackfil
         deps.onActiveChange?.(roomId);
         let finished = false;
         try {
+          deps.beforePass?.(roomId, [...queue]);
           const more = await runPass(roomId);
           finished = !more;
           failures.delete(roomId);

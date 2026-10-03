@@ -163,5 +163,19 @@ describe("createHistoryBackfill — pass end", () => {
     await bf.whenIdle();
     expect(ends).toEqual([false, true]);
   });
+
+  it("before each pass reports the room and the rooms still queued behind it", async () => {
+    const seen: Array<[string, string[]]> = [];
+    const bf = createHistoryBackfill({
+      canRun: () => true,
+      startPass: async () => fakeRoom([], { token: null }).pass(),
+      beforePass: (id, queued) => { seen.push([id, [...queued]]); },
+    });
+    bf.enqueue("!a");
+    bf.enqueue("!b");
+    bf.enqueue("!c");
+    await bf.whenIdle();
+    expect(seen).toEqual([["!a", []], ["!b", ["!c"]], ["!c", []]]);
+  });
 });
 
