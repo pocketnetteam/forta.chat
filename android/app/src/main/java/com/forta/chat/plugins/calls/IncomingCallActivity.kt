@@ -486,6 +486,8 @@ class IncomingCallActivity : Activity() {
             putExtra("callId", callId)
             putExtra("roomId", intent.getStringExtra("roomId"))
         }
+        // The only legitimate source of push_call_accept: see KeyguardLiftGate.
+        com.forta.chat.KeyguardLiftGate.arm(android.os.SystemClock.elapsedRealtime())
         startActivity(appBootIntent)
 
         CallConnectionService.dismissIncomingCallNotification(this)

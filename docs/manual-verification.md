@@ -379,6 +379,18 @@
 
 ## Проверено
 
+### Экран блокировки не снимается чужим запуском и возвращается после звонка
+- Коммит: см. `git log -1 -- android/app/src/main/java/com/forta/chat/KeyguardLiftGate.kt`
+- Почему нужен человек: экран блокировки и окна поверх него — только на устройстве с PIN. `MainActivity`
+  экспортирована и показывалась поверх блокировки по одному лишь extra `push_call_accept`; флаги не снимались
+  никогда. Теперь снять блокировку можно только сразу после «Принять» в `IncomingCallActivity` (одноразовая
+  отметка `KeyguardLiftGate` в процессе), флаги снимаются в `onStop`.
+- На чём: Samsung SM-A528B с PIN, звонок из дев-сборки TEST3 (`.bench/web/call-out-dev.mjs`), чат TEST3 ↔ TEST2.
+- Статус: ☑ проверено 2026-10-04. До: `am start -n com.forta.chat/.MainActivity --ez push_call_accept true` при
+  `deviceLocked=1` — список чатов поверх блокировки, и снова после гашения и включения экрана. После: та же команда —
+  экран блокировки (`mKeyguardOccluded=false`, в логе «keyguard left in place»). Ответ с экрана блокировки:
+  `MainActivity` → через 2 с экран звонка, у звонящего `connected`; после отбоя — экран блокировки, не чаты.
+
 ### Поле ввода над клавиатурой на Android (регрессия `fb0e6650`)
 - Коммит: исправление upstream `de40a1c0` (pocketnetteam/forta.chat#252, CSS: `.safe-bottom` берёт
   `--app-bottom-inset`); собственная правка `9b140e0f` (отступ окна в `MainActivity`) отменена при слиянии,
