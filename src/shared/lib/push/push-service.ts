@@ -1,4 +1,5 @@
 import { PushNotifications } from '@capacitor/push-notifications';
+import type { PluginListenerHandle } from '@capacitor/core';
 import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
 import { isIncomingCallsEnabled, syncIncomingCallsSettingToNative } from './incoming-calls-setting';
@@ -164,6 +165,7 @@ class PushService {
   /** The last FCM token deletion; the next register() waits for it, or a quick
    *  login could register the very token that is being deleted. */
   private tokenReset: Promise<unknown> = Promise.resolve();
+  private voipListeners: PluginListenerHandle[] = [];
   private matrixClient: any = null;
   private onCallPush: ((data: { callId: string; callerName: string; roomId: string; hasVideo: boolean }) => void) | null = null;
   private getRoomInfo: ((roomId: string) => { roomName: string } | null) | null = null;
@@ -239,6 +241,12 @@ class PushService {
    *  UX budget (total path stays under 1.5s) and well above measured
    *  homeserver indexing latency. */
   private static readonly TARGETED_FETCH_GRACE_MS = 500;
+
+  private async removeVoipListeners(): Promise<void> {
+    const handles = this.voipListeners;
+    this.voipListeners = [];
+    await Promise.allSettled(handles.map((h) => Promise.resolve().then(() => h.remove())));
+  }
 
   /** Sleep helper kept inline to avoid a util import for one call site. */
   private static sleep(ms: number): Promise<void> {
@@ -372,23 +380,36 @@ class PushService {
     if (!matrixClient) return;
     this.voipToken = voipToken;
     const payload = buildVoipPusherPayload(voipToken);
-    try {
-      await matrixClient.setPusher(payload);
+    // Retried like the FCM pusher: iOS hands the VoIP token over once per
+    // launch, so a single failed PUT left a killed app without CallKit rings.
+    for (let attempt = 1; ; attempt++) {
       try {
-        const previous = ownPushkeys(payload.app_id);
-        const { pushers } = await matrixClient.getPushers();
-        for (const p of pushers) {
-          if (isStalePusherEntry(p, payload.app_id, voipToken, previous)) {
-            await matrixClient.setPusher({ ...p, kind: null });
-          }
+        await matrixClient.setPusher(payload);
+        break;
+      } catch (e) {
+        if (attempt >= PushService.PUSHER_REGISTER_RETRIES) {
+          console.error('[PushService] Failed to register VoIP pusher:', e);
+          return;
         }
-      } catch (pe) {
-        console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
+        await PushService.sleep(1000 * 2 ** (attempt - 1));
+        // Logged out (or switched account) during the backoff: a retry would
+        // put the pusher back on an account that just removed it.
+        if (this.matrixClient !== matrixClient) return;
       }
-      rememberOwnPushkey(payload.app_id, voipToken);
-    } catch (e) {
-      console.error('[PushService] Failed to register VoIP pusher:', e);
     }
+    if (this.matrixClient !== matrixClient) return;
+    try {
+      const previous = ownPushkeys(payload.app_id);
+      const { pushers } = await matrixClient.getPushers();
+      for (const p of pushers) {
+        if (isStalePusherEntry(p, payload.app_id, voipToken, previous)) {
+          await matrixClient.setPusher({ ...p, kind: null });
+        }
+      }
+    } catch (pe) {
+      console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
+    }
+    rememberOwnPushkey(payload.app_id, voipToken);
   }
 
   /**
@@ -815,17 +836,21 @@ class PushService {
     // voipTokenReceived listener.
     if (isIOS) {
       try {
-        await IOSVoIPPush.addListener('voipTokenReceived', async ({ token }) => {
-          await this.registerVoipPusher(matrixClient, token);
-        });
-        await IOSVoIPPush.addListener('voipTokenInvalidated', async () => {
+        // init() runs again on every account login: drop the previous
+        // listeners, and read the client at call time, so a rotated token is
+        // registered once and only for the account signed in now.
+        await this.removeVoipListeners();
+        this.voipListeners.push(await IOSVoIPPush.addListener('voipTokenReceived', async ({ token }) => {
+          await this.registerVoipPusher(this.matrixClient, token);
+        }));
+        this.voipListeners.push(await IOSVoIPPush.addListener('voipTokenInvalidated', async () => {
           // Best-effort cleanup of the stale VoIP pusher. We don't have
           // the old token in scope, but the Matrix homeserver lists ALL
           // pushers under our user — any fortaios.voip with a key not
           // matching a current token gets dropped on the next
           // registerVoipPusher() pass.
           console.log('[PushService] VoIP token invalidated by iOS');
-        });
+        }));
         const { token } = await IOSVoIPPush.getToken();
         if (token) {
           await this.registerVoipPusher(matrixClient, token);
@@ -890,6 +915,7 @@ class PushService {
     } catch (e) {
       console.warn('[PushService] removeAllListeners failed:', e);
     }
+    await this.removeVoipListeners();
 
     // Promise.resolve().then: a call that throws synchronously still settles.
     const removals: Promise<unknown>[] = [];

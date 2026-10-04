@@ -113,4 +113,44 @@ describe('PushService.registerPusher retry behaviour', () => {
     expect(client.setPusher).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem('push_pusher_dead_letter')).toBeNull();
   });
+
+  // Regression: the VoIP pusher was PUT once; iOS delivers the token once per
+  // launch, so one transient failure meant no CallKit ring until relaunch.
+  it('retries the VoIP pusher registration on transient failure', async () => {
+    const client = {
+      setPusher: vi.fn().mockRejectedValueOnce(new Error('network blip')).mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerVoipPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = client;
+    const promise = svc.registerVoipPusher(client, 'voip-abc');
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(2);
+    expect(client.getPushers).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a pending VoIP pusher retry when the account logged out during the backoff', async () => {
+    const client = {
+      setPusher: vi.fn().mockRejectedValueOnce(new Error('network blip')).mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerVoipPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = client;
+    const promise = svc.registerVoipPusher(client, 'voip-abc');
+    await vi.advanceTimersByTimeAsync(0);
+    svc.matrixClient = null; // what unregisterForLogout does first
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(1);
+    expect(client.getPushers).not.toHaveBeenCalled();
+  });
 });
