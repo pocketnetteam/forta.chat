@@ -640,6 +640,7 @@ export const en = {
   "call.warning.noRelay": "Couldn't connect and no relay server was reachable — this network may block direct calls.",
   "call.warning.torBypassed": "Calls don't go through Tor: the other party can see your IP address.",
   "call.error.connectionLost": "Call connection lost.",
+  "call.error.cameraUnavailable": "Couldn't turn the camera on — the call goes on without video.",
   "call.error.legacyWebView": "Your device's browser engine is too old for stable calls. Update Android System WebView from the Play Store.",
   "call.info.waitingForServer": "Connecting to the server, the call will start automatically…",
   "call.error.matrixNotReady": "Couldn't connect to the server. Try calling again in a moment.",

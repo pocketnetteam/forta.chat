@@ -467,6 +467,13 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // to the homeserver (CallState.InviteSent). See the InviteSent branch
   // below for the full rationale.
   let ringbackStarted = false;
+  // The SDK sets Connected again after an ICE restart (Wi-Fi to mobile
+  // handover): the timer, startedAt and the native "connected" report belong
+  // to the first time only, or the call's duration restarts from 0.
+  let connectedOnce = false;
+  // Set by onError when the SDK is about to end the call for that error:
+  // the ended state then closes it as failed, not as an ordinary hangup.
+  let errorEnding = false;
 
   const onState = ((newState: SDKCallState, _oldState: SDKCallState) => {
     const status = mapSDKState(newState, direction);
@@ -502,7 +509,11 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       clearConnectingWatchdog();
     }
 
-    if (status === CallStatus.connected) {
+    if (status === CallStatus.connected && connectedOnce) {
+      stopAllSounds();
+      updateFeeds(call);
+    } else if (status === CallStatus.connected) {
+      connectedOnce = true;
       stopAllSounds();
       clearIncomingTimeout();
       callStore.startTimer();
@@ -522,6 +533,12 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
         }).catch(() => {});
         NativeWebRTC.updateCallStatus({ status: "Connected", duration: "" }).catch(() => {});
       }
+    }
+
+    if (status === CallStatus.ended && errorEnding) {
+      errorEnding = false;
+      failCall();
+      return;
     }
 
     if (status === CallStatus.ended) {
@@ -587,15 +604,8 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     }
   }) as CallEventHandlerMap[CallEvent.Hangup];
 
-  const onError = ((error: unknown) => {
-    // Detailed log for debugging (e.g. ICE failure when WiFi ↔ 4G)
-    const err = error as { code?: string; message?: string } | undefined;
-    const code = err?.code ?? (error as Error)?.name;
-    const msg = err?.message ?? (error as Error)?.message ?? String(error);
-    console.error("[call-service] call error:", code ?? "unknown", msg, error);
-    if (err && typeof err === "object" && !err.message && Object.keys(err).length > 0) {
-      console.error("[call-service] error object:", JSON.stringify(err, null, 2));
-    }
+  /** The end of a call the SDK ended with an error: status failed, a failed history entry. */
+  const failCall = () => {
     stopAllSounds();
     clearIncomingTimeout();
     clearConnectingWatchdog();
@@ -622,6 +632,41 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       });
     }
     callStore.scheduleClearCall(2000);
+  };
+
+  const onError = ((error: unknown) => {
+    // Detailed log for debugging (e.g. ICE failure when WiFi ↔ 4G)
+    const err = error as { code?: string; message?: string } | undefined;
+    const code = err?.code ?? (error as Error)?.name;
+    const msg = err?.message ?? (error as Error)?.message ?? String(error);
+    console.error("[call-service] call error:", code ?? "unknown", msg, error);
+    if (err && typeof err === "object" && !err.message && Object.keys(err).length > 0) {
+      console.error("[call-service] error object:", JSON.stringify(err, null, 2));
+    }
+    // Not every SDK error ends the call. Most are followed at once by
+    // terminate(), and onState(ended) then closes it as failed. A camera
+    // that cannot be turned on mid-call (upgradeCall) leaves a working voice
+    // call, and a failed answer send leaves the call ringing: tearing those
+    // down here ended the call on this side only — the peer stayed in it.
+    errorEnding = true;
+    queueMicrotask(() => {
+      if (!errorEnding || call.callHasEnded()) return;
+      errorEnding = false;
+      if (code === CallErrorCode.NoUserMedia && call.state === SDKCallState.Connected) {
+        useToast().toast(tRaw("call.error.cameraUnavailable"), "error", 4000);
+        return;
+      }
+      // Still alive after an error it cannot recover from: hang up properly
+      // so the peer stops too; onState(ended) closes it as failed.
+      errorEnding = true;
+      try {
+        call.hangup((code as CallErrorCode) ?? CallErrorCode.UserHangup, false);
+      } catch (e) {
+        console.warn("[call-service] hangup after error failed:", e);
+        errorEnding = false;
+        failCall();
+      }
+    });
   }) as CallEventHandlerMap[CallEvent.Error];
 
   boundHandlers = { callId: call.callId, call, onState, onFeeds, onHangup, onError };

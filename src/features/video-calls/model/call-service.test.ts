@@ -175,6 +175,8 @@ vi.mock('matrix-js-sdk-bastyon/lib/webrtc/call', () => ({
     remoteScreensharingStream: null,
     remoteUsermediaFeed: null,
     getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+    state: 'create_offer',
+    callHasEnded: vi.fn(() => false),
   })),
   CallEvent: {
     State: 'State',
@@ -194,6 +196,7 @@ vi.mock('matrix-js-sdk-bastyon/lib/webrtc/call', () => ({
   },
   CallErrorCode: {
     UserHangup: 'user_hangup',
+    NoUserMedia: 'no_user_media',
   },
 }));
 
@@ -733,6 +736,68 @@ describe('call-service permission flow', () => {
       const { useCallService } = await import('./call-service');
 
       expect(useCallService().currentCall().callId).toBeUndefined();
+    });
+  });
+
+  describe('SDK errors that do not end the call', () => {
+    // Regression: every CallEvent.Error tore the call down on this side only.
+    // A camera that cannot start mid-call leaves a working voice call, and a
+    // failed answer send leaves the call ringing — the peer stayed connected.
+    async function placed() {
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      const handler = (name: string) =>
+        mockOn.mock.calls.filter((c: unknown[]) => c[0] === name).at(-1)?.[1] as (...a: unknown[]) => void;
+      const call = mockSetMatrixCall.mock.calls.at(-1)?.[0] as { state: string; callHasEnded: ReturnType<typeof vi.fn> };
+      mockUpdateStatus.mockClear();
+      mockHangup.mockClear();
+      return { onError: handler('Error'), onState: handler('State'), call };
+    }
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+
+    it('closes a call the SDK ends after the error as failed', async () => {
+      const { onError, onState, call } = await placed();
+      onError({ code: 'ice_failed', message: 'ice' });
+      call.callHasEnded.mockReturnValue(true);
+      onState('ended', 'connecting');
+      await flush();
+      expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
+    });
+
+    it('keeps a connected call when the camera cannot be turned on', async () => {
+      const { onError, call } = await placed();
+      call.state = 'connected';
+      onError({ code: 'no_user_media', message: 'camera' });
+      await flush();
+      expect(mockUpdateStatus).not.toHaveBeenCalledWith('failed');
+      expect(mockHangup).not.toHaveBeenCalled();
+    });
+
+    it('hangs up properly when the call is left alive after another error', async () => {
+      const { onError, call } = await placed();
+      call.state = 'ringing';
+      onError({ code: 'send_answer', message: 'answer' });
+      await flush();
+      expect(mockHangup).toHaveBeenCalledWith('send_answer', false);
+    });
+  });
+
+  describe('reconnect after an ICE restart', () => {
+    // Regression: the SDK sets Connected again after a network handover, and
+    // each time the timer restarted from 0 and startedAt moved, so the call's
+    // duration in history counted only from the last blip.
+    it('starts the timer once even if Connected is reported again', async () => {
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      const onState = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'State')?.[1] as
+        (newState: string, oldState: string) => void;
+      (mockCallStore.startTimer as ReturnType<typeof vi.fn>).mockClear();
+
+      onState('connected', 'connecting');
+      onState('connecting', 'connected');
+      onState('connected', 'connecting');
+
+      expect(mockCallStore.startTimer as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
     });
   });
 
