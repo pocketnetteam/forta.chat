@@ -9,7 +9,7 @@ import { formatDate } from "@/shared/lib/format";
 import { stripMentionAddresses } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
-import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "@/entities/chat/lib/dedupe-call-events";
+import { dedupeCallEvents, planCallRecordDeletion, timelineAnchorFor } from "@/entities/chat/lib/dedupe-call-events";
 import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
@@ -368,20 +368,18 @@ const virtualItems = computed<VirtualItem[]>(() => {
   const msgs = timelineMessages.value;
   const items: VirtualItem[] = [];
   const { frozenLastReadId: watermarkId, frozenUnreadCount } = bannerState.value;
-  // The watermark can name a call record the collapse above removed — the
-  // second hangup is usually the newest event in the room. Point it at the
-  // record that survived, or the unread banner loses its anchor and never
-  // renders.
-  const frozenLastReadId =
-    watermarkId && frozenUnreadCount > 0
-      ? (collapsedCallEventIds(rawMsgs).get(watermarkId) ?? watermarkId)
-      : watermarkId;
+  // The watermark can name a call record the collapse above removed (the
+  // second hangup, a record deleted for oneself). Move it to the nearest shown
+  // row before it, or the unread banner loses its anchor and never renders;
+  // null means no shown row precedes it.
+  const hasUnread = !!watermarkId && frozenUnreadCount > 0;
+  const frozenLastReadId = hasUnread ? timelineAnchorFor(rawMsgs, msgs, watermarkId) : watermarkId;
   const myAddr = authStore.address;
 
   // Track whether we've found the last-read message and need to insert the banner.
   // The banner goes BEFORE the first inbound (not own) message after the last-read marker.
   // This ensures own messages sent after the watermark stay ABOVE the banner.
-  let bannerPending = false;
+  let bannerPending = hasUnread && frozenLastReadId === null;
   let bannerInserted = false;
 
   for (let i = 0; i < msgs.length; i++) {

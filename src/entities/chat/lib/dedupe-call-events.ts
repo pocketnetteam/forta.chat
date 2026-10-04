@@ -38,39 +38,41 @@ export function dedupeCallEvents<T extends { callInfo?: Message["callInfo"]; del
   return out;
 }
 
-type CallRecord = Pick<Message, "id" | "_key" | "callInfo">;
+type Keyed = Pick<Message, "id" | "_key">;
 
 /**
- * Maps every id {@link dedupeCallEvents} drops onto the id that survived it.
+ * Where the unread banner anchors when the read watermark names a row the
+ * timeline does not show.
  *
- * Anything holding a message id across the collapse needs this. The read
- * watermark is the case that bites: the second hangup is the newest event in
- * the room, so it is exactly what "last read" tends to name — and once that
- * record is collapsed away, a lookup for its id finds nothing at all.
+ * {@link dedupeCallEvents} drops rows the watermark tends to name: the second
+ * hangup of a call is usually the newest event in the room, and a call record
+ * deleted for oneself vanishes too. Looking the dropped id up in the timeline
+ * finds nothing and the banner never renders. The anchor moves to the nearest
+ * shown row before the watermark: everything up to it was read.
+ *
+ * Returns `anchorId` when it is shown or not loaded at all (nothing to correct
+ * yet), the stable id of the nearest earlier shown row, or `null` when no shown
+ * row precedes it — the banner then belongs above the first unread row.
  */
-export function collapsedCallEventIds(
-  messages: readonly CallRecord[],
-): Map<string, string> {
-  const survivors = new Map<string, CallRecord>();
-  const collapsed = new Map<string, string>();
-
-  for (const message of messages) {
-    const callId = message.callInfo?.callId;
-    if (!callId) continue;
-
-    const survivor = survivors.get(callId);
-    if (!survivor) {
-      survivors.set(callId, message);
-      continue;
-    }
-
-    // Callers match on either id, so either one resolves the anchor.
-    const survivorId = survivor._key ?? survivor.id;
-    if (message.id) collapsed.set(message.id, survivorId);
-    if (message._key) collapsed.set(message._key, survivorId);
+export function timelineAnchorFor(
+  raw: readonly Keyed[],
+  shown: readonly Keyed[],
+  anchorId: string,
+): string | null {
+  const shownIds = new Set<string>();
+  for (const m of shown) {
+    if (m.id) shownIds.add(m.id);
+    if (m._key) shownIds.add(m._key);
   }
+  if (shownIds.has(anchorId)) return anchorId;
 
-  return collapsed;
+  const at = raw.findIndex((m) => m.id === anchorId || m._key === anchorId);
+  if (at < 0) return anchorId;
+  for (let i = at - 1; i >= 0; i--) {
+    const m = raw[i];
+    if (shownIds.has(m.id) || (m._key && shownIds.has(m._key))) return m._key ?? m.id;
+  }
+  return null;
 }
 
 type CallRecordOwner = Pick<Message, "id" | "senderId" | "callInfo">;

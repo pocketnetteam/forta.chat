@@ -19,3 +19,16 @@ describe("MessageList neighbour lookups", () => {
     expect(source).toMatch(/timelineMessages\[\(item\.index \?\? 0\) - 1\]/);
   });
 });
+
+/**
+ * Regression: a read watermark on a call record the timeline drops (a deleted
+ * record, a collapsed hangup whose survivor is deleted) found no row, so the
+ * unread banner never rendered. The anchor resolves against the shown rows.
+ */
+describe("MessageList unread banner anchor", () => {
+  it("resolves the watermark against the shown rows and handles no earlier row", () => {
+    expect(source).toMatch(/timelineAnchorFor\(rawMsgs, msgs, watermarkId\)/);
+    expect(source).toMatch(/let bannerPending = hasUnread && frozenLastReadId === null;/);
+    expect(source).not.toMatch(/collapsedCallEventIds/);
+  });
+});
