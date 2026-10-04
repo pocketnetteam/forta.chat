@@ -15,6 +15,7 @@ import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
 import { getModeratorChange, isServiceRoomName, isWithinCreationBurst, isCreationBurstMemberEvent } from "../lib/system-event-filter";
 import { preservePendingRooms } from "../lib/preserve-pending-rooms";
+import { mergeIntoSortedRooms } from "../lib/merge-sorted-rooms";
 import { indexCallEvents, isMissedCallHangup, type CallEventIndex } from "../lib/call-outcome";
 import {
   classifyTimelineEvent,
@@ -1816,26 +1817,6 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     return room.lastMessage?.timestamp || room.updatedAt || 0;
   };
 
-  /** Binary search for insertion in descending-sorted array */
-  const binarySearchDesc = (arr: ChatRoom[], key: number, pinned: ReadonlySet<string>, isPinned: boolean): number => {
-    let lo: number, hi: number;
-    if (isPinned) {
-      lo = 0;
-      hi = 0;
-      while (hi < arr.length && pinned.has(arr[hi].id)) hi++;
-    } else {
-      lo = 0;
-      while (lo < arr.length && pinned.has(arr[lo].id)) lo++;
-      hi = arr.length;
-    }
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (getSortKey(arr[mid]) > key) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  };
-
   const _sortedRoomsRef = shallowRef<ChatRoom[]>([]);
   // Accumulate Dexie delta changes while suppressed, then apply incrementally
   let _deferredChanges: RoomChange[] = [];
@@ -1897,49 +1878,30 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const id = c.type === "delete" ? c.roomId : c.room.id;
       dedup.set(id, c);
     }
-    const arr = [..._sortedRoomsRef.value];
-    const pinned = pinnedRoomIds.value;
-    let mutated = false;
+    // null = drop the room from the sidebar. A room the cache maps to the same
+    // ChatRoom reference changed nothing visible (status, unread, name,
+    // preview, ts), so its sort key and position stay valid and the merge
+    // keeps it in place. Pinned changes flow through a separate watcher →
+    // scheduleFullSortedRebuild.
+    const updates = new Map<string, ChatRoom | null>();
     for (const change of dedup.values()) {
       if (change.type === "delete") {
-        const idx = arr.findIndex(r => r.id === change.roomId);
-        if (idx !== -1) {
-          arr.splice(idx, 1);
-          mutated = true;
-        }
+        updates.set(change.roomId, null);
         _chatRoomFromDexieCache.delete(change.roomId);
+      } else if (shouldExcludeLocalRoomFromSidebar(change.room)) {
+        updates.set(change.room.id, null);
+        _chatRoomFromDexieCache.delete(change.room.id);
       } else {
-        if (shouldExcludeLocalRoomFromSidebar(change.room)) {
-          const oldIdx = arr.findIndex(r => r.id === change.room.id);
-          if (oldIdx !== -1) {
-            arr.splice(oldIdx, 1);
-            _chatRoomFromDexieCache.delete(change.room.id);
-            mutated = true;
-          }
-          continue;
-        }
-        const chatRoom = mapLocalRoomToChatRoom(change.room);
-        const oldIdx = arr.findIndex(r => r.id === change.room.id);
-        // Diff guard: cache returned the same ChatRoom reference, nothing
-        // visible about this room changed (status, unread, name, preview, ts).
-        // The sort key is also unchanged because it derives from those same
-        // fields, so position stays valid. Skip splice + triggerRef.
-        // Pinned changes flow through a separate watcher → scheduleFullSortedRebuild.
-        if (oldIdx !== -1 && arr[oldIdx] === chatRoom) continue;
-        if (oldIdx !== -1) arr.splice(oldIdx, 1);
-        const key = getSortKey(chatRoom);
-        const isPinned = pinned.has(change.room.id);
-        const newIdx = binarySearchDesc(arr, key, pinned, isPinned);
-        arr.splice(newIdx, 0, chatRoom);
-        mutated = true;
+        updates.set(change.room.id, mapLocalRoomToChatRoom(change.room));
       }
     }
-    if (!mutated) {
+    const next = mergeIntoSortedRooms(_sortedRoomsRef.value, updates, getSortKey, pinnedRoomIds.value);
+    if (!next) {
       perfCount("sortedRooms:patch-noop");
       return;
     }
     perfCount("sortedRooms:effective-patch");
-    _sortedRoomsRef.value = arr;
+    _sortedRoomsRef.value = next;
   };
 
   // ---------------------------------------------------------------------------
