@@ -185,7 +185,8 @@ class CallForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
-    private var savedVoiceCallVolume: Int = -1
+    // The one volume change the focus listener owns (a duck). Main thread only.
+    private val focusDuck = FocusDuckVolume()
     // The one mic mute the focus listener owns. Main thread only: the focus
     // listener and Telecom's connection callbacks both run there.
     private val focusLossMute = FocusLossMute()
@@ -666,12 +667,11 @@ class CallForegroundService : Service() {
                 // D-09: Lower volume to ~30%
                 Log.d("WebRTCAudio", "Focus: DUCK — lowering volume")
                 audioManager?.let { am ->
-                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                    am.setStreamVolume(
-                        AudioManager.STREAM_VOICE_CALL,
-                        (maxVol * 0.3).toInt().coerceAtLeast(1),
-                        0
+                    val target = focusDuck.onDuck(
+                        current = am.getStreamVolume(AudioManager.STREAM_VOICE_CALL),
+                        max = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
                     )
+                    if (target >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -687,13 +687,7 @@ class CallForegroundService : Service() {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 // D-09: Restore volume + unmute
                 Log.d("WebRTCAudio", "Focus: GAIN — restoring audio")
-                if (savedVoiceCallVolume >= 0) {
-                    audioManager?.setStreamVolume(
-                        AudioManager.STREAM_VOICE_CALL,
-                        savedVoiceCallVolume,
-                        0
-                    )
-                }
+                restoreDuckedVolume()
                 releaseFocusLossMute("focus regained")
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
@@ -710,6 +704,16 @@ class CallForegroundService : Service() {
      * Undo the mute a transient focus loss applied — and only that one, so a
      * mute the user chose survives focus coming back.
      */
+    private fun restoreDuckedVolume() {
+        val am = audioManager ?: return
+        try {
+            val restore = focusDuck.release(am.getStreamVolume(AudioManager.STREAM_VOICE_CALL))
+            if (restore >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, restore, 0)
+        } catch (e: Exception) {
+            Log.w("WebRTCAudio", "Failed to restore voice call volume", e)
+        }
+    }
+
     private fun releaseFocusLossMute(reason: String) {
         if (!focusLossMute.release()) return
         Log.d("WebRTCAudio", "Unmuting the mic a focus loss muted: $reason")
@@ -728,13 +732,6 @@ class CallForegroundService : Service() {
             runCatching { am.abandonAudioFocusRequest(it) }
                 .onFailure { e -> Log.w("WebRTCAudio", "abandon before re-request threw", e) }
             audioFocusRequest = null
-        }
-
-        // Save current volume for restore (D-09). Only on the first request of
-        // the call: a re-request during a ducked window would otherwise capture
-        // the ducked level as the "original" and restore that on teardown.
-        if (savedVoiceCallVolume < 0) {
-            savedVoiceCallVolume = am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
         }
 
         val attrs = AudioAttributes.Builder()
@@ -764,24 +761,10 @@ class CallForegroundService : Service() {
                 .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocusRequest threw", e) }
             audioFocusRequest = null
         }
-        // Session 23 / D-09: restore the user's previous voice-call
-        // volume here, in addition to the existing AUDIOFOCUS_GAIN
-        // listener path. When we self-abandon the focus (call ended
-        // normally) the focus change listener does not fire — without
-        // this explicit restore the voice-call volume could stay at
-        // the ducked level set by an earlier focus change.
-        if (savedVoiceCallVolume >= 0) {
-            try {
-                audioManager?.setStreamVolume(
-                    AudioManager.STREAM_VOICE_CALL,
-                    savedVoiceCallVolume,
-                    0,
-                )
-            } catch (e: Exception) {
-                Log.w("WebRTCAudio", "Failed to restore voice call volume", e)
-            }
-            savedVoiceCallVolume = -1
-        }
+        // Session 23 / D-09: undo a duck still in force here too. When we
+        // self-abandon the focus (call ended normally) the focus change
+        // listener does not fire, and the volume would stay ducked.
+        restoreDuckedVolume()
         // The call is over, and this instance may serve the next one. Not in
         // requestAudioFocus: CallActivity.onResume re-requests on every return
         // to the call, and a mute still in force must stay undoable.
