@@ -116,6 +116,15 @@ class IncomingCallActivity : Activity() {
             finish()
             return
         }
+        // Same race on the ringer screen: started for an invite whose hangup
+        // was handled before it surfaced, it found nothing to dismiss it and
+        // rang for 30 s.
+        val ringingCallId = intent.getStringExtra("callId").orEmpty()
+        if (ringingCallId.isNotEmpty() && CancelledCallStore(this).isCancelled(ringingCallId)) {
+            Log.i(TAG, "onCreate: $ringingCallId was cancelled before the ringer surfaced — closing")
+            finish()
+            return
+        }
         currentInstance = this
         // O13: the volume rocker on this screen must change the ringer, not
         // media — the ringtone plays on STREAM_RING, and a user turning a

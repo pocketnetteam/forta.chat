@@ -285,6 +285,14 @@ class CallConnectionService : ConnectionService() {
 
         Log.d(TAG, "onCreateIncomingConnection: callId=$callId, caller=$callerName, roomId=$roomId")
 
+        // The caller's hangup can be handled between the invite push asking
+        // Telecom for this connection and Telecom creating it: nothing was
+        // there to dismiss then, and Telecom rang a dead call for 45 s.
+        if (callId.isNotEmpty() && CancelledCallStore(this).isCancelled(callId)) {
+            Log.i(TAG, "onCreateIncomingConnection: $callId was cancelled before it rang — not ringing")
+            return Connection.createFailedConnection(DisconnectCause(DisconnectCause.MISSED, "cancelled"))
+        }
+
         // A conversation in progress keeps the single slot. Evicting it — what
         // this did unconditionally — left it alive but unreachable: every
         // consumer reads the slot with no callId check (reportCallEnded,
