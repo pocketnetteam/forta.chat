@@ -171,6 +171,16 @@ class CallPlugin : Plugin() {
      * have installed its own, and clearing those would silence a live plugin.
      */
     override fun handleOnDestroy() {
+        // The bridge — and with it the WebView that runs the Matrix call — is
+        // going: renderer-death recreate(), a system destroy, exitApp. The JS
+        // call cannot survive it (WebRTCPlugin disposes the peer connections),
+        // but a live Telecom connection did: every later call hit the busy
+        // path while the process lived. Release it as a task removal does,
+        // telling the peer natively; a ringing call is left to its ringer.
+        if (activity?.isChangingConfigurations != true) {
+            val released = runCatching { CallConnectionService.releaseOnTaskRemoved() }.getOrDefault(false)
+            if (released) Log.w(TAG, "Bridge destroyed with a live call — released it")
+        }
         installedCallbacks?.let { (answered, rejected, ended) ->
             if (CallConnection.onAnswered === answered) CallConnection.onAnswered = null
             if (CallConnection.onRejected === rejected) CallConnection.onRejected = null

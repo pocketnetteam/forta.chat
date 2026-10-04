@@ -24,6 +24,17 @@
 
 ## Ожидают проверки
 
+### Уничтожение моста во время звонка освобождает Telecom-соединение
+- Коммит: см. `git log -1 -- android/app/src/main/java/com/forta/chat/plugins/calls/CallPlugin.kt`
+- Почему нужен человек: Telecom и жизненный цикл Activity — только на устройстве. При `recreate()` после смерти
+  рендерера WebView (или другом уничтожении моста) peer connection закрывались, а Telecom-соединение оставалось
+  ACTIVE — пока жил процесс, новые звонки шли как «занято». Теперь `CallPlugin.handleOnDestroy` освобождает живой
+  звонок путём смахивания задачи (`releaseOnTaskRemoved`: нативный `m.call.hangup` + отключение).
+- Статус: ☐ частично. 2026-10-04 на Samsung: `App.exitApp()` во время звонка — «Bridge destroyed with a live call
+  — released it», `CallHangupSignal … HTTP 200`, у звонящего `ended` через 1 с. Но при `exitApp` трубку кладёт и
+  JS (`unload`); смерть рендерера, ради которой правка, по adb не воспроизвести (`chrome://crash` WebView не
+  открывает, убить изолированный процесс без root нельзя).
+
 ### Встречный вызов не оставляет звонок без обработчиков и Telecom-соединение висеть
 - Коммит: см. `git log -1 -- src/entities/call/model/call-store.ts`
 - Почему нужен человек: гонка двух вызовов и Telecom — только на устройствах. До правки (Samsung, 2026-10-04 20:26):
