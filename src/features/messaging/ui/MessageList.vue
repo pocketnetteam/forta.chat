@@ -38,7 +38,7 @@ import { computeChatListStyle } from "./chat-list-style";
 const chatStore = useChatStore();
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
-const { loadMessages, toggleReaction, deleteMessage, deleteMessages, votePoll, endPoll, retryMediaUpload, retryMessage, cancelMediaUpload } = useMessages();
+const { loadMessages, toggleReaction, deleteMessage, deleteMessages, votePoll, endPoll, retryMediaUpload, retryMessage, cancelFailedMessage, cancelMediaUpload } = useMessages();
 const { getState: getFileState, download: downloadFile, saveFile } = useFileDownload();
 const { toast } = useToast();
 const { t, locale } = useI18n();
@@ -1514,6 +1514,7 @@ defineExpose({ scrollToMessage, setSearchQuery });
             @poll-end="handlePollEnd"
             @retry-media="retryMediaUpload"
             @retry-message="retryMessage"
+            @cancel-message="cancelFailedMessage"
             @cancel-upload="cancelMediaUpload"
           >
             <template #avatar>

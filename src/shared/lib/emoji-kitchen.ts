@@ -59,8 +59,14 @@ async function ensureRecipes(): Promise<RecipeMap> {
   return _loading;
 }
 
-// Kick off loading immediately so the data is ready when needed
-void ensureRecipes();
+/**
+ * Load the recipe dataset (~2.5 MB parsed). Called when the kitchen bar
+ * mounts, not on import: EmojiPicker is in the startup graph, so an eager
+ * kickoff parsed the whole dataset on every cold start.
+ */
+export async function loadKitchenRecipes(): Promise<void> {
+  await ensureRecipes();
+}
 
 // ---------------------------------------------------------------------------
 // Public API

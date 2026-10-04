@@ -2142,6 +2142,18 @@ export function useMessages() {
     }
   };
 
+  /** Cancel a failed text send: the message leaves the chat and the queue. */
+  const cancelFailedMessage = async (message: Message): Promise<void> => {
+    if (message.status !== MessageStatus.failed) return;
+    const mKey = (message as Message & { _key?: string })._key;
+    if (!mKey || !isChatDbReady()) return;
+    try {
+      await getChatDb().eventWriter.discardFailedMessage(mKey);
+    } catch (e) {
+      console.error("[cancelFailedMessage] Failed to discard:", e);
+    }
+  };
+
   /** Cancel an in-flight or failed media upload */
   const cancelMediaUpload = async (message: Message): Promise<void> => {
     const mKey = (message as Message & { _key?: string })._key;
@@ -2174,6 +2186,7 @@ export function useMessages() {
   };
 
   return {
+    cancelFailedMessage,
     cancelMediaUpload,
     deleteMessage,
     deleteMessages,
