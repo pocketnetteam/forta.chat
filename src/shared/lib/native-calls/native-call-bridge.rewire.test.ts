@@ -40,6 +40,9 @@ async function setup() {
   vi.doMock('@/entities/call', () => ({
     useCallStore: () => ({ matrixCall: null }),
   }));
+  vi.doMock('@/entities/matrix', () => ({
+    getMatrixClientService: () => ({ client: { callEventHandler: { calls: new Map() }, getRooms: () => [] } }),
+  }));
   const { nativeCallBridge } = await import('./native-call-bridge');
   return { nativeCallBridge, added };
 }
@@ -50,7 +53,7 @@ function service() {
     rejectCall: vi.fn(),
     hangup: vi.fn(),
     setLocalVideoMuted: vi.fn(),
-    currentCall: () => null,
+    currentCall: () => ({ callId: undefined }),
   };
 }
 
@@ -75,5 +78,27 @@ describe('nativeCallBridge.wire() called again', () => {
     expect(second.hangup).toHaveBeenCalledTimes(1);
     expect(second.setLocalVideoMuted).toHaveBeenCalledTimes(1);
     expect(first.hangup).not.toHaveBeenCalled();
+  });
+
+  // Regression (Samsung 2026-10-05): Accept tapped just as the caller hung up
+  // — the SDK never made a call, the wait timed out with a warning, and the
+  // natively answered connection stayed ACTIVE, refusing later calls as busy.
+  it('releases the native answer when no call arrives', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] });
+    try {
+      const { nativeCallBridge, added } = await setup();
+      const svc = { ...service(), releaseOrphanedNativeAnswer: vi.fn() };
+      await nativeCallBridge.wire(svc);
+      added.find((a) => a.event === 'callAnswered')!.handler({ callId: 'orphan-call', roomId: '!room:x' });
+      // Step the 300 ms poll, letting each tick's dynamic imports settle.
+      for (let i = 0; i < 110; i++) {
+        await vi.advanceTimersByTimeAsync(300);
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(svc.releaseOrphanedNativeAnswer).toHaveBeenCalledWith('orphan-call', '!room:x');
+      expect(svc.answerCall).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
