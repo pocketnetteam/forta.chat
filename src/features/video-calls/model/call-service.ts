@@ -2280,6 +2280,19 @@ export function useCallService() {
     return { callId: call?.callId, roomId: call?.roomId };
   }
 
+  /**
+   * Native answered a call that never reached JS — accepted on the ringer just
+   * as the caller hung up, so /sync brought the invite and its hangup together
+   * and the SDK made no call. The Telecom connection stayed ACTIVE until a
+   * backstop ended it, and every call meanwhile was refused as busy. Left
+   * alone when a call is live here: that call owns the native side.
+   */
+  function releaseOrphanedNativeAnswer(callId: string, roomId?: string) {
+    if (callStore.hasLiveCall) return;
+    console.warn("[call-service] releasing a native answer no call arrived for:", callId);
+    void finalizeCall("answer-orphaned", callId, roomId);
+  }
+
   return {
     startCall,
     handleIncomingCall,
@@ -2293,5 +2306,6 @@ export function useCallService() {
     setAudioDevice,
     setVideoDevice,
     setLocalVideoMuted,
+    releaseOrphanedNativeAnswer,
   };
 }

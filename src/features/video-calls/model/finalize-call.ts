@@ -44,7 +44,8 @@ export type FinalizeReason =
   | "permission-denied"
   | "ice-failed"
   | "user-cancel"
-  | "watchdog-timeout";
+  | "watchdog-timeout"
+  | "answer-orphaned";
 
 export interface CallTelemetryEvent {
   type: "call_finalize_start" | "call_finalized";

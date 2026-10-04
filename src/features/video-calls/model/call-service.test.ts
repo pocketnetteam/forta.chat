@@ -2776,3 +2776,30 @@ describe('device switch keeps the mute state', () => {
     expect(newTrack.enabled).toBe(false);
   });
 });
+
+describe('releaseOrphanedNativeAnswer', () => {
+  it('finalizes the native call when no call is live in JS', async () => {
+    const { __resetFinalizeCallStateForTests } = await import('./finalize-call');
+    __resetFinalizeCallStateForTests();
+    mockCallStore.hasLiveCall = false;
+    const { useCallService } = await import('./call-service');
+    useCallService().releaseOrphanedNativeAnswer('orphan-native', '!room:matrix.org');
+    await vi.waitFor(() => expect(mockReportCallEnded).toHaveBeenCalledWith('orphan-native'));
+  });
+
+  it('leaves the native side alone while a call is live', async () => {
+    const { __resetFinalizeCallStateForTests } = await import('./finalize-call');
+    __resetFinalizeCallStateForTests();
+    mockReportCallEnded.mockClear();
+    mockCallStore.hasLiveCall = true;
+    try {
+      const { useCallService } = await import('./call-service');
+      useCallService().releaseOrphanedNativeAnswer('other-native', '!room:matrix.org');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockReportCallEnded).not.toHaveBeenCalled();
+    } finally {
+      mockCallStore.hasLiveCall = false;
+    }
+  });
+});
+

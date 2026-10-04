@@ -390,6 +390,11 @@ interface BridgeCallService {
   currentCall: () => NativeCallEventTarget;
   /** Android only — the native CallActivity's video toggle. */
   setLocalVideoMuted?: (muted: boolean) => void;
+  /**
+   * Native answered a call that never reached JS (the caller hung up as the
+   * user tapped Accept): release its Telecom connection and screens.
+   */
+  releaseOrphanedNativeAnswer?: (callId: string, roomId?: string) => void;
 }
 
 class NativeCallBridge {
@@ -713,6 +718,9 @@ class NativeCallBridge {
       }
       if (Date.now() >= deadline) {
         console.warn('[NativeCallBridge] Timed out waiting for matrixCall:', callId);
+        // The connection was answered natively and nothing in JS will ever end
+        // it: it stayed ACTIVE, and every later call was refused as busy.
+        this.callService?.releaseOrphanedNativeAnswer?.(callId, roomId);
         return;
       }
       setTimeout(tick, POLL_MS);
