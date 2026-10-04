@@ -266,9 +266,13 @@ class CallForegroundService : Service() {
                 updateNotification(text)
             }
             ACTION_HANGUP -> {
-                // Hangup triggered from notification action
+                // "Hang up" on the ongoing-call notification does what the call
+                // screen's button does: JS hangs the call up (m.call.hangup, then
+                // its teardown stops this service) and the screen closes. It used
+                // to close the screen and stop the service only — the peer was
+                // never told and stayed in a silent call.
+                CallActivity.onNativeHangup?.invoke()
                 CallActivity.onCallEnded?.invoke()
-                stopSelf()
             }
             ACTION_STOP -> {
                 val stopGeneration = intent.getLongExtra(EXTRA_GENERATION, -1L)
