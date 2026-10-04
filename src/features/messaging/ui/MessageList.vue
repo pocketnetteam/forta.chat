@@ -354,13 +354,18 @@ interface VirtualItem {
   [key: string]: unknown;
 }
 
+// Matrix stores one hangup event per participant who ends the call, so a call
+// both sides hang up leaves two records of the same call. Collapse them here
+// rather than in the store: the events are legitimate and stay in the
+// database, only the timeline shows one entry per call. `item.index` points
+// into this list, and so must the neighbour lookups in the template: they
+// read the raw store list, which is longer by every collapsed or deleted
+// call record, so grouping compared the wrong neighbours after one.
+const timelineMessages = computed(() => dedupeCallEvents(chatStore.activeMessages));
+
 const virtualItems = computed<VirtualItem[]>(() => {
-  // Matrix stores one hangup event per participant who ends the call, so a call
-  // both sides hang up leaves two records of the same call. Collapse them here
-  // rather than in the store: the events are legitimate and stay in the
-  // database, only the timeline shows one entry per call.
   const rawMsgs = chatStore.activeMessages;
-  const msgs = dedupeCallEvents(rawMsgs);
+  const msgs = timelineMessages.value;
   const items: VirtualItem[] = [];
   const { frozenLastReadId: watermarkId, frozenUnreadCount } = bannerState.value;
   // The watermark can name a call record the collapse above removed — the
@@ -1429,8 +1434,8 @@ defineExpose({ scrollToMessage, setSearchQuery });
             :is-own="item.message.senderId === authStore.address"
             :my-address="authStore.address ?? undefined"
             :is-group="isGroup"
-            :show-avatar="themeStore.messageGrouping ? !isConsecutiveMessage(item.message, chatStore.activeMessages[(item.index ?? 0) + 1]) : true"
-            :is-first-in-group="themeStore.messageGrouping ? !isConsecutiveMessage(chatStore.activeMessages[(item.index ?? 0) - 1], item.message) : true"
+            :show-avatar="themeStore.messageGrouping ? !isConsecutiveMessage(item.message, timelineMessages[(item.index ?? 0) + 1]) : true"
+            :is-first-in-group="themeStore.messageGrouping ? !isConsecutiveMessage(timelineMessages[(item.index ?? 0) - 1], item.message) : true"
             @contextmenu="openContextMenu"
             @reply="(msg) => { chatStore.replyingTo = { id: msg.id, senderId: msg.senderId, content: msg.content.slice(0, 150), type: msg.type }; }"
             @scroll-to-reply="scrollToMessage"
