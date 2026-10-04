@@ -139,6 +139,7 @@
             android:turnScreenOn="true"
             android:exported="false"
             android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|uiMode|keyboardHidden"
             android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
 
         <activity

@@ -664,7 +664,10 @@ class IncomingCallActivity : Activity() {
         // instance's onDestroy null out the pointer to the live one, turning
         // dismissIfShowing/stopRingerIfShowing into permanent no-ops and
         // orphaning a ringtone nothing can reach.
-        if (currentInstance === this) {
+        // A configuration change the manifest does not absorb (locale, font
+        // scale) recreates the screen for the same call: stopping here cleared
+        // the user's silence, and the new instance rang again from the start.
+        if (currentInstance === this && !isChangingConfigurations) {
             // A back press or a swipe from Recents: stop ringing, as before.
             // Telecom's own 45 s backstop still ends the connection.
             IncomingRinger.stop(shownCallId)
