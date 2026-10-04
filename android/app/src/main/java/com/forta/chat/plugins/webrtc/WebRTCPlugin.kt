@@ -41,6 +41,9 @@ class WebRTCPlugin : Plugin() {
 
     }
 
+    /** The manager this plugin instance created, for its own teardown. */
+    private var ownManager: NativeWebRTCManager? = null
+
     override fun load() {
         // WEE-47 (#834): construct the manager but DO NOT call initialize().
         // initialize() builds PeerConnectionFactory + JavaAudioDeviceModule,
@@ -51,7 +54,7 @@ class WebRTCPlugin : Plugin() {
         // not needed until the SDK actually creates the first peer
         // connection or local media stream; [ensureInitialized] guarantees
         // it is set up exactly once on the first call-time entry point.
-        manager = NativeWebRTCManager(context)
+        manager = NativeWebRTCManager(context).also { ownManager = it }
 
         // Wire CallActivity native hangup → JS event
         com.forta.chat.plugins.calls.CallActivity.onNativeHangup = {
@@ -625,8 +628,13 @@ class WebRTCPlugin : Plugin() {
     }
 
     override fun handleOnDestroy() {
-        manager?.dispose()
-        manager = null
+        // Only this bridge's manager: an app relaunched while the old activity
+        // was still finishing loads the new plugin first, and clearing the
+        // shared slot left every later WebRTC call "Manager not initialized".
+        val own = ownManager
+        ownManager = null
+        own?.dispose()
+        if (manager === own) manager = null
         super.handleOnDestroy()
     }
 }
