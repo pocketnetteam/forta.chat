@@ -98,12 +98,26 @@ class CallForegroundService : Service() {
         }
 
         fun updateStatus(context: Context, status: String, duration: String = "") {
+            // Nothing to update without a running service, and startService
+            // from the background (locked phone, no foreground service) throws
+            // BackgroundServiceStartNotAllowedException on Android 12+, which
+            // took the whole process down from the plugin thread. A started
+            // instance created just for this update also lingered, reading as
+            // a live call to the router's watchdog and the idle exit.
+            if (!isRunning) {
+                Log.d(TAG, "updateStatus($status) with no call service running — skipped")
+                return
+            }
             val intent = Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_UPDATE
                 putExtra(EXTRA_STATUS, status)
                 putExtra(EXTRA_DURATION, duration)
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "updateStatus rejected by the system", e)
+            }
         }
 
         /**
@@ -118,7 +132,14 @@ class CallForegroundService : Service() {
                 action = ACTION_STOP
                 putExtra(EXTRA_GENERATION, startLedger.generationFor(callId, startGeneration.get()))
             }
-            context.startService(intent)
+            // Reached from every call teardown. From the background with the
+            // service already gone, Android 12+ refuses the start and the
+            // throw crashed the process; there is nothing left to stop then.
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "stop rejected by the system (service not running: ${!isRunning})", e)
+            }
         }
 
         /**
@@ -262,6 +283,9 @@ class CallForegroundService : Service() {
                 // `person must have a non-empty a name` when callerName was "".
                 if (!hasStarted) {
                     Log.w(TAG, "ACTION_UPDATE before ACTION_START — ignoring stale update")
+                    // An instance created for this update alone must not stay
+                    // started; stopSelf(startId) spares a start queued after it.
+                    stopSelf(startId)
                     return START_NOT_STICKY
                 }
                 val status = intent.getStringExtra(EXTRA_STATUS) ?: ""

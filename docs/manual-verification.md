@@ -33,6 +33,17 @@
   входящего на месте; без заглушения — звонок не начинается заново.
 - Статус: ☐ не проверено (контрактный тест)
 
+### Обновление статуса звонка из фона не роняет приложение
+- Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/plugins/calls/CallServiceBackgroundStartContractTest.kt`
+- Почему нужен человек: ограничения фоновых запусков Android 12+ — только на устройстве. `updateStatus` и `stop`
+  службы звонка вызывали `startService` без защиты: из фона без работающей службы Android бросал
+  `BackgroundServiceStartNotAllowedException` в потоке плагинов, и процесс падал. Экземпляр, созданный ради
+  запоздалого обновления, оставался запущенным и считался живым звонком.
+- На чём: Samsung SM-A528B, Android 14; CDP `NativeWebRTC.updateCallStatus` через 75 с после блокировки экрана.
+- Статус: ☑ проверено 2026-10-05 A/B: старая сборка — `FATAL EXCEPTION: CapacitorPlugins … BackgroundServiceStart
+  NotAllowedException` (00:46:42); с правкой — `updateStatus(stale) with no call service running — skipped`, процесс
+  жив, служб нет. Остаток: реальный путь через `stop()` (пропущенный звонок в кармане, отбой звонящего).
+
 ### Экран звонка, открытый заново, помнит выключенный микрофон и длительность
 - Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/plugins/calls/CallActivityReopenContractTest.kt`
 - Почему нужен человек: Activity и уведомление — только на устройстве. `isMuted` и счётчик жили в экземпляре экрана:
