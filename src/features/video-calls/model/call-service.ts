@@ -1419,6 +1419,16 @@ export function useCallService() {
       }
     }
 
+    // We are dialling ourselves: the outgoing call has not reached the slot
+    // yet (it does so after several awaits), so hasLiveCall below misses it,
+    // and the incoming call took the slot and stranded the dial. Busy.
+    if (outgoingCallInProgress) {
+      console.log("[call-service] handleIncomingCall: dialling out, rejecting as busy");
+      matrixCall.reject();
+      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+      return;
+    }
+
     if (callStore.hasLiveCall) {
       console.log("[call-service] handleIncomingCall: already in call, rejecting");
       // Deliberately NOT finalizeCall() here, unlike the expired-invite
@@ -1455,6 +1465,12 @@ export function useCallService() {
     }
 
     callStore.cancelScheduledClear();
+    // The previous call's CallInfo stays until its scheduled clear, which was
+    // just cancelled: drop it, or this call is answered with that call's
+    // type, peer and id (the native path skips setActiveCall until answer).
+    if (callStore.activeCall && callStore.activeCall.callId !== matrixCall.callId && !callStore.isInCall) {
+      callStore.activeCall = null;
+    }
 
     const peerId = matrixCall.getOpponentMember()?.userId ?? "";
     const { peerAddress, peerName } = await resolvePeerInfo(peerId);

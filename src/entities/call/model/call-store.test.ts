@@ -226,6 +226,19 @@ describe("call-store", () => {
       expect(store.activeCall).toBeNull();
     });
 
+    // Regression: a dial that crossed an incoming call took the slot within the
+    // ended call's clear window; the clear then stripped the new call's
+    // listeners and its Telecom connection stayed DIALING for 30 minutes.
+    it("leaves a newer call in the slot alone", () => {
+      const removeAllListeners = vi.fn();
+      store.setMatrixCall({ callId: "old", state: "ended" });
+      store.scheduleClearCall(1500);
+      store.setMatrixCall({ callId: "new", state: "invite_sent", removeAllListeners });
+      vi.advanceTimersByTime(1500);
+      expect(store.matrixCall?.callId).toBe("new");
+      expect(removeAllListeners).not.toHaveBeenCalled();
+    });
+
     it("cancelScheduledClear prevents the clear", () => {
       store.setActiveCall(makeCallInfo());
       store.scheduleClearCall(3000);

@@ -739,6 +739,32 @@ describe('call-service permission flow', () => {
     });
   });
 
+  describe('an incoming call while dialling out', () => {
+    // Regression: the dial reaches the call slot only after several awaits,
+    // so an incoming call in that window took the slot and stranded the dial
+    // (no call screen, a Telecom connection left DIALING).
+    it('is rejected as busy and does not take the slot', async () => {
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      const dialling = service.startCall('!room:matrix.org', 'voice');
+      await Promise.resolve();
+      mockSetMatrixCall.mockClear();
+      const reject = vi.fn();
+      await service.handleIncomingCall({
+        callId: 'crossing-call',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: vi.fn(),
+        off: vi.fn(),
+        reject,
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      } as never);
+      await dialling;
+      expect(reject).toHaveBeenCalled();
+      expect(mockSetMatrixCall).not.toHaveBeenCalledWith(expect.objectContaining({ callId: 'crossing-call' }));
+    });
+  });
+
   describe('SDK errors that do not end the call', () => {
     // Regression: every CallEvent.Error tore the call down on this side only.
     // A camera that cannot start mid-call leaves a working voice call, and a
