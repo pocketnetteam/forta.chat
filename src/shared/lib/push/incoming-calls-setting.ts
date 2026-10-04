@@ -33,9 +33,19 @@ export async function setIncomingCallsEnabled(enabled: boolean): Promise<void> {
   await syncIncomingCallsSettingToNative();
 }
 
-/** Native's copy follows JS; called on change and at start, in case it was lost. Never throws. */
+/**
+ * Native's copy follows JS; called on change and at start, in case it was lost.
+ * Only a stored choice is sent: with no value (a fresh install, or WebView
+ * storage purged by the OS) the default "on" would overwrite a native "off"
+ * and Forta would ring again without the user touching the switch. Never throws.
+ */
 export async function syncIncomingCallsSettingToNative(): Promise<void> {
   if (!isNative) return;
+  try {
+    if (window.localStorage.getItem(STORAGE_KEY) === null) return;
+  } catch {
+    return;
+  }
   try {
     await PushData.setIncomingCallsEnabled({ enabled: isIncomingCallsEnabled() });
   } catch (e) {

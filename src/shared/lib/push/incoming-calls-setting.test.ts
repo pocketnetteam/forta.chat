@@ -60,4 +60,11 @@ describe("incoming calls setting (#1388)", () => {
     mockSetEnabled.mockRejectedValueOnce(new Error("UNIMPLEMENTED"));
     await expect(syncIncomingCallsSettingToNative()).resolves.toBeUndefined();
   });
+
+  // Regression: a purged WebView storage read as "on" and the start-up sync
+  // overwrote native "off", so Forta rang again on its own.
+  it("does not push the default to native when nothing is stored", async () => {
+    await syncIncomingCallsSettingToNative();
+    expect(mockSetEnabled).not.toHaveBeenCalled();
+  });
 });
