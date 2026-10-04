@@ -1005,6 +1005,20 @@ let answerInProgress = false;
  * `Call.incoming`. Read defensively — `state` is not in every SDK version's
  * public surface and a missing one must not stop a legitimate call ringing.
  */
+/**
+ * Reject an invite we will not ring. The SDK throws unless the call is still
+ * ringing, and its expiry timer can end it during the awaits before this
+ * point; the throw escaped handleIncomingCall as an unhandled rejection and
+ * skipped the dedup release after it.
+ */
+function rejectQuietly(call: MatrixCall): void {
+  try {
+    call.reject();
+  } catch (e) {
+    console.warn("[call-service] reject of an invite we will not ring failed:", e);
+  }
+}
+
 function isSdkCallEnded(call: MatrixCall): boolean {
   const state = (call as unknown as { state?: string }).state;
   return state === "ended";
@@ -1448,7 +1462,7 @@ export function useCallService() {
     // and the incoming call took the slot and stranded the dial. Busy.
     if (outgoingCallInProgress) {
       console.log("[call-service] handleIncomingCall: dialling out, rejecting as busy");
-      matrixCall.reject();
+      rejectQuietly(matrixCall);
       if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
       return;
     }
@@ -1468,7 +1482,7 @@ export function useCallService() {
       // reads the Telecom slot first and only forwards the push here. A call
       // that still rings is SecondRingPolicy's case — see
       // docs/call-bugs-needing-you.md, "Второй входящий во время разговора".
-      matrixCall.reject();
+      rejectQuietly(matrixCall);
       // Release the dedup slot: when the current call ends the user is
       // available again, and a legitimate re-invite from the same caller
       // (rare same-callId retry) should ring through instead of being
@@ -1480,7 +1494,7 @@ export function useCallService() {
     const otherTabActive = await checkOtherTabHasCall();
     if (otherTabActive) {
       console.warn("[call-service] Another tab already has an active call, rejecting incoming");
-      matrixCall.reject();
+      rejectQuietly(matrixCall);
       // Same rationale as the isInCall branch: ownership of the call is
       // delegated to the other tab — releasing our dedup slot lets a
       // future invite ring through normally if that tab closes.

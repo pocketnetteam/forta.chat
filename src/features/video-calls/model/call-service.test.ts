@@ -1002,6 +1002,23 @@ describe('call-service permission flow', () => {
       expect(clearCall.mock.invocationCallOrder[0]).toBeLessThan(mockSetMatrixCall.mock.invocationCallOrder.at(-1)!);
     });
 
+    // Regression: reject() throws once the SDK ended the invite; the throw
+    // escaped as an unhandled rejection and kept the dedup slot taken.
+    it('releases the dedup slot when rejecting a busy invite throws', async () => {
+      const { isIncomingCallSeen, __resetIncomingCallDedupForTests } =
+        await import('./incoming-call-dedup');
+      const { useCallService } = await import('./call-service');
+      __resetIncomingCallDedupForTests();
+      mockCallStore.hasLiveCall = true;
+      const call = { ...incoming('busy-throws'), reject: vi.fn(() => { throw new Error("Call must be in 'ringing' state to reject!"); }) };
+      try {
+        await expect(useCallService().handleIncomingCall(call as never)).resolves.toBeUndefined();
+      } finally {
+        mockCallStore.hasLiveCall = false;
+      }
+      expect(isIncomingCallSeen('busy-throws')).toBe(false);
+    });
+
     it('does not reset a live call in the slot', async () => {
       const { useCallService } = await import('./call-service');
       const clearCall = mockCallStore.clearCall as Mock;
