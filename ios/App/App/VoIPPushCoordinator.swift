@@ -171,6 +171,16 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
 
         // Synchronous on the main queue (the registry's queue): the provider is
         // told before this method returns and before completion().
+        //
+        // A call the plugin already tracks (JS showed it from /sync before the
+        // push came, or a repeat push) is not reported again: the plugin
+        // answers at once, synchronously, without touching CallKit. iOS
+        // counts that as a push with no report and kills the app. A new call
+        // completes only later, from CallKit. So a completion that runs
+        // before reportIncomingCall returns means nothing was reported, and
+        // a placeholder is reported and ended instead.
+        var insideReport = true
+        var answeredWithoutCallKit = false
         IncomingCallKit.shared.reportIncomingCall(
             callId: callId,
             callerName: callerName,
@@ -178,11 +188,21 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
             hasVideo: hasVideo,
             extra: ["roomId": roomId]
         ) { error in
+            if insideReport && error == nil {
+                answeredWithoutCallKit = true
+                return
+            }
             if let error {
                 NSLog("[VoIPPush] CallKit rejected call %@: %@", callId, error.localizedDescription)
             } else {
                 NSLog("[VoIPPush] CallKit displayed call %@", callId)
             }
+        }
+        insideReport = false
+        if answeredWithoutCallKit {
+            signedOutSink.reportAndEnd(callId: callId, reason: "already shown")
+            completion()
+            return
         }
         NSLog("[VoIPPush] reported call %@ to CallKit", callId)
 
