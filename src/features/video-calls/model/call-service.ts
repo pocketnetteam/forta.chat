@@ -1534,8 +1534,35 @@ export function useCallService() {
     // straight to answering — this is the path that matches what
     // WhatsApp/Telegram do: one tap on Answer transitions the surface
     // directly to the in-call screen.
+    // The SDK ends a call whose invite is past its lifetime; its expiry
+    // timer can fire during the awaits above, before wireCallEvents, so no
+    // State event will ever report it.
+    const dropEndedInvite = () => {
+      console.warn(
+        "[call-service] incoming call already ended by the SDK (expired invite) — not ringing:",
+        matrixCall.callId,
+      );
+      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+      // Through finalizeCall like every other termination path: the native
+      // side may already be ringing (FCM usually wins this race, which is how
+      // a retained invite gets here in the first place), and only finalizeCall
+      // releases the Telecom connection and dismisses that ringer. Nulling the
+      // Pinia slot alone is invisible to native — the phone would keep ringing
+      // for a call that is already over.
+      unwireCallEvents();
+      if (isNative) void finalizeCall("sdk-ended", matrixCall.callId, matrixCall.roomId);
+      callStore.setMatrixCall(null);
+    };
+
     const alreadyAccepted = isNative && (await consumePendingAnswerCallId(matrixCall.callId, matrixCall.roomId));
     if (alreadyAccepted) {
+      // Accepted on the push ringer, but the invite expired before the app
+      // got here: answering it would leave an "incoming" CallInfo that no
+      // event ever ends — isInCall stuck true, every later call "busy".
+      if (isSdkCallEnded(matrixCall)) {
+        dropEndedInvite();
+        return;
+      }
       console.log("[call-service] Pre-accepted incoming call, skipping ringer:", matrixCall.callId);
       // Seed activeCall with incoming status so answerCall() sees the
       // right state and the UI has something to bind to. Do NOT pre-set
@@ -1603,20 +1630,7 @@ export function useCallService() {
     // minutes later, and there was no call" looks like from the outside
     // (#958, #928).
     if (isSdkCallEnded(matrixCall)) {
-      console.warn(
-        "[call-service] incoming call already ended by the SDK (expired invite) — not ringing:",
-        matrixCall.callId,
-      );
-      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
-      // Through finalizeCall like every other termination path: the native
-      // side may already be ringing (FCM usually wins this race, which is how
-      // a retained invite gets here in the first place), and only finalizeCall
-      // releases the Telecom connection and dismisses that ringer. Nulling the
-      // Pinia slot alone is invisible to native — the phone would keep ringing
-      // for a call that is already over.
-      unwireCallEvents();
-      if (isNative) void finalizeCall("sdk-ended", matrixCall.callId, matrixCall.roomId);
-      callStore.setMatrixCall(null);
+      dropEndedInvite();
       return;
     }
 

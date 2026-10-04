@@ -1166,6 +1166,25 @@ describe('call-service permission flow', () => {
       expect(mockSetMatrixCall).toHaveBeenLastCalledWith(null);
     });
 
+    // Regression: the push-accepted branch skipped the expiry check, set an
+    // "incoming" CallInfo and answered; answerCall returned on the ended call
+    // and nothing ever cleared it — isInCall stuck, every later call busy.
+    it('drops an expired invite the user already accepted on the push ringer', async () => {
+      const { consumePendingAnswerCallId } = await import('@/shared/lib/native-calls');
+      vi.mocked(consumePendingAnswerCallId).mockResolvedValueOnce(true);
+      const { useCallService } = await import('./call-service');
+      await useCallService().handleIncomingCall(
+        staleIncoming('ended', 'stale-invite-e') as never,
+      );
+
+      expect(mockSetActiveCall).not.toHaveBeenCalled();
+      expect(mockAnswer).not.toHaveBeenCalled();
+      expect(mockSetMatrixCall).toHaveBeenLastCalledWith(null);
+      await vi.waitFor(() =>
+        expect(mockReportCallEnded).toHaveBeenCalledWith('stale-invite-e'),
+      );
+    });
+
     it('still rings a call the SDK is holding in ringing state', async () => {
       const { useCallService } = await import('./call-service');
       await useCallService().handleIncomingCall(
