@@ -533,11 +533,15 @@ class CallConnectionService : ConnectionService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             if (!notificationManager.canUseFullScreenIntent()) {
                 Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted, FSI will be heads-up only")
+                // Try the ringer directly, but post the notification as well:
+                // from a background or freshly woken process Android 10+ drops
+                // this start without throwing, and the early return left the
+                // call with no surface at all (the push notification was
+                // already cancelled) — Telecom rang into nothing for 45 s.
                 try {
                     applicationContext.startActivity(fullScreenIntent)
-                    return
                 } catch (e: Exception) {
-                    Log.w(TAG, "Direct activity start also failed, falling back to notification", e)
+                    Log.w(TAG, "Direct activity start failed", e)
                 }
             }
         }

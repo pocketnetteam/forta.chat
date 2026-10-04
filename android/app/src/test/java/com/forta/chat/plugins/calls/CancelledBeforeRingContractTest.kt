@@ -31,4 +31,15 @@ class CancelledBeforeRingContractTest {
         val body = s.substring(start, s.indexOf("currentInstance = this", start))
         assertTrue(body.contains("CancelledCallStore(this).isCancelled(ringingCallId)"))
     }
+
+    /** Regression: without the full-screen intent the ringer start was assumed to work and the notification skipped. */
+    @Test
+    fun noFullScreenIntentStillPostsTheNotification() {
+        val s = source("com/forta/chat/plugins/calls/CallConnectionService.kt")
+        val start = s.indexOf("if (!notificationManager.canUseFullScreenIntent())")
+        assertTrue(start >= 0)
+        val branch = s.substring(start, s.indexOf("val caller = androidx.core.app.Person.Builder()", start))
+        val returns = Regex("^\\s*return\\b", RegexOption.MULTILINE).containsMatchIn(branch)
+        assertTrue("the branch must not return before the notification is posted", !returns)
+    }
 }
