@@ -4,6 +4,7 @@ import path from "path";
 import AutoImport from "unplugin-auto-import/vite";
 import Components from "unplugin-vue-components/vite";
 import { defineConfig } from "vite";
+import { manualChunks } from "./scripts/lib/vite-manual-chunks.mjs";
 
 export default defineConfig({
   base: "./",
@@ -121,12 +122,7 @@ export default defineConfig({
     },
     rollupOptions: {
       output: {
-        manualChunks(id) {
-          if (id.includes("matrix-js-sdk") || id.includes("@matrix-org")) return "matrix";
-          if (id.includes("node_modules/vue") || id.includes("vue-router") || id.includes("pinia")) return "vue-core";
-          if (id.includes("vue-virtual-scroller")) return "virtual-scroller";
-          if (id.includes("node_modules/buffer") || id.includes("stream-browserify") || id.includes("pbkdf2") || id.includes("create-hash") || id.includes("bn.js")) return "crypto-polyfills";
-        },
+        manualChunks,
       },
     },
     chunkSizeWarningLimit: 800,
