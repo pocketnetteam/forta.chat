@@ -700,10 +700,7 @@ class CallForegroundService : Service() {
         }
     }
 
-    /**
-     * Undo the mute a transient focus loss applied — and only that one, so a
-     * mute the user chose survives focus coming back.
-     */
+    /** Undo a duck still in force, unless the user moved the volume since. */
     private fun restoreDuckedVolume() {
         val am = audioManager ?: return
         try {
@@ -714,6 +711,10 @@ class CallForegroundService : Service() {
         }
     }
 
+    /**
+     * Undo the mute a transient focus loss applied — and only that one, so a
+     * mute the user chose survives focus coming back.
+     */
     private fun releaseFocusLossMute(reason: String) {
         if (!focusLossMute.release()) return
         Log.d("WebRTCAudio", "Unmuting the mic a focus loss muted: $reason")

@@ -70,9 +70,15 @@ class CallPlugin : Plugin() {
         // own persisted session marker — never on another app's live call —
         // and never touches MODE_RINGTONE, which Telecom releases itself when
         // the dead process's connections go with it.
-        runCatching {
-            CallTeardown.endCall(context, CallTeardownPolicy.Reason.COLD_START, null)
-        }.onFailure { Log.w(TAG, "cold-start teardown sweep threw", it) }
+        //
+        // Once per process: load() runs again for every new bridge — the app
+        // opened from a notification after exitApp or a task swipe left the
+        // process alive — and the sweep stopped a ringer that was still ringing.
+        if (ColdStartSweep.firstInProcess()) {
+            runCatching {
+                CallTeardown.endCall(context, CallTeardownPolicy.Reason.COLD_START, null)
+            }.onFailure { Log.w(TAG, "cold-start teardown sweep threw", it) }
+        }
 
         val onAnswered: (String, String) -> Unit = { callId, roomId ->
             notifyListeners("callAnswered", JSObject().apply {
