@@ -7,6 +7,7 @@ const {
   net,
   session,
   dialog,
+  desktopCapturer,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -320,6 +321,26 @@ function bootElectronApp() {
         const allowed = ["media", "notifications", "display-capture"];
         callback(allowed.includes(permission));
       },
+    );
+
+    // Screen share in calls: without a handler Electron rejects every
+    // getDisplayMedia, so the call's share button always failed on desktop.
+    // macOS 15+ shows its own picker; elsewhere the primary screen is shared
+    // (the user just pressed "Share screen" in the call).
+    win.webContents.session.setDisplayMediaRequestHandler(
+      (_request, callback) => {
+        desktopCapturer
+          .getSources({ types: ["screen"] })
+          .then((sources) => {
+            if (sources.length === 0) return callback({});
+            callback({ video: sources[0] });
+          })
+          .catch((e) => {
+            console.warn("[main] screen share: no capture source", e);
+            callback({});
+          });
+      },
+      { useSystemPicker: true },
     );
 
     if (isDev) {
