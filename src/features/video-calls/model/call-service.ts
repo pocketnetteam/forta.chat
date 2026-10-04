@@ -32,6 +32,7 @@ import {
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall, waitForFinalizeSettled, FINALIZE_SETTLE_WAIT_MS } from "./finalize-call";
 import { holdPageAwake } from "./page-awake-tone";
+import { onScreenShareEnded } from "./screen-share-end";
 import { waitUntil } from "@/shared/lib/wait-until";
 import { isIncomingCallsEnabled } from "@/shared/lib/push/incoming-calls-setting";
 import {
@@ -973,6 +974,8 @@ function getClient(): any {
 // ---------------------------------------------------------------------------
 
 let toggleCameraLock = false;
+// Module-level like the lock above: every useCallService() caller shares one call.
+let stopScreenShareWatch: (() => void) | null = null;
 
 // ---------------------------------------------------------------------------
 // Answer-call re-entry lock (WEE-45 / forta-bugs#724)
@@ -2068,6 +2071,17 @@ export function useCallService() {
       const newState = await call.setScreensharingEnabled(!wasEnabled);
       // setScreensharingEnabled returns the actual new state (true=sharing, false=not)
       callStore.screenSharing = newState;
+      stopScreenShareWatch?.();
+      stopScreenShareWatch = null;
+      if (newState) {
+        // Stopped from the browser's own "Stop sharing" control: tear the
+        // feed down the same way the in-app button does.
+        stopScreenShareWatch = onScreenShareEnded(call.localScreensharingStream, () => {
+          stopScreenShareWatch = null;
+          if (callStore.matrixCall !== call || !callStore.screenSharing) return;
+          void toggleScreenShare();
+        });
+      }
       updateFeeds(call);
     } catch (e) {
       console.error("[call-service] toggleScreenShare error:", e);
