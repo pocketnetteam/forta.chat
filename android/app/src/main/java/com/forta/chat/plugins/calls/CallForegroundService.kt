@@ -84,7 +84,9 @@ class CallForegroundService : Service() {
                 callId?.let { putExtra(CallActivity.EXTRA_CALL_ID, it) }
             }
             try {
-                context.startForegroundService(intent)
+                // ContextCompat: plain startService below Android 8, where
+                // startForegroundService does not exist (minSdk 24).
+                androidx.core.content.ContextCompat.startForegroundService(context, intent)
             } catch (e: Throwable) {
                 // WEE-31: Android 12+ ForegroundServiceStartNotAllowedException
                 // when the call accept path is invoked from a context the OS
@@ -206,6 +208,8 @@ class CallForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    // Android 7: focus held through the stream-based API, no request object.
+    private var legacyFocusHeld = false
     // The one volume change the focus listener owns (a duck). Main thread only.
     private val focusDuck = FocusDuckVolume()
     // The one mic mute the focus listener owns. Main thread only: the focus
@@ -532,6 +536,9 @@ class CallForegroundService : Service() {
     // -----------------------------------------------------------------------
 
     private fun createNotificationChannel() {
+        // Channels exist from Android 8; below it the class is missing and this
+        // threw from onCreate, killing the process at every call.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.channel_active_call),
@@ -747,6 +754,20 @@ class CallForegroundService : Service() {
 
     private fun requestAudioFocus() {
         val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // AudioFocusRequest is Android 8+; Android 7 takes the stream form.
+            @Suppress("DEPRECATION")
+            runCatching { am.abandonAudioFocus(audioFocusChangeListener) }
+            @Suppress("DEPRECATION")
+            val result = am.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN,
+            )
+            legacyFocusHeld = true
+            Log.d("WebRTCAudio", "Audio focus requested (GAIN, legacy), result=$result")
+            return
+        }
 
         // Release the previous request before building another one. This is not
         // a one-shot call: CallActivity.onResume re-requests on every return to
@@ -781,10 +802,17 @@ class CallForegroundService : Service() {
         // Reached from onDestroy and onTaskRemoved, where a throw propagates
         // into the Service lifecycle callback and takes the process with it —
         // and both of those run precisely when the call is already going wrong.
-        audioFocusRequest?.let {
-            runCatching { audioManager?.abandonAudioFocusRequest(it) }
-                .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocusRequest threw", e) }
-            audioFocusRequest = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let {
+                runCatching { audioManager?.abandonAudioFocusRequest(it) }
+                    .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocusRequest threw", e) }
+                audioFocusRequest = null
+            }
+        } else if (legacyFocusHeld) {
+            @Suppress("DEPRECATION")
+            runCatching { audioManager?.abandonAudioFocus(audioFocusChangeListener) }
+                .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocus threw", e) }
+            legacyFocusHeld = false
         }
         // Session 23 / D-09: undo a duck still in force here too. When we
         // self-abandon the focus (call ended normally) the focus change

@@ -24,6 +24,18 @@
 
 ## Ожидают проверки
 
+### Звонки и уведомления на Android 7.0–8.1
+- Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/Android7ApiGuardContractTest.kt`
+- Почему нужен человек: нужен аппарат или эмулятор с Android 7.x (образа API 24/25 на стенде нет). minSdk 24, но lint
+  находил 43 вызова API 26/28 без проверки: служба звонка падала в `onCreate` (`NotificationChannel`) — процесс
+  умирал на каждом звонке; рингер бросал исключение до `play()` (`Ringtone.setLooping`, API 28) и молчал на 7.0–8.1;
+  `startForegroundService`, `AudioFocusRequest`, вибрация, Tor (`Process.isAlive`), очистка уведомлений
+  (`Notification.channelId`) — то же. Теперь `./gradlew :app:lintSideloadDebug` — 0 ошибок NewApi.
+- Шаги: на Android 7.x — входящий звонок звонит и вибрирует, «Принять» соединяет, в разговоре есть звук, отбой без
+  падения; открыть чат с уведомлением — уведомление снимается; включить Tor.
+- Статус: ☐ не проверено на Android 7–8 (lint чист, контрактный тест; на Android 14 регресса нет — звонок
+  2026-10-05 01:13: рингер, `Audio focus requested (GAIN)`, соединение, `Service stopped`)
+
 ### «Принять» в момент отбоя звонящего не оставляет фантомный звонок
 - Коммит: см. `git log -1 -S "releaseOrphanedNativeAnswer" -- src/shared/lib/native-calls/native-call-bridge.ts`
 - Почему нужен человек: гонка нажатия с отбоем и Telecom — только на устройстве. Нажатие «Принять» через ~1 с после

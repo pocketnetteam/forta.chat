@@ -517,17 +517,19 @@ class CallConnectionService : ConnectionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Create notification channel
+        // Create notification channel (Android 8+; channels do not exist below)
         val channelId = "incoming_calls"
         val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(
-            channelId, applicationContext.getString(R.string.channel_incoming_calls),
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = applicationContext.getString(R.string.channel_incoming_calls_desc)
-            setSound(null, null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId, applicationContext.getString(R.string.channel_incoming_calls),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = applicationContext.getString(R.string.channel_incoming_calls_desc)
+                setSound(null, null)
+            }
+            notificationManager.createNotificationChannel(channel)
         }
-        notificationManager.createNotificationChannel(channel)
 
         // FSI permission check for Android 14+ (USE_FULL_SCREEN_INTENT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -886,6 +888,9 @@ class CallConnection(
                 return true
             }
         }
+        // Self-managed connections, the only kind this app creates, are
+        // Android 8+; nothing to route through Telecom below it.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         Log.d("CallConnection", "setAudioRoute($device)")
         @Suppress("DEPRECATION")
         setAudioRoute(TelecomAudioRoute.routeFor(device))

@@ -74,7 +74,7 @@ class MainActivity : BridgeActivity() {
             Log.w(
                 TAG,
                 "WebView render process gone (didCrash=" +
-                    "${runCatching { detail?.didCrash() }.getOrNull()}) -> $decision",
+                    "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) detail?.didCrash() else null}) -> $decision",
             )
             // Android forbids *using* a WebView whose renderer is gone. Who
             // destroys it depends on whether anyone else still will.
