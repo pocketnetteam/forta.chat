@@ -2115,6 +2115,9 @@ export function useCallService() {
         console.error("[call-service] setAudioDevice: no audio track obtained");
         return;
       }
+      // A fresh track starts enabled, and the SDK mutes by disabling the
+      // track: without this a muted user goes live on the new mic.
+      newTrack.enabled = !call.isMicrophoneMuted();
 
       // 2. Replace track on the WebRTC sender
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2173,6 +2176,8 @@ export function useCallService() {
         console.error("[call-service] setVideoDevice: no video track obtained");
         return;
       }
+      // Same as the mic: a camera turned off must stay off on the new device.
+      newTrack.enabled = !call.isLocalVideoMuted();
 
       // 2. Replace track on the WebRTC sender
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
