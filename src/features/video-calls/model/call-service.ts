@@ -1196,6 +1196,9 @@ export function useCallService() {
     }
 
     callStore.cancelScheduledClear();
+    // The cancelled clear was the only reset of the last call's mute, video,
+    // minimized and timer fields; without it this call starts with them.
+    if (!callStore.hasLiveCall) callStore.clearCall();
 
     // forta-bugs#497 / WEE-53: warn up-front when an outdated WebView is about
     // to drive a call. Previously this only surfaced if a mid-call network
@@ -1486,10 +1489,13 @@ export function useCallService() {
     }
 
     callStore.cancelScheduledClear();
-    // The previous call's CallInfo stays until its scheduled clear, which was
-    // just cancelled: drop it, or this call is answered with that call's
-    // type, peer and id (the native path skips setActiveCall until answer).
-    if (callStore.activeCall && callStore.activeCall.callId !== matrixCall.callId && !callStore.isInCall) {
+    // The previous call's state stays until its scheduled clear, which was
+    // just cancelled: reset it, or this call is answered with that call's
+    // type, peer and id (the native path skips setActiveCall until answer)
+    // and starts muted or minimized because that call was.
+    if (!callStore.hasLiveCall && callStore.matrixCall !== matrixCall) {
+      callStore.clearCall();
+    } else if (callStore.activeCall && callStore.activeCall.callId !== matrixCall.callId && !callStore.isInCall) {
       callStore.activeCall = null;
     }
 

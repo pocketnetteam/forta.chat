@@ -406,6 +406,15 @@ describe('call-service permission flow', () => {
       );
     });
 
+    it('resets the ended call\'s state before dialling (clear window)', async () => {
+      const clearCall = mockCallStore.clearCall as Mock;
+      clearCall.mockClear();
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      expect(clearCall).toHaveBeenCalled();
+      expect(clearCall.mock.invocationCallOrder[0]).toBeLessThan(mockSetActiveCall.mock.invocationCallOrder[0]);
+    });
+
     // WEE-49 / forta-bugs#460: a fast double-tap on the dial button (or a
     // JS-event re-emit from CallEventCard's call-back handler) used to slip
     // past the `isInCall` check while the first invocation was still awaiting
@@ -978,6 +987,30 @@ describe('call-service permission flow', () => {
         getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
       };
     }
+
+    // Regression: a call starting inside the previous call's clear window
+    // cancelled that clear — the only reset of its mute, minimized and timer
+    // fields — so the new call began muted or with its window hidden.
+    it('resets the ended call\'s state when the next call takes the slot', async () => {
+      const { useCallService } = await import('./call-service');
+      const clearCall = mockCallStore.clearCall as Mock;
+      clearCall.mockClear();
+      mockCallStore.hasLiveCall = false;
+      mockCallStore.matrixCall = incoming('ended-call');
+      await useCallService().handleIncomingCall(incoming('next-call') as never);
+      expect(clearCall).toHaveBeenCalledTimes(1);
+      expect(clearCall.mock.invocationCallOrder[0]).toBeLessThan(mockSetMatrixCall.mock.invocationCallOrder.at(-1)!);
+    });
+
+    it('does not reset a live call in the slot', async () => {
+      const { useCallService } = await import('./call-service');
+      const clearCall = mockCallStore.clearCall as Mock;
+      clearCall.mockClear();
+      const call = incoming('same-call');
+      mockCallStore.matrixCall = call;
+      await useCallService().handleIncomingCall(call as never);
+      expect(clearCall).not.toHaveBeenCalled();
+    });
 
     it('keeps the call marked as seen once its handlers are wired', async () => {
       const { isIncomingCallSeen, __resetIncomingCallDedupForTests } =
