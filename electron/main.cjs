@@ -158,12 +158,18 @@ function bootElectronApp() {
 
     ipcMain.handle("file:save", async (_event, fileName, buffer) => {
       if (!mainWindow) return null;
+      if (typeof fileName !== "string" || !(buffer instanceof ArrayBuffer || ArrayBuffer.isView(buffer))) {
+        return null;
+      }
       const { filePath } = await dialog.showSaveDialog(mainWindow, {
-        defaultPath: fileName,
+        defaultPath: path.basename(fileName),
       });
       if (!filePath) return null;
-      fs.writeFileSync(filePath, Buffer.from(buffer));
-      shell.openPath(filePath);
+      await fs.promises.writeFile(filePath, Buffer.from(buffer));
+      // Reveal, never open: the name and the bytes come from whoever sent the
+      // file, and opening it ran a received .exe / .bat / .command right after
+      // the user only asked to save it.
+      shell.showItemInFolder(filePath);
       return filePath;
     });
 
