@@ -106,6 +106,18 @@ describe("NativeRTCPeerConnection proxy", () => {
     uninstallNativeWebRTCProxy();
   });
 
+  // Regression: close() while init still awaited addListener left every
+  // handler added after it on the plugin for the rest of the process.
+  describe("close during init", () => {
+    it("removes the listeners init adds after close()", async () => {
+      const pc = new window.RTCPeerConnection();
+      pc.close();
+      for (let i = 0; i < 10; i++) await tick();
+      const left = Object.values(nativeListeners).reduce((n, set) => n + set.size, 0);
+      expect(left).toBe(0);
+    });
+  });
+
   describe("STUN fallback injection", () => {
     it("injects default Google STUN when config provides no iceServers", async () => {
       const pc = new window.RTCPeerConnection();
