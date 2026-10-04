@@ -183,6 +183,7 @@ vi.mock('matrix-js-sdk-bastyon/lib/webrtc/call', () => ({
     FeedsChanged: 'FeedsChanged',
     Hangup: 'Hangup',
     Error: 'Error',
+    Replaced: 'Replaced',
   },
   CallState: {
     Ringing: 'ringing',
@@ -736,6 +737,19 @@ describe('call-service permission flow', () => {
       const { useCallService } = await import('./call-service');
 
       expect(useCallService().currentCall().callId).toBeUndefined();
+    });
+  });
+
+  describe('glare resolved by the SDK', () => {
+    // Regression: replacedBy() answered the other side's call without
+    // Call.incoming — a live call with the mic open and no UI.
+    it('hangs the successor call up', async () => {
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      const onReplaced = mockOn.mock.calls.filter((c: unknown[]) => c[0] === 'Replaced').at(-1)?.[1] as (n: unknown) => void;
+      const successor = { callId: 'successor', hangup: vi.fn() };
+      onReplaced(successor);
+      expect(successor.hangup).toHaveBeenCalledWith('user_hangup', false);
     });
   });
 

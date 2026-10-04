@@ -367,6 +367,7 @@ let boundHandlers: {
    */
   call: MatrixCall;
   onState: CallEventHandlerMap[CallEvent.State];
+  onReplaced: CallEventHandlerMap[CallEvent.Replaced];
   onFeeds: CallEventHandlerMap[CallEvent.FeedsChanged];
   onHangup: CallEventHandlerMap[CallEvent.Hangup];
   onError: CallEventHandlerMap[CallEvent.Error];
@@ -419,6 +420,7 @@ function unwireCallEvents() {
     wired.off(CallEvent.FeedsChanged, boundHandlers.onFeeds);
     wired.off(CallEvent.Hangup, boundHandlers.onHangup);
     wired.off(CallEvent.Error, boundHandlers.onError);
+    wired.off(CallEvent.Replaced, boundHandlers.onReplaced);
   } catch { /* ignore */ }
   boundHandlers = null;
 }
@@ -669,7 +671,23 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     });
   }) as CallEventHandlerMap[CallEvent.Error];
 
-  boundHandlers = { callId: call.callId, call, onState, onFeeds, onHangup, onError };
+  // Glare: both sides dialled at once and the SDK resolved it by ending this
+  // call and answering the other side's invite itself (replacedBy). That call
+  // never reaches Call.incoming — no store entry, no screen, no hangup button,
+  // yet live with the mic open. Hand-over to it is not supported (the native
+  // call is keyed by this call's id), so it is hung up and both sides can
+  // dial again; this call ends normally through onState.
+  const onReplaced = ((newCall: MatrixCall) => {
+    console.warn("[call-service] call", call.callId, "replaced by", newCall.callId, "after glare — hanging the successor up");
+    try {
+      newCall.hangup(CallErrorCode.UserHangup, false);
+    } catch (e) {
+      console.warn("[call-service] could not hang up the glare successor:", e);
+    }
+  }) as CallEventHandlerMap[CallEvent.Replaced];
+
+  boundHandlers = { callId: call.callId, call, onState, onReplaced, onFeeds, onHangup, onError };
+  call.on(CallEvent.Replaced, onReplaced);
   call.on(CallEvent.State, onState);
   call.on(CallEvent.FeedsChanged, onFeeds);
   call.on(CallEvent.Hangup, onHangup);
