@@ -92,16 +92,51 @@ export function buildVoipPusherPayload(voipToken: string): PusherPayload {
 
 /**
  * Decide whether a pusher entry from `getPushers()` is stale and should be
- * removed. Stale = same `app_id` as our current platform's pusher but a
- * different `pushkey`. We never touch entries from other platforms — those
- * belong to other devices on this Matrix account.
+ * removed: same `app_id` as ours, a different `pushkey`, and that pushkey was
+ * registered by this install before (a rotated token). Pushers are per user,
+ * not per device: a pushkey this install never registered belongs to another
+ * phone on the same account, and deleting it — what the bare app_id match
+ * did — silenced calls and notifications there until it restarted and deleted
+ * ours in turn. Tokens that die without us are reported dead by the push
+ * gateway and removed by the homeserver.
  */
 export function isStalePusherEntry(
   p: { app_id?: string; pushkey?: string },
   currentAppId: string,
   currentToken: string,
+  ownPreviousPushkeys: readonly string[],
 ): boolean {
-  return p.app_id === currentAppId && p.pushkey !== currentToken;
+  return (
+    p.app_id === currentAppId &&
+    p.pushkey !== currentToken &&
+    typeof p.pushkey === 'string' &&
+    ownPreviousPushkeys.includes(p.pushkey)
+  );
+}
+
+const OWN_PUSHKEYS_LIMIT = 5;
+const ownPushkeysStorageKey = (appId: string) => `forta-chat:push_own_pushkeys:${appId}`;
+
+/** Pushkeys this install registered for `appId`, newest last. */
+export function ownPushkeys(appId: string): string[] {
+  try {
+    const raw = localStorage.getItem(ownPushkeysStorageKey(appId));
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.filter((k): k is string => typeof k === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Remember a pushkey this install registered, so a later rotation can clean it up. */
+export function rememberOwnPushkey(appId: string, pushkey: string): void {
+  try {
+    const keys = ownPushkeys(appId).filter((k) => k !== pushkey);
+    keys.push(pushkey);
+    localStorage.setItem(ownPushkeysStorageKey(appId), JSON.stringify(keys.slice(-OWN_PUSHKEYS_LIMIT)));
+  } catch {
+    // Best effort: without the list a rotated token is left for the gateway to expire.
+  }
 }
 
 /**
@@ -228,15 +263,17 @@ class PushService {
         // Pusher is live — best-effort stale cleanup is a separate concern;
         // its failure must not invalidate the successful registration above.
         try {
+          const previous = ownPushkeys(payload.app_id);
           const { pushers } = await matrixClient.getPushers();
           for (const p of pushers) {
-            if (isStalePusherEntry(p, payload.app_id, token)) {
+            if (isStalePusherEntry(p, payload.app_id, token, previous)) {
               await matrixClient.setPusher({ ...p, kind: null });
             }
           }
         } catch (pe) {
           console.warn('[PushService] Could not clean stale pushers:', pe);
         }
+        rememberOwnPushkey(payload.app_id, token);
         return;
       } catch (e) {
         lastError = e;
@@ -338,15 +375,17 @@ class PushService {
     try {
       await matrixClient.setPusher(payload);
       try {
+        const previous = ownPushkeys(payload.app_id);
         const { pushers } = await matrixClient.getPushers();
         for (const p of pushers) {
-          if (isStalePusherEntry(p, payload.app_id, voipToken)) {
+          if (isStalePusherEntry(p, payload.app_id, voipToken, previous)) {
             await matrixClient.setPusher({ ...p, kind: null });
           }
         }
       } catch (pe) {
         console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
       }
+      rememberOwnPushkey(payload.app_id, voipToken);
     } catch (e) {
       console.error('[PushService] Failed to register VoIP pusher:', e);
     }
@@ -683,24 +722,6 @@ class PushService {
       }));
     });
 
-    // iOS-specific tap source. UNUserNotificationCenter.delegate is owned
-    // by Capacitor's runtime; foreground/background taps surface as the
-    // standard PushNotifications.pushNotificationActionPerformed event.
-    // Cold-start taps are still buffered into PushData.getPendingIntent()
-    // by the native IOSPushIntent plugin.
-    if (isIOS) {
-      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
-        const data = (action.notification.data ?? {}) as Record<string, unknown>;
-        const roomId = typeof data.room_id === 'string' ? data.room_id : undefined;
-        if (!roomId) return;
-        const eventId = typeof data.event_id === 'string' ? data.event_id : undefined;
-        window.dispatchEvent(new CustomEvent('push:openRoom', {
-          detail: { roomId, eventId },
-        }));
-      });
-    }
-
-
     // Check for buffered push intent from cold-start (native fired before JS was ready)
     try {
       const pending = await PushData.getPendingIntent();
@@ -740,6 +761,26 @@ class PushService {
     }
 
     await PushNotifications.removeAllListeners();
+
+    // iOS-specific tap source. Added after removeAllListeners above — it
+    // used to be added before it and removed at once, so a tap on a
+    // notification while the app ran opened nothing. UNUserNotificationCenter.delegate is owned
+    // by Capacitor's runtime; foreground/background taps surface as the
+    // standard PushNotifications.pushNotificationActionPerformed event.
+    // Cold-start taps are still buffered into PushData.getPendingIntent()
+    // by the native IOSPushIntent plugin.
+    if (isIOS) {
+      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+        const data = (action.notification.data ?? {}) as Record<string, unknown>;
+        const roomId = typeof data.room_id === 'string' ? data.room_id : undefined;
+        if (!roomId) return;
+        const eventId = typeof data.event_id === 'string' ? data.event_id : undefined;
+        window.dispatchEvent(new CustomEvent('push:openRoom', {
+          detail: { roomId, eventId },
+        }));
+      });
+    }
+
 
     PushNotifications.addListener('registration', async ({ value: token }) => {
       // FCM token received
