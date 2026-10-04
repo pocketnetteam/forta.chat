@@ -824,6 +824,20 @@ export class MessageRepository {
     return msgs[0];
   }
 
+  /** Newest message in a room that the timeline still shows (not deleted,
+   *  not a cancelled upload awaiting cleanup). */
+  async getLastVisible(roomId: string, clearedAtTs?: number): Promise<LocalMessage | undefined> {
+    const lower = clearedAtTs ?? Dexie.minKey;
+    const msgs = await this.db.messages
+      .where("[roomId+timestamp]")
+      .between([roomId, lower], [roomId, Dexie.maxKey], !clearedAtTs, true)
+      .reverse()
+      .filter((m) => !m.softDeleted && !m.deleted && m.status !== "cancelled")
+      .limit(1)
+      .toArray();
+    return msgs[0];
+  }
+
   /** Get the timestamp of the last inbound (non-own) message in a room */
   async getLastInboundTimestamp(roomId: string, myAddress: string, clearedAtTs?: number): Promise<number> {
     const lower = clearedAtTs ?? Dexie.minKey;

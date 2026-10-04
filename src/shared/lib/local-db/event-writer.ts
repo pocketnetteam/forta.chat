@@ -812,6 +812,57 @@ export class EventWriter {
     this.onChange?.(redaction.roomId);
   }
 
+  /** Discard an own message whose send failed («Отменить» on the failed
+   *  bubble). The server never saw it, so it is removed outright: no
+   *  redaction, no «Сообщение удалено» placeholder. Its queued send ops go
+   *  too, and a chat-list preview that still shows it rolls back to the
+   *  newest remaining message (a local send never sets lastMessageEventId,
+   *  so writeRedaction's rollback can't find it).
+   *  Returns false, touching nothing, unless the message is failed and local-only
+   *  with no op mid-send. */
+  async discardFailedMessage(clientId: string): Promise<boolean> {
+    let roomId: string | undefined;
+    const discarded = await this.db.transaction(
+      "rw",
+      [this.db.messages, this.db.rooms, this.db.pendingOps],
+      async () => {
+        const msg = await this.messageRepo.getByClientId(clientId);
+        if (!msg || msg.status !== "failed" || msg.eventId || msg.localId == null) return false;
+        const ops = await this.db.pendingOps.where("clientId").equals(clientId).toArray();
+        if (ops.some((op) => op.status === "syncing")) return false;
+
+        roomId = msg.roomId;
+        await this.db.messages.delete(msg.localId);
+        await this.db.pendingOps.bulkDelete(ops.map((op) => op.id!));
+
+        const room = await this.roomRepo.getRoom(msg.roomId);
+        if (room?.lastMessageTimestamp !== msg.timestamp) return true;
+
+        const prev = await this.messageRepo.getLastVisible(msg.roomId, room.clearedAtTs);
+        if (!prev) {
+          await this.roomRepo.clearLastMessage(msg.roomId);
+          return true;
+        }
+        await this.roomRepo.updateLastMessage(
+          msg.roomId,
+          this.getPreviewText(prev.type, prev.content, prev.transferInfo?.amount, prev.fileInfo) || "[message]",
+          prev.timestamp,
+          prev.senderId,
+          prev.type,
+          prev.eventId ?? undefined,
+          prev.callInfo,
+          prev.systemMeta,
+          true,
+        );
+        await this.db.rooms.update(msg.roomId, { lastMessageLocalStatus: prev.status });
+        return true;
+      },
+    );
+
+    if (discarded && roomId) this.onChange?.(roomId);
+    return discarded;
+  }
+
   // ---------------------------------------------------------------------------
   // Read receipts
   // ---------------------------------------------------------------------------

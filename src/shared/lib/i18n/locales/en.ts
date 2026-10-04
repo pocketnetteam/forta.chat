@@ -355,6 +355,7 @@ export const en = {
   "message.retry": "Retry",
   "message.failedToLoadImage": "Failed to load image",
   "message.tapToRetry": "Tap to retry",
+  "message.cancelSend": "Cancel",
   "message.heicNotSupported": "HEIC image — open in gallery to view",
   "message.videoUnsupportedFormat": "Video format not supported",
   "message.videoLoadFailed": "Failed to load video",
