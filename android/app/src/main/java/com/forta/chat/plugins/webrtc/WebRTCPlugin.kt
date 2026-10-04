@@ -193,7 +193,12 @@ class WebRTCPlugin : Plugin() {
                     // Notify CallActivity when connected
                     if (state == PeerConnection.IceConnectionState.CONNECTED ||
                         state == PeerConnection.IceConnectionState.COMPLETED) {
+                        com.forta.chat.plugins.calls.CallActivity.mediaConnected = true
                         com.forta.chat.plugins.calls.CallActivity.onCallConnected?.invoke()
+                    } else if (state == PeerConnection.IceConnectionState.CLOSED ||
+                        state == PeerConnection.IceConnectionState.FAILED ||
+                        state == PeerConnection.IceConnectionState.NEW) {
+                        com.forta.chat.plugins.calls.CallActivity.mediaConnected = false
                     }
                 }
 
@@ -563,6 +568,7 @@ class WebRTCPlugin : Plugin() {
             return
         }
         manager?.closeAllPeerConnections()
+        com.forta.chat.plugins.calls.CallActivity.mediaConnected = false
         call.resolve(JSObject().apply { put("skipped", false) })
     }
 

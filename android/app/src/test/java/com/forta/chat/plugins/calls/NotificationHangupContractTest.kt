@@ -27,4 +27,25 @@ class NotificationHangupContractTest {
         assertTrue(branch.contains("CallActivity.onNativeHangup?.invoke()"))
         assertFalse("stopping the service first drops the call before JS hangs up", branch.contains("stopSelf()"))
     }
+
+    /** Regression: a tap on the notification opened a bare CallActivity ("Unknown", video, no call id). */
+    @Test
+    fun contentIntentCarriesTheCall() {
+        val start = service.indexOf("val contentIntent = Intent(this, CallActivity::class.java)")
+        assertTrue("content intent not found", start >= 0)
+        val block = service.substring(start, service.indexOf("val contentPendingIntent", start))
+        assertTrue(block.contains("CallActivity.EXTRA_CALLER_NAME"))
+        assertTrue(block.contains("CallActivity.EXTRA_CALL_TYPE"))
+        assertTrue(block.contains("CallActivity.EXTRA_CALL_ID"))
+    }
+
+    /** A screen reopened mid-call showed "Connecting…" for the rest of the call. */
+    @Test
+    fun reopenedScreenPicksUpTheConnectedState() {
+        val activity = listOf(
+            "src/main/java/com/forta/chat/plugins/calls/CallActivity.kt",
+            "android/app/src/main/java/com/forta/chat/plugins/calls/CallActivity.kt",
+        ).map { File(it) }.first { it.exists() }.readText()
+        assertTrue(activity.contains("if (mediaConnected) handleCallConnected()"))
+    }
 }

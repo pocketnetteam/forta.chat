@@ -81,6 +81,7 @@ class CallForegroundService : Service() {
                 putExtra(EXTRA_CALLER_NAME, callerName)
                 putExtra(EXTRA_CALL_TYPE, callType)
                 putExtra(EXTRA_GENERATION, generation)
+                callId?.let { putExtra(CallActivity.EXTRA_CALL_ID, it) }
             }
             try {
                 context.startForegroundService(intent)
@@ -200,6 +201,7 @@ class CallForegroundService : Service() {
     // app's display label so the notification still reads sensibly.
     private var callerName = "Forta Chat"
     private var callType = ""
+    private var callId = ""
     // Tracks whether ACTION_START actually populated callerName/callType
     // for this service instance. Lets ACTION_UPDATE detect the
     // out-of-order delivery path and ignore the update instead of
@@ -234,6 +236,7 @@ class CallForegroundService : Service() {
                 val incomingName = intent.getStringExtra(EXTRA_CALLER_NAME)
                 callerName = if (incomingName.isNullOrBlank()) "Unknown" else incomingName
                 callType = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "voice"
+                callId = intent.getStringExtra(CallActivity.EXTRA_CALL_ID).orEmpty()
                 hasStarted = true
                 generation = intent.getLongExtra(EXTRA_GENERATION, -1L)
                 // Re-assert liveness: a stop that ran on this same instance
@@ -591,8 +594,14 @@ class CallForegroundService : Service() {
     }
 
     private fun buildNotification(status: String): Notification {
+        // Carry the call along: a tap after the call screen was closed creates
+        // a fresh CallActivity, which otherwise showed "Unknown", assumed a
+        // video call (camera prompt on a voice call) and had no call id.
         val contentIntent = Intent(this, CallActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(CallActivity.EXTRA_CALLER_NAME, callerName)
+            putExtra(CallActivity.EXTRA_CALL_TYPE, callType.ifEmpty { "voice" })
+            if (callId.isNotEmpty()) putExtra(CallActivity.EXTRA_CALL_ID, callId)
         }
         val contentPendingIntent = PendingIntent.getActivity(
             this, 0, contentIntent,

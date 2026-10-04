@@ -71,6 +71,15 @@ class CallActivity : Activity(), SensorEventListener {
         // Static callback for ICE connected state
         var onCallConnected: (() -> Unit)? = null
 
+        /**
+         * Whether the current call's media is connected, for a screen created
+         * after the fact (reopened from the ongoing-call notification): the
+         * onCallConnected callback has already fired by then, and the screen
+         * sat on "Connecting…" for the rest of the call.
+         */
+        @Volatile
+        var mediaConnected = false
+
         // Static callback for native hangup button
         var onNativeHangup: (() -> Unit)? = null
 
@@ -308,6 +317,7 @@ class CallActivity : Activity(), SensorEventListener {
         onRemoteVideoMuted = { muted -> runOnUiThread { onRemoteVideoMuteChanged(muted) } }
         // Register for call connected
         onCallConnected = { runOnUiThread { handleCallConnected() } }
+        if (mediaConnected) handleCallConnected()
 
         Log.d(TAG, "CallActivity created: $callerName, type=$callType")
     }
