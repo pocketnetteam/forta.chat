@@ -650,7 +650,7 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     // down here ended the call on this side only — the peer stayed in it.
     errorEnding = true;
     queueMicrotask(() => {
-      if (!errorEnding || call.callHasEnded()) return;
+      if (!errorEnding || call.callHasEnded?.() === true) return;
       errorEnding = false;
       if (code === CallErrorCode.NoUserMedia && call.state === SDKCallState.Connected) {
         useToast().toast(tRaw("call.error.cameraUnavailable"), "error", 4000);
@@ -1318,8 +1318,9 @@ export function useCallService() {
       // WEE-16: the bridge now retries with a backoff and never rejects
       // — failures are logged inside the bridge with full attempt count.
       // We do not await it: starting audio routing is non-blocking for
-      // the dial-tone UX.
-      if (isNative) {
+      // the dial-tone UX. Not for a call hung up while it was being placed:
+      // its teardown already ran, and the routing would outlive it.
+      if (isNative && call.callHasEnded?.() !== true) {
         void nativeCallBridge.startAudioRouting({ callType: type });
       }
     } catch (e) {
@@ -1752,6 +1753,15 @@ export function useCallService() {
       return;
     }
 
+    // The caller may have hung up while the permission prompt was open:
+    // answer() on an ended call revives it (WaitLocalMedia), takes the mic and
+    // can even send m.call.answer for a call that is over.
+    if (call.callHasEnded?.() === true) {
+      console.info("[call-service] answerCall: the call ended before it could be answered:", call.callId);
+      answerInProgress = false;
+      return;
+    }
+
     callStore.updateStatus(CallStatus.connecting);
 
     // WEE-45: release the re-entry lock now that status === 'connecting'.
@@ -1797,6 +1807,16 @@ export function useCallService() {
       console.log("[call-service] answerCall: calling SDK call.answer(true, " + isVideo + ")");
       await call.answer(true, isVideo);
       console.log("[call-service] answerCall: SDK call.answer resolved");
+
+      // Hung up while answer() ran: teardown already happened (finalize is
+      // once per call), so the call screen and audio routing must not come up
+      // for a call that is over, and the stream answer() got is released here.
+      if (call.callHasEnded?.() === true) {
+        console.info("[call-service] answerCall: the call ended while answering:", call.callId);
+        clearConnectingWatchdog();
+        releaseLocalMedia(call);
+        return;
+      }
 
       // Non-blocking native UX transitions.
       if (isNative && callStore.activeCall) {

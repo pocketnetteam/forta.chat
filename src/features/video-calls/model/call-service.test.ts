@@ -1331,6 +1331,35 @@ describe('call-service permission flow', () => {
       expect(answerOrder).toBeLessThan(routingOrder);
     });
 
+    // Regression: a caller who hung up while the answer was in flight left a
+    // native call screen and audio routing up for a call that was over.
+    it('does not answer a call that ended during the permission prompt', async () => {
+      seedIncomingCall('voice');
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => true;
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(mockAnswer).not.toHaveBeenCalled();
+      expect(mockStartAudioRouting).not.toHaveBeenCalled();
+    });
+
+    it('brings up no call screen or routing for a call that ended while answering', async () => {
+      seedIncomingCall('voice');
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        ended = true;
+      });
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(mockAnswer).toHaveBeenCalledOnce();
+      expect(mockStartAudioRouting).not.toHaveBeenCalled();
+      expect(mockNativeWebRTCMethods.launchCallUI).not.toHaveBeenCalled();
+    });
+
     it('keeps the page audible for the answered call before the native call screen hides it', async () => {
       seedIncomingCall('voice');
 
