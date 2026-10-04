@@ -791,6 +791,9 @@ class NativeWebRTCManager(private val context: Context) {
             .onFailure { Log.w(TAG, "setAudioEnabled on a disposed track", it) }
     }
 
+    /** Whether the local mic track is live; null without a track. */
+    fun isAudioEnabled(): Boolean? = runCatching { localAudioTrack?.enabled() }.getOrNull()
+
     fun switchCamera() {
         runCatching {
             videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {

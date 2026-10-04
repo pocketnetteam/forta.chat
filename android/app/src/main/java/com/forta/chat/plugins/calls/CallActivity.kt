@@ -79,6 +79,22 @@ class CallActivity : Activity(), SensorEventListener {
          */
         @Volatile
         var mediaConnected = false
+            private set
+
+        /**
+         * When the current call's media first connected (elapsedRealtime), so
+         * a screen reopened mid-call shows the call's duration, not the time
+         * since the screen opened.
+         */
+        @Volatile
+        var mediaConnectedAtMs = 0L
+            private set
+
+        fun markMediaConnected(connected: Boolean) {
+            if (connected && !mediaConnected) mediaConnectedAtMs = android.os.SystemClock.elapsedRealtime()
+            if (!connected) mediaConnectedAtMs = 0L
+            mediaConnected = connected
+        }
 
         // Static callback for native hangup button
         var onNativeHangup: (() -> Unit)? = null
@@ -317,6 +333,10 @@ class CallActivity : Activity(), SensorEventListener {
         onRemoteVideoMuted = { muted -> runOnUiThread { onRemoteVideoMuteChanged(muted) } }
         // Register for call connected
         onCallConnected = { runOnUiThread { handleCallConnected() } }
+        // A screen reopened mid-call: the mute the previous screen (or JS)
+        // applied lives on the native track, not in this new instance.
+        isMuted = WebRTCPlugin.manager?.isAudioEnabled() == false
+        updateButtonStates()
         if (mediaConnected) handleCallConnected()
 
         Log.d(TAG, "CallActivity created: $callerName, type=$callType")
@@ -382,14 +402,21 @@ class CallActivity : Activity(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        // A finishing screen is destroyed after the next call's screen was
+        // created (hang up, redial within a few hundred ms): the callbacks and
+        // the router listener are that screen's by then, and clearing them
+        // left it unable to close, start its timer or show remote video.
+        val isCurrent = currentInstance === this || currentInstance == null
         if (currentInstance === this) currentInstance = null
         handler.removeCallbacks(timerRunnable)
         handler.removeCallbacks(hideControlsRunnable)
         pulseAnimator?.cancel()
-        onCallEnded = null
-        onCallConnected = null
-        onRemoteVideo = null
-        onRemoteVideoMuted = null
+        if (isCurrent) {
+            onCallEnded = null
+            onCallConnected = null
+            onRemoteVideo = null
+            onRemoteVideoMuted = null
+        }
         // Note: onNativeHangup is wired by WebRTCPlugin.load() and stays alive
 
         try {
@@ -406,7 +433,7 @@ class CallActivity : Activity(), SensorEventListener {
         // Ended). Stopping here would prematurely restore MODE_NORMAL while
         // the call might still be rebuilding the Activity after PiP exit
         // or screen-off recreation.
-        audioRouter.setUiListener(null)
+        if (isCurrent) audioRouter.setUiListener(null)
 
         super.onDestroy()
     }
@@ -544,7 +571,15 @@ class CallActivity : Activity(), SensorEventListener {
 
     fun handleCallConnected() {
         runOnUiThread {
+            // WebRTCPlugin calls this on every ICE CONNECTED/COMPLETED, and a
+            // reconnect after a network drop sends another: each run posted one
+            // more self-rescheduling timer chain and reset the label to 00:00.
+            if (isConnected) return@runOnUiThread
             isConnected = true
+            val since = mediaConnectedAtMs
+            if (since > 0L) {
+                callDurationSeconds = ((android.os.SystemClock.elapsedRealtime() - since) / 1000L).toInt()
+            }
             callStatusText.text = "00:00"
             handler.post(timerRunnable)
             scheduleHideControls()
