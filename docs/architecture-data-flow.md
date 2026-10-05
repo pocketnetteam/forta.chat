@@ -13,7 +13,7 @@ Forta Chat использует **offline-first** архитектуру с дв
 
 ## 1. Слои хранения
 
-### 1.1 Dexie (IndexedDB) — 15 таблиц (schema v18)
+### 1.1 Dexie (IndexedDB) — 15 таблиц (schema v19)
 
 | Таблица | Назначение | Ключ | Индексы |
 |---------|-----------|------|---------|
@@ -147,20 +147,20 @@ ChatPage.vue загружает сообщения комнаты
 ```
 setActiveRoom(roomId)
   ↓
-roomFetchStates.set(roomId, "loading")
+снапшот последней выдачи liveQuery (недавние комнаты) → первый кадр без скелетона
   ↓
-Dexie.messages.where({roomId}).sortBy('timestamp')
+MessageList: peek 1 строки в Dexie → decideRoomOpen()   (room-open-plan.ts)
+  ├─ "cached"  → показать строки Dexie, сеть не на пути открытия
+  ├─ "empty"   → история очищена, пустое состояние
+  └─ "network" → loadRoomMessages под бюджетом 8 с (room-open-load.ts), затем «Повторить»
   ↓
-Если сообщений < THRESHOLD:
-  ├─ matrixClient.scrollback()       ← подгрузка истории
-  └─ EventWriter записывает в Dexie
-  ↓
-liveQuery обновляет messages
-  ↓
-roomFetchStates.set(roomId, "ready")
-  ↓
-ChatVirtualScroller рендерит сообщения
+liveQuery обновляет messages → ChatVirtualScroller рендерит
 ```
+
+Скролл вверх листает `/messages` от `LocalRoom.paginationToken`, а не SDK scrollback. Дыры после
+ограниченного `/sync` (`Room.timelineReset`) помечаются в `LocalRoom.gapToken` и закрываются в фоне
+(`entities/chat/model/history-backfill.ts`; фоново — только открытый чат, видимые строки и 30 недавних
+комнат, остальные — при открытии). План: [2026-09-28-chat-open-local-first.md](plans/2026-09-28-chat-open-local-first.md).
 
 ### 2.5 Загрузка профилей
 

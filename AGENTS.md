@@ -81,4 +81,5 @@ Do not commit until all checks pass. There is no separate `lint` script.
 - Builds: [docs/android-local-build.md](docs/android-local-build.md), [docs/ios-local-build.md](docs/ios-local-build.md), [docs/vite-cold-start-optimization.md](docs/vite-cold-start-optimization.md)
 - Calls: [docs/webrtc-architecture.md](docs/webrtc-architecture.md), [docs/webrtc-calls-troubleshooting.md](docs/webrtc-calls-troubleshooting.md), [docs/webrtc-logs-analysis.md](docs/webrtc-logs-analysis.md), [docs/webrtc-solution-proposal.md](docs/webrtc-solution-proposal.md), [docs/call-bug-reproduction-matrix.md](docs/call-bug-reproduction-matrix.md), [docs/call-fix-checklist.md](docs/call-fix-checklist.md), [docs/call-bugs-needing-you.md](docs/call-bugs-needing-you.md)
 - Product and audits: [docs/ux-specification.md](docs/ux-specification.md), [docs/bastyon-chat-vs-forta-audit.md](docs/bastyon-chat-vs-forta-audit.md), [docs/emoji.md](docs/emoji.md), [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
-- Verification: [docs/manual-verification.md](docs/manual-verification.md); plans in `docs/plans/`
+- Verification: [docs/manual-verification.md](docs/manual-verification.md); Android E2E (Maestro): [e2e/README.md](e2e/README.md)
+- Plans: `docs/plans/`, status of each in [docs/plans/README.md](docs/plans/README.md) — update it when a plan's stage lands

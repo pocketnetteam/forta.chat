@@ -4,6 +4,40 @@
 
 Два списка: **1** — что исправлено на ветке, с шагами воспроизведения на старой сборке и проверки на новой; **2** — что ещё открыто. Дальше план. Состояние чекбоксов сохраняет страница: https://claude.ai/code/artifact/7bbf3a5b-2db0-474c-a305-ace0ae23f09d (приватная, статусы и заметки читаются оттуда напрямую). Здесь можно ставить `[x]`.
 
+## Статус на 2026-10-05
+
+Чеклист — снимок 2026-09-07; ветка влита в `master` (PR #253). Источник правды по проверкам —
+`docs/manual-verification.md`; ниже сводка по нему. `[x]` в пунктах проставлены только для проверенных.
+
+| Пункт | Состояние | Запись в `manual-verification.md` |
+|---|---|---|
+| F01 | ☑ проверено | «Микрофон освобождается после смахивания приложения из «недавних»» |
+| F02 | ☐ частично (защита проверена на Samsung с внедрённой гонкой) | «Разговор переживает завершение предыдущего звонка» |
+| F03 | ☑ закрыто решением владельца 2026-09-21 | «Зависший звонок отпускается при возврате в приложение» |
+| F07 | ☑ проверено 2026-09-10 | «Кнопка приёма не роняет приложение на границе таймаута» |
+| F10 | ☑ проверено 2026-09-10 | «Второй входящий не кладёт трубку идущему разговору» |
+| F11 | ☒ шаг 4 провален, путь заменён `27541373` (☑) | «Второй звонок перерисовывает экран входящего», «Второй звонок из другой комнаты не забирает экран у звонящего» |
+| F15 | ☑ проверено 2026-09-10 | «Баннер непрочитанного переживает схлопывание записей о звонке» |
+| F16 | ☑ проверено 2026-09-14 | «Тыловая камера не зеркалится» |
+| F17 | ☑ проверено 2026-09-17 | «Проба эхоподавителя не срабатывает ложно на здоровом аппарате» |
+| F18 | ☐ не проверено (нужна пара «старый релиз → релиз из CI») | «Пустые каналы уведомлений не возвращаются после обновления» |
+| F19 | ☐ частично: шаг 3 ☑, шаги 1–2 недостижимы на Samsung/Pixel | «В «Аккаунтах вызовов» значится Forta Chat» |
+| F22 | ☐ не проверено (нужна CI-сборка) | «Таймлайн аудио доезжает в реальном отчёте» |
+| F23 | ☐ не проверено (нужен телефон с жалобой на звук) | «Переключатель движка WebRTC меняет поведение» |
+| F24 | ☑ проверено 2026-09-17/21 | «Tor работает после удаления libconjure.so» |
+| F25 | ☑ проверено | «Аудиорежим сбрасывается без JS-финализации…» |
+| F26 | ☑ проверено | «Ответ из шторки и с экрана блокировки переживает 30-ю секунду» |
+| F27 | ☑ проверено | «ICE-кандидаты до answer доходят до соединения» |
+| F28 | ☑ проверено | «Одна камера на исходящий видеозвонок» |
+| F29 | ☑ закрыто 2026-09-22 | «Громкая связь: отказ и пин ручного выбора» |
+| F30 | ☐ частично (шаг 2 ☑; строка `Tor` и TURN — нет) | «Факты ICE и Tor в отчёте» |
+| F31 | ☐ частично (Pixel ☑; Samsung шаг 2 — нет) | «Full-screen intent и качелька громкости» |
+| F32 | ☑ проверено | «Слот Telecom по callId» |
+| F04, F05, F06, F08, F09, F12, F13, F14, F20, F21 | нет отдельной записи — статус неизвестен | — |
+
+Список 2 (O01–O16) — открытые кластеры отчётов пользователей; их состояние — в
+`docs/call-bugs-needing-you.md` и `docs/plans/2026-09-18-calls-handoff.md`.
+
 ## Стенд и сборки
 
 **Что есть:** Samsung (модель впишите на странице), Pixel, два эмулятора Pixel API 35 с Maestro, аккаунты `TEST1`/`TEST2` в `.env`, веб-клиент Forta как третья сторона.
@@ -59,7 +93,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
 ### Завершение звонка и аудиорежим
 
 
-- [ ] **F01. Микрофон остаётся занятым после смахивания приложения из недавних; протёкшая дорожка ломает следующий звонок (#997)**
+- [x] **F01. Микрофон остаётся занятым после смахивания приложения из недавних; протёкшая дорожка ломает следующий звонок (#997)**
   - Коммиты: `00ddc636` · Отчёты: [#997](https://github.com/greenShirtMystery/forta-bugs/issues/997) · Кластер: call-teardown-resource-leak
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: Pixel real device или Samsung real device (аппарат с mic-индикатором на Android 12+); Две тестовые учётные записи TEST1/TEST2 в .env; Locally built debug APK (или CI test APK если требуется функция с FLAG — но для этого теста базовая установка достаточна); adb подключение к устройству или эмулятору
   - Ограничения: Жест свайпа-из-недавних (Recents) требует ручного выполнения на реальном устройстве; Maestro не может симулировать системный жест ОС и поэтому не может быть использован для автоматизации этого шага. Микрофонный индикатор (точка в статус-баре) существует только на Android 12+; на Android 11 и ниже визуальная проверка индикатора пропускается, полагаемся на logcat и функциональность второго звонка. Все остальные шаги (установка APK, запуск звонка, проверка logcat, второй звонок, проверка звука) полностью автоматизируемы или прямолинейно верифицируемы на имеющемся оборудовании.
@@ -124,7 +158,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «Разговор переживает завершение предыдущего звонка»
 
 
-- [ ] **F03. Зависший звонок отпускается при возврате в приложение**
+- [x] **F03. Зависший звонок отпускается при возврате в приложение**
   - Коммиты: `00ddc636` · Отчёты: [#928](https://github.com/greenShirtMystery/forta-bugs/issues/928), [#958](https://github.com/greenShirtMystery/forta-bugs/issues/958) · Кластер: Stuck in MODE_RINGTONE after stale incoming call
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: Реальное устройство с Doze (предпочтительно Pixel или Samsung); Аккаунт TEST2 для входящего вызова (веб-клиент или другое устройство); adb доступ
   - Ограничения: На эмуляторе поведение Doze и Telecom отличается от реальных устройств. Требует точной синхронизации входящего вызова с действиями (тайминг критичен — нужно смахнуть ДО 45-секундного дедлайна соединения). Может потребоваться несколько попыток для воспроизводства.
@@ -236,7 +270,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «Зависший звонок отпускается при возврате в приложение»
 
 
-- [ ] **F07. Нажатие Принять/Отклонить на границе 45-секундного таймаута не роняет приложение**
+- [x] **F07. Нажатие Принять/Отклонить на границе 45-секундного таймаута не роняет приложение**
   - Коммиты: `00ddc636` · Кластер: accept-button-crash
   - Где: любой · Можно ли: частично · Нужно: Baseline: origin/master (66ae28ce) не содержит механизм 45-секундного таймаута — воспроизведение на baseline невозможно; HEAD: локально собранный debug APK или CI test APK (для проверки процесса kill в logcat); Реальный Samsung, Google Pixel, или эмулятор Pixel API 35 с Maestro; TEST1 и TEST2 для входящих звонков с разных аккаунтов
   - Ограничения: Baseline не имеет ring timeout, поэтому классическое воспроизведение (\"старое приложение вылетает\") невозможно. Проверка ограничена тестированием safeguards в новом коде (HEAD 00ddc636). На базовом APK можно только убедиться, что приложение не ломается от нажатия на граничных секундах (потому что timeout просто отсутствует). На старой сборке 45-секундного дедлайна Telecom нет (он добавлен в 00ddc636); там есть только 30-секундный авто-сброс экрана входящего, поэтому на старой сборке ловите границу 29–31 с, на новой — обе границы (30 и 45 с).
@@ -366,7 +400,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «Фикс изменяет ДВЕ охраны: startCall (строка 928: if (callStore.hasLiveCall)) и handleIncomingCall (строка 1197: if (callStore.hasLiveCall)). Обе были if (callStore.isInCall) в baseline (origin/master). Критично также наличие вызова touchMatrixCall() в onState обработчике (строка 437 в wireCallEvents): без него hasLiveCall остаётся в кэше после изменения SDK-состояния и охрана не переоценивается. Все три компонента необходимы для корректности фикса.»
 
 
-- [ ] **F10. Второй входящий во время разговора клал трубку идущему разговору**
+- [x] **F10. Второй входящий во время разговора клал трубку идущему разговору**
   - Коммиты: `e3079e09` · Кластер: call-state-displacement
   - Где: любой · Можно ли: можно проверить · Нужно: три аккаунта (A на целевом устройстве, B и C звонящие) или два реальных устройства + веб-клиент, либо два эмулятора (каждый с одним аккаунтом) + веб-клиент для третьей стороны; реальный Pixel или Samsung для точности Telecom-поведения, либо эмулятор Pixel API 35 с Maestro; adb для чтения logcat и dumpsys
   - Ограничения: Debug builds (собранные локально) не имеют google-services.json и FCM — экран входящего от C может не появиться через уведомление, но вызов всё равно будет обработан в onCreateIncomingConnection. CI Test APK (из GitHub Actions) имеет FCM и может показывать экран входящего. Для проверки, включено ли в Настройках → Приложения → Разрешения → Телефон для Forta Chat, нужен реальный аппарат.
@@ -495,7 +529,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «F14: Два hangup-события на одного звонка (baseline не дедупирует). После фикса: одна запись в таймлайне. Проверить: (1) скриншот UI (одна запись, не две); (2) DevTools IndexedDB bastyon-chat-{userId} → messages (два event_id, один callId); (3) проверить наличие коммитов 2254c375 и 2d639194 в целевой сборке (второй исправляет побочный эффект с unread-баннером)»
 
 
-- [ ] **F15. Баннер новых сообщений сохраняется при схлопывании записей о звонке**
+- [x] **F15. Баннер новых сообщений сохраняется при схлопывании записей о звонке**
   - Коммиты: `2d639194` · Кластер: unread-banner-collapse
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: git для сборки промежуточной версии (git checkout 2254c375 или git checkout 2d639194^); npm run build:android для сборки debug APK; эмулятор Pixel API-35 или реальный Pixel/Samsung; браузер с localhost:5173 (Vite dev server, npm run dev)
   - Ограничения: Требует синхронизации между браузером (web client) и эмулятором на одной учетке TEST1; невозможен на single-device setup без cross-client sync. Сборка baseline требует git checkout (используйте git checkout 2d639194^ для быстрого получения версии без фикса).
@@ -525,7 +559,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «Баннер непрочитанного переживает схлопывание записей о звонке»
 
 
-- [ ] **F16. Тыловая камера зеркалилась на Android**
+- [x] **F16. Тыловая камера зеркалилась на Android**
   - Коммиты: `3ac40372` · Отчёты: [#939](https://github.com/greenShirtMystery/forta-bugs/issues/939) · Кластер: video
   - Где: Samsung и Pixel · Можно ли: можно проверить
   - Ограничения: Эмулятор не подходит: синтетическая камера не имеет реального label с 'facing back'. Требуется реальное устройство (Pixel или Samsung), что уже есть в наличии.
@@ -553,7 +587,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
 ### Звук на вендорах вне списка
 
 
-- [ ] **F17. Нет звука на устройствах вне vendor-списка сломанного AEC: рантайм-проба AcousticEchoCanceler**
+- [x] **F17. Нет звука на устройствах вне vendor-списка сломанного AEC: рантайм-проба AcousticEchoCanceler**
   - Коммиты: `3cc4feee`, `5cd50126` · Отчёты: [#1337](https://github.com/greenShirtMystery/forta-bugs/issues/1337), [#1318](https://github.com/greenShirtMystery/forta-bugs/issues/1318), [#1292](https://github.com/greenShirtMystery/forta-bugs/issues/1292), [#1231](https://github.com/greenShirtMystery/forta-bugs/issues/1231), [#1226](https://github.com/greenShirtMystery/forta-bugs/issues/1226) · Кластер: F17 / no-audio
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: реальный Samsung/OnePlus вне BROKEN_HW_AEC_VENDORS; adb на хосте; TEST1/TEST2
   - Ограничения: Эмулятор Android 35 не имеет реального audio HAL, поэтому runtime probe для AcousticEchoCanceler вернёт null и будет использоваться только vendor list. Реальные audio проблемы можно проверить только на физических устройствах Samsung/OnePlus с поломанным HW AEC.
@@ -653,7 +687,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «В «Аккаунтах вызовов» запись приложения называется «Forta Chat» (не «Bastyon Chat»); входящие звонки поступают корректно после обновления»
 
 
-- [ ] **F24. Удалён неиспользуемый libconjure.so (24 МБ); Tor должен работать как раньше**
+- [x] **F24. Удалён неиспользуемый libconjure.so (24 МБ); Tor должен работать как раньше**
   - Коммиты: `9b425964` · Кластер: Tor daemon and bridge obfuscation
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: три аккаунта (TEST1/TEST2/TEST3) или два браузера; реальный аппарат (Telecom требует физического device); adb
   - Ограничения: This bench cannot show APK size differences across global CDN caches or diff APK compression ratios on different OEM firmware; locally build and adb-install to confirm size reduction on the actual target device. Tor bootstrap time varies by geography and network state (30–60 sec is typical for Russia; may be longer in regions with Tor congestion).
@@ -687,7 +721,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Запись в `docs/manual-verification.md`: «Tor работает после удаления libconjure.so»
 
 
-- [ ] **F25. Единый владелец завершения звонка: аудиорежим сбрасывается и без JS-финализации (O01, хвосты O02/O08)**
+- [x] **F25. Единый владелец завершения звонка: аудиорежим сбрасывается и без JS-финализации (O01, хвосты O02/O08)**
   - Коммиты: `07dd6ee8` · Кластер: stuck-after-call · Отчёты: O01 (37 отчётов), примеры в O01
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: обе сборки; для FCM-hangup при убитом процессе — CI-сборка (push)
   - Ограничения: на эмуляторе доказаны два пути — штатное завершение (политика ничего не трогает, `actions=[]`) и смерть процесса во время набора (новый процесс на cold-start увидел `audioMode=3` и открытый маркер сессии, сделал `forceStop(teardown COLD_START)` через 1,1 с после смерти). Смерть процесса во время ринга на эмуляторе API 35 режим не подвешивает: MODE_RINGTONE (маркер закрыт — рингер не сессия роутера) стал MODE_NORMAL через 3 с после `kill -9`, Telecom снял RINGING сам; система перезапустила только `CallConnectionService`, активити не пересоздала, поэтому sweep отработает при следующем открытии приложения. Значит 22 отчёта в MODE_RINGTONE — либо процесс не умирал, либо OEM-AudioService не сбрасывает режим по смерти клиента: это проверяется только на аппарате. FCM-hangup и OEM-переустановка режима (Samsung) на эмуляторе не воспроизводятся. Факт для диагностики: пока self-managed Connection в DIALING/ACTIVE, режим MODE_IN_COMMUNICATION держит сам Telecom и переустанавливает его после нашего `stop()`; отпускает через ~30 мс после `onDisconnect`. Значит `reportCallEnded`, не дошедший до Telecom, = висящий режим, который наш сброс не победит — это семейство слота (O06), а не роутера.
@@ -715,7 +749,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Автотесты: `CallTeardownPolicyTest.kt` (таблица reason×state), `CallTeardownContractTest.kt` (все хуки зовут `endCall`; только роутер пишет MODE_IN_COMMUNICATION; stale STOP; маркер закрывается на обоих путях), `AudioRouterEnsureModeTest.kt`, `CallServiceStopPolicyTest.kt`; androidTest `CallTeardownInstrumentedTest.kt` — реальный AudioManager на эмуляторе (`./gradlew :app:connectedSideloadDebugAndroidTest`).
   - Запись в `docs/manual-verification.md`: «Аудиорежим сбрасывается без JS-финализации: убитый процесс, FCM-hangup, серия звонков».
 
-- [ ] **F26. Один владелец ринга по callId; ответ из шторки и с экрана блокировки не сбрасывает звонок (O04, O09)**
+- [x] **F26. Один владелец ринга по callId; ответ из шторки и с экрана блокировки не сбрасывает звонок (O04, O09)**
   - Коммиты: `d606afdc` · Кластер: duplicate-ring, accept-button · Отчёты: O04 (4), O09 (6)
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: обе сборки; для «убитый процесс + шторка» и keyguard — CI-сборка (push)
   - Ограничения: на эмуляторе API 35 подтверждён только цикл рингера в рантайме: `IncomingRinger: arm` при ринге, через 30 с `auto-rejecting` → `stop` → Telecom REJECT → `CallTeardown` (MODE_RINGTONE не трогается, режим вернулся в NORMAL после отпускания Telecom); ответ через Telecom-уведомление и ответ с экрана прогнать не удалось — на софтверном рендере SystemUI отвечает ANR-диалогами, тап по кнопке Answer в шторке не доходит до PendingIntent, затем эмуляторы упали. Путь шторки, keyguard с PIN и путь FCM при убитом процессе — только аппарат (CI-сборка).
@@ -742,7 +776,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Автотесты: `IncomingRingerLedgerTest.kt`, `IncomingIntentMergeTest.kt`, `IncomingRingerContractTest.kt` (владелец один; флаги и roomId у интентов; onAnswer/reportCallConnected гасят ринг и push; decline gated; MainActivity.onNewIntent), `CallTeardownPolicyTest.kt` (STOP_RINGER по ключу). Maestro `05-call-answer.yaml` теперь ждёт 35 с после ответа и повторно проверяет `Mute`.
   - Запись в `docs/manual-verification.md`: «Ответ из шторки и с экрана блокировки переживает 30-ю секунду».
 
-- [ ] **F27. ICE-кандидаты, пришедшие до answer, больше не теряются (O15)**
+- [x] **F27. ICE-кандидаты, пришедшие до answer, больше не теряются (O15)**
   - Коммиты: `d4ae4282` · Кластер: connect-fail · Отчёты: O15 (код), вероятный вклад в O02/O05 («Соединение…» без relay)
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: обе сборки, две сети (Samsung на сотовой, Pixel на Wi-Fi)
   - Ограничения: на эмуляторах прогон до ICE-пути не дошёл (звонок заканчивался в пределах 10 с после ринга, экран ринга исчезал до ответа) — подтверждение только тестами; на эмуляторе сценарий тот же, что на стенде. Слышимость не проверяется — только факт соединения и логи.
@@ -766,7 +800,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Автотесты: `ice-candidate-buffer.test.ts` (порядок, сквозной проход после SRD, closed, end-of-candidates, ошибка SRD сохраняет очередь, ошибка одного кандидата, двойной attach); `call-service.test.ts` → «attaches the candidate buffer to the peer connection the SDK creates».
   - Запись в `docs/manual-verification.md`: «ICE-кандидаты до answer доходят до соединения».
 
-- [ ] **F28. Исходящий видеозвонок открывает камеру один раз; живой трек попадает в каждое соединение (O11)**
+- [x] **F28. Исходящий видеозвонок открывает камеру один раз; живой трек попадает в каждое соединение (O11)**
   - Коммиты: `4c23a27b` · Кластер: video · Отчёты: O11 (#1222 «одна сторона видит, другая нет», #1226 «в видео меня не слышно»)
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: обе сборки, реальная камера на обоих
   - Ограничения: на эмуляторе камера виртуальная — проверяется только факт одного захвата (одна строка `Local video started with camera` на звонок) и по одному `attached video track` на соединение; качество картинки и OEM-энкодеры — только стенд. Прогон на эмуляторах 2026-09-08 не завершён (хост дважды зависал и перезагрузился) — эмуляторного подтверждения у F28 нет.
@@ -788,7 +822,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Автотесты: `TrackAttachPolicyTest` (8 строк таблицы), `TrackAttachContractTest` (единственная точка `addTrack`, обе reuse-ветки через правило, `startLocalVideo` под `mediaLock`, `initVideoRenderers` без `startLocalVideo`, `attachLocalRenderer` без блокировки и порядок записи/чтения полей в обеих ветках гонки). Соединение, чьи senders не читаются (идёт teardown), пропускается с warning; ошибки `addTrack` по-прежнему всплывают наверх.
   - Запись в `docs/manual-verification.md`: «Одна камера на исходящий видеозвонок».
 
-- [ ] **F29. Громкая связь: отказ вместо молчания, ручной выбор не сбивается Bluetooth (O08)**
+- [x] **F29. Громкая связь: отказ вместо молчания, ручной выбор не сбивается Bluetooth (O08)**
   - Коммиты: `62581806` · Кластер: speaker-toggle · Отчёты: O08 (#1334 OnePlus, #1328, #1223)
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: обе сборки, Bluetooth-гарнитура
   - Ограничения: на эмуляторе нет Bluetooth и нет отдельного динамика/наушника — эмулятором не проверяется. Прошивки, где оба API переключения динамика игнорируются (часть OnePlus), фикс не чинит: они видны как `route: … FAILED` в таймлайне отчёта.
@@ -846,7 +880,7 @@ cp android/app/build/outputs/apk/sideload/debug/app-sideload-debug.apk ~/forta-n
   - Автотесты: `IncomingCallSurfaceContractTest` (STREAM_RING в onCreate, гейт API 34, deep-link для пакета, разрешение в манифесте), `use-notification-settings.test.ts` (false/null/reject, открытие экрана), `notification-settings-fsi.test.ts` (баннер только при `false`, кнопка), `collect-call-diagnostics.test.ts` (Android 14 / до 14 / iOS), `bug-report-sender.test.ts` (строка).
   - Запись в `docs/manual-verification.md`: «Full-screen intent и качелька громкости».
 
-- [ ] **F32. Исходящее Telecom-соединение получает свой callId; читатели слота проверяют id (O06)**
+- [x] **F32. Исходящее Telecom-соединение получает свой callId; читатели слота проверяют id (O06)**
   - Коммиты: `dac97dcb` · Кластер: stuck-after-call / second-call · Отчёты: O06 (код)
   - Где: Samsung и Pixel · Можно ли: можно проверить · Нужно: обе сборки, третья сторона (веб) для второго входящего
   - Ограничения: слот по-прежнему один — второй входящий во время разговора получает BUSY (продуктовое решение, см. O06).
