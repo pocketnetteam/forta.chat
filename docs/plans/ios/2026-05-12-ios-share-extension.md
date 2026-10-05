@@ -3,7 +3,7 @@
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task.
 
 **Parent plan:** `2026-05-12-ios-overall-plan.md`
-**Reuses:** `docs/plans/2026-04-09-android-share-target.md` (existing JS pipeline `share-target.ts`)
+**Reuses:** `docs/plans/2026-04-09-android-share-target.md` (удалён, см. `docs/plans/README.md`) (existing JS pipeline `share-target.ts`)
 
 **Goal:** Make Forta Chat appear in iOS Share Sheet (text, links, images, video, files), routing the shared payload through the existing `share-target.ts` → ForwardPicker pipeline. Match Android behavior 1:1 from the user's POV.
 
@@ -221,7 +221,7 @@ git commit -m "feat(ios): Share Extension target writes shared payload to App Gr
 
 **Step 1: Inspect existing Android-side reader**
 
-The current `share-target.ts` (per `docs/plans/2026-04-09-android-share-target.md`) listens to `CapacitorShareTarget.addListener('shareTargetReceived', cb)` and pulls the initial payload via `getInitialShare()`. Both work on iOS too — the plugin abstracts the App Group read.
+The current `share-target.ts` (per `docs/plans/2026-04-09-android-share-target.md` (удалён, см. `docs/plans/README.md`)) listens to `CapacitorShareTarget.addListener('shareTargetReceived', cb)` and pulls the initial payload via `getInitialShare()`. Both work on iOS too — the plugin abstracts the App Group read.
 
 **Step 2: Verify payload shape**
 

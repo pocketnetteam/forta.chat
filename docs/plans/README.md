@@ -9,7 +9,7 @@ For living docs use:
 - [docs/android-local-build.md](../android-local-build.md) / [docs/ios-local-build.md](../ios-local-build.md)
 - [docs/manual-verification.md](../manual-verification.md) — what still waits for a check on a device
 
-Commands inside plans (e.g. `npm run lint`, old paths like `new-bastyon-chat`, `SettingsPage.vue`, `com/bastyon/chat`, `Podfile` / `App.xcworkspace`) may be stale — follow `AGENTS.md` for current verification. Unticked checkboxes in a plan do not mean the work is open: most plans were never ticked. The table below is the status.
+Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `Podfile` / `App.xcworkspace`) may be stale — follow `AGENTS.md` for current verification. Unticked checkboxes in a plan do not mean the work is open: most plans were never ticked. The table below is the status.
 
 ## Status index (checked against the code, 2026-10-05)
 
@@ -34,11 +34,19 @@ Commands inside plans (e.g. `npm run lint`, old paths like `new-bastyon-chat`, `
 | Plan | Notes |
 |---|---|
 | [2026-09-28-chat-open-local-first](2026-09-28-chat-open-local-first.md) | stages 0–4; device measurements pending in `manual-verification.md` |
-| 2026-02-19 media-voice, 2026-03-03 chat-info-panel, 2026-03-06 invite-friend, 2026-03-06 post-player, 2026-03-09 chat-search (redesign, v2), 2026-03-10 channels-tab, 2026-03-10 link-preview, 2026-03-11 paste-drop-files, 2026-03-13 video-circles, 2026-03-18 unread-ux, 2026-03-19 optimistic-media-upload, 2026-03-20 native-webrtc-android, 2026-03-20 voice-message-ux, 2026-03-23 reply-preview-persistence, 2026-03-25 encrypted-display, 2026-03-30 logout-data-cleanup, 2026-03-30 room-list-scalability, 2026-03-31 android-back-button, 2026-03-31 reliable-registration, 2026-04-09 android-share-target, 2026-04-09 encryption-guard, 2026-04-09 telegram-forward, 2026-04-17 bug-report-status-tracker | spot-checked: the files and symbols the plans create exist |
-| [2026-03-13-youth-chat-pack](2026-03-13-youth-chat-pack.md) | Emoji Kitchen, GIF, reaction effects, typing bubble shipped; sticker packs removed later (`8b0d0675`) |
-| [2026-03-19-capacitor-mobile-app](2026-03-19-capacitor-mobile-app.md) | shipped; Android package is `com.forta.chat`, not `com.bastyon.chat` as in the plan |
-| [2026-03-20-sync-status-ux](2026-03-20-sync-status-ux.md) | shipped as `features/sync-status/model/use-sync-status.ts` (the plan's `use-chat-sync-status.ts` was not created) |
-| [2026-03-20-tor-status-mobile-design](2026-03-20-tor-status-mobile-design.md), [2026-03-27-tor-graceful-degradation](2026-03-27-tor-graceful-degradation-plan.md) | marked done in the plans |
-| [2026-03-31-android-safe-area-insets](2026-03-31-android-safe-area-insets.md) | superseded: keyboard and insets now go through `--app-bottom-inset` (see `docs/agent/architecture.md`, «Mobile layout») |
 
-**Not checked** (no status in the plan, not reconciled with the code): 2026-03-18 read-watermarks, 2026-03-19 chat-list-consistency-fix, 2026-03-19 message-overlap-fix, 2026-03-23 perf-cascade-elimination, 2026-03-23 telegram-like-scroll, 2026-03-24 perf-first-launch, 2026-03-25 fix-android-recording, 2026-03-25 perf-large-accounts, `dexiemigration/`, `AVATAR-UPLOAD-PEERTUBE.md`.
+**Not checked** (no status, not reconciled with the code): `dexiemigration/`, `AVATAR-UPLOAD-PEERTUBE.md`.
+
+## Deleted plans
+
+Removed 2026-10-05: the plans dated 2026-02 … 2026-04 and `llama/` (the first local-AI plan, replaced by
+`llama2/`). Of the dated plans, 28 were spot-checked as shipped or superseded (sticker packs from the youth-chat
+pack were removed later, `8b0d0675`); 8 were never reconciled with the code: read-watermarks,
+chat-list-consistency-fix, message-overlap-fix, perf-cascade-elimination, telegram-like-scroll, perf-first-launch,
+fix-android-recording, perf-large-accounts. Restore any of them from
+the last commit that had it:
+
+```bash
+git show 5ce16751:docs/plans/<file>.md          # read
+git ls-tree -r --name-only 5ce16751 docs/plans   # full list
+```

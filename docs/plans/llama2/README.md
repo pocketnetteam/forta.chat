@@ -103,7 +103,7 @@
 - План перехода `llama-cpp-capacitor` → `llama-cpp-pro` (Фаза 0 перед перф-тюнинг-планом, см. выше):
   `C:\inetpub2026\localai\docs\2026-08-20-llama-cpp-pro-migration-plan.md` — живёт в `local-ai`, т.к.
   весь объём работы там.
-- Предыдущий (устаревший) план в этом репозитории: [`docs/plans/llama/README.md`](../llama/README.md)
+- Предыдущий (устаревший) план в этом репозитории: `docs/plans/llama/README.md` (удалён, см. `docs/plans/README.md`)
   — LoRA-адаптерная схема поверх `llama-cpp-capacitor` напрямую, архитектурно заменена готовой
   `local-ai`; сохранён только как исторический контекст.
 - Dexie / local-first: `src/shared/lib/local-db/schema.ts`, `channel-repository.ts`.
