@@ -1955,6 +1955,11 @@ export function useCallService() {
     clearIncomingTimeout();
     clearConnectingWatchdog();
     stopAllSounds();
+    // Before reject(): the SDK ends the call synchronously inside it, and the
+    // still-wired State handler then logged a "missed" entry and played the
+    // end tone for a call the user just declined — two history entries.
+    // Everything that handler would do runs here instead.
+    unwireCallEvents();
 
     // WEE-31 follow-up: previously a throw inside call.reject() — most
     // commonly on web when the SDK call is in Fledgling state and rejects
@@ -1990,8 +1995,6 @@ export function useCallService() {
     // declined elsewhere) must release the camera/mic. No-op when rejected
     // while still ringing (no local stream acquired yet).
     releaseLocalMedia(call);
-
-    unwireCallEvents();
 
     if (callStore.activeCall) {
       callStore.addHistoryEntry({

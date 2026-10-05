@@ -2267,6 +2267,35 @@ describe('local media release on call teardown (WEE-89)', () => {
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
+  // Regression (web, 2026-10-05): reject() ends the SDK call synchronously, and
+  // the still-wired State handler added a "missed" entry and played the end
+  // tone before rejectCall added "declined" — two entries for one decline.
+  it('records one declined entry and no end tone for a decline', async () => {
+    const fakeCall = makeCallWithTracks([]);
+    fakeCall.reject = vi.fn(() => {
+      const offed = new Set(mockOff.mock.calls.map((c: unknown[]) => c[1]));
+      const live = mockOn.mock.calls.filter((c: unknown[]) => c[0] === 'State' && !offed.has(c[1]));
+      for (const [, handler] of live) (handler as (s: string, p: string) => void)('ended', 'ringing');
+    });
+    const { useCallService } = await import('./call-service');
+    const service = useCallService();
+    await service.handleIncomingCall(fakeCall as never);
+    mockCallStore.matrixCall = fakeCall;
+    mockCallStore.activeCall = {
+      callId: 'test-call-id', roomId: 'test-room-id', peerId: '@peer:matrix.org', peerAddress: 'peer',
+      peerName: 'Peer', type: 'voice', direction: 'incoming', status: 'incoming', startedAt: null, endedAt: null,
+    };
+    const { playEndTone } = await import('./call-sounds');
+    vi.mocked(playEndTone).mockClear();
+    mockAddHistoryEntry.mockClear();
+
+    service.rejectCall();
+
+    expect(mockAddHistoryEntry.mock.calls.map((c: unknown[]) => (c[0] as { status: string }).status)).toEqual(['declined']);
+    expect(playEndTone).not.toHaveBeenCalled();
+    mockCallStore.activeCall = null;
+  });
+
   it('stops local media tracks on reject', async () => {
     const stop = vi.fn();
     mockCallStore.matrixCall = makeCallWithTracks([stop]);
