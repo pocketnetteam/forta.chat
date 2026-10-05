@@ -59,8 +59,14 @@
   (`Notification.channelId`) — то же. Теперь `./gradlew :app:lintSideloadDebug` — 0 ошибок NewApi.
 - Шаги: на Android 7.x — входящий звонок звонит и вибрирует, «Принять» соединяет, в разговоре есть звук, отбой без
   падения; открыть чат с уведомлением — уведомление снимается; включить Tor.
-- Статус: ☐ не проверено на Android 7–8 (lint чист, контрактный тест; на Android 14 регресса нет — звонок
-  2026-10-05 01:13: рингер, `Audio focus requested (GAIN)`, соединение, `Service stopped`)
+- Статус: ☐ частично. 2026-10-05 эмулятор Android 7.0 (API 24, `google_apis` arm64, `adb root`, компоненты
+  запускались напрямую тем же интентом, что шлёт приложение). Старая сборка: запуск службы звонка —
+  `FATAL EXCEPTION: main … NoClassDefFoundError: android/app/NotificationChannel`; рингер — `vibration failed …
+  NoClassDefFoundError: android/os/VibrationEffect`. С правкой: служба в foreground с уведомлением, `Audio focus
+  requested (GAIN, legacy)`, вибрация с паттерном `[0, 1000, 1000]`, рингтон звучит. Уточнение: рингтон на API 24
+  играл и раньше — `Ringtone.setLooping` там уже есть как скрытый метод, тезис «рингер молчал» был неверен.
+  Остаток: весь сценарий звонка — системный WebView эмулятора (Chrome 53) не грузит приложение (белый экран,
+  `SyntaxError`, нет `window.Capacitor`); нужен Android 7 с обновлённым WebView (Play Store).
 
 ### «Принять» в момент отбоя звонящего не оставляет фантомный звонок
 - Коммит: см. `git log -1 -S "releaseOrphanedNativeAnswer" -- src/shared/lib/native-calls/native-call-bridge.ts`
