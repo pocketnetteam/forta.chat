@@ -39,9 +39,9 @@ Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / 
 
 ## Features
 
-- 🔒 **End-to-end encryption** for direct and group chats (Matrix Olm/Megolm via `matrix-js-sdk-bastyon`)
+- 🔒 **End-to-end encryption** for direct and group chats (Bastyon's Pcrypto: secp256k1 + AES-SIV, compatible with Bastyon chat)
 - 📴 **Local-first storage**: Dexie (IndexedDB) as the single source of truth, offline-first outbound queue via `SyncEngine` (FIFO + exponential backoff)
-- 📞 **Video calls** — 1:1 and group WebRTC — see [docs/webrtc-architecture.md](docs/webrtc-architecture.md)
+- 📞 **Calls** — 1:1 audio/video over WebRTC; group chats use external call links — see [docs/webrtc-architecture.md](docs/webrtc-architecture.md)
 - 🎙 **Rich media**: photos, videos, voice notes, video circles, and files with crash-recovery uploads
 - 🌐 **Public rooms & invite links**, reactions, polls, read watermarks, edit/redact
 - 🔑 **Sign in with Bastyon** — use your existing Bastyon private key — see [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
@@ -78,8 +78,8 @@ Available on the web at [forta.chat](https://forta.chat), on desktop (Windows / 
 
 ### Prerequisites
 
-- Node.js 18+
-- npm 7+
+- Node.js 22+
+- npm 10+
 
 ### Install
 
@@ -143,11 +143,11 @@ Capacitor config: [capacitor.config.ts](capacitor.config.ts) (`appId: com.forta.
 
 ### iOS (Capacitor)
 
-Requires macOS 14+, Xcode 16+, CocoaPods, and an enrolled Apple Developer account. iOS builds cannot run on Windows or Linux.
+Requires macOS 14+, Xcode 16+, and an enrolled Apple Developer account. Native dependencies come through Swift Package Manager (`ios/App/CapApp-SPM`), not CocoaPods. iOS builds cannot run on Windows or Linux.
 
 ```bash
-npm run cap:build:ios   # vite build + cap sync ios
-npm run cap:open:ios    # open ios/App/App.xcworkspace in Xcode
+npm run cap:build:ios   # vite build + cap sync ios + SPM product-name fix
+npm run cap:open:ios    # open ios/App/App.xcodeproj in Xcode
 npm run cap:run:ios     # run on simulator / connected device
 ```
 
@@ -195,7 +195,8 @@ Deep dives:
 
 | File | Topic |
 |------|-------|
-| [CLAUDE.md](CLAUDE.md) | Development rules (stack, architecture, conventions, verification) |
+| [AGENTS.md](AGENTS.md) | Development rules (stack, architecture, conventions, verification) |
+| [docs/manual-verification.md](docs/manual-verification.md) | Fixes waiting for a check on a real device |
 | [docs/local-first-architecture.md](docs/local-first-architecture.md) | Local-first: Dexie, SyncEngine, EventWriter |
 | [docs/architecture-data-flow.md](docs/architecture-data-flow.md) | Data flow and reactivity |
 | [docs/ux-specification.md](docs/ux-specification.md) | UX specification |
@@ -206,7 +207,7 @@ Deep dives:
 | [docs/android-local-build.md](docs/android-local-build.md) | Local Android APK build |
 | [docs/ios-local-build.md](docs/ios-local-build.md) | Local iOS build |
 | [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md) | How to obtain a Bastyon private key |
-| [docs/plans/](docs/plans/) | Design docs and feature plans (historical) |
+| [docs/plans/](docs/plans/README.md) | Design docs and feature plans, with a status index |
 
 ## Development
 
@@ -217,7 +218,7 @@ npm run build              # build (includes vue-tsc --noEmit + vite)
 npm run test               # tests
 ```
 
-Conventions, TDD, code review and the rest — in [CLAUDE.md](CLAUDE.md). There is no separate `npm run lint` in this repo.
+Conventions, TDD, code review and the rest — in [AGENTS.md](AGENTS.md). There is no separate `npm run lint` in this repo.
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 

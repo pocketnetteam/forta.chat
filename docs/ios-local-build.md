@@ -8,8 +8,7 @@
 |---|---|
 | Хост | **macOS 14+** — Xcode не работает на Windows/Linux |
 | Xcode | **16.0+** (iOS SDK 17+) |
-| CocoaPods | `sudo gem install cocoapods` (или `brew install cocoapods`) |
-| Node.js | 18+ с `npm` 7+ |
+| Node.js | 22+ с `npm` 10+ |
 | Apple Developer | Аккаунт в команде с подписанным `com.forta.chat` App ID |
 
 Проверь, что Xcode видит твой Apple ID: **Xcode → Settings → Accounts**. Без логина archive подписывать не сможет.
@@ -18,10 +17,9 @@
 
 ```bash
 npm install
-cd ios/App && pod install && cd -
 ```
 
-`pod install` нужен после каждого добавления / удаления Capacitor-плагина (`npm install @capacitor/...`). Если CocoaPods жалуется на устаревший репозиторий — `pod repo update` или `pod install --repo-update`.
+CocoaPods не используется: нативные зависимости подключаются через Swift Package Manager. Манифест `ios/App/CapApp-SPM/Package.swift` генерирует `npx cap sync ios` (руками не править). После sync `scripts/fix-ios-spm-products.mjs` выравнивает имена продуктов (форк `llama-cpp-pro` объявляет `LlamaCppCapacitor`, а не `LlamaCppPro`) — `npm run cap:build:ios` делает это сам. Пакеты Xcode скачивает при первом открытии проекта.
 
 ## Dev-сборка (симулятор)
 
@@ -30,7 +28,7 @@ npm run cap:build:ios
 npm run cap:open:ios
 ```
 
-`cap:build:ios` собирает Vite-bundle и синхронизирует его в `ios/App/public/` через Capacitor CLI. `cap:open:ios` открывает workspace в Xcode.
+`cap:build:ios` проставляет версию (`cap:version:ios`), собирает Vite-bundle, синхронизирует его в `ios/App/App/public/` через Capacitor CLI и чинит имена SPM-продуктов. `cap:open:ios` открывает `ios/App/App.xcodeproj` в Xcode.
 
 В Xcode:
 
@@ -66,7 +64,7 @@ npm run cap:open:ios
 
 `App.entitlements` уже содержит правильный ключ — но Xcode ДОПОЛНИТЕЛЬНО требует, чтобы capability была видна в UI, иначе provisioning profile её не подхватит:
 
-1. Открой `ios/App/App.xcworkspace`.
+1. Открой `ios/App/App.xcodeproj` (`npm run cap:open:ios`).
 2. Target **App** → вкладка **Signing & Capabilities**.
 3. Кнопка **+ Capability** → выбрать **Associated Domains**.
 4. В появившейся секции Xcode уже увидит две записи из `App.entitlements`:
@@ -137,7 +135,7 @@ Entry:
 |---|---|
 | Bundle ID | `com.forta.chat` |
 | App Group | `group.com.forta.chat` |
-| Capacitor | 8.2 |
+| Capacitor | 8 (`@capacitor/ios` ^8.3) |
 | iOS deployment target | 15.0 |
 | Xcode | 16+ |
 | iOS SDK | 17+ |
@@ -152,5 +150,5 @@ Entry:
 | Universal Link открывает Safari, а не app | AASA отдаётся как `application/json` без редиректа? AppID/TeamID совпадают? | `aasa-DEPLOYMENT.md` |
 | Xcode: "Provisioning profile doesn't include com.apple.developer.associated-domains" | Capability включена в Apple Developer portal? Download Manual Profiles? | этот документ, секция Capabilities |
 | Cold-start invite не подхватывается | iOS Console: `appUrlOpen` fired? JS: `[deep-link-handler] App.getLaunchUrl failed`? | `src/app/providers/initializers/deep-link-handler.ts` |
-| `pod install` падает | `pod repo update` и повторить | CocoaPods docs |
+| Xcode: `product 'LlamaCppPro' … not found` при разрешении пакетов | Sync сделан без `fix-ios-spm-products.mjs`: запустить `node scripts/fix-ios-spm-products.mjs` или `npm run cap:build:ios` | `scripts/fix-ios-spm-products.mjs` |
 | Push token не приходит | Реальное устройство (не симулятор)? `aps-environment` правильный? `GoogleService-Info.plist` для нужного bundle? | `docs/plans/ios/2026-05-12-ios-apns-push.md` |

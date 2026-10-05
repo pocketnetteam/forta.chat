@@ -3,7 +3,7 @@
 **Дата:** 2026-07-14  
 **Статус:** MVP реализован (фазы 0–6); остаётся manual QA и мелкие хвосты  
 **Референс:** [android-tor.md](./android-tor.md) — как Tor работает в Cordova-сборке Bastyon/PocketNet  
-**Связанные документы:** `docs/plans/2026-03-19-capacitor-mobile-app-design.md`, `docs/plans/2026-03-20-tor-status-mobile-design.md`, `docs/plans/2026-03-27-tor-graceful-degradation-plan.md`
+**Связанные документы:** `docs/plans/2026-03-19-capacitor-mobile-app-design.md` (удалён, см. `docs/plans/README.md`), `docs/plans/2026-03-20-tor-status-mobile-design.md` (удалён, см. `docs/plans/README.md`), `docs/plans/2026-03-27-tor-graceful-degradation-plan.md` (удалён, см. `docs/plans/README.md`)
 
 ---
 
