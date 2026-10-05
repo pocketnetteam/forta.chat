@@ -176,12 +176,15 @@ vi.mock('matrix-js-sdk-bastyon/lib/webrtc/call', () => ({
     remoteScreensharingStream: null,
     remoteUsermediaFeed: null,
     getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+    state: 'create_offer',
+    callHasEnded: vi.fn(() => false),
   })),
   CallEvent: {
     State: 'State',
     FeedsChanged: 'FeedsChanged',
     Hangup: 'Hangup',
     Error: 'Error',
+    Replaced: 'Replaced',
   },
   CallState: {
     Ringing: 'ringing',
@@ -195,6 +198,7 @@ vi.mock('matrix-js-sdk-bastyon/lib/webrtc/call', () => ({
   },
   CallErrorCode: {
     UserHangup: 'user_hangup',
+    NoUserMedia: 'no_user_media',
   },
 }));
 
@@ -401,6 +405,15 @@ describe('call-service permission flow', () => {
       expect(mockHoldPageAwake.mock.invocationCallOrder[0]).toBeLessThan(
         mockNativeWebRTCMethods.launchCallUI.mock.invocationCallOrder[0],
       );
+    });
+
+    it('resets the ended call\'s state before dialling (clear window)', async () => {
+      const clearCall = mockCallStore.clearCall as Mock;
+      clearCall.mockClear();
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      expect(clearCall).toHaveBeenCalled();
+      expect(clearCall.mock.invocationCallOrder[0]).toBeLessThan(mockSetActiveCall.mock.invocationCallOrder[0]);
     });
 
     // WEE-49 / forta-bugs#460: a fast double-tap on the dial button (or a
@@ -737,6 +750,107 @@ describe('call-service permission flow', () => {
     });
   });
 
+  describe('glare resolved by the SDK', () => {
+    // Regression: replacedBy() answered the other side's call without
+    // Call.incoming — a live call with the mic open and no UI.
+    it('hangs the successor call up', async () => {
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      const onReplaced = mockOn.mock.calls.filter((c: unknown[]) => c[0] === 'Replaced').at(-1)?.[1] as (n: unknown) => void;
+      const successor = { callId: 'successor', hangup: vi.fn() };
+      onReplaced(successor);
+      expect(successor.hangup).toHaveBeenCalledWith('user_hangup', false);
+    });
+  });
+
+  describe('an incoming call while dialling out', () => {
+    // Regression: the dial reaches the call slot only after several awaits,
+    // so an incoming call in that window took the slot and stranded the dial
+    // (no call screen, a Telecom connection left DIALING).
+    it('is rejected as busy and does not take the slot', async () => {
+      const { useCallService } = await import('./call-service');
+      const service = useCallService();
+      const dialling = service.startCall('!room:matrix.org', 'voice');
+      await Promise.resolve();
+      mockSetMatrixCall.mockClear();
+      const reject = vi.fn();
+      await service.handleIncomingCall({
+        callId: 'crossing-call',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: vi.fn(),
+        off: vi.fn(),
+        reject,
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      } as never);
+      await dialling;
+      expect(reject).toHaveBeenCalled();
+      expect(mockSetMatrixCall).not.toHaveBeenCalledWith(expect.objectContaining({ callId: 'crossing-call' }));
+    });
+  });
+
+  describe('SDK errors that do not end the call', () => {
+    // Regression: every CallEvent.Error tore the call down on this side only.
+    // A camera that cannot start mid-call leaves a working voice call, and a
+    // failed answer send leaves the call ringing — the peer stayed connected.
+    async function placed() {
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      const handler = (name: string) =>
+        mockOn.mock.calls.filter((c: unknown[]) => c[0] === name).at(-1)?.[1] as (...a: unknown[]) => void;
+      const call = mockSetMatrixCall.mock.calls.at(-1)?.[0] as { state: string; callHasEnded: ReturnType<typeof vi.fn> };
+      mockUpdateStatus.mockClear();
+      mockHangup.mockClear();
+      return { onError: handler('Error'), onState: handler('State'), call };
+    }
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+
+    it('closes a call the SDK ends after the error as failed', async () => {
+      const { onError, onState, call } = await placed();
+      onError({ code: 'ice_failed', message: 'ice' });
+      call.callHasEnded.mockReturnValue(true);
+      onState('ended', 'connecting');
+      await flush();
+      expect(mockUpdateStatus).toHaveBeenCalledWith('failed');
+    });
+
+    it('keeps a connected call when the camera cannot be turned on', async () => {
+      const { onError, call } = await placed();
+      call.state = 'connected';
+      onError({ code: 'no_user_media', message: 'camera' });
+      await flush();
+      expect(mockUpdateStatus).not.toHaveBeenCalledWith('failed');
+      expect(mockHangup).not.toHaveBeenCalled();
+    });
+
+    it('hangs up properly when the call is left alive after another error', async () => {
+      const { onError, call } = await placed();
+      call.state = 'ringing';
+      onError({ code: 'send_answer', message: 'answer' });
+      await flush();
+      expect(mockHangup).toHaveBeenCalledWith('send_answer', false);
+    });
+  });
+
+  describe('reconnect after an ICE restart', () => {
+    // Regression: the SDK sets Connected again after a network handover, and
+    // each time the timer restarted from 0 and startedAt moved, so the call's
+    // duration in history counted only from the last blip.
+    it('starts the timer once even if Connected is reported again', async () => {
+      const { useCallService } = await import('./call-service');
+      await useCallService().startCall('!room:matrix.org', 'voice');
+      const onState = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'State')?.[1] as
+        (newState: string, oldState: string) => void;
+      (mockCallStore.startTimer as ReturnType<typeof vi.fn>).mockClear();
+
+      onState('connected', 'connecting');
+      onState('connecting', 'connected');
+      onState('connected', 'connecting');
+
+      expect(mockCallStore.startTimer as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('outgoing ringback gating (#866 / WEE-54)', () => {
     function captureOnState() {
       const stateCall = mockOn.mock.calls.find((c: unknown[]) => c[0] === 'State');
@@ -874,6 +988,47 @@ describe('call-service permission flow', () => {
         getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
       };
     }
+
+    // Regression: a call starting inside the previous call's clear window
+    // cancelled that clear — the only reset of its mute, minimized and timer
+    // fields — so the new call began muted or with its window hidden.
+    it('resets the ended call\'s state when the next call takes the slot', async () => {
+      const { useCallService } = await import('./call-service');
+      const clearCall = mockCallStore.clearCall as Mock;
+      clearCall.mockClear();
+      mockCallStore.hasLiveCall = false;
+      mockCallStore.matrixCall = incoming('ended-call');
+      await useCallService().handleIncomingCall(incoming('next-call') as never);
+      expect(clearCall).toHaveBeenCalledTimes(1);
+      expect(clearCall.mock.invocationCallOrder[0]).toBeLessThan(mockSetMatrixCall.mock.invocationCallOrder.at(-1)!);
+    });
+
+    // Regression: reject() throws once the SDK ended the invite; the throw
+    // escaped as an unhandled rejection and kept the dedup slot taken.
+    it('releases the dedup slot when rejecting a busy invite throws', async () => {
+      const { isIncomingCallSeen, __resetIncomingCallDedupForTests } =
+        await import('./incoming-call-dedup');
+      const { useCallService } = await import('./call-service');
+      __resetIncomingCallDedupForTests();
+      mockCallStore.hasLiveCall = true;
+      const call = { ...incoming('busy-throws'), reject: vi.fn(() => { throw new Error("Call must be in 'ringing' state to reject!"); }) };
+      try {
+        await expect(useCallService().handleIncomingCall(call as never)).resolves.toBeUndefined();
+      } finally {
+        mockCallStore.hasLiveCall = false;
+      }
+      expect(isIncomingCallSeen('busy-throws')).toBe(false);
+    });
+
+    it('does not reset a live call in the slot', async () => {
+      const { useCallService } = await import('./call-service');
+      const clearCall = mockCallStore.clearCall as Mock;
+      clearCall.mockClear();
+      const call = incoming('same-call');
+      mockCallStore.matrixCall = call;
+      await useCallService().handleIncomingCall(call as never);
+      expect(clearCall).not.toHaveBeenCalled();
+    });
 
     it('keeps the call marked as seen once its handlers are wired', async () => {
       const { isIncomingCallSeen, __resetIncomingCallDedupForTests } =
@@ -1027,6 +1182,25 @@ describe('call-service permission flow', () => {
       );
 
       expect(mockSetMatrixCall).toHaveBeenLastCalledWith(null);
+    });
+
+    // Regression: the push-accepted branch skipped the expiry check, set an
+    // "incoming" CallInfo and answered; answerCall returned on the ended call
+    // and nothing ever cleared it — isInCall stuck, every later call busy.
+    it('drops an expired invite the user already accepted on the push ringer', async () => {
+      const { consumePendingAnswerCallId } = await import('@/shared/lib/native-calls');
+      vi.mocked(consumePendingAnswerCallId).mockResolvedValueOnce(true);
+      const { useCallService } = await import('./call-service');
+      await useCallService().handleIncomingCall(
+        staleIncoming('ended', 'stale-invite-e') as never,
+      );
+
+      expect(mockSetActiveCall).not.toHaveBeenCalled();
+      expect(mockAnswer).not.toHaveBeenCalled();
+      expect(mockSetMatrixCall).toHaveBeenLastCalledWith(null);
+      await vi.waitFor(() =>
+        expect(mockReportCallEnded).toHaveBeenCalledWith('stale-invite-e'),
+      );
     });
 
     it('still rings a call the SDK is holding in ringing state', async () => {
@@ -1265,6 +1439,35 @@ describe('call-service permission flow', () => {
       const answerOrder = mockAnswer.mock.invocationCallOrder[0];
       const routingOrder = mockStartAudioRouting.mock.invocationCallOrder[0];
       expect(answerOrder).toBeLessThan(routingOrder);
+    });
+
+    // Regression: a caller who hung up while the answer was in flight left a
+    // native call screen and audio routing up for a call that was over.
+    it('does not answer a call that ended during the permission prompt', async () => {
+      seedIncomingCall('voice');
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => true;
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(mockAnswer).not.toHaveBeenCalled();
+      expect(mockStartAudioRouting).not.toHaveBeenCalled();
+    });
+
+    it('brings up no call screen or routing for a call that ended while answering', async () => {
+      seedIncomingCall('voice');
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        ended = true;
+      });
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(mockAnswer).toHaveBeenCalledOnce();
+      expect(mockStartAudioRouting).not.toHaveBeenCalled();
+      expect(mockNativeWebRTCMethods.launchCallUI).not.toHaveBeenCalled();
     });
 
     it('keeps the page audible for the answered call before the native call screen hides it', async () => {
@@ -2094,6 +2297,35 @@ describe('local media release on call teardown (WEE-89)', () => {
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
+  // Regression (web, 2026-10-05): reject() ends the SDK call synchronously, and
+  // the still-wired State handler added a "missed" entry and played the end
+  // tone before rejectCall added "declined" — two entries for one decline.
+  it('records one declined entry and no end tone for a decline', async () => {
+    const fakeCall = makeCallWithTracks([]);
+    fakeCall.reject = vi.fn(() => {
+      const offed = new Set(mockOff.mock.calls.map((c: unknown[]) => c[1]));
+      const live = mockOn.mock.calls.filter((c: unknown[]) => c[0] === 'State' && !offed.has(c[1]));
+      for (const [, handler] of live) (handler as (s: string, p: string) => void)('ended', 'ringing');
+    });
+    const { useCallService } = await import('./call-service');
+    const service = useCallService();
+    await service.handleIncomingCall(fakeCall as never);
+    mockCallStore.matrixCall = fakeCall;
+    mockCallStore.activeCall = {
+      callId: 'test-call-id', roomId: 'test-room-id', peerId: '@peer:matrix.org', peerAddress: 'peer',
+      peerName: 'Peer', type: 'voice', direction: 'incoming', status: 'incoming', startedAt: null, endedAt: null,
+    };
+    const { playEndTone } = await import('./call-sounds');
+    vi.mocked(playEndTone).mockClear();
+    mockAddHistoryEntry.mockClear();
+
+    service.rejectCall();
+
+    expect(mockAddHistoryEntry.mock.calls.map((c: unknown[]) => (c[0] as { status: string }).status)).toEqual(['declined']);
+    expect(playEndTone).not.toHaveBeenCalled();
+    mockCallStore.activeCall = null;
+  });
+
   it('stops local media tracks on reject', async () => {
     const stop = vi.fn();
     mockCallStore.matrixCall = makeCallWithTracks([stop]);
@@ -2540,3 +2772,93 @@ describe('remote video state reaches the native call screen', () => {
     expect(feed.listenerCount('mute_state_changed')).toBe(0);
   });
 });
+
+// Regression: a fresh getUserMedia track starts enabled and the SDK mutes by
+// disabling the track, so switching the mic (or camera) while muted put the
+// user back on air while the button still said "muted".
+describe('device switch keeps the mute state', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function setup(kind: 'audio' | 'video', muted: boolean) {
+    const newTrack = { kind, enabled: true, stop: vi.fn() };
+    const replaceTrack = vi.fn().mockResolvedValue(undefined);
+    const oldTrack = { kind, enabled: !muted, stop: vi.fn() };
+    const localStream = {
+      getAudioTracks: () => (kind === 'audio' ? [oldTrack] : []),
+      getVideoTracks: () => (kind === 'video' ? [oldTrack] : []),
+      removeTrack: vi.fn(),
+      addTrack: vi.fn(),
+    };
+    mockCallStore.matrixCall = {
+      isMicrophoneMuted: vi.fn(() => kind === 'audio' && muted),
+      isLocalVideoMuted: vi.fn(() => kind === 'video' && muted),
+      peerConn: { getSenders: () => [{ track: oldTrack, replaceTrack }] },
+      localUsermediaStream: localStream,
+      getFeeds: () => [],
+      getLocalFeeds: () => [],
+      getRemoteFeeds: () => [],
+    };
+    const stream = {
+      getAudioTracks: () => (kind === 'audio' ? [newTrack] : []),
+      getVideoTracks: () => (kind === 'video' ? [newTrack] : []),
+      getTracks: () => [newTrack],
+    };
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+    });
+    return { newTrack, replaceTrack };
+  }
+
+  it('a muted mic stays muted on the new device', async () => {
+    const { newTrack, replaceTrack } = setup('audio', true);
+    const { useCallService } = await import('./call-service');
+    await useCallService().setAudioDevice('mic-2');
+    expect(replaceTrack).toHaveBeenCalledWith(newTrack);
+    expect(newTrack.enabled).toBe(false);
+  });
+
+  it('a live mic stays live on the new device', async () => {
+    const { newTrack } = setup('audio', false);
+    const { useCallService } = await import('./call-service');
+    await useCallService().setAudioDevice('mic-2');
+    expect(newTrack.enabled).toBe(true);
+  });
+
+  it('a camera turned off stays off on the new device', async () => {
+    const { newTrack, replaceTrack } = setup('video', true);
+    const { useCallService } = await import('./call-service');
+    await useCallService().setVideoDevice('cam-2');
+    expect(replaceTrack).toHaveBeenCalledWith(newTrack);
+    expect(newTrack.enabled).toBe(false);
+  });
+});
+
+describe('releaseOrphanedNativeAnswer', () => {
+  it('finalizes the native call when no call is live in JS', async () => {
+    const { __resetFinalizeCallStateForTests } = await import('./finalize-call');
+    __resetFinalizeCallStateForTests();
+    mockCallStore.hasLiveCall = false;
+    const { useCallService } = await import('./call-service');
+    useCallService().releaseOrphanedNativeAnswer('orphan-native', '!room:matrix.org');
+    await vi.waitFor(() => expect(mockReportCallEnded).toHaveBeenCalledWith('orphan-native'));
+  });
+
+  it('leaves the native side alone while a call is live', async () => {
+    const { __resetFinalizeCallStateForTests } = await import('./finalize-call');
+    __resetFinalizeCallStateForTests();
+    mockReportCallEnded.mockClear();
+    mockCallStore.hasLiveCall = true;
+    try {
+      const { useCallService } = await import('./call-service');
+      useCallService().releaseOrphanedNativeAnswer('other-native', '!room:matrix.org');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockReportCallEnded).not.toHaveBeenCalled();
+    } finally {
+      mockCallStore.hasLiveCall = false;
+    }
+  });
+});
+

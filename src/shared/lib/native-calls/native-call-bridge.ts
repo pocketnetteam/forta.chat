@@ -390,10 +390,22 @@ interface BridgeCallService {
   currentCall: () => NativeCallEventTarget;
   /** Android only — the native CallActivity's video toggle. */
   setLocalVideoMuted?: (muted: boolean) => void;
+  /**
+   * Native answered a call that never reached JS (the caller hung up as the
+   * user tapped Accept): release its Telecom connection and screens.
+   */
+  releaseOrphanedNativeAnswer?: (callId: string, roomId?: string) => void;
 }
 
 class NativeCallBridge {
   private callService: BridgeCallService | null = null;
+  /**
+   * wire() runs on every Matrix init — a re-login or account switch without a
+   * page reload — and each run used to add another set of listeners, so a
+   * native hangup or video toggle ran twice (two concurrent upgradeCall).
+   * The handlers read `this.callService`, so one set serves every wire().
+   */
+  private listenersAdded = false;
   /**
    * WEE-16: signal aborted by stop/forceStop so any in-flight
    * `startAudioRouting` retry bails immediately. Without this, a user
@@ -444,33 +456,38 @@ class NativeCallBridge {
       console.warn('[NativeCallBridge] requestAudioPermission failed:', e);
     }
 
-    await NativeCall.addListener('callAnswered', ({ callId, roomId }) => {
-      console.log('[NativeCallBridge] Call answered:', callId, 'room:', roomId);
-      // Record the accept so handleIncomingCall on the JS side knows
-      // to skip the duplicate-ring path and go straight to answered.
-      // BOTH callId and roomId are needed because a push without call_id
-      // keys the connection by its event_id, which will NEVER match the
-      // Matrix SDK's call.callId. For such an id the roomId fallback is how
-      // we correlate the pending accept with the MatrixCall.
-      // Assigned whole: this event names one call, so its room travels with
-      // its id. Keeping a previous call's room here and re-stamping it is
-      // exactly how a stale marker used to swallow an unrelated later call.
-      // Written on this side rather than natively, hence the local clock.
-      pendingAnswer = pendingCallMarkerOf(callId, roomId, Date.now());
-      this.waitForMatrixCallAndAnswer(callId, roomId, pendingAnswer);
-    });
+    const addListeners = !this.listenersAdded;
+    this.listenersAdded = true;
 
-    await NativeCall.addListener('callDeclined', ({ callId, roomId }) => {
-      console.log('[NativeCallBridge] Call declined:', callId);
-      if (!this.eventNamesCurrentCall('callDeclined', { callId, roomId })) return;
-      this.callService?.rejectCall();
-    });
+    if (addListeners) {
+      await NativeCall.addListener('callAnswered', ({ callId, roomId }) => {
+        console.log('[NativeCallBridge] Call answered:', callId, 'room:', roomId);
+        // Record the accept so handleIncomingCall on the JS side knows
+        // to skip the duplicate-ring path and go straight to answered.
+        // BOTH callId and roomId are needed because a push without call_id
+        // keys the connection by its event_id, which will NEVER match the
+        // Matrix SDK's call.callId. For such an id the roomId fallback is how
+        // we correlate the pending accept with the MatrixCall.
+        // Assigned whole: this event names one call, so its room travels with
+        // its id. Keeping a previous call's room here and re-stamping it is
+        // exactly how a stale marker used to swallow an unrelated later call.
+        // Written on this side rather than natively, hence the local clock.
+        pendingAnswer = pendingCallMarkerOf(callId, roomId, Date.now());
+        this.waitForMatrixCallAndAnswer(callId, roomId, pendingAnswer);
+      });
 
-    await NativeCall.addListener('callEnded', ({ callId, roomId }) => {
-      console.log('[NativeCallBridge] Call ended natively:', callId);
-      if (!this.eventNamesCurrentCall('callEnded', { callId, roomId })) return;
-      this.callService?.hangup();
-    });
+      await NativeCall.addListener('callDeclined', ({ callId, roomId }) => {
+        console.log('[NativeCallBridge] Call declined:', callId);
+        if (!this.eventNamesCurrentCall('callDeclined', { callId, roomId })) return;
+        this.callService?.rejectCall();
+      });
+
+      await NativeCall.addListener('callEnded', ({ callId, roomId }) => {
+        console.log('[NativeCallBridge] Call ended natively:', callId);
+        if (!this.eventNamesCurrentCall('callEnded', { callId, roomId })) return;
+        this.callService?.hangup();
+      });
+    }
 
     // Replay queued answer if user tapped Answer before JS was ready.
     //
@@ -564,7 +581,7 @@ class NativeCallBridge {
     // call-service.ts (Step 5 / webrtc-decision.md). Registering these
     // listeners on iOS would target a no-op Capacitor handle and emit
     // "UNIMPLEMENTED" warnings on every call setup. Skip cleanly.
-    if (isAndroid) {
+    if (isAndroid && addListeners) {
       // Native CallActivity hangup button → proper SDK hangup
       await NativeWebRTC.addListener('onNativeHangup', () => {
         console.log('[NativeCallBridge] Native UI hangup');
@@ -701,6 +718,9 @@ class NativeCallBridge {
       }
       if (Date.now() >= deadline) {
         console.warn('[NativeCallBridge] Timed out waiting for matrixCall:', callId);
+        // The connection was answered natively and nothing in JS will ever end
+        // it: it stayed ACTIVE, and every later call was refused as busy.
+        this.callService?.releaseOrphanedNativeAnswer?.(callId, roomId);
         return;
       }
       setTimeout(tick, POLL_MS);

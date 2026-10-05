@@ -747,7 +747,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           try {
             const callService = useCallService();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            callService.handleIncomingCall(call as any);
+            callService.handleIncomingCall(call as any).catch((err: unknown) => {
+              console.error("[auth] Failed to handle incoming call:", err);
+            });
           } catch (err) {
             console.error("[auth] Failed to handle incoming call:", err);
             try { (call as any).reject?.(); } catch { /* ignore */ }

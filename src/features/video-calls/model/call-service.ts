@@ -33,6 +33,7 @@ import {
 import { ensureCallPermissions, PermissionDeniedError, callPermissionError } from "./permissions";
 import { finalizeCall, waitForFinalizeSettled, FINALIZE_SETTLE_WAIT_MS } from "./finalize-call";
 import { holdPageAwake } from "./page-awake-tone";
+import { onScreenShareEnded } from "./screen-share-end";
 import { waitUntil } from "@/shared/lib/wait-until";
 import { isIncomingCallsEnabled } from "@/shared/lib/push/incoming-calls-setting";
 import {
@@ -368,6 +369,7 @@ let boundHandlers: {
    */
   call: MatrixCall;
   onState: CallEventHandlerMap[CallEvent.State];
+  onReplaced: CallEventHandlerMap[CallEvent.Replaced];
   onFeeds: CallEventHandlerMap[CallEvent.FeedsChanged];
   onHangup: CallEventHandlerMap[CallEvent.Hangup];
   onError: CallEventHandlerMap[CallEvent.Error];
@@ -420,6 +422,7 @@ function unwireCallEvents() {
     wired.off(CallEvent.FeedsChanged, boundHandlers.onFeeds);
     wired.off(CallEvent.Hangup, boundHandlers.onHangup);
     wired.off(CallEvent.Error, boundHandlers.onError);
+    wired.off(CallEvent.Replaced, boundHandlers.onReplaced);
   } catch { /* ignore */ }
   boundHandlers = null;
 }
@@ -468,6 +471,13 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // to the homeserver (CallState.InviteSent). See the InviteSent branch
   // below for the full rationale.
   let ringbackStarted = false;
+  // The SDK sets Connected again after an ICE restart (Wi-Fi to mobile
+  // handover): the timer, startedAt and the native "connected" report belong
+  // to the first time only, or the call's duration restarts from 0.
+  let connectedOnce = false;
+  // Set by onError when the SDK is about to end the call for that error:
+  // the ended state then closes it as failed, not as an ordinary hangup.
+  let errorEnding = false;
 
   const onState = ((newState: SDKCallState, _oldState: SDKCallState) => {
     const status = mapSDKState(newState, direction);
@@ -503,7 +513,11 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       clearConnectingWatchdog();
     }
 
-    if (status === CallStatus.connected) {
+    if (status === CallStatus.connected && connectedOnce) {
+      stopAllSounds();
+      updateFeeds(call);
+    } else if (status === CallStatus.connected) {
+      connectedOnce = true;
       stopAllSounds();
       clearIncomingTimeout();
       callStore.startTimer();
@@ -523,6 +537,12 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
         }).catch(() => {});
         NativeWebRTC.updateCallStatus({ status: "Connected", duration: "" }).catch(() => {});
       }
+    }
+
+    if (status === CallStatus.ended && errorEnding) {
+      errorEnding = false;
+      failCall();
+      return;
     }
 
     if (status === CallStatus.ended) {
@@ -588,15 +608,8 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
     }
   }) as CallEventHandlerMap[CallEvent.Hangup];
 
-  const onError = ((error: unknown) => {
-    // Detailed log for debugging (e.g. ICE failure when WiFi ↔ 4G)
-    const err = error as { code?: string; message?: string } | undefined;
-    const code = err?.code ?? (error as Error)?.name;
-    const msg = err?.message ?? (error as Error)?.message ?? String(error);
-    console.error("[call-service] call error:", code ?? "unknown", msg, error);
-    if (err && typeof err === "object" && !err.message && Object.keys(err).length > 0) {
-      console.error("[call-service] error object:", JSON.stringify(err, null, 2));
-    }
+  /** The end of a call the SDK ended with an error: status failed, a failed history entry. */
+  const failCall = () => {
     stopAllSounds();
     clearIncomingTimeout();
     clearConnectingWatchdog();
@@ -623,9 +636,60 @@ function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
       });
     }
     callStore.scheduleClearCall(2000);
+  };
+
+  const onError = ((error: unknown) => {
+    // Detailed log for debugging (e.g. ICE failure when WiFi ↔ 4G)
+    const err = error as { code?: string; message?: string } | undefined;
+    const code = err?.code ?? (error as Error)?.name;
+    const msg = err?.message ?? (error as Error)?.message ?? String(error);
+    console.error("[call-service] call error:", code ?? "unknown", msg, error);
+    if (err && typeof err === "object" && !err.message && Object.keys(err).length > 0) {
+      console.error("[call-service] error object:", JSON.stringify(err, null, 2));
+    }
+    // Not every SDK error ends the call. Most are followed at once by
+    // terminate(), and onState(ended) then closes it as failed. A camera
+    // that cannot be turned on mid-call (upgradeCall) leaves a working voice
+    // call, and a failed answer send leaves the call ringing: tearing those
+    // down here ended the call on this side only — the peer stayed in it.
+    errorEnding = true;
+    queueMicrotask(() => {
+      if (!errorEnding || call.callHasEnded?.() === true) return;
+      errorEnding = false;
+      if (code === CallErrorCode.NoUserMedia && call.state === SDKCallState.Connected) {
+        useToast().toast(tRaw("call.error.cameraUnavailable"), "error", 4000);
+        return;
+      }
+      // Still alive after an error it cannot recover from: hang up properly
+      // so the peer stops too; onState(ended) closes it as failed.
+      errorEnding = true;
+      try {
+        call.hangup((code as CallErrorCode) ?? CallErrorCode.UserHangup, false);
+      } catch (e) {
+        console.warn("[call-service] hangup after error failed:", e);
+        errorEnding = false;
+        failCall();
+      }
+    });
   }) as CallEventHandlerMap[CallEvent.Error];
 
-  boundHandlers = { callId: call.callId, call, onState, onFeeds, onHangup, onError };
+  // Glare: both sides dialled at once and the SDK resolved it by ending this
+  // call and answering the other side's invite itself (replacedBy). That call
+  // never reaches Call.incoming — no store entry, no screen, no hangup button,
+  // yet live with the mic open. Hand-over to it is not supported (the native
+  // call is keyed by this call's id), so it is hung up and both sides can
+  // dial again; this call ends normally through onState.
+  const onReplaced = ((newCall: MatrixCall) => {
+    console.warn("[call-service] call", call.callId, "replaced by", newCall.callId, "after glare — hanging the successor up");
+    try {
+      newCall.hangup(CallErrorCode.UserHangup, false);
+    } catch (e) {
+      console.warn("[call-service] could not hang up the glare successor:", e);
+    }
+  }) as CallEventHandlerMap[CallEvent.Replaced];
+
+  boundHandlers = { callId: call.callId, call, onState, onReplaced, onFeeds, onHangup, onError };
+  call.on(CallEvent.Replaced, onReplaced);
   call.on(CallEvent.State, onState);
   call.on(CallEvent.FeedsChanged, onFeeds);
   call.on(CallEvent.Hangup, onHangup);
@@ -915,6 +979,8 @@ function getClient(): any {
 // ---------------------------------------------------------------------------
 
 let toggleCameraLock = false;
+// Module-level like the lock above: every useCallService() caller shares one call.
+let stopScreenShareWatch: (() => void) | null = null;
 
 // ---------------------------------------------------------------------------
 // Answer-call re-entry lock (WEE-45 / forta-bugs#724)
@@ -944,6 +1010,20 @@ let answerInProgress = false;
  * `Call.incoming`. Read defensively — `state` is not in every SDK version's
  * public surface and a missing one must not stop a legitimate call ringing.
  */
+/**
+ * Reject an invite we will not ring. The SDK throws unless the call is still
+ * ringing, and its expiry timer can end it during the awaits before this
+ * point; the throw escaped handleIncomingCall as an unhandled rejection and
+ * skipped the dedup release after it.
+ */
+function rejectQuietly(call: MatrixCall): void {
+  try {
+    call.reject();
+  } catch (e) {
+    console.warn("[call-service] reject of an invite we will not ring failed:", e);
+  }
+}
+
 function isSdkCallEnded(call: MatrixCall): boolean {
   const state = (call as unknown as { state?: string }).state;
   return state === "ended";
@@ -1135,6 +1215,9 @@ export function useCallService() {
     }
 
     callStore.cancelScheduledClear();
+    // The cancelled clear was the only reset of the last call's mute, video,
+    // minimized and timer fields; without it this call starts with them.
+    if (!callStore.hasLiveCall) callStore.clearCall();
 
     // forta-bugs#497 / WEE-53: warn up-front when an outdated WebView is about
     // to drive a call. Previously this only surfaced if a mid-call network
@@ -1285,8 +1368,9 @@ export function useCallService() {
       // WEE-16: the bridge now retries with a backoff and never rejects
       // — failures are logged inside the bridge with full attempt count.
       // We do not await it: starting audio routing is non-blocking for
-      // the dial-tone UX.
-      if (isNative) {
+      // the dial-tone UX. Not for a call hung up while it was being placed:
+      // its teardown already ran, and the routing would outlive it.
+      if (isNative && call.callHasEnded?.() !== true) {
         void nativeCallBridge.startAudioRouting({ callType: type });
       }
     } catch (e) {
@@ -1385,6 +1469,16 @@ export function useCallService() {
       }
     }
 
+    // We are dialling ourselves: the outgoing call has not reached the slot
+    // yet (it does so after several awaits), so hasLiveCall below misses it,
+    // and the incoming call took the slot and stranded the dial. Busy.
+    if (outgoingCallInProgress) {
+      console.log("[call-service] handleIncomingCall: dialling out, rejecting as busy");
+      rejectQuietly(matrixCall);
+      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+      return;
+    }
+
     if (callStore.hasLiveCall) {
       console.log("[call-service] handleIncomingCall: already in call, rejecting");
       // Deliberately NOT finalizeCall() here, unlike the expired-invite
@@ -1400,7 +1494,7 @@ export function useCallService() {
       // reads the Telecom slot first and only forwards the push here. A call
       // that still rings is SecondRingPolicy's case — see
       // docs/call-bugs-needing-you.md, "Второй входящий во время разговора".
-      matrixCall.reject();
+      rejectQuietly(matrixCall);
       // Release the dedup slot: when the current call ends the user is
       // available again, and a legitimate re-invite from the same caller
       // (rare same-callId retry) should ring through instead of being
@@ -1412,7 +1506,7 @@ export function useCallService() {
     const otherTabActive = await checkOtherTabHasCall();
     if (otherTabActive) {
       console.warn("[call-service] Another tab already has an active call, rejecting incoming");
-      matrixCall.reject();
+      rejectQuietly(matrixCall);
       // Same rationale as the isInCall branch: ownership of the call is
       // delegated to the other tab — releasing our dedup slot lets a
       // future invite ring through normally if that tab closes.
@@ -1421,6 +1515,15 @@ export function useCallService() {
     }
 
     callStore.cancelScheduledClear();
+    // The previous call's state stays until its scheduled clear, which was
+    // just cancelled: reset it, or this call is answered with that call's
+    // type, peer and id (the native path skips setActiveCall until answer)
+    // and starts muted or minimized because that call was.
+    if (!callStore.hasLiveCall && callStore.matrixCall !== matrixCall) {
+      callStore.clearCall();
+    } else if (callStore.activeCall && callStore.activeCall.callId !== matrixCall.callId && !callStore.isInCall) {
+      callStore.activeCall = null;
+    }
 
     const peerId = matrixCall.getOpponentMember()?.userId ?? "";
     const { peerAddress, peerName } = await resolvePeerInfo(peerId);
@@ -1457,8 +1560,35 @@ export function useCallService() {
     // straight to answering — this is the path that matches what
     // WhatsApp/Telegram do: one tap on Answer transitions the surface
     // directly to the in-call screen.
+    // The SDK ends a call whose invite is past its lifetime; its expiry
+    // timer can fire during the awaits above, before wireCallEvents, so no
+    // State event will ever report it.
+    const dropEndedInvite = () => {
+      console.warn(
+        "[call-service] incoming call already ended by the SDK (expired invite) — not ringing:",
+        matrixCall.callId,
+      );
+      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+      // Through finalizeCall like every other termination path: the native
+      // side may already be ringing (FCM usually wins this race, which is how
+      // a retained invite gets here in the first place), and only finalizeCall
+      // releases the Telecom connection and dismisses that ringer. Nulling the
+      // Pinia slot alone is invisible to native — the phone would keep ringing
+      // for a call that is already over.
+      unwireCallEvents();
+      if (isNative) void finalizeCall("sdk-ended", matrixCall.callId, matrixCall.roomId);
+      callStore.setMatrixCall(null);
+    };
+
     const alreadyAccepted = isNative && (await consumePendingAnswerCallId(matrixCall.callId, matrixCall.roomId));
     if (alreadyAccepted) {
+      // Accepted on the push ringer, but the invite expired before the app
+      // got here: answering it would leave an "incoming" CallInfo that no
+      // event ever ends — isInCall stuck true, every later call "busy".
+      if (isSdkCallEnded(matrixCall)) {
+        dropEndedInvite();
+        return;
+      }
       console.log("[call-service] Pre-accepted incoming call, skipping ringer:", matrixCall.callId);
       // Seed activeCall with incoming status so answerCall() sees the
       // right state and the UI has something to bind to. Do NOT pre-set
@@ -1526,20 +1656,7 @@ export function useCallService() {
     // minutes later, and there was no call" looks like from the outside
     // (#958, #928).
     if (isSdkCallEnded(matrixCall)) {
-      console.warn(
-        "[call-service] incoming call already ended by the SDK (expired invite) — not ringing:",
-        matrixCall.callId,
-      );
-      if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
-      // Through finalizeCall like every other termination path: the native
-      // side may already be ringing (FCM usually wins this race, which is how
-      // a retained invite gets here in the first place), and only finalizeCall
-      // releases the Telecom connection and dismisses that ringer. Nulling the
-      // Pinia slot alone is invisible to native — the phone would keep ringing
-      // for a call that is already over.
-      unwireCallEvents();
-      if (isNative) void finalizeCall("sdk-ended", matrixCall.callId, matrixCall.roomId);
-      callStore.setMatrixCall(null);
+      dropEndedInvite();
       return;
     }
 
@@ -1719,6 +1836,15 @@ export function useCallService() {
       return;
     }
 
+    // The caller may have hung up while the permission prompt was open:
+    // answer() on an ended call revives it (WaitLocalMedia), takes the mic and
+    // can even send m.call.answer for a call that is over.
+    if (call.callHasEnded?.() === true) {
+      console.info("[call-service] answerCall: the call ended before it could be answered:", call.callId);
+      answerInProgress = false;
+      return;
+    }
+
     callStore.updateStatus(CallStatus.connecting);
 
     // WEE-45: release the re-entry lock now that status === 'connecting'.
@@ -1764,6 +1890,16 @@ export function useCallService() {
       console.log("[call-service] answerCall: calling SDK call.answer(true, " + isVideo + ")");
       await call.answer(true, isVideo);
       console.log("[call-service] answerCall: SDK call.answer resolved");
+
+      // Hung up while answer() ran: teardown already happened (finalize is
+      // once per call), so the call screen and audio routing must not come up
+      // for a call that is over, and the stream answer() got is released here.
+      if (call.callHasEnded?.() === true) {
+        console.info("[call-service] answerCall: the call ended while answering:", call.callId);
+        clearConnectingWatchdog();
+        releaseLocalMedia(call);
+        return;
+      }
 
       // Non-blocking native UX transitions.
       if (isNative && callStore.activeCall) {
@@ -1831,6 +1967,11 @@ export function useCallService() {
     clearIncomingTimeout();
     clearConnectingWatchdog();
     stopAllSounds();
+    // Before reject(): the SDK ends the call synchronously inside it, and the
+    // still-wired State handler then logged a "missed" entry and played the
+    // end tone for a call the user just declined — two history entries.
+    // Everything that handler would do runs here instead.
+    unwireCallEvents();
 
     // WEE-31 follow-up: previously a throw inside call.reject() — most
     // commonly on web when the SDK call is in Fledgling state and rejects
@@ -1866,8 +2007,6 @@ export function useCallService() {
     // declined elsewhere) must release the camera/mic. No-op when rejected
     // while still ringing (no local stream acquired yet).
     releaseLocalMedia(call);
-
-    unwireCallEvents();
 
     if (callStore.activeCall) {
       callStore.addHistoryEntry({
@@ -1981,6 +2120,17 @@ export function useCallService() {
       const newState = await call.setScreensharingEnabled(!wasEnabled);
       // setScreensharingEnabled returns the actual new state (true=sharing, false=not)
       callStore.screenSharing = newState;
+      stopScreenShareWatch?.();
+      stopScreenShareWatch = null;
+      if (newState) {
+        // Stopped from the browser's own "Stop sharing" control: tear the
+        // feed down the same way the in-app button does.
+        stopScreenShareWatch = onScreenShareEnded(call.localScreensharingStream, () => {
+          stopScreenShareWatch = null;
+          if (callStore.matrixCall !== call || !callStore.screenSharing) return;
+          void toggleScreenShare();
+        });
+      }
       updateFeeds(call);
     } catch (e) {
       console.error("[call-service] toggleScreenShare error:", e);
@@ -2014,6 +2164,9 @@ export function useCallService() {
         console.error("[call-service] setAudioDevice: no audio track obtained");
         return;
       }
+      // A fresh track starts enabled, and the SDK mutes by disabling the
+      // track: without this a muted user goes live on the new mic.
+      newTrack.enabled = !call.isMicrophoneMuted();
 
       // 2. Replace track on the WebRTC sender
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2072,6 +2225,8 @@ export function useCallService() {
         console.error("[call-service] setVideoDevice: no video track obtained");
         return;
       }
+      // Same as the mic: a camera turned off must stay off on the new device.
+      newTrack.enabled = !call.isLocalVideoMuted();
 
       // 2. Replace track on the WebRTC sender
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2140,6 +2295,19 @@ export function useCallService() {
     return { callId: call?.callId, roomId: call?.roomId };
   }
 
+  /**
+   * Native answered a call that never reached JS — accepted on the ringer just
+   * as the caller hung up, so /sync brought the invite and its hangup together
+   * and the SDK made no call. The Telecom connection stayed ACTIVE until a
+   * backstop ended it, and every call meanwhile was refused as busy. Left
+   * alone when a call is live here: that call owns the native side.
+   */
+  function releaseOrphanedNativeAnswer(callId: string, roomId?: string) {
+    if (callStore.hasLiveCall) return;
+    console.warn("[call-service] releasing a native answer no call arrived for:", callId);
+    void finalizeCall("answer-orphaned", callId, roomId);
+  }
+
   return {
     startCall,
     handleIncomingCall,
@@ -2153,5 +2321,6 @@ export function useCallService() {
     setAudioDevice,
     setVideoDevice,
     setLocalVideoMuted,
+    releaseOrphanedNativeAnswer,
   };
 }

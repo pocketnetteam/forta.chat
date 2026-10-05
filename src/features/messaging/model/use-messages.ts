@@ -1769,11 +1769,17 @@ export function useMessages() {
             const onProgress = makeThrottledProgress((percent) => {
               dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
             });
+            const gifUpload = new AbortController();
             const url = await withTimeout(
-              matrixService.uploadContent(fileToUpload, onProgress),
+              matrixService.uploadContent(fileToUpload, onProgress, gifUpload.signal),
               UPLOAD_TIMEOUT_MS,
               "GIF upload",
-            );
+            ).catch((e: unknown) => {
+              // The timeout does not stop the upload: abort it, or it keeps
+              // sending and writing progress after the message failed.
+              gifUpload.abort();
+              throw e;
+            });
 
             const content: Record<string, unknown> = {
               body: info?.title || "GIF",

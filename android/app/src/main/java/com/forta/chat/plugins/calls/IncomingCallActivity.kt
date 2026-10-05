@@ -116,6 +116,15 @@ class IncomingCallActivity : Activity() {
             finish()
             return
         }
+        // Same race on the ringer screen: started for an invite whose hangup
+        // was handled before it surfaced, it found nothing to dismiss it and
+        // rang for 30 s.
+        val ringingCallId = intent.getStringExtra("callId").orEmpty()
+        if (ringingCallId.isNotEmpty() && CancelledCallStore(this).isCancelled(ringingCallId)) {
+            Log.i(TAG, "onCreate: $ringingCallId was cancelled before the ringer surfaced — closing")
+            finish()
+            return
+        }
         currentInstance = this
         // O13: the volume rocker on this screen must change the ringer, not
         // media — the ringtone plays on STREAM_RING, and a user turning a
@@ -486,6 +495,8 @@ class IncomingCallActivity : Activity() {
             putExtra("callId", callId)
             putExtra("roomId", intent.getStringExtra("roomId"))
         }
+        // The only legitimate source of push_call_accept: see KeyguardLiftGate.
+        com.forta.chat.KeyguardLiftGate.arm(android.os.SystemClock.elapsedRealtime())
         startActivity(appBootIntent)
 
         CallConnectionService.dismissIncomingCallNotification(this)
@@ -653,7 +664,10 @@ class IncomingCallActivity : Activity() {
         // instance's onDestroy null out the pointer to the live one, turning
         // dismissIfShowing/stopRingerIfShowing into permanent no-ops and
         // orphaning a ringtone nothing can reach.
-        if (currentInstance === this) {
+        // A configuration change the manifest does not absorb (locale, font
+        // scale) recreates the screen for the same call: stopping here cleared
+        // the user's silence, and the new instance rang again from the start.
+        if (currentInstance === this && !isChangingConfigurations) {
             // A back press or a swipe from Recents: stop ringing, as before.
             // Telecom's own 45 s backstop still ends the connection.
             IncomingRinger.stop(shownCallId)

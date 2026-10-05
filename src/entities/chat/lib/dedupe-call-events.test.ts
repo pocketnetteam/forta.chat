@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "./dedupe-call-events";
+import { dedupeCallEvents, planCallRecordDeletion, timelineAnchorFor } from "./dedupe-call-events";
 
 type Row = {
   id: string;
   _key?: string;
+  deleted?: boolean;
   callInfo?: { callType: "voice" | "video"; missed: boolean; callId?: string };
 };
 
@@ -52,47 +53,48 @@ describe("dedupeCallEvents", () => {
   });
 });
 
-describe("collapsedCallEventIds", () => {
-  it("points a watermark on the dropped hangup at the record that survived", () => {
-    // The bug this exists for: "last read" lands on the second hangup because
-    // it is the newest event in the room, then dedupeCallEvents removes it and
-    // the unread banner searches the timeline for an id that is no longer there.
-    const rows = [call("ev1", "call-a"), call("ev2", "call-a")];
+describe("timelineAnchorFor", () => {
+  const anchor = (rows: Row[], id: string) => timelineAnchorFor(rows, dedupeCallEvents(rows), id);
 
-    expect(collapsedCallEventIds(rows).get("ev2")).toBe("ev1");
+  it("points a watermark on the dropped hangup at the record that survived", () => {
+    // "Last read" lands on the second hangup because it is the newest event in
+    // the room, then dedupeCallEvents removes it and the banner lost its anchor.
+    expect(anchor([call("ev1", "call-a"), call("ev2", "call-a")], "ev2")).toBe("ev1");
   });
 
-  it("maps the dropped record's stable key as well as its id", () => {
+  it("returns the surviving row's stable key", () => {
     const rows: Row[] = [
       { ...call("ev1", "call-a"), _key: "key1" },
       { ...call("ev2", "call-a"), _key: "key2" },
     ];
-
-    const collapsed = collapsedCallEventIds(rows);
-    expect(collapsed.get("ev2")).toBe("key1");
-    expect(collapsed.get("key2")).toBe("key1");
+    expect(anchor(rows, "ev2")).toBe("key1");
+    expect(anchor(rows, "key2")).toBe("key1");
   });
 
-  it("maps every dropped record when a call leaves more than two", () => {
-    const rows = [call("ev1", "call-a"), call("ev2", "call-a"), call("ev3", "call-a")];
-
-    const collapsed = collapsedCallEventIds(rows);
-    expect(collapsed.get("ev2")).toBe("ev1");
-    expect(collapsed.get("ev3")).toBe("ev1");
-  });
-
-  it("maps nothing when no record is dropped", () => {
-    const rows = [text("m1"), call("ev1", "call-a"), call("ev2", "call-b"), call("old")];
-
-    expect(collapsedCallEventIds(rows).size).toBe(0);
-  });
-
-  it("never maps a surviving id, so a live watermark is left alone", () => {
+  it("leaves a shown watermark and one not loaded yet alone", () => {
     const rows = [call("ev1", "call-a"), call("ev2", "call-a"), text("m1")];
+    expect(anchor(rows, "ev1")).toBe("ev1");
+    expect(anchor(rows, "m1")).toBe("m1");
+    expect(anchor(rows, "not-loaded")).toBe("not-loaded");
+  });
 
-    const collapsed = collapsedCallEventIds(rows);
-    expect(collapsed.has("ev1")).toBe(false);
-    expect(collapsed.has("m1")).toBe(false);
+  // Regression: a watermark on a call record deleted for oneself found nothing.
+  it("anchors a watermark on a deleted call record to the row before it", () => {
+    const rows: Row[] = [text("m1"), { ...call("ev1", "call-a"), deleted: true }, text("m2")];
+    expect(anchor(rows, "ev1")).toBe("m1");
+  });
+
+  // Regression: when the first record of a call is the deleted one, the old
+  // mapping sent the second record's watermark to the hidden first.
+  it("skips a deleted survivor of the collapse", () => {
+    const rows: Row[] = [text("m1"), { ...call("ev1", "call-a"), deleted: true }, call("ev2", "call-a"), text("m2")];
+    expect(anchor(rows, "ev2")).toBe("ev2");
+    expect(anchor(rows, "ev1")).toBe("m1");
+  });
+
+  it("returns null when no shown row precedes the watermark", () => {
+    const rows: Row[] = [{ ...call("ev1", "call-a"), deleted: true }, text("m1")];
+    expect(anchor(rows, "ev1")).toBeNull();
   });
 });
 

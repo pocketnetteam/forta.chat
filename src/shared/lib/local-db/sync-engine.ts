@@ -984,6 +984,9 @@ export class SyncEngine {
       // whole upload phase (including in-attempt retries) rather than being
       // reset between attempts — protects against a runaway 4×4-min loop on
       // a flaky link.
+      // withTimeout does not cancel what it races: abort the upload when the
+      // deadline fires, or the XHR goes on sending in the background and its
+      // progress writes land on a message already marked failed.
       const url = await withTimeout(
         uploadWithRetry(
           () =>
@@ -996,7 +999,10 @@ export class SyncEngine {
         ),
         MEDIA_UPLOAD_TIMEOUT_MS,
         "Media upload",
-      );
+      ).catch((e: unknown) => {
+        if (!controller.signal.aborted) controller.abort();
+        throw e;
+      });
 
       await this.db.attachments.update(attachment.id!, {
         status: "uploaded",

@@ -285,6 +285,14 @@ class CallConnectionService : ConnectionService() {
 
         Log.d(TAG, "onCreateIncomingConnection: callId=$callId, caller=$callerName, roomId=$roomId")
 
+        // The caller's hangup can be handled between the invite push asking
+        // Telecom for this connection and Telecom creating it: nothing was
+        // there to dismiss then, and Telecom rang a dead call for 45 s.
+        if (callId.isNotEmpty() && CancelledCallStore(this).isCancelled(callId)) {
+            Log.i(TAG, "onCreateIncomingConnection: $callId was cancelled before it rang — not ringing")
+            return Connection.createFailedConnection(DisconnectCause(DisconnectCause.MISSED, "cancelled"))
+        }
+
         // A conversation in progress keeps the single slot. Evicting it — what
         // this did unconditionally — left it alive but unreachable: every
         // consumer reads the slot with no callId check (reportCallEnded,
@@ -509,27 +517,33 @@ class CallConnectionService : ConnectionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Create notification channel
+        // Create notification channel (Android 8+; channels do not exist below)
         val channelId = "incoming_calls"
         val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(
-            channelId, applicationContext.getString(R.string.channel_incoming_calls),
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = applicationContext.getString(R.string.channel_incoming_calls_desc)
-            setSound(null, null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId, applicationContext.getString(R.string.channel_incoming_calls),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = applicationContext.getString(R.string.channel_incoming_calls_desc)
+                setSound(null, null)
+            }
+            notificationManager.createNotificationChannel(channel)
         }
-        notificationManager.createNotificationChannel(channel)
 
         // FSI permission check for Android 14+ (USE_FULL_SCREEN_INTENT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             if (!notificationManager.canUseFullScreenIntent()) {
                 Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted, FSI will be heads-up only")
+                // Try the ringer directly, but post the notification as well:
+                // from a background or freshly woken process Android 10+ drops
+                // this start without throwing, and the early return left the
+                // call with no surface at all (the push notification was
+                // already cancelled) — Telecom rang into nothing for 45 s.
                 try {
                     applicationContext.startActivity(fullScreenIntent)
-                    return
                 } catch (e: Exception) {
-                    Log.w(TAG, "Direct activity start also failed, falling back to notification", e)
+                    Log.w(TAG, "Direct activity start failed", e)
                 }
             }
         }
@@ -874,6 +888,9 @@ class CallConnection(
                 return true
             }
         }
+        // Self-managed connections, the only kind this app creates, are
+        // Android 8+; nothing to route through Telecom below it.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         Log.d("CallConnection", "setAudioRoute($device)")
         @Suppress("DEPRECATION")
         setAudioRoute(TelecomAudioRoute.routeFor(device))

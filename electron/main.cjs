@@ -7,6 +7,7 @@ const {
   net,
   session,
   dialog,
+  desktopCapturer,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -158,12 +159,18 @@ function bootElectronApp() {
 
     ipcMain.handle("file:save", async (_event, fileName, buffer) => {
       if (!mainWindow) return null;
+      if (typeof fileName !== "string" || !(buffer instanceof ArrayBuffer || ArrayBuffer.isView(buffer))) {
+        return null;
+      }
       const { filePath } = await dialog.showSaveDialog(mainWindow, {
-        defaultPath: fileName,
+        defaultPath: path.basename(fileName),
       });
       if (!filePath) return null;
-      fs.writeFileSync(filePath, Buffer.from(buffer));
-      shell.openPath(filePath);
+      await fs.promises.writeFile(filePath, Buffer.from(buffer));
+      // Reveal, never open: the name and the bytes come from whoever sent the
+      // file, and opening it ran a received .exe / .bat / .command right after
+      // the user only asked to save it.
+      shell.showItemInFolder(filePath);
       return filePath;
     });
 
@@ -314,6 +321,26 @@ function bootElectronApp() {
         const allowed = ["media", "notifications", "display-capture"];
         callback(allowed.includes(permission));
       },
+    );
+
+    // Screen share in calls: without a handler Electron rejects every
+    // getDisplayMedia, so the call's share button always failed on desktop.
+    // macOS 15+ shows its own picker; elsewhere the primary screen is shared
+    // (the user just pressed "Share screen" in the call).
+    win.webContents.session.setDisplayMediaRequestHandler(
+      (_request, callback) => {
+        desktopCapturer
+          .getSources({ types: ["screen"] })
+          .then((sources) => {
+            if (sources.length === 0) return callback({});
+            callback({ video: sources[0] });
+          })
+          .catch((e) => {
+            console.warn("[main] screen share: no capture source", e);
+            callback({});
+          });
+      },
+      { useSystemPicker: true },
     );
 
     if (isDev) {
