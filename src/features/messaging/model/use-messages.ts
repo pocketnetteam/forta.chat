@@ -22,6 +22,7 @@ import { useToast } from "@/shared/lib/use-toast";
 import { isServerEventId } from "./redact-target";
 import { SendError, sendDiag } from "./send-errors";
 import { reportSendError } from "./send-error-bus";
+import { optimizeChatImage } from "@/shared/lib/upload-image";
 
 /** Per-phase media pipeline timeouts. Splitting the old single 5-minute cap
  *  lets us surface phase-specific failures (e.g. crypto hang vs upload stall)
@@ -483,7 +484,10 @@ export function useMessages() {
     // HEIC must be converted before getImageDimensions — Chromium <img> cannot
     // decode HEIC at all, so reading naturalWidth/Height on the original blob
     // would produce zeros and corrupt the m.image event payload.
-    const processedFile = await convertHeicToJpeg(file);
+    const converted = await convertHeicToJpeg(file);
+    // Downscale to 2048 px / q=0.85 (sendFile keeps the original). Forwards are
+    // skipped: the sender already optimized it and a second encode only loses quality.
+    const processedFile = options.forwardedFrom ? converted : await optimizeChatImage(converted);
 
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) {
