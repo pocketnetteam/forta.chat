@@ -22,6 +22,11 @@ const mocks = vi.hoisted(() => ({
   enqueueSpy: vi.fn(),
   attachmentsAddSpy: vi.fn(),
   getDecryptedBlobSpy: vi.fn(),
+  optimizeChatImageSpy: vi.fn(async (f: File) => f),
+}));
+
+vi.mock("@/shared/lib/upload-image", () => ({
+  optimizeChatImage: mocks.optimizeChatImageSpy,
 }));
 
 vi.mock("@/shared/lib/local-db", () => ({
@@ -123,6 +128,7 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
     mocks.enqueueSpy.mockReset();
     mocks.attachmentsAddSpy.mockReset();
     mocks.getDecryptedBlobSpy.mockReset();
+    mocks.optimizeChatImageSpy.mockClear();
     mocks.createLocalSpy.mockResolvedValue({ clientId: "client-xyz", localId: 42 });
     mocks.enqueueSpy.mockResolvedValue(1);
     mocks.attachmentsAddSpy.mockResolvedValue(7);
@@ -183,6 +189,23 @@ describe("forward media — internal forward re-uploads media (Session 52)", () 
     const [op, , payload] = mocks.enqueueSpy.mock.calls[0];
     expect(op).toBe("send_file");
     expect(payload).toMatchObject({ msgtype: "m.image" });
+    // Already optimized by the original sender — no second lossy encode.
+    expect(mocks.optimizeChatImageSpy).not.toHaveBeenCalled();
+  });
+
+  it("sending a new image uploads the optimized file, not the original", async () => {
+    const original = new File([new Uint8Array(4096)], "big.jpg", { type: "image/jpeg" });
+    const optimized = new File([new Uint8Array(1024)], "big.jpg", { type: "image/jpeg" });
+    mocks.optimizeChatImageSpy.mockResolvedValueOnce(optimized);
+
+    const { sendImage } = useMessages();
+    const ok = await sendImage(original);
+
+    expect(ok).toBe(true);
+    expect(mocks.optimizeChatImageSpy).toHaveBeenCalledWith(original);
+    expect(mocks.attachmentsAddSpy.mock.calls[0][0]).toMatchObject({ localBlob: optimized, size: 1024 });
+    const [, , payload] = mocks.enqueueSpy.mock.calls[0];
+    expect(payload).toMatchObject({ msgtype: "m.image", eventInfo: { size: 1024 } });
   });
 
   it("forwarding a pdf dispatches send_file enqueue with msgtype m.file", async () => {

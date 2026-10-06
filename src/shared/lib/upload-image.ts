@@ -15,6 +15,28 @@ const COMPRESS_MAX_SIDE_FALLBACK = 1536;
 /** JPEG quality steps tried in order. */
 const COMPRESS_QUALITY_STEPS = [0.85, 0.75, 0.65, 0.5];
 
+/** Longest side (px) of a photo sent to a chat. */
+export const CHAT_IMAGE_MAX_SIDE = 2048;
+/** Encode quality for photos sent to a chat (JPEG / WebP). */
+const CHAT_IMAGE_QUALITY = 0.85;
+/** A photo already within {@link CHAT_IMAGE_MAX_SIDE} is re-encoded only above
+ *  this size — small files gain nothing and would lose quality. */
+const CHAT_IMAGE_REENCODE_MIN_BYTES = 500 * 1024;
+/** Source types the chat optimizer re-encodes, mapped to the output type.
+ *  PNG stays PNG (screenshots, transparency); GIF/SVG/HEIC are never touched. */
+const CHAT_IMAGE_OUTPUT_MIME: Record<string, string> = {
+  "image/jpeg": "image/jpeg",
+  "image/jpg": "image/jpeg",
+  "image/pjpeg": "image/jpeg",
+  "image/webp": "image/webp",
+  "image/png": "image/png",
+};
+const MIME_EXTENSION: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/png": "png",
+};
+
 export class ImageUploadError extends Error {
   constructor(message: string) {
     super(message);
@@ -36,6 +58,7 @@ function drawToBlob(
   w: number,
   h: number,
   quality: number,
+  mime = "image/jpeg",
 ): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const canvas = document.createElement("canvas");
@@ -46,6 +69,8 @@ function drawToBlob(
       reject(new ImageUploadError("Canvas 2D context unavailable"));
       return;
     }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(img, 0, 0, w, h);
     canvas.toBlob(
       (blob) => {
@@ -55,7 +80,7 @@ function drawToBlob(
         }
         resolve(blob);
       },
-      "image/jpeg",
+      mime,
       quality,
     );
   });
@@ -107,6 +132,80 @@ export async function compressImageToLimit(
     return new File([last], originalName.replace(/\.\w+$/, "") + ".jpg", {
       type: "image/jpeg",
     });
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+
+/** Bytes scanned for an APNG `acTL` chunk; it must precede the first `IDAT`,
+ *  which sits right after the header chunks. */
+const ANIMATION_SNIFF_BYTES = 64 * 1024;
+
+function indexOfAscii(bytes: Uint8Array, tag: string): number {
+  outer: for (let i = 0; i <= bytes.length - tag.length; i++) {
+    for (let j = 0; j < tag.length; j++) {
+      if (bytes[i + j] !== tag.charCodeAt(j)) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/** Animated WebP (VP8X header with the animation flag) or APNG (`acTL` chunk
+ *  before the first `IDAT`). Unreadable input counts as animated so the
+ *  optimizer leaves it alone. */
+export async function isAnimatedImage(file: Blob): Promise<boolean> {
+  try {
+    const bytes = new Uint8Array(await file.slice(0, ANIMATION_SNIFF_BYTES).arrayBuffer());
+    if (indexOfAscii(bytes.subarray(0, 4), "RIFF") === 0 && indexOfAscii(bytes.subarray(8, 16), "WEBPVP8X") === 0) {
+      return (bytes[20] & 0x02) !== 0;
+    }
+    const actl = indexOfAscii(bytes, "acTL");
+    if (actl < 0) return false;
+    const idat = indexOfAscii(bytes, "IDAT");
+    return idat < 0 || actl < idat;
+  } catch {
+    return true;
+  }
+}
+
+/** Downscale a photo sent to a chat to {@link CHAT_IMAGE_MAX_SIDE} on the
+ *  longest side and re-encode it at {@link CHAT_IMAGE_QUALITY}. Cameras produce
+ *  4000+ px, 5-12 MB JPEGs that every recipient would otherwise download in
+ *  full. Returns the original file when the type is not optimizable (GIF, SVG,
+ *  HEIC), when it is small and already within the limit, when the re-encode is
+ *  not smaller, or on any decode/encode failure (fail-open). */
+export async function optimizeChatImage(file: File): Promise<File> {
+  const outMime = CHAT_IMAGE_OUTPUT_MIME[file.type.toLowerCase()];
+  if (!outMime) return file;
+  // A canvas keeps only the first frame — animated WebP / APNG go out as is.
+  if (outMime !== "image/jpeg" && (await isAnimatedImage(file))) return file;
+
+  const src = URL.createObjectURL(file);
+  try {
+    const { img, w: origW, h: origH } = await loadImage(src);
+    if (origW < 1 || origH < 1) return file;
+
+    const needsResize = Math.max(origW, origH) > CHAT_IMAGE_MAX_SIDE;
+    // A PNG within the limit is kept: lossless re-encoding rarely helps.
+    if (!needsResize && (outMime === "image/png" || file.size <= CHAT_IMAGE_REENCODE_MIN_BYTES)) {
+      return file;
+    }
+
+    const dims = fitWithinMaxSide(origW, origH, CHAT_IMAGE_MAX_SIDE);
+    const blob = await drawToBlob(img, dims.w, dims.h, CHAT_IMAGE_QUALITY, outMime);
+    if (blob.size >= file.size) return file;
+
+    // Browsers without an encoder for `outMime` (WebP on iOS 15) fall back to PNG.
+    const type = blob.type || outMime;
+    const ext = MIME_EXTENSION[type] ?? "jpg";
+    const name = /\.\w+$/.test(file.name)
+      ? file.name.replace(/\.\w+$/, `.${ext}`)
+      : `${file.name || "photo"}.${ext}`;
+    return new File([blob], name, { type });
+  } catch (e) {
+    console.warn("[upload-image] chat image optimization failed, sending original:", e);
+    return file;
   } finally {
     URL.revokeObjectURL(src);
   }
