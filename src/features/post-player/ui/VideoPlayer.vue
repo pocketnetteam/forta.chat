@@ -212,17 +212,6 @@ const openExternal = () => {
       </svg>
     </div>
 
-    <!-- External fallback available from the first tap (not only on error) -->
-    <a
-      v-if="playing && !error"
-      data-testid="video-external"
-      :href="url"
-      target="_blank"
-      rel="noopener noreferrer"
-      class="absolute bottom-2 right-2 z-10 rounded bg-black/60 px-2 py-1 text-xs text-white underline"
-      @click.stop.prevent="openExternal"
-    >Open externally</a>
-
     <template v-if="!playing && !error">
       <img
         v-if="thumbUrl"
@@ -252,6 +241,7 @@ const openExternal = () => {
 
     <div v-if="error" class="absolute inset-0 flex items-center justify-center bg-black">
       <a
+        data-testid="video-external"
         :href="url"
         target="_blank"
         rel="noopener noreferrer"
