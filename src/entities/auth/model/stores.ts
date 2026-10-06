@@ -945,6 +945,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           console.warn("[auth] Failed to init call tab lock:", err);
         });
 
+        // Web/Electron has no push service, but its in-tab beep reads the same
+        // mute set: pull server mute rules here too, or a group muted on another
+        // device keeps beeping in this browser (native syncs after push init).
+        if (!isNative && matrixService.client) {
+          chatStore.syncMutedRoomsFromMatrix().catch((err) => {
+            console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
+          });
+        }
+
         // Init push notifications FIRST (before call bridge which steals focus for audio permission)
         if (isNative && matrixService.client) {
           try {
