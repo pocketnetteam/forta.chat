@@ -2127,6 +2127,7 @@
   пришёл) и `m.call.hangup`. Без вычитания `select_answer` было бы 2. Единица — приглашение: так принятый на другом
   устройстве звонок считался и до этой правки (`hcount-rule`), новое правило значок не увеличило.
 - Статус: ☑ шаги 1–3 проверены 2026-09-18 (`sahere1`, `ownerb1`, `ownerb3`, `ownerb4`)
+- Статус: ☑ релиз dbf8c20 (тест 1.13.9) 2026-10-06 — TEST2 на Samsung и на вебе (forta.chat). Шаг «ответ на другом устройстве»: Forta 2 мин в фоне, TEST1 звонит, ответ на вебе TEST2 в 17:30:10.513 → на телефоне пуш 17:30:11.571 `select_answer … answered on another device`, `Call ended remotely (type=m.call.select_answer)`, `IncomingRinger: stop` через 1,07 с после ответа; после — MODE_NORMAL, Telecom пуст. Шаг «ответ здесь»: ответ на Samsung → `select_answer … answered on this device, leaving it`, разговор до отбоя веба через 15 с, веб TEST2 перестал звонить в момент `select_answer` (`sel.log`, `selans-*`, `selhere-*`).
 
 ### Forta, открытая из «Недавних», не звонит по завершённому звонку
 - Коммит: `612fbb4e`
