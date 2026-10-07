@@ -833,6 +833,10 @@ export const en = {
   "postPlayer.openPost": "Open",
   "postPlayer.goToComment": "Go to comment",
   "postPlayer.searchChats": "Search chats...",
+  "postPlayer.closeGallery": "Close",
+  "postPlayer.prevImage": "Previous image",
+  "postPlayer.nextImage": "Next image",
+  "postPlayer.imageCount": "{count} photos",
 
   // ── Registration ──
   "register.title": "Create Account",

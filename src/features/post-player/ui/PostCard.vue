@@ -10,6 +10,7 @@ import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
 import CommentPreview from "./CommentPreview.vue";
+import PostImageGallery from "./PostImageGallery.vue";
 import { renderArticleText } from "@/shared/lib/article-blocks";
 import { parseTextLinks, truncateLinkSegments } from "@/shared/lib/linkify";
 import { openExternalUrl } from "@/shared/lib/open-external-url";
@@ -59,10 +60,11 @@ const showModal = ref(false);
 const videoInfo = computed(() => post.value?.url ? parseVideoUrl(post.value.url) : null);
 const isArticle = computed(() => post.value?.settings?.v === "a");
 
-const firstImage = computed(() => {
-  if (!post.value?.images?.length) return null;
-  return normalizePocketnetImageUrl(post.value.images[0]);
-});
+const images = computed(() =>
+  (post.value?.images ?? []).map((img) => normalizePocketnetImageUrl(img)).filter(Boolean),
+);
+const firstImage = computed(() => images.value[0] ?? null);
+const showGallery = ref(false);
 
 /** Plain-text preview that handles both Editor.js JSON (articles) and plain
  *  messages, split into text/link segments. Truncated after linkifying so a
@@ -289,14 +291,30 @@ onMounted(loadPostData);
          embedding the iframe in the feed, which would lock feed scroll (WEE-74). -->
     <VideoPlayer v-if="videoInfo" :url="post.url" inline @expand="showModal = true" />
 
-    <!-- Image -->
-    <img
+    <!-- Image — tap opens the gallery with all of the post's images -->
+    <div
       v-else-if="firstImage"
-      :src="firstImage"
-      alt=""
-      class="max-h-64 w-full object-cover"
-      loading="lazy"
-    />
+      class="relative cursor-pointer"
+      data-testid="post-card-image"
+      @click.stop="showGallery = true"
+    >
+      <img
+        :src="firstImage"
+        alt=""
+        class="max-h-64 w-full object-cover"
+        loading="lazy"
+      />
+      <div
+        v-if="images.length > 1"
+        class="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-black/50 px-2 py-0.5 text-xs font-medium text-white"
+        :aria-label="t('postPlayer.imageCount', { count: images.length })"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+        </svg>
+        {{ images.length }}
+      </div>
+    </div>
 
     <!-- Content section -->
     <div class="flex flex-col gap-1.5 px-3 pt-2 sm:gap-2 sm:px-4 sm:pt-3">
@@ -421,6 +439,12 @@ onMounted(loadPostData);
     :author-avatar-url="authorAvatarUrl"
     :initial-comment-id="props.initialCommentId"
     @close="showModal = false"
+  />
+
+  <PostImageGallery
+    v-if="showGallery && images.length"
+    :images="images"
+    @close="showGallery = false"
   />
 
   <!-- Donate modal for boost -->

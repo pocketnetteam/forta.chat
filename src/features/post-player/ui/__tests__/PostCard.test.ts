@@ -372,3 +372,67 @@ describe("PostCard comment link and repost frame", () => {
     expect(classes).not.toContain("my-1.5");
   });
 });
+
+describe("PostCard image gallery", () => {
+  const imagePost: BastyonPostData = {
+    ...videoPost,
+    url: "",
+    caption: "Photos",
+    images: ["one.jpg", "two.jpg", "three.jpg"],
+  };
+  const galleryStubs = { ...stubs, PostImageGallery: true };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockVideoInfo = null;
+    getCachedPost.mockReturnValue(imagePost);
+  });
+
+  afterEach(() => {
+    getCachedPost.mockReturnValue(null);
+  });
+
+  it("tapping the image opens the gallery with all of the post's images", async () => {
+    const w = mount(PostCard, { props: { txid: "tx123", isOwn: false }, global: { stubs: galleryStubs } });
+    await flushPromises();
+
+    expect(w.findComponent({ name: "PostImageGallery" }).exists()).toBe(false);
+    await w.find("[data-testid='post-card-image']").trigger("click");
+
+    const gallery = w.findComponent({ name: "PostImageGallery" });
+    expect(gallery.exists()).toBe(true);
+    expect(gallery.props("images")).toEqual(["one.jpg", "two.jpg", "three.jpg"]);
+
+    gallery.vm.$emit("close");
+    await flushPromises();
+    expect(w.findComponent({ name: "PostImageGallery" }).exists()).toBe(false);
+  });
+
+  it("the image tap does not bubble to the message bubble", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const onParentClick = vi.fn();
+    host.addEventListener("click", onParentClick);
+    const w = mount(PostCard, {
+      props: { txid: "tx123", isOwn: false },
+      global: { stubs: galleryStubs },
+      attachTo: host,
+    });
+    await flushPromises();
+    await w.find("[data-testid='post-card-image']").trigger("click");
+    expect(onParentClick).not.toHaveBeenCalled();
+    w.unmount();
+    host.remove();
+  });
+
+  it("shows the image count badge only for multi-image posts", async () => {
+    const multi = mountCard();
+    await flushPromises();
+    expect(multi.find("[data-testid='post-card-image']").text()).toContain("3");
+
+    getCachedPost.mockReturnValue({ ...imagePost, images: ["one.jpg"] });
+    const single = mountCard();
+    await flushPromises();
+    expect(single.find("[data-testid='post-card-image']").text()).toBe("");
+  });
+});

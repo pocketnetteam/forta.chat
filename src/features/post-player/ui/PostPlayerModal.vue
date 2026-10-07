@@ -11,6 +11,7 @@ import PostAuthor from "./PostAuthor.vue";
 import PostActions from "./PostActions.vue";
 import PostComments from "./PostComments.vue";
 import ArticleBody from "./ArticleBody.vue";
+import PostImageGallery from "./PostImageGallery.vue";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 import { useChatStore } from "@/entities/chat";
 import { parseVideoUrl } from "@/shared/lib/video-embed";
@@ -56,8 +57,9 @@ const isOwnPost = computed(() => props.post.address === authStore.address);
 const isArticle = computed(() => props.post.settings?.v === "a");
 
 const images = computed(() =>
-  (props.post.images || []).map((img) => normalizePocketnetImageUrl(img))
+  (props.post.images || []).map((img) => normalizePocketnetImageUrl(img)).filter(Boolean)
 );
+const showGallery = ref(false);
 
 const handleRate = async (value: number) => {
   await submitVote(value);
@@ -83,7 +85,8 @@ const handleCommentSubmit = async (message: string) => {
 };
 
 const onKeydown = (e: KeyboardEvent) => {
-  if (e.key === "Escape") emit("close");
+  // Escape over the open gallery closes only the gallery.
+  if (e.key === "Escape" && !showGallery.value) emit("close");
 };
 
 /** Load comments; for a shared comment link also load that comment (a reply
@@ -138,7 +141,14 @@ onUnmounted(() => {
                flow (WEE-82 / forta-bugs#963). -->
           <VideoPlayer v-if="videoInfo" :url="post.url" autoplay />
           <div v-else-if="images.length" class="max-h-80 overflow-hidden">
-            <img :src="images[0]" alt="" class="w-full object-cover" loading="lazy" />
+            <img
+              :src="images[0]"
+              alt=""
+              class="w-full cursor-pointer object-cover"
+              loading="lazy"
+              data-testid="post-modal-image"
+              @click="showGallery = true"
+            />
           </div>
 
           <div class="flex flex-col gap-4 p-5 text-text-color">
@@ -231,6 +241,11 @@ onUnmounted(() => {
         @close="closeBoost"
       />
 
+      <PostImageGallery
+        v-if="showGallery && images.length"
+        :images="images"
+        @close="showGallery = false"
+      />
     </div>
   </Teleport>
 </template>
