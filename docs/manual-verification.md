@@ -24,6 +24,21 @@
 
 ## Ожидают проверки
 
+### Выключенные входящие остаются выключенными после потери хранилища WebView
+- Коммит: см. `git log -1 -S "resolveIncomingCallsEnabled" -- src/shared/lib/push/incoming-calls-setting.ts`
+- Почему нужен человек: потеря только хранилища WebView при живых SharedPreferences/UserDefaults воспроизводится
+  на аппарате; тесты проверяют логику (`incoming-calls-setting.test.ts`). Раньше JS после такой потери считал
+  входящие включёнными, и звонок через /sync звонил, хотя пользователь их выключил (ревью звонков 2026-10-04, C05).
+  iOS-часть (`IOSPushIntentPlugin.getIncomingCallsEnabled`) не собиралась в этой сессии — проверить сборкой под XR.
+- На чём: Samsung SM-A528B (отладочная сборка из ветки чистки) ↔ веб TEST1; iPhone XR для iOS.
+- Шаги:
+  1. Настройки → «Входящие звонки» выключить. Остановить приложение.
+  2. Стереть только Local Storage WebView: `adb shell run-as com.forta.chat rm -rf "app_webview/Default/Local Storage"`.
+  3. Открыть приложение (вход сохраняется в Dexie/IndexedDB), веб звонит.
+     - **Ожидается:** телефон не звонит; в настройках переключатель «выключен».
+     - **Раньше:** телефон звонил, переключатель показывал «включен».
+- Статус: ☐ не проверено
+
 ### Поздний отбой прошлого звонка не закрывает экран входящего следующего
 - Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/plugins/calls/IncomingScreenOwnershipContractTest.kt`
 - Почему нужен человек: гонка между отложенным закрытием экрана для звонка A и intent'ом, который уже перерисовал

@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockPlatform, mockSetEnabled } = vi.hoisted(() => ({
+const { mockPlatform, mockSetEnabled, mockGetEnabled } = vi.hoisted(() => ({
   mockPlatform: { isNative: true },
   mockSetEnabled: vi.fn().mockResolvedValue(undefined),
+  mockGetEnabled: vi.fn().mockResolvedValue({ enabled: true }),
 }));
 
 vi.mock("@/shared/lib/platform", () => ({
@@ -12,20 +13,63 @@ vi.mock("@/shared/lib/platform", () => ({
   },
 }));
 vi.mock("./push-data-plugin", () => ({
-  PushData: { setIncomingCallsEnabled: (...args: unknown[]) => mockSetEnabled(...args) },
+  PushData: {
+    setIncomingCallsEnabled: (...args: unknown[]) => mockSetEnabled(...args),
+    getIncomingCallsEnabled: (...args: unknown[]) => mockGetEnabled(...args),
+  },
 }));
 
 import {
   isIncomingCallsEnabled,
+  resolveIncomingCallsEnabled,
   setIncomingCallsEnabled,
   syncIncomingCallsSettingToNative,
+  __resetIncomingCallsSettingForTests,
 } from "./incoming-calls-setting";
 
 describe("incoming calls setting (#1388)", () => {
   beforeEach(() => {
     window.localStorage.clear();
     mockSetEnabled.mockClear();
+    mockGetEnabled.mockReset().mockResolvedValue({ enabled: true });
     mockPlatform.isNative = true;
+    __resetIncomingCallsSettingForTests();
+  });
+
+  // C05 (calls review 2026-10-04): WebView storage purged, native still "off".
+  // JS defaulted to on, so a call arriving through /sync rang anyway and the
+  // settings screen showed the switch on.
+  it("takes native's choice when JS lost its own, and keeps it", async () => {
+    mockGetEnabled.mockResolvedValue({ enabled: false });
+    await expect(resolveIncomingCallsEnabled()).resolves.toBe(false);
+    expect(isIncomingCallsEnabled()).toBe(false);
+    expect(mockSetEnabled).not.toHaveBeenCalled();
+  });
+
+  it("prefers the stored JS value over native", async () => {
+    window.localStorage.setItem("forta-chat:incoming_calls_enabled", "true");
+    mockGetEnabled.mockResolvedValue({ enabled: false });
+    await expect(resolveIncomingCallsEnabled()).resolves.toBe(true);
+    expect(mockGetEnabled).not.toHaveBeenCalled();
+  });
+
+  it("rings when native cannot answer in time", async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetEnabled.mockReturnValue(new Promise(() => {}));
+      const resolved = resolveIncomingCallsEnabled();
+      await vi.advanceTimersByTimeAsync(600);
+      await expect(resolved).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the start-up sync restores native's choice instead of pushing the default", async () => {
+    mockGetEnabled.mockResolvedValue({ enabled: false });
+    await syncIncomingCallsSettingToNative();
+    expect(isIncomingCallsEnabled()).toBe(false);
+    expect(mockSetEnabled).not.toHaveBeenCalled();
   });
 
   it("is on by default, so an install that never saw the switch keeps ringing", () => {

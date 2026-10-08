@@ -10,7 +10,7 @@ import { checkOtherTabHasCall } from "./call-tab-lock";
 import { isNative } from "@/shared/lib/platform";
 import { consumePendingAnswerCallId, consumePendingRejectCallId, nativeCallBridge } from "@/shared/lib/native-calls";
 import { finalizeCall } from "./finalize-call";
-import { isIncomingCallsEnabled } from "@/shared/lib/push/incoming-calls-setting";
+import { resolveIncomingCallsEnabled } from "@/shared/lib/push/incoming-calls-setting";
 import { clearIncomingCallSeen, isIncomingCallSeen, markIncomingCallSeen } from "./incoming-call-dedup";
 import { refreshPeerNameAsync, resolvePeerInfo } from "./call-peer-info";
 import { armIncomingTimeout, clearIncomingTimeout } from "./call-timers";
@@ -89,13 +89,6 @@ export async function handleIncomingCall(matrixCall: MatrixCall) {
   }
   if (matrixCall.callId) markIncomingCallSeen(matrixCall.callId);
 
-  // "Incoming calls" off (#1388): no ringer and no reject, so Bastyon and
-  // the account's other devices keep ringing. The SDK drops the call when
-  // the caller hangs up or the invite expires.
-  if (!isIncomingCallsEnabled()) {
-    console.info("[call-service] incoming call ignored, incoming calls are off:", matrixCall.callId);
-    return;
-  }
 
   // C01 (calls review 2026-10-04): the setup below awaits pending native
   // decisions, the other-tab check and the peer lookup. A second invite that
@@ -118,6 +111,15 @@ export async function handleIncomingCall(matrixCall: MatrixCall) {
 /** The part of {@link handleIncomingCall} that runs under the setup reservation (C01). */
 async function setUpIncomingCall(matrixCall: MatrixCall) {
   const callStore = useCallStore();
+
+  // "Incoming calls" off (#1388): no ringer and no reject, so Bastyon and
+  // the account's other devices keep ringing. The SDK drops the call when
+  // the caller hangs up or the invite expires. Native's copy decides when
+  // WebView storage lost the JS value (C05).
+  if (!(await resolveIncomingCallsEnabled())) {
+    console.info("[call-service] incoming call ignored, incoming calls are off:", matrixCall.callId);
+    return;
+  }
 
   // Check FIRST whether the user already declined this call in the
   // native ringer (before JS was running). If so, send the rejection

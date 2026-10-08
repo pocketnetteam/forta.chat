@@ -185,6 +185,12 @@ class PushDataPlugin : Plugin() {
         call.resolve()
     }
 
+    /** JS reads native's copy when WebView storage lost its own (C05). */
+    @PluginMethod
+    fun getIncomingCallsEnabled(call: PluginCall) {
+        call.resolve(JSObject().put("enabled", IncomingCallsStore.isEnabled(context)))
+    }
+
     @PluginMethod
     fun cacheRoomName(call: PluginCall) {
         val roomId = call.getString("roomId") ?: run {

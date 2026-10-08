@@ -42,7 +42,11 @@ export async function setIncomingCallsEnabled(enabled: boolean): Promise<void> {
 export async function syncIncomingCallsSettingToNative(): Promise<void> {
   if (!isNative) return;
   try {
-    if (window.localStorage.getItem(STORAGE_KEY) === null) return;
+    if (window.localStorage.getItem(STORAGE_KEY) === null) {
+      // No JS value: take native's copy instead of pushing the default (C05).
+      await resolveIncomingCallsEnabled();
+      return;
+    }
   } catch {
     return;
   }
@@ -51,4 +55,50 @@ export async function syncIncomingCallsSettingToNative(): Promise<void> {
   } catch (e) {
     console.warn("[incoming-calls] native sync failed:", e);
   }
+}
+
+/** How long an incoming call waits for native's copy before it rings anyway. */
+const NATIVE_READ_TIMEOUT_MS = 500;
+let nativeChoice: Promise<boolean | null> | null = null;
+
+/** Native's copy of the switch, read once per process; null when unavailable. */
+function readNativeChoice(): Promise<boolean | null> {
+  if (!isNative) return Promise.resolve(null);
+  nativeChoice ??= Promise.race([
+    PushData.getIncomingCallsEnabled()
+      .then((r) => (typeof r?.enabled === "boolean" ? r.enabled : null))
+      .catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), NATIVE_READ_TIMEOUT_MS)),
+  ]);
+  return nativeChoice;
+}
+
+/**
+ * The switch for a call that is about to ring. C05 (calls review 2026-10-04):
+ * with WebView storage purged JS defaulted to on while native still held
+ * "off", so a call arriving through /sync rang although the user had turned
+ * calls off. A stored JS value wins; without one native's copy is taken and
+ * stored, and the default "on" applies only when neither has a choice.
+ * Never throws.
+ */
+export async function resolveIncomingCallsEnabled(): Promise<boolean> {
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (stored !== null) return stored !== "false";
+  } catch {
+    return true;
+  }
+  const native = await readNativeChoice();
+  if (native === null) return true;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, String(native));
+  } catch {
+    /* best effort: the next call asks the cached native value again */
+  }
+  return native;
+}
+
+/** Test-only: forget the cached native read. */
+export function __resetIncomingCallsSettingForTests(): void {
+  nativeChoice = null;
 }

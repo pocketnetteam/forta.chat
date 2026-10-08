@@ -16,4 +16,5 @@ CAP_PLUGIN(IOSPushIntentPlugin, "PushData",
     CAP_PLUGIN_METHOD(markSessionActive, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(markLoggedOut, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(setIncomingCallsEnabled, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(getIncomingCallsEnabled, CAPPluginReturnPromise);
 )
