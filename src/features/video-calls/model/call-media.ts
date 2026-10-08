@@ -83,10 +83,6 @@ let toggleCameraLock = false;
 // Module-level like the lock above: every useCallService() caller shares one call.
 let stopScreenShareWatch: (() => void) | null = null;
 
-// ---------------------------------------------------------------------------
-// Answer-call re-entry lock (WEE-45 / forta-bugs#724)
-// ---------------------------------------------------------------------------
-
 export async function toggleMute() {
   const callStore = useCallStore();
   const call = callStore.matrixCall as MatrixCall | null;
