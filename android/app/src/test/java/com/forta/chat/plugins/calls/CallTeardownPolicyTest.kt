@@ -23,6 +23,7 @@ class CallTeardownPolicyTest {
         routerActive: Boolean = false,
         markerOpen: Boolean = false,
         ringingCallId: String? = null,
+        routerOwner: String? = null,
     ) = State(
         audioMode = audioMode,
         otherCallLive = otherCallLive,
@@ -30,7 +31,43 @@ class CallTeardownPolicyTest {
         routerActive = routerActive,
         sessionMarkerOpen = markerOpen,
         ringingCallId = ringingCallId,
+        routerOwnerCallId = routerOwner,
     )
+
+    // -- the router owner (C02, native half) -----------------------------------
+
+    @Test
+    fun `a late disconnect of call A leaves the router call B owns without a slot`() {
+        val actions = CallTeardownPolicy.decide(
+            Reason.DISCONNECT,
+            state(routerActive = true, fgsRunning = true, routerOwner = "call-B"),
+            "call-A",
+        )
+        assertEquals(emptyList<Action>(), actions)
+    }
+
+    @Test
+    fun `the owner's own disconnect still releases the router`() {
+        val actions = CallTeardownPolicy.decide(
+            Reason.DISCONNECT,
+            state(routerActive = true, fgsRunning = true, routerOwner = "call-A"),
+            "call-A",
+        )
+        assertEquals(listOf(Action.FORCE_STOP_ROUTER, Action.STOP_FOREGROUND_SERVICE), actions)
+    }
+
+    @Test
+    fun `an unnamed teardown or a push event id cannot prove another owner`() {
+        val owned = state(routerActive = true, routerOwner = "call-B")
+        assertEquals(listOf(Action.FORCE_STOP_ROUTER), CallTeardownPolicy.decide(Reason.DISCONNECT, owned, null))
+        assertEquals(listOf(Action.FORCE_STOP_ROUTER), CallTeardownPolicy.decide(Reason.REMOTE_HANGUP, owned, "\$event"))
+    }
+
+    @Test
+    fun `cold start ignores a stale owner`() {
+        val actions = CallTeardownPolicy.decide(Reason.COLD_START, state(routerActive = true, routerOwner = "call-B"), "call-A")
+        assertEquals(listOf(Action.FORCE_STOP_ROUTER), actions)
+    }
 
     // -- the ringer ------------------------------------------------------------
 

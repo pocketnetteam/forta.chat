@@ -751,6 +751,9 @@ class AudioRouter private constructor(private val context: Context) {
     /** Whether [start] ran and [stop]/[forceStop] have not yet. */
     fun isRoutingActive(): Boolean = isActive
 
+    /** The call that owns the routing (C02), or null; read by [CallTeardown]. */
+    fun routingOwner(): String? = synchronized(lifecycleLock) { ownerCallId }
+
     private fun markSessionOpen() {
         // apply(), not commit(): this runs on the capture hot path, under
         // NativeWebRTCManager's media lock as well as ours, and a blocking

@@ -56,4 +56,12 @@ class AudioRouterOwnerContractTest {
         assertTrue("stopAudioRouting must hand the callId to the router:\n$stop", stop.contains("audioRouter?.stop(callId)"))
         assertTrue("a dropped stop must not unbind the volume rocker:\n$stop", stop.indexOf("if (!stopped)") in 0 until stop.indexOf("USE_DEFAULT_STREAM_TYPE"))
     }
+
+    @Test
+    fun nativeTeardown_readsTheRouterOwner() {
+        // Review 2026-10-08: CallTeardown's force-stop must see the owner too,
+        // or a late native endCall for call A resets call B's audio.
+        val teardown = source("com/forta/chat/plugins/calls/CallTeardown.kt")
+        assertTrue(teardown, teardown.contains("routerOwnerCallId = AudioRouter.getSharedInstance(app).routingOwner()"))
+    }
 }

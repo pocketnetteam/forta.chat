@@ -66,6 +66,7 @@ object CallTeardown {
             routerActive = AudioRouter.getSharedInstance(app).isRoutingActive(),
             sessionMarkerOpen = AudioRouter.hasOpenSessionMarker(app),
             ringingCallId = IncomingRinger.ringingCallId,
+            routerOwnerCallId = AudioRouter.getSharedInstance(app).routingOwner(),
         )
     }
 }
