@@ -83,6 +83,12 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### Pinia stores
 - `useAuthStore()` (auth, sessions, Matrix init), `useChatStore()` (rooms, active room, metadata), `useUserStore()`, `useCallStore()` (WebRTC), `useChannelStore()`, `useThemeStore()`, `useLocaleStore()`, `useTorStore()`, `useMediaStore()`, local-ai and ai-chat stores
 
+### Calls (`src/features/video-calls/model/`)
+- `useCallService()` in `call-service.ts` is a facade over `call-outgoing`, `call-incoming`, `call-answer`, `call-media`; event wiring in `call-events`, timers in `call-timers`, the single exit in `finalize-call`.
+- One owner per call resource, keyed by `callId`: the JS exit (`finalizeCall`), the native exit (`CallTeardown`), the ringer (`IncomingRinger`), the Telecom slot, and the audio routing (`AudioRouter` owner, `AudioRouterOwnership`). A late action for another call is dropped, not applied.
+- An incoming invite reserves the slot before its first await (`call-incoming.ts`); a second invite meanwhile is answered busy.
+- Source-contract tests read `call-*.ts` and the Kotlin sources as text: moving code means updating them (see `call-service.test.ts`, `android/app/src/test/.../*ContractTest.kt`).
+
 ## Entry points
 
 - `src/main.ts`: mounts `#app`, Buffer polyfill, boot errors
