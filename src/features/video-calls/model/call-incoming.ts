@@ -47,6 +47,9 @@ function isSdkCallEnded(call: MatrixCall): boolean {
   return state === "ended";
 }
 
+/** The invite whose setup is running (C01); a second invite meanwhile is answered busy. */
+let incomingSetupCallId: string | null = null;
+
 export async function handleIncomingCall(matrixCall: MatrixCall) {
   const callStore = useCallStore();
   ensureCallHangupContextProvider();
@@ -93,6 +96,28 @@ export async function handleIncomingCall(matrixCall: MatrixCall) {
     console.info("[call-service] incoming call ignored, incoming calls are off:", matrixCall.callId);
     return;
   }
+
+  // C01 (calls review 2026-10-04): the setup below awaits pending native
+  // decisions, the other-tab check and the peer lookup. A second invite that
+  // arrived in that window found the slot empty and overwrote the first one.
+  // Reserve the setup synchronously; another invite meanwhile is busy.
+  if (incomingSetupCallId !== null && incomingSetupCallId !== matrixCall.callId) {
+    console.log("[call-service] handleIncomingCall: another invite is being set up, rejecting as busy");
+    rejectQuietly(matrixCall);
+    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+    return;
+  }
+  incomingSetupCallId = matrixCall.callId;
+  try {
+    await setUpIncomingCall(matrixCall);
+  } finally {
+    if (incomingSetupCallId === matrixCall.callId) incomingSetupCallId = null;
+  }
+}
+
+/** The part of {@link handleIncomingCall} that runs under the setup reservation (C01). */
+async function setUpIncomingCall(matrixCall: MatrixCall) {
+  const callStore = useCallStore();
 
   // Check FIRST whether the user already declined this call in the
   // native ringer (before JS was running). If so, send the rejection
@@ -194,6 +219,14 @@ export async function handleIncomingCall(matrixCall: MatrixCall) {
     startedAt: null,
     endedAt: null,
   };
+
+  // C01: a dial or another call may have taken the slot during the awaits above.
+  if (isOutgoingCallInProgress() || (callStore.hasLiveCall && callStore.matrixCall !== matrixCall)) {
+    console.log("[call-service] handleIncomingCall: the slot was taken during setup, rejecting as busy");
+    rejectQuietly(matrixCall);
+    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+    return;
+  }
 
   callStore.setMatrixCall(matrixCall);
   callStore.videoMuted = !isVideo;

@@ -1020,6 +1020,52 @@ describe('call-service permission flow', () => {
       expect(isIncomingCallSeen('busy-throws')).toBe(false);
     });
 
+    // C01 (calls review 2026-10-04): two invites raced through the setup
+    // awaits, both found the slot empty and the second overwrote the first.
+    it('answers a second invite busy while the first is still being set up', async () => {
+      const { useCallService } = await import('./call-service');
+      mockCallStore.hasLiveCall = false;
+      mockCallStore.matrixCall = null;
+      let release!: () => void;
+      mockGetUser.mockReturnValueOnce(undefined);
+      mockLoadUsersBatch.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+      const first = { ...incoming('first-call'), reject: vi.fn() };
+      const second = { ...incoming('second-call'), reject: vi.fn() };
+      const p1 = useCallService().handleIncomingCall(first as never);
+      await new Promise((r) => setTimeout(r, 0));
+      const p2 = useCallService().handleIncomingCall(second as never);
+      await new Promise((r) => setTimeout(r, 0));
+      release();
+      await Promise.all([p1, p2]);
+      expect(second.reject).toHaveBeenCalled();
+      expect(first.reject).not.toHaveBeenCalled();
+      const slotted = mockSetMatrixCall.mock.calls.map((c) => (c[0] as { callId?: string } | null)?.callId).filter(Boolean);
+      expect(slotted).toEqual(['first-call']);
+    });
+
+    it('answers an invite busy when another call took the slot during its setup', async () => {
+      const { useCallService } = await import('./call-service');
+      mockCallStore.hasLiveCall = false;
+      mockCallStore.matrixCall = null;
+      let release!: () => void;
+      mockGetUser.mockReturnValueOnce(undefined);
+      mockLoadUsersBatch.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+      const invite = { ...incoming('late-invite'), reject: vi.fn() };
+      const p = useCallService().handleIncomingCall(invite as never);
+      await new Promise((r) => setTimeout(r, 0));
+      mockCallStore.hasLiveCall = true; // a dial or another call won the slot meanwhile
+      mockCallStore.matrixCall = incoming('slot-owner');
+      release();
+      try {
+        await p;
+      } finally {
+        mockCallStore.hasLiveCall = false;
+      }
+      expect(invite.reject).toHaveBeenCalled();
+      const slotted = mockSetMatrixCall.mock.calls.map((c) => (c[0] as { callId?: string } | null)?.callId);
+      expect(slotted).not.toContain('late-invite');
+    });
+
     it('does not reset a live call in the slot', async () => {
       const { useCallService } = await import('./call-service');
       const clearCall = mockCallStore.clearCall as Mock;
