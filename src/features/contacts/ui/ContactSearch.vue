@@ -17,6 +17,9 @@ const emit = defineEmits<{
   roomCreated: [roomId: string];
   selectMessage: [payload: { roomId: string; messageId: string }];
   clear: [];
+  /** Directory (blockchain) user search in flight — the parent shows it as a
+   *  spinner in its input, so results never shift under the user's finger. */
+  searching: [isSearching: boolean];
 }>();
 
 const { searchResults, searchError, isSearching, isCreatingRoom, debouncedSearch, getOrCreateRoom } = useContacts();
@@ -58,6 +61,13 @@ const visibleMessages = computed(() =>
   showAllMessages.value ? search.messageResults.value : search.messageResults.value.slice(0, 5)
 );
 
+const hasAnyResults = computed(() =>
+  visibleChats.value.length > 0 || visibleUsers.value.length > 0 || visibleMessages.value.length > 0,
+);
+
+watch(isSearching, (v) => emit("searching", v), { immediate: true });
+onUnmounted(() => emit("searching", false));
+
 const handleSelectRoom = (room: ChatRoom) => {
   chatStore.setActiveRoom(room.id);
   emit("roomCreated", room.id);
@@ -77,8 +87,10 @@ const handleSelectMessage = (result: MessageSearchResult) => {
 
 <template>
   <div class="flex flex-col gap-1 overflow-y-auto px-1">
-    <!-- Loading -->
-    <div v-if="isSearching" class="flex items-center justify-center gap-2 p-3 text-sm text-text-on-main-bg-color">
+    <!-- Loading — only while nothing is listed yet. Once results are shown the
+         parent's input spinner signals the search: a row inserted above the
+         results shifted the list mid-tap and users hit the wrong contact. -->
+    <div v-if="isSearching && !hasAnyResults" data-testid="contact-search-loading" class="flex items-center justify-center gap-2 p-3 text-sm text-text-on-main-bg-color">
       <svg class="contain-strict h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>

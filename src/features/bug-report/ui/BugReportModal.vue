@@ -188,6 +188,7 @@ const handleSend = async () => {
         {{ t("bugReport.description") }}
       </label>
       <textarea
+        autocomplete="off"
         v-model="description"
         :placeholder="t('bugReport.descriptionPlaceholder')"
         rows="4"

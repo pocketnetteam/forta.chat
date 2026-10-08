@@ -305,6 +305,9 @@ export interface DecryptionJob {
   attempts: number;
   nextAttemptAt: number;         // Timestamp for backoff scheduling
   lastError?: string;
+  /** AES-SIV verification failures across ALL attempts — unlike `attempts`,
+   *  never reset when the job is re-queued (see DecryptionWorker). */
+  sivFailures?: number;
   createdAt: number;
 }
 

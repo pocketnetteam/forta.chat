@@ -27,6 +27,7 @@ const searchOpen = ref(false);
 // closes the local filter, and a created room hands off via `selectRoom`.
 const addMode = ref(false);
 const addQuery = ref("");
+const isAddSearching = ref(false);
 
 const openAddContact = () => {
   searchOpen.value = false;
@@ -246,12 +247,22 @@ const toggleSearch = () => {
 
     <!-- Add-contact mode: directory search + create DM (reuses ContactSearch) -->
     <template v-if="addMode">
-      <div class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
+      <div class="relative shrink-0 border-b border-neutral-grad-0 px-3 py-2">
+        <!-- Centred by flex, not translate: animate-spin's transform would
+             override -translate-y-1/2 and the spinner wobbled off-centre. -->
+        <span
+          v-if="isAddSearching && addQuery.trim()"
+          class="pointer-events-none absolute inset-y-0 right-5 flex items-center"
+          data-testid="add-contact-search-spinner"
+        >
+          <span class="contain-strict h-3.5 w-3.5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent" />
+        </span>
         <input
+          autocomplete="off"
           v-model="addQuery"
           type="text"
           :placeholder="t('contacts.addPlaceholder')"
-          class="h-9 w-full rounded-lg bg-neutral-grad-0 px-3 text-sm text-text-color outline-none placeholder:text-text-on-main-bg-color focus:ring-1 focus:ring-color-bg-ac"
+          class="h-9 w-full rounded-lg bg-neutral-grad-0 pl-3 pr-8 text-sm text-text-color outline-none placeholder:text-text-on-main-bg-color focus:ring-1 focus:ring-color-bg-ac"
           autofocus
         />
       </div>
@@ -265,6 +276,7 @@ const toggleSearch = () => {
         @room-created="handleAddRoomCreated"
         @select-message="handleAddSelectMessage"
         @clear="addQuery = ''"
+        @searching="isAddSearching = $event"
       />
       <div
         v-else
@@ -277,6 +289,7 @@ const toggleSearch = () => {
     <!-- Search bar -->
     <div v-if="!addMode && searchOpen" class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
       <input
+        autocomplete="off"
         v-model="searchQuery"
         type="text"
         :placeholder="t('contacts.searchPlaceholder')"

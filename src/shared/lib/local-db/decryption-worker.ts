@@ -33,8 +33,25 @@ function isPermanentFailure(e: unknown, roomCrypto: RoomCrypto | undefined): boo
   return isEmptyKeyError(e) && roomCrypto?.getKeysLoadState?.() === "loaded";
 }
 
+/** AES-SIV MAC mismatch ("AES-SIV: ciphertext verification failure!"): the
+ *  ciphertext doesn't match any key we derive. It can still heal once (keys
+ *  refetched after a rotation), so it is retried, but only this many times in
+ *  total: re-queueing resets `attempts`, so without a separate counter such a
+ *  message was re-queued on every key load / room open forever. */
+const SIV_VERIFICATION_ERROR = "ciphertext verification failure";
+export const MAX_SIV_FAILURES = 5;
+
+function isSivVerificationError(e: unknown): boolean {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.includes(SIV_VERIFICATION_ERROR);
+}
+
+function hasExhaustedSivRetries(job: DecryptionJob): boolean {
+  return (job.sivFailures ?? 0) >= MAX_SIV_FAILURES;
+}
+
 function isUndecryptableJob(job: DecryptionJob): boolean {
-  return job.status === "dead" && job.lastError === EMPTY_KEY_ERROR;
+  return job.status === "dead" && (job.lastError === EMPTY_KEY_ERROR || hasExhaustedSivRetries(job));
 }
 
 /**
@@ -135,9 +152,48 @@ export class DecryptionWorker {
     } catch (e) {
       if (isPermanentFailure(e, roomCrypto)) {
         await this.markUndecryptable(eventId, msg.roomId, encryptedBody, e).catch(() => {});
+      } else if (isSivVerificationError(e)) {
+        await this.recordSivFailure(eventId, msg.roomId, encryptedBody, e).catch(() => {});
       }
       return false;
     }
+  }
+
+  /** Count an AES-SIV failure of an out-of-queue decrypt against the message's
+   *  total budget; the last allowed one kills the job for good. */
+  private async recordSivFailure(
+    eventId: string,
+    roomId: string,
+    encryptedBody: string,
+    e: unknown,
+  ): Promise<void> {
+    await this.db.transaction(
+      "rw",
+      [this.db.messages, this.db.rooms, this.db.decryptionQueue],
+      async () => {
+        let job = await this.db.decryptionQueue.where("eventId").equals(eventId).first();
+        if (job?.status === "processing" || (job && isUndecryptableJob(job))) return;
+        if (!job) {
+          const now = Date.now();
+          const id = await this.db.decryptionQueue.add({
+            eventId, roomId, encryptedBody, status: "waiting", attempts: 0,
+            nextAttemptAt: now + FAST_BACKOFF_MS[0], createdAt: now,
+          });
+          job = await this.db.decryptionQueue.get(id);
+          if (!job) return;
+          this.scheduleNext();
+        }
+        const sivFailures = (job.sivFailures ?? 0) + 1;
+        if (sivFailures >= MAX_SIV_FAILURES) {
+          await this.commitFailure(job, e, true); // counts this failure → sivFailures = MAX
+        } else {
+          await this.db.decryptionQueue.update(job.id!, {
+            sivFailures,
+            lastError: String(e instanceof Error ? e.message : e),
+          });
+        }
+      },
+    );
   }
 
   /** Record a permanent failure for a message decrypted outside the queue:
@@ -553,12 +609,14 @@ export class DecryptionWorker {
    *  transaction. `permanent` kills the job at once instead of backing off. */
   private async commitFailure(job: DecryptionJob, e: unknown, permanent = false): Promise<void> {
     const attempts = job.attempts + 1;
-    const isDead = permanent || attempts >= MAX_ATTEMPTS;
+    const sivFailures = (job.sivFailures ?? 0) + (isSivVerificationError(e) ? 1 : 0);
+    const isDead = permanent || attempts >= MAX_ATTEMPTS || sivFailures >= MAX_SIV_FAILURES;
 
     cryptoDebug("retry:fail", {
       eventId: job.eventId,
       roomId: job.roomId,
       attempts,
+      sivFailures,
       isDead,
       error: e instanceof Error ? e.message : String(e),
     });
@@ -578,6 +636,7 @@ export class DecryptionWorker {
     await this.db.decryptionQueue.update(job.id!, {
       status: isDead ? "dead" : "waiting",
       attempts,
+      sivFailures,
       nextAttemptAt: isDead ? 0 : Date.now() + delay + jitter,
       lastError: String(e instanceof Error ? e.message : e),
     });

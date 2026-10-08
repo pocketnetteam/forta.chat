@@ -835,6 +835,10 @@ export const ru: Record<TranslationKey, string> = {
   "postPlayer.openPost": "Открыть",
   "postPlayer.goToComment": "Перейти к комментарию",
   "postPlayer.searchChats": "Поиск чатов...",
+  "postPlayer.closeGallery": "Закрыть",
+  "postPlayer.prevImage": "Предыдущее изображение",
+  "postPlayer.nextImage": "Следующее изображение",
+  "postPlayer.imageCount": "Фото: {count}",
 
   // ── Registration ──
   "register.title": "Создать аккаунт",

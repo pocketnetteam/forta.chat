@@ -73,6 +73,7 @@ const { t } = useI18n();
 const { activeTab, setTab, openSettingsContent } = useSidebarTab();
 
 const sidebarSearchQuery = ref("");
+const isSidebarSearching = ref(false);
 
 const searchPlaceholder = computed(() => {
   const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
@@ -398,11 +399,21 @@ const walletStore = useWalletStore();
               <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
+              autocomplete="off"
               :value="sidebarSearchQuery"
               :placeholder="searchPlaceholder"
-              class="w-full rounded-lg bg-chat-input-bg py-2 pl-8 pr-8 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+              class="w-full rounded-lg bg-chat-input-bg py-2 pl-8 pr-12 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
               @input="sidebarSearchQuery = ($event.target as HTMLInputElement).value"
             />
+            <!-- Centred by flex, not translate: animate-spin's transform would
+                 override -translate-y-1/2 and the spinner wobbled off-centre. -->
+            <span
+              v-if="isSidebarSearching && sidebarSearchQuery.trim()"
+              class="pointer-events-none absolute inset-y-0 right-7 flex items-center"
+              data-testid="sidebar-search-spinner"
+            >
+              <span class="contain-strict h-3.5 w-3.5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent" />
+            </span>
             <button
               v-if="sidebarSearchQuery"
               class="absolute right-2 top-1/2 -translate-y-1/2 text-text-on-main-bg-color hover:text-text-color"
@@ -423,6 +434,7 @@ const walletStore = useWalletStore();
             @room-created="handleRoomCreated"
             @select-message="handleSelectMessage"
             @clear="sidebarSearchQuery = ''"
+            @searching="isSidebarSearching = $event"
           />
         </template>
         <template v-else>

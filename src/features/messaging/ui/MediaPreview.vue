@@ -101,6 +101,7 @@ const toggleCaptionPosition = () => {
         <div class="shrink-0 border-t border-white/10 px-4 py-3" style="padding-bottom: calc(max(var(--app-bottom-inset, 0px), var(--safe-area-inset-bottom, 0px)) + 12px)">
           <div class="flex items-end gap-3">
             <input
+              autocomplete="off"
               :value="props.caption"
               type="text"
               :placeholder="t('media.addCaption')"

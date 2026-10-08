@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Dexie from "dexie";
 import "fake-indexeddb/auto";
-import { DecryptionWorker } from "../decryption-worker";
+import { DecryptionWorker, MAX_SIV_FAILURES } from "../decryption-worker";
 import type { DecryptionJob } from "../schema";
 
 // Minimal in-memory Dexie for tests
@@ -853,6 +853,90 @@ describe("DecryptionWorker", () => {
 
       expect(await worker.decryptMessageNow("$ev1")).toBe(false);
       expect(decryptEvent).toHaveBeenCalledTimes(1);
+      worker.dispose();
+    });
+  });
+
+  // ── AES-SIV verification failure: at most MAX_SIV_FAILURES attempts in total ──
+  describe("AES-SIV verification failure budget", () => {
+    const SIV_ERROR = "AES-SIV: ciphertext verification failure!";
+
+    function makeSivWorker() {
+      const decryptEvent = vi.fn(() => Promise.reject(new Error(SIV_ERROR)));
+      const getRoomCrypto = vi.fn().mockResolvedValue({ decryptEvent, getKeysLoadState: () => "loaded" });
+      const worker = new DecryptionWorker(db as any, getRoomCrypto);
+      return { worker, decryptEvent };
+    }
+
+    const addStuckMessage = () =>
+      db.messages.add({
+        eventId: "$ev1", roomId: "!r1", timestamp: 1, content: "[encrypted]",
+        decryptionStatus: "pending", encryptedBody: "{}",
+      } as any);
+
+    const jobOf = () => db.decryptionQueue.where("eventId").equals("$ev1").first();
+
+    async function tickDue(worker: DecryptionWorker) {
+      await db.decryptionQueue.toCollection().modify({ nextAttemptAt: 0 });
+      await worker.tick();
+    }
+
+    it("re-queueing does not reset the budget: the job dies after 5 failures in total", async () => {
+      const { worker, decryptEvent } = makeSivWorker();
+      await addStuckMessage();
+
+      // Each round: recovery re-queues (resets `attempts`), one attempt fails.
+      for (let i = 0; i < MAX_SIV_FAILURES; i++) {
+        expect(await worker.recoverLatestStuckMessages("!r1")).toBe(1);
+        await tickDue(worker);
+      }
+
+      const job = await jobOf();
+      expect(job?.status).toBe("dead");
+      expect(job?.sivFailures).toBe(MAX_SIV_FAILURES);
+      expect((await db.messages.where("eventId").equals("$ev1").first())?.decryptionStatus).toBe("failed");
+
+      // No path brings it back.
+      expect(await worker.recoverLatestStuckMessages("!r1")).toBe(0);
+      expect(await worker.recoverStuckMessages("!r1")).toBe(0);
+      await worker.retryForRoom("!r1");
+      expect((await jobOf())?.status).toBe("dead");
+      expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      expect(decryptEvent).toHaveBeenCalledTimes(MAX_SIV_FAILURES);
+      worker.dispose();
+    });
+
+    it("decryptMessageNow attempts count against the same budget", async () => {
+      const { worker, decryptEvent } = makeSivWorker();
+      await addStuckMessage();
+
+      for (let i = 0; i < MAX_SIV_FAILURES; i++) {
+        expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      }
+      const job = await jobOf();
+      expect(job?.status).toBe("dead");
+      expect(job?.sivFailures).toBe(MAX_SIV_FAILURES);
+
+      expect(await worker.decryptMessageNow("$ev1")).toBe(false);
+      expect(await worker.recoverLatestStuckMessages("!r1")).toBe(0);
+      expect(decryptEvent).toHaveBeenCalledTimes(MAX_SIV_FAILURES);
+      worker.dispose();
+    });
+
+    it("other errors keep the regular retry policy and are not capped by the SIV budget", async () => {
+      const decryptEvent = vi.fn(() => Promise.reject(new Error("network down")));
+      const getRoomCrypto = vi.fn().mockResolvedValue({ decryptEvent });
+      const worker = new DecryptionWorker(db as any, getRoomCrypto);
+      await addStuckMessage();
+
+      for (let i = 0; i < MAX_SIV_FAILURES + 1; i++) {
+        await worker.recoverLatestStuckMessages("!r1");
+        await tickDue(worker);
+      }
+      const job = await jobOf();
+      expect(job?.status).toBe("waiting");
+      expect(job?.sivFailures ?? 0).toBe(0);
+      expect(await worker.recoverLatestStuckMessages("!r1")).toBe(1);
       worker.dispose();
     });
   });

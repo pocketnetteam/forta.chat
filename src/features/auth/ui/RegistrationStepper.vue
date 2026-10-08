@@ -216,6 +216,7 @@ const handleRetry = () => {
           <!-- Error: username retry form -->
           <template v-if="isError && errorType === 'username'">
             <input
+              autocomplete="off"
               v-model="retryName"
               type="text"
               :placeholder="t('register.namePlaceholder')"
