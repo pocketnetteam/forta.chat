@@ -492,7 +492,7 @@ describe("parseBastyonTransactionLink", () => {
 
   it("makes transaction links block URLs and builds the explorer URL", () => {
     expect(isBastyonBlockUrl(`bastyon://i?stx=${TXID}`)).toBe(true);
-    expect(toTransactionExplorerUrl(TXID)).toBe(`https://explorer.pocketnet.app/tx/${TXID}`);
+    expect(toTransactionExplorerUrl(TXID)).toBe(`https://bastyon.com/blockexplorer/transaction/${TXID}`);
   });
 });
 

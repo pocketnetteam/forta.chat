@@ -129,6 +129,6 @@ describe("TransactionLinkCard", () => {
 
     expect(w.text()).toContain(`${TXID.slice(0, 10)}…${TXID.slice(-8)}`);
     await w.find("button").trigger("click");
-    expect(openExternalUrl).toHaveBeenCalledWith(`https://explorer.pocketnet.app/tx/${TXID}`);
+    expect(openExternalUrl).toHaveBeenCalledWith(`https://bastyon.com/blockexplorer/transaction/${TXID}`);
   });
 });

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Message } from "@/entities/chat";
 import { useChatStore } from "@/entities/chat";
+import { toTransactionExplorerUrl } from "@/shared/lib/bastyon-link";
 
 const props = defineProps<{ message: Message; isOwn: boolean }>();
 const chatStore = useChatStore();
@@ -11,9 +12,7 @@ const transfer = computed(() => props.message.transferInfo!);
 const fromName = computed(() => chatStore.getDisplayName(transfer.value.from));
 const toName = computed(() => chatStore.getDisplayName(transfer.value.to));
 
-const explorerUrl = computed(() =>
-  `https://explorer.pocketnet.app/tx/${transfer.value.txId}`,
-);
+const explorerUrl = computed(() => toTransactionExplorerUrl(transfer.value.txId));
 
 /** Normalize amount — handle both PKOIN and satoshi values.
  *  If amount > 1000, assume it's in satoshis and convert. */

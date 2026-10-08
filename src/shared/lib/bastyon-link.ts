@@ -365,7 +365,7 @@ export function parseBastyonTransactionLink(url: string): { txid: string } | nul
   return HEX64_RE.test(txid) ? { txid } : null;
 }
 
-/** Block explorer page of a transaction (same explorer as TransferCard). */
+/** Bastyon block explorer page of a transaction (link previews and TransferCard). */
 export function toTransactionExplorerUrl(txid: string): string {
-  return `https://explorer.pocketnet.app/tx/${txid}`;
+  return `https://bastyon.com/blockexplorer/transaction/${txid}`;
 }
