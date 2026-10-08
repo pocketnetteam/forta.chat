@@ -22,7 +22,7 @@ import { maybeWarnLegacyWebView } from "./call-engine-setup";
 import { CALL_MEMBERS_TIMEOUT_MS, refreshPeerNameAsync, resolvePeerInfo } from "./call-peer-info";
 import { warnIfCallBypassesTor } from "./call-tor-facts";
 import { hintStoredDevices } from "./call-media";
-import { releaseLocalMedia, releaseUnadoptedMedia, unwireCallEvents, wireCallEvents } from "./call-events";
+import { releaseLateMedia, unwireCallEvents, wireCallEvents } from "./call-events";
 import { launchNativeCallScreen } from "./call-native-screen";
 import { hangup } from "./call-answer";
 
@@ -312,8 +312,7 @@ async function startCallInner(roomId: string, type: CallType) {
     // already run, but the SDK may still have built a peer connection and kept
     // the stream in MediaHandler without a feed: release both here.
     if (call.callHasEnded?.() === true) {
-      releaseLocalMedia(call);
-      releaseUnadoptedMedia(call);
+      releaseLateMedia(call);
       try {
         call.peerConn?.close();
       } catch (e) {
@@ -340,8 +339,11 @@ async function startCallInner(roomId: string, type: CallType) {
     stopAllSounds();
     unwireCallEvents();
     // WEE-89: placeCall may have run getUserMedia before throwing — release
-    // any acquired camera/mic tracks so they aren't left captured.
-    releaseLocalMedia(call);
+    // any acquired camera/mic tracks so they aren't left captured. A placement
+    // that failed after a hangup (Samsung 2026-10-08: "Invalid ICE server
+    // configuration") never adopted its stream and finds its finalize already
+    // done, so the late stream and the mode go here too.
+    releaseLateMedia(call);
     callStore.updateStatus(CallStatus.failed);
     callStore.scheduleClearCall(2000);
     // H1/H7 + Session 23: native side of startAudioRouting may have

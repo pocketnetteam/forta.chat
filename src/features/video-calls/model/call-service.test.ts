@@ -1610,11 +1610,39 @@ describe('call-service permission flow', () => {
         handler.userMediaStreams.push(stream);
         ended = true;
       });
+      mockStopAudioRouting.mockClear();
 
       const { useCallService } = await import('./call-service');
       await useCallService().answerCall();
 
       expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+      // Samsung 2026-10-08: the late native audio start raised MODE_IN_COMMUNICATION
+      // for 27 s after the teardown had reset it.
+      expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: 'incoming-call-id' });
+    });
+
+    // Samsung 2026-10-08, the answer side of the failed placement: answer()
+    // threw after the hangup, the finalize was already done, the late stream
+    // and the mode it raised stayed.
+    it('releases the late stream and the stranded mode when answering fails after the hangup', async () => {
+      seedIncomingCall('voice');
+      const stream = { id: 'late-stream-answer-error' };
+      const handler = { restoreMediaSettings: vi.fn(), userMediaStreams: [] as unknown[], stopUserMediaStream: vi.fn() };
+      matrixState.client!.getMediaHandler.mockReturnValue(handler as never);
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        handler.userMediaStreams.push(stream);
+        ended = true;
+        throw new Error('answer failed after the hangup');
+      });
+      mockStopAudioRouting.mockClear();
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+      expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: 'incoming-call-id' });
     });
 
     // Review 2026-10-08: the next invite already ringing in the slot owns no
@@ -2393,6 +2421,30 @@ describe('local media release on call teardown (WEE-89)', () => {
 
     expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
     expect(pc.close).toHaveBeenCalled();
+    // Samsung 2026-10-08: the late native audio start raised MODE_IN_COMMUNICATION
+    // after the teardown; a stop keyed by this call resets that stranded mode.
+    expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: expect.any(String) });
+  });
+
+  // Samsung 2026-10-08: after the hangup placeVoiceCall went on and failed
+  // ("Invalid ICE server configuration"). The error path released only the
+  // call's own feeds, so the late stream stayed live and the mode stuck ~40 s.
+  it('releases the late stream and the stranded mode when placing fails after the hangup', async () => {
+    const stream = { id: 'late-stream-error' };
+    const handler = { restoreMediaSettings: vi.fn(), userMediaStreams: [] as unknown[], stopUserMediaStream: vi.fn() };
+    matrixState.client!.getMediaHandler.mockReturnValue(handler as never);
+    mockPlaceVoiceCall.mockImplementationOnce(function (this: Record<string, unknown>) {
+      handler.userMediaStreams.push(stream);
+      this.callHasEnded = () => true;
+      return Promise.reject(new Error("Couldn't start call! Invalid ICE server configuration."));
+    });
+    mockStopAudioRouting.mockClear();
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+    expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: expect.any(String) });
   });
   beforeEach(async () => {
     vi.useRealTimers();

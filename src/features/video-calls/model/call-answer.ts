@@ -19,7 +19,7 @@ import { refreshPeerNameAsync } from "./call-peer-info";
 import { warnIfCallBypassesTor } from "./call-tor-facts";
 import { getClient, hintStoredDevices } from "./call-media";
 import { CONNECTING_WATCHDOG_MS, armConnectingWatchdog, clearConnectingWatchdog, clearIncomingTimeout } from "./call-timers";
-import { releaseLocalMedia, releaseUnadoptedMedia, unwireCallEvents } from "./call-events";
+import { releaseLateMedia, releaseLocalMedia, unwireCallEvents } from "./call-events";
 import { launchNativeCallScreen } from "./call-native-screen";
 
 // ---------------------------------------------------------------------------
@@ -239,8 +239,7 @@ export async function answerCall() {
     if (call.callHasEnded?.() === true) {
       console.info("[call-service] answerCall: the call ended while answering:", call.callId);
       clearConnectingWatchdog();
-      releaseLocalMedia(call);
-      releaseUnadoptedMedia(call);
+      releaseLateMedia(call);
       return;
     }
 
@@ -268,8 +267,9 @@ export async function answerCall() {
     clearConnectingWatchdog();
     unwireCallEvents();
     // WEE-89: call.answer may have run getUserMedia before throwing —
-    // release any acquired camera/mic tracks so they aren't left captured.
-    releaseLocalMedia(call);
+    // release any acquired camera/mic tracks so they aren't left captured,
+    // and the stream and mode a late getUserMedia left after a hangup (C03).
+    releaseLateMedia(call);
     callStore.updateStatus(CallStatus.failed);
     callStore.scheduleClearCall(2000);
     // H1 + H7 + Session 23: always tear down audio routing on answer

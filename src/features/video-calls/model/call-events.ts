@@ -137,6 +137,19 @@ export function releaseUnadoptedMedia(call: MatrixCall): void {
   }
 }
 
+/**
+ * Everything a call that ended while the SDK waited for getUserMedia (C03) can
+ * leave behind: its own feeds, the stream MediaHandler got late, and on native
+ * the MODE_IN_COMMUNICATION that stream's audio start raised after the teardown
+ * had reset it (Samsung, 2026-10-08: 27-40 s). The stop is named by this call,
+ * so native drops it when another call owns the router (C02).
+ */
+export function releaseLateMedia(call: MatrixCall): void {
+  releaseLocalMedia(call);
+  releaseUnadoptedMedia(call);
+  if (isNative) void nativeCallBridge.stopAudioRouting({ callId: call.callId });
+}
+
 export function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
   // Defensive: remove any prior handlers first
   unwireCallEvents();
