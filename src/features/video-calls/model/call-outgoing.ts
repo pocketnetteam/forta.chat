@@ -22,7 +22,7 @@ import { maybeWarnLegacyWebView } from "./call-engine-setup";
 import { CALL_MEMBERS_TIMEOUT_MS, refreshPeerNameAsync, resolvePeerInfo } from "./call-peer-info";
 import { warnIfCallBypassesTor } from "./call-tor-facts";
 import { hintStoredDevices } from "./call-media";
-import { releaseLocalMedia, unwireCallEvents, wireCallEvents } from "./call-events";
+import { releaseLocalMedia, releaseUnadoptedMedia, unwireCallEvents, wireCallEvents } from "./call-events";
 import { launchNativeCallScreen } from "./call-native-screen";
 import { hangup } from "./call-answer";
 
@@ -306,6 +306,20 @@ async function startCallInner(roomId: string, type: CallType) {
       await call.placeVideoCall();
     } else {
       await call.placeVoiceCall();
+    }
+
+    // C03: hung up while the SDK waited for getUserMedia. The teardown has
+    // already run, but the SDK may still have built a peer connection and kept
+    // the stream in MediaHandler without a feed: release both here.
+    if (call.callHasEnded?.() === true) {
+      releaseLocalMedia(call);
+      releaseUnadoptedMedia(call);
+      try {
+        call.peerConn?.close();
+      } catch (e) {
+        console.warn("[call-service] closing the late peer connection failed:", e);
+      }
+      return;
     }
 
     // Activate native VoIP audio routing — MODE_IN_COMMUNICATION,

@@ -17,7 +17,7 @@ import { finalizeCall } from "./finalize-call";
 import { clearIncomingCallSeen } from "./incoming-call-dedup";
 import { cleanupRemoteFeedListener, mapSDKState, updateFeeds } from "./call-feeds";
 import { DIAGNOSTICS_WARNING_KEYS } from "./call-tor-facts";
-import { applySavedDevicesExact } from "./call-media";
+import { applySavedDevicesExact, getClient } from "./call-media";
 import { clearConnectingWatchdog, clearIncomingTimeout } from "./call-timers";
 
 /** Stored handler refs so we can remove them with call.off() */
@@ -112,6 +112,26 @@ export function releaseLocalMedia(call: MatrixCall): void {
     } catch (e) {
       console.warn("[call-service] releaseLocalMedia: track.stop failed:", e);
     }
+  }
+}
+
+/**
+ * C03 (calls review 2026-10-04): a call that ends while the SDK waits for
+ * getUserMedia never adopts the stream — answer() and placeCall() return
+ * before the feed is pushed, so releaseLocalMedia(call) finds nothing while
+ * MediaHandler keeps the mic/camera open (and reuses that stream for the next
+ * call). Stop every user media stream the handler holds, unless another call
+ * is live and may own one of them.
+ */
+export function releaseUnadoptedMedia(call: MatrixCall): void {
+  const live = useCallStore().matrixCall as MatrixCall | null;
+  if (live && live !== call && live.callHasEnded?.() !== true) return;
+  try {
+    const handler = getClient()?.getMediaHandler?.();
+    const streams: MediaStream[] = [...(handler?.userMediaStreams ?? [])];
+    for (const stream of streams) handler.stopUserMediaStream(stream);
+  } catch (e) {
+    console.warn("[call-service] releaseUnadoptedMedia failed:", e);
   }
 }
 

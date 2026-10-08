@@ -1470,6 +1470,27 @@ describe('call-service permission flow', () => {
       expect(mockNativeWebRTCMethods.launchCallUI).not.toHaveBeenCalled();
     });
 
+    // C03 (calls review 2026-10-04): the SDK returns from answer() without
+    // adopting the stream when the call ended during getUserMedia, so
+    // releaseLocalMedia(call) saw nothing and the mic stayed open.
+    it('stops the stream the SDK got for a call that ended while answering', async () => {
+      seedIncomingCall('voice');
+      const stream = { id: 'late-stream' };
+      const handler = { restoreMediaSettings: vi.fn(), userMediaStreams: [] as unknown[], stopUserMediaStream: vi.fn() };
+      matrixState.client!.getMediaHandler.mockReturnValue(handler as never);
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        handler.userMediaStreams.push(stream);
+        ended = true;
+      });
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+    });
+
     it('keeps the page audible for the answered call before the native call screen hides it', async () => {
       seedIncomingCall('voice');
 
@@ -2185,6 +2206,28 @@ describe('call-service permission flow', () => {
 // track on all teardown paths via releaseLocalMedia().
 // ---------------------------------------------------------------------------
 describe('local media release on call teardown (WEE-89)', () => {
+
+  // C03 (calls review 2026-10-04): hung up while placeVoiceCall waited for
+  // getUserMedia — the SDK still built a peer connection and kept the stream
+  // in MediaHandler without a feed, after the teardown had already run.
+  it('releases the stream and peer connection a call placed after its hangup got', async () => {
+    const stream = { id: 'late-stream' };
+    const handler = { restoreMediaSettings: vi.fn(), userMediaStreams: [] as unknown[], stopUserMediaStream: vi.fn() };
+    matrixState.client!.getMediaHandler.mockReturnValue(handler as never);
+    const pc = { close: vi.fn() };
+    mockPlaceVoiceCall.mockImplementationOnce(function (this: Record<string, unknown>) {
+      handler.userMediaStreams.push(stream);
+      this.peerConn = pc;
+      this.callHasEnded = () => true;
+      return Promise.resolve();
+    });
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+    expect(pc.close).toHaveBeenCalled();
+  });
   beforeEach(async () => {
     vi.useRealTimers();
     vi.clearAllMocks();

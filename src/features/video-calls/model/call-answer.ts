@@ -19,7 +19,7 @@ import { refreshPeerNameAsync } from "./call-peer-info";
 import { warnIfCallBypassesTor } from "./call-tor-facts";
 import { getClient, hintStoredDevices } from "./call-media";
 import { CONNECTING_WATCHDOG_MS, armConnectingWatchdog, clearConnectingWatchdog, clearIncomingTimeout } from "./call-timers";
-import { releaseLocalMedia, unwireCallEvents } from "./call-events";
+import { releaseLocalMedia, releaseUnadoptedMedia, unwireCallEvents } from "./call-events";
 import { launchNativeCallScreen } from "./call-native-screen";
 
 // ---------------------------------------------------------------------------
@@ -240,6 +240,7 @@ export async function answerCall() {
       console.info("[call-service] answerCall: the call ended while answering:", call.callId);
       clearConnectingWatchdog();
       releaseLocalMedia(call);
+      releaseUnadoptedMedia(call);
       return;
     }
 
