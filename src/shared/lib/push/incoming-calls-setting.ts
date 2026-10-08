@@ -64,13 +64,20 @@ let nativeChoice: Promise<boolean | null> | null = null;
 /** Native's copy of the switch, read once per process; null when unavailable. */
 function readNativeChoice(): Promise<boolean | null> {
   if (!isNative) return Promise.resolve(null);
-  nativeChoice ??= Promise.race([
+  if (nativeChoice) return nativeChoice;
+  const attempt = Promise.race([
     PushData.getIncomingCallsEnabled()
       .then((r) => (typeof r?.enabled === "boolean" ? r.enabled : null))
       .catch(() => null),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), NATIVE_READ_TIMEOUT_MS)),
   ]);
-  return nativeChoice;
+  nativeChoice = attempt;
+  // A timeout or a failure is not native's answer: the next call asks again
+  // instead of ringing on the default for the rest of the process.
+  void attempt.then((choice) => {
+    if (choice === null && nativeChoice === attempt) nativeChoice = null;
+  });
+  return attempt;
 }
 
 /**

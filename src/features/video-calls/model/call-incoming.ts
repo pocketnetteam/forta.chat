@@ -47,8 +47,14 @@ function isSdkCallEnded(call: MatrixCall): boolean {
   return state === "ended";
 }
 
-/** The invite whose setup is running (C01); a second invite meanwhile is answered busy. */
-let incomingSetupCallId: string | null = null;
+/** Answer an invite busy and release its dedup slot, so a re-invite rings once the user is free. */
+function rejectAsBusy(matrixCall: MatrixCall): void {
+  rejectQuietly(matrixCall);
+  if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+}
+
+/** The invite whose setup is running (C01); another invite waits for it to finish. */
+let incomingSetup: { callId: string; done: Promise<void> } | null = null;
 
 export async function handleIncomingCall(matrixCall: MatrixCall) {
   const callStore = useCallStore();
@@ -90,36 +96,40 @@ export async function handleIncomingCall(matrixCall: MatrixCall) {
   if (matrixCall.callId) markIncomingCallSeen(matrixCall.callId);
 
 
-  // C01 (calls review 2026-10-04): the setup below awaits pending native
-  // decisions, the other-tab check and the peer lookup. A second invite that
-  // arrived in that window found the slot empty and overwrote the first one.
-  // Reserve the setup synchronously; another invite meanwhile is busy.
-  if (incomingSetupCallId !== null && incomingSetupCallId !== matrixCall.callId) {
-    console.log("[call-service] handleIncomingCall: another invite is being set up, rejecting as busy");
-    rejectQuietly(matrixCall);
-    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
-    return;
-  }
-  incomingSetupCallId = matrixCall.callId;
-  try {
-    await setUpIncomingCall(matrixCall);
-  } finally {
-    if (incomingSetupCallId === matrixCall.callId) incomingSetupCallId = null;
-  }
-}
-
-/** The part of {@link handleIncomingCall} that runs under the setup reservation (C01). */
-async function setUpIncomingCall(matrixCall: MatrixCall) {
-  const callStore = useCallStore();
-
   // "Incoming calls" off (#1388): no ringer and no reject, so Bastyon and
   // the account's other devices keep ringing. The SDK drops the call when
   // the caller hangs up or the invite expires. Native's copy decides when
-  // WebView storage lost the JS value (C05).
+  // WebView storage lost the JS value (C05). Before the setup reservation:
+  // an invite that will be ignored must not answer another one busy.
   if (!(await resolveIncomingCallsEnabled())) {
     console.info("[call-service] incoming call ignored, incoming calls are off:", matrixCall.callId);
     return;
   }
+
+  // C01 (calls review 2026-10-04): the setup below awaits pending native
+  // decisions, the other-tab check and the peer lookup. A second invite that
+  // arrived in that window found the slot empty and overwrote the first one.
+  // One setup at a time: a second invite waits for the running one and is
+  // then judged like any other — busy when that call took the slot, ringing
+  // when it came to nothing (expired, declined in the native ringer, another
+  // tab). Answering it busy at once turned a free user busy (review 2026-10-08).
+  while (incomingSetup && incomingSetup.callId !== matrixCall.callId) {
+    await incomingSetup.done;
+  }
+  if (incomingSetup) return;
+  let finishSetup!: () => void;
+  incomingSetup = { callId: matrixCall.callId, done: new Promise<void>((resolve) => (finishSetup = resolve)) };
+  try {
+    await setUpIncomingCall(matrixCall);
+  } finally {
+    incomingSetup = null;
+    finishSetup();
+  }
+}
+
+/** The part of {@link handleIncomingCall} that runs while it holds the setup (C01). */
+async function setUpIncomingCall(matrixCall: MatrixCall) {
+  const callStore = useCallStore();
 
   // Check FIRST whether the user already declined this call in the
   // native ringer (before JS was running). If so, send the rejection
@@ -154,8 +164,7 @@ async function setUpIncomingCall(matrixCall: MatrixCall) {
   // and the incoming call took the slot and stranded the dial. Busy.
   if (isOutgoingCallInProgress()) {
     console.log("[call-service] handleIncomingCall: dialling out, rejecting as busy");
-    rejectQuietly(matrixCall);
-    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+    rejectAsBusy(matrixCall);
     return;
   }
 
@@ -174,23 +183,21 @@ async function setUpIncomingCall(matrixCall: MatrixCall) {
     // reads the Telecom slot first and only forwards the push here. A call
     // that still rings is SecondRingPolicy's case — see
     // docs/call-bugs-needing-you.md, "Второй входящий во время разговора".
-    rejectQuietly(matrixCall);
-    // Release the dedup slot: when the current call ends the user is
+    // Releases the dedup slot too: when the current call ends the user is
     // available again, and a legitimate re-invite from the same caller
     // (rare same-callId retry) should ring through instead of being
     // silently swallowed by the 60s window.
-    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+    rejectAsBusy(matrixCall);
     return;
   }
 
   const otherTabActive = await checkOtherTabHasCall();
   if (otherTabActive) {
     console.warn("[call-service] Another tab already has an active call, rejecting incoming");
-    rejectQuietly(matrixCall);
     // Same rationale as the isInCall branch: ownership of the call is
     // delegated to the other tab — releasing our dedup slot lets a
     // future invite ring through normally if that tab closes.
-    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+    rejectAsBusy(matrixCall);
     return;
   }
 
@@ -224,9 +231,8 @@ async function setUpIncomingCall(matrixCall: MatrixCall) {
 
   // C01: a dial or another call may have taken the slot during the awaits above.
   if (isOutgoingCallInProgress() || (callStore.hasLiveCall && callStore.matrixCall !== matrixCall)) {
-    console.log("[call-service] handleIncomingCall: the slot was taken during setup, rejecting as busy");
-    rejectQuietly(matrixCall);
-    if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
+    console.info("[call-service] handleIncomingCall: the slot was taken during setup, rejecting as busy");
+    rejectAsBusy(matrixCall);
     return;
   }
 

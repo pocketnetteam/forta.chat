@@ -121,11 +121,13 @@ export function releaseLocalMedia(call: MatrixCall): void {
  * before the feed is pushed, so releaseLocalMedia(call) finds nothing while
  * MediaHandler keeps the mic/camera open (and reuses that stream for the next
  * call). Stop every user media stream the handler holds, unless another call
- * is live and may own one of them.
+ * is live and may own one of them. An invite that only rings owns none: it
+ * gets its media when answered (review 2026-10-08).
  */
 export function releaseUnadoptedMedia(call: MatrixCall): void {
   const live = useCallStore().matrixCall as MatrixCall | null;
-  if (live && live !== call && live.callHasEnded?.() !== true) return;
+  const liveMayOwnMedia = !!live && live !== call && live.callHasEnded?.() !== true && live.state !== "ringing";
+  if (liveMayOwnMedia) return;
   try {
     const handler = getClient()?.getMediaHandler?.();
     const streams: MediaStream[] = [...(handler?.userMediaStreams ?? [])];

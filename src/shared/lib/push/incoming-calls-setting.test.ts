@@ -65,6 +65,24 @@ describe("incoming calls setting (#1388)", () => {
     }
   });
 
+  it("asks native again after a read that timed out (review 2026-10-08)", async () => {
+    // A slow first read used to pin the default for the whole process, so a
+    // switched-off phone rang for every call until the app restarted.
+    vi.useFakeTimers();
+    try {
+      mockGetEnabled.mockReturnValueOnce(new Promise(() => {}));
+      const first = resolveIncomingCallsEnabled();
+      await vi.advanceTimersByTimeAsync(600);
+      await expect(first).resolves.toBe(true);
+
+      mockGetEnabled.mockResolvedValueOnce({ enabled: false });
+      await expect(resolveIncomingCallsEnabled()).resolves.toBe(false);
+      expect(mockGetEnabled).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("the start-up sync restores native's choice instead of pushing the default", async () => {
     mockGetEnabled.mockResolvedValue({ enabled: false });
     await syncIncomingCallsSettingToNative();

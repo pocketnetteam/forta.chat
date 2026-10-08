@@ -968,6 +968,41 @@ describe('call-service permission flow', () => {
       expect(on).not.toHaveBeenCalled();
       expect(reject).not.toHaveBeenCalled();
     });
+
+    // Review 2026-10-08: the C01 setup reservation answered the second invite
+    // busy while the first was still being ignored, so the caller heard busy
+    // and the account's other devices stopped ringing.
+    it('ignores a second invite that arrives while the first is being ignored', async () => {
+      const { __resetIncomingCallDedupForTests } = await import('./incoming-call-dedup');
+      const { useCallService } = await import('./call-service');
+      __resetIncomingCallDedupForTests();
+      window.localStorage.setItem('forta-chat:incoming_calls_enabled', 'false');
+      mockSetMatrixCall.mockClear();
+      const invite = (callId: string) => ({
+        callId,
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        on: vi.fn(),
+        off: vi.fn(),
+        reject: vi.fn(),
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      });
+      const first = invite('calls-off-first');
+      const second = invite('calls-off-second');
+
+      try {
+        await Promise.all([
+          useCallService().handleIncomingCall(first as never),
+          useCallService().handleIncomingCall(second as never),
+        ]);
+      } finally {
+        window.localStorage.removeItem('forta-chat:incoming_calls_enabled');
+      }
+
+      expect(first.reject).not.toHaveBeenCalled();
+      expect(second.reject).not.toHaveBeenCalled();
+      expect(mockSetMatrixCall).not.toHaveBeenCalled();
+    });
   });
 
   describe('incoming-call dedup window (#644)', () => {
@@ -1031,16 +1066,61 @@ describe('call-service permission flow', () => {
       mockLoadUsersBatch.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
       const first = { ...incoming('first-call'), reject: vi.fn() };
       const second = { ...incoming('second-call'), reject: vi.fn() };
-      const p1 = useCallService().handleIncomingCall(first as never);
-      await new Promise((r) => setTimeout(r, 0));
-      const p2 = useCallService().handleIncomingCall(second as never);
-      await new Promise((r) => setTimeout(r, 0));
-      release();
-      await Promise.all([p1, p2]);
+      // The slot as the real store keeps it: the first call takes it.
+      mockSetMatrixCall.mockImplementation((c: { state?: string } | null) => {
+        mockCallStore.matrixCall = c as never;
+        mockCallStore.hasLiveCall = !!c && c.state !== 'ended';
+      });
+      try {
+        const p1 = useCallService().handleIncomingCall(first as never);
+        await new Promise((r) => setTimeout(r, 0));
+        const p2 = useCallService().handleIncomingCall(second as never);
+        await new Promise((r) => setTimeout(r, 0));
+        release();
+        await Promise.all([p1, p2]);
+      } finally {
+        mockSetMatrixCall.mockImplementation(() => undefined);
+        mockCallStore.hasLiveCall = false;
+        mockCallStore.matrixCall = null;
+      }
       expect(second.reject).toHaveBeenCalled();
       expect(first.reject).not.toHaveBeenCalled();
       const slotted = mockSetMatrixCall.mock.calls.map((c) => (c[0] as { callId?: string } | null)?.callId).filter(Boolean);
       expect(slotted).toEqual(['first-call']);
+    });
+
+    // Review 2026-10-08: the reservation answered the second invite busy even
+    // when the first one's setup came to nothing (expired, declined in the
+    // native ringer, owned by another tab) and the user was free.
+    it('rings a second invite once the first one\'s setup came to nothing', async () => {
+      const { useCallService } = await import('./call-service');
+      mockCallStore.hasLiveCall = false;
+      mockCallStore.matrixCall = null;
+      let release!: () => void;
+      mockGetUser.mockReturnValueOnce(undefined);
+      mockLoadUsersBatch.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+      // The SDK ends the first invite while its setup waits (an expired invite).
+      const first = { ...incoming('expired-first'), reject: vi.fn(), state: 'ended' };
+      const second = { ...incoming('fresh-second'), reject: vi.fn(), state: 'ringing' };
+      mockSetMatrixCall.mockImplementation((c: { state?: string } | null) => {
+        mockCallStore.matrixCall = c as never;
+        mockCallStore.hasLiveCall = !!c && c.state !== 'ended';
+      });
+      try {
+        const p1 = useCallService().handleIncomingCall(first as never);
+        await new Promise((r) => setTimeout(r, 0));
+        const p2 = useCallService().handleIncomingCall(second as never);
+        await new Promise((r) => setTimeout(r, 0));
+        release();
+        await Promise.all([p1, p2]);
+      } finally {
+        mockSetMatrixCall.mockImplementation(() => undefined);
+        mockCallStore.hasLiveCall = false;
+        mockCallStore.matrixCall = null;
+      }
+      expect(second.reject).not.toHaveBeenCalled();
+      const slotted = mockSetMatrixCall.mock.calls.map((c) => (c[0] as { callId?: string } | null)?.callId);
+      expect(slotted).toContain('fresh-second');
     });
 
     it('answers an invite busy when another call took the slot during its setup', async () => {
@@ -1535,6 +1615,46 @@ describe('call-service permission flow', () => {
       await useCallService().answerCall();
 
       expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+    });
+
+    // Review 2026-10-08: the next invite already ringing in the slot owns no
+    // media, but it used to keep the ended call's late stream (and the mic) open.
+    it('stops that stream even when the next call already rings in the slot', async () => {
+      seedIncomingCall('voice');
+      const stream = { id: 'late-stream-2' };
+      const handler = { restoreMediaSettings: vi.fn(), userMediaStreams: [] as unknown[], stopUserMediaStream: vi.fn() };
+      matrixState.client!.getMediaHandler.mockReturnValue(handler as never);
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        handler.userMediaStreams.push(stream);
+        ended = true;
+        mockCallStore.matrixCall = { callId: 'next-ringing', state: 'ringing', callHasEnded: () => false } as never;
+      });
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+    });
+
+    it('leaves the streams alone when the next call in the slot is already being answered', async () => {
+      seedIncomingCall('voice');
+      const stream = { id: 'next-calls-stream' };
+      const handler = { restoreMediaSettings: vi.fn(), userMediaStreams: [] as unknown[], stopUserMediaStream: vi.fn() };
+      matrixState.client!.getMediaHandler.mockReturnValue(handler as never);
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        handler.userMediaStreams.push(stream);
+        ended = true;
+        mockCallStore.matrixCall = { callId: 'next-answering', state: 'wait_local_media', callHasEnded: () => false } as never;
+      });
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(handler.stopUserMediaStream).not.toHaveBeenCalled();
     });
 
     it('keeps the page audible for the answered call before the native call screen hides it', async () => {
