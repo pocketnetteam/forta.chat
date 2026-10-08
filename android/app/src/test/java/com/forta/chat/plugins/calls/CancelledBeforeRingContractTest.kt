@@ -18,7 +18,7 @@ class CancelledBeforeRingContractTest {
 
     @Test
     fun telecomConnectionChecksTheStore() {
-        val s = source("com/forta/chat/plugins/calls/CallConnectionService.kt")
+        val s = (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt"))
         val start = s.indexOf("override fun onCreateIncomingConnection")
         val body = s.substring(start, s.indexOf("currentConnection?.let", start))
         assertTrue(body.contains("CancelledCallStore(this).isCancelled(callId)"))
@@ -35,7 +35,7 @@ class CancelledBeforeRingContractTest {
     /** Regression: without the full-screen intent the ringer start was assumed to work and the notification skipped. */
     @Test
     fun noFullScreenIntentStillPostsTheNotification() {
-        val s = source("com/forta/chat/plugins/calls/CallConnectionService.kt")
+        val s = (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt"))
         val start = s.indexOf("if (!notificationManager.canUseFullScreenIntent())")
         assertTrue(start >= 0)
         val branch = s.substring(start, s.indexOf("val caller = androidx.core.app.Person.Builder()", start))

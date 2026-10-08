@@ -20,7 +20,7 @@ class IncomingRingerContractTest {
     }
 
     private val activity by lazy { source("com/forta/chat/plugins/calls/IncomingCallActivity.kt") }
-    private val connectionService by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val connectionService by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
     private val callPlugin by lazy { source("com/forta/chat/plugins/calls/CallPlugin.kt") }
     private val teardown by lazy { source("com/forta/chat/plugins/calls/CallTeardown.kt") }
     private val mainActivity by lazy { source("com/forta/chat/MainActivity.kt") }

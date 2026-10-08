@@ -21,7 +21,7 @@ class CallTeardownContractTest {
         return resolved.readText()
     }
 
-    private val connectionService by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val connectionService by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
     private val foregroundService by lazy { source("com/forta/chat/plugins/calls/CallForegroundService.kt") }
     private val firebaseService by lazy { source("com/forta/chat/FortaFirebaseMessagingService.kt") }
     private val callPlugin by lazy { source("com/forta/chat/plugins/calls/CallPlugin.kt") }

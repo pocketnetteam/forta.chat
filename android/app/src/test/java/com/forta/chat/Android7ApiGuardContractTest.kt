@@ -43,7 +43,7 @@ class Android7ApiGuardContractTest {
             val body = s.substring(start, s.indexOf("val channel = NotificationChannel(", start))
             assertTrue("$path: channel creation without an SDK guard", body.contains("Build.VERSION_CODES.O"))
         }
-        val telecom = read("plugins/calls/CallConnectionService.kt")
+        val telecom = (read("plugins/calls/CallConnectionService.kt") + "\n" + read("plugins/calls/CallConnection.kt"))
         val at = telecom.indexOf("val channel = NotificationChannel(")
         assertTrue(telecom.substring(at - 200, at).contains("Build.VERSION.SDK_INT >= Build.VERSION_CODES.O"))
     }

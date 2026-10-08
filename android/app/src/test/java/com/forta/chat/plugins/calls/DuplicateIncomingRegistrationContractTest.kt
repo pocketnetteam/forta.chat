@@ -23,7 +23,7 @@ class DuplicateIncomingRegistrationContractTest {
 
     private val body by lazy {
         functionBody(
-            source("com/forta/chat/plugins/calls/CallConnectionService.kt"),
+            (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")),
             "override\\s+fun\\s+onCreateIncomingConnection\\s*\\(",
         )
     }
