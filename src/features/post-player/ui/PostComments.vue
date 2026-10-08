@@ -106,6 +106,7 @@ const formatTime = (ts: number) => {
 
     <div class="flex gap-2">
       <input
+        autocomplete="off"
         v-model="newComment"
         type="text"
         :placeholder="t('postPlayer.writeComment')"

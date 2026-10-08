@@ -57,6 +57,7 @@ function handleKeydown(e: KeyboardEvent): void {
 <template>
   <div class="safe-bottom flex shrink-0 items-end gap-2 border-t border-neutral-grad-0 bg-background-total-theme px-3 py-2">
     <textarea
+      autocomplete="off"
       v-model="text"
       rows="1"
       class="max-h-32 min-h-[40px] flex-1 resize-none rounded-2xl border border-neutral-grad-0 bg-neutral-grad-0 px-3.5 py-2 text-[15px] text-text-color outline-none placeholder:text-text-on-main-bg-color focus:border-color-bg-ac"

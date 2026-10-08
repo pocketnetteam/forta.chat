@@ -715,6 +715,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   </div>
                   <div v-else class="mt-2 w-full text-left">
                     <textarea
+                      autocomplete="off"
                       v-model="topicDraft"
                       class="w-full rounded-lg bg-chat-input-bg px-3 py-2 text-xs text-text-color outline-none placeholder:text-neutral-grad-2"
                       :placeholder="t('chatInfo.addDescription')"
@@ -792,6 +793,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               <template v-if="roomShareable">
                 <div class="flex items-center gap-2">
                   <input
+                    autocomplete="off"
                     :value="inviteLink"
                     readonly
                     class="min-w-0 flex-1 rounded-lg bg-chat-input-bg px-3 py-2 text-xs text-text-color outline-none"
@@ -937,6 +939,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               <!-- Add member search (inline) -->
               <div v-if="showAddMember" class="mb-3">
                 <input
+                  autocomplete="off"
                   :value="addSearchQuery"
                   type="text"
                   :placeholder="t('info.searchToAdd')"

@@ -45,6 +45,7 @@ function onSave(): void {
       {{ t("settings.callProviders.label") }} <span class="text-color-bad">*</span>
     </label>
     <input
+      autocomplete="off"
       v-model="label"
       type="text"
       :placeholder="t('settings.callProviders.labelPlaceholder')"

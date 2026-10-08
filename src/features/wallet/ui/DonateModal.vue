@@ -165,6 +165,7 @@ watch(() => props.show, (v) => {
         <label class="mb-1.5 block text-xs font-medium text-text-on-main-bg-color">{{ t("wallet.amount") }}</label>
         <div class="flex items-center gap-2 rounded-xl border-2 px-3 py-2.5 transition-colors" :class="insufficientBalance ? 'border-color-bad' : 'border-neutral-grad-0 focus-within:border-color-bg-ac'">
           <input
+            autocomplete="off"
             v-model="amount"
             type="number"
             step="0.01"
@@ -181,6 +182,7 @@ watch(() => props.show, (v) => {
       <div>
         <label class="mb-1.5 block text-xs font-medium text-text-on-main-bg-color">{{ t("wallet.message") }}</label>
         <input
+          autocomplete="off"
           v-model="message"
           type="text"
           maxlength="200"
