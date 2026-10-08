@@ -23,9 +23,9 @@
 
 ## Задачи
 
-Состояние на 2026-10-08 16:45: сделаны 1–5 (C03 тоже). Дальше — п. 6 (iOS, нужен подключённый XR), п. 7 (разрез
-`call-service.test.ts`). Владелец пишет pocketnet про прокси Tor (текст — в сессии 2026-10-08). На Samsung отладочная
-сборка `00a3cede`, Tor «Никогда»; SIM владелец переставлял — мобильные данные больше не нужны.
+Состояние на 2026-10-08 17:00: все задачи 1–7 сделаны. Открыто: прокси Tor (владелец пишет pocketnet), удаление
+переключателя движка WebRTC (ждёт статистики отчётов), путь C05 на iOS через Safari Web Inspector, пуш ветки — по
+просьбе владельца. На Samsung отладочная сборка `00a3cede`, Tor «Никогда»; на XR сборка ветки, вход TEST3.
 
 1. ✅ **Сделано 2026-10-08:** на Samsung стоит отладочная сборка ветки (`324053c2`), вход TEST2, CDP работает.
    ~~**Отладочная сборка ветки на Samsung.** `npm run build` → `npx cap sync android` → `cd android &&
@@ -69,9 +69,13 @@
      готовности «Всегда» по правилу `ca30651c` идёт напрямую.
    - **Решение владельца по правилу «Всегда напрямую до готовности Tor»** (`TorRouteDecider.kt:26`, с июля) — в силе.
 5. ✅ **Ревью ветки** `/code-review high` по `af29998d..HEAD` сделано 2026-10-08 — 9 находок, ниже.
-6. **iOS:** собрать под XR (C05 добавил `getIncomingCallsEnabled` в `IOSPushIntentPlugin`), ловушка
-   `npx cap sync ios` → `LlamaCppPro` в `ios/App/CapApp-SPM/Package.swift` откатить перед `xcodebuild`.
-7. **По желанию:** разрезать `call-service.test.ts` (2957 строк) по модулям; удаление переключателя движка WebRTC —
+6. ✅ **iOS** 2026-10-08: `npx cap sync ios` (откат `LlamaCppPro` в `Package.swift`), `xcodebuild … -destination
+   'id=00008020-001104C43A88003A' -derivedDataPath $TMPDIR/ios-dd -allowProvisioningUpdates build` — BUILD SUCCEEDED
+   (Swift-часть C05 компилируется), установлено на XR через `devicectl`, запуск с консолью: вход TEST3, Matrix 200,
+   ошибок плагина нет. Путь C05 (чтение `getIncomingCallsEnabled` при пустом localStorage) на iOS не прогнан — к
+   WKWebView нет devtools из командной строки (нужен Safari Web Inspector).
+7. ✅ `call-service.test.ts` разрезан 2026-10-08 на 7 файлов по модулям + общий `call-service.harness.ts` (116 тестов,
+   проверка «чистый перенос» по строкам). **По желанию дальше:** удаление переключателя движка WebRTC —
    только после статистики отчётов и решения владельца.
 
 ## Решено 2026-10-08 (после ревью)
