@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { reactive, ref } from 'vue';
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { tRaw } from '@/shared/lib/i18n';
 
@@ -1525,11 +1525,15 @@ describe('call-service permission flow', () => {
       // The tests above cover today's three launches. A fourth one calling
       // NativeWebRTC.launchCallUI directly would bring the frozen page back
       // for its calls, so every launch has to go through one place.
-      const code = readFileSync(resolve(__dirname, 'call-service.ts'), 'utf-8')
+      // The call service is split across call-*.ts modules; the rule covers all of them.
+      const strip = (text: string) => text
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/^\s*\/\/.*$/gm, '');
+      const serviceModules = readdirSync(__dirname).filter((f) => /^call-.*\.ts$/.test(f) && !f.endsWith('.test.ts'));
+      const all = serviceModules.map((f) => strip(readFileSync(resolve(__dirname, f), 'utf-8'))).join('\n');
+      const code = strip(readFileSync(resolve(__dirname, 'call-native-screen.ts'), 'utf-8'));
 
-      expect(code.match(/NativeWebRTC\.launchCallUI\(/g)).toHaveLength(1);
+      expect(all.match(/NativeWebRTC\.launchCallUI\(/g)).toHaveLength(1);
       // Android only: the freeze is Chromium's, and NativeWebRTC is an
       // Android plugin — on iOS the launch rejected with UNIMPLEMENTED on
       // every call, and a tone would share the audio session with the call.

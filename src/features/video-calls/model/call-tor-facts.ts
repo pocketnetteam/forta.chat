@@ -1,6 +1,8 @@
 /** Tor facts for call diagnostics and the user warning shown when a call bypasses Tor (split out of call-service.ts). */
 import type { DiagnosticsWarningType } from "./webrtc-diagnostics";
 import type { CallTorDiagnostics } from "@/shared/lib/bug-report";
+import { registerCallDiagnosticsExtras } from "@/shared/lib/bug-report";
+import { webrtcDiagnostics } from "./webrtc-diagnostics";
 import { tRaw } from "@/shared/lib/i18n";
 import { useToast } from "@/shared/lib/use-toast";
 
@@ -39,3 +41,10 @@ export async function warnIfCallBypassesTor(): Promise<void> {
     console.warn("[call-service] tor hint toast failed:", e);
   }
 }
+
+// O05/O14: the bug report's call section gets the last connection's ICE
+// facts and the Tor state from here; shared/ cannot import this feature.
+registerCallDiagnosticsExtras(async () => ({
+  ice: webrtcDiagnostics.getIceSummary(),
+  tor: await torFacts(),
+}));
