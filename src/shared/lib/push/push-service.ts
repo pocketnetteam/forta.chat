@@ -308,6 +308,14 @@ class PushService {
     for (let attempt = 1; attempt <= PushService.PUSHER_REGISTER_RETRIES; attempt++) {
       try {
         await matrixClient.setPusher(payload);
+        // Logged out (or switched account) while the PUT was in flight: logout
+        // already removed this account's pushers, so take the late one back off.
+        if (this.matrixClient !== matrixClient) {
+          await matrixClient.setPusher({ ...payload, kind: null }).catch((e: unknown) => {
+            console.warn('[PushService] Could not take back a pusher registered after logout:', e);
+          });
+          return;
+        }
         if (attempt > 1) {
           console.info(`[PushService] Pusher registered on attempt ${attempt}`);
         }
@@ -335,6 +343,9 @@ class PushService {
             e,
           );
           await PushService.sleep(delay);
+          // Logged out (or switched account) during the backoff: a retry would
+          // put the pusher back on an account that just removed it.
+          if (this.matrixClient !== matrixClient) return;
         }
       }
     }
