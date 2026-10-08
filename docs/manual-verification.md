@@ -60,6 +60,7 @@
      - **Раньше:** экран TEST3 не появлялся или сразу закрывался, `[call-service] incoming call already ended by the
        SDK (expired invite)`.
 - Статус: ☐ не проверено
+- Статус: ☑ проверено 2026-10-08 на Samsung SM-A528B, отладочная сборка с исправлением (`f5c60d41`): `OFFSETS="3800 4000 4000 4200 4400" .bench/runs/rel/c09.sh` — во всех 5 повторах экран показал TEST3 и звонил (28 → 21 с), TEST3 «соединение» до своего отбоя; в повторах 1, 2 и 5 инвайт попал в окно: `Closed 0 PeerConnection(s) of the ended call; kept [pc_2_…], created after it` (в повторе 5 — от обоих путей: шаг JS-финализации и поток сервиса). `no PeerConnection` / `expired invite` — 0. Гейт после каждого повтора зелёный (`.bench/runs/rel/c09-n1-*`).
 
 ### Поздний отбой прошлого звонка не закрывает экран входящего следующего
 - Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/plugins/calls/IncomingScreenOwnershipContractTest.kt`
