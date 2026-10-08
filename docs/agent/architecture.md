@@ -88,6 +88,7 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 - One owner per call resource, keyed by `callId`: the JS exit (`finalizeCall`), the native exit (`CallTeardown`), the ringer (`IncomingRinger`), the Telecom slot, and the audio routing (`AudioRouter` owner, `AudioRouterOwnership`). A late action for another call is dropped, not applied.
 - An incoming invite reserves the slot before its first await (`call-incoming.ts`); a second invite meanwhile is answered busy.
 - Source-contract tests read `call-*.ts` and the Kotlin sources as text: moving code means updating them (see `call-service.test.ts`, `android/app/src/test/.../*ContractTest.kt`).
+- Call-service tests sit next to the module they cover (`call-outgoing`, `call-incoming`, `call-answer`, `call-audio-routing`, `call-events`, `call-media`, `call-service` `.test.ts`). They share one mock set, `call-service.harness.ts`: import it before anything else (its `vi.mock` calls must register before a test imports `./call-service`) and run `resetCallServiceHarness` in `beforeEach`.
 
 ## Entry points
 
