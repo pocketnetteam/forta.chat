@@ -432,21 +432,3 @@ describe("waitForFinalizeSettled — the dial path waits for the previous call",
   });
 });
 
-describe("forceResetAudioState — recovery without callId", () => {
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    mockForceStopAudio.mockResolvedValue(undefined);
-  });
-
-  it("delegates to nativeCallBridge.forceStopAudio", async () => {
-    const { forceResetAudioState } = await import("./finalize-call");
-    await forceResetAudioState();
-    expect(mockForceStopAudio).toHaveBeenCalledOnce();
-  });
-
-  it("does not throw when the native bridge errors", async () => {
-    mockForceStopAudio.mockRejectedValueOnce(new Error("native fail"));
-    const { forceResetAudioState } = await import("./finalize-call");
-    await expect(forceResetAudioState()).resolves.toBeUndefined();
-  });
-});

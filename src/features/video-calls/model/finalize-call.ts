@@ -211,16 +211,6 @@ export function __hasFinalizeInFlightForTests(): boolean {
   return inFlight.size > 0;
 }
 
-/**
- * Force-reset audio state without a specific callId. Used by the
- * app-resume watchdog when the device is stuck in MODE_IN_COMMUNICATION
- * and no call is live (typically because a previous call's finalize
- * never ran — JS process killed, OEM stopped the foreground service).
- */
-export async function forceResetAudioState(): Promise<void> {
-  await safeStep("forceStopAudio", "<no-call>", () => nativeCallBridge.forceStopAudio());
-}
-
 export function onCallTelemetry(listener: TelemetryListener): () => void {
   telemetryListeners.add(listener);
   return () => {
