@@ -38,8 +38,27 @@ class IncomingScreenOwnershipContractTest {
     fun answeredElsewhere_closesOnlyTheScreenItSaw() {
         val stop = body("fun stopRingerIfShowing\\(")
         val post = stop.indexOf("handler.post {")
-        val guard = stop.indexOf("if (screen.shownCallId != answered)", post)
+        val guard = stop.indexOf("RemoteHangupPolicy.endsSurface(screen.shownCallId, answeredCallId)", post)
         val finish = stop.indexOf("screen.finish()", post)
         assertTrue("the rebound check must run inside the runnable, before finish():\n$stop", post >= 0 && guard in post until finish)
+    }
+
+    @Test
+    fun answeredElsewhere_stopsOnlyTheAnsweredCallsRing() {
+        // Review 2026-10-08: stopAll() here silenced call B's ring and retired
+        // its deadline when the answer for call A arrived after the screen was
+        // rebound to B.
+        val stop = body("fun stopRingerIfShowing\\(")
+        assertTrue("the ring must be stopped by the answered call's id:\n$stop", stop.contains("RemoteHangupPolicy.endsSurface(it, answeredCallId)"))
+        assertTrue("no blanket stop of whatever rings:\n$stop", !stop.contains("stopAll()"))
+    }
+
+    @Test
+    fun bothAnswerRoutes_nameTheAnsweredCall() {
+        val connection = source("com/forta/chat/plugins/calls/CallConnection.kt")
+        val plugin = source("com/forta/chat/plugins/calls/CallPlugin.kt")
+        assertTrue("CallConnection.onAnswer must name its call", connection.contains("IncomingCallActivity.stopRingerIfShowing(callId)"))
+        assertTrue("reportCallConnected must name its call", plugin.contains("IncomingCallActivity.stopRingerIfShowing(callId)"))
+        assertTrue("no unnamed caller left", !connection.contains("stopRingerIfShowing()") && !plugin.contains("stopRingerIfShowing()"))
     }
 }

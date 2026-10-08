@@ -86,9 +86,11 @@ class IncomingRingerContractTest {
     }
 
     @Test
-    fun jsReportedConnectStopsWhateverRingsAndDismissesThePushNotification() {
+    fun jsReportedConnectStopsTheConnectedCallsRingAndDismissesThePushNotification() {
         val body = functionBody(callPlugin, "fun\\s+reportCallConnected\\s*\\(")
-        assertTrue("reportCallConnected must stop the ring:\n$body", body.contains("IncomingRinger.stopAll()"))
+        // Keyed since the 2026-10-08 review: a ring already rebound to the next
+        // call stays; a push event id still matches anything (RemoteHangupPolicy).
+        assertTrue("reportCallConnected must stop the ring of the call that connected:\n$body", body.contains("IncomingCallActivity.stopRingerIfShowing(callId)"))
         assertTrue("reportCallConnected must dismiss the push notification:\n$body", body.contains("dismissPushCallNotification("))
     }
 

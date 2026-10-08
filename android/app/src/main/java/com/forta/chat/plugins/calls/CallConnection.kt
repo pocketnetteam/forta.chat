@@ -375,7 +375,7 @@ class CallConnection(
         // until the 30 s auto-reject hung it up. Idempotent for the Accept path,
         // which has already run cleanup().
         IncomingRinger.stop(callId)
-        IncomingCallActivity.stopRingerIfShowing()
+        IncomingCallActivity.stopRingerIfShowing(callId)
         CallConnectionService.dismissIncomingCallNotification(context)
         // The push-side notification keeps its own Accept/Decline buttons; a
         // Decline tapped on it during the call would hang the call up.

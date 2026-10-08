@@ -76,16 +76,20 @@ class IncomingCallActivity : Activity() {
          * markers alone: they are how the JS side learns to answer, and an
          * answered call is exactly when they are needed.
          */
-        fun stopRingerIfShowing() {
-            // The ringer is process-wide now, so this silences it even when the
-            // instance that armed it is no longer the one the pointer holds.
-            IncomingRinger.stopAll()
-            currentInstance?.let { screen ->
+        fun stopRingerIfShowing(answeredCallId: String? = null) {
+            // Only the answered call's ring and screen come down: a screen an
+            // incoming intent already rebound to the next call keeps ringing
+            // (review 2026-10-08). Without an id whatever rings and shows comes
+            // down, as before; a push event id matches anything (RemoteHangupPolicy).
+            IncomingRinger.ringingCallId
+                ?.takeIf { RemoteHangupPolicy.endsSurface(it, answeredCallId) }
+                ?.let { IncomingRinger.stop(it) }
+            currentInstance?.takeIf { RemoteHangupPolicy.endsSurface(it.shownCallId, answeredCallId) }?.let { screen ->
                 Log.d(TAG, "Call answered elsewhere — silencing ringer")
-                val answered = screen.shownCallId
+                val shown = screen.shownCallId
                 screen.handler.post {
                     // C09: leave a screen that a queued intent rebound to another call.
-                    if (screen.shownCallId != answered) {
+                    if (screen.shownCallId != shown || !RemoteHangupPolicy.endsSurface(screen.shownCallId, answeredCallId)) {
                         Log.d(TAG, "Answered-elsewhere close skipped: screen now shows ${screen.shownCallId}")
                         return@post
                     }

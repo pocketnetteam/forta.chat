@@ -421,10 +421,10 @@ class CallPlugin : Plugin() {
     fun reportCallConnected(call: PluginCall) {
         // setActive() here bypasses CallConnection.onAnswer(), so the silencing
         // that lives there does not cover this route. JS reaches it whenever the
-        // call connects without Telecom having answered it itself.
-        IncomingRinger.stopAll()
-        IncomingCallActivity.stopRingerIfShowing()
+        // call connects without Telecom having answered it itself. Keyed by the
+        // call that connected: a ring already rebound to the next call stays.
         val callId = call.getString("callId")
+        IncomingCallActivity.stopRingerIfShowing(callId)
         captureHangupTarget(callId)
         val connection = CallConnectionService.currentConnection?.takeIf { slot ->
             CallSlotPolicy.owns(slot.callId, callId).also { owns ->
