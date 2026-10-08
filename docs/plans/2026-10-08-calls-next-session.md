@@ -23,15 +23,18 @@
 
 ## Задачи
 
-1. **Отладочная сборка ветки на Samsung.** `npm run build` → `npx cap sync android` → `cd android &&
+1. ✅ **Сделано 2026-10-08:** на Samsung стоит отладочная сборка ветки (`324053c2`), вход TEST2, CDP работает.
+   ~~**Отладочная сборка ветки на Samsung.** `npm run build` → `npx cap sync android` → `cd android &&
    ./gradlew :app:assembleSideloadDebug`. Релизную 1.13.9 удалить (`adb uninstall com.forta.chat`; подписи разные),
    поставить отладочную, попросить владельца войти как TEST2. Проверить CDP к WebView
-   (`adb forward tcp:9223 localabstract:webview_devtools_remote_<pid>`, `.bench/tools/cdp-eval.mjs`).
-2. **Wi-Fi → LTE на сборке ветки.** `.bench/runs/rel/lte.sh lte-branch`: звонок веб → Samsung, на 15-й секунде
+   (`adb forward tcp:9223 localabstract:webview_devtools_remote_<pid>`, `.bench/tools/cdp-eval.mjs`).~~ Если в ветке
+   появятся новые коммиты с кодом — пересобрать и поставить `adb install -r` (подпись та же, вход сохранится).
+2. ✅ **Сделано 2026-10-08 (`9c29766a`):** звонок 98 с пережил Wi-Fi → LTE → Wi-Fi, в консоли оба
+   `[call-service] network …, restartIce`. ~~**Wi-Fi → LTE на сборке ветки.** `.bench/runs/rel/lte.sh lte-branch`: звонок веб → Samsung, на 15-й секунде
    `svc wifi disable`, через ~35 с `svc wifi enable`. Ожидается: звонок остаётся `connected`, после выключения через
    ~10 с новая пара `srflx/srflx`, после включения — `host/host`, гейт зелёный. Перенос кода смены сети
    (`call-engine-setup.ts`) — главный риск чистки для этого сценария. Записать статус в записи `9d1f1036`,
-   `c2ed5f98`, `6b1b88cc` в `docs/manual-verification.md`.
+   `c2ed5f98`, `6b1b88cc` в `docs/manual-verification.md`.~~
 3. **Новые записи «Ожидают проверки»** в `manual-verification.md` (по шагам в записях):
    - C02 «Поздняя остановка звука прошлого звонка…» — задержка `nativeCallBridge.stopAudioRouting` 8 с по CDP;
    - C03 «Микрофон отпускается, если звонок кончился, пока шёл запрос микрофона» — нужен отозванный доступ к микрофону
