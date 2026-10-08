@@ -47,9 +47,17 @@ class IncomingCallActivity : Activity() {
             IncomingRinger.ringingCallId
                 ?.takeIf { RemoteHangupPolicy.endsSurface(it, endedCallId) }
                 ?.let { IncomingRinger.stop(it) }
-            currentInstance?.takeIf { RemoteHangupPolicy.endsSurface(it.shownCallId, endedCallId) }?.let {
+            currentInstance?.takeIf { RemoteHangupPolicy.endsSurface(it.shownCallId, endedCallId) }?.let { screen ->
                 Log.d(TAG, "Dismissing incoming call screen (remote hangup)")
-                it.handler.post { it.dismissByRemote() }
+                screen.handler.post {
+                    // C09: an incoming intent queued ahead of this runnable may have
+                    // rebound the screen to another call; check again where it runs.
+                    if (RemoteHangupPolicy.endsSurface(screen.shownCallId, endedCallId)) {
+                        screen.dismissByRemote()
+                    } else {
+                        Log.d(TAG, "Remote hangup for $endedCallId skipped: screen now shows ${screen.shownCallId}")
+                    }
+                }
             }
         }
 
@@ -72,11 +80,17 @@ class IncomingCallActivity : Activity() {
             // The ringer is process-wide now, so this silences it even when the
             // instance that armed it is no longer the one the pointer holds.
             IncomingRinger.stopAll()
-            currentInstance?.let {
+            currentInstance?.let { screen ->
                 Log.d(TAG, "Call answered elsewhere — silencing ringer")
-                it.handler.post {
-                    it.cleanup()
-                    it.finish()
+                val answered = screen.shownCallId
+                screen.handler.post {
+                    // C09: leave a screen that a queued intent rebound to another call.
+                    if (screen.shownCallId != answered) {
+                        Log.d(TAG, "Answered-elsewhere close skipped: screen now shows ${screen.shownCallId}")
+                        return@post
+                    }
+                    screen.cleanup()
+                    screen.finish()
                 }
             }
         }
