@@ -1665,7 +1665,7 @@ describe('call-service permission flow', () => {
       await service.startCall('!room:matrix.org', 'voice');
 
       expect(mockPlaceVoiceCall).toHaveBeenCalledOnce();
-      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'voice' });
+      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'voice', callId: 'test-call-id' });
     });
 
     it('calls startAudioRouting after placeVideoCall with callType=video', async () => {
@@ -1676,7 +1676,7 @@ describe('call-service permission flow', () => {
       await service.startCall('!room:matrix.org', 'video');
 
       expect(mockPlaceVideoCall).toHaveBeenCalledOnce();
-      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'video' });
+      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'video', callId: 'test-call-id' });
     });
 
     it('does NOT call startAudioRouting when placeCall throws', async () => {
@@ -1737,7 +1737,7 @@ describe('call-service permission flow', () => {
       await service.answerCall();
 
       expect(mockAnswer).toHaveBeenCalledOnce();
-      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'voice' });
+      expect(mockStartAudioRouting).toHaveBeenCalledWith({ callType: 'voice', callId: 'incoming-call-id' });
     });
 
     it('calls stopAudioRouting on hangup', async () => {

@@ -153,7 +153,8 @@ class CallTeardownContractTest {
         // marker opened by ensureCommunicationMode() and never closed would
         // later pass the cold-start sweep's "is this mode ours" check for a
         // mode that is not.
-        val body = functionBody(audioRouter, "fun\\s+stop\\s*\\(")
+        // The routing teardown sits in stopRouting(); stop(callId) only adds the owner check (C02).
+        val body = functionBody(audioRouter, "fun\\s+stopRouting\\s*\\(")
         val inactiveReturn = body.indexOf("already inactive, no-op")
         val close = body.lastIndexOf("markSessionClosed()", inactiveReturn)
         assertTrue("stop()'s inactive branch must close the marker before returning:\n$body", close >= 0 && inactiveReturn - close < 400)
@@ -188,7 +189,7 @@ class CallTeardownContractTest {
 
     @Test
     fun sessionMarker_isClosedByBothTeardownPaths() {
-        for (name in listOf("stop", "forceStop")) {
+        for (name in listOf("stopRouting", "forceStop")) {
             val body = functionBody(audioRouter, "fun\\s+$name\\s*\\(")
             assertTrue("$name() must close the session marker:\n$body", body.contains("markSessionClosed()"))
         }

@@ -155,7 +155,7 @@ async function runSteps(reason: FinalizeReason, callId: string, roomId?: string)
     await safeStep("retirePendingMarkers", callId, () => retirePendingMarkers(callId, roomId));
 
     // Step 1: stop audio routing (mode → NORMAL, clearCommunicationDevice)
-    await safeStep("stopAudioRouting", callId, () => nativeCallBridge.stopAudioRouting());
+    await safeStep("stopAudioRouting", callId, () => nativeCallBridge.stopAudioRouting({ callId }));
 
     // Step 2: report call ended → CallConnection cleanup
     await safeStep("reportCallEnded", callId, () => nativeCallBridge.reportCallEnded(callId));

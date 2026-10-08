@@ -260,7 +260,7 @@ export async function answerCall() {
     // failures are logged inside the bridge.
     if (isNative) {
       const callType = isVideo ? "video" : "voice";
-      void nativeCallBridge.startAudioRouting({ callType });
+      void nativeCallBridge.startAudioRouting({ callType, callId: call.callId });
     }
   } catch (e) {
     console.error("[call-service] Failed to answer call:", e);

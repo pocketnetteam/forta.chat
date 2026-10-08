@@ -678,7 +678,8 @@ class CallPlugin : Plugin() {
     @PluginMethod
     fun startAudioRouting(call: PluginCall) {
         val callType = call.getString("callType") ?: "voice"
-        audioRouter?.start(callType)
+        // C02: the router remembers which call owns it; a stop for another call is dropped.
+        audioRouter?.start(callType, call.getString("callId"))
 
         // Session 31 (#644): bind MainActivity's hardware volume keys to
         // STREAM_VOICE_CALL for the duration of the call. CallActivity sets
@@ -701,11 +702,18 @@ class CallPlugin : Plugin() {
         // waiting for SCO_DISCONNECTED on API < 31; running it on the
         // plugin thread would serialize every other native call (push,
         // status bar, share) and risk ANRs.
+        val callId = call.getString("callId")
         cleanupExecutor.execute {
-            try {
-                audioRouter?.stop()
+            // C02: false when another call owns the router — leave its volume binding alone too.
+            val stopped = try {
+                audioRouter?.stop(callId) ?: true
             } catch (e: Exception) {
                 Log.e(TAG, "stopAudioRouting threw", e)
+                true
+            }
+            if (!stopped) {
+                call.resolve()
+                return@execute
             }
 
             // Session 31 (#644): restore the activity's volume rocker AFTER

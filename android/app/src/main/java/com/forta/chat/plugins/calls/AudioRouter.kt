@@ -442,6 +442,12 @@ class AudioRouter private constructor(private val context: Context) {
     // the lock-free runnables.
     @Volatile private var isActive = false
     private var callType = "voice"
+
+    /**
+     * The call that owns the routing (C02). A stop sent for another call is
+     * dropped — see [AudioRouterOwnership]. Guarded by [lifecycleLock].
+     */
+    private var ownerCallId: String? = null
     private var bluetoothDeviceName: String? = null
 
     // Session 54: cancellable Runnables. The 500ms re-apply runnable used to
@@ -518,7 +524,7 @@ class AudioRouter private constructor(private val context: Context) {
         return canCreateHardwareAec(0)
     }
 
-    fun start(callType: String) = synchronized(lifecycleLock) {
+    fun start(callType: String, callId: String? = null) = synchronized(lifecycleLock) {
         // Idempotent: second start() in the same call cycle (e.g. JS side
         // hits startAudioRouting twice because of renegotiation) must not
         // re-register device callbacks or the same callback would fire
@@ -526,12 +532,21 @@ class AudioRouter private constructor(private val context: Context) {
         // Synchronized with stop()/forceStop() so a watchdog forceStop
         // racing a fresh start() cannot interleave half-set state.
         if (isActive) {
+            // C02: a new call starting while the previous call's stop is still
+            // queued takes the routing over, so that late stop is dropped.
+            val owner = AudioRouterOwnership.ownerAfterStart(ownerCallId, callId)
+            if (owner != ownerCallId) {
+                Log.w(LIFECYCLE_TAG, "start($callType) — already active, ownership $ownerCallId -> $owner")
+                timeline.record("owner_change", owner ?: "")
+                ownerCallId = owner
+            }
             Log.w(LIFECYCLE_TAG, "start($callType) — already active, no-op (current callType=${this.callType})")
             return@synchronized
         }
 
         this.callType = callType
         this.isActive = true
+        this.ownerCallId = callId
 
         // One timeline per call: the previous call's entries would only
         // confuse triage. An orphaned router never reaches start(), so its
@@ -762,7 +777,22 @@ class AudioRouter private constructor(private val context: Context) {
         }
     }
 
-    fun stop() = synchronized(lifecycleLock) {
+    /**
+     * Stop the routing for [callId]. Returns false when the router belongs to
+     * another call and the stop was dropped (C02); null [callId] always stops.
+     */
+    fun stop(callId: String? = null): Boolean = synchronized(lifecycleLock) {
+        if (!AudioRouterOwnership.shouldStop(callId, ownerCallId)) {
+            Log.w(LIFECYCLE_TAG, "stop($callId) — router owned by $ownerCallId, ignored")
+            timeline.record("stop_ignored_other_owner", callId ?: "")
+            return@synchronized false
+        }
+        ownerCallId = null
+        stopRouting()
+        true
+    }
+
+    private fun stopRouting() = synchronized(lifecycleLock) {
         // Idempotent: every call lifecycle path ends with stopAudioRouting
         // (hangup, reject, SDK state=Ended, answer-errored, permission-denied),
         // so calling stop twice happens routinely. Without the guard we would
@@ -925,6 +955,7 @@ class AudioRouter private constructor(private val context: Context) {
         Log.w(LIFECYCLE_TAG, "forceStop($reason) — bypassing guards, brute reset")
         timeline.record("force_stop", reason)
         isActive = false
+        ownerCallId = null
         ensureWatchdog?.let { mainHandler.removeCallbacks(it) }
         ensureWatchdog = null
 

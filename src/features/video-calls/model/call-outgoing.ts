@@ -332,7 +332,7 @@ async function startCallInner(roomId: string, type: CallType) {
     // the dial-tone UX. Not for a call hung up while it was being placed:
     // its teardown already ran, and the routing would outlive it.
     if (isNative && call.callHasEnded?.() !== true) {
-      void nativeCallBridge.startAudioRouting({ callType: type });
+      void nativeCallBridge.startAudioRouting({ callType: type, callId: call.callId });
     }
   } catch (e) {
     console.error("[call-service] Failed to place call:", e);

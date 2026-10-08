@@ -416,6 +416,8 @@ class NativeCallBridge {
    * its own cancellation token.
    */
   private audioRoutingAbort: AbortController | null = null;
+  /** The call whose `startAudioRouting` owns {@link audioRoutingAbort} (C02). */
+  private audioRoutingCallId: string | null = null;
 
   /**
    * True when a native call-lifecycle event may act on the call JS holds now.
@@ -970,7 +972,7 @@ class NativeCallBridge {
    * a short backoff so a single transient hiccup does not silently kill
    * audio for the whole call.
    */
-  async startAudioRouting(options: { callType: string }): Promise<void> {
+  async startAudioRouting(options: { callType: string; callId?: string }): Promise<void> {
     if (!isNative) return;
     // Abort any in-flight retry from a previous call cycle so we don't
     // double-arm AudioRouter. Then create a fresh controller scoped to
@@ -978,6 +980,7 @@ class NativeCallBridge {
     this.audioRoutingAbort?.abort();
     const controller = new AbortController();
     this.audioRoutingAbort = controller;
+    this.audioRoutingCallId = options.callId ?? null;
     const result = await withRetry(
       () => NativeCall.startAudioRouting(options),
       {
@@ -1087,15 +1090,21 @@ class NativeCallBridge {
    * Must be called on hangup / reject / ended. Restores MODE_NORMAL,
    * clears communication device, unregisters receivers.
    */
-  async stopAudioRouting(): Promise<void> {
+  async stopAudioRouting(options: { callId?: string } = {}): Promise<void> {
     if (!isNative) return;
-    // WEE-16: abort any pending startAudioRouting retry before tearing
-    // down. Otherwise a retry scheduled during a transient failure can
-    // fire AudioRouter.start() right after we stopped it.
-    this.audioRoutingAbort?.abort();
-    this.audioRoutingAbort = null;
+    // C02: a late stop for an earlier call must not cancel the start of the
+    // call that has taken the router over; the native side drops it too.
+    const forOtherCall = !!options.callId && !!this.audioRoutingCallId && options.callId !== this.audioRoutingCallId;
+    if (!forOtherCall) {
+      // WEE-16: abort any pending startAudioRouting retry before tearing
+      // down. Otherwise a retry scheduled during a transient failure can
+      // fire AudioRouter.start() right after we stopped it.
+      this.audioRoutingAbort?.abort();
+      this.audioRoutingAbort = null;
+      this.audioRoutingCallId = null;
+    }
     try {
-      await NativeCall.stopAudioRouting();
+      await NativeCall.stopAudioRouting(options);
     } catch (e) {
       console.warn('[NativeCallBridge] stopAudioRouting failed:', e);
     }
@@ -1116,6 +1125,7 @@ class NativeCallBridge {
     // path must also kill in-flight retries.
     this.audioRoutingAbort?.abort();
     this.audioRoutingAbort = null;
+    this.audioRoutingCallId = null;
     try {
       await NativeCall.forceStopAudio();
     } catch (e) {

@@ -84,6 +84,14 @@ describe("finalizeCall — central call cleanup", () => {
     expect(mockCloseAllPeerConnections).toHaveBeenCalledOnce();
   });
 
+  // C02: the router stops only for the call that owns it, so the finalized
+  // call's id travels with the stop.
+  it("stops the audio routing for the finalized call only", async () => {
+    const { finalizeCall } = await import("./finalize-call");
+    await finalizeCall("hangup", "call-c02", "!room:server");
+    expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: "call-c02" });
+  });
+
   it("retires the call's pending answer/reject markers, with the room", async () => {
     // Without this the marker outlives the call and matches the NEXT invite
     // from the same room: the redial is auto-answered without a ringer, or
