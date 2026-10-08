@@ -116,6 +116,7 @@
   configuration`), ветка ошибки отпускала только свои фиды: поток остался `audio:live`, режим ~40 с. Оба случая закрыты
   `releaseLateMedia` (поток + невзятые потоки `MediaHandler` + остановка маршрутизации с `callId`) — перепроверить
   (`.bench/runs/rel/c03-*`).
+- Статус: ☑ проверено 2026-10-08 на Samsung SM-A528B, сборка с исправлением (`00a3cede`), `getUserMedia` SDK задержан на 15 с: входящий — веб сбросил, пока ответ ждал микрофон, `the call ended while answering` → `stopUserMediaStream`, дорожка `ended`, режим, поднятый поздним `ensureCommunicationMode(startLocalAudio)`, сброшен через 0,7 с (`stop() — inactive but device left in MODE_IN_COMMUNICATION, brute-resetting`); исходящий — отбой на нативном экране через 6 с, `Failed to place call` → тот же сброс потока и режима через 0,8 с. Гейт зелёный сразу и через 10 с в обоих (`.bench/runs/rel/c03-*`).
 
 
 ### «Отменить» у неотправленного текстового сообщения
