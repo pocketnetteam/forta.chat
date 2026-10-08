@@ -382,7 +382,21 @@ describe("waitForFinalizeSettled — the dial path waits for the previous call",
     const { finalizeCall } = await import("./finalize-call");
     await finalizeCall("hangup", "callId-named");
     expect(mockDismissCallUI).toHaveBeenCalledWith({ callId: "callId-named" });
-    expect(mockCloseAllPeerConnections).toHaveBeenCalledWith({ callId: "callId-named" });
+    expect(mockCloseAllPeerConnections).toHaveBeenCalledWith(expect.objectContaining({ callId: "callId-named" }));
+  });
+
+  it("N1: the close carries when the call ended, not when the step reached native", async () => {
+    // The next call's invite builds its PeerConnection while the earlier
+    // steps run; native leaves a connection created after this mark.
+    vi.useFakeTimers({ now: 1_791_462_201_539 });
+    mockDismissCallUI.mockReturnValueOnce(new Promise<void>((resolve) => setTimeout(resolve, 300)));
+    const { finalizeCall } = await import("./finalize-call");
+
+    const finalize = finalizeCall("hangup", "callId-n1");
+    await vi.advanceTimersByTimeAsync(400);
+    await finalize;
+
+    expect(mockCloseAllPeerConnections).toHaveBeenCalledWith({ callId: "callId-n1", createdBefore: 1_791_462_201_539 });
   });
 
   it("resolves at once when nothing is finalizing", async () => {

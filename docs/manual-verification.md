@@ -42,6 +42,25 @@
 - Статус: ☐ не проверено
 - Статус: ☑ проверено 2026-10-08 на Samsung SM-A528B, отладочная сборка ветки: входящие выключены (JS и натив), стёрт весь Local Storage WebView — это разлогинило приложение, владелец вошёл заново. После входа JS-значение `"false"` взято из натива (раньше считалось бы «включено»). Звонок с веба: `FortaPush: Call push dropped: incoming calls are off` и `[call-service] incoming call ignored, incoming calls are off`, рингера и экрана нет, гейт зелёный (`.bench/runs/rel/c05-*`). Настройка возвращена во «включено». iOS-часть не собиралась.
 
+### Звонок сразу после отбоя прошлого звонит
+- Коммит: см. `git log -1 -- android/app/src/main/java/com/forta/chat/plugins/webrtc/ReleaseScopePolicy.kt`
+- Почему нужен человек: правило и проводку закрывают `ReleaseScopePolicyTest`, `ReleaseScopeContractTest` и тест
+  finalize-call, но что звонок действительно звонит, видно только на аппарате. Раньше закрытие соединений прошлого
+  звонка (шаг 4 JS-финализации или фоновый поток `CallForegroundService`) шло через 60–300 мс после отбоя и закрывало
+  соединение, которое SDK уже создал для инвайта следующего звонка: `setRemoteDescription: no PeerConnection`,
+  инвайт молча отбрасывался, звонящий висел на «соединении» до своего таймаута (Samsung, 2026-10-08, сдвиг 4 с в
+  `.bench/runs/rel/c09.sh`).
+- На чём: Samsung SM-A528B ↔ веб TEST1 и TEST3, отладочная сборка ветки.
+- Шаги:
+  1. `OFFSETS="3800 4000 4000 4200 4400" .bench/runs/rel/c09.sh`: TEST1 звонит и сбрасывает на 5-й секунде, TEST3
+     звонит так, что его инвайт приходит в первые сотни миллисекунд после отбоя.
+     - **Ожидается:** экран входящего показывает TEST3 и звонит в каждом повторе, где инвайт пришёл после отбоя; в
+       логкате `Closed N PeerConnection(s) of the ended call; kept [pc_…], created after it`; нет
+       `setRemoteDescription: no PeerConnection`. Гейт после каждого повтора зелёный, микрофон после отбоя свободен.
+     - **Раньше:** экран TEST3 не появлялся или сразу закрывался, `[call-service] incoming call already ended by the
+       SDK (expired invite)`.
+- Статус: ☐ не проверено
+
 ### Поздний отбой прошлого звонка не закрывает экран входящего следующего
 - Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/plugins/calls/IncomingScreenOwnershipContractTest.kt`
 - Почему нужен человек: гонка между отложенным закрытием экрана для звонка A и intent'ом, который уже перерисовал

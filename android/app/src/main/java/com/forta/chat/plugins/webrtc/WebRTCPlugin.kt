@@ -570,7 +570,9 @@ class WebRTCPlugin : Plugin() {
             call.resolve(JSObject().apply { put("skipped", true) })
             return
         }
-        manager?.closeAllPeerConnections()
+        // N1: when the call ended. A connection created after it — the next
+        // call's invite — stays up; see ReleaseScopePolicy.
+        manager?.closeAllPeerConnections(call.getLong("createdBefore"))
         com.forta.chat.plugins.calls.CallActivity.markMediaConnected(false)
         call.resolve(JSObject().apply { put("skipped", false) })
     }

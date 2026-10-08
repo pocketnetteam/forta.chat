@@ -138,6 +138,9 @@ export async function finalizeCall(
 async function runSteps(reason: FinalizeReason, callId: string, roomId?: string): Promise<void> {
   try {
     emit({ type: "call_finalize_start", reason, callId });
+    // N1: the moment this call ended. Step 4 closes only connections native
+    // created before it; the next call's invite may already have built its own.
+    const endedAt = Date.now();
 
     // Step 0: retire this call's pending answer/reject markers. They exist
     // to carry a decision across a process that was not alive to act on it;
@@ -174,7 +177,9 @@ async function runSteps(reason: FinalizeReason, callId: string, roomId?: string)
     // Named: reaching native after the next call's launchCallUI, this close
     // would take the new call's connections down with the old one's.
     if (isAndroid) {
-      await safeStep("closeAllPeerConnections", callId, () => NativeWebRTC.closeAllPeerConnections({ callId }));
+      await safeStep("closeAllPeerConnections", callId, () =>
+        NativeWebRTC.closeAllPeerConnections({ callId, createdBefore: endedAt }),
+      );
     }
 
     // Step 5: let the page fall silent. The tone kept Chromium from freezing

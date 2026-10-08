@@ -44,7 +44,7 @@ class AudioRecordingReleaseContractTest {
 
     @Test
     fun closingAll_stopsRecording_beforeTheFirstClose() {
-        val locked = Regex("fun\\s+closeAllPeerConnections\\s*\\(\\s*\\)\\s*=\\s*synchronized\\(mediaLock\\)")
+        val locked = Regex("fun\\s+closeAllPeerConnections\\s*\\([^)]*\\)\\s*=\\s*synchronized\\(mediaLock\\)")
         assertTrue("closeAllPeerConnections must stay under mediaLock", locked.containsMatchIn(manager))
         val body = functionBody(manager, "private\\s+fun\\s+closeAllPeerConnectionsLocked\\s*\\(")
         val stop = body.indexOf("stopAudioRecording(")

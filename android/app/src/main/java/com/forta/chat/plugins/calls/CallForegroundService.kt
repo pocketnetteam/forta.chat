@@ -70,6 +70,9 @@ class CallForegroundService : Service() {
          * See [CallServiceStopPolicy].
          */
         const val EXTRA_GENERATION = "startGeneration"
+
+        /** When the stop was asked for (wall clock, ms); the media release closes only what is older (N1). */
+        const val EXTRA_STOP_REQUESTED_AT = "stopRequestedAt"
         private val startGeneration = java.util.concurrent.atomic.AtomicLong(0L)
         private val startLedger = CallStartLedger()
 
@@ -133,6 +136,7 @@ class CallForegroundService : Service() {
             val intent = Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_STOP
                 putExtra(EXTRA_GENERATION, startLedger.generationFor(callId, startGeneration.get()))
+                putExtra(EXTRA_STOP_REQUESTED_AT, System.currentTimeMillis())
             }
             // Reached from every call teardown. From the background with the
             // service already gone, Android 12+ refuses the start and the
@@ -238,6 +242,9 @@ class CallForegroundService : Service() {
     // with the counter in [isStale] before any process-wide teardown.
     private var generation: Long = -1L
 
+    /** When this call's stop was asked for; the media release leaves younger connections (N1). */
+    private var stopRequestedAt: Long? = null
+
     private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
@@ -317,6 +324,7 @@ class CallForegroundService : Service() {
                     return START_NOT_STICKY
                 }
                 hasStarted = false
+                stopRequestedAt = intent.getLongExtra(EXTRA_STOP_REQUESTED_AT, System.currentTimeMillis())
                 releaseWakeLock()
                 abandonAudioFocus()
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -383,13 +391,17 @@ class CallForegroundService : Service() {
         // global and the next call may have created its own while this task
         // waited behind a slow stopCapture.
         val owner = generation
+        // N1: the next call's invite builds its connection before any start of
+        // this service, so the generation check cannot see it. Close only what
+        // existed when this call's stop was asked for (or now, without a stop).
+        val createdBefore = stopRequestedAt ?: System.currentTimeMillis()
         runCatching {
             mediaReleaseExecutor.execute {
                 if (CallServiceStopPolicy.isStale(owner, startGeneration.get())) {
                     Log.w(TAG, "media release from $from skipped — a newer call started")
                     return@execute
                 }
-                runCatching { WebRTCPlugin.manager?.closeAllPeerConnections() }
+                runCatching { WebRTCPlugin.manager?.closeAllPeerConnections(createdBefore) }
                     .onFailure { Log.w(TAG, "closeAllPeerConnections from $from threw", it) }
             }
         }.onFailure { Log.w(TAG, "could not schedule media release from $from", it) }

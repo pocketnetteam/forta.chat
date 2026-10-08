@@ -101,6 +101,15 @@ class NativeWebRTCManager(private val context: Context) {
     private val peerConnections = java.util.concurrent.ConcurrentHashMap<String, PeerConnection>()
 
     /**
+     * When each connection was created (wall clock, ms). A close for an ended
+     * call leaves the ones created after that call ended — see [ReleaseScopePolicy].
+     */
+    private val peerCreatedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** When the current local tracks were made; null when there are none. Guarded by [mediaLock]. */
+    private var localMediaCreatedAt: Long? = null
+
+    /**
      * Serialises creating and disposing the local capture objects.
      *
      * A concurrent map protects the map; the tracks and sources below are
@@ -252,6 +261,7 @@ class NativeWebRTCManager(private val context: Context) {
         peerConnections[peerId]?.let {
             try { it.close() } catch (_: Exception) {}
             peerConnections.remove(peerId)
+            peerCreatedAt.remove(peerId)
             remoteVideo.forgetPeer(peerId)
         }
 
@@ -332,6 +342,7 @@ class NativeWebRTCManager(private val context: Context) {
         })
 
         if (pc != null) {
+            peerCreatedAt[peerId] = System.currentTimeMillis()
             peerConnections[peerId] = pc
 
             // Auto-attach existing local tracks (getUserMedia runs before createPC).
@@ -629,6 +640,7 @@ class NativeWebRTCManager(private val context: Context) {
             )
         }
         localAudioTrack?.setEnabled(true)
+        if (localMediaCreatedAt == null) localMediaCreatedAt = System.currentTimeMillis()
         Log.d("WebRTCAudio", "startLocalAudio: AudioTrack created and enabled")
 
         localAudioTrack?.let { attachLocalTrackLocked(it, "audio", peerId, "startLocalAudio") }
@@ -687,6 +699,7 @@ class NativeWebRTCManager(private val context: Context) {
 
         val track = factory?.createVideoTrack("video0", localVideoSource)
         localVideoTrack = track
+        if (track != null && localMediaCreatedAt == null) localMediaCreatedAt = System.currentTimeMillis()
         track?.setEnabled(true)
 
         // The preview bound by CallActivity before the track existed is picked
@@ -942,6 +955,7 @@ class NativeWebRTCManager(private val context: Context) {
 
     fun closePeerConnection(peerId: String) {
         val pc = peerConnections.remove(peerId)
+        peerCreatedAt.remove(peerId)
         remoteVideo.forgetPeer(peerId)
         if (pc != null) {
             if (peerConnections.isEmpty()) stopAudioRecording(pc, peerId)
@@ -984,24 +998,64 @@ class NativeWebRTCManager(private val context: Context) {
         localAudioTrack = null
         localAudioSource?.dispose()
         localAudioSource = null
+        localMediaCreatedAt = null
     }
 
-    fun closeAllPeerConnections() = synchronized(mediaLock) {
-        closeAllPeerConnectionsLocked()
+    /**
+     * Close the connections of a call that ended at [createdBefore] (wall
+     * clock, ms) and release the local media. A connection created after that
+     * moment is the next call's — the SDK builds an incoming call's connection
+     * on the invite — and stays up (N1, see [ReleaseScopePolicy]). Without a
+     * mark everything closes, as before.
+     */
+    fun closeAllPeerConnections(createdBefore: Long? = null) = synchronized(mediaLock) {
+        closeAllPeerConnectionsLocked(createdBefore)
     }
 
-    private fun closeAllPeerConnectionsLocked() {
-        val connections = peerConnections.toMap()
-        connections.entries.firstOrNull()?.let { (peerId, pc) -> stopAudioRecording(pc, peerId) }
-        for ((peerId, pc) in connections) {
+    private fun closeAllPeerConnectionsLocked(createdBefore: Long?) {
+        val (closing, kept) = peerConnections.toMap().entries
+            .partition { (peerId, _) -> ReleaseScopePolicy.closes(peerCreatedAt[peerId], createdBefore) }
+        closing.firstOrNull()?.let { (peerId, pc) -> stopAudioRecording(pc, peerId) }
+        for ((peerId, pc) in closing) {
             try { pc.close() } catch (_: Exception) {}
+            peerConnections.remove(peerId, pc)
+            peerCreatedAt.remove(peerId)
+            remoteVideo.forgetPeer(peerId)
             Log.d(TAG, "[$peerId] Closed")
         }
-        peerConnections.clear()
-        remoteVideo.forgetAll()
-        stopLocalMediaLocked()
-        listener = null
-        Log.d(TAG, "All PeerConnections closed")
+        if (kept.isEmpty()) {
+            remoteVideo.forgetAll()
+            stopLocalMediaLocked()
+            listener = null
+            Log.d(TAG, "All PeerConnections closed")
+            return
+        }
+        // The next call's connection stays, with its listener. The ended call's
+        // tracks come off it before they are disposed — a sender left holding a
+        // disposed track makes attachLocalTrackLocked skip that connection, and
+        // the next call would answer without sound.
+        if (ReleaseScopePolicy.releasesLocalMedia(kept.size, localMediaCreatedAt, createdBefore)) {
+            for ((peerId, pc) in kept) detachLocalTracksLocked(pc, peerId)
+            stopLocalMediaLocked()
+        }
+        // Recording is one switch for the whole factory: lowered above for the
+        // closed connections, raised again for the ones that stay.
+        for ((peerId, pc) in kept) enableAudioRecording(pc, peerId)
+        Log.w(TAG, "Closed ${closing.size} PeerConnection(s) of the ended call; kept ${kept.map { it.key }}, created after it")
+    }
+
+    private fun detachLocalTracksLocked(pc: PeerConnection, peerId: String) {
+        val local = setOfNotNull(localAudioTrack?.id(), localVideoTrack?.id())
+        if (local.isEmpty()) return
+        runCatching {
+            for (sender in pc.senders) {
+                val trackId = sender.track()?.id() ?: continue
+                if (trackId in local) {
+                    pc.removeTrack(sender)
+                    Log.d(TAG, "[$peerId] detached the ended call's track $trackId")
+                }
+            }
+        }.onFailure { Log.w(TAG, "[$peerId] could not detach the ended call's tracks", it) }
     }
 
     fun dispose() {
