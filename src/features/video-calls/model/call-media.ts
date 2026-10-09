@@ -209,6 +209,9 @@ export async function setAudioDevice(deviceId: string) {
         console.warn("[call-service] No audio sender found on peer connection");
       }
     }
+    // A mute pressed while replaceTrack ran disabled the old track only
+    // (review 2026-10-08, TS4); take the state again before the swap.
+    newTrack.enabled = !call.isMicrophoneMuted();
 
     // 3. Swap track in local MediaStream so UI reflects new device
     const localStream = call.localUsermediaStream;
@@ -270,6 +273,8 @@ export async function setVideoDevice(deviceId: string) {
         console.warn("[call-service] No video sender found on peer connection");
       }
     }
+    // Same for a camera turned off while replaceTrack ran (TS4).
+    newTrack.enabled = !call.isLocalVideoMuted();
 
     // 3. Swap track in local MediaStream so UI reflects new device
     const localStream = call.localUsermediaStream;

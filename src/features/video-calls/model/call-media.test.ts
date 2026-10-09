@@ -51,6 +51,30 @@ describe('device switch keeps the mute state', () => {
     expect(newTrack.enabled).toBe(false);
   });
 
+  // Review 2026-10-08 (TS4): a mute pressed while replaceTrack ran disabled
+  // the old track, and the new track, enabled before the await, went live.
+  it('a mute pressed during the switch holds on the new mic', async () => {
+    const { newTrack, replaceTrack } = setup('audio', false);
+    const call = mockCallStore.matrixCall as { isMicrophoneMuted: ReturnType<typeof vi.fn> };
+    replaceTrack.mockImplementationOnce(async () => {
+      call.isMicrophoneMuted.mockReturnValue(true);
+    });
+    const { useCallService } = await import('./call-service');
+    await useCallService().setAudioDevice('mic-2');
+    expect(newTrack.enabled).toBe(false);
+  });
+
+  it('a camera turned off during the switch stays off on the new camera', async () => {
+    const { newTrack, replaceTrack } = setup('video', false);
+    const call = mockCallStore.matrixCall as { isLocalVideoMuted: ReturnType<typeof vi.fn> };
+    replaceTrack.mockImplementationOnce(async () => {
+      call.isLocalVideoMuted.mockReturnValue(true);
+    });
+    const { useCallService } = await import('./call-service');
+    await useCallService().setVideoDevice('cam-2');
+    expect(newTrack.enabled).toBe(false);
+  });
+
   it('a live mic stays live on the new device', async () => {
     const { newTrack } = setup('audio', false);
     const { useCallService } = await import('./call-service');
