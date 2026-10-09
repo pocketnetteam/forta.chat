@@ -27,7 +27,9 @@ describe("MessageList neighbour lookups", () => {
  */
 describe("MessageList unread banner anchor", () => {
   it("resolves the watermark against the shown rows and handles no earlier row", () => {
-    expect(source).toMatch(/timelineAnchorFor\(rawMsgs, msgs, watermarkId\)/);
+    // Against the rows the list draws, ghosts excluded (review 2026-10-08, C10).
+    expect(source).toMatch(/timelineAnchorFor\(rawMsgs, msgs\.filter\(\(m\) => !isGhostMessage\(m\)\), watermarkId\)/);
+    expect(source).toMatch(/if \(isGhostMessage\(msg\)\) \{/);
     expect(source).toMatch(/let bannerPending = hasUnread && frozenLastReadId === null;/);
     expect(source).not.toMatch(/collapsedCallEventIds/);
   });

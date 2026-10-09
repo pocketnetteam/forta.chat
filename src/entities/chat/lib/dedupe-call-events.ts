@@ -54,6 +54,27 @@ type Keyed = Pick<Message, "id" | "_key">;
  * yet), the stable id of the nearest earlier shown row, or `null` when no shown
  * row precedes it — the banner then belongs above the first unread row.
  */
+/**
+ * A row the message list never draws: no text, media, poll, call or transfer,
+ * not deleted, not a system row, and not waiting for decryption (an
+ * "[encrypted]" placeholder must stay visible). The list skips these, and the
+ * unread anchor must be chosen among the rows it draws (C10).
+ */
+export function isGhostMessage(
+  m: Pick<Partial<Message>, "deleted" | "content" | "fileInfo" | "pollInfo" | "callInfo" | "transferInfo" | "type" | "decryptionStatus">,
+): boolean {
+  return (
+    !m.deleted &&
+    !m.content &&
+    !m.fileInfo &&
+    !m.pollInfo &&
+    !m.callInfo &&
+    !m.transferInfo &&
+    m.type !== "system" &&
+    !m.decryptionStatus
+  );
+}
+
 export function timelineAnchorFor(
   raw: readonly Keyed[],
   shown: readonly Keyed[],

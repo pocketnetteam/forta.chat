@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dedupeCallEvents, planCallRecordDeletion, timelineAnchorFor } from "./dedupe-call-events";
+import { dedupeCallEvents, isGhostMessage, planCallRecordDeletion, timelineAnchorFor } from "./dedupe-call-events";
 
 type Row = {
   id: string;
@@ -50,6 +50,30 @@ describe("dedupeCallEvents", () => {
 
   it("returns an empty list unchanged", () => {
     expect(dedupeCallEvents([])).toEqual([]);
+  });
+});
+
+describe("isGhostMessage", () => {
+  it("is a row with nothing to draw", () => {
+    expect(isGhostMessage({ content: "" })).toBe(true);
+  });
+
+  it("keeps rows that are drawn: text, media, calls, deleted, system, pending decryption", () => {
+    expect(isGhostMessage({ content: "hi" })).toBe(false);
+    expect(isGhostMessage({ content: "", deleted: true })).toBe(false);
+    expect(isGhostMessage({ content: "", type: "system" } as never)).toBe(false);
+    expect(isGhostMessage({ content: "", decryptionStatus: "pending" } as never)).toBe(false);
+    expect(isGhostMessage({ content: "", callInfo: { callType: "voice", missed: false } } as never)).toBe(false);
+  });
+});
+
+// Review 2026-10-08 (C10): the watermark could name a ghost row — kept by the
+// dedupe, dropped by the list — and the unread banner lost its anchor.
+describe("timelineAnchorFor over the rows the list draws", () => {
+  it("moves a watermark on a ghost row to the nearest drawn row before it", () => {
+    const rows = [{ id: "ev1", content: "read" }, { id: "ghost", content: "" }, { id: "ev3", content: "new" }];
+    const drawn = rows.filter((m) => !isGhostMessage(m));
+    expect(timelineAnchorFor(rows, drawn, "ghost")).toBe("ev1");
   });
 });
 

@@ -9,7 +9,7 @@ import { formatDate } from "@/shared/lib/format";
 import { formatMessageForCopy } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
-import { dedupeCallEvents, planCallRecordDeletion, timelineAnchorFor } from "@/entities/chat/lib/dedupe-call-events";
+import { dedupeCallEvents, isGhostMessage, planCallRecordDeletion, timelineAnchorFor } from "@/entities/chat/lib/dedupe-call-events";
 import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
@@ -383,7 +383,11 @@ const virtualItems = computed<VirtualItem[]>(() => {
   // row before it, or the unread banner loses its anchor and never renders;
   // null means no shown row precedes it.
   const hasUnread = !!watermarkId && frozenUnreadCount > 0;
-  const frozenLastReadId = hasUnread ? timelineAnchorFor(rawMsgs, msgs, watermarkId) : watermarkId;
+  // Among the rows this list draws: a ghost row kept by the collapse above is
+  // skipped below, and an anchor on it left the banner without a place (C10).
+  const frozenLastReadId = hasUnread
+    ? timelineAnchorFor(rawMsgs, msgs.filter((m) => !isGhostMessage(m)), watermarkId)
+    : watermarkId;
   const myAddr = authStore.address;
 
   // Track whether we've found the last-read message and need to insert the banner.
@@ -398,16 +402,7 @@ const virtualItems = computed<VirtualItem[]>(() => {
     // Skip ghost messages: no content, no media, not deleted, not system.
     // NEVER skip messages with pending/failed decryption — they must remain visible
     // so the user sees that a new message exists (shown as "[encrypted]" placeholder).
-    if (
-      !msg.deleted &&
-      !msg.content &&
-      !msg.fileInfo &&
-      !msg.pollInfo &&
-      !msg.callInfo &&
-      !msg.transferInfo &&
-      msg.type !== "system" &&
-      !msg.decryptionStatus
-    ) {
+    if (isGhostMessage(msg)) {
       if (import.meta.env.DEV) {
         console.warn("[MessageList] ghost message filtered:", msg.id, msg.senderId, msg.status);
       }
