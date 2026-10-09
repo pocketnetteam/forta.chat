@@ -52,6 +52,7 @@ const onCancel = () => emit("close");
     <div class="w-full max-w-sm rounded-xl bg-background-total-theme p-5 shadow-xl">
       <h3 class="mb-3 text-base font-semibold text-text-color">{{ t("contact.renameTitle") }}</h3>
       <input
+        autocomplete="off"
         ref="inputRef"
         v-model="alias"
         type="text"

@@ -267,7 +267,7 @@ export class MessageRepository {
       message.localId = localId as number;
 
       // Atomically update room preview so sidebar reflects sent message instantly
-      const preview = this.getPreviewText(msgType, params.content, params.transferInfo?.amount, params.fileInfo);
+      const preview = this.getPreviewText(msgType, params.content, params.fileInfo);
       await this.db.rooms.update(params.roomId, {
         lastMessagePreview: preview.slice(0, 200),
         lastMessageTimestamp: now,
@@ -275,6 +275,12 @@ export class MessageRepository {
         lastMessageType: msgType,
         lastMessageLocalStatus: "pending" as import("./schema").LocalMessageStatus,
         lastMessageReaction: null,
+        // Details of the message this one replaces: a missed call left its
+        // callInfo behind and the sent text showed in the list as a red
+        // missed call (the server echo often loses the monotonic guard).
+        lastMessageCallInfo: undefined,
+        lastMessageSystemMeta: undefined,
+        lastMessageDecryptionStatus: undefined,
         updatedAt: now,
       });
     });
@@ -283,13 +289,14 @@ export class MessageRepository {
   }
 
   /** Generate preview text for sidebar display */
-  private getPreviewText(type: MessageType, content: string, transferAmount?: number, fileInfo?: { name?: string }): string {
+  private getPreviewText(type: MessageType, content: string, fileInfo?: { name?: string }): string {
     if (type === MessageType.image) return "[photo]";
     if (type === MessageType.video) return "[video]";
     if (type === MessageType.audio) return "[voice message]";
     if (type === MessageType.file) return fileInfo?.name || "[file]";
     if (type === MessageType.poll) return "[poll]";
-    if (type === MessageType.transfer) return `[transfer] ${transferAmount ?? 0} PKOIN`;
+    // The amount of a legacy JSON transfer is unverified — never show it.
+    if (type === MessageType.transfer) return "[transfer] PKOIN";
     if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
@@ -648,14 +655,43 @@ export class MessageRepository {
 
   /** Update the eventId on a pending message (after server confirms) */
   async confirmSent(clientId: string, eventId: string): Promise<void> {
-    await this.db.messages
-      .where("clientId")
-      .equals(clientId)
-      .modify({
-        eventId,
-        status: "synced" as LocalMessageStatus,
-        serverTs: Date.now(),
-      });
+    await this.db.transaction("rw", this.db.messages, async () => {
+      await this.removeEchoDuplicates(clientId, eventId);
+      await this.db.messages
+        .where("clientId")
+        .equals(clientId)
+        .modify({
+          eventId,
+          status: "synced" as LocalMessageStatus,
+          serverTs: Date.now(),
+        });
+    });
+  }
+
+  /** Drop rows that already hold `eventId` under a different clientId.
+   *  Bastyon's /sync echo carries no `unsigned.transaction_id`, so when a
+   *  send lands server-side but the SDK throws (timeout), the local row goes
+   *  "failed" and the echo is inserted as a separate `srv_<eventId>` row.
+   *  The retry reuses the clientId as txnId, the server dedupes it and
+   *  returns the SAME eventId — without this the sender sees the message
+   *  twice while the peer sees it once. The local row wins (it carries the
+   *  clientId, link preview, blob URL); reactions from the echo carry over.
+   *  Must run inside a transaction that covers `messages`. */
+  private async removeEchoDuplicates(clientId: string, eventId: string): Promise<void> {
+    // No local row to keep (cancelled / cleaned up) — the echo is the only copy.
+    const local = await this.db.messages.where("clientId").equals(clientId).first();
+    if (!local) return;
+    const echoes = await this.db.messages
+      .where("eventId")
+      .equals(eventId)
+      .filter((m) => m.clientId !== clientId)
+      .toArray();
+    if (echoes.length === 0) return;
+    const echoReactions = echoes.find((m) => m.reactions && Object.keys(m.reactions).length > 0)?.reactions;
+    if (echoReactions && (!local.reactions || Object.keys(local.reactions).length === 0)) {
+      await this.db.messages.update(local.localId!, { reactions: echoReactions });
+    }
+    await this.db.messages.bulkDelete(echoes.map((m) => m.localId!));
   }
 
   /** Update upload progress for a media message */
@@ -674,6 +710,7 @@ export class MessageRepository {
     roomId: string,
   ): Promise<void> {
     await this.db.transaction('rw', [this.db.messages, this.db.rooms], async () => {
+      await this.removeEchoDuplicates(clientId, eventId);
       await this.db.messages
         .where("clientId")
         .equals(clientId)

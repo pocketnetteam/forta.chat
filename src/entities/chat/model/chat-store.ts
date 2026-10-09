@@ -7,6 +7,13 @@ import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
+import { countUnreadRoomsForTab } from "../lib/room-visibility";
+import {
+  mutedRoomIdsFromPushRules,
+  waitForSdkPushRules,
+  type PushRulesLike,
+  type SdkPushRulesSource,
+} from "../lib/muted-rooms";
 import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { reuseIfUnchanged } from "../lib/message-memo";
@@ -65,6 +72,9 @@ import { ChatDatabase, useLiveQuery, localToMessage, localToMessages, deriveOutb
 import type { ChatRoom, FileInfo, ForwardingMessage, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
 import { resolveCachedRoomsAddress } from "./cached-rooms-address";
+
+/** How long boot waits for the SDK's own push rules before fetching them. */
+const SDK_PUSH_RULES_WAIT_MS = 30_000;
 
 const NAMESPACE = "chat";
 
@@ -1242,11 +1252,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
   const pinnedRoomIds = ref<Set<string>>(new Set());
   const mutedRoomIds = ref<Set<string>>(new Set());
+  /** Mute toggles the server has not confirmed yet. They win over server push
+   *  rules (a sync echo from before the write must not flip the toggle back).
+   *  A failed write stays here for the session so an offline mute holds. */
+  const pendingMuteWrites = new Map<string, boolean>();
 
   /** Called from auth store on login/switch to bind per-account keys */
   const bindAccountKeys = (address: string) => {
     _pinnedKey = `chat_pinned_rooms:${address}`;
     _mutedKey = `chat_muted_rooms:${address}`;
+    pendingMuteWrites.clear();
     pinnedRoomIds.value = new Set(JSON.parse(localStorage.getItem(_pinnedKey) || "[]"));
     mutedRoomIds.value = new Set(JSON.parse(localStorage.getItem(_mutedKey) || "[]"));
   };
@@ -1284,6 +1299,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     else s.delete(roomId);
     mutedRoomIds.value = s;
     persistRoomSets();
+    pendingMuteWrites.set(roomId, muted);
 
     // 2. Server sync — fire-and-forget for UI snappiness. On failure we
     //    keep the optimistic local state (better UX than yanking the
@@ -1300,6 +1316,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       } | null;
       if (client?.setRoomMutePushRule) {
         await client.setRoomMutePushRule('global', roomId, muted);
+        // A newer toggle of the same room may be in flight — keep that one.
+        if (pendingMuteWrites.get(roomId) === muted) pendingMuteWrites.delete(roomId);
       }
     } catch (e) {
       console.warn('[chat-store] Failed to push mute rule to server:', { roomId, muted, e });
@@ -1313,49 +1331,45 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     setRoomMute(roomId, willBeMuted).catch(() => { /* already warned inside */ });
   };
 
-  /** Pull authoritative mute state from Matrix push rules and merge with
-   *  the local set. Called after Matrix becomes ready.
+  /** Pull authoritative mute state from Matrix push rules. Called after
+   *  Matrix becomes ready (and on native app resume).
    *
-   *  Merge policy: we UNION the server set with the local set rather than
-   *  replacing. The race we are protecting against: between `pushService.init`
-   *  and the `getPushRules` round-trip the user may have tapped Mute on a
-   *  room — `setRoomMute` already wrote that optimistically into
-   *  `mutedRoomIds`, and the in-flight `setRoomMutePushRule` POST has not
-   *  necessarily landed before we read the rules back. A plain "server wins"
-   *  policy would clobber that optimistic write, silently un-muting a room
-   *  the user just muted. We bias toward "muted" because the failure mode is
-   *  safer: at worst the user has to tap Unmute again on the next boot if
-   *  their just-issued unmute didn't land on the server yet, but we never
-   *  silently push notifications into a room they had silenced. */
-  const syncMutedRoomsFromMatrix = async (): Promise<void> => {
+   *  The server is the source of truth, so a room unmuted on another device
+   *  unmutes here too. The exception is `pendingMuteWrites`: between a tap and
+   *  the server confirming it, `getPushRules` (or a sync echo) still returns the
+   *  old rule, and replacing the set would silently undo what the user just did.
+   *
+   *  `fromSdk` (boot): reuse the rules the SDK fetched before its first /sync
+   *  instead of a second GET /pushrules; falls back to the network if they
+   *  have not arrived within SDK_PUSH_RULES_WAIT_MS. */
+  const syncMutedRoomsFromMatrix = async (opts?: { fromSdk?: boolean }): Promise<void> => {
     try {
       const matrixService = getMatrixClientService();
-      const client = matrixService.client as unknown as {
-        getPushRules?: () => Promise<{
-          global?: { room?: Array<{ rule_id: string; enabled: boolean; actions: unknown[] }> };
-        }>;
-      } | null;
+      const client = matrixService.client as unknown as (SdkPushRulesSource & {
+        getPushRules?: () => Promise<PushRulesLike>;
+      }) | null;
       if (!client?.getPushRules) return;
-      const rules = await client.getPushRules();
-      const roomRules = rules?.global?.room ?? [];
-      const serverMuted = new Set<string>();
-      for (const r of roomRules) {
-        if (!r?.enabled) continue;
-        // Convention used by setRoomMutePushRule: actions = ["dont_notify"]
-        // means muted. Be defensive about the action shape.
-        const isMute = Array.isArray(r.actions) && r.actions.some(
-          (a) => a === 'dont_notify' || (typeof a === 'object' && a !== null && (a as { value?: boolean }).value === false),
-        );
-        if (isMute && typeof r.rule_id === 'string') serverMuted.add(r.rule_id);
-      }
-      // Union, not replace — see merge-policy note above.
-      const merged = new Set<string>(mutedRoomIds.value);
-      for (const id of serverMuted) merged.add(id);
-      mutedRoomIds.value = merged;
-      persistRoomSets();
+      const sdkRules = opts?.fromSdk ? await waitForSdkPushRules(client, SDK_PUSH_RULES_WAIT_MS) : null;
+      applyServerMutedRooms(sdkRules ?? await client.getPushRules());
     } catch (e) {
       console.warn('[chat-store] Failed to sync mute rules from Matrix:', e);
     }
+  };
+
+  /** Replace `mutedRoomIds` with the server mute rules plus unconfirmed local
+   *  toggles. Also fed by live `m.push_rules` account_data, so a group muted on
+   *  another device stops beeping in the web tab without a reload. */
+  const applyServerMutedRooms = (rules: PushRulesLike | null | undefined): void => {
+    const next = mutedRoomIdsFromPushRules(rules);
+    if (!next) return; // no room rules in the payload — keep what we have
+    for (const [roomId, muted] of pendingMuteWrites) {
+      if (muted) next.add(roomId);
+      else next.delete(roomId);
+    }
+    const current = mutedRoomIds.value;
+    if (next.size === current.size && [...next].every((id) => current.has(id))) return;
+    mutedRoomIds.value = next;
+    persistRoomSets();
   };
 
   /** Single writer for unreadCount across ALL update paths.
@@ -4638,6 +4652,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     sortedRooms.value.filter((r) => r.membership === "invite").length
   );
 
+  /** Group chats with unread messages (badge on the "Groups" folder tab). */
+  const unreadGroupCount = computed(() =>
+    countUnreadRoomsForTab(sortedRooms.value, "groups", mutedRoomIds.value)
+  );
+
   const addRoom = (room: ChatRoom) => {
     const existing = getRoomById(room.id);
     if (existing) {
@@ -5851,7 +5870,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Handle donation/transfer messages (m.notice with txId — from original bastyon-chat)
     const mtype = content.msgtype as string;
     if (mtype === "m.notice" && content.txId) {
-      const body = (content.body as string) ?? `Sent ${content.amount} PKOIN`;
+      const body = (content.body as string) ?? "PKOIN";
       return {
         id: raw.event_id as string,
         roomId,
@@ -5892,7 +5911,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (body.startsWith('{"_transfer":true')) {
       try {
         const transfer = JSON.parse(body);
-        const displayBody = transfer.message || `Sent ${transfer.amount} PKOIN`;
+        const displayBody = transfer.message || "PKOIN";
         return {
           id: raw.event_id as string,
           roomId,
@@ -7857,7 +7876,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Handle donation/transfer messages (m.notice with txId)
       const mtype0 = content.msgtype as string;
       if (mtype0 === "m.notice" && content.txId) {
-        const txBody = (content.body as string) ?? `Sent ${content.amount} PKOIN`;
+        const txBody = (content.body as string) ?? "PKOIN";
         const transferMsg: Message = {
           id: raw.event_id as string,
           roomId,
@@ -7912,7 +7931,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (body.startsWith('{"_transfer":true')) {
         try {
           const transfer = JSON.parse(body);
-          const displayBody = transfer.message || `Sent ${transfer.amount} PKOIN`;
+          const displayBody = transfer.message || "PKOIN";
           const encTransferMsg: Message = {
             id: raw.event_id as string,
             roomId,
@@ -8386,6 +8405,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *    - A one-shot replay on login (cold-start hydration before /sync). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleAccountDataEvent = async (event: any): Promise<void> => {
+    if (event?.getType?.() === "m.push_rules") {
+      applyServerMutedRooms(event.getContent?.() as PushRulesLike | null);
+      return;
+    }
     if (event?.getType?.() !== "m.bastyon.contact_aliases") return;
     const content = event.getContent?.() as {
       aliases?: Record<string, { name: string; updatedAt: number }>;
@@ -8722,6 +8745,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     pinnedMessageIndex.value = 0;
     pinnedRoomIds.value = new Set();
     mutedRoomIds.value = new Set();
+    pendingMuteWrites.clear();
     matrixKitRef.value = null;
     pcryptoRef.value = null;
     _roomCryptoInFlight.clear();
@@ -8872,6 +8896,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     acceptInvite,
     declineInvite,
     inviteCount,
+    unreadGroupCount,
     setActiveRoom,
     setHelpers,
     retryEncryptedPreviews,

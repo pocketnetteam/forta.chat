@@ -819,8 +819,18 @@ export const en = {
   "roomLink.unknown": "Invitation to a group chat",
   "roomLink.members": "Members: {count}",
   "roomLink.open": "Open chat",
+  "linkLabel.post": "Post",
+  "linkLabel.comment": "Comment",
+  "linkLabel.collection": "Collection",
+  "linkLabel.transaction": "Transaction",
   "txLink.label": "PKOIN transaction",
   "txLink.open": "Open in explorer",
+  "txLink.from": "From",
+  "txLink.to": "To",
+  "txLink.notFound": "Transaction not found",
+  "txLink.retry": "Retry",
+  "txLink.confirmations": "Confirmations: {count}",
+  "txLink.unconfirmed": "Awaiting confirmation",
 
   // Post player
   "postPlayer.boost": "Boost",
@@ -834,6 +844,10 @@ export const en = {
   "postPlayer.openPost": "Open",
   "postPlayer.goToComment": "Go to comment",
   "postPlayer.searchChats": "Search chats...",
+  "postPlayer.closeGallery": "Close",
+  "postPlayer.prevImage": "Previous image",
+  "postPlayer.nextImage": "Next image",
+  "postPlayer.imageCount": "{count} photos",
 
   // ── Registration ──
   "register.title": "Create Account",

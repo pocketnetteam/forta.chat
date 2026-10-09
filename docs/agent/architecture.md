@@ -19,7 +19,7 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 
 ### `src/pages/`
 - Purpose: route containers that assemble features + layouts
-- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, `AppearancePage.vue` (`/settings/appearance`); settings hub is `widgets/sidebar/ui/SettingsPanel.vue`
+- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `WelcomePage.vue`, `ProfilePage.vue`, `ProfileEditPage.vue`, `DownloadPage.vue`, `AppsDownloadPage.vue`, `AppearancePage.vue` (`/settings/appearance`); settings hub is `widgets/sidebar/ui/SettingsPanel.vue`
 - Depends on features, widgets, entities; used by Vue Router (`app/providers/router/`)
 
 ### `src/widgets/`
@@ -75,6 +75,9 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### Matrix service (`entities/matrix/`)
 - Wrapper around the Matrix SDK and E2E crypto: client service, per-room crypto instances, key management
 - `decryptEvent()`, `encryptEvent()`, `getRoomMembers()`, `fetchEventContext()`
+- E2E is Bastyon's Pcrypto (`matrix-crypto.ts`: secp256k1 + AES-SIV, AES-CBC for files), not Olm/Megolm; the SDK's Rust crypto is never initialised and stays a lazy chunk
+- The SDK's IndexedDB sync store runs in a Web Worker where the WebView supports it (`sync-store-worker.ts`: probed once, falls back to the main thread; a failed probe is remembered per userAgent)
+- Room members: `ensureRoomMembers()` (`ensure-room-members.ts`) before encryption decisions; peer keys for several rooms are fetched in one batch via `chatStore.preloadRoomKeys()`. `lazyLoadMembers` stays `false` (plan `docs/plans/2026-10-03-initial-sync-lazy-members.md`, phase II cancelled)
 
 ### Vendored Pocketnet SDK (`public/js/lib/client/sdk.js`)
 - Loaded as a classic `<script>`, not bundled; edited in place. Mark each local change with a `Forta Chat:` comment and cover it in `src/app/providers/initializers/__tests__/sdk-*.test.ts` (sdk.js runs in a `vm` sandbox there).

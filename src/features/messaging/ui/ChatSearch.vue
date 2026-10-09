@@ -222,6 +222,7 @@ const handleClose = () => {
         </button>
 
         <input
+          autocomplete="off"
           ref="inputRef"
           v-model="query"
           type="text"

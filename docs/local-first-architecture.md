@@ -10,7 +10,7 @@
 
 ### Current state (реализовано)
 Приложение использует **local-first** модель:
-- **IndexedDB (Dexie.js)** — локальный источник истины (`shared/lib/local-db/schema.ts`, schema v18, 15 таблиц)
+- **IndexedDB (Dexie.js)** — локальный источник истины (`shared/lib/local-db/schema.ts`, schema v19, 15 таблиц)
 - Все чтения идут из локальной БД через `useLiveQuery`, а не напрямую из Matrix SDK
 - Все мутации сначала пишутся локально, затем синхронизируются в фоне через `SyncEngine`
   (FIFO-очередь `pendingOps`, exponential backoff + jitter)

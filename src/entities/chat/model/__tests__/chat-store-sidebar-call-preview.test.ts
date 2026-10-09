@@ -7,6 +7,7 @@
  * room when a field outside the call info changed, and its per-room cache was
  * keyed on those same fields, so the list showed the old reading until restart.
  */
+import { MessageType } from "@/entities/chat/model/types";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
@@ -78,6 +79,8 @@ function callRoom(missed: boolean): LocalRoom {
     lastMessagePreview: "[message]",
     lastMessageEventId: "$hangup",
     lastMessageSenderId: "peer",
+    // Call records are system messages (every writer stores the type with callInfo).
+    lastMessageType: MessageType.system,
     lastMessageCallInfo: { callType: "voice", missed },
     lastMessageSystemMeta: { template: missed ? "system.missedVoiceCall" : "system.voiceCall", senderAddr: "peer" },
   } as LocalRoom;

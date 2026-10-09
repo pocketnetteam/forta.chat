@@ -30,10 +30,10 @@ describe("matrix-client device_id persistence", () => {
 
   it("reads the stored device_id using the account address before login", () => {
     const source = getSource();
-    const getClientStart = source.indexOf("async getClient(");
+    const getClientStart = source.indexOf("private async passwordLogin(");
     expect(getClientStart).toBeGreaterThan(-1);
 
-    // Search only within the getClient method to avoid matching unrelated code
+    // Search only within the passwordLogin method to avoid matching unrelated code
     const getClientBody = source.slice(getClientStart, getClientStart + 4000);
 
     expect(getClientBody).toContain(
@@ -61,7 +61,7 @@ describe("matrix-client device_id persistence", () => {
 
   it("persists the device_id after a successful login/register", () => {
     const source = getSource();
-    const getClientStart = source.indexOf("async getClient(");
+    const getClientStart = source.indexOf("private async passwordLogin(");
     const getClientBody = source.slice(getClientStart, getClientStart + 4000);
 
     expect(getClientBody).toContain(
@@ -87,7 +87,7 @@ describe("matrix-client device_id persistence", () => {
     // with no mention of device_id anywhere around it. We assert that within
     // the getClient method the identifier `device_id` is present near the
     // login call.
-    const getClientStart = source.indexOf("async getClient(");
+    const getClientStart = source.indexOf("private async passwordLogin(");
     const getClientBody = source.slice(getClientStart, getClientStart + 4000);
     expect(getClientBody).toMatch(/device_id/);
   });

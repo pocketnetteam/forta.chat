@@ -56,8 +56,12 @@ export interface RpcFailoverOptions {
   nowMs?: number;
   /** Cooldown for a failed node before it is retried; defaults to {@link NODE_COOLDOWN_MS}. */
   cooldownMs?: number;
-  /** Per-node request ceiling; defaults to {@link NODE_REQUEST_TIMEOUT_MS}. */
+  /** How long a node may stay silent before the next one is asked in
+   *  parallel; defaults to {@link NODE_REQUEST_TIMEOUT_MS}. */
   timeoutMs?: number;
+  /** Hard per-node ceiling after which the request is aborted; defaults to
+   *  {@link NODE_HARD_TIMEOUT_FACTOR} × `timeoutMs`. */
+  hardTimeoutMs?: number;
 }
 
 /**
@@ -69,6 +73,12 @@ export interface RpcFailoverOptions {
  */
 export const NODE_REQUEST_TIMEOUT_MS = 10_000;
 
+/** A slow node is not cancelled at {@link NODE_REQUEST_TIMEOUT_MS}: the next
+ *  node is asked alongside it and the first answer wins (a cold node answering
+ *  at 11 s used to be aborted and the whole request restarted elsewhere). It is
+ *  only aborted at this multiple, so a blackholed host still frees its socket. */
+export const NODE_HARD_TIMEOUT_FACTOR = 3;
+
 /** fetch with a hard deadline. The deadline is enforced by Promise.race, so it
  *  holds even on ancient WebViews without AbortController and with fetch
  *  implementations that ignore `init.signal`; when AbortController IS available
@@ -79,9 +89,9 @@ async function fetchWithDeadline(
   doFetch: typeof fetch,
   url: string,
   init: RequestInit,
-  timeoutMs: number
+  timeoutMs: number,
+  controller: AbortController | null
 ): Promise<Response> {
-  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -163,27 +173,64 @@ export async function rpcFetchWithFailover(
   const doFetch = opts.fetchImpl ?? fetch;
   const nowMs = opts.nowMs ?? Date.now();
   const cooldownMs = opts.cooldownMs ?? NODE_COOLDOWN_MS;
-  const timeoutMs = opts.timeoutMs ?? NODE_REQUEST_TIMEOUT_MS;
+  const hedgeMs = opts.timeoutMs ?? NODE_REQUEST_TIMEOUT_MS;
+  const hardMs = opts.hardTimeoutMs ?? hedgeMs * NODE_HARD_TIMEOUT_FACTOR;
   const start = opts.startIndex ?? stickyIndex;
+  const candidates = orderedCandidates(nodes, start, nowMs);
   const errors: string[] = [];
+  const init: RequestInit = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
 
-  for (const base of orderedCandidates(nodes, start, nowMs)) {
-    let response: Response;
-    try {
-      response = await fetchWithDeadline(
-        doFetch,
-        `${base}${path}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-        timeoutMs
-      );
-    } catch (e) {
-      // Network error / timeout abort → cut the node off and try the next one.
-      errors.push(`${base}: ${e instanceof Error ? e.message : String(e)}`);
+  type Outcome = { base: string; response?: Response; error?: unknown };
+  const inFlight = new Map<string, { outcome: Promise<Outcome>; abort: () => void }>();
+  let nextIndex = 0;
+  // A client error ends the failover, but a node already asked alongside may
+  // still answer — it is awaited before the error is thrown.
+  let clientError: Error | null = null;
+
+  const launchNext = (): void => {
+    if (nextIndex >= candidates.length) return;
+    const base = candidates[nextIndex++];
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const outcome = fetchWithDeadline(doFetch, `${base}${path}`, init, hardMs, controller).then(
+      (response): Outcome => ({ base, response }),
+      (error: unknown): Outcome => ({ base, error }),
+    );
+    inFlight.set(base, { outcome, abort: () => controller?.abort() });
+  };
+  const abortRest = (): void => {
+    for (const attempt of inFlight.values()) attempt.abort();
+    inFlight.clear();
+  };
+
+  launchNext();
+  while (inFlight.size > 0) {
+    // While nodes are left, a silent one gets company after hedgeMs.
+    let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+    const hedge = nextIndex < candidates.length
+      ? new Promise<null>((resolve) => { hedgeTimer = setTimeout(() => resolve(null), hedgeMs); })
+      : null;
+    const settled = await Promise.race([
+      ...[...inFlight.values()].map((a) => a.outcome),
+      ...(hedge ? [hedge] : []),
+    ]);
+    clearTimeout(hedgeTimer);
+
+    if (settled === null) {
+      launchNext();
+      continue;
+    }
+    const { base, response, error } = settled;
+    inFlight.delete(base);
+
+    if (!response) {
+      // Network error / hard timeout → cut the node off and try the next one.
+      errors.push(`${base}: ${error instanceof Error ? error.message : String(error)}`);
       disableNode(base, nowMs, cooldownMs);
+      launchNext();
       continue;
     }
 
@@ -192,6 +239,7 @@ export async function rpcFetchWithFailover(
       // (no failover) — the gateway answered, so the caller decides. This matches
       // the prior single-node behaviour; widening failover to RPC-level errors
       // risks masking genuine bad-param/not-found errors.
+      abortRest();
       enableNode(base); // healthy again
       stickyIndex = nodes.indexOf(base); // remember it for next time
       return await response.json();
@@ -201,10 +249,14 @@ export async function rpcFetchWithFailover(
     if (!isRetriableNodeStatus(response.status)) {
       // Client-side error (4xx etc.) — the node is fine, the request isn't;
       // don't cut it off and don't waste calls on other nodes.
-      throw new Error(`[node-failover] non-retriable HTTP ${response.status} from ${base}${path}`);
+      clientError ??= new Error(`[node-failover] non-retriable HTTP ${response.status} from ${base}${path}`);
+      nextIndex = candidates.length;
+      continue;
     }
     disableNode(base, nowMs, cooldownMs);
+    launchNext();
   }
 
+  if (clientError) throw clientError;
   throw new Error(`[node-failover] all nodes failed for ${path}: ${errors.join("; ")}`);
 }

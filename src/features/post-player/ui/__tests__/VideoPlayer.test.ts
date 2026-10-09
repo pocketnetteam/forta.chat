@@ -108,12 +108,14 @@ describe("VideoPlayer channel spinner (WEE-70)", () => {
     expect(src).toContain("autoplay=1");
   });
 
-  it("показывает «открыть внешне» сразу после тапа play (не только по error)", async () => {
+  it("не показывает «открыть внешне» поверх играющего видео — только при ошибке", async () => {
     const wrapper = mount(VideoPlayer, { props: { url: YT_URL } });
 
     await wrapper.find("button").trigger("click");
     await flushPromises();
+    expect(wrapper.find("[data-testid='video-external']").exists()).toBe(false);
 
+    await wrapper.find("iframe").trigger("error");
     expect(wrapper.find("[data-testid='video-external']").exists()).toBe(true);
   });
 
@@ -131,8 +133,6 @@ describe("VideoPlayer channel spinner (WEE-70)", () => {
       await flushPromises();
 
       expect(wrapper.find("[data-testid='video-loading']").exists()).toBe(false);
-      // External fallback remains reachable.
-      expect(wrapper.find("[data-testid='video-external']").exists()).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -144,6 +144,7 @@ describe("VideoPlayer channel spinner (WEE-70)", () => {
 
     await wrapper.find("button").trigger("click");
     await flushPromises();
+    await wrapper.find("iframe").trigger("error");
 
     await wrapper.find("[data-testid='video-external']").trigger("click");
     expect(openExternalUrl).toHaveBeenCalledWith(YT_URL);

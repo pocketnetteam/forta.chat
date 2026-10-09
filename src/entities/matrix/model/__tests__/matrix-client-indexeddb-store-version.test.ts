@@ -21,7 +21,7 @@ const getSource = (): string =>
 describe("matrix-client IndexedDBStore — version bump", () => {
   it("uses the matrix-js-sdk-v7 store name, not v6", () => {
     const source = getSource();
-    expect(source).toContain('dbName: "matrix-js-sdk-v7:" + this.credentials.username');
+    expect(source).toContain('dbName: "matrix-js-sdk-v7:" + username');
     expect(source).not.toContain("matrix-js-sdk-v6");
   });
 });

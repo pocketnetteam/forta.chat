@@ -12,6 +12,23 @@
 
 ---
 
+## Status (checked against the code, 2026-10-05)
+
+All eight sub-plans have landed; the per-plan checkboxes below were never ticked and are not the status. What still needs work is listed in the last column.
+
+| # | Plan | State | Commits | Still open |
+|---|---|---|---|---|
+| 1 | simple tasks | done | `6e6d5624`, `75a728ec` | — |
+| 2 | keyboard / safe area | done, reworked | `99c75914`, PR #235 (`73cb789c`); later one rule for both platforms (`--app-bottom-inset`, `de40a1c0`) | keyboard on a real iPhone not re-checked after `de40a1c0` |
+| 3 | APNs push + NSE | code done | `f13e77c5`, `a0770162`, `570b8236` | Sygnal `fortaios` / `fortaios.voip` not configured on the homeserver (pushers dropped 2026-09-24, see `../2026-09-18-calls-handoff.md`); NSE decrypt deferred (`2026-05-14-nse-e2e-decrypt-issue.md`) |
+| 4 | WebRTC decision | done | `11199863` | — |
+| 5 | CallKit / PushKit | done, checked on iPhone XR | `605f53c9`, `6f79bccc`, `09e3e314`, `ed870de4` | real VoIP push delivery depends on Sygnal (row 3) |
+| 6 | Share Extension | done | `c9d12fb6`, `ecbc286c` | — |
+| 7 | Universal Links | app side done | `f92d4c73` | AASA on `forta.chat` is deployed by the web team; not verified from here |
+| 8 | file transfer stub | done | `d509ebbc` | — |
+
+Build tooling moved from CocoaPods to Swift Package Manager: the plans still say `Podfile`, `pod install` and `App.xcworkspace`; follow [`docs/ios-local-build.md`](../../ios-local-build.md) instead (`App.xcodeproj`, `CapApp-SPM`, `scripts/fix-ios-spm-products.mjs`).
+
 ## Plan index
 
 | # | Plan | Area | Effort |

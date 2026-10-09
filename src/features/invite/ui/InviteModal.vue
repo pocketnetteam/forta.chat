@@ -73,6 +73,7 @@ const shareUrl = (platform: string) => {
       <!-- Link field -->
       <div class="flex w-full items-center gap-2 rounded-lg border border-neutral-grad-0 bg-background-secondary-theme p-2">
         <input
+          autocomplete="off"
           :value="inviteLink"
           readonly
           class="min-w-0 flex-1 bg-transparent text-sm text-text-color outline-none"

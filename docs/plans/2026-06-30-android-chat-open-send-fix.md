@@ -6,6 +6,18 @@
 > 1. Тап по чату в списке → чат «не показывается» (пустой экран / остаётся список).
 > 2. Сообщения и изображения часто не уходят (зависают в sending или падают в failed).
 
+> **Статус (сверено с кодом 2026-10-05): план как написан не выполнялся.** Чекбоксы ниже не отражают
+> состояние.
+> - Phase 1 (открытие чата) заменена планом [2026-09-28-chat-open-local-first.md](2026-09-28-chat-open-local-first.md):
+>   открытие решается по peek строки Dexie (`room-open-plan.ts`), `waitForRoomMessages` больше нет.
+> - Task 2.1: отдельного `use-sync-resume-kick.ts` нет; `SyncEngine.setOnline()` получает переходы сети через
+>   `onConnectivityChange` (`@capacitor/network` + `online`/`offline`, `stores.ts`). Пинка очереди на
+>   `appStateChange` нет.
+> - Task 2.2: не сделано — `WATCHDOG_INTERVAL_MS` в `sync-engine.ts` по-прежнему 30 с.
+> - Task 2.3: не сделано — явного пинка очереди при `isReady` false → true нет, тест `sync-engine-matrix-ready` не создан.
+> - Task 2.4: `SyncEngine.getQueueHealth()` есть, в UI не выведен.
+> - Phase 3–5: не сверялись по отдельности.
+
 **Goal:** Стабильное открытие чата из sidebar на Android и надёжная доставка исходящих (текст + медиа) после sleep/wake, handover WiFi↔LTE и при медленном IndexedDB.
 
 **Architecture:** Два независимых кластера с общей точкой отказа — **Android WebView + IndexedDB + Matrix /sync**:

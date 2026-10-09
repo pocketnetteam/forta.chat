@@ -6,8 +6,9 @@ import { mount } from "@vue/test-utils";
 vi.mock("@/shared/lib/i18n", () => ({
   useI18n: () => ({ t: (k: string) => k }),
 }));
+const chatStoreMock = { inviteCount: 0, unreadGroupCount: 0 };
 vi.mock("@/entities/chat", () => ({
-  useChatStore: () => ({ inviteCount: 0 }),
+  useChatStore: () => chatStoreMock,
 }));
 vi.mock("@/entities/channel", () => ({
   useChannelStore: () => ({ channels: [] }),
@@ -66,6 +67,31 @@ describe("FolderTabs — sliding indicator", () => {
 
     await wrapper.setProps({ scrollProgress: null });
     expect(indicator(wrapper).classList.contains("transition-all")).toBe(true);
+    wrapper.unmount();
+  });
+});
+
+describe("FolderTabs — badges", () => {
+  beforeEach(() => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    chatStoreMock.inviteCount = 0;
+    chatStoreMock.unreadGroupCount = 0;
+  });
+
+  const badgeOf = (w: ReturnType<typeof mount>, label: string) =>
+    w.findAll("button").find((b) => b.text().startsWith(label))?.find("span");
+
+  it("показывает число групп с непрочитанными рядом с «Группы»", () => {
+    chatStoreMock.unreadGroupCount = 7;
+    const wrapper = mount(FolderTabs, { props: { modelValue: "all" } });
+    expect(badgeOf(wrapper, "tabs.groups")?.text()).toBe("7");
+    expect(badgeOf(wrapper, "tabs.personal")?.exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("без непрочитанных групп бейджа нет", () => {
+    const wrapper = mount(FolderTabs, { props: { modelValue: "all" } });
+    expect(badgeOf(wrapper, "tabs.groups")?.exists()).toBe(false);
     wrapper.unmount();
   });
 });

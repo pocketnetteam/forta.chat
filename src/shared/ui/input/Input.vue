@@ -6,6 +6,9 @@ interface Props {
   placeholder?: string;
   type?: string;
   disabled?: boolean;
+  /** Off by default: browsers otherwise offer address/e-mail autofill on
+   *  search and name fields. */
+  autocomplete?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -14,7 +17,8 @@ const props = withDefaults(defineProps<Props>(), {
   error: "",
   placeholder: "",
   type: "text",
-  disabled: false
+  disabled: false,
+  autocomplete: "off",
 });
 
 const emit = defineEmits<{
@@ -32,6 +36,7 @@ const onInput = (e: Event) => {
       {{ props.label }}
     </label>
     <input
+      :autocomplete="props.autocomplete"
       :value="props.modelValue"
       :type="props.type"
       :placeholder="props.placeholder"

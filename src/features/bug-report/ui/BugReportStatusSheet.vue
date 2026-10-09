@@ -237,6 +237,7 @@ void props.mode;
                     }}
                   </label>
                   <textarea
+                    autocomplete="off"
                     :id="`reason-${issue.number}`"
                     v-model="reasonDrafts[issue.number]"
                     rows="2"

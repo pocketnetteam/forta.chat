@@ -197,6 +197,7 @@ const handleSubmit = async () => {
         </label>
         <div class="relative">
           <input
+            autocomplete="off"
             v-model="name"
             type="text"
             :placeholder="t('register.namePlaceholder')"
@@ -218,6 +219,7 @@ const handleSubmit = async () => {
           {{ t("register.aboutOptional") }}
         </label>
         <textarea
+          autocomplete="off"
           v-model="about"
           :placeholder="t('register.aboutPlaceholder')"
           rows="2"

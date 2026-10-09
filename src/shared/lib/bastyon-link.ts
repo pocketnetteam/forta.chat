@@ -365,7 +365,31 @@ export function parseBastyonTransactionLink(url: string): { txid: string } | nul
   return HEX64_RE.test(txid) ? { txid } : null;
 }
 
-/** Block explorer page of a transaction (same explorer as TransferCard). */
+/** A transaction id: 64 hex chars (any case). Guards ids from untrusted payloads. */
+export function isTxid(value: unknown): value is string {
+  return typeof value === "string" && HEX64_RE.test(value.toLowerCase());
+}
+
+/** Deep link to a transaction, as Bastyon itself shares a PKOIN transfer in chat
+ *  (`app.meta.protocol + '://i?stx=' + txid`). */
+export function toBastyonTransactionLink(txid: string): string {
+  return `bastyon://i?stx=${txid}`;
+}
+
+/**
+ * Chat message announcing a PKOIN transfer: the sender's note (if any) and the
+ * transaction link. Only the txid travels — receivers read amount, sender and
+ * recipient from the chain (TransactionLinkCard), so nothing in the message can
+ * misstate the transfer. The old `{"_transfer":true,…}` JSON body carried those
+ * fields unverified and other clients could not read it.
+ */
+export function buildTransferMessageBody(txid: string, message?: string): string {
+  const link = toBastyonTransactionLink(txid);
+  const note = message?.trim();
+  return note ? `${note}\n${link}` : link;
+}
+
+/** Bastyon block explorer page of a transaction (link previews). */
 export function toTransactionExplorerUrl(txid: string): string {
-  return `https://explorer.pocketnet.app/tx/${txid}`;
+  return `https://bastyon.com/blockexplorer/transaction/${txid}`;
 }

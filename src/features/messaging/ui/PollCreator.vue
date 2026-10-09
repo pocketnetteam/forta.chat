@@ -56,6 +56,7 @@ const handleCreate = () => {
 
       <!-- Question -->
       <input
+        autocomplete="off"
         v-model="question"
         type="text"
         :placeholder="t('poll.askQuestion')"
@@ -67,6 +68,7 @@ const handleCreate = () => {
       <div class="mb-3 flex flex-col gap-2">
         <div v-for="(_, index) in options" :key="index" class="flex items-center gap-2">
           <input
+            autocomplete="off"
             v-model="options[index]"
             type="text"
             :placeholder="t('poll.option', { n: index + 1 })"

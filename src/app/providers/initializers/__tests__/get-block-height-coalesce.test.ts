@@ -66,6 +66,16 @@ describe("AppInitializer.getBlockHeight — coalesce + cooldown", () => {
     await expect(p2).resolves.toBe(12345);
   });
 
+  it("reads the tip from getnodeinfo's lastblock.height (real node response shape)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, {
+      result: "success",
+      data: { version: "0.22.21", time: 1791478173, lastblock: { height: 4051812, hash: "a92a", time: 1791478176 } },
+    })));
+
+    const init = createAppInitializer();
+    expect(await init.getBlockHeight()).toBe(4051812);
+  });
+
   it("cools down after all nodes fail — no immediate re-fetch", async () => {
     const fetchSpy = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
     vi.stubGlobal("fetch", fetchSpy);

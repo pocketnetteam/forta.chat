@@ -41,6 +41,7 @@ export function buildLastMessage(
   if (effectivePreview == null) return undefined;
 
   const ts = lr.lastMessageTimestamp ?? 0;
+  const type = lr.lastMessageType ?? MessageType.text;
   return {
     id: lr.lastMessageEventId ?? "",
     roomId: lr.id,
@@ -52,10 +53,12 @@ export function buildLastMessage(
       ts,
       lr.lastReadOutboundTs ?? 0,
     ),
-    type: lr.lastMessageType ?? MessageType.text,
+    type,
     decryptionStatus: lr.lastMessageDecryptionStatus,
-    callInfo: lr.lastMessageCallInfo,
-    systemMeta: lr.lastMessageSystemMeta,
+    // Call and system details belong to system records only. Rows written by
+    // older builds can carry a previous call's info under a text message.
+    callInfo: type === MessageType.system ? lr.lastMessageCallInfo : undefined,
+    systemMeta: type === MessageType.system ? lr.lastMessageSystemMeta : undefined,
   };
 }
 

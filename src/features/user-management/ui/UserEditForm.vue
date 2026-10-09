@@ -257,6 +257,7 @@ watch(
           <div class="flex-1">
             <label class="text-xs text-text-on-main-bg-color">{{ t("profile.name") }}</label>
             <input
+              autocomplete="off"
               v-model="form.name"
               type="text"
               :placeholder="t('profile.displayName')"
@@ -278,6 +279,7 @@ watch(
               >{{ aboutCount }}/{{ aboutMaxLength }}</span>
             </div>
             <textarea
+              autocomplete="off"
               v-model="form.about"
               :placeholder="t('profile.bioPlaceholder')"
               rows="2"
@@ -299,6 +301,7 @@ watch(
           <div class="flex-1">
             <label class="text-xs text-text-on-main-bg-color">{{ t("profile.website") }}</label>
             <input
+              autocomplete="off"
               v-model="form.site"
               type="text"
               placeholder="https://..."
