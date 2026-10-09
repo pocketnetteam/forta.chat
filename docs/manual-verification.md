@@ -87,6 +87,7 @@
        SDK (expired invite)`.
 - Статус: ☐ не проверено
 - Статус: ☑ проверено 2026-10-08 на Samsung SM-A528B, отладочная сборка с исправлением (`f5c60d41`): `OFFSETS="3800 4000 4000 4200 4400" .bench/runs/rel/c09.sh` — во всех 5 повторах экран показал TEST3 и звонил (28 → 21 с), TEST3 «соединение» до своего отбоя; в повторах 1, 2 и 5 инвайт попал в окно: `Closed 0 PeerConnection(s) of the ended call; kept [pc_2_…], created after it` (в повторе 5 — от обоих путей: шаг JS-финализации и поток сервиса). `no PeerConnection` / `expired invite` — 0. Гейт после каждого повтора зелёный (`.bench/runs/rel/c09-n1-*`).
+- Статус: ☑ без регресса 2026-10-09 на Samsung SM-A528B, отладочная сборка ветки (`ed42bf68`): `OFFSETS="3800 4200 5000" .bench/runs/rel/c09.sh` — во всех 3 повторах экран показал TEST3 и звонил, «занято» и `no PeerConnection` — 0, гейт после каждого повтора зелёный (`.bench/runs/rel/full-1009b.log`).
 
 ### Поздний отбой прошлого звонка не закрывает экран входящего следующего
 - Коммит: см. `git log -1 -- android/app/src/test/java/com/forta/chat/plugins/calls/IncomingScreenOwnershipContractTest.kt`
@@ -111,7 +112,10 @@
   посреди разговора B (ревью звонков 2026-10-04, C02).
 - На чём: Samsung SM-A528B ↔ веб TEST1, отладочная сборка из ветки чистки (нужен CDP).
 - Шаги:
-  1. По CDP задержать остановку: обернуть `nativeCallBridge.stopAudioRouting` так, чтобы она ждала 8 с.
+  1. По CDP задержать только доставку остановки в натив: `Capacitor.nativePromise` для `NativeCall.stopAudioRouting`
+     сразу отвечает JS и шлёт вызов в натив через 30 с (`.bench/runs/rel/c02.sh`). Если JS ждёт задержанный
+     вызов, финализация держит и `reportCallEnded`: слот Telecom звонка A остаётся ACTIVE, и звонок B по /sync
+     пропускается как «занято» (`ensureIncomingCallVisible: ringer already up, skip`) — гонка не воспроизводится.
   2. Веб звонит, телефон отвечает, через 10 с веб кладёт трубку; сразу веб звонит снова, телефон отвечает.
      - **Ожидается:** в логкате `stop(<A>) — router owned by <B>, ignored`; у звонка B `dumpsys audio` =
        MODE_IN_COMMUNICATION до его отбоя, звук идёт, после отбоя B — MODE_NORMAL.
@@ -119,6 +123,7 @@
   3. Регресс без задержки: серия из 5 звонков подряд, после каждого гейт стенда зелёный.
 - Статус: ☐ не проверено
 - Статус: ☑ проверено 2026-10-08 на Samsung SM-A528B, отладочная сборка ветки (`324053c2`): по CDP `Capacitor.nativePromise` задерживал `NativeCall.stopAudioRouting` на 30 с; звонок A 43 с, сразу звонок B. Остановка A ушла из JS в 12:03:28Z и дошла до натива в 15:03:58 (МСК) — через 9 с после соединения B: `stop(<A>) — router owned by <B>, ignored`. Режим во время B каждые 3 с — `MODE_IN_COMMUNICATION`, после отбоя B — `MODE_NORMAL`, гейт зелёный (`.bench/runs/rel/c02-*`).
+- Статус: ☑ проверено 2026-10-09 на Samsung SM-A528B, отладочная сборка ветки (`ed42bf68`), задержка только нативной доставки (шаг 1): звонок A 43 с, сразу звонок B, B соединился около 19:01:58, остановка A дошла до натива в 19:02:11: `stop(<A>) — router owned by <B>, ignored`. Режим во время B каждые 3 с — `MODE_IN_COMMUNICATION`, после отбоя B — `MODE_NORMAL`, гейт зелёный (`.bench/runs/rel/c02-run.log`, `c02-logcat.txt`).
 
 ### Микрофон отпускается, если звонок кончился, пока шёл запрос микрофона
 - Коммит: см. `git log -1 -S "releaseUnadoptedMedia" -- src/features/video-calls/model/call-events.ts`
@@ -143,7 +148,7 @@
   `releaseLateMedia` (поток + невзятые потоки `MediaHandler` + остановка маршрутизации с `callId`) — перепроверить
   (`.bench/runs/rel/c03-*`).
 - Статус: ☑ проверено 2026-10-08 на Samsung SM-A528B, сборка с исправлением (`00a3cede`), `getUserMedia` SDK задержан на 15 с: входящий — веб сбросил, пока ответ ждал микрофон, `the call ended while answering` → `stopUserMediaStream`, дорожка `ended`, режим, поднятый поздним `ensureCommunicationMode(startLocalAudio)`, сброшен через 0,7 с (`stop() — inactive but device left in MODE_IN_COMMUNICATION, brute-resetting`); исходящий — отбой на нативном экране через 6 с, `Failed to place call` → тот же сброс потока и режима через 0,8 с. Гейт зелёный сразу и через 10 с в обоих (`.bench/runs/rel/c03-*`).
-
+- Статус: ☑ без регресса 2026-10-09 на Samsung SM-A528B, отладочная сборка ветки (`ed42bf68`), `getUserMedia` SDK задержан на 15 с: входящий — `the call ended while answering`, поток `audio:ended`; исходящий — `Failed to place call`, поток `audio:ended`; гейт зелёный сразу и через 10 с (`.bench/runs/rel/full-1009b.log`).
 
 ### «Отменить» у неотправленного текстового сообщения
 - Коммит: (заполнить при коммите)
