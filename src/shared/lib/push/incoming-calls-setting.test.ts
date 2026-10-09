@@ -83,6 +83,18 @@ describe("incoming calls setting (#1388)", () => {
     }
   });
 
+  it("keeps a choice the user made while native's copy was read (review 2026-10-08)", async () => {
+    let answer!: (r: { enabled: boolean }) => void;
+    mockGetEnabled.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    const resolved = resolveIncomingCallsEnabled();
+
+    await setIncomingCallsEnabled(false);
+    answer({ enabled: true });
+
+    await expect(resolved).resolves.toBe(false);
+    expect(window.localStorage.getItem("forta-chat:incoming_calls_enabled")).toBe("false");
+  });
+
   it("the start-up sync restores native's choice instead of pushing the default", async () => {
     mockGetEnabled.mockResolvedValue({ enabled: false });
     await syncIncomingCallsSettingToNative();

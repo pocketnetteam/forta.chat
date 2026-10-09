@@ -311,9 +311,7 @@ class PushService {
         // Logged out (or switched account) while the PUT was in flight: logout
         // already removed this account's pushers, so take the late one back off.
         if (this.matrixClient !== matrixClient) {
-          await matrixClient.setPusher({ ...payload, kind: null }).catch((e: unknown) => {
-            console.warn('[PushService] Could not take back a pusher registered after logout:', e);
-          });
+          await this.takeBackLatePusher(matrixClient, payload);
           return;
         }
         if (attempt > 1) {
@@ -422,6 +420,29 @@ class PushService {
   }
 
   /**
+   * Remove a pusher a signed-out client registered after its logout. Not when
+   * the same account is signed in again on this device: that session uses the
+   * same pushkey, and the take-back would delete its pusher (review
+   * 2026-10-08). Never throws.
+   */
+  private async takeBackLatePusher(staleClient: any, payload: PusherPayload): Promise<void> {
+    let sameAccount = false;
+    try {
+      const current = this.matrixClient?.getUserId?.();
+      sameAccount = !!current && current === staleClient.getUserId?.();
+    } catch {
+      sameAccount = false;
+    }
+    if (sameAccount) {
+      console.info('[PushService] Late pusher kept: the same account is signed in again');
+      return;
+    }
+    await staleClient.setPusher({ ...payload, kind: null }).catch((e: unknown) => {
+      console.warn('[PushService] Could not take back a pusher registered after logout:', e);
+    });
+  }
+
+  /**
    * Register the iOS VoIP (PushKit) pusher for `m.call.invite` events.
    *
    * Idempotent: safe to call on every `voipTokenReceived` event including
@@ -431,7 +452,9 @@ class PushService {
    * trying to deliver to gone-app tokens forever.
    */
   private async registerVoipPusher(matrixClient: any, voipToken: string): Promise<void> {
-    if (!matrixClient) return;
+    // Not for a client that is no longer signed in: logout can land while
+    // init() awaits the VoIP token (review 2026-10-08, P2).
+    if (!matrixClient || this.matrixClient !== matrixClient) return;
     this.voipToken = voipToken;
     const payload = buildVoipPusherPayload(voipToken);
     // Retried like the FCM pusher: iOS hands the VoIP token over once per
@@ -451,7 +474,11 @@ class PushService {
         if (this.matrixClient !== matrixClient) return;
       }
     }
-    if (this.matrixClient !== matrixClient) return;
+    // Landed after logout, like the FCM pusher above (P2).
+    if (this.matrixClient !== matrixClient) {
+      await this.takeBackLatePusher(matrixClient, payload);
+      return;
+    }
     try {
       const previous = ownPushkeys(payload.app_id);
       const { pushers } = await matrixClient.getPushers();

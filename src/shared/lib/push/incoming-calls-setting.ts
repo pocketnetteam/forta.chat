@@ -96,6 +96,14 @@ export async function resolveIncomingCallsEnabled(): Promise<boolean> {
     return true;
   }
   const native = await readNativeChoice();
+  // The user may have flipped the switch while native was read (review
+  // 2026-10-08, P1): that choice is newer than native's copy and wins.
+  try {
+    const flipped = window.localStorage.getItem(STORAGE_KEY);
+    if (flipped !== null) return flipped !== "false";
+  } catch {
+    /* unreadable storage: fall through to native's copy */
+  }
   if (native === null) return true;
   try {
     window.localStorage.setItem(STORAGE_KEY, String(native));
