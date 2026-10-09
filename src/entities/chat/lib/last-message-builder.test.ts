@@ -140,10 +140,10 @@ describe("buildLastMessage", () => {
 
   it("preserves all metadata fields (type, callInfo, systemMeta, decryptionStatus)", () => {
     const lr = makeLocalRoom({
-      lastMessagePreview: "[voice message]",
+      lastMessagePreview: "Voice call",
       lastMessageLocalStatus: "synced",
       lastMessageTimestamp: 1000,
-      lastMessageType: MessageType.audio,
+      lastMessageType: MessageType.system,
       lastMessageDecryptionStatus: "pending",
       lastMessageCallInfo: { callType: "voice", missed: false, duration: 30 },
       lastMessageSystemMeta: { template: "system.voiceCall", senderAddr: "addr" },
@@ -153,7 +153,7 @@ describe("buildLastMessage", () => {
     const msg = buildLastMessage(lr)!;
     expect(msg.id).toBe("$event:s");
     expect(msg.senderId).toBe("@me:s");
-    expect(msg.type).toBe(MessageType.audio);
+    expect(msg.type).toBe(MessageType.system);
     expect(msg.decryptionStatus).toBe("pending");
     expect(msg.callInfo).toEqual({ callType: "voice", missed: false, duration: 30 });
     expect(msg.systemMeta).toEqual({ template: "system.voiceCall", senderAddr: "addr" });
@@ -216,3 +216,31 @@ describe("lastMessageFromMessage", () => {
     expect(lastMessageFromMessage(baseMessage, lr).status).toBe(MessageStatus.read);
   });
 });
+
+describe("buildLastMessage — call details only on system records", () => {
+  const MISSED = { callType: "voice" as const, missed: true };
+
+  it("ignores a stale callInfo left under a text message (red missed-call preview)", () => {
+    const lr = makeLocalRoom({
+      lastMessagePreview: "Илья?",
+      lastMessageTimestamp: 10,
+      lastMessageType: MessageType.text,
+      lastMessageCallInfo: MISSED,
+      lastMessageSystemMeta: { template: "system.missedVoiceCall", senderAddr: "peer" },
+    });
+    const msg = buildLastMessage(lr);
+    expect(msg?.callInfo).toBeUndefined();
+    expect(msg?.systemMeta).toBeUndefined();
+  });
+
+  it("keeps callInfo for a call record", () => {
+    const lr = makeLocalRoom({
+      lastMessagePreview: "Missed call",
+      lastMessageTimestamp: 10,
+      lastMessageType: MessageType.system,
+      lastMessageCallInfo: MISSED,
+    });
+    expect(buildLastMessage(lr)?.callInfo).toEqual(MISSED);
+  });
+});
+

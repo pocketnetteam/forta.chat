@@ -275,6 +275,12 @@ export class MessageRepository {
         lastMessageType: msgType,
         lastMessageLocalStatus: "pending" as import("./schema").LocalMessageStatus,
         lastMessageReaction: null,
+        // Details of the message this one replaces: a missed call left its
+        // callInfo behind and the sent text showed in the list as a red
+        // missed call (the server echo often loses the monotonic guard).
+        lastMessageCallInfo: undefined,
+        lastMessageSystemMeta: undefined,
+        lastMessageDecryptionStatus: undefined,
         updatedAt: now,
       });
     });
