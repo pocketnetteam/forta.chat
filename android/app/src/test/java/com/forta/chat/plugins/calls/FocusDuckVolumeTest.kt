@@ -44,6 +44,15 @@ class FocusDuckVolumeTest {
     }
 
     @Test
+    fun `a duck after the user changed the level restores the user's level`() {
+        val duck = FocusDuckVolume()
+        duck.onDuck(current = 8, max = 10) // 8 -> 3
+        // The user turns it up to 5 during the duck, then another duck comes.
+        assertEquals(3, duck.onDuck(current = 5, max = 10))
+        assertEquals(5, duck.release(current = 3))
+    }
+
+    @Test
     fun `restores once`() {
         val duck = FocusDuckVolume()
         duck.onDuck(current = 8, max = 10)

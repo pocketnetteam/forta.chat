@@ -22,7 +22,10 @@ class FocusDuckVolume {
     /** A duck arrived. Returns the volume to set now, or -1 to leave it. */
     fun onDuck(current: Int, max: Int): Int {
         val target = minOf(current, (max * DUCK_FRACTION).toInt().coerceAtLeast(1))
-        if (restoreTo < 0) restoreTo = current
+        // A level the user set after the last duck is the one to restore now
+        // (review 2026-10-08); a repeat duck on the ducked level keeps the
+        // original.
+        if (restoreTo < 0 || current != duckedTo) restoreTo = current
         duckedTo = target
         return if (target == current) -1 else target
     }

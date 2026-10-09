@@ -954,6 +954,22 @@ class AudioRouter private constructor(private val context: Context) {
      * the foreground service) and the device is stuck in
      * MODE_IN_COMMUNICATION.
      */
+    /**
+     * [forceStop] for a teardown named by [callId]. The owner is read again
+     * under [lifecycleLock]: [CallTeardown] reads the device state, then acts,
+     * and a call that took the router over in between keeps it (review
+     * 2026-10-08, AND1). Returns false when the stop was skipped.
+     */
+    fun forceStopUnlessOwnedByAnother(callId: String?, reason: String): Boolean = synchronized(lifecycleLock) {
+        if (CallTeardownPolicy.routerOwnedByAnotherCall(ownerCallId, callId)) {
+            Log.w(LIFECYCLE_TAG, "forceStop($reason) for $callId skipped — router owned by $ownerCallId")
+            timeline.record("force_stop_skipped_other_owner", callId ?: "")
+            return@synchronized false
+        }
+        forceStop(reason)
+        true
+    }
+
     fun forceStop(reason: String = "brute reset") = synchronized(lifecycleLock) {
         Log.w(LIFECYCLE_TAG, "forceStop($reason) — bypassing guards, brute reset")
         timeline.record("force_stop", reason)

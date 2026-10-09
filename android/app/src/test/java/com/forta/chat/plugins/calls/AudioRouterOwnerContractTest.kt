@@ -64,4 +64,18 @@ class AudioRouterOwnerContractTest {
         val teardown = source("com/forta/chat/plugins/calls/CallTeardown.kt")
         assertTrue(teardown, teardown.contains("routerOwnerCallId = AudioRouter.getSharedInstance(app).routingOwner()"))
     }
+
+    @Test
+    fun nativeTeardown_checksTheOwnerAgainWhereTheStopRuns() {
+        // Review 2026-10-08, AND1: the owner read in collectState goes stale by
+        // the time the action runs; a call that took the router meanwhile kept
+        // losing it to the unkeyed forceStop.
+        val teardown = source("com/forta/chat/plugins/calls/CallTeardown.kt")
+        assertTrue(teardown, teardown.contains("forceStopUnlessOwnedByAnother(callId, \"teardown \$reason\")"))
+        val guarded = body(router, "fun forceStopUnlessOwnedByAnother\\(")
+        val check = guarded.indexOf("CallTeardownPolicy.routerOwnedByAnotherCall(ownerCallId, callId)")
+        val stop = guarded.indexOf("forceStop(reason)")
+        assertTrue("the owner check must come before the stop, under the lock:\n$guarded", check in 0 until stop)
+        assertTrue(guarded, guarded.contains("synchronized(lifecycleLock)"))
+    }
 }

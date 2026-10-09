@@ -98,7 +98,7 @@ object CallTeardownPolicy {
      * Both ids known, comparable and different. A push event id never equals
      * a Matrix call id, so it proves nothing (see [CallSlotPolicy]).
      */
-    private fun routerOwnedByAnotherCall(owner: String?, callId: String?): Boolean {
+    fun routerOwnedByAnotherCall(owner: String?, callId: String?): Boolean {
         if (owner.isNullOrEmpty() || callId.isNullOrEmpty()) return false
         if (CallSlotPolicy.isEventId(owner) || CallSlotPolicy.isEventId(callId)) return false
         return owner != callId
