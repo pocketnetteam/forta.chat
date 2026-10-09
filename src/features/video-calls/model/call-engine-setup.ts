@@ -161,7 +161,7 @@ function registerNetworkChangeRestart(): void {
       // is fine, while doing nothing for the very devices the guard was
       // meant to help (since their Vue UI never drives this code path on
       // the bug-report flow). The native side has its own connectiondead
-      // path (see [call-service.ts onPeerConnectionCreated]) which already
+      // path (see [call-events.ts onPeerConnectionCreated]) which already
       // surfaces a typed error to the user.
       if (!isNative && isLegacyWebView()) {
         console.warn(
