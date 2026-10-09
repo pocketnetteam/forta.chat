@@ -264,14 +264,22 @@ export async function answerCall() {
   } catch (e) {
     console.error("[call-service] Failed to answer call:", e);
     useBugReport().open({ context: tRaw("bugReport.ctx.answerCall"), error: e });
-    clearConnectingWatchdog();
-    unwireCallEvents();
+    // An answer that fails after its hangup may find the next call in the
+    // slot (review 2026-10-08, TS1): its watchdog, handlers, status and slot
+    // are not this call's to clear.
+    const nextCallInSlot = callStore.matrixCall != null && callStore.matrixCall !== call;
+    if (!nextCallInSlot) {
+      clearConnectingWatchdog();
+      unwireCallEvents();
+    }
     // WEE-89: call.answer may have run getUserMedia before throwing —
     // release any acquired camera/mic tracks so they aren't left captured,
     // and the stream and mode a late getUserMedia left after a hangup (C03).
     releaseLateMedia(call);
-    callStore.updateStatus(CallStatus.failed);
-    callStore.scheduleClearCall(2000);
+    if (!nextCallInSlot) {
+      callStore.updateStatus(CallStatus.failed);
+      callStore.scheduleClearCall(2000);
+    }
     // H1 + H7 + Session 23: always tear down audio routing on answer
     // failure. If call.answer threw *after* startAudioRouting queued
     // (it's fire-and-forget), MODE_IN_COMMUNICATION may already be

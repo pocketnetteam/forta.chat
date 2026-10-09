@@ -5,6 +5,7 @@ import {
   mockStopAudioRouting,
   mockEnsureCallPermissions,
   mockUpdateStatus,
+  mockScheduleClearCall,
   mockSetMatrixCall,
   mockAddHistoryEntry,
   mockCallStore,
@@ -142,6 +143,27 @@ describe('local media release on call teardown (WEE-89)', () => {
 
     expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
     expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: expect.any(String) });
+  });
+
+  // Review 2026-10-08 (TS1): by the time a placement fails after its hangup,
+  // the next call may hold the slot; its status, handlers and slot are not
+  // this call's to fail and clear.
+  it('leaves the next call in the slot alone when placing fails after the hangup', async () => {
+    const next = { callId: 'next-call', state: 'ringing', callHasEnded: () => false };
+    mockPlaceVoiceCall.mockImplementationOnce(function (this: Record<string, unknown>) {
+      this.callHasEnded = () => true;
+      mockCallStore.matrixCall = next;
+      return Promise.reject(new Error('late failure after the hangup'));
+    });
+    mockUpdateStatus.mockClear();
+    mockScheduleClearCall.mockClear();
+
+    const { useCallService } = await import('./call-service');
+    await useCallService().startCall('!room:matrix.org', 'voice');
+
+    expect(mockUpdateStatus).not.toHaveBeenCalledWith('failed');
+    expect(mockScheduleClearCall).not.toHaveBeenCalled();
+    expect(mockCallStore.matrixCall).toBe(next);
   });
   beforeEach(async () => {
     vi.useRealTimers();

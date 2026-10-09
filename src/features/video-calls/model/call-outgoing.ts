@@ -336,16 +336,24 @@ async function startCallInner(roomId: string, type: CallType) {
   } catch (e) {
     console.error("[call-service] Failed to place call:", e);
     useBugReport().open({ context: tRaw("bugReport.ctx.placeCall"), error: e });
-    stopAllSounds();
-    unwireCallEvents();
+    // A placement that fails after its hangup may find the next call in the
+    // slot (review 2026-10-08, TS1): the sounds, handlers, status and slot are
+    // that call's then, and only this call's own leftovers are released.
+    const nextCallInSlot = callStore.matrixCall != null && callStore.matrixCall !== call;
+    if (!nextCallInSlot) {
+      stopAllSounds();
+      unwireCallEvents();
+    }
     // WEE-89: placeCall may have run getUserMedia before throwing — release
     // any acquired camera/mic tracks so they aren't left captured. A placement
     // that failed after a hangup (Samsung 2026-10-08: "Invalid ICE server
     // configuration") never adopted its stream and finds its finalize already
     // done, so the late stream and the mode go here too.
     releaseLateMedia(call);
-    callStore.updateStatus(CallStatus.failed);
-    callStore.scheduleClearCall(2000);
+    if (!nextCallInSlot) {
+      callStore.updateStatus(CallStatus.failed);
+      callStore.scheduleClearCall(2000);
+    }
     // H1/H7 + Session 23: native side of startAudioRouting may have
     // already bumped the phone into MODE_IN_COMMUNICATION (it is queued
     // sync with placeCall). finalizeCall always runs the full teardown

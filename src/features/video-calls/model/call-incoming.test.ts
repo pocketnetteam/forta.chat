@@ -416,4 +416,71 @@ describe('call-service: an incoming invite', () => {
       expect(mockEnsureIncomingCallVisible).toHaveBeenCalled();
     });
   });
+
+  // Review 2026-10-08 (TS3): a native marker read that never answered held
+  // the incoming setup, and every later invite waited behind it for good.
+  describe('a native marker read that never answers', () => {
+    it('does not hold the incoming queue', async () => {
+      const { consumePendingRejectCallId } = await import('@/shared/lib/native-calls');
+      const invite = (callId: string) => ({
+        callId,
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        state: 'ringing',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: vi.fn(),
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      });
+      vi.useFakeTimers();
+      try {
+        vi.mocked(consumePendingRejectCallId).mockImplementationOnce(() => new Promise<boolean>(() => {}));
+        const { useCallService } = await import('./call-service');
+        let settled = false;
+        void Promise.all([
+          useCallService().handleIncomingCall(invite('stuck-read') as never),
+          useCallService().handleIncomingCall(invite('waiting-behind') as never),
+        ]).then(() => { settled = true; });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(settled).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // Review 2026-10-08 (TS2): the invite expired while its pending-answer read
+  // ran, and a dial took the slot meanwhile. Dropping the expired invite used
+  // to unwire and null the slot globally — that dial's.
+  describe('an invite dropped after its awaits', () => {
+    it('leaves a dial that took the slot meanwhile', async () => {
+      const { consumePendingAnswerCallId } = await import('@/shared/lib/native-calls');
+      const invite = {
+        callId: 'expired-invite',
+        roomId: '!room:matrix.org',
+        type: 'voice',
+        state: 'ringing',
+        on: mockOn,
+        off: mockOff,
+        answer: mockAnswer,
+        reject: mockReject,
+        getOpponentMember: vi.fn(() => ({ userId: '@peer:matrix.org' })),
+      };
+      const dial = { callId: 'dial', state: 'invite_sent', callHasEnded: () => false };
+      vi.mocked(consumePendingAnswerCallId).mockImplementationOnce(async () => {
+        invite.state = 'ended';
+        mockCallStore.matrixCall = dial;
+        return true;
+      });
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().handleIncomingCall(invite as never);
+
+      expect(mockSetMatrixCall).not.toHaveBeenCalledWith(null);
+      expect(mockCallStore.matrixCall).toBe(dial);
+    });
+  });
 });

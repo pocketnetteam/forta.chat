@@ -53,6 +53,32 @@ function rejectAsBusy(matrixCall: MatrixCall): void {
   if (matrixCall.callId) clearIncomingCallSeen(matrixCall.callId);
 }
 
+/** How long an incoming setup waits for a native marker read before it counts as no marker. */
+const MARKER_READ_TIMEOUT_MS = 3_000;
+
+/**
+ * A native marker read that never answers must not hold the incoming setup:
+ * every later invite waits behind it (review 2026-10-08, TS3). Past the
+ * deadline the call is treated as neither pre-declined nor pre-accepted, so
+ * it rings.
+ */
+async function withMarkerDeadline(read: Promise<boolean>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      read,
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn("[call-service] native marker read timed out; the call rings");
+          resolve(false);
+        }, MARKER_READ_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** The invite whose setup is running (C01); another invite waits for it to finish. */
 let incomingSetup: { callId: string; done: Promise<void> } | null = null;
 
@@ -137,10 +163,10 @@ async function setUpIncomingCall(matrixCall: MatrixCall) {
   // Must come before the Pre-accepted check so an accidental double-
   // marker state can't accept a call the user rejected.
   if (isNative) {
-    const alreadyRejected = await consumePendingRejectCallId(
+    const alreadyRejected = await withMarkerDeadline(consumePendingRejectCallId(
       matrixCall.callId,
       matrixCall.roomId,
-    );
+    ));
     if (alreadyRejected) {
       console.log(
         "[call-service] Pre-rejected incoming call, calling reject():",
@@ -269,12 +295,15 @@ async function setUpIncomingCall(matrixCall: MatrixCall) {
     // releases the Telecom connection and dismisses that ringer. Nulling the
     // Pinia slot alone is invisible to native — the phone would keep ringing
     // for a call that is already over.
-    unwireCallEvents();
+    // A dial may have taken the slot during the awaits (review 2026-10-08,
+    // TS2): its handlers and slot are not this invite's to drop.
+    const nextCallInSlot = callStore.matrixCall != null && callStore.matrixCall !== matrixCall;
+    if (!nextCallInSlot) unwireCallEvents();
     if (isNative) void finalizeCall("sdk-ended", matrixCall.callId, matrixCall.roomId);
-    callStore.setMatrixCall(null);
+    if (!nextCallInSlot) callStore.setMatrixCall(null);
   };
 
-  const alreadyAccepted = isNative && (await consumePendingAnswerCallId(matrixCall.callId, matrixCall.roomId));
+  const alreadyAccepted = isNative && (await withMarkerDeadline(consumePendingAnswerCallId(matrixCall.callId, matrixCall.roomId)));
   if (alreadyAccepted) {
     // Accepted on the push ringer, but the invite expired before the app
     // got here: answering it would leave an "incoming" CallInfo that no

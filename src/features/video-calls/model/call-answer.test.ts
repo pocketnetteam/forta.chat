@@ -283,6 +283,30 @@ describe('call-service: answering', () => {
     // C03 (calls review 2026-10-04): the SDK returns from answer() without
     // adopting the stream when the call ended during getUserMedia, so
     // releaseLocalMedia(call) saw nothing and the mic stayed open.
+    // Review 2026-10-08 (TS1): answer() threw after the call ended and the
+    // next call already holds the slot; failing and clearing it was not this
+    // call's to do.
+    it('leaves the next call in the slot alone when answering fails after the hangup', async () => {
+      seedIncomingCall('voice');
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      const next = { callId: 'next-call', state: 'ringing', callHasEnded: () => false };
+      mockAnswer.mockImplementationOnce(async () => {
+        ended = true;
+        mockCallStore.matrixCall = next;
+        throw new Error('answer failed after the hangup');
+      });
+      mockUpdateStatus.mockClear();
+      mockScheduleClearCall.mockClear();
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(mockUpdateStatus).not.toHaveBeenCalledWith('failed');
+      expect(mockScheduleClearCall).not.toHaveBeenCalled();
+      expect(mockCallStore.matrixCall).toBe(next);
+    });
+
     it('stops the stream the SDK got for a call that ended while answering', async () => {
       seedIncomingCall('voice');
       const stream = { id: 'late-stream' };
@@ -348,6 +372,25 @@ describe('call-service: answering', () => {
       await useCallService().answerCall();
 
       expect(handler.stopUserMediaStream).toHaveBeenCalledWith(stream);
+    });
+
+    // Review 2026-10-08 (AND3): the next call's getUserMedia raised the call
+    // audio mode before its routing claimed the owner; this call's late stop
+    // reset it.
+    it('does not stop the audio routing while the next call is being answered', async () => {
+      seedIncomingCall('voice');
+      let ended = false;
+      (mockCallStore.matrixCall as Record<string, unknown>).callHasEnded = () => ended;
+      mockAnswer.mockImplementationOnce(async () => {
+        ended = true;
+        mockCallStore.matrixCall = { callId: 'next-answering', state: 'wait_local_media', callHasEnded: () => false } as never;
+      });
+      mockStopAudioRouting.mockClear();
+
+      const { useCallService } = await import('./call-service');
+      await useCallService().answerCall();
+
+      expect(mockStopAudioRouting).not.toHaveBeenCalled();
     });
 
     it('leaves the streams alone when the next call in the slot is already being answered', async () => {

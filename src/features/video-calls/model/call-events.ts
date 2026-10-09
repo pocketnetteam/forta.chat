@@ -116,6 +116,17 @@ export function releaseLocalMedia(call: MatrixCall): void {
 }
 
 /**
+ * Whether the call in the slot is another live call that may already own
+ * the mic or the call audio mode: one being answered or placed (the SDK sets
+ * WaitLocalMedia before getUserMedia) or connected. An invite that only
+ * rings owns neither (review 2026-10-08).
+ */
+function anotherCallMayOwnMedia(call: MatrixCall): boolean {
+  const live = useCallStore().matrixCall as MatrixCall | null;
+  return !!live && live !== call && live.callHasEnded?.() !== true && live.state !== "ringing";
+}
+
+/**
  * C03 (calls review 2026-10-04): a call that ends while the SDK waits for
  * getUserMedia never adopts the stream — answer() and placeCall() return
  * before the feed is pushed, so releaseLocalMedia(call) finds nothing while
@@ -125,9 +136,7 @@ export function releaseLocalMedia(call: MatrixCall): void {
  * gets its media when answered (review 2026-10-08).
  */
 export function releaseUnadoptedMedia(call: MatrixCall): void {
-  const live = useCallStore().matrixCall as MatrixCall | null;
-  const liveMayOwnMedia = !!live && live !== call && live.callHasEnded?.() !== true && live.state !== "ringing";
-  if (liveMayOwnMedia) return;
+  if (anotherCallMayOwnMedia(call)) return;
   try {
     const handler = getClient()?.getMediaHandler?.();
     const streams: MediaStream[] = [...(handler?.userMediaStreams ?? [])];
@@ -147,7 +156,10 @@ export function releaseUnadoptedMedia(call: MatrixCall): void {
 export function releaseLateMedia(call: MatrixCall): void {
   releaseLocalMedia(call);
   releaseUnadoptedMedia(call);
-  if (isNative) void nativeCallBridge.stopAudioRouting({ callId: call.callId });
+  // Not while the next call is being answered or placed: its getUserMedia
+  // raised the mode before its routing claimed the owner, and this stop would
+  // reset that mode (review 2026-10-08, AND3).
+  if (isNative && !anotherCallMayOwnMedia(call)) void nativeCallBridge.stopAudioRouting({ callId: call.callId });
 }
 
 export function wireCallEvents(call: MatrixCall, direction: "outgoing" | "incoming") {
