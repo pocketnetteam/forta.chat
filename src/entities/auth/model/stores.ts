@@ -17,6 +17,7 @@ import {
   Pcrypto,
 } from "@/entities/matrix";
 import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto";
+import { clearCachedMatrixSession } from "@/entities/matrix/model/matrix-session-cache";
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { looksLikeProperName } from "@/entities/chat/lib/chat-helpers";
@@ -112,7 +113,7 @@ function hexDecode(hex: string): string {
   return result;
 }
 
-let _onSyncStatusCallback: ((state: string) => void) | null = null;
+let _onSyncStatusCallback: ((state: string, info?: { fromCache?: boolean }) => void) | null = null;
 
 /** Extract a numeric error code from various error shapes returned by the SDK/RPC layer.
  *  The Actions system wraps errors differently — this covers common patterns:
@@ -209,6 +210,13 @@ function clearWalletRefreshSchedule(): void {
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
   const backgroundSyncManager = new BackgroundSyncManager();
+
+  /** Chain tip (block height) from getnodeinfo polls and WS `new block`;
+   *  0 until the first report. Only moves forward. */
+  const blockHeight = ref(0);
+  const noteBlockHeight = (height: number) => {
+    if (height > blockHeight.value) blockHeight.value = height;
+  };
 
   // Reactive session list + active account
   const sessions = ref<StoredSession[]>(sessionManager.getSessions());
@@ -451,6 +459,26 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     );
   };
 
+  /** Push the Pocketnet name to the Matrix displayname (no-op until both the
+   *  profile and Matrix are there; the helper skips an unchanged name). */
+  const syncOwnDisplayNameToMatrix = () => {
+    if (!matrixReady.value || !address.value || !userInfo.value?.name) return;
+    void syncDisplayNameAfterInit(getMatrixClientService(), {
+      userId: address.value,
+      name: userInfo.value.name,
+    });
+  };
+
+  /** True when an earlier session cached this account's own profile with its
+   *  encryption keys and numeric id — enough for room crypto to resolve the
+   *  own participant offline, so Matrix can start without waiting for the
+   *  Bastyon proxy. Without it the profile must load first. */
+  const hasCachedOwnProfile = (): boolean => {
+    if (!address.value) return false;
+    const cached = readSelfProfile(address.value);
+    return !!cached?.keys && cached.keys.length >= REQUIRED_ENCRYPTION_KEYS && cached.id != null;
+  };
+
   /** Initialize Matrix client, kit and crypto after login */
   const initMatrixInner = async () => {
     if (!address.value || !privateKey.value) {
@@ -605,7 +633,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       let _lastSyncState: string | null = null;
       matrixService.setHandlers({
-        onSync: (state) => {
+        onSync: (state, info) => {
           const wasDisconnected = _lastSyncState === "ERROR" || _lastSyncState === "RECONNECTING";
           _lastSyncState = state;
 
@@ -634,7 +662,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           } else if (state === "STOPPED") {
             chatStore.setSyncState(state);
           }
-          _onSyncStatusCallback?.(state);
+          _onSyncStatusCallback?.(state, info);
         },
         // Not gated on roomsInitialized: a limited sync during the catch-up
         // sync is exactly where holes in stored history come from.
@@ -805,12 +833,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
         // Sync Pocketnet name → Matrix displayname when it changed since last push.
         // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
-        if (address.value && userInfo.value?.name) {
-          void syncDisplayNameAfterInit(matrixService, {
-            userId: address.value,
-            name: userInfo.value.name,
-          });
-        }
+        // When the profile is still loading (Matrix started from the cached
+        // profile), fetchUserInfo runs this once it arrives.
+        syncOwnDisplayNameToMatrix();
 
         // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
         // soon as Matrix is connected, BEFORE we wait for PREPARED. The
@@ -874,6 +899,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // Fetch blockchain block height and update Pcrypto (critical for encryption key derivation).
         // In legacy code this was provided by the parent app via pcrypto.set.block().
         appInitializer.getBlockHeight().then((height) => {
+          noteBlockHeight(height);
           if (height > 0 && cryptoInstance) {
             cryptoInstance.setBlock({ height });
             console.log("[auth] Pcrypto block height set to", height);
@@ -885,6 +911,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         _blockHeightInterval = setInterval(() => {
           if (!pcrypto.value) { clearInterval(_blockHeightInterval!); _blockHeightInterval = null; return; }
           appInitializer.getBlockHeight().then((height) => {
+            noteBlockHeight(height);
             if (height > 0) pcrypto.value!.setBlock({ height });
           }).catch(() => {});
         }, 60_000);
@@ -901,6 +928,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             getLastKnownBlock: () => pcrypto.value?.currentblock?.height ?? 0,
             handlers: {
               onBlock: ({ height }) => {
+                noteBlockHeight(height);
                 if (height > 0 && pcrypto.value) {
                   pcrypto.value.setBlock({ height });
                 }
@@ -949,7 +977,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // mute set: pull server mute rules here too, or a group muted on another
         // device keeps beeping in this browser (native syncs after push init).
         if (!isNative && matrixService.client) {
-          chatStore.syncMutedRoomsFromMatrix().catch((err) => {
+          chatStore.syncMutedRoomsFromMatrix({ fromSdk: true }).catch((err) => {
             console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
           });
         }
@@ -1052,7 +1080,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // same mute state across devices and across APK reinstalls —
             // localStorage is treated as a cache, not the source of truth.
             try {
-              await chatStore.syncMutedRoomsFromMatrix();
+              await chatStore.syncMutedRoomsFromMatrix({ fromSdk: true });
             } catch (err) {
               console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
             }
@@ -1206,6 +1234,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     const requestAddress = address.value;
     const requestPrivateKey = privateKey.value;
     configureSdkUser(requestAddress, requestPrivateKey);
+    // Image URL rewriting list; goes out with the profile once the proxy answered.
+    void appInitializer.loadArchivedPeertubeServers();
 
     // During registration the local SDK may still hold an empty profile from
     // the first post-login getuserprofile — always hit the network.
@@ -1246,6 +1276,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             const merged = mergeSelfProfileWithRemote(cached, userData);
 
             setUserInfo(merged);
+            syncOwnDisplayNameToMatrix();
 
             writeSelfProfile({
               address: requestAddress,
@@ -1582,6 +1613,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
+    // The next sign-in of this account must log in, not reuse the old token.
+    if (logoutAddress) clearCachedMatrixSession(logoutAddress);
     matrixReady.value = false;
     matrixError.value = null;
     matrixKit.value = null;
@@ -2328,6 +2361,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */
   const loadPost = (txid: string) => appInitializer.loadPost(txid);
 
+  /** Load a raw PKOIN transaction by txid (verbose getrawtransaction). */
+  const loadTransaction = (txid: string, update = false) => appInitializer.loadTransaction(txid, update);
+
+  /** Fetch the chain tip when nothing has reported it yet (e.g. a transaction
+   *  card rendered before the first poll / WS block). */
+  const ensureBlockHeight = async (): Promise<number> => {
+    if (blockHeight.value > 0) return blockHeight.value;
+    noteBlockHeight(await appInitializer.getBlockHeight());
+    return blockHeight.value;
+  };
+
   const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
   const loadCommentsByIds = (ids: string[]) => appInitializer.loadCommentsByIds(ids, address.value || undefined);
   const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
@@ -2350,7 +2394,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }) =>
     appInitializer.getProfileFeed(authorAddress, options);
 
-  function setSyncStatusCallback(cb: (state: string) => void) {
+  function setSyncStatusCallback(cb: (state: string, info?: { fromCache?: boolean }) => void) {
     _onSyncStatusCallback = cb;
   }
 
@@ -2509,6 +2553,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     editUserData,
     fetchCaptcha,
     fetchUserInfo,
+    hasCachedOwnProfile,
     findRegistrationProxy,
     generateRegistrationKeys,
     hydrateLocalAliasesEarly,
@@ -2525,6 +2570,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     loadCollection,
     loadMyPostScore,
     loadPost,
+    loadTransaction,
+    blockHeight,
+    ensureBlockHeight,
     loadPostComments,
     loadCommentsByIds,
     loadUsersInfo: (addresses: string[], options?: { update?: boolean }) =>

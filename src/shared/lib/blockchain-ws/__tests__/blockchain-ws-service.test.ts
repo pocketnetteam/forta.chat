@@ -1,6 +1,8 @@
+// @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBlockchainWsServiceForTesting } from "../blockchain-ws-service";
 import { resetGetMissedThrottle } from "../getmissed";
+import { readBlockMark, writeBlockMark } from "../last-block-mark";
 import type { BlockchainWsRpcAdapter, SignaturePayload } from "../types";
 
 class MockWebSocket {
@@ -76,6 +78,7 @@ describe("BlockchainWsService", () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
     resetGetMissedThrottle();
+    localStorage.clear();
   });
 
   afterEach(() => {
@@ -314,13 +317,7 @@ describe("BlockchainWsService", () => {
     svc.destroy();
   });
 
-  it("triggers getmissedinfo replay through the same dispatcher on open", async () => {
-    const onBlock = vi.fn();
-    const onTransaction = vi.fn();
-    const rpc = vi.fn().mockResolvedValue([
-      { block: 200 },
-      { msg: "transaction", txid: "missed-1", addr: "PADDR", nblock: 199 },
-    ]);
+  function startWithMissed(rpc: ReturnType<typeof vi.fn>, handlers: Record<string, unknown> = {}) {
     const api: BlockchainWsRpcAdapter = {
       rpc: rpc as unknown as BlockchainWsRpcAdapter["rpc"],
       get: {
@@ -334,16 +331,72 @@ describe("BlockchainWsService", () => {
       getSignature: () => validSig,
       getApi: () => api,
       getLastKnownBlock: () => 100,
-      handlers: { onBlock, onTransaction },
+      handlers,
     });
+    return svc;
+  }
+
+  it("replays getmissedinfo from the last block the socket delivered, through the same dispatcher", async () => {
+    writeBlockMark("PADDR", 190, Date.now() - 10 * 60_000);
+    const onBlock = vi.fn();
+    const onTransaction = vi.fn();
+    const rpc = vi.fn().mockResolvedValue([
+      { block: 200 },
+      { msg: "transaction", txid: "missed-1", addr: "PADDR", nblock: 199 },
+    ]);
+    const svc = startWithMissed(rpc, { onBlock, onTransaction });
     await waitFor(() => MockWebSocket.instances.length === 1);
     MockWebSocket.instances[0].fireOpen();
     await waitFor(() => onTransaction.mock.calls.length > 0);
 
-    expect(rpc).toHaveBeenCalledWith("getmissedinfo", ["PADDR", 100, 30]);
+    expect(rpc).toHaveBeenCalledWith("getmissedinfo", ["PADDR", 190, 30]);
     expect(onBlock).toHaveBeenCalledWith({ height: 200, time: undefined });
     expect(onTransaction).toHaveBeenCalledTimes(1);
     expect(onTransaction.mock.calls[0][0].txid).toBe("missed-1");
+    expect(readBlockMark("PADDR")?.height).toBe(200);
+    svc.destroy();
+  });
+
+  it("never calls getmissedinfo on a device whose socket never delivered a block", async () => {
+    const rpc = vi.fn().mockResolvedValue([]);
+    const svc = startWithMissed(rpc);
+    await waitFor(() => MockWebSocket.instances.length === 1);
+    MockWebSocket.instances[0].fireOpen();
+    await sleep(20);
+    expect(rpc).not.toHaveBeenCalled();
+    svc.destroy();
+  });
+
+  it("skips getmissedinfo when the last block arrived less than 2 minutes ago", async () => {
+    writeBlockMark("PADDR", 190, Date.now() - 30_000);
+    const rpc = vi.fn().mockResolvedValue([]);
+    const svc = startWithMissed(rpc);
+    await waitFor(() => MockWebSocket.instances.length === 1);
+    MockWebSocket.instances[0].fireOpen();
+    await sleep(20);
+    expect(rpc).not.toHaveBeenCalled();
+    svc.destroy();
+  });
+
+  it("reaches back at most 2000 blocks, estimating the tip at one block per minute", async () => {
+    writeBlockMark("PADDR", 1_000, Date.now() - 3_000 * 60_000);
+    const rpc = vi.fn().mockResolvedValue([]);
+    const svc = startWithMissed(rpc);
+    await waitFor(() => MockWebSocket.instances.length === 1);
+    MockWebSocket.instances[0].fireOpen();
+    await waitFor(() => rpc.mock.calls.length > 0);
+    expect(rpc).toHaveBeenCalledWith("getmissedinfo", ["PADDR", 2_000, 30]);
+    svc.destroy();
+  });
+
+  it("remembers each live block with its arrival time", async () => {
+    const svc = startWithMissed(vi.fn().mockResolvedValue([]));
+    await waitFor(() => MockWebSocket.instances.length === 1);
+    MockWebSocket.instances[0].fireOpen();
+    MockWebSocket.instances[0].fireMessage({ msg: "new block", height: 4_052_660 });
+    const mark = readBlockMark("PADDR");
+    expect(mark?.height).toBe(4_052_660);
+    expect(Date.now() - (mark?.at ?? 0)).toBeLessThan(1_000);
     svc.destroy();
   });
 

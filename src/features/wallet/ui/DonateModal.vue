@@ -104,7 +104,7 @@ const handleSend = async () => {
       feeDirection.value,
       message.value || undefined,
     );
-    await sendTransferMessage(txId, numericAmount.value, props.receiverAddress, message.value || undefined);
+    await sendTransferMessage(txId, message.value || undefined);
     resetAndClose();
   } catch (e) {
     console.error("[wallet] send transfer failed:", e);

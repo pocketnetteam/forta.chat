@@ -4,6 +4,7 @@ import type { MessageRepository } from "./message-repository";
 import type { RoomRepository } from "./room-repository";
 import { getMatrixClientService } from "@/entities/matrix";
 import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { buildTransferMessageBody } from "@/shared/lib/bastyon-link";
 import { withTimeout } from "@/shared/lib/with-timeout";
 
 type GetRoomCryptoFn = (roomId: string) => Promise<PcryptoRoomInstance | undefined>;
@@ -1218,15 +1219,10 @@ export class SyncEngine {
     // Recipients are decided from the member list — complete it first (lazy-loaded members).
     await roomCrypto?.ensureMembers?.();
 
-    // Encode transfer as JSON body (same format as use-messages.ts)
-    const transferBody = JSON.stringify({
-      _transfer: true,
-      txId: payload.txId,
-      amount: payload.amount,
-      from: payload.from,
-      to: payload.to,
-      message: payload.message,
-    });
+    // New sends go out as plain text (use-messages → send_message); this op
+    // only drains transfers queued by an older build. Send them the same way:
+    // the Bastyon stx link, verified from the chain by every receiver.
+    const transferBody = buildTransferMessageBody(payload.txId, payload.message);
 
     // Transfers MUST dedupe on retry — a double-send here would mean a
     // duplicate tip bubble for the recipient. Pass clientId as the Matrix

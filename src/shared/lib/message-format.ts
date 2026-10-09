@@ -10,6 +10,7 @@ import {
   parseBastyonRoomLink,
   parseBastyonTransactionLink,
 } from "./bastyon-link";
+import { tRaw } from "@/shared/lib/i18n";
 
 /**
  * Maximum allowed message body length (bytes).
@@ -139,17 +140,24 @@ export function formatMessageForCopy(
   return bastyonLinksToHttps(stripMentionAddresses(text, getAlias));
 }
 
+/** Any URL in a preview (http(s) or a Bastyon deep link), trailing punctuation excluded. */
+const PREVIEW_URL_RE = /\b(?:https?|bastyon|pocketnet):\/\/[^\s<>"'`]*[^\s<>"'`.,!?;:)\]}»…]/gi;
+
 /**
- * Replace bastyon:// and bastyon.com post and collection links with a short label for previews;
- * other bastyon:// links (profiles, pages) are shown in their https://bastyon.com form.
- * "Check this bastyon://index?s=abc123...def" → "Check this [Bastyon post]"
+ * Replace Bastyon post, comment, collection and transaction links (bastyon://
+ * and bastyon.com forms) with a short localized label for previews (chat list,
+ * reply quotes); other bastyon:// links (profiles, pages) are shown in their
+ * https://bastyon.com form.
+ * "Check this bastyon://index?s=abc123...def" → "Check this 📝 Post"
  */
 export function stripBastyonLinks(text: string): string {
   if (!text) return "";
   return text
-    .replace(BASTYON_LINK_RE, (m) => (parseBasytonLink(m)?.commentId ? "💬 Bastyon comment" : "📝 Bastyon post"))
-    .replace(BASTYON_COLLECTION_LINK_RE, "🗂 Bastyon collection")
-    .replace(BASTYON_SCHEME_LINK_RE, (m) => bastyonSchemeToHttps(m));
+    .replace(BASTYON_LINK_RE, (m) =>
+      (parseBasytonLink(m)?.commentId ? `💬 ${tRaw("linkLabel.comment")}` : `📝 ${tRaw("linkLabel.post")}`))
+    .replace(BASTYON_COLLECTION_LINK_RE, () => `🗂 ${tRaw("linkLabel.collection")}`)
+    .replace(PREVIEW_URL_RE, (m) =>
+      (parseBastyonTransactionLink(m) ? `💸 ${tRaw("linkLabel.transaction")}` : bastyonSchemeToHttps(m)));
 }
 
 /** Bastyon profile / room / transaction links become cards, any other URL a plain link. */

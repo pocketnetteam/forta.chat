@@ -73,6 +73,8 @@ function service(): MatrixClientService {
 describe("MatrixClientService — a superseded init() does not start its own client", () => {
   beforeEach(() => {
     created.length = 0;
+    // A login caches the session; each case must start from a cold boot.
+    localStorage.clear();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });

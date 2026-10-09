@@ -43,11 +43,6 @@ import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link
 import { setNotificationClickHandler } from "@/shared/lib/notifications/web-notifier";
 import { JOIN_ROOM_REQUEST_EVENT } from "@/shared/lib/join-room-request";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
-import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
-import { PROXY_NODES } from "@/shared/config/constants";
-
-// Non-critical: if the request fails, images keep original URLs until next session.
-loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].port}`);
 
 const { t } = useI18n();
 
@@ -465,11 +460,17 @@ onMounted(async () => {
   // would show raw nicknames forever. Reading Dexie needs no connectivity.
   authStore.hydrateLocalAliasesEarly().catch(() => { /* best-effort */ });
 
-  try {
-    await authStore.fetchUserInfo();
-  } catch (e) {
+  // With the own profile (keys + id) cached by an earlier session, Matrix does
+  // not need the Bastyon proxy: start it right away and let the profile load
+  // alongside. Without the cache (first start, cleared storage) the profile
+  // must arrive first, as before.
+  const profileLoad = authStore.fetchUserInfo().catch((e) => {
     console.error("[App] fetchUserInfo error:", e);
-  }
+  });
+  const startMatrixWithoutProfile = authStore.isAuthenticated
+    && !authStore.registrationPending
+    && authStore.hasCachedOwnProfile();
+  if (!startMatrixWithoutProfile) await profileLoad;
 
   // If registration is still pending from a previous session, resume polling
   if (authStore.isAuthenticated && authStore.registrationPending) {
@@ -484,7 +485,8 @@ onMounted(async () => {
       .catch((e) => console.warn("[App] push settle for signed-out launch failed:", e));
   }
 
-  // Process referral / join links after Matrix is ready
+  // Process referral / join links after Matrix is ready (and the profile, as before)
+  await profileLoad;
   await processReferral();
   await processJoinRoom();
 });

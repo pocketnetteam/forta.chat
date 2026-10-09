@@ -267,7 +267,7 @@ export class MessageRepository {
       message.localId = localId as number;
 
       // Atomically update room preview so sidebar reflects sent message instantly
-      const preview = this.getPreviewText(msgType, params.content, params.transferInfo?.amount, params.fileInfo);
+      const preview = this.getPreviewText(msgType, params.content, params.fileInfo);
       await this.db.rooms.update(params.roomId, {
         lastMessagePreview: preview.slice(0, 200),
         lastMessageTimestamp: now,
@@ -275,6 +275,12 @@ export class MessageRepository {
         lastMessageType: msgType,
         lastMessageLocalStatus: "pending" as import("./schema").LocalMessageStatus,
         lastMessageReaction: null,
+        // Details of the message this one replaces: a missed call left its
+        // callInfo behind and the sent text showed in the list as a red
+        // missed call (the server echo often loses the monotonic guard).
+        lastMessageCallInfo: undefined,
+        lastMessageSystemMeta: undefined,
+        lastMessageDecryptionStatus: undefined,
         updatedAt: now,
       });
     });
@@ -283,13 +289,14 @@ export class MessageRepository {
   }
 
   /** Generate preview text for sidebar display */
-  private getPreviewText(type: MessageType, content: string, transferAmount?: number, fileInfo?: { name?: string }): string {
+  private getPreviewText(type: MessageType, content: string, fileInfo?: { name?: string }): string {
     if (type === MessageType.image) return "[photo]";
     if (type === MessageType.video) return "[video]";
     if (type === MessageType.audio) return "[voice message]";
     if (type === MessageType.file) return fileInfo?.name || "[file]";
     if (type === MessageType.poll) return "[poll]";
-    if (type === MessageType.transfer) return `[transfer] ${transferAmount ?? 0} PKOIN`;
+    // The amount of a legacy JSON transfer is unverified — never show it.
+    if (type === MessageType.transfer) return "[transfer] PKOIN";
     if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }

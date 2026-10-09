@@ -31,7 +31,20 @@ export function useDebouncedStatus(raw: Ref<SyncPhase>) {
     if (successTimer) { clearTimeout(successTimer); successTimer = null; }
   }
 
+  // immediate: the page starts in "connecting", so the header spinner covers
+  // the boot until the first live /sync. That first state shows at once — with
+  // a cached session the first /sync lands well inside the show delay, which
+  // used to hide the spinner on every reload. Later episodes keep the delay.
+  let isBootState = true;
   watch(raw, (next) => {
+    if (isBootState) {
+      isBootState = false;
+      if (isActivePhase(next)) {
+        visibleStatus.value = next;
+        shownAt = Date.now();
+        return;
+      }
+    }
     if (isActivePhase(next)) {
       if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
       if (successTimer) { clearTimeout(successTimer); successTimer = null; }
@@ -74,7 +87,7 @@ export function useDebouncedStatus(raw: Ref<SyncPhase>) {
         }, remaining);
       }
     }
-  });
+  }, { immediate: true });
 
   onScopeDispose(clearAll);
 

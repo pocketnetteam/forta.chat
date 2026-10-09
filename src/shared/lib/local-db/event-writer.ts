@@ -845,7 +845,7 @@ export class EventWriter {
         }
         await this.roomRepo.updateLastMessage(
           msg.roomId,
-          this.getPreviewText(prev.type, prev.content, prev.transferInfo?.amount, prev.fileInfo) || "[message]",
+          this.getPreviewText(prev.type, prev.content, prev.fileInfo) || "[message]",
           prev.timestamp,
           prev.senderId,
           prev.type,
@@ -976,7 +976,6 @@ export class EventWriter {
   private getPreviewText(
     type: MessageType,
     content: string,
-    transferAmount?: number,
     fileInfo?: { name?: string },
   ): string {
     if (type === MessageType.image) return tRaw("message.photo");
@@ -985,7 +984,8 @@ export class EventWriter {
     if (type === MessageType.videoCircle) return tRaw("message.videoMessage");
     if (type === MessageType.file) return fileInfo?.name || tRaw("message.file");
     if (type === MessageType.poll) return tRaw("message.poll");
-    if (type === MessageType.transfer) return `${tRaw("message.transfer")} ${transferAmount ?? 0} PKOIN`;
+    // The amount of a legacy JSON transfer is unverified — never show it.
+    if (type === MessageType.transfer) return `${tRaw("message.transfer")} PKOIN`;
     if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
@@ -1019,7 +1019,6 @@ export class EventWriter {
       preview = this.getPreviewText(
         parsed.type,
         parsed.content,
-        parsed.transferInfo?.amount,
         parsed.fileInfo,
       );
     } catch (err) {

@@ -820,8 +820,18 @@ export const ru: Record<TranslationKey, string> = {
   "roomLink.unknown": "Приглашение в групповой чат",
   "roomLink.members": "Участников: {count}",
   "roomLink.open": "Открыть чат",
+  "linkLabel.post": "Публикация",
+  "linkLabel.comment": "Комментарий",
+  "linkLabel.collection": "Коллекция",
+  "linkLabel.transaction": "Транзакция",
   "txLink.label": "Транзакция PKOIN",
   "txLink.open": "Открыть в обозревателе",
+  "txLink.from": "Отправитель",
+  "txLink.to": "Получатель",
+  "txLink.notFound": "Транзакция не найдена",
+  "txLink.retry": "Повторить",
+  "txLink.confirmations": "Подтверждений: {count}",
+  "txLink.unconfirmed": "Ожидает подтверждения",
 
   // Post player
   "postPlayer.boost": "Поддержать",

@@ -26,7 +26,7 @@ const getSource = (): string =>
   readFileSync(resolve(__dirname, "../matrix-client.ts"), "utf-8");
 
 const getCatchBlock = (source: string): string => {
-  const getClientStart = source.indexOf("async getClient(");
+  const getClientStart = source.indexOf("private async passwordLogin(");
   expect(getClientStart).toBeGreaterThan(-1);
   const catchStart = source.indexOf("} catch (e: unknown) {", getClientStart);
   expect(catchStart).toBeGreaterThan(-1);

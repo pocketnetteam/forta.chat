@@ -175,6 +175,8 @@ declare var Api: new (instance: PocketnetInstanceType) => {
   };
   wait: { ready(type: string, timeout: number): Promise<void> };
   ready: { use: boolean };
+  /** Proxy endpoints; the list is memoized inside api.js. */
+  api: { peertubeserversList(): Promise<string[] | null | undefined> };
 };
 declare var Actions: new (instance: PocketnetInstanceType, api: InstanceType<typeof Api>) => {
   init(): void;
@@ -203,7 +205,37 @@ declare var pSDK: new (opts: {
     load(txids: string[], update?: boolean): Promise<unknown>;
     get(txid: string): import("@/shared/lib/bastyon-collection").BastyonCollectionRaw | null;
   };
+  /** Posts (vendor sdk.js `self.share`, IndexedDB 'share'; objects are kit.js pShare) */
+  share: {
+    load(txids: string[], update?: boolean): Promise<unknown>;
+    get(txid: string): PShareSDK | null;
+  };
+  /** Raw transactions (vendor sdk.js `self.transaction`, in-memory cache);
+   *  rejects `{ code: -5 }` when the node doesn't know the txid. */
+  transaction: {
+    load(txid: string, update?: boolean): Promise<Record<string, unknown>>;
+  };
 };
+
+/** kit.js pShare — a post as psdk keeps it (fields already decoded and XSS-cleaned). */
+interface PShareSDK {
+  txid: string;
+  address: string;
+  caption: string;
+  /** Editor.js data for articles v2 (parsed object), plain text otherwise. */
+  message: string | Record<string, unknown>;
+  images: string[];
+  tags: string[];
+  url: string;
+  settings: { v?: string; [key: string]: unknown };
+  /** Original txid of a repost: a string, or `{ v: txid }` in some payloads. */
+  repost: unknown;
+  time: Date;
+  score: number;
+  scnt: number;
+  myVal?: number;
+  deleted?: boolean;
+}
 declare var UserInfo: new () => {
   name: { set(v: string): void };
   language: { set(v: string): void };
