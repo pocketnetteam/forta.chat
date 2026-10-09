@@ -165,3 +165,41 @@ describe("PcryptoRoom.ensureMembers — participant keys", () => {
     expect(room.canBeEncrypt()).toBe(true);
   });
 });
+
+// Review 2026-10-08 (H3): the member list was read once, before the key load.
+// A member who joined while the keys loaded was left out of this message's
+// recipients and could not read it.
+describe("PcryptoRoom.ensureMembers — a member who joins during the key load", () => {
+  it("loads that member's keys too", async () => {
+    const alice = makeUser("aaaa55", 1);
+    const bob = makeUser("bbbb66", 2);
+    const carol = makeUser("cccc77", 3);
+    const everyone = [alice, bob, carol];
+    const state = new FakeRoomState();
+    state.join(alice.id, 1000);
+    let loaded = false;
+    const a = await makeParticipant({ user: alice, everyone, state, tetatet: false });
+    Object.assign(a.chat, {
+      membersLoaded: () => loaded,
+      loadMembersIfNeeded: async () => { state.join(bob.id, 2000); loaded = true; return true; },
+      getMyMembership: () => "join",
+    });
+    const room = await roomOf(a);
+    const requested: string[][] = [];
+    a.pcrypto.setHelpers({
+      getUsersInfo: async (ids) => {
+        requested.push([...ids]);
+        // Carol joins while the first key request is on the wire.
+        if (requested.length === 1) state.join(carol.id, 3000);
+        return everyone.filter((u) => ids.includes(u.id)).map((u) => ({ id: u.id, keys: u.publics, source: { id: u.sourceId } }));
+      },
+      isTetatetChat: () => false,
+      isChatPublic: () => false,
+      matrixId: (id) => `@${id}:server`,
+    });
+
+    await room.ensureMembers!();
+
+    expect(requested.flat()).toContain(carol.id);
+  });
+});

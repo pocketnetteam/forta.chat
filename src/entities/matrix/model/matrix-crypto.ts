@@ -782,6 +782,12 @@ export class Pcrypto {
     }
 
     // ---- usershash — match of original lines 824-839 ----
+    // Keyed by membership alone, not by the members' public keys: the group's
+    // common-key event is reused until somebody joins or leaves. A member whose
+    // published keys change cannot read events wrapped for the old keys until
+    // the membership changes. Keys are derived from the account key, so this
+    // takes a deliberate republish of a different set (review 2026-10-08, H1);
+    // changing it means a new wire format, agreed with Bastyon.
     function usershash(): string {
       const _users = preparedUsers(0, version);
       return md5(
@@ -930,14 +936,19 @@ export class Pcrypto {
         // fresh: a list possibly stale after a limited sync is reloaded first.
         await ensureRoomMembers(chat as LazyMembersRoom, { fresh: true });
         // Local recompute from room state — members may also have arrived
-        // through sync or another caller since the last prepare().
-        const before = Object.keys(users).sort().join(",");
-        getusershistory();
-        if (Object.keys(users).sort().join(",") === before) return;
-        await getusersinfo(forcedRefreshesInFlight > 0);
-        // canBeEncrypt() reads usersinfo: after a failed request it still
-        // holds the old participants and would encrypt without the new ones.
-        if (keysLoadState === "failed") throw new Error("participant keys not loaded");
+        // through sync or another caller since the last prepare(). Again after
+        // each key load: a member who joined while it ran was left out of the
+        // recipients (review 2026-10-08, H3). Bounded, so a room whose
+        // membership churns faster than three loads sends with what it has.
+        for (let pass = 0; pass < 3; pass++) {
+          const before = Object.keys(users).sort().join(",");
+          getusershistory();
+          if (Object.keys(users).sort().join(",") === before) return;
+          await getusersinfo(forcedRefreshesInFlight > 0);
+          // canBeEncrypt() reads usersinfo: after a failed request it still
+          // holds the old participants and would encrypt without the new ones.
+          if (keysLoadState === "failed") throw new Error("participant keys not loaded");
+        }
       },
 
       // ---- encryptEvent — routes to group or 1:1 path ----
