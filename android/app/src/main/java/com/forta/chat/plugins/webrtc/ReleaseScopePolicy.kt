@@ -18,6 +18,12 @@ object ReleaseScopePolicy {
      * call that ended at [createdBefore]. A close without a mark (dispose, an
      * older caller) and a connection without a creation time both close, as
      * before.
+     *
+     * Wall clock on both sides (JS Date.now and System.currentTimeMillis read
+     * the same system clock), so a clock stepped back inside the few hundred
+     * milliseconds between the end and the next invite would close the new
+     * connection again. Accepted: JS has no monotonic clock shared with native,
+     * and the old rule closed it every time (review 2026-10-08, AND2).
      */
     fun closes(createdAt: Long?, createdBefore: Long?): Boolean =
         createdBefore == null || createdAt == null || createdAt < createdBefore
