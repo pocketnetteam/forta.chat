@@ -3,6 +3,8 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { loadArchivedPeertubeServers, setArchivedPeertubeServers } from "@/shared/lib/image-url";
+import { PROXY_NODES } from "@/shared/config/constants";
 import { toBastyonCollectionData, type BastyonCollectionData } from "@/shared/lib/bastyon-collection";
 import {
   ensureActionBroadcast,
@@ -69,6 +71,37 @@ function hasPostContent(post: BastyonPostData): boolean {
  *  Numbers are excluded on purpose — feed fields like `r` can be ratings. */
 function isRepostMarker(value: unknown): boolean {
   return (typeof value === "object" && value !== null) || (typeof value === "string" && value !== "");
+}
+
+/** A psdk pShare (already decoded + XSS-cleaned by sdk.js) as Forta's post
+ *  data. A repost carries only the original's txid — the nested PostCard loads
+ *  the original itself (through psdk too). */
+export function shareToPostData(share: PShareSDK): BastyonPostData {
+  const time = share.time instanceof Date ? Math.floor(share.time.getTime() / 1000) : Number(share.time) || 0;
+  const post: BastyonPostData = {
+    txid: share.txid,
+    address: share.address ?? "",
+    caption: share.caption ?? "",
+    // Articles v2: sdk.js parses the Editor.js JSON; Forta renders it from a string.
+    message: typeof share.message === "string" ? share.message : JSON.stringify(share.message ?? ""),
+    images: Array.isArray(share.images) ? share.images : [],
+    url: share.url ?? "",
+    tags: Array.isArray(share.tags) ? share.tags : [],
+    settings: (share.settings as { v?: string }) ?? {},
+    time,
+    scoreSum: Number(share.score ?? 0),
+    scoreCnt: Number(share.scnt ?? 0),
+    myVal: share.myVal != null ? Number(share.myVal) : undefined,
+  };
+  const extracted = extractRepostTxid(share.repost);
+  if (extracted) {
+    post.repost = {
+      txid: extracted.txid, address: "", caption: "", message: "", images: [], url: "", tags: [], settings: {}, time: 0,
+    };
+  } else if (isRepostMarker(share.repost)) {
+    post.repostUnresolved = true;
+  }
+  return post;
 }
 
 export interface PostComment {
@@ -175,6 +208,18 @@ export class AppInitializer {
   private blockHeightLastResult = 0;
   private static readonly BLOCK_HEIGHT_COOLDOWN_MS = 45_000;
 
+  /** One getnodeinfo serves both the node-time sync and the block height at
+   *  boot: concurrent callers share the request, later ones reuse the answer
+   *  for NODE_INFO_REUSE_MS (blocks are ~1 min apart). */
+  private nodeInfoInFlight: Promise<{ info: unknown; fetchedAt: number }> | null = null;
+  private nodeInfoLast: { info: unknown; fetchedAt: number } | null = null;
+  private static readonly NODE_INFO_REUSE_MS = 30_000;
+
+  /** Proxy ping (initApi + waitForApiReady) shared by every boot RPC, so the
+   *  blockchain calls all start together once a proxy answered. */
+  private apiReadyPromise: Promise<boolean> | null = null;
+  private peertubeServersPromise: Promise<void> | null = null;
+
   /** UserInfo broadcast action currently queued per address, keyed by
    *  address. The Actions SDK manages a queued action's retries itself (a 3s
    *  internal interval started by `Actions.init()`) — calling
@@ -217,12 +262,81 @@ export class AppInitializer {
 
   syncNodeTime() {
     if (!this.api || !this.actions) return Promise.resolve();
-    return this.api.rpc("getnodeinfo").then(getnodeinfoResult => {
+    return this.fetchNodeInfo().then(({ info, fetchedAt }) => {
+      // Measured against when the answer arrived, so a reused answer is exact.
       const timeDifference =
-        getnodeinfoResult.time - Math.floor(new Date().getTime() / 1000);
+        (info as { time: number }).time - Math.floor(fetchedAt / 1000);
       PocketnetInstanceConfigurator.setTimeDifference(timeDifference);
       this.actions!.prepare();
     });
+  }
+
+  /** getnodeinfo through the SDK Api, deduplicated (see nodeInfoInFlight). */
+  private fetchNodeInfo(): Promise<{ info: unknown; fetchedAt: number }> {
+    const last = this.nodeInfoLast;
+    if (last && Date.now() - last.fetchedAt < AppInitializer.NODE_INFO_REUSE_MS) {
+      return Promise.resolve(last);
+    }
+    if (this.nodeInfoInFlight) return this.nodeInfoInFlight;
+    const api = this.api;
+    if (!api) return Promise.reject(new Error("Api not available"));
+    // After the proxy ping, so the block-height poll Matrix starts early joins
+    // the node-time request instead of racing it.
+    this.nodeInfoInFlight = this.whenApiReady()
+      .catch(() => false)
+      .then(() => api.rpc("getnodeinfo"))
+      .then((info: unknown) => {
+        const result = { info, fetchedAt: Date.now() };
+        if (AppInitializer.nodeInfoHeight(info) > 0) this.nodeInfoLast = result;
+        return result;
+      })
+      .finally(() => {
+        this.nodeInfoInFlight = null;
+      });
+    return this.nodeInfoInFlight;
+  }
+
+  /** Resolves once a Bastyon proxy answered the ping (false when none did, or
+   *  in standalone mode). A failed result is not kept, so the next call pings again. */
+  whenApiReady(): Promise<boolean> {
+    if (!this._available || !this.api) return Promise.resolve(false);
+    if (!this.apiReadyPromise) {
+      const ready = this.initApi()
+        .then(() => this.waitForApiReady())
+        .then(
+          (ok) => {
+            if (!ok && this.apiReadyPromise === ready) this.apiReadyPromise = null;
+            return ok;
+          },
+          (e: unknown) => {
+            if (this.apiReadyPromise === ready) this.apiReadyPromise = null;
+            throw e;
+          },
+        );
+      this.apiReadyPromise = ready;
+    }
+    return this.apiReadyPromise;
+  }
+
+  /** Archived peertube hosts (image URL rewriting). Asked from the proxy that
+   *  answered the ping; without the Bastyon Api, straight from the first proxy. */
+  loadArchivedPeertubeServers(): Promise<void> {
+    if (this.peertubeServersPromise) return this.peertubeServersPromise;
+    const load = (async () => {
+      const ready = await this.whenApiReady().catch(() => false);
+      const viaApi = ready && this.api
+        ? await this.api.api.peertubeserversList().catch(() => null)
+        : null;
+      if (Array.isArray(viaApi) && viaApi.length > 0) {
+        setArchivedPeertubeServers(viaApi);
+        return;
+      }
+      const servers = await loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].port}`);
+      // Nothing loaded: let the next fetchUserInfo retry ask again.
+      if (servers.length === 0) this.peertubeServersPromise = null;
+    })();
+    this.peertubeServersPromise = load;
+    return load;
   }
 
   /** Fetch current blockchain block height via getnodeinfo RPC.
@@ -246,14 +360,22 @@ export class AppInitializer {
     return this.blockHeightInFlight;
   }
 
+  /** getnodeinfo reports the tip as `lastblock.height` (what pocketnet reads);
+   *  a bare `height` is accepted too. */
+  private static nodeInfoHeight(info: unknown): number {
+    const i = (info ?? {}) as { height?: unknown; lastblock?: { height?: unknown } };
+    const height = Number(i.lastblock?.height ?? i.height);
+    return Number.isFinite(height) && height > 0 ? height : 0;
+  }
+
   private async fetchBlockHeightUncached(): Promise<number> {
     let height = 0;
 
     // Primary: SDK Api (has its own internal node handling).
     if (this.api) {
       try {
-        const info = await this.api.rpc("getnodeinfo");
-        height = info?.height ?? 0;
+        const { info } = await this.fetchNodeInfo();
+        height = AppInitializer.nodeInfoHeight(info);
         if (height > 0) {
           this.blockHeightLastResult = height;
           this.blockHeightCooldownUntil = 0;
@@ -269,10 +391,10 @@ export class AppInitializer {
     // height (and therefore encryption) when the SDK's node is 502 and it does
     // not rotate. Best-effort — returns 0 like before if every node is down.
     try {
-      const envelope = await callPocketnetRpc<{ height?: number }>({
+      const envelope = await callPocketnetRpc<{ height?: number; lastblock?: { height?: number } }>({
         method: "getnodeinfo",
       });
-      height = unwrapRpcPayload(envelope).height ?? 0;
+      height = AppInitializer.nodeInfoHeight(unwrapRpcPayload(envelope));
     } catch (e) {
       console.error("[appInit] getBlockHeight error (all nodes failed):", e);
       height = 0;
@@ -566,15 +688,14 @@ export class AppInitializer {
     options?: { update?: boolean },
   ) {
     if (!this._available) return Promise.resolve(null);
-    return this.initApi().then(() => {
-      return this.waitForApiReady().then(canUse => {
-        if (canUse) {
-          this.syncNodeTime();
-          this.actions!.addAccount(address);
-          return this.loadUserData([address], onLoad, options);
-        }
-        return null;
-      });
+    return this.whenApiReady().then(canUse => {
+      if (canUse) {
+        // After the ping every blockchain call goes out at once.
+        this.syncNodeTime().catch((e: unknown) => console.warn("[appInit] syncNodeTime failed:", e));
+        this.actions!.addAccount(address);
+        return this.loadUserData([address], onLoad, options);
+      }
+      return null;
     });
   }
 
@@ -721,9 +842,43 @@ export class AppInitializer {
     }
   }
 
+  /** Verbose raw transaction (`getrawtransaction txid 1`, as pocketnet's
+   *  transactionview loads it); null when the node doesn't know it. */
+  async loadTransaction(txid: string, update = false): Promise<Record<string, unknown> | null> {
+    // psdk: same call + in-memory cache + request coalescing as Bastyon.
+    // `update` bypasses that cache (re-polling a tx our node didn't have or
+    // had only in the mempool). Rejects when the node doesn't know the txid.
+    if (this.psdk) return this.psdk.transaction.load(txid, update);
+    if (!this.api) {
+      console.warn("[appInit] loadTransaction: api not available");
+      return null;
+    }
+    const data = await this.api.rpc("getrawtransaction", [txid, 1]);
+    const tx = Array.isArray(data) ? data[0] : data;
+    if (!tx || typeof tx !== "object" || Object.keys(tx).length === 0) return null;
+    return tx as Record<string, unknown>;
+  }
+
   async loadPost(txid: string): Promise<BastyonPostData | null> {
     const cached = this.postCache.get(txid);
     if (cached) return cached;
+
+    // psdk first: IndexedDB 'share' cache, batched getrawtransactionwithmessagebyid
+    // and Bastyon's own decoding/XSS cleaning. The direct RPC parse below stays
+    // as the fallback when psdk is missing (standalone) or fails.
+    if (this.psdk) {
+      try {
+        await this.psdk.share.load([txid]);
+        const share = this.psdk.share.get(txid);
+        if (!share || share.deleted) return null;
+        const post = shareToPostData(share);
+        this.postCache.set(txid, post);
+        return post;
+      } catch (e) {
+        console.warn("[appInit] loadPost via psdk failed, falling back to RPC:", e);
+      }
+    }
+
     if (!this.api) {
       console.warn("[appInit] loadPost: api not available");
       return null;
@@ -1205,6 +1360,9 @@ export class AppInitializer {
       // WEE-13) made every gateway proxy hit the same backend, so one dead
       // backend failed all mirrors identically. Each gateway now picks its own
       // healthy default backend.
+      // Waits for the boot proxy ping like the other blockchain calls; goes
+      // ahead without it (failover client below) when no proxy answered.
+      await this.whenApiReady().catch(() => false);
       const envelope = await callPocketnetRpc<{ height?: number; channels?: unknown[] }>({
         method: "getsubscribeschannels",
         parameters: [address, blockNumber, page, pageSize],

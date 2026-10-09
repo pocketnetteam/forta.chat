@@ -818,8 +818,18 @@ export const en = {
   "roomLink.unknown": "Invitation to a group chat",
   "roomLink.members": "Members: {count}",
   "roomLink.open": "Open chat",
+  "linkLabel.post": "Post",
+  "linkLabel.comment": "Comment",
+  "linkLabel.collection": "Collection",
+  "linkLabel.transaction": "Transaction",
   "txLink.label": "PKOIN transaction",
   "txLink.open": "Open in explorer",
+  "txLink.from": "From",
+  "txLink.to": "To",
+  "txLink.notFound": "Transaction not found",
+  "txLink.retry": "Retry",
+  "txLink.confirmations": "Confirmations: {count}",
+  "txLink.unconfirmed": "Awaiting confirmation",
 
   // Post player
   "postPlayer.boost": "Boost",

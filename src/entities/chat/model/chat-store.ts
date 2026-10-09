@@ -7,7 +7,13 @@ import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions
 import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
-import { mutedRoomIdsFromPushRules, type PushRulesLike } from "../lib/muted-rooms";
+import { countUnreadRoomsForTab } from "../lib/room-visibility";
+import {
+  mutedRoomIdsFromPushRules,
+  waitForSdkPushRules,
+  type PushRulesLike,
+  type SdkPushRulesSource,
+} from "../lib/muted-rooms";
 import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { reuseIfUnchanged } from "../lib/message-memo";
@@ -66,6 +72,9 @@ import { ChatDatabase, useLiveQuery, localToMessage, localToMessages, deriveOutb
 import type { ChatRoom, FileInfo, ForwardingMessage, LinkPreview, Message, PeerKeysStatus, PollInfo, ReplyTo, TransferInfo } from "./types";
 import { MessageStatus, MessageType } from "./types";
 import { resolveCachedRoomsAddress } from "./cached-rooms-address";
+
+/** How long boot waits for the SDK's own push rules before fetching them. */
+const SDK_PUSH_RULES_WAIT_MS = 30_000;
 
 const NAMESPACE = "chat";
 
@@ -1328,15 +1337,20 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  The server is the source of truth, so a room unmuted on another device
    *  unmutes here too. The exception is `pendingMuteWrites`: between a tap and
    *  the server confirming it, `getPushRules` (or a sync echo) still returns the
-   *  old rule, and replacing the set would silently undo what the user just did. */
-  const syncMutedRoomsFromMatrix = async (): Promise<void> => {
+   *  old rule, and replacing the set would silently undo what the user just did.
+   *
+   *  `fromSdk` (boot): reuse the rules the SDK fetched before its first /sync
+   *  instead of a second GET /pushrules; falls back to the network if they
+   *  have not arrived within SDK_PUSH_RULES_WAIT_MS. */
+  const syncMutedRoomsFromMatrix = async (opts?: { fromSdk?: boolean }): Promise<void> => {
     try {
       const matrixService = getMatrixClientService();
-      const client = matrixService.client as unknown as {
+      const client = matrixService.client as unknown as (SdkPushRulesSource & {
         getPushRules?: () => Promise<PushRulesLike>;
-      } | null;
+      }) | null;
       if (!client?.getPushRules) return;
-      applyServerMutedRooms(await client.getPushRules());
+      const sdkRules = opts?.fromSdk ? await waitForSdkPushRules(client, SDK_PUSH_RULES_WAIT_MS) : null;
+      applyServerMutedRooms(sdkRules ?? await client.getPushRules());
     } catch (e) {
       console.warn('[chat-store] Failed to sync mute rules from Matrix:', e);
     }
@@ -4638,6 +4652,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     sortedRooms.value.filter((r) => r.membership === "invite").length
   );
 
+  /** Group chats with unread messages (badge on the "Groups" folder tab). */
+  const unreadGroupCount = computed(() =>
+    countUnreadRoomsForTab(sortedRooms.value, "groups", mutedRoomIds.value)
+  );
+
   const addRoom = (room: ChatRoom) => {
     const existing = getRoomById(room.id);
     if (existing) {
@@ -5851,7 +5870,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Handle donation/transfer messages (m.notice with txId — from original bastyon-chat)
     const mtype = content.msgtype as string;
     if (mtype === "m.notice" && content.txId) {
-      const body = (content.body as string) ?? `Sent ${content.amount} PKOIN`;
+      const body = (content.body as string) ?? "PKOIN";
       return {
         id: raw.event_id as string,
         roomId,
@@ -5892,7 +5911,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (body.startsWith('{"_transfer":true')) {
       try {
         const transfer = JSON.parse(body);
-        const displayBody = transfer.message || `Sent ${transfer.amount} PKOIN`;
+        const displayBody = transfer.message || "PKOIN";
         return {
           id: raw.event_id as string,
           roomId,
@@ -7848,7 +7867,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // Handle donation/transfer messages (m.notice with txId)
       const mtype0 = content.msgtype as string;
       if (mtype0 === "m.notice" && content.txId) {
-        const txBody = (content.body as string) ?? `Sent ${content.amount} PKOIN`;
+        const txBody = (content.body as string) ?? "PKOIN";
         const transferMsg: Message = {
           id: raw.event_id as string,
           roomId,
@@ -7903,7 +7922,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (body.startsWith('{"_transfer":true')) {
         try {
           const transfer = JSON.parse(body);
-          const displayBody = transfer.message || `Sent ${transfer.amount} PKOIN`;
+          const displayBody = transfer.message || "PKOIN";
           const encTransferMsg: Message = {
             id: raw.event_id as string,
             roomId,
@@ -8868,6 +8887,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     acceptInvite,
     declineInvite,
     inviteCount,
+    unreadGroupCount,
     setActiveRoom,
     setHelpers,
     retryEncryptedPreviews,

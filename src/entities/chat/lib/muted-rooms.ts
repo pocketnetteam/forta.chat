@@ -28,3 +28,34 @@ export function mutedRoomIdsFromPushRules(rules: PushRulesLike | null | undefine
   }
   return muted;
 }
+
+/** The slice of the Matrix client that holds the push rules the SDK loaded. */
+export interface SdkPushRulesSource {
+  pushRules?: PushRulesLike | null;
+  on?: (event: "sync", listener: () => void) => unknown;
+  off?: (event: "sync", listener: () => void) => unknown;
+}
+
+/** Push rules the SDK fetched itself before its first /sync, without a second
+ *  GET /pushrules. Resolves on the first sync event that finds them set (the
+ *  cached-sync PREPARED can fire before they arrive), or null after
+ *  `timeoutMs` so the caller can fall back to the network. */
+export function waitForSdkPushRules(
+  client: SdkPushRulesSource,
+  timeoutMs: number,
+): Promise<PushRulesLike | null> {
+  if (client.pushRules) return Promise.resolve(client.pushRules);
+  if (!client.on || !client.off) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const finish = (rules: PushRulesLike | null) => {
+      clearTimeout(timer);
+      client.off?.("sync", onSync);
+      resolve(rules);
+    };
+    const onSync = () => {
+      if (client.pushRules) finish(client.pushRules);
+    };
+    const timer = setTimeout(() => finish(client.pushRules ?? null), timeoutMs);
+    client.on?.("sync", onSync);
+  });
+}

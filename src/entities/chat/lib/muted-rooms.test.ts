@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { mutedRoomIdsFromPushRules } from "./muted-rooms";
+import { describe, it, expect, vi } from "vitest";
+import { mutedRoomIdsFromPushRules, waitForSdkPushRules } from "./muted-rooms";
 
 describe("mutedRoomIdsFromPushRules", () => {
   it("collects enabled room rules with dont_notify", () => {
@@ -41,5 +41,49 @@ describe("mutedRoomIdsFromPushRules", () => {
     expect(mutedRoomIdsFromPushRules(null)).toBeNull();
     expect(mutedRoomIdsFromPushRules({})).toBeNull();
     expect(mutedRoomIdsFromPushRules({ global: { room: null } })).toBeNull();
+  });
+});
+
+describe("waitForSdkPushRules", () => {
+  const RULES = { global: { room: [{ rule_id: "!r", enabled: true, actions: ["dont_notify"] }] } };
+
+  function fakeClient(pushRules: unknown = null) {
+    const listeners = new Set<() => void>();
+    return {
+      pushRules: pushRules as typeof RULES | null,
+      on: vi.fn((_e: "sync", l: () => void) => listeners.add(l)),
+      off: vi.fn((_e: "sync", l: () => void) => listeners.delete(l)),
+      emitSync() { for (const l of [...listeners]) l(); },
+      listeners,
+    };
+  }
+
+  it("returns rules the SDK already loaded without waiting", async () => {
+    const client = fakeClient(RULES);
+    await expect(waitForSdkPushRules(client, 1000)).resolves.toBe(RULES);
+    expect(client.on).not.toHaveBeenCalled();
+  });
+
+  it("waits past a sync event that fires before the rules (cached PREPARED)", async () => {
+    const client = fakeClient();
+    const pending = waitForSdkPushRules(client, 1000);
+    client.emitSync();
+    client.pushRules = RULES;
+    client.emitSync();
+    await expect(pending).resolves.toBe(RULES);
+    expect(client.listeners.size).toBe(0);
+  });
+
+  it("gives up with null after the timeout so the caller fetches them", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = fakeClient();
+      const pending = waitForSdkPushRules(client, 500);
+      vi.advanceTimersByTime(500);
+      await expect(pending).resolves.toBeNull();
+      expect(client.listeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

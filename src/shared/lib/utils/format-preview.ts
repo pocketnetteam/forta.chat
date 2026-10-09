@@ -55,7 +55,8 @@ export function useFormatPreview() {
         preview = `📊 ${msg.pollInfo?.question || t("message.poll")}`;
         break;
       case MessageType.transfer:
-        preview = `💸 ${msg.transferInfo ? `${msg.transferInfo.amount} PKOIN` : (content || t("message.transfer"))}`;
+        // Legacy JSON transfer: its amount is unverified, so it is not shown.
+        preview = `💸 ${msg.transferInfo?.message || `${t("message.transfer")} PKOIN`}`;
         break;
       case MessageType.callLink:
         // content is already "📞 <label>" (WEE-57)

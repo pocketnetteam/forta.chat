@@ -39,6 +39,13 @@ const visibleTabs = computed(() =>
   })
 );
 
+/** Count shown next to a tab label: pending invites, unread group chats. */
+const badgeCount = (tab: FilterValue): number => {
+  if (tab === "invites") return chatStore.inviteCount;
+  if (tab === "groups") return chatStore.unreadGroupCount;
+  return 0;
+};
+
 const tabRefs = ref<HTMLElement[]>([]);
 const scrollContainer = ref<HTMLElement | null>(null);
 
@@ -142,10 +149,10 @@ watch(() => props.scrollProgress, (val) => {
     >
       {{ tab.label }}
       <span
-        v-if="tab.value === 'invites' && chatStore.inviteCount > 0"
+        v-if="badgeCount(tab.value) > 0"
         class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-color-bg-ac px-1 text-[10px] font-medium text-white"
       >
-        {{ chatStore.inviteCount }}
+        {{ badgeCount(tab.value) }}
       </span>
     </button>
     <!-- Sliding indicator -->

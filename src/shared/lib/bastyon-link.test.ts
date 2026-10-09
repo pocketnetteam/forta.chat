@@ -17,6 +17,8 @@ import {
   parseBastyonTransactionLink,
   toBastyonPostHttpsUrl,
   toTransactionExplorerUrl,
+  buildTransferMessageBody,
+  isTxid,
 } from "./bastyon-link";
 
 const TXID = "a".repeat(64);
@@ -493,6 +495,21 @@ describe("parseBastyonTransactionLink", () => {
   it("makes transaction links block URLs and builds the explorer URL", () => {
     expect(isBastyonBlockUrl(`bastyon://i?stx=${TXID}`)).toBe(true);
     expect(toTransactionExplorerUrl(TXID)).toBe(`https://bastyon.com/blockexplorer/transaction/${TXID}`);
+  });
+
+  it("isTxid accepts only 64 hex chars", () => {
+    expect(isTxid(TXID)).toBe(true);
+    expect(isTxid(TXID.toUpperCase())).toBe(true);
+    expect(isTxid(undefined)).toBe(false);
+    expect(isTxid("abc")).toBe(false);
+    expect(isTxid(42)).toBe(false);
+  });
+
+  it("a transfer message is Bastyon's stx link (plus the note) and parses back to the txid", () => {
+    expect(buildTransferMessageBody(TXID)).toBe(`bastyon://i?stx=${TXID}`);
+    const withNote = buildTransferMessageBody(TXID, " thanks! ");
+    expect(withNote.split("\n")).toEqual(["thanks!", `bastyon://i?stx=${TXID}`]);
+    expect(parseBastyonTransactionLink(withNote.split("\n")[1])).toEqual({ txid: TXID });
   });
 });
 

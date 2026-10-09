@@ -22,7 +22,8 @@ import MessageContent from "./MessageContent.vue";
 import EncryptedMessageNotice from "./EncryptedMessageNotice.vue";
 import MessageStatusIcon from "./MessageStatusIcon.vue";
 import PollCard from "./PollCard.vue";
-import TransferCard from "./TransferCard.vue";
+import { TransactionLinkCard } from "@/features/bastyon-link-preview";
+import { isTxid } from "@/shared/lib/bastyon-link";
 import CallLinkCard from "./CallLinkCard.vue";
 import ReactionRow from "./ReactionRow.vue";
 import VoiceMessage from "./VoiceMessage.vue";
@@ -1455,7 +1456,9 @@ const replyPreviewSender = computed(() => {
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
       </div>
 
-      <!-- Transfer message -->
+      <!-- Legacy transfer message ({"_transfer":true,…} JSON from older Forta
+           builds): only its txid is trusted — amount, sender and recipient come
+           from the chain, like for the stx link new transfers are sent as. -->
       <div
         v-else-if="message.type === MessageType.transfer && message.transferInfo"
         class="rounded-bubble px-3 py-2"
@@ -1470,7 +1473,17 @@ const replyPreviewSender = computed(() => {
         >
           {{ senderDisplayResult.text }}
         </div>
-        <TransferCard :message="message" :is-own="props.isOwn" />
+        <!-- The JSON is any sender's text: a missing/garbage txid gets no card -->
+        <TransactionLinkCard
+          v-if="isTxid(message.transferInfo.txId)"
+          :txid="message.transferInfo.txId.toLowerCase()"
+          :is-own="props.isOwn"
+        />
+        <p
+          v-if="message.transferInfo.message"
+          class="select-text whitespace-pre-wrap break-words text-chat-base"
+          data-testid="transfer-note"
+        >{{ message.transferInfo.message }}</p>
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
           <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />

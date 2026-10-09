@@ -7,7 +7,9 @@
  *     opens a socket and sends a `registration` message signed with the user's key.
  *  2. The proxy answers `{msg:"registered"}` and starts streaming events.
  *  3. Live events go through `dispatch()`; same dispatcher is reused for the
- *     RPC `getmissedinfo` catch-up (initial + on focus return).
+ *     RPC `getmissedinfo` catch-up (on (re)connect and focus return), which
+ *     runs only from a block the socket delivered earlier and only after a
+ *     gap of 2+ blocks, at most 2000 blocks back (last-block-mark.ts).
  *  4. The service is OPTIONAL: any failure (no signature, dead proxy, malformed
  *     payload) is logged with `[blockchain-ws]` prefix but never throws.
  *
@@ -28,6 +30,7 @@ import {
   fetchGetMissed,
   markGetMissedRan,
 } from "./getmissed";
+import { catchUpFromBlock, readBlockMark, writeBlockMark } from "./last-block-mark";
 import type {
   BlockchainWsHandlers,
   BlockchainWsStartOptions,
@@ -86,7 +89,7 @@ export class BlockchainWsService {
     this.started = true;
     this.dedupe.clear();
     this.dedupeOrder = [];
-    this.lastBlockHeight = options.getLastKnownBlock() || 0;
+    this.lastBlockHeight = readBlockMark(options.address)?.height ?? 0;
 
     const api = options.getApi();
     if (!api) {
@@ -162,7 +165,10 @@ export class BlockchainWsService {
     const api = this.options.getApi();
     if (!api) return;
 
-    const fromBlock = this.lastBlockHeight || this.options.getLastKnownBlock() || 0;
+    // Only from a block this device actually received over the socket, and
+    // only when blocks were missed (socket dropped, app closed): see
+    // last-block-mark.ts. A device that never connected has nothing to catch up.
+    const fromBlock = catchUpFromBlock(readBlockMark(this.options.address));
     if (!fromBlock) return;
 
     let result;
@@ -293,6 +299,7 @@ export class BlockchainWsService {
         const height = Number(heightRaw) || 0;
         if (height > 0 && height > this.lastBlockHeight) {
           this.lastBlockHeight = height;
+          writeBlockMark(this.options.address, height);
         }
         const time = typeof data.time === "number" ? (data.time as number) : undefined;
         handlers.onBlock?.({ height, time });

@@ -200,17 +200,32 @@ describe("stripMentionAddresses", () => {
 describe("stripBastyonLinks", () => {
   it("replaces bastyon:// links with label", () => {
     const txid = "e".repeat(64);
-    expect(stripBastyonLinks(`bastyon://post?s=${txid}`)).toContain("Bastyon post");
+    expect(stripBastyonLinks(`bastyon://post?s=${txid}`)).toContain("📝 Post");
   });
 
   it("replaces bastyon.com links with label", () => {
     const txid = "f".repeat(64);
-    expect(stripBastyonLinks(`https://bastyon.com/index?v=${txid}`)).toContain("Bastyon post");
+    expect(stripBastyonLinks(`https://bastyon.com/index?v=${txid}`)).toContain("📝 Post");
   });
 
   it("labels a shared comment link (username path + commentid) as a comment", () => {
     const url = `https://bastyon.com/daniel_satchkov?s=${"a".repeat(64)}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${"b".repeat(64)}`;
-    expect(stripBastyonLinks(`look ${url}`)).toBe("look 💬 Bastyon comment");
+    expect(stripBastyonLinks(`look ${url}`)).toBe("look 💬 Comment");
+  });
+
+  it("labels transaction links in both the bastyon:// and the https form", () => {
+    const txid = "d".repeat(64);
+    expect(stripBastyonLinks(`bastyon://i?stx=${txid}`)).toBe("💸 Transaction");
+    expect(stripBastyonLinks(`thanks https://bastyon.com/i?stx=${txid}!`)).toBe("thanks 💸 Transaction!");
+  });
+
+  it("labels collection links", () => {
+    expect(stripBastyonLinks(`bastyon://collection?c=${"c".repeat(64)}`)).toBe("🗂 Collection");
+  });
+
+  it("keeps other links: bastyon:// profiles become https, foreign URLs stay as they are", () => {
+    expect(stripBastyonLinks("bastyon://daniel_satchkov")).toBe("https://bastyon.com/daniel_satchkov");
+    expect(stripBastyonLinks("see https://example.com/a?stx=1")).toBe("see https://example.com/a?stx=1");
   });
 
   it("returns empty string for empty input", () => {
@@ -228,10 +243,10 @@ describe("stripBastyonLinks", () => {
     const { cleanMatrixIds } = await import("@/entities/chat/lib/chat-helpers");
     const link = `bastyon://post?s=${"a".repeat(64)}`;
 
-    expect(cleanMatrixIds(stripBastyonLinks(link))).toBe("📝 Bastyon post");
+    expect(cleanMatrixIds(stripBastyonLinks(link))).toBe("📝 Post");
     // The reversed order leaves a mangled link in the preview — pinned so
     // nobody "simplifies" the call order back.
-    expect(stripBastyonLinks(cleanMatrixIds(link))).not.toBe("📝 Bastyon post");
+    expect(stripBastyonLinks(cleanMatrixIds(link))).not.toBe("📝 Post");
   });
 });
 
@@ -410,7 +425,7 @@ describe("Bastyon collection links (shared collections)", () => {
   });
 
   it("stripBastyonLinks replaces collection links with a label", () => {
-    expect(stripBastyonLinks(`bastyon://collection?c=${txid}`)).toBe("🗂 Bastyon collection");
+    expect(stripBastyonLinks(`bastyon://collection?c=${txid}`)).toBe("🗂 Collection");
   });
 });
 
