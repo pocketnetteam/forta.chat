@@ -419,10 +419,12 @@ export function hangup() {
  * the id because a push-created connection's id can never be compared with a
  * Matrix one.
  */
-export function currentCall(): { callId: string | undefined; roomId?: string } {
+export function currentCall(): { callId: string | undefined; roomId?: string; state?: string } {
   const callStore = useCallStore();
   const call = callStore.matrixCall as MatrixCall | null;
-  return { callId: call?.callId, roomId: call?.roomId };
+  // The SDK state lets the native bridge tell a ringing call from an answered
+  // one: a decline applies only to the first (C07).
+  return { callId: call?.callId, roomId: call?.roomId, state: call?.state };
 }
 
 /**

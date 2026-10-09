@@ -42,6 +42,8 @@ export interface IOSVoIPPushPlugin {
    * first arrives or is rotated.
    */
   getToken(): Promise<{ token: string | null }>;
+  /** JS answered this call and released its CallKit record; a repeated VoIP push for it must not ring (C07). */
+  markHandedOff(options: { callId: string }): Promise<void>;
   addListener(
     event: 'voipTokenReceived',
     cb: (data: IOSVoIPTokenPayload) => void,

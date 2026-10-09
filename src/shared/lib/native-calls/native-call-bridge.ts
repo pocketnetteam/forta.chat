@@ -387,7 +387,7 @@ interface BridgeCallService {
    * `callId` when JS holds none. Required, not optional: an absent accessor
    * would silently restore the unscoped teardown rather than fail a call site.
    */
-  currentCall: () => NativeCallEventTarget;
+  currentCall: () => NativeCallEventTarget & { state?: string };
   /** Android only — the native CallActivity's video toggle. */
   setLocalVideoMuted?: (muted: boolean) => void;
   /**
@@ -480,7 +480,27 @@ class NativeCallBridge {
 
       await NativeCall.addListener('callDeclined', ({ callId, roomId }) => {
         console.log('[NativeCallBridge] Call declined:', callId);
+        const held = this.callService?.currentCall();
+        // C08 (calls review 2026-10-04): declined on CallKit before Matrix
+        // delivered the invite. There is no call to reject yet, and iOS keeps
+        // no marker of its own (Android's CallConnection does), so the late
+        // invite used to ring. Keep the decision, aged like the answer marker,
+        // for handleIncomingCall. Only when JS holds no call: a marker stored
+        // beside a held call is how a stale reject once declined the next one.
+        if (isIOS && !held?.callId) {
+          pendingReject = pendingCallMarkerOf(callId, roomId, Date.now());
+          console.log('[NativeCallBridge] Decline kept for the invite still to come:', callId, 'room:', roomId);
+          return;
+        }
         if (!this.eventNamesCurrentCall('callDeclined', { callId, roomId })) return;
+        // C07: a decline can only end a call that still rings. One that comes
+        // for a call already answered is a phantom ringer (a repeated VoIP
+        // push after the CallKit handoff), and rejectCall would hang the live
+        // call up.
+        if (held?.state && held.state !== 'ringing') {
+          console.log('[NativeCallBridge] Decline for a call already answered ignored:', callId, held.state);
+          return;
+        }
         this.callService?.rejectCall();
       });
 

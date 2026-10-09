@@ -101,6 +101,31 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
     private var pendingEvents: [(name: String, data: [String: Any])] = []
     private let signedOutSink = SignedOutCallSink()
 
+    /// Calls JS answered and handed from CallKit to WebKit audio (C07, calls
+    /// review 2026-10-04). The handoff ends the CallKit record, so the plugin
+    /// forgets the call; a repeated VoIP push for it (an APNs duplicate, a
+    /// gateway retry, a push slower than the answer) then looked new, rang
+    /// again, and a decline on that ringer ended the live call. Kept for the
+    /// length of an invite's life. Main queue only.
+    private var handedOff: [String: Date] = [:]
+    private static let handedOffLifetime: TimeInterval = 10 * 60
+
+    /// JS answered [callId] and released its CallKit record (main queue).
+    func markHandedOff(_ callId: String) {
+        pruneHandedOff()
+        handedOff[callId] = Date()
+    }
+
+    private func wasHandedOff(_ callId: String) -> Bool {
+        pruneHandedOff()
+        return handedOff[callId] != nil
+    }
+
+    private func pruneHandedOff() {
+        let now = Date()
+        handedOff = handedOff.filter { now.timeIntervalSince($0.value) < Self.handedOffLifetime }
+    }
+
     /// Set by `IOSVoIPPushPlugin.load()`; queued events flush on assignment.
     weak var plugin: CAPPlugin? {
         didSet { flushPendingEvents() }
@@ -165,6 +190,13 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
         }
         guard IncomingCallsSetting.isEnabled else {
             signedOutSink.reportAndEnd(callId: callId, reason: "incoming calls off")
+            completion()
+            return
+        }
+        // Already answered and handed to WebKit: report and end at once, as
+        // iOS requires a report for every VoIP push, but ring nothing (C07).
+        guard !wasHandedOff(callId) else {
+            signedOutSink.reportAndEnd(callId: callId, reason: "already answered")
             completion()
             return
         }

@@ -1,4 +1,5 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { IOSVoIPPush } from '@/shared/lib/push/ios-voip-push';
 import { Camera } from '@capacitor/camera';
 import type {
   AudioProbeResult,
@@ -229,6 +230,11 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
       if (!accepted) return;
       releasedToWebKit.add(accepted.callId);
       lastCallKitReleaseAt = Date.now();
+      // The plugin forgets the call once its record ends; tell the VoIP push
+      // coordinator, so a repeated push for this call does not ring it again (C07).
+      void IOSVoIPPush.markHandedOff({ callId: accepted.callId }).catch((e: unknown) => {
+        console.warn('[NativeCallBridge.iOS] markHandedOff failed:', e);
+      });
       await IncomingCallKit.endCall({ callId: accepted.callId, reason: 'audio-handoff' });
       console.log('[NativeCallBridge.iOS] CallKit call released to WebKit audio:', accepted.callId);
     } catch (e) {
