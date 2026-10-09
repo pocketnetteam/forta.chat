@@ -387,6 +387,10 @@ class NativeRTCPeerConnection extends EventTarget {
       console.error("[NativeRTCProxy] Failed to initialize:", e);
       this._initError = e as Error;
       this._resolveReady(); // resolve anyway so methods don't hang forever
+    } finally {
+      // close() during init already emptied the list: whatever was added
+      // after it would stay on the plugin for the rest of the process.
+      if (this._closed) this._removeListeners();
     }
   }
 
@@ -776,6 +780,13 @@ class NativeRTCPeerConnection extends EventTarget {
   // Close
   // -----------------------------------------------------------------------
 
+  private _removeListeners(): void {
+    for (const handle of this.listeners) {
+      handle.remove();
+    }
+    this.listeners = [];
+  }
+
   close(): void {
     if (this._closed) return;
     this._closed = true;
@@ -798,10 +809,7 @@ class NativeRTCPeerConnection extends EventTarget {
     console.log("[NativeRTCProxy] close, peerId:", this._peerId);
     NativeWebRTC.closePeerConnection({ peerId: this._peerId }).catch(() => {});
 
-    for (const handle of this.listeners) {
-      handle.remove();
-    }
-    this.listeners = [];
+    this._removeListeners();
     this._remoteStreams.clear();
     this._remoteTracks.clear();
   }

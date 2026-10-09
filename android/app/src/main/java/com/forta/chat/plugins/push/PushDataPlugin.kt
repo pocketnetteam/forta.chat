@@ -185,6 +185,12 @@ class PushDataPlugin : Plugin() {
         call.resolve()
     }
 
+    /** JS reads native's copy when WebView storage lost its own (C05). */
+    @PluginMethod
+    fun getIncomingCallsEnabled(call: PluginCall) {
+        call.resolve(JSObject().put("enabled", IncomingCallsStore.isEnabled(context)))
+    }
+
     @PluginMethod
     fun cacheRoomName(call: PluginCall) {
         val roomId = call.getString("roomId") ?: run {
@@ -335,7 +341,7 @@ class PushDataPlugin : Plugin() {
         try {
             val active = nm.activeNotifications ?: emptyArray()
             for (sb in active) {
-                if (sb.id == targetId && sb.notification?.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES) {
+                if (sb.id == targetId && isMessagesChannel(sb.notification)) {
                     nm.cancel(sb.tag, sb.id)
                 }
             }
@@ -364,8 +370,7 @@ class PushDataPlugin : Plugin() {
         // Cancel by tag: only the messages tag, leave call notifications alone.
         val active = nm.activeNotifications ?: emptyArray()
         for (sb in active) {
-            if (sb.tag == FortaFirebaseMessagingService.NOTIF_TAG &&
-                sb.notification?.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES) {
+            if (sb.tag == FortaFirebaseMessagingService.NOTIF_TAG && isMessagesChannel(sb.notification)) {
                 nm.cancel(sb.tag, sb.id)
             }
         }
@@ -465,5 +470,12 @@ class PushDataPlugin : Plugin() {
         } catch (e: Exception) {
             call.reject("Could not open the full-screen intent settings: ${e.message}", "unavailable", e)
         }
+    }
+
+    /** Channels exist from Android 8; below it every notification is the app's one stream. */
+    private fun isMessagesChannel(n: android.app.Notification?): Boolean {
+        if (n == null) return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        return n.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES
     }
 }

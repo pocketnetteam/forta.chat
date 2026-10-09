@@ -18,7 +18,7 @@ class CallHangupSignalContractTest {
             ?: error("$relative not found. Tried: $candidates from ${File(".").absolutePath}")
     }
 
-    private val connection by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val connection by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
     private val plugin by lazy { source("com/forta/chat/plugins/calls/CallPlugin.kt") }
     private val teardown by lazy { source("com/forta/chat/plugins/calls/CallTeardown.kt") }
     private val exit by lazy { source("com/forta/chat/plugins/calls/IdleProcessExit.kt") }

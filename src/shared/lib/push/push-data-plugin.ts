@@ -60,6 +60,8 @@ interface PushDataPlugin extends Plugin {
   markLoggedOut(): Promise<void>;
   /** "Incoming calls" switch: off, a call push neither rings nor shows (see incoming-calls-setting). */
   setIncomingCallsEnabled(options: { enabled: boolean }): Promise<void>;
+  /** Native's copy of the switch; JS reads it when WebView storage lost its own (C05). */
+  getIncomingCallsEnabled(): Promise<{ enabled: boolean }>;
   addListener(event: 'pushReceived', handler: (data: PushPayload) => void): Promise<PluginListenerHandle>;
   addListener(event: 'pushOpenRoom', handler: (data: { roomId: string; eventId?: string }) => void): Promise<PluginListenerHandle>;
 }

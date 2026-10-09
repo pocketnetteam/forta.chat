@@ -6127,12 +6127,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const rel = content["m.relates_to"] as Record<string, unknown>;
       const targetId = rel.event_id as string;
       const target = msgMap.get(targetId);
-      if (target) {
+      const editorId = matrixIdToAddress((raw.sender as string) ?? "");
+      // Only the author edits a message (H4); writeEdit enforces it in Dexie too.
+      if (target && target.senderId === editorId) {
         target.content = await resolveEditText(raw, roomCrypto);
         target.edited = true;
 
         // Persist edit to Dexie so it survives reload
         await chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+          senderId: editorId,
           targetEventId: targetId,
           newContent: target.content,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
@@ -6589,6 +6592,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const roomCrypto = await ensureRoomCrypto(roomId);
       for (const raw of edits) {
         await dbKit.eventWriter.writeEdit(roomId, {
+          senderId: matrixIdToAddress((raw.sender as string) ?? ""),
           targetEventId: targetOf(raw)!,
           newContent: await resolveEditText(raw, roomCrypto),
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
@@ -7792,16 +7796,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
 
         const cleanBody = newBody.replace(/^\* /, "");
+        const editorId = matrixIdToAddress((raw.sender as string) ?? "");
 
-        // Persist to Dexie (survives reload, triggers useLiveQuery)
+        // Persist to Dexie (survives reload, triggers useLiveQuery). writeEdit
+        // drops an edit that is not from the target's author in this room (H4).
         chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+          senderId: editorId,
           targetEventId: targetId,
           newContent: cleanBody,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
         });
 
-        // Immediate in-memory update (no Dexie round-trip delay)
-        updateMessageContent(roomId, targetId, cleanBody);
+        // Immediate in-memory update (no Dexie round-trip delay), for the
+        // author's own edit only.
+        const shown = messages.value[roomId]?.find((m) => m.id === targetId);
+        if (!shown || shown.senderId === editorId) updateMessageContent(roomId, targetId, cleanBody);
         return;
       }
 

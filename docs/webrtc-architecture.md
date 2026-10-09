@@ -79,7 +79,19 @@
 
 | Путь | Назначение |
 |------|------------|
-| `src/features/video-calls/model/call-service.ts` | Главный сервис звонков: оркестрация, интеграция с SDK |
+| `src/features/video-calls/model/call-service.ts` | Фасад `useCallService()`: собирает функции модулей ниже (с 2026-10 логика разнесена по модулям) |
+| `src/features/video-calls/model/call-outgoing.ts` | Исходящий звонок: ожидание Matrix, блокировка повторного набора, размещение |
+| `src/features/video-calls/model/call-incoming.ts` | Входящий звонок: бронь слота, проверки «занято», другая вкладка, отложенные решения натива, рингер |
+| `src/features/video-calls/model/call-answer.ts` | Ответ, отклонение, отбой, помощники нативного ответа |
+| `src/features/video-calls/model/call-events.ts` | Подписка на события MatrixCall, освобождение медиа (`releaseLocalMedia`, `releaseUnadoptedMedia`) |
+| `src/features/video-calls/model/call-media.ts` | Микрофон, камера, демонстрация экрана, смена устройств, сохранённые устройства |
+| `src/features/video-calls/model/call-timers.ts` | Таймаут входящего (30 с) и сторож соединения (30 с) |
+| `src/features/video-calls/model/call-feeds.ts` | Сопоставление состояний SDK и потоков собеседника |
+| `src/features/video-calls/model/call-engine-setup.ts` | Android: установка нативного прокси WebRTC и перезапуск ICE при смене сети (при импорте) |
+| `src/features/video-calls/model/call-native-screen.ts` | Единственная точка запуска нативного экрана звонка |
+| `src/features/video-calls/model/call-peer-info.ts` | Имя и аватар собеседника |
+| `src/features/video-calls/model/call-tor-facts.ts` | Факты Tor и ICE для отчётов о баге, предупреждение «звонок мимо Tor» |
+| `src/features/video-calls/model/finalize-call.ts` | Единственный выход звонка: остановка маршрутизации (по `callId`), отчёт натива, закрытие экрана и соединений |
 | `src/features/video-calls/model/use-media-devices.ts` | Composable для перечисления устройств (камера, микрофон, динамик) |
 | `src/features/video-calls/model/call-tab-lock.ts` | Блокировка звонков между вкладками через BroadcastChannel |
 | `src/features/video-calls/model/call-sounds.ts` | Звуки звонков (рингтон, гудок, конец) через Web Audio API |

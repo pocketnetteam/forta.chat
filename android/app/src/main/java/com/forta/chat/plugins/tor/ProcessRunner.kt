@@ -1,5 +1,6 @@
 package com.forta.chat.plugins.tor
 
+import android.os.Build
 import android.util.Log
 import java.io.BufferedReader
 import java.io.File
@@ -85,7 +86,17 @@ class ProcessRunner(
         process = null
     }
 
-    fun isRunning(): Boolean = process?.isAlive == true
+    fun isRunning(): Boolean {
+        val p = process ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) return p.isAlive
+        // Process.isAlive is Android 8+: exitValue() throws while it still runs.
+        return try {
+            p.exitValue()
+            false
+        } catch (_: IllegalThreadStateException) {
+            true
+        }
+    }
 
     companion object {
         private val BOOTSTRAP_PATTERN = Pattern.compile("Bootstrapped (\\d+)%")

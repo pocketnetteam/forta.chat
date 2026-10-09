@@ -101,6 +101,31 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
     private var pendingEvents: [(name: String, data: [String: Any])] = []
     private let signedOutSink = SignedOutCallSink()
 
+    /// Calls JS answered and handed from CallKit to WebKit audio (C07, calls
+    /// review 2026-10-04). The handoff ends the CallKit record, so the plugin
+    /// forgets the call; a repeated VoIP push for it (an APNs duplicate, a
+    /// gateway retry, a push slower than the answer) then looked new, rang
+    /// again, and a decline on that ringer ended the live call. Kept for the
+    /// length of an invite's life. Main queue only.
+    private var handedOff: [String: Date] = [:]
+    private static let handedOffLifetime: TimeInterval = 10 * 60
+
+    /// JS answered [callId] and released its CallKit record (main queue).
+    func markHandedOff(_ callId: String) {
+        pruneHandedOff()
+        handedOff[callId] = Date()
+    }
+
+    private func wasHandedOff(_ callId: String) -> Bool {
+        pruneHandedOff()
+        return handedOff[callId] != nil
+    }
+
+    private func pruneHandedOff() {
+        let now = Date()
+        handedOff = handedOff.filter { now.timeIntervalSince($0.value) < Self.handedOffLifetime }
+    }
+
     /// Set by `IOSVoIPPushPlugin.load()`; queued events flush on assignment.
     weak var plugin: CAPPlugin? {
         didSet { flushPendingEvents() }
@@ -168,9 +193,26 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
             completion()
             return
         }
+        // Already answered and handed to WebKit: report and end at once, as
+        // iOS requires a report for every VoIP push, but ring nothing (C07).
+        guard !wasHandedOff(callId) else {
+            signedOutSink.reportAndEnd(callId: callId, reason: "already answered")
+            completion()
+            return
+        }
 
         // Synchronous on the main queue (the registry's queue): the provider is
         // told before this method returns and before completion().
+        //
+        // A call the plugin already tracks (JS showed it from /sync before the
+        // push came, or a repeat push) is not reported again: the plugin
+        // answers at once, synchronously, without touching CallKit. iOS
+        // counts that as a push with no report and kills the app. A new call
+        // completes only later, from CallKit. So a completion that runs
+        // before reportIncomingCall returns means nothing was reported, and
+        // a placeholder is reported and ended instead.
+        var insideReport = true
+        var answeredWithoutCallKit = false
         IncomingCallKit.shared.reportIncomingCall(
             callId: callId,
             callerName: callerName,
@@ -178,11 +220,21 @@ final class VoIPPushCoordinator: NSObject, PKPushRegistryDelegate {
             hasVideo: hasVideo,
             extra: ["roomId": roomId]
         ) { error in
+            if insideReport && error == nil {
+                answeredWithoutCallKit = true
+                return
+            }
             if let error {
                 NSLog("[VoIPPush] CallKit rejected call %@: %@", callId, error.localizedDescription)
             } else {
                 NSLog("[VoIPPush] CallKit displayed call %@", callId)
             }
+        }
+        insideReport = false
+        if answeredWithoutCallKit {
+            signedOutSink.reportAndEnd(callId: callId, reason: "already shown")
+            completion()
+            return
         }
         NSLog("[VoIPPush] reported call %@ to CallKit", callId)
 

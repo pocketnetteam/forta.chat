@@ -9,7 +9,7 @@ import { formatDate } from "@/shared/lib/format";
 import { formatMessageForCopy } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
-import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "@/entities/chat/lib/dedupe-call-events";
+import { dedupeCallEvents, isGhostMessage, planCallRecordDeletion, timelineAnchorFor } from "@/entities/chat/lib/dedupe-call-events";
 import { useFileDownload } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
@@ -364,29 +364,36 @@ interface VirtualItem {
   [key: string]: unknown;
 }
 
+// Matrix stores one hangup event per participant who ends the call, so a call
+// both sides hang up leaves two records of the same call. Collapse them here
+// rather than in the store: the events are legitimate and stay in the
+// database, only the timeline shows one entry per call. `item.index` points
+// into this list, and so must the neighbour lookups in the template: they
+// read the raw store list, which is longer by every collapsed or deleted
+// call record, so grouping compared the wrong neighbours after one.
+const timelineMessages = computed(() => dedupeCallEvents(chatStore.activeMessages));
+
 const virtualItems = computed<VirtualItem[]>(() => {
-  // Matrix stores one hangup event per participant who ends the call, so a call
-  // both sides hang up leaves two records of the same call. Collapse them here
-  // rather than in the store: the events are legitimate and stay in the
-  // database, only the timeline shows one entry per call.
   const rawMsgs = chatStore.activeMessages;
-  const msgs = dedupeCallEvents(rawMsgs);
+  const msgs = timelineMessages.value;
   const items: VirtualItem[] = [];
   const { frozenLastReadId: watermarkId, frozenUnreadCount } = bannerState.value;
-  // The watermark can name a call record the collapse above removed — the
-  // second hangup is usually the newest event in the room. Point it at the
-  // record that survived, or the unread banner loses its anchor and never
-  // renders.
-  const frozenLastReadId =
-    watermarkId && frozenUnreadCount > 0
-      ? (collapsedCallEventIds(rawMsgs).get(watermarkId) ?? watermarkId)
-      : watermarkId;
+  // The watermark can name a call record the collapse above removed (the
+  // second hangup, a record deleted for oneself). Move it to the nearest shown
+  // row before it, or the unread banner loses its anchor and never renders;
+  // null means no shown row precedes it.
+  const hasUnread = !!watermarkId && frozenUnreadCount > 0;
+  // Among the rows this list draws: a ghost row kept by the collapse above is
+  // skipped below, and an anchor on it left the banner without a place (C10).
+  const frozenLastReadId = hasUnread
+    ? timelineAnchorFor(rawMsgs, msgs.filter((m) => !isGhostMessage(m)), watermarkId)
+    : watermarkId;
   const myAddr = authStore.address;
 
   // Track whether we've found the last-read message and need to insert the banner.
   // The banner goes BEFORE the first inbound (not own) message after the last-read marker.
   // This ensures own messages sent after the watermark stay ABOVE the banner.
-  let bannerPending = false;
+  let bannerPending = hasUnread && frozenLastReadId === null;
   let bannerInserted = false;
 
   for (let i = 0; i < msgs.length; i++) {
@@ -395,16 +402,7 @@ const virtualItems = computed<VirtualItem[]>(() => {
     // Skip ghost messages: no content, no media, not deleted, not system.
     // NEVER skip messages with pending/failed decryption — they must remain visible
     // so the user sees that a new message exists (shown as "[encrypted]" placeholder).
-    if (
-      !msg.deleted &&
-      !msg.content &&
-      !msg.fileInfo &&
-      !msg.pollInfo &&
-      !msg.callInfo &&
-      !msg.transferInfo &&
-      msg.type !== "system" &&
-      !msg.decryptionStatus
-    ) {
+    if (isGhostMessage(msg)) {
       if (import.meta.env.DEV) {
         console.warn("[MessageList] ghost message filtered:", msg.id, msg.senderId, msg.status);
       }
@@ -1502,8 +1500,8 @@ defineExpose({ scrollToMessage, setSearchQuery });
             :is-own="item.message.senderId === authStore.address"
             :my-address="authStore.address ?? undefined"
             :is-group="isGroup"
-            :show-avatar="themeStore.messageGrouping ? !isConsecutiveMessage(item.message, chatStore.activeMessages[(item.index ?? 0) + 1]) : true"
-            :is-first-in-group="themeStore.messageGrouping ? !isConsecutiveMessage(chatStore.activeMessages[(item.index ?? 0) - 1], item.message) : true"
+            :show-avatar="themeStore.messageGrouping ? !isConsecutiveMessage(item.message, timelineMessages[(item.index ?? 0) + 1]) : true"
+            :is-first-in-group="themeStore.messageGrouping ? !isConsecutiveMessage(timelineMessages[(item.index ?? 0) - 1], item.message) : true"
             @contextmenu="openContextMenu"
             @reply="(msg) => { chatStore.replyingTo = { id: msg.id, senderId: msg.senderId, content: msg.content.slice(0, 150), type: msg.type }; }"
             @scroll-to-reply="scrollToMessage"

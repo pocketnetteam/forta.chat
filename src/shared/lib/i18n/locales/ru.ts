@@ -645,6 +645,7 @@ export const ru: Record<TranslationKey, string> = {
   "call.warning.noRelay": "Соединение не установлено, relay-сервер недоступен — эта сеть может блокировать прямые звонки.",
   "call.warning.torBypassed": "Звонки идут мимо Tor: собеседник может видеть ваш IP-адрес.",
   "call.error.connectionLost": "Соединение со звонком потеряно.",
+  "call.error.cameraUnavailable": "Не удалось включить камеру — звонок продолжается без видео.",
   "call.error.legacyWebView": "Браузерный движок устройства слишком старый для стабильных звонков. Обновите «Android System WebView» в Play Store.",
   "call.info.waitingForServer": "Подключаемся к серверу, звонок начнётся автоматически…",
   "call.error.matrixNotReady": "Не удалось подключиться к серверу. Попробуйте позвонить чуть позже.",

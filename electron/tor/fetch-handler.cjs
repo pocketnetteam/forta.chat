@@ -37,8 +37,8 @@ class FetchMainHandler {
     });
   }
 
-  onAbort(requestId) {
-    this.listen('Abort', requestId);
+  onAbort(requestId, listener) {
+    this.listen('Abort', requestId, listener);
   }
 
   offAbort(requestId) {
@@ -67,6 +67,12 @@ class FetchMainHandler {
     self.onRequest((requestId, requestData) => {
       const controller = new AbortController();
       const signal = controller.signal;
+      // The renderer sends Abort when the page cancels the request; nothing
+      // listened, so a cancelled download kept streaming through Tor.
+      self.onAbort(requestId, () => {
+        controller.abort();
+        delete self.requests[requestId];
+      });
 
       const url = requestData.url;
       delete requestData.url;
@@ -89,6 +95,15 @@ class FetchMainHandler {
           data.body.on('end', () => {
             self.offAbort(requestId);
             self.sendEnd(requestId);
+            delete self.requests[requestId];
+          });
+
+          // A socket error mid-body (Tor circuit dropped, abort) is emitted on
+          // the stream; with no listener it was an uncaught exception in the
+          // main process.
+          data.body.on('error', () => {
+            self.offAbort(requestId);
+            self.sendError(requestId);
             delete self.requests[requestId];
           });
         })

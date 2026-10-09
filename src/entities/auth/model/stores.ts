@@ -775,7 +775,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           try {
             const callService = useCallService();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            callService.handleIncomingCall(call as any);
+            callService.handleIncomingCall(call as any).catch((err: unknown) => {
+              console.error("[auth] Failed to handle incoming call:", err);
+            });
           } catch (err) {
             console.error("[auth] Failed to handle incoming call:", err);
             try { (call as any).reject?.(); } catch { /* ignore */ }
@@ -1334,6 +1336,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  Skips if registration is already in progress (register() handles it). */
   const verifyAndRepublishKeys = async () => {
     if (!address.value || !privateKey.value) return;
+    // The account this check is for. Read again after every await: an account
+    // switch between them published A's profile under B's address and keys
+    // (review 2026-10-08, H2).
+    const subjectAddress = address.value;
+    const subjectKey = privateKey.value;
+    const accountChanged = () => address.value !== subjectAddress || privateKey.value !== subjectKey;
 
     // Don't interfere with active registration — register() manages its own poll
     if (registrationPending.value || pendingRegProfile.value) {
@@ -1342,7 +1350,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
 
     // Step 1: Quick check via local SDK cache.
-    const userData = appInitializer.getUserData(address.value);
+    const userData = appInitializer.getUserData(subjectAddress);
     const cachedKeyCount = countCachedKeys(userData);
 
     // Step 2: Cache may be stale/empty after login — verify via fresh SDK
@@ -1352,12 +1360,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (cachedKeyCount < REQUIRED_ENCRYPTION_KEYS) {
       console.log("[auth] Cache shows", cachedKeyCount, "keys, verifying via RPC...");
       try {
-        const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+        const rawProfiles = await appInitializer.loadUsersInfoRaw([subjectAddress]);
         blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
       } catch (e) {
         console.warn("[auth] RPC key check failed, skipping re-publish:", e);
         blockchainCheckFailed = true;
       }
+      if (accountChanged()) return;
     }
 
     // checkUnspents only affects the republish-vs-needs-funds split; query it
@@ -1368,8 +1377,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       !blockchainCheckFailed &&
       (blockchainKeyCount ?? 0) < REQUIRED_ENCRYPTION_KEYS;
     const hasUnspents = mayNeedRepublish
-      ? await appInitializer.checkUnspents(address.value)
+      ? await appInitializer.checkUnspents(subjectAddress)
       : false;
+    if (accountChanged()) return;
 
     const action = resolveKeyRepublishAction({
       cachedKeyCount,
@@ -1404,14 +1414,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       case "republish": {
         likelyBastyonUser.value = true;
         interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
-        const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
+        const encPublicKeys = generateEncryptionKeys(subjectKey).map(k => k.public);
         const profile = {
           name: userData?.name ?? "",
           language: userData?.language ?? "en",
           about: userData?.about ?? "",
         };
         const image = userData?.image ?? "";
-        const republishAddress = address.value;
+        const republishAddress = subjectAddress;
         // Fire-and-forget: the broadcast is a blockchain round-trip that must
         // not add latency to login. It can no longer hang the UI (never flips
         // registrationPending) and failure is non-fatal — login proceeds either
@@ -1419,6 +1429,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         void (async () => {
           try {
             await appInitializer.syncNodeTime();
+            // The broadcast signs with the signed-in account's key.
+            if (accountChanged()) {
+              console.warn("[auth] Background key re-publish dropped: the account changed");
+              return;
+            }
             await appInitializer.registerUserProfile(republishAddress, profile, encPublicKeys, image);
             console.log("[auth] Encryption keys re-published in background (existing-account login)");
           } catch (e) {
