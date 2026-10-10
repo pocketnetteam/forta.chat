@@ -5,8 +5,10 @@ independently checked by a second one that tried to refute it; P0s were reproduc
 The owner-facing report (Russian, with cause, fix and linked forta-bugs reports per finding) is a private
 artifact: https://claude.ai/artifact/BLUR5C39UtCMaUEvzdPNBn
 
-Work happens on branch `audit/full-app-2026-09` in the worktree `.claude/worktrees/audit`, next to the calls
-session on `fix/calls-2026-09`. `fix/calls-2026-09` is merged in (merge, not rebase) at the start of each batch.
+Work happens on branch `audit/full-app-2026-09`. Until 2026-10-09 it lived in the worktree `.claude/worktrees/audit`
+and merged `fix/calls-2026-09` at the start of each batch. On 2026-10-10 the worktree was removed and the branch
+merged `refactor/calls-cleanup-2026-10` (upstream v1.13.5 plus the October calls work) in `c121d525`. Merge, not
+rebase.
 Commits cite the finding id, e.g. `fix(boot): … (audit W2B-01)`.
 
 Batches: 1 isolated P0s, 2 sending and session, 3 own/peer keys, 4 media/Tor/groups/contacts, 5 security and
@@ -54,16 +56,16 @@ D desktop (Electron).
 | S7-04 | P2 | 4 | AiWD | Kick / ban / promote-to-admin / mute failures are silently swallowed in the chat-info member menu | `src/features/chat-info/ui/ChatInfoPanel.vue` | fixed |
 | S8-04 | P2 | 5 | D | Electron window has no application menu and no context menu — no right-click Copy/Paste, no discoverable Reload | `electron/main.cjs (весь файл — нет импорта Menu)` | fixed |
 | W2C-04 | P2 | 6 | AWD | HEIC photos show no preview in the composer/attachment picker before sending | `src/features/messaging/model/use-media-upload.ts` | fixed |
-| S1-04 | P2 | 3 | WAiD | Reply preview text is resolved once and permanently baked in — if resolved while the quoted message is still mid-decrypt, the reply shows "[encrypted]" forever even after the original decrypts fine | `src/entities/chat/model/chat-store.ts` | fixed |
+| S1-04 | P2 | 3 | WAiD | Reply preview text is resolved once and permanently baked in — if resolved while the quoted message is still mid-decrypt, the reply shows "[encrypted]" forever even after the original decrypts fine | `src/entities/chat/model/chat-store.ts` | fixed; merge fix: the refetch guard marks an original done only after it decrypts, and never quotes ciphertext (`c121d525`, `efaa00b3`) |
 | S3b-03 | P2 | 4 | AiWD | `acceptInvite` swallows `joinRoom` failures — user sees the invite screen again with no explanation | `src/entities/chat/model/chat-store.ts` | fixed |
 | S4-04 | P2 | 6 | A | Save-to-gallery on Android 7–9 (API 24-28) never requests the runtime WRITE_EXTERNAL_STORAGE permission | `android/app/src/main/java/com/forta/chat/plugins/savemedia/SaveMediaPlugin.kt` | fixed |
 | S6-03 | P2 | 6 | AiWD | Avatar → Matrix sync: unbounded `fetch` of the just-uploaded image, failure silently swallowed — Matrix avatar (`avatar_url`, drives group avatars) never gets set, no user-facing error | `src/entities/auth/lib/sync-profile-to-matrix.ts` | fixed |
 | W2A-03 | P2 | 6 | WAiD | "Font Size" appearance setting has no effect on real chat messages — only the settings-page preview responds | `src/entities/theme/model/stores.ts` | not a bug: message text already uses text-chat-base = var(--font-size-base) (MessageBubble.vue, since cd5472e2) |
 | S2-04 | P2 | 6 | WAiD | Legacy localStorage offline-queue path marks a message "sent" while it is only queued on-device, with no reconnect trigger beyond a browser `online` event | `src/features/messaging/model/use-messages.ts` | open |
-| S3-03 | P2 | 6 | AiWD | Bulk timeline parse drops edits/reactions whose target isn't in the same parsed batch (no Dexie fallback, unlike replies) | `src/entities/chat/model/chat-store.ts` | fixed |
+| S3-03 | P2 | 6 | AiWD | Bulk timeline parse drops edits/reactions whose target isn't in the same parsed batch (no Dexie fallback, unlike replies) | `src/entities/chat/model/chat-store.ts` | fixed; after the merge stored targets go through `applyPageRelationsToStored` and only relations with a target not in Dexie yet are stashed (`efaa00b3`) |
 | S5-03 | P2 | 2 | WAiD | `bootStatus` reaches `"ready"` before Matrix ever starts connecting — the dedicated "matrix unreachable" boot-error screen can never render | `src/app/index.ts` | covered by S2-01 (timed Matrix retry + connection header) |
 | W2C-03 | P2 | 6 | Ai | Video-circle (video note) player force-loops and force-resumes playback, ignoring pause | `src/features/messaging/ui/VideoCirclePlayer.vue` | fixed |
-| S1-05 | P2 | 6 | WAiD | Derived per-recipient AES key caches are keyed by identity+block, not by the actual public-key bytes — a peer's key rotation can leave a stale shared secret cached for the rest of a group's key-generation lifetime | `src/entities/matrix/model/matrix-crypto.ts` | fixed |
+| S1-05 | P2 | 6 | WAiD | Derived per-recipient AES key caches are keyed by identity+block, not by the actual public-key bytes — a peer's key rotation can leave a stale shared secret cached for the rest of a group's key-generation lifetime | `src/entities/matrix/model/matrix-crypto.ts` | fixed; worker part superseded by the cleanup side (`cd600e0b`, key on myId + member keys), main-thread `aeskeysls` fingerprint kept in the merge |
 | S4-05 | P2 | 6 | Ai | Large media is fully materialized in memory at least twice (Blob + base64 string) on save and on native disk-cache write | `src/features/messaging/model/use-file-download.ts` | owner decision: architecture (stream/chunk media writes instead of whole-blob base64) |
 | W2C-01 | P2 | 6 | A | Long-press context menu fires during native text selection, covering the message | `src/features/messaging/ui/MessageBubble.vue` | fixed |
 | W2A-02 | P2 | 6 | WAD | `useLocalStorage` has no error handling — every appearance/theme setting can silently fail to persist | `src/shared/lib/browser/use-local-storage.ts` | fixed |
