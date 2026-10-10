@@ -323,7 +323,8 @@ class PushService {
    *  S6-01, device check 2026-10-10). The whole set every time, so a removed
    *  alias leaves too. */
   async syncSenderAliasesToNative(): Promise<void> {
-    if (!this.getSenderAliases) return;
+    // Android only: the iOS plugin has no such method (the NSE keeps its own names).
+    if (isIOS || !this.getSenderAliases) return;
     try {
       await PushData.cacheSenderAliases({ aliases: this.getSenderAliases() });
     } catch (e) {

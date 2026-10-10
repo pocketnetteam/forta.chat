@@ -218,8 +218,10 @@ describe("legacy offline queue (audit S2-04)", () => {
       sendText.mockImplementationOnce(() => new Promise<string>(() => {}));
 
       online.value = true;
-      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sendText).toHaveBeenCalledTimes(1);
+      // Past the 30 s send timeout, before the 15 s retry timer.
+      await vi.advanceTimersByTimeAsync(31_000);
       expect(getQueue()).toHaveLength(1);
       expect(statusOfLast()).toBe(MessageStatus.sending);
 
@@ -245,5 +247,30 @@ describe("legacy offline queue (audit S2-04)", () => {
     expect(sendText.mock.calls.map((c) => c[1])).toEqual(["first", "second"]);
     spy.mockRestore();
     scope.stop();
+  });
+
+  // Review 2026-10-10 (second pass): after a send gave up, nothing ran the
+  // queue again while the connection stayed up.
+  it("tries a kept message again on a timer, without a connectivity change", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const scope = effectScope();
+      const messaging = scope.run(() => useMessages())!;
+      await messaging.sendMessage("hello while offline");
+      sendText.mockRejectedValueOnce(new Error("timeout of 30000ms exceeded"));
+
+      online.value = true;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(getQueue()).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(sendText).toHaveBeenCalledTimes(2);
+      expect(getQueue()).toHaveLength(0);
+      expect(statusOfLast()).toBe(MessageStatus.sent);
+      scope.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -136,6 +136,10 @@ async function handleUploadCancelled(
 let draining = false;
 /** A drain trigger arrived while a drain was busy. */
 let drainAgain = false;
+/** Next try for a message kept after its send gave up; the connection may stay
+ *  up, and nothing else would run the queue again. */
+let drainRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const OFFLINE_QUEUE_RETRY_MS = 15_000;
 
 /** A send from the legacy offline queue that hangs gives up after this and
  *  stays queued; the same txnId keeps a late duplicate off the server. */
@@ -147,7 +151,7 @@ const OFFLINE_QUEUE_SEND_TIMEOUT_MS = 30_000;
 function isOfflineQueueSendTransient(e: unknown): boolean {
   if (isNetworkBlocked(e)) return true;
   const message = e instanceof Error ? e.message : String(e);
-  return /offline queue send timed out|known txnId/.test(message);
+  return /offline queue send timed out|known txnId|timeout of \d+ms exceeded/.test(message);
 }
 
 export function useMessages() {
@@ -342,7 +346,14 @@ export function useMessages() {
       const matrixService = getMatrixClientService();
       if (!matrixService.isReady()) return;
       const msg = getQueue()[0];
-      if (!msg) return;
+      if (!msg) {
+        // Nothing left to retry.
+        if (drainRetryTimer !== null) {
+          clearTimeout(drainRetryTimer);
+          drainRetryTimer = null;
+        }
+        return;
+      }
       let serverEventId: string | undefined;
       let outcome: "sent" | "keep" | "failed";
       try {
@@ -374,7 +385,15 @@ export function useMessages() {
           outcome = "failed";
         }
       }
-      if (outcome === "keep") return;
+      if (outcome === "keep") {
+        if (drainRetryTimer === null) {
+          drainRetryTimer = setTimeout(() => {
+            drainRetryTimer = null;
+            void drainOfflineQueue();
+          }, OFFLINE_QUEUE_RETRY_MS);
+        }
+        return;
+      }
       dequeue();
       try {
         if (outcome === "failed") {
