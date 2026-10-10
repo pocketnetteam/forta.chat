@@ -1539,6 +1539,16 @@ describe("useFileDownload", () => {
       ).toBe("https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc");
     });
 
+    // Review 2026-10-10: the mirror exists for places where the primary is
+    // blocked; a URL the sender stored there must not wait out a primary
+    // timeout on its first attempt.
+    it("starts from the host the URL was stored on", () => {
+      expect(mediaHostForAttempt(0, "matrix.2.pocketnet.app")).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(1, "matrix.2.pocketnet.app")).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(2, "matrix.2.pocketnet.app")).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(1, "cdn.example.com")).toBe("matrix.2.pocketnet.app");
+    });
+
     it("tries the other own host once after a 404, and names the host when both miss", async () => {
       const seen: string[] = [];
       (global.fetch as Mock).mockImplementation(async (url: string) => {
@@ -1559,8 +1569,7 @@ describe("useFileDownload", () => {
         error = getState("client_404").error;
       });
       scope.stop();
-      expect(new Set(seen)).toEqual(new Set(["matrix.pocketnet.app", "matrix.2.pocketnet.app"]));
-      expect(seen).toHaveLength(2);
+      expect(seen).toEqual(["matrix.2.pocketnet.app", "matrix.pocketnet.app"]);
       expect(String(error ?? "")).toContain("404");
     });
 
@@ -1584,6 +1593,30 @@ describe("useFileDownload", () => {
         state = getState("client_404b");
       });
       scope.stop();
+      expect((state as { objectUrl?: string } | undefined)?.objectUrl).toBeTruthy();
+    });
+
+    // Review 2026-10-10: the host is now in the error message, so the legacy
+    // "404" substring check must not read it; a 500 from such a host retries.
+    it("retries a 500 from a host whose name holds 404", async () => {
+      (global.fetch as Mock)
+        .mockResolvedValueOnce({ ok: false, status: 500, blob: () => Promise.resolve(new Blob()) })
+        .mockResolvedValueOnce({ ok: true, status: 200, blob: () => Promise.resolve(new Blob([new Uint8Array([1])])) });
+      const scope = effectScope();
+      let state: unknown;
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt500", _key: "client_500", roomId: "!room:server", senderId: "@u:server",
+          content: "file.pdf", timestamp: Date.now(), status: "sent", type: "file",
+          fileInfo: { name: "file.pdf", type: "application/pdf", size: 1024, url: "https://cdn404.example.com/file.pdf" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        await download(message);
+        state = getState("client_500");
+      });
+      scope.stop();
+      expect(global.fetch as Mock).toHaveBeenCalledTimes(2);
       expect((state as { objectUrl?: string } | undefined)?.objectUrl).toBeTruthy();
     });
 

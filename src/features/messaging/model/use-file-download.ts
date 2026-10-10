@@ -469,10 +469,15 @@ const MEDIA_HOSTS = [MATRIX_SERVER, ...MATRIX_MIRRORS];
 /** Pick the media host for a given retry attempt, alternating
  *  primary↔mirror(s) so a throttled/blocked primary media-repo gets bypassed
  *  on the next try while a transient primary blip can still recover (WEE-90 H2).
- *  attempt 0 → primary, 1 → mirror[0], 2 → primary, 3 → mirror[0]… */
-export function mediaHostForAttempt(attempt: number): string {
-  const idx = ((attempt % MEDIA_HOSTS.length) + MEDIA_HOSTS.length) % MEDIA_HOSTS.length;
-  return MEDIA_HOSTS[idx];
+ *  attempt 0 → primary, 1 → mirror[0], 2 → primary, 3 → mirror[0]…
+ *  A URL stored on one of our mirrors starts from that mirror: the mirror
+ *  serves places where the primary is blocked. */
+export function mediaHostForAttempt(attempt: number, storedHost: string = MATRIX_SERVER): string {
+  const order = isOwnMediaHost(storedHost)
+    ? [storedHost, ...MEDIA_HOSTS.filter((h) => h !== storedHost)]
+    : MEDIA_HOSTS;
+  const idx = ((attempt % order.length) + order.length) % order.length;
+  return order[idx];
 }
 
 /** Rewrite a resolved media URL's host to `host`. Only our own homeserver
@@ -628,7 +633,7 @@ async function downloadAndDecrypt(
       // Alternate primary↔mirror across attempts so a blocked/throttled primary
       // media-repo is bypassed on retry (WEE-90 H2). No-op for the first attempt
       // and for non-primary hosts.
-      const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt));
+      const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt, hostOf(resolvedUrl)));
       fetchUrl = appendCacheBust(hostUrl, attempt);
       let blob: Blob;
       if (shouldUseNativeTorDownload()) {
@@ -727,8 +732,9 @@ async function downloadAndDecrypt(
           if (ownHostLeft) continue;
         }
         if (status !== undefined && NON_RETRIABLE_STATUSES.has(status)) throw e;
-        // Legacy substring match in case status wasn't attached
-        if (e.message.includes("404") || e.message.includes("403") || e.message.includes("415")) {
+        // Legacy substring match in case status wasn't attached. Only then:
+        // the message of a status error names the host, which may hold digits.
+        if (status === undefined && (e.message.includes("404") || e.message.includes("403") || e.message.includes("415"))) {
           throw e;
         }
       }
