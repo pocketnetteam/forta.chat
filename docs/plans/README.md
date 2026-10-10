@@ -17,7 +17,7 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 
 | Plan | State | What is open |
 |---|---|---|
-| [2026-09-28-full-app-audit](2026-09-28-full-app-audit.md) | 51 of 63 findings fixed; merged with the calls cleanup (`c121d525`) | S2-04, W2C-05, W2D-02 (virtualization), owner decisions S10-01, S10-05, S10-06, S8-02, S4-05, W2C-06 |
+| [2026-09-28-full-app-audit](2026-09-28-full-app-audit.md) | 50 fixed, 2 partly (W2D-02, S10-05 Electron report-only CSP), 4 closed otherwise, 5 open; merged with the calls cleanup (`c121d525`) | W2D-02 (ChannelView virtualization), owner decisions S10-01, S10-06, S8-02, S4-05, W2C-06; CSP on web and mobile |
 | [2026-10-08-calls-next-session](2026-10-08-calls-next-session.md) | calls cleanup in PR #276 | iOS checks on the XR (C06, C07, C08), Tor proxy `Host`, WebRTC engine toggle removal |
 | [2026-10-10-missed-push-calls](2026-10-10-missed-push-calls.md) | T1–T3 done on `audit/full-app-2026-09` | T4 (Doze run by the owner), T5 (tester data); missed-call card for an invite with no hangup |
 | [2026-10-08-background-voice-playback](2026-10-08-background-voice-playback.md) | not started | everything (stages 0–8) |
