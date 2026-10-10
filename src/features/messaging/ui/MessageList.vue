@@ -579,6 +579,9 @@ const checkScroll = () => {
 let pendingScrollToBottom = false;
 let scrollStableTimer: ReturnType<typeof setTimeout> | undefined;
 let scrollToBottomGen = 0;
+/** Own messages appended since the app started; a scroll to the banner that
+ *  waits for its row skips when one arrived meanwhile. */
+let ownAppendCount = 0;
 /** Scroll to newest messages (bottom of chat = scrollTop 0 in column-reverse). */
 const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
   newMessageCount.value = 0;
@@ -979,11 +982,15 @@ const openRoom = async (roomId: string | null) => {
         // once its row arrives (audit W2C-02).
         if (el) el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
         const scrollAtOpen = el?.scrollTop ?? 0;
+        const ownAppendsAtOpen = ownAppendCount;
         void waitForBannerRow(BANNER_ROW_WAIT_MS).then(async (idx) => {
           if (isStale() || idx < 0) return;
           // The user already scrolled: do not move the view under them.
           const now = getScrollContainer();
           if (now && Math.abs(now.scrollTop - scrollAtOpen) > 2) return;
+          // The user sent a message meanwhile: the view follows it at the
+          // bottom, not up to the banner.
+          if (ownAppendCount !== ownAppendsAtOpen) return;
           await nextTick();
           const fresh = reversedItems.value.findIndex(item => item.type === "unread-banner");
           if (fresh >= 0) scrollToBannerRow(fresh);
@@ -1083,6 +1090,7 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
   if (!lastMsg) return;
 
   const lastAddedIsOwn = lastMsg.senderId === authStore.address;
+  if (lastAddedIsOwn) ownAppendCount++;
 
   if (lastAddedIsOwn || isNearBottom.value) {
     scrollToBottom();

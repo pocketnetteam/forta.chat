@@ -54,4 +54,13 @@ describe("MessageList — scroll to the unread banner", () => {
     expect(toBottom).toContain("const gen = ++scrollToBottomGen;");
     expect(toBottom.match(/if \(gen !== scrollToBottomGen\) return;/g)).toHaveLength(2);
   });
+
+  // Review 2026-10-10: an own send during the wait keeps scrollTop at 0, so the
+  // "user scrolled" guard missed it and the banner scroll pulled the view up
+  // from the message just sent.
+  it("skips the delayed banner scroll after an own send", () => {
+    expect(fallback).toMatch(/const ownAppendsAtOpen = ownAppendCount;/);
+    expect(fallback).toMatch(/if \(ownAppendCount !== ownAppendsAtOpen\) return;/);
+    expect(source).toMatch(/const lastAddedIsOwn = lastMsg\.senderId === authStore\.address;\s*if \(lastAddedIsOwn\) ownAppendCount\+\+;/);
+  });
 });
