@@ -11,6 +11,7 @@ import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
+import { isNetworkBlocked } from "@/shared/lib/network/typed-network-errors";
 import { detectUrl, fetchPreview } from "./use-link-preview";
 import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
@@ -127,6 +128,12 @@ async function handleUploadCancelled(
     cancellingSet.delete(clientId);
   }
 }
+
+/** True while an offline-queue drain runs. The head stays queued until it is
+ *  sent, so a second drain at the same time — another useMessages() instance
+ *  (MessageInput and MessageList each hold one) or another trigger — would
+ *  send it again. */
+let draining = false;
 
 export function useMessages() {
   const chatStore = useChatStore();
@@ -294,52 +301,73 @@ export function useMessages() {
 
   /** Drain queued messages when coming back online or when Matrix is ready again. */
   const drainOfflineQueue = async () => {
-    // One at a time, and only taken off the queue once Matrix can send it:
-    // taking it first lost it whenever the drain met a reconnecting client
-    // (audit S2-04). What stays queued goes out on the next drain.
-    while (getQueue().length > 0) {
-      const matrixService = getMatrixClientService();
-      if (!matrixService.isReady()) break;
-      const msg = dequeue();
-      if (!msg) break;
-      try {
-        const roomCrypto = await getSendCrypto(msg.roomId);
-        let serverEventId: string;
-        if (roomCrypto?.canBeEncrypt()) {
-          const encrypted = await roomCrypto.encryptEvent(msg.content);
-          serverEventId = await matrixService.sendEncryptedText(msg.roomId, encrypted);
-        } else {
-          // Defense in depth: offline queue replay must not silently
-          // downgrade to plaintext if peer keys are gone by the time we
-          // come back online.
-          if (roomCrypto?.requiresEncryption()) {
-            throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — offline queue drain`);
+    if (draining) return;
+    draining = true;
+    try {
+      // One at a time, and only taken off the queue once it is sent or failed
+      // for good: taking it first lost it whenever the drain met a
+      // reconnecting client or a network that dropped again (audit S2-04).
+      // What stays queued goes out on the next drain.
+      while (isOnline.value) {
+        const matrixService = getMatrixClientService();
+        if (!matrixService.isReady()) break;
+        const msg = getQueue()[0];
+        if (!msg) break;
+        try {
+          const roomCrypto = await getSendCrypto(msg.roomId);
+          let serverEventId: string;
+          if (roomCrypto?.canBeEncrypt()) {
+            const encrypted = await roomCrypto.encryptEvent(msg.content);
+            serverEventId = await matrixService.sendEncryptedText(msg.roomId, encrypted);
+          } else {
+            // Defense in depth: offline queue replay must not silently
+            // downgrade to plaintext if peer keys are gone by the time we
+            // come back online.
+            if (roomCrypto?.requiresEncryption()) {
+              throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — offline queue drain`);
+            }
+            serverEventId = await matrixService.sendText(msg.roomId, msg.content);
           }
-          serverEventId = await matrixService.sendText(msg.roomId, msg.content);
+          dequeue();
+          if (serverEventId) {
+            chatStore.updateMessageIdAndStatus(msg.roomId, msg.id, serverEventId, MessageStatus.sent);
+          } else {
+            chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.sent);
+          }
+        } catch (e) {
+          if (isNetworkBlocked(e)) {
+            // Never reached the server: it stays queued and "sending".
+            console.warn("[offline-queue] Network lost while sending, keeping the message queued:", e);
+            break;
+          }
+          console.error("[offline-queue] Failed to send queued message:", e);
+          dequeue();
+          chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.failed);
         }
-        if (serverEventId) {
-          chatStore.updateMessageIdAndStatus(msg.roomId, msg.id, serverEventId, MessageStatus.sent);
-        } else {
-          chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.sent);
-        }
-      } catch (e) {
-        console.error("[offline-queue] Failed to send queued message:", e);
-        chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.failed);
       }
+    } finally {
+      draining = false;
     }
   };
 
-  // Drain on the browser's `online` event and when Matrix is ready again: a
-  // reconnect without a network change used to leave the queue untouched.
+  // Drain on the browser's `online` event, when the app's connectivity turns
+  // online (native network changes fire no window event) and when Matrix is
+  // ready again: a reconnect without a network change used to leave the
+  // queue untouched.
   if (typeof window !== "undefined") {
     window.addEventListener("online", drainOfflineQueue);
     const stopReadyWatch = watch(
       () => authStore.matrixReady,
       (ready) => { if (ready) void drainOfflineQueue(); },
     );
+    const stopOnlineWatch = watch(
+      () => isOnline.value,
+      (onlineNow) => { if (onlineNow) void drainOfflineQueue(); },
+    );
     onScopeDispose(() => {
       window.removeEventListener("online", drainOfflineQueue);
       stopReadyWatch();
+      stopOnlineWatch();
     });
   }
 
