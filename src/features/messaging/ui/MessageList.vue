@@ -458,11 +458,32 @@ const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().r
  *  Cached so per-frame scroll handlers don't repeat the linear scan. */
 const bannerIdx = computed(() => reversedItems.value.findIndex(item => item.type === "unread-banner"));
 
-/** How long the first scroll to the unread banner waits for the message window
- *  expansion that brings the banner in (the expansion itself may take 5 s). */
-const BANNER_WINDOW_WAIT_MS = 500;
-const waitForBannerWindow = (expand: Promise<boolean>): Promise<unknown> =>
-  Promise.race([expand.catch(() => false), new Promise((r) => setTimeout(r, BANNER_WINDOW_WAIT_MS))]);
+/** How long the first scroll to the unread banner waits for the banner row to
+ *  reach the list (audit W2C-02). On open the room's messages are still landing
+ *  from Dexie and, with more unread than the window holds, the expansion that
+ *  brings the last-read message in takes a few hundred ms to seconds; a 500 ms
+ *  wait on the expansion alone gave up on a real phone and dropped to the newest
+ *  message. */
+const BANNER_ROW_WAIT_MS = 3000;
+/** Index of the banner row in the reversed list once it is there, or -1 when it
+ *  does not show up within `timeoutMs`. */
+const waitForBannerRow = (timeoutMs: number): Promise<number> =>
+  new Promise((resolve) => {
+    if (bannerIdx.value >= 0) {
+      resolve(bannerIdx.value);
+      return;
+    }
+    const timer = setTimeout(() => {
+      stop();
+      resolve(-1);
+    }, timeoutMs);
+    const stop = watch(bannerIdx, (idx) => {
+      if (idx < 0) return;
+      clearTimeout(timer);
+      stop();
+      resolve(idx);
+    });
+  });
 
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
@@ -557,22 +578,47 @@ const checkScroll = () => {
 
 let pendingScrollToBottom = false;
 let scrollStableTimer: ReturnType<typeof setTimeout> | undefined;
+let scrollToBottomGen = 0;
 /** Scroll to newest messages (bottom of chat = scrollTop 0 in column-reverse). */
 const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
   newMessageCount.value = 0;
   clearTimeout(scrollStableTimer);
   pendingScrollToBottom = true;
+  const gen = ++scrollToBottomGen;
 
   nextTick(() => {
+    if (gen !== scrollToBottomGen) return;
     const el = getScrollContainer();
     if (el) el.scrollTop = 0;
     // Wait for content to settle (images loading, reactions expanding)
     requestAnimationFrame(() => {
+      if (gen !== scrollToBottomGen) return;
       const el2 = getScrollContainer();
       if (el2) el2.scrollTop = 0;
       resetStableTimer(onSettled);
     });
   });
+};
+
+/** Drop a scroll to the newest message that has not settled yet. */
+const cancelScrollToBottom = () => {
+  scrollToBottomGen++;
+  clearTimeout(scrollStableTimer);
+  pendingScrollToBottom = false;
+};
+
+/**
+ * Show the unread banner at the top of the view.
+ * The first messages landing during the open queue a scroll to the newest
+ * one, and while it settles the content-resize observer pulls the view back
+ * down; isNearBottom still says "bottom" from the room switch until a scroll
+ * event lands. Both sent the chat back to the newest message 40 ms after
+ * reaching the banner on a phone (Samsung, 2026-10-10, audit W2C-02).
+ */
+const scrollToBannerRow = (reversedIdx: number) => {
+  cancelScrollToBottom();
+  scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
+  checkScroll();
 };
 
 const resetStableTimer = (onSettled?: () => void) => {
@@ -736,8 +782,6 @@ const openRoom = async (roomId: string | null) => {
   // ═══ PHASE 2: DETERMINE ANCHOR ═══
   let anchorItemIndex = -1;
   let scrollToBanner = false;
-  /** The window expansion that brings the last-read message in, if one started. */
-  let bannerWindowExpand: Promise<boolean> | null = null;
 
   if (isChatDbReady()) {
     const dbKit = getChatDb();
@@ -781,7 +825,7 @@ const openRoom = async (roomId: string | null) => {
       // last-read message so the banner can match it in virtualItems.
       const neededWindow = plan.unreadCount + 20;
       if (neededWindow > chatStore.messageWindowSize) {
-        bannerWindowExpand = chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
+        void chatStore.expandMessageWindow(neededWindow - chatStore.messageWindowSize);
       }
 
       scrollToBanner = true;
@@ -927,30 +971,23 @@ const openRoom = async (roomId: string | null) => {
       if (bannerIdx >= 0) {
         // Convert to reversed index for the inverted scroller
         const reversedIdx = reversedItems.value.findIndex(item => item.type === "unread-banner");
-        if (reversedIdx >= 0) {
-          scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
-        }
-      } else if (bannerWindowExpand) {
-        // More than a window of unread: the expansion that brings the
-        // banner in had not landed yet, and the view used to fall back to
-        // the newest message (audit W2C-02). Give it a moment, then retry.
-        const expand = bannerWindowExpand;
+        if (reversedIdx >= 0) scrollToBannerRow(reversedIdx);
+      } else {
+        // The banner row is not in the list yet: the messages are still
+        // landing, or the window expansion that brings the last-read message
+        // in has not finished. Show the newest for now and move to the banner
+        // once its row arrives (audit W2C-02).
+        if (el) el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
         const scrollAtOpen = el?.scrollTop ?? 0;
-        void waitForBannerWindow(expand).then(async () => {
-          if (isStale()) return;
+        void waitForBannerRow(BANNER_ROW_WAIT_MS).then(async (idx) => {
+          if (isStale() || idx < 0) return;
           // The user already scrolled: do not move the view under them.
           const now = getScrollContainer();
           if (now && Math.abs(now.scrollTop - scrollAtOpen) > 2) return;
           await nextTick();
-          const idx = reversedItems.value.findIndex(item => item.type === "unread-banner");
-          if (idx >= 0) scrollerRef.value?.scrollToIndex(idx, { align: "start" });
-          else {
-            const container = getScrollContainer();
-            if (container) container.scrollTop = 0;
-          }
+          const fresh = reversedItems.value.findIndex(item => item.type === "unread-banner");
+          if (fresh >= 0) scrollToBannerRow(fresh);
         });
-      } else if (el) {
-        el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
       }
     } else if (el) {
       el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
