@@ -1163,18 +1163,44 @@ export class MatrixClientService {
   async sendText(roomId: string, text: string, txnId?: string): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
     const content = sdk.ContentHelpers.makeTextMessage(text);
-    const res = txnId !== undefined
-      // matrix-js-sdk routes sendEvent through the same txnId dedup path that
-      // sendMessage uses, so we can go through sendEvent when we have an ID.
-      ? await this.client.sendEvent(roomId, "m.room.message", content, txnId)
-      : await this.client.sendMessage(roomId, content);
-    return (res as { event_id: string }).event_id;
+    if (txnId === undefined) {
+      const res = await this.client.sendMessage(roomId, content);
+      return (res as { event_id: string }).event_id;
+    }
+    // matrix-js-sdk routes sendEvent through the same txnId dedup path that
+    // sendMessage uses, so we can go through sendEvent when we have an ID.
+    return this.sendMessageEvent(roomId, content, txnId);
   }
 
   /** Send encrypted text message. Returns server event_id. */
   async sendEncryptedText(roomId: string, content: Record<string, unknown>, txnId?: string): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
-    const res = await this.client.sendEvent(roomId, "m.room.message", content, txnId);
+    return this.sendMessageEvent(roomId, content, txnId);
+  }
+
+  /**
+   * `client.sendEvent` for an m.room.message that survives a retry with the
+   * same txnId. The SDK keeps a failed send's local echo under its txnId
+   * (NOT_SENT) and throws "addPendingEvent called on an event with known
+   * txnId" for a second send with it, so the outbound queue's retries never
+   * reached the server and one network error failed the message for good.
+   * A NOT_SENT echo is resent instead (same txnId: the server still dedupes
+   * it), a SENT one answers with its event id. An echo still in flight falls
+   * through to sendEvent, which throws, and the queue retries later.
+   */
+  private async sendMessageEvent(roomId: string, content: object, txnId?: string): Promise<string> {
+    const client = this.client!;
+    if (txnId !== undefined) {
+      const room = client.getRoom(roomId);
+      const echo = room?.getEventForTxnId(txnId);
+      if (room && echo?.status === sdk.EventStatus.NOT_SENT) {
+        const res = await client.resendEvent(echo, room);
+        return (res as { event_id: string }).event_id;
+      }
+      const sentId = echo?.status === sdk.EventStatus.SENT ? echo.getId() : undefined;
+      if (sentId && !sentId.startsWith("~")) return sentId;
+    }
+    const res = await client.sendEvent(roomId, "m.room.message", content, txnId);
     return (res as { event_id: string }).event_id;
   }
 
