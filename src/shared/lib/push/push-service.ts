@@ -1,4 +1,5 @@
 import { PushNotifications } from '@capacitor/push-notifications';
+import type { PluginListenerHandle } from '@capacitor/core';
 import { isIOS, isNative } from '@/shared/lib/platform';
 import { PushData, type PushPayload } from './push-data-plugin';
 import { isIncomingCallsEnabled, syncIncomingCallsSettingToNative } from './incoming-calls-setting';
@@ -19,6 +20,7 @@ import {
   findCallSelectAnswerPushRule,
 } from './call-select-answer-push-rule';
 import { tRaw } from '@/shared/lib/i18n';
+import { useToast } from '@/shared/lib/use-toast';
 import { buildMessageNotificationContent } from '@/shared/lib/notifications/message-notification-content';
 import { interopLog } from '@/shared/lib/interop';
 
@@ -93,16 +95,51 @@ export function buildVoipPusherPayload(voipToken: string): PusherPayload {
 
 /**
  * Decide whether a pusher entry from `getPushers()` is stale and should be
- * removed. Stale = same `app_id` as our current platform's pusher but a
- * different `pushkey`. We never touch entries from other platforms — those
- * belong to other devices on this Matrix account.
+ * removed: same `app_id` as ours, a different `pushkey`, and that pushkey was
+ * registered by this install before (a rotated token). Pushers are per user,
+ * not per device: a pushkey this install never registered belongs to another
+ * phone on the same account, and deleting it — what the bare app_id match
+ * did — silenced calls and notifications there until it restarted and deleted
+ * ours in turn. Tokens that die without us are reported dead by the push
+ * gateway and removed by the homeserver.
  */
 export function isStalePusherEntry(
   p: { app_id?: string; pushkey?: string },
   currentAppId: string,
   currentToken: string,
+  ownPreviousPushkeys: readonly string[],
 ): boolean {
-  return p.app_id === currentAppId && p.pushkey !== currentToken;
+  return (
+    p.app_id === currentAppId &&
+    p.pushkey !== currentToken &&
+    typeof p.pushkey === 'string' &&
+    ownPreviousPushkeys.includes(p.pushkey)
+  );
+}
+
+const OWN_PUSHKEYS_LIMIT = 5;
+const ownPushkeysStorageKey = (appId: string) => `forta-chat:push_own_pushkeys:${appId}`;
+
+/** Pushkeys this install registered for `appId`, newest last. */
+export function ownPushkeys(appId: string): string[] {
+  try {
+    const raw = localStorage.getItem(ownPushkeysStorageKey(appId));
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.filter((k): k is string => typeof k === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Remember a pushkey this install registered, so a later rotation can clean it up. */
+export function rememberOwnPushkey(appId: string, pushkey: string): void {
+  try {
+    const keys = ownPushkeys(appId).filter((k) => k !== pushkey);
+    keys.push(pushkey);
+    localStorage.setItem(ownPushkeysStorageKey(appId), JSON.stringify(keys.slice(-OWN_PUSHKEYS_LIMIT)));
+  } catch {
+    // Best effort: without the list a rotated token is left for the gateway to expire.
+  }
 }
 
 /**
@@ -117,6 +154,18 @@ export function isStalePusherEntry(
  * are already on screen. Running the JS replacement path would do work for
  * no observable effect.
  */
+/**
+ * A message body that is still Bastyon ciphertext, not text to show. The SDK
+ * never decrypts these (the app does, into Dexie). A group message is
+ * `m.encrypted` with an AES-CBC body in hex, only 32 characters for a short
+ * text, so the long-base64 check alone let it into the notification
+ * (2026-10-10); older payloads are a long base64 blob.
+ */
+export function isBastyonCiphertext(content: { msgtype?: unknown; body?: unknown } | null | undefined): boolean {
+  if (content?.msgtype === "m.encrypted") return true;
+  return typeof content?.body === "string" && /^[A-Za-z0-9+/]{50,}={0,2}$/.test(content.body);
+}
+
 export function shouldRunJsPushDecryption(opts: { isIOS: boolean }): boolean {
   return !opts.isIOS;
 }
@@ -130,7 +179,12 @@ class PushService {
   /** The last FCM token deletion; the next register() waits for it, or a quick
    *  login could register the very token that is being deleted. */
   private tokenReset: Promise<unknown> = Promise.resolve();
+  private voipListeners: PluginListenerHandle[] = [];
   private matrixClient: any = null;
+  /** PushData listeners added by init(). Every init() (a login, an account
+   *  switch) added another pair without removing the last, so one push ran
+   *  its handlers once per past session (audit S6-04). */
+  private pushDataListeners: Array<Promise<PluginListenerHandle>> = [];
   private onCallPush: ((data: { callId: string; callerName: string; roomId: string; hasVideo: boolean }) => void) | null = null;
   private getRoomInfo: ((roomId: string) => { roomName: string; isGroup?: boolean } | null) | null = null;
   private getActiveRoomId: (() => string | null) | null = null;
@@ -165,6 +219,28 @@ class PushService {
 
   setAllSenderNamesGetter(getter: () => Record<string, string>) {
     this.getAllSenderNames = getter;
+  }
+
+  private senderNameResolver: ((matrixUserId: string) => string | null) | null = null;
+  private noPlayServicesNoticeShown = false;
+
+  /** Resolve a sender's name the way the chat does (the contact's local alias
+   *  first). Push titles took the Matrix member name or even the raw Matrix ID,
+   *  bypassing aliases (audit S6-01). */
+  setSenderNameResolver(resolver: ((matrixUserId: string) => string | null) | null) {
+    this.senderNameResolver = resolver;
+  }
+
+  private senderNameFor(senderId: string | undefined, fallback: string | undefined): string {
+    if (senderId && this.senderNameResolver) {
+      try {
+        const name = this.senderNameResolver(senderId);
+        if (name) return name;
+      } catch (e) {
+        console.warn('[PushService] sender name resolver failed:', e);
+      }
+    }
+    return fallback || tRaw('push.unknownSender');
   }
 
   setSenderNameGetter(getter: (matrixUserId: string) => string | null) {
@@ -223,6 +299,7 @@ class PushService {
 
   /** Push all known sender display names to native SharedPreferences */
   async syncSenderNamesToNative(): Promise<void> {
+    await this.syncSenderAliasesToNative();
     if (!this.getAllSenderNames) return;
     try {
       const senders = this.getAllSenderNames();
@@ -231,6 +308,27 @@ class PushService {
       }
     } catch (e) {
       console.warn('[PushService] Failed to sync sender names to native:', e);
+    }
+  }
+
+  /** Contact aliases by Matrix user id (audit S6-01). */
+  private getSenderAliases: (() => Record<string, string>) | null = null;
+
+  setSenderAliasesGetter(getter: () => Record<string, string>) {
+    this.getSenderAliases = getter;
+  }
+
+  /** Hand the contact aliases to native: with the page asleep it draws the
+   *  notification title, and the push carries only the Matrix name (audit
+   *  S6-01, device check 2026-10-10). The whole set every time, so a removed
+   *  alias leaves too. */
+  async syncSenderAliasesToNative(): Promise<void> {
+    // Android only: the iOS plugin has no such method (the NSE keeps its own names).
+    if (isIOS || !this.getSenderAliases) return;
+    try {
+      await PushData.cacheSenderAliases({ aliases: this.getSenderAliases() });
+    } catch (e) {
+      console.warn('[PushService] Failed to sync contact aliases to native:', e);
     }
   }
 
@@ -247,6 +345,12 @@ class PushService {
    *  UX budget (total path stays under 1.5s) and well above measured
    *  homeserver indexing latency. */
   private static readonly TARGETED_FETCH_GRACE_MS = 500;
+
+  private async removeVoipListeners(): Promise<void> {
+    const handles = this.voipListeners;
+    this.voipListeners = [];
+    await Promise.allSettled(handles.map((h) => Promise.resolve().then(() => h.remove())));
+  }
 
   /** Sleep helper kept inline to avoid a util import for one call site. */
   private static sleep(ms: number): Promise<void> {
@@ -265,21 +369,29 @@ class PushService {
     for (let attempt = 1; attempt <= PushService.PUSHER_REGISTER_RETRIES; attempt++) {
       try {
         await matrixClient.setPusher(payload);
+        // Logged out (or switched account) while the PUT was in flight: logout
+        // already removed this account's pushers, so take the late one back off.
+        if (this.matrixClient !== matrixClient) {
+          await this.takeBackLatePusher(matrixClient, payload);
+          return;
+        }
         if (attempt > 1) {
           console.info(`[PushService] Pusher registered on attempt ${attempt}`);
         }
         // Pusher is live — best-effort stale cleanup is a separate concern;
         // its failure must not invalidate the successful registration above.
         try {
+          const previous = ownPushkeys(payload.app_id);
           const { pushers } = await matrixClient.getPushers();
           for (const p of pushers) {
-            if (isStalePusherEntry(p, payload.app_id, token)) {
+            if (isStalePusherEntry(p, payload.app_id, token, previous)) {
               await matrixClient.setPusher({ ...p, kind: null });
             }
           }
         } catch (pe) {
           console.warn('[PushService] Could not clean stale pushers:', pe);
         }
+        rememberOwnPushkey(payload.app_id, token);
         return;
       } catch (e) {
         lastError = e;
@@ -290,6 +402,9 @@ class PushService {
             e,
           );
           await PushService.sleep(delay);
+          // Logged out (or switched account) during the backoff: a retry would
+          // put the pusher back on an account that just removed it.
+          if (this.matrixClient !== matrixClient) return;
         }
       }
     }
@@ -366,6 +481,29 @@ class PushService {
   }
 
   /**
+   * Remove a pusher a signed-out client registered after its logout. Not when
+   * the same account is signed in again on this device: that session uses the
+   * same pushkey, and the take-back would delete its pusher (review
+   * 2026-10-08). Never throws.
+   */
+  private async takeBackLatePusher(staleClient: any, payload: PusherPayload): Promise<void> {
+    let sameAccount = false;
+    try {
+      const current = this.matrixClient?.getUserId?.();
+      sameAccount = !!current && current === staleClient.getUserId?.();
+    } catch {
+      sameAccount = false;
+    }
+    if (sameAccount) {
+      console.info('[PushService] Late pusher kept: the same account is signed in again');
+      return;
+    }
+    await staleClient.setPusher({ ...payload, kind: null }).catch((e: unknown) => {
+      console.warn('[PushService] Could not take back a pusher registered after logout:', e);
+    });
+  }
+
+  /**
    * Register the iOS VoIP (PushKit) pusher for `m.call.invite` events.
    *
    * Idempotent: safe to call on every `voipTokenReceived` event including
@@ -375,24 +513,45 @@ class PushService {
    * trying to deliver to gone-app tokens forever.
    */
   private async registerVoipPusher(matrixClient: any, voipToken: string): Promise<void> {
-    if (!matrixClient) return;
+    // Not for a client that is no longer signed in: logout can land while
+    // init() awaits the VoIP token (review 2026-10-08, P2).
+    if (!matrixClient || this.matrixClient !== matrixClient) return;
     this.voipToken = voipToken;
     const payload = buildVoipPusherPayload(voipToken);
-    try {
-      await matrixClient.setPusher(payload);
+    // Retried like the FCM pusher: iOS hands the VoIP token over once per
+    // launch, so a single failed PUT left a killed app without CallKit rings.
+    for (let attempt = 1; ; attempt++) {
       try {
-        const { pushers } = await matrixClient.getPushers();
-        for (const p of pushers) {
-          if (isStalePusherEntry(p, payload.app_id, voipToken)) {
-            await matrixClient.setPusher({ ...p, kind: null });
-          }
+        await matrixClient.setPusher(payload);
+        break;
+      } catch (e) {
+        if (attempt >= PushService.PUSHER_REGISTER_RETRIES) {
+          console.error('[PushService] Failed to register VoIP pusher:', e);
+          return;
         }
-      } catch (pe) {
-        console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
+        await PushService.sleep(1000 * 2 ** (attempt - 1));
+        // Logged out (or switched account) during the backoff: a retry would
+        // put the pusher back on an account that just removed it.
+        if (this.matrixClient !== matrixClient) return;
       }
-    } catch (e) {
-      console.error('[PushService] Failed to register VoIP pusher:', e);
     }
+    // Landed after logout, like the FCM pusher above (P2).
+    if (this.matrixClient !== matrixClient) {
+      await this.takeBackLatePusher(matrixClient, payload);
+      return;
+    }
+    try {
+      const previous = ownPushkeys(payload.app_id);
+      const { pushers } = await matrixClient.getPushers();
+      for (const p of pushers) {
+        if (isStalePusherEntry(p, payload.app_id, voipToken, previous)) {
+          await matrixClient.setPusher({ ...p, kind: null });
+        }
+      }
+    } catch (pe) {
+      console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
+    }
+    rememberOwnPushkey(payload.app_id, voipToken);
   }
 
   /**
@@ -471,16 +630,15 @@ class PushService {
         const content = raw.content as Record<string, unknown>;
         const body = content?.body;
         if (body && typeof body === "string") {
-          // Skip if body is still ciphertext (base64 blob — Bastyon E2EE wraps
-          // encrypted payloads inside m.room.message with a base64-encoded body)
-          if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
+          if (isBastyonCiphertext(content)) return null;
           // Resolve display name from room member state instead of raw matrix ID
           const senderId = raw.sender as string;
           const room = this.matrixClient?.getRoom(roomId);
           const member = room?.getMember(senderId);
           // Without a Matrix displayname the SDK names a member by their user id.
           const memberName = member?.name && member.name !== senderId ? member.name : null;
-          const senderName = memberName || this.getSenderName?.(senderId) || senderId || tRaw('push.unknownSender');
+          // The local alias first, as in the chat (audit S6-01).
+          const senderName = this.senderNameFor(senderId, memberName || this.getSenderName?.(senderId) || senderId);
           return { senderName, body: this.formatBody(content) };
         }
       }
@@ -556,9 +714,8 @@ class PushService {
         const content = event.getContent?.();
         const body = content?.body;
         if (!body || typeof body !== 'string') return null;
-        // Skip if body is still ciphertext (base64 blob)
-        if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
-        const senderName = event.sender?.name || event.getSender?.() || tRaw('push.unknownSender');
+        if (isBastyonCiphertext(content)) return null;
+        const senderName = this.senderNameFor(event.getSender?.(), event.sender?.name || event.getSender?.());
         return { senderName, body: this.formatBody(content) };
       };
 
@@ -605,8 +762,8 @@ class PushService {
       const content = ev.getContent?.();
       const body = content?.body;
       if (!body || typeof body !== 'string') continue;
-      if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) continue;
-      const senderName = ev.sender?.name || ev.getSender?.() || tRaw('push.unknownSender');
+      if (isBastyonCiphertext(content)) continue;
+      const senderName = this.senderNameFor(ev.getSender?.(), ev.sender?.name || ev.getSender?.());
       return { senderName, body: this.formatBody(content) };
     }
     return null;
@@ -724,37 +881,20 @@ class PushService {
 
 
     // 3. Listen for push data forwarded from native service
-    PushData.addListener('pushReceived', (data) => {
+    await this.removePushDataListeners();
+    this.pushDataListeners.push(PushData.addListener('pushReceived', (data) => {
       this.handlePushFromNative(data as PushPayload);
-    });
+    }));
 
     // Listen for notification tap (Android source: PushDataPlugin emits
     // pushOpenRoom directly; on iOS the native PushData plugin no longer
     // emits this — see iOS handler below).
-    PushData.addListener('pushOpenRoom', (data) => {
+    this.pushDataListeners.push(PushData.addListener('pushOpenRoom', (data) => {
       // push tap → open room
       window.dispatchEvent(new CustomEvent('push:openRoom', {
         detail: { roomId: data.roomId, eventId: data.eventId },
       }));
-    });
-
-    // iOS-specific tap source. UNUserNotificationCenter.delegate is owned
-    // by Capacitor's runtime; foreground/background taps surface as the
-    // standard PushNotifications.pushNotificationActionPerformed event.
-    // Cold-start taps are still buffered into PushData.getPendingIntent()
-    // by the native IOSPushIntent plugin.
-    if (isIOS) {
-      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
-        const data = (action.notification.data ?? {}) as Record<string, unknown>;
-        const roomId = typeof data.room_id === 'string' ? data.room_id : undefined;
-        if (!roomId) return;
-        const eventId = typeof data.event_id === 'string' ? data.event_id : undefined;
-        window.dispatchEvent(new CustomEvent('push:openRoom', {
-          detail: { roomId, eventId },
-        }));
-      });
-    }
-
+    }));
 
     // Check for buffered push intent from cold-start (native fired before JS was ready)
     try {
@@ -781,6 +921,12 @@ class PushService {
       try {
         const status = await PushData.isFcmAvailable();
         fcmAvailable = status.available;
+        // No Google Play Services (Huawei and other GMS-less phones): say so
+        // once instead of pushes silently never arriving (audit W2B-03).
+        if (status.playServices === false && !this.noPlayServicesNoticeShown) {
+          this.noPlayServicesNoticeShown = true;
+          useToast().toast(tRaw('push.noPlayServices'), 'info', 8000);
+        }
       } catch (e) {
         console.warn('[PushService] isFcmAvailable check failed, assuming FCM disabled:', e);
         fcmAvailable = false;
@@ -795,6 +941,26 @@ class PushService {
     }
 
     await PushNotifications.removeAllListeners();
+
+    // iOS-specific tap source. Added after removeAllListeners above — it
+    // used to be added before it and removed at once, so a tap on a
+    // notification while the app ran opened nothing. UNUserNotificationCenter.delegate is owned
+    // by Capacitor's runtime; foreground/background taps surface as the
+    // standard PushNotifications.pushNotificationActionPerformed event.
+    // Cold-start taps are still buffered into PushData.getPendingIntent()
+    // by the native IOSPushIntent plugin.
+    if (isIOS) {
+      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+        const data = (action.notification.data ?? {}) as Record<string, unknown>;
+        const roomId = typeof data.room_id === 'string' ? data.room_id : undefined;
+        if (!roomId) return;
+        const eventId = typeof data.event_id === 'string' ? data.event_id : undefined;
+        window.dispatchEvent(new CustomEvent('push:openRoom', {
+          detail: { roomId, eventId },
+        }));
+      });
+    }
+
 
     PushNotifications.addListener('registration', async ({ value: token }) => {
       // FCM token received
@@ -829,17 +995,21 @@ class PushService {
     // voipTokenReceived listener.
     if (isIOS) {
       try {
-        await IOSVoIPPush.addListener('voipTokenReceived', async ({ token }) => {
-          await this.registerVoipPusher(matrixClient, token);
-        });
-        await IOSVoIPPush.addListener('voipTokenInvalidated', async () => {
+        // init() runs again on every account login: drop the previous
+        // listeners, and read the client at call time, so a rotated token is
+        // registered once and only for the account signed in now.
+        await this.removeVoipListeners();
+        this.voipListeners.push(await IOSVoIPPush.addListener('voipTokenReceived', async ({ token }) => {
+          await this.registerVoipPusher(this.matrixClient, token);
+        }));
+        this.voipListeners.push(await IOSVoIPPush.addListener('voipTokenInvalidated', async () => {
           // Best-effort cleanup of the stale VoIP pusher. We don't have
           // the old token in scope, but the Matrix homeserver lists ALL
           // pushers under our user — any fortaios.voip with a key not
           // matching a current token gets dropped on the next
           // registerVoipPusher() pass.
           console.log('[PushService] VoIP token invalidated by iOS');
-        });
+        }));
         const { token } = await IOSVoIPPush.getToken();
         if (token) {
           await this.registerVoipPusher(matrixClient, token);
@@ -883,8 +1053,22 @@ class PushService {
    *     offline, or left by an older build — dies at FCM on its next send.
    * Waits at most LOGOUT_UNREGISTER_TIMEOUT_MS; never throws.
    */
+  /** Remove the PushData listeners this service added; never throws. */
+  private async removePushDataListeners(): Promise<void> {
+    const pending = this.pushDataListeners;
+    this.pushDataListeners = [];
+    await Promise.all(
+      pending.map((handle) =>
+        Promise.resolve(handle).then((h) => h?.remove()).catch((e) => {
+          console.warn('[PushService] removing a PushData listener failed:', e);
+        }),
+      ),
+    );
+  }
+
   async unregisterForLogout(): Promise<void> {
     if (!isNative) return;
+    await this.removePushDataListeners();
     const matrixClient = this.matrixClient;
     const fcmToken = this.fcmToken;
     const voipToken = this.voipToken;
@@ -904,6 +1088,7 @@ class PushService {
     } catch (e) {
       console.warn('[PushService] removeAllListeners failed:', e);
     }
+    await this.removeVoipListeners();
 
     // Promise.resolve().then: a call that throws synchronously still settles.
     const removals: Promise<unknown>[] = [];

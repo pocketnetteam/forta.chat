@@ -41,6 +41,7 @@ import {
 import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix/chat-storage";
 import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { everyMemberProfileLoaded } from "./group-key-members";
 import { ensureRoomMembers, type LazyMembersRoom } from "./ensure-room-members";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
@@ -222,6 +223,10 @@ export const ENCRYPTION_REQUIRED_NO_KEYS =
 
 export interface PcryptoRoomInstance {
   canBeEncrypt(): boolean;
+  /** Whether every current member's profile has loaded. canBeEncrypt() is
+   *  false until it is, so callers can tell "still loading" from "a member has
+   *  no keys" (audit S1-01). Optional so test doubles need not implement it. */
+  membersLoaded?(): boolean;
   /** Whether the room mandates encryption (i.e. private, non-public). When
    *  true and canBeEncrypt() is false, callers must NOT fall back to
    *  plaintext — the sender has to wait for keys or fail the op. Public /
@@ -406,7 +411,12 @@ export class Pcrypto {
       return u.source?.id;
     }
 
-    // ---- preparedUsers — EXACT match of original lines 66-86 ----
+    // ---- preparedUsers — match of original lines 66-86 ----
+    /** Every current member has a loaded profile (audit S1-01). */
+    function currentMembersLoaded(): boolean {
+      return everyMemberProfileLoaded(getusersbytime(0).map((u) => u.id), usersinfo);
+    }
+
     function preparedUsers(time: number, v?: number): CryptoUserInfo[] {
       const r = _.filter(getusersinfobytime(time), function (ui) {
         return !!ui.keys && ui.keys.length >= m;
@@ -735,8 +745,13 @@ export class Pcrypto {
       // v <= 1 means an unsorted user list. The cache-key suffix normalises
       // undefined → 1 instead of the original's `v || self.version`: that
       // made v1 and v2 share one entry despite deriving different keys.
-      // Local storage only — no effect on the wire format.
-      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v && v > 1 ? v : 1}`;
+      // The members' public keys are part of the key too: a member who rotated
+      // keys without a membership change kept the cached shared secret for
+      // the whole generation (audit S1-05). Local storage only — no effect on
+      // the wire format.
+      const keyUsers = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(_time, v);
+      const keysFingerprint = md5(keyUsers.map((u) => `${u.id}:${(u.keys ?? []).join(",")}`).join("|")).slice(0, 12);
+      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v && v > 1 ? v : 1}-${keysFingerprint}`;
       const ek = `${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`;
 
       if (!lsspromises[ek]) {
@@ -782,6 +797,12 @@ export class Pcrypto {
     }
 
     // ---- usershash — match of original lines 824-839 ----
+    // Keyed by membership alone, not by the members' public keys: the group's
+    // common-key event is reused until somebody joins or leaves. A member whose
+    // published keys change cannot read events wrapped for the old keys until
+    // the membership changes. Keys are derived from the account key, so this
+    // takes a deliberate republish of a different set (review 2026-10-08, H1);
+    // changing it means a new wire format, agreed with Bastyon.
     function usershash(): string {
       const _users = preparedUsers(0, version);
       return md5(
@@ -879,6 +900,10 @@ export class Pcrypto {
         return true;
       },
 
+      membersLoaded(): boolean {
+        return currentMembersLoaded();
+      },
+
       canBeEncrypt(): boolean {
         const publicChat = pcrypto.getIsChatPublic?.(chat) ?? false;
         if (publicChat) return false;
@@ -895,6 +920,11 @@ export class Pcrypto {
         if (memberCount <= 1 || memberCount >= 50) return false;
         // Guard against empty-array short-circuit: refuse until peer is loaded.
         if (usersinfoArray.length < 2) return false;
+        // Every current member must be loaded, not just two: the common key is
+        // wrapped only for loaded members, so anyone still loading could never
+        // read what gets sent now. The send throws and SyncEngine retries once
+        // the profiles land (audit S1-01, forta-bugs#1399 #1394).
+        if (!currentMembersLoaded()) return false;
 
         // ALL participants must have 12 published keys for ECDH to work
         return usersinfoArray.every(u => u.keys && u.keys.length >= m);
@@ -930,14 +960,19 @@ export class Pcrypto {
         // fresh: a list possibly stale after a limited sync is reloaded first.
         await ensureRoomMembers(chat as LazyMembersRoom, { fresh: true });
         // Local recompute from room state — members may also have arrived
-        // through sync or another caller since the last prepare().
-        const before = Object.keys(users).sort().join(",");
-        getusershistory();
-        if (Object.keys(users).sort().join(",") === before) return;
-        await getusersinfo(forcedRefreshesInFlight > 0);
-        // canBeEncrypt() reads usersinfo: after a failed request it still
-        // holds the old participants and would encrypt without the new ones.
-        if (keysLoadState === "failed") throw new Error("participant keys not loaded");
+        // through sync or another caller since the last prepare(). Again after
+        // each key load: a member who joined while it ran was left out of the
+        // recipients (review 2026-10-08, H3). Bounded, so a room whose
+        // membership churns faster than three loads sends with what it has.
+        for (let pass = 0; pass < 3; pass++) {
+          const before = Object.keys(users).sort().join(",");
+          getusershistory();
+          if (Object.keys(users).sort().join(",") === before) return;
+          await getusersinfo(forcedRefreshesInFlight > 0);
+          // canBeEncrypt() reads usersinfo: after a failed request it still
+          // holds the old participants and would encrypt without the new ones.
+          if (keysLoadState === "failed") throw new Error("participant keys not loaded");
+        }
       },
 
       // ---- encryptEvent — routes to group or 1:1 path ----

@@ -44,7 +44,8 @@ export type FinalizeReason =
   | "permission-denied"
   | "ice-failed"
   | "user-cancel"
-  | "watchdog-timeout";
+  | "watchdog-timeout"
+  | "answer-orphaned";
 
 export interface CallTelemetryEvent {
   type: "call_finalize_start" | "call_finalized";
@@ -137,6 +138,9 @@ export async function finalizeCall(
 async function runSteps(reason: FinalizeReason, callId: string, roomId?: string): Promise<void> {
   try {
     emit({ type: "call_finalize_start", reason, callId });
+    // N1: the moment this call ended. Step 4 closes only connections native
+    // created before it; the next call's invite may already have built its own.
+    const endedAt = Date.now();
 
     // Step 0: retire this call's pending answer/reject markers. They exist
     // to carry a decision across a process that was not alive to act on it;
@@ -154,7 +158,7 @@ async function runSteps(reason: FinalizeReason, callId: string, roomId?: string)
     await safeStep("retirePendingMarkers", callId, () => retirePendingMarkers(callId, roomId));
 
     // Step 1: stop audio routing (mode → NORMAL, clearCommunicationDevice)
-    await safeStep("stopAudioRouting", callId, () => nativeCallBridge.stopAudioRouting());
+    await safeStep("stopAudioRouting", callId, () => nativeCallBridge.stopAudioRouting({ callId }));
 
     // Step 2: report call ended → CallConnection cleanup
     await safeStep("reportCallEnded", callId, () => nativeCallBridge.reportCallEnded(callId));
@@ -173,7 +177,9 @@ async function runSteps(reason: FinalizeReason, callId: string, roomId?: string)
     // Named: reaching native after the next call's launchCallUI, this close
     // would take the new call's connections down with the old one's.
     if (isAndroid) {
-      await safeStep("closeAllPeerConnections", callId, () => NativeWebRTC.closeAllPeerConnections({ callId }));
+      await safeStep("closeAllPeerConnections", callId, () =>
+        NativeWebRTC.closeAllPeerConnections({ callId, createdBefore: endedAt }),
+      );
     }
 
     // Step 5: let the page fall silent. The tone kept Chromium from freezing
@@ -208,16 +214,6 @@ export async function waitForFinalizeSettled(timeoutMs: number): Promise<boolean
 /** Test-only: whether a finalize is still between its steps. */
 export function __hasFinalizeInFlightForTests(): boolean {
   return inFlight.size > 0;
-}
-
-/**
- * Force-reset audio state without a specific callId. Used by the
- * app-resume watchdog when the device is stuck in MODE_IN_COMMUNICATION
- * and no call is live (typically because a previous call's finalize
- * never ran — JS process killed, OEM stopped the foreground service).
- */
-export async function forceResetAudioState(): Promise<void> {
-  await safeStep("forceStopAudio", "<no-call>", () => nativeCallBridge.forceStopAudio());
 }
 
 export function onCallTelemetry(listener: TelemetryListener): () => void {

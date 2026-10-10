@@ -102,6 +102,14 @@ vi.mock("@/shared/lib/use-toast", () => ({
   }),
 }));
 
+// --- Tor media transfer mock: off unless a test turns it on ---
+let mockTorDownloadActive = false;
+const mockTorDownload: Mock = vi.fn();
+vi.mock("@/shared/lib/file-transfer/tor-media-transfer", () => ({
+  shouldUseNativeTorDownload: () => mockTorDownloadActive,
+  downloadMediaViaTorFile: (...args: unknown[]) => mockTorDownload(...args),
+}));
+
 // --- Global fetch mock ---
 const mockFetchResponse = {
   ok: true,
@@ -1247,6 +1255,45 @@ describe("useFileDownload", () => {
         global.fetch = originalFetch;
       }
     }, 15_000);
+
+    // Audit S4-01: a Tor download that never ended kept its permit, and after
+    // three of them no media in the app loaded at all.
+    it("frees the permit when a Tor download fails, and hands the Tor path the caller's signal", async () => {
+      mockTorDownloadActive = true;
+      mockTorDownload.mockRejectedValue(new Error("Tor download timed out after 600000ms"));
+      vi.useFakeTimers();
+      const scope = effectScope();
+      try {
+        await scope.run(async () => {
+          const { download } = useFileDownload();
+          const controller = new AbortController();
+          const done = download({
+            id: "$evt_tor_stall",
+            _key: "client_tor_stall",
+            roomId: "!room:server",
+            senderId: "@u:server",
+            content: "photo.jpg",
+            timestamp: Date.now(),
+            status: "sent",
+            type: "image",
+            fileInfo: { name: "photo.jpg", type: "image/jpeg", size: 1024, url: "https://example.com/tor_stall.jpg" },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any, controller.signal);
+          await vi.runAllTimersAsync();
+          await done;
+
+          expect(mockTorDownload).toHaveBeenCalled();
+          const [, , options] = mockTorDownload.mock.calls[0] as [string, unknown, { signal?: AbortSignal }];
+          expect(options.signal).toBe(controller.signal);
+          expect(_mediaGateActiveForTests()).toBe(0);
+        });
+      } finally {
+        scope.stop();
+        vi.useRealTimers();
+        mockTorDownloadActive = false;
+        mockTorDownload.mockReset();
+      }
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1481,6 +1528,96 @@ describe("useFileDownload", () => {
       // Element/Cinny sender) must not be silently rerouted to our mirror.
       const foreign = "https://cdn.example.com/media/abc";
       expect(rewriteMediaHost(foreign, "matrix.2.pocketnet.app")).toBe(foreign);
+    });
+
+    // 1.13.5 brought five "Download failed: 404" reports in a day (forta-bugs
+    // #1448–#1454) where history had one: a URL stored on one of our hosts
+    // never tried the other one, and 404 failed at once.
+    it("rewrites a URL stored on the mirror to the primary too", () => {
+      expect(
+        rewriteMediaHost("https://matrix.2.pocketnet.app/_matrix/media/v3/download/x/abc", "matrix.pocketnet.app"),
+      ).toBe("https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc");
+    });
+
+    // Review 2026-10-10: the mirror exists for places where the primary is
+    // blocked; a URL the sender stored there must not wait out a primary
+    // timeout on its first attempt.
+    it("starts from the host the URL was stored on", () => {
+      expect(mediaHostForAttempt(0, "matrix.2.pocketnet.app")).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(1, "matrix.2.pocketnet.app")).toBe("matrix.pocketnet.app");
+      expect(mediaHostForAttempt(2, "matrix.2.pocketnet.app")).toBe("matrix.2.pocketnet.app");
+      expect(mediaHostForAttempt(1, "cdn.example.com")).toBe("matrix.2.pocketnet.app");
+    });
+
+    it("tries the other own host once after a 404, and names the host when both miss", async () => {
+      const seen: string[] = [];
+      (global.fetch as Mock).mockImplementation(async (url: string) => {
+        seen.push(new URL(url).hostname);
+        return { ok: false, status: 404, blob: () => Promise.resolve(new Blob()) };
+      });
+      const scope = effectScope();
+      let error: unknown;
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt404", _key: "client_404", roomId: "!room:server", senderId: "@u:server",
+          content: "file.pdf", timestamp: Date.now(), status: "sent", type: "file",
+          fileInfo: { name: "file.pdf", type: "application/pdf", size: 1024, url: "https://matrix.2.pocketnet.app/_matrix/media/v3/download/matrix.pocketnet.app/abc" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        await download(message);
+        error = getState("client_404").error;
+      });
+      scope.stop();
+      expect(seen).toEqual(["matrix.2.pocketnet.app", "matrix.pocketnet.app"]);
+      expect(String(error ?? "")).toContain("404");
+    });
+
+    it("recovers when the other own host has the file", async () => {
+      (global.fetch as Mock).mockImplementation(async (url: string) =>
+        new URL(url).hostname === "matrix.2.pocketnet.app"
+          ? { ok: true, status: 200, blob: () => Promise.resolve(new Blob([new Uint8Array([1])])) }
+          : { ok: false, status: 404, blob: () => Promise.resolve(new Blob()) },
+      );
+      const scope = effectScope();
+      let state: unknown;
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt404b", _key: "client_404b", roomId: "!room:server", senderId: "@u:server",
+          content: "file.pdf", timestamp: Date.now(), status: "sent", type: "file",
+          fileInfo: { name: "file.pdf", type: "application/pdf", size: 1024, url: "https://matrix.pocketnet.app/_matrix/media/v3/download/matrix.pocketnet.app/abc" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        await download(message);
+        state = getState("client_404b");
+      });
+      scope.stop();
+      expect((state as { objectUrl?: string } | undefined)?.objectUrl).toBeTruthy();
+    });
+
+    // Review 2026-10-10: the host is now in the error message, so the legacy
+    // "404" substring check must not read it; a 500 from such a host retries.
+    it("retries a 500 from a host whose name holds 404", async () => {
+      (global.fetch as Mock)
+        .mockResolvedValueOnce({ ok: false, status: 500, blob: () => Promise.resolve(new Blob()) })
+        .mockResolvedValueOnce({ ok: true, status: 200, blob: () => Promise.resolve(new Blob([new Uint8Array([1])])) });
+      const scope = effectScope();
+      let state: unknown;
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt500", _key: "client_500", roomId: "!room:server", senderId: "@u:server",
+          content: "file.pdf", timestamp: Date.now(), status: "sent", type: "file",
+          fileInfo: { name: "file.pdf", type: "application/pdf", size: 1024, url: "https://cdn404.example.com/file.pdf" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        await download(message);
+        state = getState("client_500");
+      });
+      scope.stop();
+      expect(global.fetch as Mock).toHaveBeenCalledTimes(2);
+      expect((state as { objectUrl?: string } | undefined)?.objectUrl).toBeTruthy();
     });
 
     it("leaves non-URL inputs (blob:/data:) untouched", () => {

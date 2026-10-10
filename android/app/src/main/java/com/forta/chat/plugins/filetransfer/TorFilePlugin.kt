@@ -53,6 +53,8 @@ class TorFilePlugin : Plugin() {
                 val fileSize = inputStream.available().toLong()
 
                 val conn = openThroughTor(uploadUrl)
+                conn.connectTimeout = TorFileTimeouts.CONNECT_MS
+                conn.readTimeout = TorFileTimeouts.uploadReadMs(fileSize)
 
                 conn.requestMethod = "POST"
                 conn.doOutput = true
@@ -115,6 +117,8 @@ class TorFilePlugin : Plugin() {
         Thread {
             try {
                 val conn = openThroughTor(url)
+                conn.connectTimeout = TorFileTimeouts.CONNECT_MS
+                conn.readTimeout = TorFileTimeouts.DOWNLOAD_READ_MS
 
                 if (authHeader.isNotEmpty()) {
                     conn.setRequestProperty("Authorization", authHeader)

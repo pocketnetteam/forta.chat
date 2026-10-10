@@ -159,11 +159,10 @@ const peerKeysMissing = computed(() => {
   const roomId = chatStore.activeRoomId;
   if (!roomId) return false;
   const status = chatStore.peerKeysStatus.get(roomId);
-  // Show warning only when peers lack keys (not for public/large rooms).
-  // Mirror the same suppression that MessageInput.vue applies to peerKeysOk —
-  // group AND public rooms must both stay banner-free, otherwise the user sees
-  // an enabled send button next to a "messaging unavailable" warning.
-  if (chatStore.activeRoom?.isGroup) return false;
+  // Show warning only when peers lack keys (not for public/large rooms, which
+  // never report "missing" to begin with). Groups get the banner too: one member
+  // without keys makes every send in the group fail after its retries, and
+  // hiding the reason left the whole group guessing (audit S7-03).
   if (chatStore.isRoomPublic(roomId)) return false;
   return status === "missing" || status === "load-failed";
 });
@@ -171,18 +170,51 @@ const peerKeysMissing = computed(() => {
 const { toast } = useToast();
 const { t } = useI18n();
 
-// "load-failed" = we could not fetch the keys, not that the peer has none.
-const peerKeysBannerText = computed(() =>
-  chatStore.activeRoomId && chatStore.peerKeysStatus.get(chatStore.activeRoomId) === "load-failed"
-    ? t("chat.peerKeysLoadFailed")
-    : t("chat.peerKeysMissing"),
-);
+// This account's own keys are missing: then nobody can read what it sends, and
+// the banner must say so instead of blaming the peer (audit W2A-01).
+const ownKeysMissing = computed(() => authStore.ownKeysMissing === true);
+
+// One banner text, most specific cause first: our own keys are missing
+// (audit W2A-01), the keys could not be loaded ("load-failed" is not "the
+// peer has none"), then a group member or the peer has none.
+const peerKeysBannerText = computed(() => {
+  if (ownKeysMissing.value) return t("chat.ownKeysMissing");
+  const roomId = chatStore.activeRoomId;
+  if (roomId && chatStore.peerKeysStatus.get(roomId) === "load-failed") return t("chat.peerKeysLoadFailed");
+  return chatStore.activeRoom?.isGroup ? t("chat.groupMemberKeysMissing") : t("chat.peerKeysMissing");
+});
+
+const OWN_KEYS_PUBLISH_TEXT = {
+  "already-ok": "chat.ownKeysPublishAlreadyOk",
+  republished: "chat.ownKeysPublishSent",
+  "needs-funds": "chat.ownKeysPublishNeedsFunds",
+  "broadcast-failed": "chat.ownKeysPublishFailed",
+  skipped: "chat.ownKeysPublishSkipped",
+} as const;
+
+const publishingOwnKeys = ref(false);
+
+const publishOwnKeys = async () => {
+  if (publishingOwnKeys.value) return;
+  publishingOwnKeys.value = true;
+  try {
+    const result = await authStore.republishKeysFromUi();
+    const ok = result.state === "republished" || result.state === "already-ok";
+    toast(t(OWN_KEYS_PUBLISH_TEXT[result.state]), ok ? "success" : "error", 6000);
+    const roomId = chatStore.activeRoomId;
+    if (ok && roomId) await chatStore.checkPeerKeys(roomId);
+  } catch (e) {
+    console.warn("[ChatWindow] publishing own keys failed:", e);
+    toast(t("chat.ownKeysPublishFailed"), "error", 6000);
+  } finally {
+    publishingOwnKeys.value = false;
+  }
+};
 
 // Retry handler for the peer-keys banner. The banner is no longer a hard
 // blocker (regression #597/#598/#639) — it offers an escape hatch so a stuck
-// "missing" state never traps the user. There is deliberately no "republish
-// my own keys" action here: the banner means the PEER hasn't published keys,
-// not the local user — republishing keys that already exist is a no-op.
+// "missing" state never traps the user. Publishing our own keys is a separate
+// action (publishOwnKeys), shown only when our own keys are the ones missing.
 const peerKeysRetrying = ref(false);
 
 const retryPeerKeys = async () => {
@@ -210,6 +242,10 @@ watch(() => chatStore.activeRoomId, async (roomId) => {
 }, { immediate: true });
 
 let peerKeyRecheckTimer: ReturnType<typeof setInterval> | null = null;
+// Rooms whose automatic recheck already did its one forced (network) refresh.
+// A peer profile cached before they published keys never expires otherwise, so
+// "hasn't published keys" stayed up until the manual Retry (audit S1-03).
+const forcedPeerKeyRecheck = new Set<string>();
 
 watch(() => chatStore.activeRoomId, (roomId) => {
   if (peerKeyRecheckTimer) { clearInterval(peerKeyRecheckTimer); peerKeyRecheckTimer = null; }
@@ -225,10 +261,17 @@ watch(() => chatStore.activeRoomId, (roomId) => {
     if (status === "missing") {
       const roomCrypto = authStore.pcrypto?.rooms[roomId];
       if (roomCrypto) {
+        // The first tick for a room forces one network refresh; later ticks
+        // stay on the cache so a stuck room does not hit the network every 30 s.
+        const force = !forcedPeerKeyRecheck.has(roomId);
+        forcedPeerKeyRecheck.add(roomId);
         try {
-          await roomCrypto.prepare();
+          await roomCrypto.prepare(force);
           await chatStore.checkPeerKeys(roomId);
-        } catch { /* ignore */ }
+        } catch {
+          // A forced refresh that failed has not refreshed anything; force the next tick again.
+          if (force) forcedPeerKeyRecheck.delete(roomId);
+        }
       }
     }
   }, 30_000);
@@ -478,7 +521,10 @@ const handleAcceptInvite = async () => {
   if (!roomId) return;
   inviteLoading.value = true;
   try {
-    await chatStore.acceptInvite(roomId);
+    const result = await chatStore.acceptInvite(roomId);
+    if (result !== "joined") {
+      toast(t(result === "banned" ? "chat.acceptInviteBanned" : "chat.acceptInviteFailed"), "error");
+    }
   } finally {
     inviteLoading.value = false;
   }
@@ -718,6 +764,15 @@ onUnmounted(() => {
           <div class="flex-1 min-w-0">
             <p class="leading-snug">{{ peerKeysBannerText }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                v-if="ownKeysMissing"
+                type="button"
+                class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                :disabled="publishingOwnKeys"
+                @click="publishOwnKeys"
+              >
+                {{ t("chat.publishOwnKeys") }}
+              </button>
               <button
                 type="button"
                 class="rounded-md border border-amber-300 dark:border-amber-700 bg-white/60 dark:bg-amber-950/40 px-3 py-1 text-xs font-medium text-amber-900 dark:text-amber-100 hover:bg-white dark:hover:bg-amber-900/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"

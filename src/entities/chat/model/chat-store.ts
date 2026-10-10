@@ -17,6 +17,7 @@ import {
 import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { reuseIfUnchanged } from "../lib/message-memo";
+import { decidePeerKeysStatus } from "../lib/peer-keys-status";
 import { toParsedMessages } from "../lib/parsed-message";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
@@ -63,6 +64,7 @@ import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
 import { buildMessageNotificationContent } from "@/shared/lib/notifications/message-notification-content";
 import { tRaw } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 
@@ -805,6 +807,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  and updated optimistically by setContactAlias(). Cross-device sync is
    *  driven by the m.bastyon.contact_aliases global account_data event. */
   const localAliases = ref<Record<string, string>>({});
+  // Native draws notification titles while the page sleeps: it gets every
+  // alias change (audit S6-01, device check 2026-10-10).
+  if (isNative) {
+    watch(localAliases, () => {
+      void import("@/shared/lib/push")
+        .then(({ pushService }) => pushService.syncSenderAliasesToNative())
+        .catch(() => {});
+    });
+  }
 
   /** In-memory timestamp cache for alias entries (raw address → ms).
    *  Mirrors Dexie users.aliasUpdatedAt so cross-device LWW conflict
@@ -821,6 +832,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *    4. Truncated address fallback. */
   const getDisplayName = (address: string): string => {
     if (!address) return "?";
+    const known = getKnownDisplayName(address);
+    if (known) return known;
+    // Fallback: truncated address
+    if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
+    return address;
+  };
+
+  /** Steps 1-3 of `getDisplayName` (alias, Matrix name cache, user store)
+   *  without the truncated-address fallback: null when the chat does not know
+   *  a name yet, so a caller with its own better fallback (a push title with
+   *  the Matrix member name) can use it. */
+  const getKnownDisplayName = (address: string): string | null => {
+    if (!address) return null;
     // Try hex-decoded lookup (room.members stores hex IDs, cache uses raw addresses)
     let resolvedAddr = address;
     if (/^[a-f0-9]+$/i.test(address)) {
@@ -850,9 +874,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const uStore = useUserStore();
     const userProfile = uStore.users[resolvedAddr];
     if (userProfile?.name && isDisplayableName(userProfile.name)) return userProfile.name;
-    // Fallback: truncated address
-    if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
-    return address;
+    return null;
   };
 
   /** Same resolution chain as `getDisplayName` but SKIPS the local-alias
@@ -3125,6 +3147,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const roomId of changed) {
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) {
+        // Keep the open room, as fullRoomRefresh does: getRoom() also misses
+        // rooms the SDK has not materialised yet and every room while the
+        // client is being rebuilt, and dropping the active one showed
+        // "select a chat" inside an open chat (audit S3b-01, forta-bugs#1390).
+        if (roomId === activeRoomId.value) continue;
         // Room gone from SDK — collect for batch removal
         if (roomsMap.has(roomId)) {
           roomsMap.delete(roomId);
@@ -4008,6 +4035,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  // Incoming messages and reactions wait up to 150/500 ms in the event
+  // writer's buffers; an app closed or killed in that window lost them
+  // (audit S3-01). Write them out as soon as the app goes to the background.
+  const flushIncomingWrites = () => {
+    chatDbKitRef.value?.eventWriter.flushWriteBuffer().catch((e) => {
+      console.warn("[chat-store] flushing incoming writes on background failed:", e);
+    });
+  };
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushIncomingWrites();
+    });
+    window.addEventListener("pagehide", flushIncomingWrites);
+  }
+
   // Listen for visibility changes to send pending read receipts
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
@@ -4050,6 +4092,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
           // 4. Self-heal unread counts — fix any drift accumulated during suspension
           syncAllUnreadFromMatrix();
+        } else {
+          flushIncomingWrites();
         }
       });
     }).catch(() => {});
@@ -4583,7 +4627,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Accept an invite: join the room and update membership */
-  const acceptInvite = async (roomId: string) => {
+  /** Join an invited room. Resolves why the join did not happen, so the caller
+   *  can say so: the invite screen used to just come back with no word of what
+   *  went wrong (audit S3b-03). */
+  const acceptInvite = async (roomId: string): Promise<"joined" | "banned" | "failed"> => {
     try {
       const matrixService = getMatrixClientService();
       // Security (best-effort): block join if local state shows user is banned.
@@ -4591,7 +4638,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const myUserId = matrixService.getUserId() ?? "";
       if (isUserBanned(roomId, myUserId)) {
         console.warn("[chat-store] acceptInvite blocked: user is banned from room", roomId);
-        return;
+        return "banned";
       }
       await matrixService.joinRoom(roomId);
 
@@ -4621,8 +4668,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         profilesRequestedForRooms.delete(roomId);
         setActiveRoom(roomId);
       }
+      return "joined";
     } catch (e) {
       console.warn("[chat-store] acceptInvite error:", e);
+      return "failed";
     }
   };
 
@@ -4727,13 +4776,64 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Remove a room: kick other members → leave → forget → remove from local state.
-   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups). */
-  const removeRoom = async (roomId: string) => {
-    // Tombstone in Dexie — cross-device visible, survives reload
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "removed");
+  /** Tombstone a room the user is leaving and return the membership it had,
+   *  so a leave the server refuses can be undone. */
+  const tombstoneForLeave = async (
+    roomId: string,
+    reason: "left" | "removed",
+  ): Promise<LocalRoom["membership"] | undefined> => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return undefined;
+    const previous = await kit.rooms.getRoom(roomId);
+    await kit.rooms.tombstoneRoom(roomId, reason);
+    return previous?.membership;
+  };
+
+  /** Whether the SDK already counts the user out of the room. */
+  const sdkSaysLeft = (roomId: string): boolean => {
+    try {
+      const room = getMatrixClientService().getRoom(roomId) as
+        | { selfMembership?: string; getMyMembership?: () => string }
+        | null;
+      const membership = room?.selfMembership ?? room?.getMyMembership?.();
+      return membership === "leave" || membership === "ban";
+    } catch {
+      return false;
     }
+  };
+
+  /** The leave failed: bring the room back now and say so. It used to vanish,
+   *  then quietly return at a later sync with no explanation, since the SDK
+   *  still counted the user as joined (audit S7-01). Resolves false, restoring
+   *  nothing, when /sync already reported the user out: the leave reached the
+   *  server and only its answer was lost. (If that /sync comes later, it
+   *  tombstones the room again through the membership handler.) */
+  const restoreRoomAfterFailedLeave = async (
+    roomId: string,
+    membership: LocalRoom["membership"] | undefined,
+    messageKey: "chat.leaveFailed" | "chat.deleteFailed",
+  ): Promise<boolean> => {
+    if (sdkSaysLeft(roomId)) {
+      console.warn("[chat-store] leave reported an error, but the user is already out of", roomId);
+      return false;
+    }
+    try {
+      await chatDbKitRef.value?.rooms.reviveRoom(roomId, membership);
+    } catch (e) {
+      console.warn("[chat-store] restoring a room after a failed leave:", e);
+    }
+    markRoomChanged(roomId);
+    refreshRooms();
+    useToast().toast(tRaw(messageKey), "error");
+    return true;
+  };
+
+  /** Remove a room: kick other members → leave → forget → remove from local state.
+   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups).
+   *  Resolves false (the room is back, the user told why) when the leave failed. */
+  const removeRoom = async (roomId: string): Promise<boolean> => {
+    // Tombstone in Dexie — cross-device visible, survives reload
+    const previousMembership = await tombstoneForLeave(roomId, "removed");
 
     // Optimistic: remove from UI immediately
     optimisticRemoveRoom(roomId);
@@ -4782,10 +4882,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
 
       await matrixService.leaveRoom(roomId);
-      await matrixService.forgetRoom(roomId);
     } catch (e) {
-      console.warn("[chat-store] removeRoom leave/forget error:", e);
+      console.warn("[chat-store] removeRoom leave error:", e);
+      return !(await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.deleteFailed"));
     }
+    try {
+      await getMatrixClientService().forgetRoom(roomId);
+    } catch (e) {
+      console.warn("[chat-store] removeRoom forget error:", e);
+    }
+    return true;
   };
 
   /** Clear chat history for current user only. Room membership is NOT affected.
@@ -4829,23 +4935,28 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Leave a group chat without kicking other members. */
-  const leaveGroup = async (roomId: string) => {
+  /** Leave a group chat without kicking other members. Resolves false (the room
+   *  is back, the user told why) when the leave failed. */
+  const leaveGroup = async (roomId: string): Promise<boolean> => {
     // Tombstone in Dexie — cross-device visible
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "left");
-    }
+    const previousMembership = await tombstoneForLeave(roomId, "left");
 
     // Optimistic: remove from UI
     optimisticRemoveRoom(roomId);
 
+    const matrixService = getMatrixClientService();
     try {
-      const matrixService = getMatrixClientService();
       await matrixService.leaveRoom(roomId);
-      await matrixService.forgetRoom(roomId);
     } catch (e) {
       console.warn("[chat-store] leaveGroup error:", e);
+      return !(await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.leaveFailed"));
     }
+    try {
+      await matrixService.forgetRoom(roomId);
+    } catch (e) {
+      console.warn("[chat-store] leaveGroup forget error:", e);
+    }
+    return true;
   };
 
   /** Kick a single user from a room (requires admin power level).
@@ -6127,12 +6238,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const rel = content["m.relates_to"] as Record<string, unknown>;
       const targetId = rel.event_id as string;
       const target = msgMap.get(targetId);
-      if (target) {
+      const editorId = matrixIdToAddress((raw.sender as string) ?? "");
+      // Only the author edits a message (H4); writeEdit enforces it in Dexie too.
+      if (target && target.senderId === editorId) {
         target.content = await resolveEditText(raw, roomCrypto);
         target.edited = true;
 
         // Persist edit to Dexie so it survives reload
         await chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+          senderId: editorId,
           targetEventId: targetId,
           newContent: target.content,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
@@ -6333,8 +6447,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Step 1: Find unresolved replies in Dexie (source of truth for UI)
     const clearedAtTs = db.eventWriter.getClearedAtTs(roomId);
     const roomMsgs = await db.messages.getMessages(roomId, 200, undefined, clearedAtTs);
+    // A quote stored as "[encrypted]" was resolved while its original was still
+    // undecrypted; treat it as unresolved so it heals (audit S1-04).
     const unresolved = roomMsgs.filter(
-      m => m.replyTo && !m.replyTo.deleted && !m.replyTo.senderId && !m.replyTo.content,
+      m => m.replyTo && !m.replyTo.deleted
+        && ((!m.replyTo.senderId && !m.replyTo.content) || m.replyTo.content === "[encrypted]"),
     );
     if (unresolved.length === 0) return;
 
@@ -6358,8 +6475,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             try {
               perfCount("net:event");
               const raw = await matrixService.client!.fetchRoomEvent(roomId, eventId);
-              replyFetchAttempted.add(eventId);
-              if (!raw) return;
+              if (!raw) {
+                replyFetchAttempted.add(eventId);
+                return;
+              }
 
               let body = "";
               let senderId = "";
@@ -6369,16 +6488,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               senderId = matrixIdToAddress((raw.sender as string) ?? "");
 
               // Decrypt if needed
-              if (content?.msgtype === "m.encrypted" && roomCrypto) {
+              if (content?.msgtype === "m.encrypted") {
+                // No room crypto yet: quoting the ciphertext would stick for
+                // the session. A later pass decrypts it (audit S1-04).
+                if (!roomCrypto) return;
                 try {
                   const decrypted = await roomCrypto.decryptEvent(raw as Record<string, unknown>);
                   body = decrypted.body ?? "";
                 } catch {
-                  body = "";
+                  // Not decryptable yet: leave the reply for a later pass
+                  // instead of quoting an empty text forever (audit S1-04).
+                  return;
                 }
               } else {
                 body = (content?.body as string) ?? "";
               }
+              // Done for this session only now: an original that did not decrypt
+              // yet stays eligible for a later pass (audit S1-04).
+              replyFetchAttempted.add(eventId);
 
               // Detect message type
               const mtype = content?.msgtype as string;
@@ -6420,6 +6547,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             eventId: msg.eventId,
             replyTo: { id: replyTo.id, senderId: "", content: "", deleted: true },
           });
+        } else if (
+          original.decryptionStatus === "pending"
+          || original.decryptionStatus === "failed"
+          || original.content === "[encrypted]"
+        ) {
+          // The original is still being decrypted: quoting it now baked
+          // "[encrypted]" into the reply for good (audit S1-04). Leave it
+          // unresolved; the next pass after the decrypt fills it in.
+          continue;
         } else {
           patches.push({
             eventId: msg.eventId,
@@ -6561,6 +6697,58 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     await applyPageRelationsToStored(roomId, page, dbKit);
   };
 
+  /** Relations of a timeline whose target message is not in it. Stored
+   *  targets go through applyPageRelationsToStored (writes only what changes);
+   *  for a target not in Dexie yet the event writer keeps the relation until
+   *  it lands. A pending edit uses the room crypto already registered (no new
+   *  instance for a room loaded in the background) and is skipped while it
+   *  cannot be read: "[encrypted]" over a message has no retry path. */
+  const writeRelationsOutsideTimeline = async (
+    roomId: string,
+    rawEvents: ReadonlyArray<Record<string, unknown> | null>,
+    inTimeline: ReadonlySet<string>,
+    dbKit: ChatDbKit,
+  ): Promise<void> => {
+    const relationOf = (raw: Record<string, unknown>) =>
+      (raw.content as Record<string, unknown> | undefined)?.["m.relates_to"] as Record<string, unknown> | undefined;
+    const outside = rawEvents.filter((raw): raw is Record<string, unknown> => {
+      if (!raw) return false;
+      const kind = classifyTimelineEvent(raw);
+      if (kind !== "edit" && kind !== "reaction") return false;
+      const targetId = relationOf(raw)?.event_id as string | undefined;
+      return !!targetId && !inTimeline.has(targetId);
+    });
+    if (outside.length === 0) return;
+
+    const stored = await applyPageRelationsToStored(roomId, outside, dbKit);
+    const matrixService = getMatrixClientService();
+    const roomCrypto = useAuthStore().pcrypto?.rooms[roomId];
+    for (const raw of outside) {
+      const rel = relationOf(raw)!;
+      const targetId = rel.event_id as string;
+      if (stored.has(targetId)) continue;
+      const senderId = matrixIdToAddress((raw.sender as string) ?? "");
+      if (classifyTimelineEvent(raw) === "edit") {
+        const newContent = await resolveEditText(raw, roomCrypto);
+        if (newContent === "[encrypted]") continue;
+        await dbKit.eventWriter.writeEdit(roomId, {
+          senderId,
+          targetEventId: targetId,
+          newContent,
+          editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
+        });
+      } else if (typeof raw.event_id === "string" && typeof rel.key === "string") {
+        await dbKit.eventWriter.writeReaction({
+          eventId: raw.event_id,
+          targetEventId: targetId,
+          emoji: rel.key,
+          senderAddress: senderId,
+          isMine: matrixService.isMe(raw.sender as string),
+        });
+      }
+    }
+  };
+
   /** Edits and reactions from a history page, applied to their targets as
    *  stored in Dexie: the parser only applies relations to messages it parses,
    *  and bulkInsert never updates a row that already exists. Idempotent —
@@ -6570,7 +6758,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomId: string,
     page: Record<string, unknown>[],
     dbKit: ChatDbKit,
-  ): Promise<void> => {
+  ): Promise<ReadonlySet<string>> => {
     const relations = page.filter((raw) => {
       const kind = classifyTimelineEvent(raw);
       return kind === "edit" || kind === "reaction";
@@ -6578,9 +6766,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const targetOf = (raw: Record<string, unknown>) =>
       ((raw.content as Record<string, unknown>)["m.relates_to"] as Record<string, unknown> | undefined)?.event_id as string | undefined;
     const targetIds = [...new Set(relations.map(targetOf).filter((id): id is string => !!id))];
-    if (targetIds.length === 0) return;
+    if (targetIds.length === 0) return new Set();
     const stored = new Map((await dbKit.messages.getByEventIds(targetIds)).map((r) => [r.eventId!, r]));
-    if (stored.size === 0) return;
+    if (stored.size === 0) return new Set();
 
     const edits = relations
       .filter((raw) => classifyTimelineEvent(raw) === "edit" && stored.has(targetOf(raw)!))
@@ -6588,9 +6776,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (edits.length > 0) {
       const roomCrypto = await ensureRoomCrypto(roomId);
       for (const raw of edits) {
+        const newContent = await resolveEditText(raw, roomCrypto);
+        // Not readable yet: keep the stored text rather than a placeholder.
+        if (newContent === "[encrypted]") continue;
         await dbKit.eventWriter.writeEdit(roomId, {
+          senderId: matrixIdToAddress((raw.sender as string) ?? ""),
           targetEventId: targetOf(raw)!,
-          newContent: await resolveEditText(raw, roomCrypto),
+          newContent,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
         });
       }
@@ -6612,6 +6804,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return { eventId, reactions: merged };
     });
     if (await dbKit.messages.bulkUpdateReactions(entries) > 0) perfCount("dexie:rw:open");
+    return new Set(stored.keys());
   };
 
   /** Timestamp of the oldest row event in the SDK's live timeline. */
@@ -7113,6 +7306,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           if (await dbKit.messages.bulkUpdateReactions(reactionEntries) > 0) {
             perfCount("dexie:rw:open");
           }
+
+          // Edits and reactions whose target is not in this timeline (an older
+          // message): the event writer updates the stored row or keeps them
+          // until it lands. They used to wait for a later scroll to parse both
+          // events together (audit S3-03).
+          await writeRelationsOutsideTimeline(roomId, rawEvents, timelineMessageIds, dbKit);
 
           // Pins may point at messages this load just wrote (first open of a room).
           if (parsedMessages.length > 0 && roomId === activeRoomId.value) {
@@ -7792,16 +7991,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
 
         const cleanBody = newBody.replace(/^\* /, "");
+        const editorId = matrixIdToAddress((raw.sender as string) ?? "");
 
-        // Persist to Dexie (survives reload, triggers useLiveQuery)
+        // Persist to Dexie (survives reload, triggers useLiveQuery). writeEdit
+        // drops an edit that is not from the target's author in this room (H4).
         chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+          senderId: editorId,
           targetEventId: targetId,
           newContent: cleanBody,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
         });
 
-        // Immediate in-memory update (no Dexie round-trip delay)
-        updateMessageContent(roomId, targetId, cleanBody);
+        // Immediate in-memory update (no Dexie round-trip delay), for the
+        // author's own edit only.
+        const shown = messages.value[roomId]?.find((m) => m.id === targetId);
+        if (!shown || shown.senderId === editorId) updateMessageContent(roomId, targetId, cleanBody);
         return;
       }
 
@@ -8633,22 +8837,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     const canEncrypt = roomCrypto.canBeEncrypt();
+    // canBeEncrypt returns false for rooms with ≥50 members, for missing peer
+    // keys, and while member profiles or keys are still loading — tell them apart.
+    let memberCount = 0;
     if (!canEncrypt) {
-      // canBeEncrypt returns false for rooms with ≥50 members or missing peer keys.
-      // Distinguish "too large" from "missing keys":
-      const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
-      const memberCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
-      if (memberCount >= 50) {
-        peerKeysStatus.set(roomId, "not-encrypted");
-        return "not-encrypted";
-      }
+      const matrixRoom = getMatrixClientService().getRoom(roomId) as any;
+      memberCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
       // Keys not received yet (request in flight, or it timed out) is not
       // "the peer has no keys": showing that banner here was a false alarm
       // on every cold open. A failed request for the open chat is retried.
       const keysState = roomCrypto.getKeysLoadState?.();
-      if (keysState === "loading" || keysState === "failed") {
+      if (memberCount < 50 && (keysState === "loading" || keysState === "failed")) {
         let status: PeerKeysStatus = "loading";
         if (keysState === "failed" && roomId === activeRoomId.value) {
           // After a few failed attempts, surface it: the banner's Retry forces
@@ -8659,13 +8859,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         peerKeysStatus.set(roomId, status);
         return status;
       }
-      peerKeysStatus.set(roomId, "missing");
-      return "missing";
     }
-
-    activeRoomKeysRetryAttempts.delete(roomId);
-    peerKeysStatus.set(roomId, "available");
-    return "available";
+    // Available, too large, member profiles still loading (audit S1-01) or missing.
+    const status = decidePeerKeysStatus({
+      canEncrypt,
+      membersLoaded: roomCrypto.membersLoaded?.(),
+      memberCount,
+    });
+    if (status === "available") activeRoomKeysRetryAttempts.delete(roomId);
+    peerKeysStatus.set(roomId, status);
+    return status;
   };
 
   // Retry for the open chat's failed key request: backs off 3s → 6s → … → 30s
@@ -8802,6 +9005,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     saveForwardDraft,
     restoreForwardDraft,
     getDisplayName,
+    getKnownDisplayName,
     getCanonicalDisplayName,
     /** Read-only: lets name caches track getDisplayName's Matrix-name source. */
     userDisplayNames,

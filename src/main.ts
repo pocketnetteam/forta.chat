@@ -12,6 +12,11 @@ setupDeepLinkHandler();
 
 import { app } from "./app";
 
+// This body runs only after every static import evaluated. Tell the boot
+// guard in index.html that the module graph loaded, so it never swaps the app
+// for its "update Android System WebView" fallback (audit W2B-01).
+(window as unknown as { __fortaBootStarted?: boolean }).__fortaBootStarted = true;
+
 app.then(app => {
   // On boot failure app is null — AppLoading stays mounted with error UI
   if (app) app.mount("#app");

@@ -42,6 +42,8 @@ vi.mock('./ios-voip-push', () => ({
   },
 }));
 vi.mock('@/shared/lib/i18n', () => ({ tRaw: (k: string) => k }));
+const toast = vi.hoisted(() => vi.fn());
+vi.mock('@/shared/lib/use-toast', () => ({ useToast: () => ({ toast }) }));
 
 interface ServiceInternals {
   matrixClient: unknown;
@@ -79,6 +81,41 @@ describe('pushService.unregisterForLogout', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  // Audit S6-04: every init() (login, account switch) added another pair of
+  // PushData listeners, so one push ran its handlers once per past session.
+  it('keeps one pair of PushData listeners across re-inits, and drops them on logout', async () => {
+    const handles: Array<{ remove: ReturnType<typeof vi.fn> }> = [];
+    PushData.addListener.mockImplementation(async () => {
+      const handle = { remove: vi.fn() };
+      handles.push(handle);
+      return handle;
+    });
+    const { svc } = await loadService();
+
+    await svc.init({ setPusher: vi.fn() });
+    await svc.init({ setPusher: vi.fn() });
+    expect(handles).toHaveLength(4);
+    expect(handles.slice(0, 2).every((h) => h.remove.mock.calls.length === 1)).toBe(true);
+    expect(handles.slice(2).every((h) => h.remove.mock.calls.length === 0)).toBe(true);
+
+    await svc.unregisterForLogout();
+    expect(handles.every((h) => h.remove.mock.calls.length === 1)).toBe(true);
+  });
+
+  // Audit W2B-03: a phone without Google Play Services never got a push, silently.
+  it('tells the user once when the device has no Google Play Services, and does not register', async () => {
+    PushData.isFcmAvailable.mockResolvedValue({ available: false, playServices: false });
+    toast.mockClear();
+    const { svc } = await loadService();
+
+    await svc.init({ setPusher: vi.fn() });
+    await svc.init({ setPusher: vi.fn() });
+
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast).toHaveBeenCalledWith('push.noPlayServices', 'info', 8000);
+    expect(PushNotifications.register).not.toHaveBeenCalled();
   });
 
   it('marks the Android session active when push starts', async () => {

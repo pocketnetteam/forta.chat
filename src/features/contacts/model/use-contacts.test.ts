@@ -243,6 +243,38 @@ describe("useContacts", () => {
       }
     });
 
+    // Audit S7-02: with both remote searches down (Tor, Matrix not ready) the
+    // user was told the contact does not exist.
+    it("says the search is unavailable, not 'not found', when every remote search failed", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("network"));
+      mockSearchUserDirectory.mockRejectedValue(new Error("network"));
+      mockIsReady.mockReturnValue(true);
+
+      await contacts.searchUsers("nobody_matches_this_xyz");
+
+      expect(contacts.searchResults.value.length).toBe(0);
+      expect(contacts.searchError.value).toBe("search.serviceUnavailable");
+    });
+
+    it("says the search is unavailable when Bastyon failed and Matrix is not ready", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("network"));
+      mockIsReady.mockReturnValue(false);
+
+      await contacts.searchUsers("nobody_matches_this_xyz");
+
+      expect(contacts.searchError.value).toBe("search.serviceUnavailable");
+    });
+
+    it("says 'not found' when one remote search answered with nothing", async () => {
+      mockRpcSearchUsers.mockRejectedValue(new Error("network"));
+      mockSearchUserDirectory.mockResolvedValue({ limited: false, results: [] });
+      mockIsReady.mockReturnValue(true);
+
+      await contacts.searchUsers("nobody_matches_this_xyz");
+
+      expect(contacts.searchError.value).toBe("search.userNotFound");
+    });
+
     it("converts a Matrix user_directory mxc:// avatar_url to an HTTP URL", async () => {
       mockRpcSearchUsers.mockResolvedValue([]);
       const targetHex = hexEncode("PMaxtest2222222222222222222222222AB").toLowerCase();

@@ -6,10 +6,15 @@ let mediaViewerInstanceCounter = 0;
 </script>
 
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import type { Message } from "@/entities/chat";
 import { useChatStore, MessageType } from "@/entities/chat";
-import { useFileDownload, invalidateDownloadCache } from "../model/use-file-download";
+import { useFileDownload, invalidateDownloadCache, saveFailureMessageKey } from "../model/use-file-download";
+import {
+  videoPlaybackErrorFromMediaError,
+  VIDEO_LOAD_TIMEOUT_MS,
+  type VideoPlaybackError,
+} from "../model/video-error";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
 import { touchDistance, nextScale, MIN_SCALE } from "../model/pinch-zoom";
@@ -129,6 +134,78 @@ const handleMediaError = () => {
 const handleMediaLoad = () => {
   const key = currentKey.value;
   if (key) recoveredKeys.delete(key);
+};
+
+// A gallery video that still failed after the one recovery above, or that never
+// loaded at all, stayed a black screen with no way out (audit S4-03). Same typed
+// errors and load deadline as the inline chat bubble.
+const videoError = ref<VideoPlaybackError | null>(null);
+let videoLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clearVideoLoadTimer = () => {
+  if (videoLoadTimer !== null) {
+    clearTimeout(videoLoadTimer);
+    videoLoadTimer = null;
+  }
+};
+
+watch(
+  () => (props.show && currentMessage.value?.type === MessageType.video ? currentUrl.value : null),
+  (url) => {
+    clearVideoLoadTimer();
+    videoError.value = null;
+    if (!url) return;
+    videoLoadTimer = setTimeout(() => {
+      videoLoadTimer = null;
+      if (videoError.value === null) videoError.value = "timeout";
+    }, VIDEO_LOAD_TIMEOUT_MS);
+  },
+);
+
+onBeforeUnmount(clearVideoLoadTimer);
+
+const handleVideoError = (event: Event) => {
+  clearVideoLoadTimer();
+  const key = currentKey.value;
+  // The first failure is usually a blob URL revoked elsewhere: re-mint it once.
+  if (key && !recoveredKeys.has(key)) {
+    handleMediaError();
+    return;
+  }
+  videoError.value = videoPlaybackErrorFromMediaError((event.target as HTMLVideoElement | null)?.error?.code);
+};
+
+const handleVideoMetadata = () => {
+  clearVideoLoadTimer();
+  if (videoError.value === "timeout") videoError.value = null;
+};
+
+// A download that failed leaves no URL, so the player never mounts and its
+// deadline never starts: the spinner used to stay for good (photos too).
+const currentDownloadFailed = computed(() => {
+  const key = currentKey.value;
+  if (!key || currentUrl.value) return false;
+  const state = getState(key);
+  return !state.loading && !!state.error;
+});
+
+const showMediaError = computed(
+  () => currentDownloadFailed.value || (videoError.value !== null && currentMessage.value?.type === MessageType.video),
+);
+
+const videoErrorMessage = computed(() => {
+  if (videoError.value === "codec-unsupported") return t("message.videoUnsupportedFormat");
+  if (currentDownloadFailed.value && currentMessage.value?.type !== MessageType.video) {
+    return t("errors.mediaUnavailable");
+  }
+  return t("message.videoLoadFailed");
+});
+
+const retryVideo = () => {
+  const key = currentKey.value;
+  if (key) recoveredKeys.delete(key);
+  videoError.value = null;
+  handleMediaError();
 };
 
 /** (Re)initialise the viewer for `messageId`. Runs on every *open*, not only
@@ -291,7 +368,7 @@ const handleSaveCurrent = async () => {
     toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
   } catch (e) {
     console.error("[MediaViewer] save failed:", e);
-    toast(t("media.saveFailed"), "error");
+    toast(t(saveFailureMessageKey(e)), "error");
   } finally {
     saving.value = false;
   }
@@ -337,7 +414,7 @@ const handleSaveCurrent = async () => {
         </div>
 
         <!-- Media content -->
-        <div class="flex flex-1 items-center justify-center overflow-hidden" @click="handleDoubleTap">
+        <div class="relative flex flex-1 items-center justify-center overflow-hidden" @click="handleDoubleTap">
           <img
             v-if="currentUrl && currentMessage.type === 'image'"
             :src="currentUrl"
@@ -355,11 +432,41 @@ const handleSaveCurrent = async () => {
             controls
             playsinline
             class="max-h-full max-w-full"
-            @error="handleMediaError"
+            @error="handleVideoError"
+            @loadedmetadata="handleVideoMetadata"
             @loadeddata="handleMediaLoad"
           />
           <div v-else class="flex items-center justify-center">
             <div class="contain-strict h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
+          </div>
+          <div
+            v-if="showMediaError"
+            data-testid="media-video-error"
+            class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 px-6 text-center text-white"
+            @click.stop
+          >
+            <span class="text-sm font-medium">{{ videoErrorMessage }}</span>
+            <div class="flex gap-2">
+              <button
+                v-if="videoError !== 'codec-unsupported' || currentDownloadFailed"
+                type="button"
+                data-testid="media-video-retry"
+                class="rounded-md bg-white/15 px-3 py-1.5 text-sm font-medium transition-colors hover:bg-white/25"
+                @click.stop="retryVideo"
+              >
+                {{ t('message.retry') }}
+              </button>
+              <button
+                v-if="currentUrl"
+                type="button"
+                data-testid="media-video-download"
+                class="rounded-md bg-color-bg-ac px-3 py-1.5 text-sm font-medium text-text-on-bg-ac-color transition-opacity hover:opacity-90 disabled:opacity-60"
+                :disabled="!currentUrl || saving"
+                @click.stop="handleSaveCurrent"
+              >
+                {{ t('message.videoDownload') }}
+              </button>
+            </div>
           </div>
         </div>
 

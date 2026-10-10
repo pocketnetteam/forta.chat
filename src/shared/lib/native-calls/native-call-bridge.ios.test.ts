@@ -27,6 +27,7 @@ const audioGetStatusSpy: Mock = vi.fn().mockResolvedValue({
   isSpeakerOn: false,
   isBtScoOn: false,
 });
+const audioSetOutputSpy: Mock = vi.fn().mockResolvedValue(undefined);
 const audioProbeSpy: Mock = vi.fn().mockResolvedValue({
   available: true,
   hasInput: true,
@@ -35,6 +36,7 @@ const audioProbeSpy: Mock = vi.fn().mockResolvedValue({
 });
 
 const cameraRequestPermissionsSpy: Mock = vi.fn().mockResolvedValue({ camera: 'granted' });
+const markHandedOffSpy: Mock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('@capacitor/core', () => ({
   registerPlugin: (name: string) => {
@@ -59,8 +61,11 @@ vi.mock('@capacitor/core', () => ({
         stop: audioStopSpy,
         forceStop: audioForceStopSpy,
         getStatus: audioGetStatusSpy,
-        setOutput: vi.fn().mockResolvedValue(undefined),
+        setOutput: audioSetOutputSpy,
       };
+    }
+    if (name === 'IOSVoIPPush') {
+      return { markHandedOff: markHandedOffSpy };
     }
     return new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) });
   },
@@ -94,6 +99,7 @@ beforeEach(() => {
     conflicting: [],
   });
   cameraRequestPermissionsSpy.mockResolvedValue({ camera: 'granted' });
+  audioSetOutputSpy.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -370,6 +376,9 @@ describe('createIOSNativeCallAdapter — addListener event mapping', () => {
     await vi.waitFor(() => expect(answered).toHaveBeenCalledOnce());
     expect(endCallSpy).toHaveBeenCalledWith({ callId: 'cid', reason: 'audio-handoff' });
     expect(endCallSpy.mock.invocationCallOrder[0]).toBeLessThan(answered.mock.invocationCallOrder[0]);
+    // C07: the push coordinator learns of the handoff, so a repeated VoIP
+    // push for this call does not ring it again.
+    expect(markHandedOffSpy).toHaveBeenCalledWith({ callId: 'cid' });
 
     // The plugin reports our own endCall with source "api": not a hangup.
     endedHandler({ call: { callId: 'cid', extra: { roomId: '!r:m' } }, source: 'api', reason: 'audio-handoff' });
@@ -485,17 +494,35 @@ describe('createIOSNativeCallAdapter — audio routing', () => {
   });
 });
 
-describe('createIOSNativeCallAdapter — getAudioDevices / setAudioDevice', () => {
-  it('returns a single synthetic "default" device (v1 — system Control Center route picker handles real routing)', async () => {
+describe('createIOSNativeCallAdapter — getAudioDevices / setAudioDevice (C06)', () => {
+  // C06 (calls review 2026-10-04): the speaker button only changed its icon on
+  // iOS — setAudioDevice was a no-op and the route never moved.
+  it('reports the real route: speaker when the built-in speaker plays, else earpiece', async () => {
     const adapter = await loadAdapter();
-    const result = await adapter.getAudioDevices();
-    expect(result.active).toBe('default');
-    expect(result.devices).toEqual([{ type: 'default', name: 'Default' }]);
+    audioGetStatusSpy.mockResolvedValueOnce({ mode: 'MODE_IN_COMMUNICATION', isSpeakerOn: true, isBtScoOn: false });
+    expect((await adapter.getAudioDevices()).active).toBe('speaker');
+    audioGetStatusSpy.mockResolvedValueOnce({ mode: 'MODE_IN_COMMUNICATION', isSpeakerOn: false, isBtScoOn: false });
+    expect((await adapter.getAudioDevices()).active).toBe('earpiece');
   });
 
-  it('setAudioDevice is a v1 no-op', async () => {
+  it('leaves the route unknown when the status cannot be read', async () => {
     const adapter = await loadAdapter();
-    await expect(adapter.setAudioDevice({ type: 'speaker' })).resolves.toBeUndefined();
+    audioGetStatusSpy.mockRejectedValueOnce(new Error('no session'));
+    expect((await adapter.getAudioDevices()).active).toBe('');
+  });
+
+  it('moves the output: speaker → speaker, earpiece → earpiece', async () => {
+    const adapter = await loadAdapter();
+    await adapter.setAudioDevice({ type: 'speaker' });
+    expect(audioSetOutputSpy).toHaveBeenLastCalledWith({ device: 'speaker' });
+    await adapter.setAudioDevice({ type: 'earpiece' });
+    expect(audioSetOutputSpy).toHaveBeenLastCalledWith({ device: 'earpiece' });
+  });
+
+  it('rejects when iOS refuses the override, so the toggle rolls back', async () => {
+    const adapter = await loadAdapter();
+    audioSetOutputSpy.mockRejectedValueOnce(new Error('overrideOutputAudioPort failed'));
+    await expect(adapter.setAudioDevice({ type: 'speaker' })).rejects.toThrow();
   });
 });
 

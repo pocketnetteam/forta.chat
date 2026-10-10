@@ -9,8 +9,8 @@ import { formatDate } from "@/shared/lib/format";
 import { formatMessageForCopy } from "@/shared/lib/message-format";
 import { UserAvatar } from "@/entities/user";
 import { useMessages } from "../model/use-messages";
-import { collapsedCallEventIds, dedupeCallEvents, planCallRecordDeletion } from "@/entities/chat/lib/dedupe-call-events";
-import { useFileDownload } from "../model/use-file-download";
+import { dedupeCallEvents, isGhostMessage, planCallRecordDeletion, timelineAnchorFor } from "@/entities/chat/lib/dedupe-call-events";
+import { useFileDownload, saveFailureMessageKey } from "../model/use-file-download";
 import { useScrollToMessage, toMessage } from "../model/use-scroll-to-message";
 import { useHistoryPagination } from "../model/use-history-pagination";
 import { isCacheLikelyStale, type RoomOpenBranch } from "../model/room-open-plan";
@@ -236,7 +236,7 @@ const handleSaveMedia = async (message: import("@/entities/chat").Message) => {
       toast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
     } catch (e) {
       console.error("[MessageList] save failed:", e);
-      toast(t("media.saveFailed"), "error");
+      toast(t(saveFailureMessageKey(e)), "error");
     }
   } finally {
     savingInFlight.delete(cacheKey);
@@ -364,29 +364,36 @@ interface VirtualItem {
   [key: string]: unknown;
 }
 
+// Matrix stores one hangup event per participant who ends the call, so a call
+// both sides hang up leaves two records of the same call. Collapse them here
+// rather than in the store: the events are legitimate and stay in the
+// database, only the timeline shows one entry per call. `item.index` points
+// into this list, and so must the neighbour lookups in the template: they
+// read the raw store list, which is longer by every collapsed or deleted
+// call record, so grouping compared the wrong neighbours after one.
+const timelineMessages = computed(() => dedupeCallEvents(chatStore.activeMessages));
+
 const virtualItems = computed<VirtualItem[]>(() => {
-  // Matrix stores one hangup event per participant who ends the call, so a call
-  // both sides hang up leaves two records of the same call. Collapse them here
-  // rather than in the store: the events are legitimate and stay in the
-  // database, only the timeline shows one entry per call.
   const rawMsgs = chatStore.activeMessages;
-  const msgs = dedupeCallEvents(rawMsgs);
+  const msgs = timelineMessages.value;
   const items: VirtualItem[] = [];
   const { frozenLastReadId: watermarkId, frozenUnreadCount } = bannerState.value;
-  // The watermark can name a call record the collapse above removed — the
-  // second hangup is usually the newest event in the room. Point it at the
-  // record that survived, or the unread banner loses its anchor and never
-  // renders.
-  const frozenLastReadId =
-    watermarkId && frozenUnreadCount > 0
-      ? (collapsedCallEventIds(rawMsgs).get(watermarkId) ?? watermarkId)
-      : watermarkId;
+  // The watermark can name a call record the collapse above removed (the
+  // second hangup, a record deleted for oneself). Move it to the nearest shown
+  // row before it, or the unread banner loses its anchor and never renders;
+  // null means no shown row precedes it.
+  const hasUnread = !!watermarkId && frozenUnreadCount > 0;
+  // Among the rows this list draws: a ghost row kept by the collapse above is
+  // skipped below, and an anchor on it left the banner without a place (C10).
+  const frozenLastReadId = hasUnread
+    ? timelineAnchorFor(rawMsgs, msgs.filter((m) => !isGhostMessage(m)), watermarkId)
+    : watermarkId;
   const myAddr = authStore.address;
 
   // Track whether we've found the last-read message and need to insert the banner.
   // The banner goes BEFORE the first inbound (not own) message after the last-read marker.
   // This ensures own messages sent after the watermark stay ABOVE the banner.
-  let bannerPending = false;
+  let bannerPending = hasUnread && frozenLastReadId === null;
   let bannerInserted = false;
 
   for (let i = 0; i < msgs.length; i++) {
@@ -395,16 +402,7 @@ const virtualItems = computed<VirtualItem[]>(() => {
     // Skip ghost messages: no content, no media, not deleted, not system.
     // NEVER skip messages with pending/failed decryption — they must remain visible
     // so the user sees that a new message exists (shown as "[encrypted]" placeholder).
-    if (
-      !msg.deleted &&
-      !msg.content &&
-      !msg.fileInfo &&
-      !msg.pollInfo &&
-      !msg.callInfo &&
-      !msg.transferInfo &&
-      msg.type !== "system" &&
-      !msg.decryptionStatus
-    ) {
+    if (isGhostMessage(msg)) {
       if (import.meta.env.DEV) {
         console.warn("[MessageList] ghost message filtered:", msg.id, msg.senderId, msg.status);
       }
@@ -459,6 +457,33 @@ const reversedItems = computed<VirtualItem[]>(() => virtualItems.value.slice().r
 /** Index of the unread banner in `reversedItems`, or -1 when not present.
  *  Cached so per-frame scroll handlers don't repeat the linear scan. */
 const bannerIdx = computed(() => reversedItems.value.findIndex(item => item.type === "unread-banner"));
+
+/** How long the first scroll to the unread banner waits for the banner row to
+ *  reach the list (audit W2C-02). On open the room's messages are still landing
+ *  from Dexie and, with more unread than the window holds, the expansion that
+ *  brings the last-read message in takes a few hundred ms to seconds; a 500 ms
+ *  wait on the expansion alone gave up on a real phone and dropped to the newest
+ *  message. */
+const BANNER_ROW_WAIT_MS = 3000;
+/** Index of the banner row in the reversed list once it is there, or -1 when it
+ *  does not show up within `timeoutMs`. */
+const waitForBannerRow = (timeoutMs: number): Promise<number> =>
+  new Promise((resolve) => {
+    if (bannerIdx.value >= 0) {
+      resolve(bannerIdx.value);
+      return;
+    }
+    const timer = setTimeout(() => {
+      stop();
+      resolve(-1);
+    }, timeoutMs);
+    const stop = watch(bannerIdx, (idx) => {
+      if (idx < 0) return;
+      clearTimeout(timer);
+      stop();
+      resolve(idx);
+    });
+  });
 
 /** Get the actual scroll container element from the scroller component. */
 const getScrollContainer = (): HTMLElement | null => {
@@ -553,22 +578,50 @@ const checkScroll = () => {
 
 let pendingScrollToBottom = false;
 let scrollStableTimer: ReturnType<typeof setTimeout> | undefined;
+let scrollToBottomGen = 0;
+/** Own messages appended since the app started; a scroll to the banner that
+ *  waits for its row skips when one arrived meanwhile. */
+let ownAppendCount = 0;
 /** Scroll to newest messages (bottom of chat = scrollTop 0 in column-reverse). */
 const scrollToBottom = (_smooth = false, onSettled?: () => void) => {
   newMessageCount.value = 0;
   clearTimeout(scrollStableTimer);
   pendingScrollToBottom = true;
+  const gen = ++scrollToBottomGen;
 
   nextTick(() => {
+    if (gen !== scrollToBottomGen) return;
     const el = getScrollContainer();
     if (el) el.scrollTop = 0;
     // Wait for content to settle (images loading, reactions expanding)
     requestAnimationFrame(() => {
+      if (gen !== scrollToBottomGen) return;
       const el2 = getScrollContainer();
       if (el2) el2.scrollTop = 0;
       resetStableTimer(onSettled);
     });
   });
+};
+
+/** Drop a scroll to the newest message that has not settled yet. */
+const cancelScrollToBottom = () => {
+  scrollToBottomGen++;
+  clearTimeout(scrollStableTimer);
+  pendingScrollToBottom = false;
+};
+
+/**
+ * Show the unread banner at the top of the view.
+ * The first messages landing during the open queue a scroll to the newest
+ * one, and while it settles the content-resize observer pulls the view back
+ * down; isNearBottom still says "bottom" from the room switch until a scroll
+ * event lands. Both sent the chat back to the newest message 40 ms after
+ * reaching the banner on a phone (Samsung, 2026-10-10, audit W2C-02).
+ */
+const scrollToBannerRow = (reversedIdx: number) => {
+  cancelScrollToBottom();
+  scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
+  checkScroll();
 };
 
 const resetStableTimer = (onSettled?: () => void) => {
@@ -921,11 +974,27 @@ const openRoom = async (roomId: string | null) => {
       if (bannerIdx >= 0) {
         // Convert to reversed index for the inverted scroller
         const reversedIdx = reversedItems.value.findIndex(item => item.type === "unread-banner");
-        if (reversedIdx >= 0) {
-          scrollerRef.value?.scrollToIndex(reversedIdx, { align: "start" });
-        }
-      } else if (el) {
-        el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
+        if (reversedIdx >= 0) scrollToBannerRow(reversedIdx);
+      } else {
+        // The banner row is not in the list yet: the messages are still
+        // landing, or the window expansion that brings the last-read message
+        // in has not finished. Show the newest for now and move to the banner
+        // once its row arrives (audit W2C-02).
+        if (el) el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
+        const scrollAtOpen = el?.scrollTop ?? 0;
+        const ownAppendsAtOpen = ownAppendCount;
+        void waitForBannerRow(BANNER_ROW_WAIT_MS).then(async (idx) => {
+          if (isStale() || idx < 0) return;
+          // The user already scrolled: do not move the view under them.
+          const now = getScrollContainer();
+          if (now && Math.abs(now.scrollTop - scrollAtOpen) > 2) return;
+          // The user sent a message meanwhile: the view follows it at the
+          // bottom, not up to the banner.
+          if (ownAppendCount !== ownAppendsAtOpen) return;
+          await nextTick();
+          const fresh = reversedItems.value.findIndex(item => item.type === "unread-banner");
+          if (fresh >= 0) scrollToBannerRow(fresh);
+        });
       }
     } else if (el) {
       el.scrollTop = 0; // column-reverse: bottom = scrollTop 0
@@ -1021,6 +1090,7 @@ watch(lastMessageIdentity, (newVal, oldVal) => {
   if (!lastMsg) return;
 
   const lastAddedIsOwn = lastMsg.senderId === authStore.address;
+  if (lastAddedIsOwn) ownAppendCount++;
 
   if (lastAddedIsOwn || isNearBottom.value) {
     scrollToBottom();
@@ -1502,8 +1572,8 @@ defineExpose({ scrollToMessage, setSearchQuery });
             :is-own="item.message.senderId === authStore.address"
             :my-address="authStore.address ?? undefined"
             :is-group="isGroup"
-            :show-avatar="themeStore.messageGrouping ? !isConsecutiveMessage(item.message, chatStore.activeMessages[(item.index ?? 0) + 1]) : true"
-            :is-first-in-group="themeStore.messageGrouping ? !isConsecutiveMessage(chatStore.activeMessages[(item.index ?? 0) - 1], item.message) : true"
+            :show-avatar="themeStore.messageGrouping ? !isConsecutiveMessage(item.message, timelineMessages[(item.index ?? 0) + 1]) : true"
+            :is-first-in-group="themeStore.messageGrouping ? !isConsecutiveMessage(timelineMessages[(item.index ?? 0) - 1], item.message) : true"
             @contextmenu="openContextMenu"
             @reply="(msg) => { chatStore.replyingTo = { id: msg.id, senderId: msg.senderId, content: msg.content.slice(0, 150), type: msg.type }; }"
             @scroll-to-reply="scrollToMessage"

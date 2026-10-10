@@ -34,16 +34,16 @@ describe("checkPeerKeys logic branches", () => {
     expect(source).toContain('peerKeysStatus.set(roomId, "not-encrypted")');
   });
 
-  it("checks memberCount >= 50 for large rooms", () => {
-    expect(source).toContain("memberCount >= 50");
-  });
-
-  it("returns 'missing' when canBeEncrypt is false for small private rooms", () => {
-    expect(source).toContain('peerKeysStatus.set(roomId, "missing")');
-  });
-
-  it("returns 'available' when canBeEncrypt is true", () => {
-    expect(source).toContain('peerKeysStatus.set(roomId, "available")');
+  // The available / missing / not-encrypted / still-loading branches live in
+  // decidePeerKeysStatus (lib/peer-keys-status.ts) and are exercised by
+  // lib/peer-keys-status.test.ts; here we pin that checkPeerKeys feeds it.
+  it("decides the status from canBeEncrypt, member profiles and member count", () => {
+    const start = source.indexOf("const checkPeerKeys = async");
+    const body = source.slice(start, source.indexOf("\n  };", start));
+    expect(body).toContain("roomCrypto.canBeEncrypt()");
+    expect(body).toContain("getJoinedMemberCount");
+    expect(body).toMatch(/decidePeerKeysStatus\(\{[\s\S]*canEncrypt[\s\S]*membersLoaded: roomCrypto\.membersLoaded\?\.\(\)[\s\S]*memberCount/);
+    expect(body).toContain("peerKeysStatus.set(roomId, status)");
   });
 });
 

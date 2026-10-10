@@ -70,6 +70,9 @@ class CallForegroundService : Service() {
          * See [CallServiceStopPolicy].
          */
         const val EXTRA_GENERATION = "startGeneration"
+
+        /** When the stop was asked for (wall clock, ms); the media release closes only what is older (N1). */
+        const val EXTRA_STOP_REQUESTED_AT = "stopRequestedAt"
         private val startGeneration = java.util.concurrent.atomic.AtomicLong(0L)
         private val startLedger = CallStartLedger()
 
@@ -81,9 +84,12 @@ class CallForegroundService : Service() {
                 putExtra(EXTRA_CALLER_NAME, callerName)
                 putExtra(EXTRA_CALL_TYPE, callType)
                 putExtra(EXTRA_GENERATION, generation)
+                callId?.let { putExtra(CallActivity.EXTRA_CALL_ID, it) }
             }
             try {
-                context.startForegroundService(intent)
+                // ContextCompat: plain startService below Android 8, where
+                // startForegroundService does not exist (minSdk 24).
+                androidx.core.content.ContextCompat.startForegroundService(context, intent)
             } catch (e: Throwable) {
                 // WEE-31: Android 12+ ForegroundServiceStartNotAllowedException
                 // when the call accept path is invoked from a context the OS
@@ -97,12 +103,26 @@ class CallForegroundService : Service() {
         }
 
         fun updateStatus(context: Context, status: String, duration: String = "") {
+            // Nothing to update without a running service, and startService
+            // from the background (locked phone, no foreground service) throws
+            // BackgroundServiceStartNotAllowedException on Android 12+, which
+            // took the whole process down from the plugin thread. A started
+            // instance created just for this update also lingered, reading as
+            // a live call to the router's watchdog and the idle exit.
+            if (!isRunning) {
+                Log.d(TAG, "updateStatus($status) with no call service running — skipped")
+                return
+            }
             val intent = Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_UPDATE
                 putExtra(EXTRA_STATUS, status)
                 putExtra(EXTRA_DURATION, duration)
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "updateStatus rejected by the system", e)
+            }
         }
 
         /**
@@ -116,8 +136,16 @@ class CallForegroundService : Service() {
             val intent = Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_STOP
                 putExtra(EXTRA_GENERATION, startLedger.generationFor(callId, startGeneration.get()))
+                putExtra(EXTRA_STOP_REQUESTED_AT, System.currentTimeMillis())
             }
-            context.startService(intent)
+            // Reached from every call teardown. From the background with the
+            // service already gone, Android 12+ refuses the start and the
+            // throw crashed the process; there is nothing left to stop then.
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "stop rejected by the system (service not running: ${!isRunning})", e)
+            }
         }
 
         /**
@@ -184,7 +212,10 @@ class CallForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
-    private var savedVoiceCallVolume: Int = -1
+    // Android 7: focus held through the stream-based API, no request object.
+    private var legacyFocusHeld = false
+    // The one volume change the focus listener owns (a duck). Main thread only.
+    private val focusDuck = FocusDuckVolume()
     // The one mic mute the focus listener owns. Main thread only: the focus
     // listener and Telecom's connection callbacks both run there.
     private val focusLossMute = FocusLossMute()
@@ -200,6 +231,7 @@ class CallForegroundService : Service() {
     // app's display label so the notification still reads sensibly.
     private var callerName = "Forta Chat"
     private var callType = ""
+    private var callId = ""
     // Tracks whether ACTION_START actually populated callerName/callType
     // for this service instance. Lets ACTION_UPDATE detect the
     // out-of-order delivery path and ignore the update instead of
@@ -209,6 +241,9 @@ class CallForegroundService : Service() {
     // The start generation this instance runs; -1 until ACTION_START. Compared
     // with the counter in [isStale] before any process-wide teardown.
     private var generation: Long = -1L
+
+    /** When this call's stop was asked for; the media release leaves younger connections (N1). */
+    private var stopRequestedAt: Long? = null
 
     private val binder = LocalBinder()
 
@@ -234,6 +269,7 @@ class CallForegroundService : Service() {
                 val incomingName = intent.getStringExtra(EXTRA_CALLER_NAME)
                 callerName = if (incomingName.isNullOrBlank()) "Unknown" else incomingName
                 callType = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "voice"
+                callId = intent.getStringExtra(CallActivity.EXTRA_CALL_ID).orEmpty()
                 hasStarted = true
                 generation = intent.getLongExtra(EXTRA_GENERATION, -1L)
                 // Re-assert liveness: a stop that ran on this same instance
@@ -258,6 +294,9 @@ class CallForegroundService : Service() {
                 // `person must have a non-empty a name` when callerName was "".
                 if (!hasStarted) {
                     Log.w(TAG, "ACTION_UPDATE before ACTION_START — ignoring stale update")
+                    // An instance created for this update alone must not stay
+                    // started; stopSelf(startId) spares a start queued after it.
+                    stopSelf(startId)
                     return START_NOT_STICKY
                 }
                 val status = intent.getStringExtra(EXTRA_STATUS) ?: ""
@@ -266,9 +305,13 @@ class CallForegroundService : Service() {
                 updateNotification(text)
             }
             ACTION_HANGUP -> {
-                // Hangup triggered from notification action
+                // "Hang up" on the ongoing-call notification does what the call
+                // screen's button does: JS hangs the call up (m.call.hangup, then
+                // its teardown stops this service) and the screen closes. It used
+                // to close the screen and stop the service only — the peer was
+                // never told and stayed in a silent call.
+                CallActivity.onNativeHangup?.invoke()
                 CallActivity.onCallEnded?.invoke()
-                stopSelf()
             }
             ACTION_STOP -> {
                 val stopGeneration = intent.getLongExtra(EXTRA_GENERATION, -1L)
@@ -281,6 +324,7 @@ class CallForegroundService : Service() {
                     return START_NOT_STICKY
                 }
                 hasStarted = false
+                stopRequestedAt = intent.getLongExtra(EXTRA_STOP_REQUESTED_AT, System.currentTimeMillis())
                 releaseWakeLock()
                 abandonAudioFocus()
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -347,13 +391,17 @@ class CallForegroundService : Service() {
         // global and the next call may have created its own while this task
         // waited behind a slow stopCapture.
         val owner = generation
+        // N1: the next call's invite builds its connection before any start of
+        // this service, so the generation check cannot see it. Close only what
+        // existed when this call's stop was asked for (or now, without a stop).
+        val createdBefore = stopRequestedAt ?: System.currentTimeMillis()
         runCatching {
             mediaReleaseExecutor.execute {
                 if (CallServiceStopPolicy.isStale(owner, startGeneration.get())) {
                     Log.w(TAG, "media release from $from skipped — a newer call started")
                     return@execute
                 }
-                runCatching { WebRTCPlugin.manager?.closeAllPeerConnections() }
+                runCatching { WebRTCPlugin.manager?.closeAllPeerConnections(createdBefore) }
                     .onFailure { Log.w(TAG, "closeAllPeerConnections from $from threw", it) }
             }
         }.onFailure { Log.w(TAG, "could not schedule media release from $from", it) }
@@ -500,6 +548,9 @@ class CallForegroundService : Service() {
     // -----------------------------------------------------------------------
 
     private fun createNotificationChannel() {
+        // Channels exist from Android 8; below it the class is missing and this
+        // threw from onCreate, killing the process at every call.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.channel_active_call),
@@ -587,8 +638,14 @@ class CallForegroundService : Service() {
     }
 
     private fun buildNotification(status: String): Notification {
+        // Carry the call along: a tap after the call screen was closed creates
+        // a fresh CallActivity, which otherwise showed "Unknown", assumed a
+        // video call (camera prompt on a voice call) and had no call id.
         val contentIntent = Intent(this, CallActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(CallActivity.EXTRA_CALLER_NAME, callerName)
+            putExtra(CallActivity.EXTRA_CALL_TYPE, callType.ifEmpty { "voice" })
+            if (callId.isNotEmpty()) putExtra(CallActivity.EXTRA_CALL_ID, callId)
         }
         val contentPendingIntent = PendingIntent.getActivity(
             this, 0, contentIntent,
@@ -653,12 +710,11 @@ class CallForegroundService : Service() {
                 // D-09: Lower volume to ~30%
                 Log.d("WebRTCAudio", "Focus: DUCK — lowering volume")
                 audioManager?.let { am ->
-                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                    am.setStreamVolume(
-                        AudioManager.STREAM_VOICE_CALL,
-                        (maxVol * 0.3).toInt().coerceAtLeast(1),
-                        0
+                    val target = focusDuck.onDuck(
+                        current = am.getStreamVolume(AudioManager.STREAM_VOICE_CALL),
+                        max = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
                     )
+                    if (target >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -674,13 +730,7 @@ class CallForegroundService : Service() {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 // D-09: Restore volume + unmute
                 Log.d("WebRTCAudio", "Focus: GAIN — restoring audio")
-                if (savedVoiceCallVolume >= 0) {
-                    audioManager?.setStreamVolume(
-                        AudioManager.STREAM_VOICE_CALL,
-                        savedVoiceCallVolume,
-                        0
-                    )
-                }
+                restoreDuckedVolume()
                 releaseFocusLossMute("focus regained")
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
@@ -690,6 +740,17 @@ class CallForegroundService : Service() {
             else -> {
                 Log.d("WebRTCAudio", "Focus: unknown change=$focusChange")
             }
+        }
+    }
+
+    /** Undo a duck still in force, unless the user moved the volume since. */
+    private fun restoreDuckedVolume() {
+        val am = audioManager ?: return
+        try {
+            val restore = focusDuck.release(am.getStreamVolume(AudioManager.STREAM_VOICE_CALL))
+            if (restore >= 0) am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, restore, 0)
+        } catch (e: Exception) {
+            Log.w("WebRTCAudio", "Failed to restore voice call volume", e)
         }
     }
 
@@ -705,6 +766,20 @@ class CallForegroundService : Service() {
 
     private fun requestAudioFocus() {
         val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // AudioFocusRequest is Android 8+; Android 7 takes the stream form.
+            @Suppress("DEPRECATION")
+            runCatching { am.abandonAudioFocus(audioFocusChangeListener) }
+            @Suppress("DEPRECATION")
+            val result = am.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN,
+            )
+            legacyFocusHeld = true
+            Log.d("WebRTCAudio", "Audio focus requested (GAIN, legacy), result=$result")
+            return
+        }
 
         // Release the previous request before building another one. This is not
         // a one-shot call: CallActivity.onResume re-requests on every return to
@@ -715,13 +790,6 @@ class CallForegroundService : Service() {
             runCatching { am.abandonAudioFocusRequest(it) }
                 .onFailure { e -> Log.w("WebRTCAudio", "abandon before re-request threw", e) }
             audioFocusRequest = null
-        }
-
-        // Save current volume for restore (D-09). Only on the first request of
-        // the call: a re-request during a ducked window would otherwise capture
-        // the ducked level as the "original" and restore that on teardown.
-        if (savedVoiceCallVolume < 0) {
-            savedVoiceCallVolume = am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
         }
 
         val attrs = AudioAttributes.Builder()
@@ -746,29 +814,22 @@ class CallForegroundService : Service() {
         // Reached from onDestroy and onTaskRemoved, where a throw propagates
         // into the Service lifecycle callback and takes the process with it —
         // and both of those run precisely when the call is already going wrong.
-        audioFocusRequest?.let {
-            runCatching { audioManager?.abandonAudioFocusRequest(it) }
-                .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocusRequest threw", e) }
-            audioFocusRequest = null
-        }
-        // Session 23 / D-09: restore the user's previous voice-call
-        // volume here, in addition to the existing AUDIOFOCUS_GAIN
-        // listener path. When we self-abandon the focus (call ended
-        // normally) the focus change listener does not fire — without
-        // this explicit restore the voice-call volume could stay at
-        // the ducked level set by an earlier focus change.
-        if (savedVoiceCallVolume >= 0) {
-            try {
-                audioManager?.setStreamVolume(
-                    AudioManager.STREAM_VOICE_CALL,
-                    savedVoiceCallVolume,
-                    0,
-                )
-            } catch (e: Exception) {
-                Log.w("WebRTCAudio", "Failed to restore voice call volume", e)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let {
+                runCatching { audioManager?.abandonAudioFocusRequest(it) }
+                    .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocusRequest threw", e) }
+                audioFocusRequest = null
             }
-            savedVoiceCallVolume = -1
+        } else if (legacyFocusHeld) {
+            @Suppress("DEPRECATION")
+            runCatching { audioManager?.abandonAudioFocus(audioFocusChangeListener) }
+                .onFailure { e -> Log.w("WebRTCAudio", "abandonAudioFocus threw", e) }
+            legacyFocusHeld = false
         }
+        // Session 23 / D-09: undo a duck still in force here too. When we
+        // self-abandon the focus (call ended normally) the focus change
+        // listener does not fire, and the volume would stay ducked.
+        restoreDuckedVolume()
         // The call is over, and this instance may serve the next one. Not in
         // requestAudioFocus: CallActivity.onResume re-requests on every return
         // to the call, and a mute still in force must stay undoable.

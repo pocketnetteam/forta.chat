@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Dexie from "dexie";
 import "fake-indexeddb/auto";
-import { SyncEngine } from "../sync-engine";
+import { MATRIX_NOT_READY_CEILING_MS, MATRIX_NOT_READY_FAILURE, SyncEngine } from "../sync-engine";
 import { MessageRepository } from "../message-repository";
 import { RoomRepository } from "../room-repository";
 import type { PendingOperation, LocalMessage, LocalRoom } from "../schema";
@@ -208,5 +208,81 @@ describe("SyncEngine — WEE-85: queue while Matrix not ready", () => {
     expect(mockMatrix.sendEncryptedText).toHaveBeenCalledTimes(1);
     expect(message?.status).toBe("synced");
     expect(message?.eventId).toBe("$server_event_id");
+  });
+
+  // Audit S2-01 / forta-bugs#1398: with the homeserver unreachable the client
+  // never became ready, and the gate re-queued the op forever without counting
+  // a retry — the message showed its clock for hours with no error at all.
+  it("fails an op that has waited for Matrix longer than the ceiling", async () => {
+    setNotReady(true);
+    try {
+      await seedRoom(h.db);
+      const msg = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "stuck" });
+      const opId = await seedOp(h.db, msg.clientId);
+      await h.db.pendingOps.update(opId, { createdAt: Date.now() - MATRIX_NOT_READY_CEILING_MS - 1_000 });
+
+      h.engine.processQueue();
+
+      await vi.waitFor(
+        async () => {
+          const op = await h.db.pendingOps.get(opId);
+          expect(op?.status).toBe("failed");
+          expect(op?.errorMessage).toBe(MATRIX_NOT_READY_FAILURE);
+        },
+        { timeout: 2000, interval: 10 },
+      );
+      const message = await h.messages.getByClientId(msg.clientId);
+      expect(message?.status).toBe("failed");
+      expect(mockMatrix.sendEncryptedText).not.toHaveBeenCalled();
+    } finally {
+      setNotReady(false);
+    }
+  });
+
+  // Batch-2 review: the per-message Retry re-sent a text as a NEW op next to its
+  // failed one (a later retryAllFailed then sent it twice) and did nothing for
+  // media while Matrix was not ready. retryFailedFor re-queues the message's own
+  // failed op, and SyncEngine waits for Matrix itself.
+  it("re-queues one message's failed op and reports whether it had one", async () => {
+    await seedRoom(h.db);
+    const target = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "retry me" });
+    const other = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "leave me" });
+    const targetOp = await seedOp(h.db, target.clientId);
+    const otherOp = await seedOp(h.db, other.clientId);
+    await h.db.pendingOps.update(targetOp, { status: "failed", retries: 5, errorMessage: "Error: boom" });
+    await h.db.pendingOps.update(otherOp, { status: "failed", retries: 5, errorMessage: "Error: boom" });
+    setNotReady(true);
+
+    try {
+      expect(await h.engine.retryFailedFor(target.clientId)).toBe(true);
+      expect(await h.engine.retryFailedFor("no-such-client")).toBe(false);
+
+      const reset = await h.db.pendingOps.get(targetOp);
+      expect(reset?.status).not.toBe("failed");
+      expect(reset?.retries).toBe(0);
+      expect((await h.db.pendingOps.get(otherOp))?.status).toBe("failed");
+    } finally {
+      setNotReady(false);
+    }
+  });
+
+  it("puts ops that failed only because Matrix was not ready back in the queue", async () => {
+    await seedRoom(h.db);
+    const waited = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "waited" });
+    const broken = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "broken" });
+    const waitedOp = await seedOp(h.db, waited.clientId);
+    const brokenOp = await seedOp(h.db, broken.clientId);
+    await h.db.pendingOps.update(waitedOp, { status: "failed", errorMessage: MATRIX_NOT_READY_FAILURE });
+    await h.db.pendingOps.update(brokenOp, { status: "failed", errorMessage: "Error: M_FORBIDDEN", retries: 5 });
+    setNotReady(true); // keep the queue from sending while we look at it
+
+    try {
+      await h.engine.retryNotReadyFailures();
+
+      expect((await h.db.pendingOps.get(waitedOp))?.status).not.toBe("failed");
+      expect((await h.db.pendingOps.get(brokenOp))?.status).toBe("failed");
+    } finally {
+      setNotReady(false);
+    }
   });
 });

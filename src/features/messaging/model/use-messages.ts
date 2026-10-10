@@ -1,5 +1,5 @@
 import { buildEditContent } from "@/shared/lib/local-db/edit-content";
-import { onScopeDispose } from "vue";
+import { onScopeDispose, watch } from "vue";
 import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime, MSC3245_VIDEO_NOTE_KEY } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
@@ -10,8 +10,8 @@ import { hexEncode } from "@/shared/lib/matrix/functions";
 import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
-import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
+import { isNetworkBlocked } from "@/shared/lib/network/typed-network-errors";
 import { detectUrl, fetchPreview } from "./use-link-preview";
 import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
@@ -90,33 +90,8 @@ function resolveMime(file: File): string {
   return MIME_EXT_FALLBACK[ext] ?? "application/octet-stream";
 }
 
-/** Convert HEIC/HEIF File to JPEG so Android WebView (Chromium) can render it.
- *  iPhone cameras default to HEIC; Chromium does not support HEIC in <img>,
- *  resulting in a broken image on the receiver side. heic2any is loaded
- *  dynamically (~340 KB gzipped chunk) only on the first HEIC encounter.
- *  Returns the original file when the input is not HEIC/HEIF, or when
- *  conversion fails (fail-open: better to send the original than nothing). */
-export async function convertHeicToJpeg(file: File): Promise<File> {
-  const isHeic =
-    /image\/(heic|heif)/i.test(file.type) ||
-    /\.(heic|heif)$/i.test(file.name);
-  if (!isHeic) return file;
-
-  try {
-    const heic2any = (await import("heic2any")).default;
-    const result = await heic2any({
-      blob: file,
-      toType: "image/jpeg",
-      quality: 0.85,
-    });
-    const jpegBlob = Array.isArray(result) ? result[0] : (result as Blob);
-    const newName = file.name.replace(/\.(heic|heif)$/i, ".jpg");
-    return new File([jpegBlob], newName, { type: "image/jpeg" });
-  } catch (e) {
-    console.warn("[convertHeicToJpeg] conversion failed, sending original:", e);
-    return file; // fail-open
-  }
-}
+import { convertHeicToJpeg } from "./heic-to-jpeg";
+export { convertHeicToJpeg };
 
 /** Track which clientIds are already being cancelled (prevent double invocation) */
 const cancellingSet = new Set<string>();
@@ -152,6 +127,31 @@ async function handleUploadCancelled(
   } catch {
     cancellingSet.delete(clientId);
   }
+}
+
+/** True while an offline-queue drain runs. The head stays queued until it is
+ *  sent, so a second drain at the same time — another useMessages() instance
+ *  (MessageInput and MessageList each hold one) or another trigger — would
+ *  send it again. */
+let draining = false;
+/** A drain trigger arrived while a drain was busy. */
+let drainAgain = false;
+/** Next try for a message kept after its send gave up; the connection may stay
+ *  up, and nothing else would run the queue again. */
+let drainRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const OFFLINE_QUEUE_RETRY_MS = 15_000;
+
+/** A send from the legacy offline queue that hangs gives up after this and
+ *  stays queued; the same txnId keeps a late duplicate off the server. */
+const OFFLINE_QUEUE_SEND_TIMEOUT_MS = 30_000;
+
+/** Errors after which a queued message stays queued: the request never reached
+ *  the server, timed out, or an earlier attempt with its txnId is still in
+ *  flight in the SDK. */
+function isOfflineQueueSendTransient(e: unknown): boolean {
+  if (isNetworkBlocked(e)) return true;
+  const message = e instanceof Error ? e.message : String(e);
+  return /offline queue send timed out|known txnId|timeout of \d+ms exceeded/.test(message);
 }
 
 export function useMessages() {
@@ -283,8 +283,9 @@ export function useMessages() {
     }
 
     if (!isOnline.value) {
+      // Queued on this device only: it stays "sending" until the drain sends
+      // it (audit S2-04 — it used to read "sent" at once).
       enqueue({ id: tempId, roomId, content: trimmed, timestamp: Date.now() });
-      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
       return true;
     }
 
@@ -317,47 +318,115 @@ export function useMessages() {
     return true;
   };
 
-  /** Drain queued messages when coming back online */
+  /** Drain queued messages when coming back online or when Matrix is ready again. */
   const drainOfflineQueue = async () => {
-    const queue = getQueue();
-    if (queue.length === 0) return;
-    // Process one at a time
-    let msg: QueuedMessage | undefined;
-    while ((msg = dequeue())) {
+    if (draining) {
+      // A trigger while a drain is busy (the network flapped during a send)
+      // must not be lost: the busy drain runs once more.
+      drainAgain = true;
+      return;
+    }
+    draining = true;
+    try {
+      do {
+        drainAgain = false;
+        await drainOnce();
+      } while (drainAgain);
+    } finally {
+      draining = false;
+    }
+  };
+
+  /** One pass over the queue. A message leaves it only once it is sent or
+   *  refused for good: taking it first lost it whenever the drain met a
+   *  reconnecting client or a network that dropped again (audit S2-04). What
+   *  stays queued goes out on the next drain. */
+  const drainOnce = async () => {
+    while (isOnline.value) {
+      const matrixService = getMatrixClientService();
+      if (!matrixService.isReady()) return;
+      const msg = getQueue()[0];
+      if (!msg) {
+        // Nothing left to retry.
+        if (drainRetryTimer !== null) {
+          clearTimeout(drainRetryTimer);
+          drainRetryTimer = null;
+        }
+        return;
+      }
+      let serverEventId: string | undefined;
+      let outcome: "sent" | "keep" | "failed";
       try {
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) break;
-        const roomCrypto = await getSendCrypto(msg.roomId);
-        let serverEventId: string;
-        if (roomCrypto?.canBeEncrypt()) {
-          const encrypted = await roomCrypto.encryptEvent(msg.content);
-          serverEventId = await matrixService.sendEncryptedText(msg.roomId, encrypted);
-        } else {
+        // The message id is the txnId: a send whose response was lost goes
+        // out again and the server dedupes it.
+        const send = async (): Promise<string> => {
+          const roomCrypto = await getSendCrypto(msg.roomId);
+          if (roomCrypto?.canBeEncrypt()) {
+            const encrypted = await roomCrypto.encryptEvent(msg.content);
+            return matrixService.sendEncryptedText(msg.roomId, encrypted, msg.id);
+          }
           // Defense in depth: offline queue replay must not silently
           // downgrade to plaintext if peer keys are gone by the time we
           // come back online.
           if (roomCrypto?.requiresEncryption()) {
             throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — offline queue drain`);
           }
-          serverEventId = await matrixService.sendText(msg.roomId, msg.content);
+          return matrixService.sendText(msg.roomId, msg.content, msg.id);
+        };
+        serverEventId = await withTimeout(send(), OFFLINE_QUEUE_SEND_TIMEOUT_MS, "offline queue send");
+        outcome = "sent";
+      } catch (e) {
+        if (isOfflineQueueSendTransient(e)) {
+          // Never reached the server, or may still: it stays queued and "sending".
+          console.warn("[offline-queue] Send did not finish, keeping the message queued:", e);
+          outcome = "keep";
+        } else {
+          console.error("[offline-queue] Failed to send queued message:", e);
+          outcome = "failed";
         }
-        if (serverEventId) {
+      }
+      if (outcome === "keep") {
+        if (drainRetryTimer === null) {
+          drainRetryTimer = setTimeout(() => {
+            drainRetryTimer = null;
+            void drainOfflineQueue();
+          }, OFFLINE_QUEUE_RETRY_MS);
+        }
+        return;
+      }
+      dequeue();
+      try {
+        if (outcome === "failed") {
+          chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.failed);
+        } else if (serverEventId) {
           chatStore.updateMessageIdAndStatus(msg.roomId, msg.id, serverEventId, MessageStatus.sent);
         } else {
           chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.sent);
         }
       } catch (e) {
-        console.error("[offline-queue] Failed to send queued message:", e);
-        chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.failed);
+        console.warn("[offline-queue] Status update failed:", e);
       }
     }
   };
 
-  // Listen for online event to drain queue (with cleanup)
+  // Drain on the browser's `online` event, when the app's connectivity turns
+  // online (native network changes fire no window event) and when Matrix is
+  // ready again: a reconnect without a network change used to leave the
+  // queue untouched.
   if (typeof window !== "undefined") {
     window.addEventListener("online", drainOfflineQueue);
+    const stopReadyWatch = watch(
+      () => authStore.matrixReady,
+      (ready) => { if (ready) void drainOfflineQueue(); },
+    );
+    const stopOnlineWatch = watch(
+      () => isOnline.value,
+      (onlineNow) => { if (onlineNow) void drainOfflineQueue(); },
+    );
     onScopeDispose(() => {
       window.removeEventListener("online", drainOfflineQueue);
+      stopReadyWatch();
+      stopOnlineWatch();
     });
   }
 
@@ -388,12 +457,9 @@ export function useMessages() {
     // the two send paths symmetric.
     const processedFile = await convertHeicToJpeg(file);
 
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      sendDiag("file:matrix-not-ready");
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
-      return false;
-    }
+    // No Matrix-readiness gate here: like text (WEE-85), the file is queued and
+    // SyncEngine holds the op until the client is ready. Returning early used
+    // to drop the attachment outright (audit S2-02, forta-bugs#1387).
 
     // Determine message type from MIME (with fallback for HEIC/extension-only files).
     // Audio MIME deliberately routes to MessageType.file: voice recordings have
@@ -489,13 +555,7 @@ export function useMessages() {
     // Downscale to 2048 px / q=0.85 (sendFile keeps the original). Forwards are
     // skipped: the sender already optimized it and a second encode only loses quality.
     const processedFile = options.forwardedFrom ? converted : await optimizeChatImage(converted);
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      sendDiag("image:matrix-not-ready");
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "image" }));
-      return false;
-    }
+    // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const dimensions = await getImageDimensions(processedFile);
     const imageMime = resolveMime(processedFile);
@@ -579,13 +639,7 @@ export function useMessages() {
       sendDiag("audio:no-room-or-file", { hasRoom: !!roomId, hasFile: !!file });
       return false;
     }
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      sendDiag("audio:matrix-not-ready");
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "audio" }));
-      return false;
-    }
+    // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const audioMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
@@ -685,12 +739,7 @@ export function useMessages() {
     sendDiag("videoCircle:start", { name: file?.name, size: file?.size });
     const roomId = chatStore.activeRoomId;
     if (!roomId || !file) return false;
-
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      reportSendError(new SendError("matrixNotReady", "Matrix client not ready", { fileName: file.name, kind: "file" }));
-      return false;
-    }
+    // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const videoMime = resolveMime(file);
     const localBlobUrl = URL.createObjectURL(file);
@@ -1676,11 +1725,17 @@ export function useMessages() {
             const onProgress = makeThrottledProgress((percent) => {
               dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
             });
+            const gifUpload = new AbortController();
             const url = await withTimeout(
-              matrixService.uploadContent(fileToUpload, onProgress),
+              matrixService.uploadContent(fileToUpload, onProgress, gifUpload.signal),
               UPLOAD_TIMEOUT_MS,
               "GIF upload",
-            );
+            ).catch((e: unknown) => {
+              // The timeout does not stop the upload: abort it, or it keeps
+              // sending and writing progress after the message failed.
+              gifUpload.abort();
+              throw e;
+            });
 
             const content: Record<string, unknown> = {
               body: info?.title || "GIF",
@@ -1811,7 +1866,6 @@ export function useMessages() {
 
     const roomId = message.roomId;
     const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
     if (!isChatDbReady()) return;
 
     const dbKit = getChatDb();
@@ -1822,6 +1876,20 @@ export function useMessages() {
 
     const localMsg = await dbKit.messages.getByClientId(mKey);
     if (!localMsg) return;
+
+    // A send that failed in SyncEngine still has its op and persisted blob:
+    // re-queue it, and SyncEngine waits for the Matrix client itself. The Retry
+    // tap used to do nothing at all while Matrix was not ready (audit batch-2
+    // review). The direct pipeline below is only for sends without an op.
+    if (await dbKit.syncEngine.retryFailedFor(mKey)) {
+      await dbKit.messages.updateStatus({ clientId: mKey }, "pending");
+      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
+      return;
+    }
+    if (!matrixService.isReady()) {
+      useToast().toast(tRaw("sync.connecting"), "info");
+      return;
+    }
 
     // Try to recover the blob from the still-alive blob URL
     const blobUrl = localMsg.localBlobUrl || localMsg.fileInfo?.url;
@@ -1875,6 +1943,11 @@ export function useMessages() {
         );
         secrets = encrypted.secrets;
         fileToUpload = encrypted.file;
+      } else if (roomCrypto?.requiresEncryption()) {
+        // Same guard as SyncEngine: a private room never gets a file in the
+        // clear. This retry pipeline used to upload and send it unencrypted
+        // whenever canBeEncrypt() was false (audit batch-2 review).
+        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — media retry`);
       }
 
       // Phase 2: Upload
@@ -2009,15 +2082,11 @@ export function useMessages() {
     // to the still-last-message case inside the repository.
     await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "pending");
 
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) {
-      console.error("[retryMessage] Matrix client still not ready", { roomId, clientId: mKey });
-      await dbKit.messages.markFailed(mKey);
-      // WEE-64: this retry never reaches SyncEngine.markMessageFailed, so mirror
-      // the failed badge onto the preview here (still-last guard in the repo).
-      await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
-      return;
-    }
+    // Re-queue the message's own failed op: a new op next to it would send the
+    // message twice once the old one is retried too. No Matrix-readiness gate:
+    // SyncEngine holds the op until the client is ready (it used to flip the
+    // message straight back to failed here — audit batch-2 review).
+    if (await dbKit.syncEngine.retryFailedFor(mKey)) return;
 
     try {
       await dbKit.syncEngine.enqueue(

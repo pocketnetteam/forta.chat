@@ -1,23 +1,13 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/entities/auth";
 import { useI18n } from "@/shared/lib/i18n";
+import { captchaImageSrc } from "./captcha-image";
 
 const emit = defineEmits<{ done: [] }>();
 const { t } = useI18n();
 const authStore = useAuthStore();
 
-const sanitizeSvg = (svg: string): string => {
-  return svg
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/on\w+\s*=\s*"[^"]*"/gi, "")
-    .replace(/on\w+\s*=\s*'[^']*'/gi, "")
-    .replace(/javascript:/gi, "")
-    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
-    .replace(/<object[\s\S]*?<\/object>/gi, "")
-    .replace(/<embed[\s\S]*?>/gi, "");
-};
-
-const captchaSvg = ref("");
+const captchaSrc = ref("");
 const captchaText = ref("");
 const loading = ref(true);
 const submitting = ref(false);
@@ -30,7 +20,7 @@ const loadCaptcha = async (clearError = true) => {
   try {
     const result = await authStore.fetchCaptcha();
     // The API returns { id, img (SVG markup), done }
-    captchaSvg.value = sanitizeSvg(result?.img || "");
+    captchaSrc.value = captchaImageSrc(result?.img || "");
     loading.value = false;
   } catch (e) {
     error.value = e instanceof Error ? e.message : t("register.captchaLoadFailed");
@@ -83,10 +73,11 @@ onMounted(loadCaptcha);
     <template v-else>
       <!-- Captcha image -->
       <div
-        v-if="captchaSvg"
+        v-if="captchaSrc"
         class="mb-4 flex justify-center overflow-hidden rounded-xl border border-neutral-grad-1 bg-white p-3"
-        v-html="captchaSvg"
-      />
+      >
+        <img :src="captchaSrc" :alt="t('register.captchaPlaceholder')" class="max-w-full" draggable="false" />
+      </div>
 
       <form class="flex flex-col" @submit.prevent="handleSubmit">
         <input

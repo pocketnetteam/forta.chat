@@ -4,6 +4,8 @@ import {
   countCachedKeys,
   countPublishedKeys,
   REQUIRED_ENCRYPTION_KEYS,
+  ownKeyCountFromCaches,
+  profileAnswerInconclusive,
   type KeyRepublishInput,
 } from "../key-republish";
 
@@ -142,5 +144,26 @@ describe("countPublishedKeys", () => {
     expect(countPublishedKeys("string")).toBe(0);
     expect(countPublishedKeys({ k: "" })).toBe(0);
     expect(countPublishedKeys({})).toBe(0);
+  });
+});
+
+// Web bench 2026-10-10: with the Pocketnet nodes unreachable the SDK cache was
+// empty and the profile load answered with no row, so a login with published
+// keys concluded "keys missing, no PKOIN" and raised the missing-keys banner.
+describe("own key count and an empty profile answer", () => {
+  it("counts the keys the self-profile snapshot kept from an earlier load", () => {
+    expect(ownKeyCountFromCaches({ keys: [] }, { keys: Array(12).fill("k") })).toBe(12);
+    expect(ownKeyCountFromCaches({ keys: Array(12).fill("k") }, null)).toBe(12);
+    expect(ownKeyCountFromCaches(null, { keys: ["a", ""] })).toBe(1);
+  });
+
+  it("treats no profile row as inconclusive once this account's profile was loaded before", () => {
+    expect(profileAnswerInconclusive([], { syncedAt: 1_800_000_000_000 })).toBe(true);
+    expect(profileAnswerInconclusive([{ k: "" }], { syncedAt: 1_800_000_000_000 })).toBe(false);
+  });
+
+  it("keeps an account never loaded on the old path", () => {
+    expect(profileAnswerInconclusive([], { syncedAt: 0 })).toBe(false);
+    expect(profileAnswerInconclusive([], null)).toBe(false);
   });
 });

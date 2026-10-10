@@ -32,6 +32,7 @@ import {
   failoverProbeOrder,
   SyncWatchdog,
   PING_TIMEOUT_MS,
+  PING_TIMEOUT_TOR_MS,
   ERROR_RETRY_BASE_MS,
   ERROR_RETRY_MAX_MS,
   CLIENT_RECOVERY_BASE_MS,
@@ -772,6 +773,14 @@ export class MatrixClientService {
       this.watchdog?.notifySync(state);
       this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING", { fromCache: data?.fromCache === true });
     });
+
+    // The homeserver rejected the access token (M_UNKNOWN_TOKEN). The SDK stops
+    // syncing after that and nothing else noticed for 5 minutes; log in again
+    // right away (audit S3b-02).
+    this.client.on("Session.logged_out", () => {
+      console.warn("[matrix] access token rejected, logging in again");
+      this.watchdog?.sessionLost();
+    });
   }
 
   /** Schedule a single retry of the CURRENT host behind exponential backoff.
@@ -804,10 +813,9 @@ export class MatrixClientService {
    *  Used before connecting so a dead/throttled primary doesn't strand /sync
    *  (WEE-105 H1). Honours primary priority so a healthy primary is untouched. */
   async pingServers(): Promise<string> {
-    // Under Tor the SDK routes through the local reverse proxy; a bare axios
-    // ping would always fail and just burn 2×PING_TIMEOUT_MS of dead boot
-    // latency. Tor is out of scope here (it isn't a working transport for us),
-    // so keep the current host and skip probing entirely.
+    // Under Tor keep the current host at boot: probing over fresh circuits
+    // would add seconds to every start. The watchdog probes the mirrors (with
+    // the Tor budget) once sync is actually stuck — see findLiveHost.
     if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
     let liveHost: string | null = null;
     const picked = await pickLiveMatrixHost(async (host) => {
@@ -821,21 +829,24 @@ export class MatrixClientService {
     return picked;
   }
 
-  /** Single-host /versions probe. Tor skips network and treats the current
-   *  baseUrl host as live. */
+  /** Single-host /versions probe. Under Tor it travels the way the SDK's own
+   *  requests do (the service worker hands it to the local Tor proxy), with a
+   *  longer budget. */
   private async probeHost(host: string): Promise<boolean> {
-    if (this.torProxyUrl) return host === hostFromBaseUrl(this.baseUrl);
     try {
-      await axios.get(`https://${host}/_matrix/client/versions`, { timeout: PING_TIMEOUT_MS });
+      await axios.get(`https://${host}/_matrix/client/versions`, {
+        timeout: this.torProxyUrl ? PING_TIMEOUT_TOR_MS : PING_TIMEOUT_MS,
+      });
       return true;
     } catch {
       return false;
     }
   }
 
-  /** First live host in `order`, or null when every probe fails (no primary fallback). */
+  /** First live host in `order`, or null when every probe fails (no primary fallback).
+   *  Probes under Tor too: answering "the current host" without asking kept the
+   *  watchdog failing over to the same dead host for hours (audit S8-01). */
   private async findLiveHost(order: readonly string[]): Promise<string | null> {
-    if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
     const host = await findLiveMatrixHost((host) => this.probeHost(host), order);
     if (host) writeCachedMatrixHost(host);
     return host;
@@ -1128,10 +1139,14 @@ export class MatrixClientService {
       if (attempt === this.initGeneration) this.building = false;
     }
 
-    // Init file storage
-    try {
-      this.db = await createChatStorage("files", 1);
-    } catch { /* ignore */ }
+    // Init file storage once: init() now runs again on a timer while the
+    // homeserver is unreachable (audit S2-01), and every createChatStorage()
+    // opened another handle that nothing closed.
+    if (!this.db) {
+      try {
+        this.db = await createChatStorage("files", 1);
+      } catch { /* ignore */ }
+    }
   }
 
   isReady(): boolean {
@@ -1148,18 +1163,44 @@ export class MatrixClientService {
   async sendText(roomId: string, text: string, txnId?: string): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
     const content = sdk.ContentHelpers.makeTextMessage(text);
-    const res = txnId !== undefined
-      // matrix-js-sdk routes sendEvent through the same txnId dedup path that
-      // sendMessage uses, so we can go through sendEvent when we have an ID.
-      ? await this.client.sendEvent(roomId, "m.room.message", content, txnId)
-      : await this.client.sendMessage(roomId, content);
-    return (res as { event_id: string }).event_id;
+    if (txnId === undefined) {
+      const res = await this.client.sendMessage(roomId, content);
+      return (res as { event_id: string }).event_id;
+    }
+    // matrix-js-sdk routes sendEvent through the same txnId dedup path that
+    // sendMessage uses, so we can go through sendEvent when we have an ID.
+    return this.sendMessageEvent(roomId, content, txnId);
   }
 
   /** Send encrypted text message. Returns server event_id. */
   async sendEncryptedText(roomId: string, content: Record<string, unknown>, txnId?: string): Promise<string> {
     if (!this.client) throw new Error("Client not initialized");
-    const res = await this.client.sendEvent(roomId, "m.room.message", content, txnId);
+    return this.sendMessageEvent(roomId, content, txnId);
+  }
+
+  /**
+   * `client.sendEvent` for an m.room.message that survives a retry with the
+   * same txnId. The SDK keeps a failed send's local echo under its txnId
+   * (NOT_SENT) and throws "addPendingEvent called on an event with known
+   * txnId" for a second send with it, so the outbound queue's retries never
+   * reached the server and one network error failed the message for good.
+   * A NOT_SENT echo is resent instead (same txnId: the server still dedupes
+   * it), a SENT one answers with its event id. An echo still in flight falls
+   * through to sendEvent, which throws, and the queue retries later.
+   */
+  private async sendMessageEvent(roomId: string, content: object, txnId?: string): Promise<string> {
+    const client = this.client!;
+    if (txnId !== undefined) {
+      const room = client.getRoom(roomId);
+      const echo = room?.getEventForTxnId(txnId);
+      if (room && echo?.status === sdk.EventStatus.NOT_SENT) {
+        const res = await client.resendEvent(echo, room);
+        return (res as { event_id: string }).event_id;
+      }
+      const sentId = echo?.status === sdk.EventStatus.SENT ? echo.getId() : undefined;
+      if (sentId && !sentId.startsWith("~")) return sentId;
+    }
+    const res = await client.sendEvent(roomId, "m.room.message", content, txnId);
     return (res as { event_id: string }).event_id;
   }
 

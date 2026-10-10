@@ -4,21 +4,22 @@ import { resolve } from "path";
 
 const getSource = () => readFileSync(resolve(__dirname, "../matrix-crypto.ts"), "utf-8");
 
+/** The whole canBeEncrypt() body, up to its closing brace. */
+function canBeEncryptBody(source: string): string {
+  const start = source.indexOf("canBeEncrypt(): boolean {");
+  expect(start).toBeGreaterThan(-1);
+  return source.slice(start, source.indexOf("\n      },", start));
+}
+
 describe("canBeEncrypt peer key check", () => {
   it("should check that all usersinfo entries have >= m keys using .every()", () => {
-    const source = getSource();
-    const start = source.indexOf("canBeEncrypt(): boolean {");
-    expect(start).toBeGreaterThan(-1);
-    const section = source.slice(start, start + 1200);
+    const section = canBeEncryptBody(getSource());
     expect(section).toContain(".every(");
     expect(section).toContain("keys.length >= m");
   });
 
   it("should not only check usersinfo.length without key verification", () => {
-    const source = getSource();
-    const start = source.indexOf("canBeEncrypt(): boolean {");
-    expect(start).toBeGreaterThan(-1);
-    const section = source.slice(start, start + 1200);
+    const section = canBeEncryptBody(getSource());
     // Should NOT have the old pattern: just return length > 1 && length < 50
     expect(section).not.toMatch(/return usersinfoArray\.length > 1 && usersinfoArray\.length < 50;/);
   });

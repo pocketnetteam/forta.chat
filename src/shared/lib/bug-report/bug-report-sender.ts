@@ -64,11 +64,9 @@ interface ScreenshotResult {
 
 async function uploadScreenshot(
   token: string,
-  base64Data: string,
+  compressed: string,
   index: number,
 ): Promise<ScreenshotResult> {
-  const compressed = await compressImage(base64Data, THUMB_MAX_WIDTH, THUMB_QUALITY);
-
   try {
     const filename = `${Date.now()}-${index}.jpg`;
     const path = `bug-screenshots/${filename}`;
@@ -233,13 +231,14 @@ async function formatBody(
         '',
         '<details><summary>FCM invite history</summary>',
         '',
-        '| # | callId | latency (ms) | expired |',
-        '|---|--------|--------------|---------|',
+        '| # | callId | latency (ms) | expired | FCM priority | outcome |',
+        '|---|--------|--------------|---------|--------------|---------|',
       );
       diag.inviteHistory.forEach((r, i) => {
         const callIdShort = r.callId ? r.callId.slice(0, 12) : '(none)';
+        const latency = r.sentTimeSource === 'missing' ? 'no send time' : String(r.deliveryLatencyMs);
         lines.push(
-          `| ${i + 1} | \`${callIdShort}\` | ${r.deliveryLatencyMs} | ${r.expired ? 'yes' : 'no'} |`,
+          `| ${i + 1} | \`${callIdShort}\` | ${latency} | ${r.expired ? 'yes' : 'no'} | ${formatFcmPriority(r.priority, r.originalPriority)} | ${r.outcome ?? '?'} |`,
         );
       });
       lines.push('</details>');
@@ -305,6 +304,19 @@ export interface BugReportResult {
   uploadError?: string;
 }
 
+const FCM_PRIORITY_NAMES: Record<number, string> = { 1: 'high', 2: 'normal' };
+
+/** FCM priority of an invite push; a push sent high and delivered lower was
+ *  downgraded by FCM (quota, Doze) rather than delayed by the network. */
+export function formatFcmPriority(priority?: number, originalPriority?: number): string {
+  if (priority === undefined) return '?';
+  const name = FCM_PRIORITY_NAMES[priority] ?? 'unknown';
+  if (originalPriority !== undefined && originalPriority !== priority && FCM_PRIORITY_NAMES[originalPriority]) {
+    return `${name} (sent ${FCM_PRIORITY_NAMES[originalPriority]})`;
+  }
+  return name;
+}
+
 export async function sendBugReport(
   input: BugReportInput,
 ): Promise<BugReportResult> {
@@ -312,8 +324,14 @@ export async function sendBugReport(
 
   const results: ScreenshotResult[] = [];
   if (input.screenshots?.length) {
-    for (let i = 0; i < input.screenshots.length; i++) {
-      results.push(await uploadScreenshot(token, input.screenshots[i], i));
+    // Compressing is independent per screenshot, so it runs at once (audit
+    // W2D-03). The uploads stay one after another: each Contents API PUT is a
+    // commit on the same branch, and concurrent ones fail with 409.
+    const compressed = await Promise.all(
+      input.screenshots.map((s) => compressImage(s, THUMB_MAX_WIDTH, THUMB_QUALITY)),
+    );
+    for (let i = 0; i < compressed.length; i++) {
+      results.push(await uploadScreenshot(token, compressed[i], i));
     }
   }
 

@@ -437,6 +437,17 @@ describe("chat-store", () => {
 
   // ─── markRoomAsRead ───────────────────────────────────────────
 
+  // Push titles fall back to the Matrix member name, which beats a truncated
+  // address — so they need to know when the chat has no name of its own.
+  describe("getKnownDisplayName", () => {
+    it("is null where getDisplayName would fall back to the address", () => {
+      const addr = "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu";
+      expect(store.getKnownDisplayName(addr)).toBeNull();
+      expect(store.getKnownDisplayName("")).toBeNull();
+      expect(store.getDisplayName(addr)).toContain("PPbNqCwe");
+    });
+  });
+
   describe("markRoomAsRead", () => {
     it("resets unreadCount to 0", () => {
       store.addRoom(makeRoom({ id: "!r1:s", unreadCount: 10 }));

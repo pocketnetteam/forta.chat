@@ -160,15 +160,66 @@ export async function uploadMediaViaTorFile(
   }
 }
 
+/**
+ * Longest a download through TorFile may take before the caller stops waiting.
+ * The plugin's own connect/read timeouts end a stalled transfer; this only frees
+ * the caller, and the media download slot it holds, if the native call never
+ * answers at all (audit S4-01).
+ */
+export const TOR_DOWNLOAD_CEILING_MS = 10 * 60_000;
+
+export interface DownloadMediaViaTorFileOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/** Settle with `promise`, or reject once `signal` aborts or `timeoutMs` passes. */
+function untilAbortOrTimeout<T>(promise: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup();
+      reject(new DOMException('Download cancelled', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Tor download timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (err: unknown) => {
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
+
 /** Download media bytes through TorFile → reverse proxy :8181. */
 export async function downloadMediaViaTorFile(
   url: string,
   authorization?: string,
+  options: DownloadMediaViaTorFileOptions = {},
 ): Promise<Blob> {
-  const { filePath, mimeType } = await fileTransferService.download({
-    url,
-    authorization,
-  });
+  if (options.signal?.aborted) {
+    throw new DOMException('Download cancelled', 'AbortError');
+  }
+  const { filePath, mimeType } = await untilAbortOrTimeout(
+    fileTransferService.download({ url, authorization }),
+    options.timeoutMs ?? TOR_DOWNLOAD_CEILING_MS,
+    options.signal,
+  );
 
   const webPath = Capacitor.convertFileSrc(filePath);
   const response = await fetch(webPath);

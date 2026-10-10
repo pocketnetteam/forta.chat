@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import com.forta.chat.FortaFirebaseMessagingService
 import com.getcapacitor.JSObject
@@ -12,6 +13,8 @@ import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailabilityLight
 
 /**
  * Bridges push data between native FCM service and JS:
@@ -28,8 +31,11 @@ class PushDataPlugin : Plugin() {
         private const val MAX_CONSUMED_KEYS = 20
     }
 
-    /** Buffered push intent data for cold-start retrieval by JS */
+    /** Buffered push intent data for cold-start retrieval by JS. Written from
+     *  the main thread (onNewIntent), read on the plugin thread: under [pendingLock]. */
+    @Volatile
     private var pendingPushRoom: JSObject? = null
+    private val pendingLock = Any()
 
     override fun load() {
         // Register with FCM service so it can forward push data to us
@@ -120,6 +126,7 @@ class PushDataPlugin : Plugin() {
         val data = JSObject()
         data.put("roomId", roomId)
         if (eventId != null) data.put("eventId", eventId)
+        android.util.Log.i("FortaPush", "push tap buffered from the launch intent (roomId=$roomId)")
         pendingPushRoom = data
     }
 
@@ -141,14 +148,27 @@ class PushDataPlugin : Plugin() {
         val data = JSObject()
         data.put("roomId", roomId)
         if (eventId != null) data.put("eventId", eventId)
+        // singleTask: with the app closed the task outlives the process, so a
+        // tap recreates the activity from the launcher intent and arrives here,
+        // before the page has loaded. Nobody listens yet; the tap waits for
+        // getPendingIntent instead of being dropped (Samsung, 2026-10-10).
+        val buffered = synchronized(pendingLock) {
+            if (hasListeners("pushOpenRoom")) false else { pendingPushRoom = data; true }
+        }
+        if (buffered) {
+            android.util.Log.i("FortaPush", "push tap buffered until JS listens (roomId=$roomId)")
+            return
+        }
+        android.util.Log.i("FortaPush", "push tap forwarded to JS (roomId=$roomId)")
         notifyListeners("pushOpenRoom", data)
     }
 
     /** Called by JS to retrieve buffered push intent from cold-start */
     @PluginMethod
     fun getPendingIntent(call: PluginCall) {
-        val pending = pendingPushRoom
-        pendingPushRoom = null
+        val pending = synchronized(pendingLock) {
+            pendingPushRoom.also { pendingPushRoom = null }
+        }
         if (pending != null) {
             call.resolve(pending)
         } else {
@@ -156,12 +176,21 @@ class PushDataPlugin : Plugin() {
         }
     }
 
-    /** True when google-services.json was present at build time (FCM safe to register). */
+    /** True when FCM can deliver here: google-services.json was present at build
+     *  time and Google Play Services is on the device ([FcmAvailability]). */
     @PluginMethod
     fun isFcmAvailable(call: PluginCall) {
+        val status = playServicesStatus()
         val result = JSObject()
-        result.put("available", com.forta.chat.BuildConfig.FIREBASE_ENABLED)
+        result.put("available", FcmAvailability.fcmUsable(com.forta.chat.BuildConfig.FIREBASE_ENABLED, status))
+        result.put("playServices", FcmAvailability.playServicesUsable(status))
         call.resolve(result)
+    }
+
+    private fun playServicesStatus(): Int = try {
+        GoogleApiAvailabilityLight.getInstance().isGooglePlayServicesAvailable(context)
+    } catch (_: Throwable) {
+        ConnectionResult.SUCCESS // unknown: do not block registration
     }
 
     /** JS is signed in: pushes are delivered (see [PushSessionPolicy]). */
@@ -183,6 +212,12 @@ class PushDataPlugin : Plugin() {
     fun setIncomingCallsEnabled(call: PluginCall) {
         IncomingCallsStore.write(context, call.getBoolean("enabled", true) ?: true)
         call.resolve()
+    }
+
+    /** JS reads native's copy when WebView storage lost its own (C05). */
+    @PluginMethod
+    fun getIncomingCallsEnabled(call: PluginCall) {
+        call.resolve(JSObject().put("enabled", IncomingCallsStore.isEnabled(context)))
     }
 
     @PluginMethod
@@ -295,6 +330,22 @@ class PushDataPlugin : Plugin() {
         call.resolve()
     }
 
+    /** Contact aliases for notification titles (audit S6-01); replaces the whole set. */
+    @PluginMethod
+    fun cacheSenderAliases(call: PluginCall) {
+        val aliases = call.getObject("aliases") ?: run {
+            call.reject("aliases object is required"); return
+        }
+        val map = mutableMapOf<String, String>()
+        val keys = aliases.keys()
+        while (keys.hasNext()) {
+            val senderId = keys.next()
+            aliases.getString(senderId)?.let { map[senderId] = it }
+        }
+        FortaFirebaseMessagingService.replaceSenderAliases(context, map)
+        call.resolve()
+    }
+
     @PluginMethod
     fun cacheSenderNames(call: PluginCall) {
         val senders = call.getObject("senders") ?: run {
@@ -325,6 +376,9 @@ class PushDataPlugin : Plugin() {
         val nm = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE)
             as android.app.NotificationManager
         nm.cancel(FortaFirebaseMessagingService.NOTIF_TAG, roomId.hashCode())
+        // The room's missed-call notice sits in the messages channel too, so
+        // the launcher badge counts it until the room is opened.
+        nm.cancel(FortaFirebaseMessagingService.MISSED_CALL_TAG, FortaFirebaseMessagingService.missedCallSlot(roomId))
         // WEE-44 / forta-bugs#764: also cancel any orphan notifications for this
         // room. Some OEM launchers (Samsung One UI in particular) keep the badge
         // dot lit if ANY notification with this notification id is active in
@@ -335,7 +389,7 @@ class PushDataPlugin : Plugin() {
         try {
             val active = nm.activeNotifications ?: emptyArray()
             for (sb in active) {
-                if (sb.id == targetId && sb.notification?.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES) {
+                if (sb.id == targetId && isMessagesChannel(sb.notification)) {
                     nm.cancel(sb.tag, sb.id)
                 }
             }
@@ -364,8 +418,7 @@ class PushDataPlugin : Plugin() {
         // Cancel by tag: only the messages tag, leave call notifications alone.
         val active = nm.activeNotifications ?: emptyArray()
         for (sb in active) {
-            if (sb.tag == FortaFirebaseMessagingService.NOTIF_TAG &&
-                sb.notification?.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES) {
+            if (sb.tag == FortaFirebaseMessagingService.NOTIF_TAG && isMessagesChannel(sb.notification)) {
                 nm.cancel(sb.tag, sb.id)
             }
         }
@@ -465,5 +518,52 @@ class PushDataPlugin : Plugin() {
         } catch (e: Exception) {
             call.reject("Could not open the full-screen intent settings: ${e.message}", "unavailable", e)
         }
+    }
+
+    /**
+     * Missed push calls (T3): does Android exempt this app from battery
+     * optimization? Without the exemption Doze and App Standby can hold a call
+     * push back until the invite is over.
+     */
+    @PluginMethod
+    fun getBatteryOptimizationStatus(call: PluginCall) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        call.resolve(JSObject().apply {
+            put("ignoring", pm.isIgnoringBatteryOptimizations(context.packageName))
+        })
+    }
+
+    /**
+     * Ask the user to exempt the app: the system dialog decides, the app never
+     * changes the setting itself. Builds without that dialog get the list of
+     * apps instead.
+     */
+    @PluginMethod
+    fun requestIgnoreBatteryOptimizations(call: PluginCall) {
+        try {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:${context.packageName}"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            call.resolve()
+        } catch (e: Exception) {
+            try {
+                context.startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                call.resolve()
+            } catch (fallback: Exception) {
+                call.reject("Could not open the battery optimization settings: ${fallback.message}", "unavailable", fallback)
+            }
+        }
+    }
+
+    /** Channels exist from Android 8; below it every notification is the app's one stream. */
+    private fun isMessagesChannel(n: android.app.Notification?): Boolean {
+        if (n == null) return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        return n.channelId == FortaFirebaseMessagingService.CHANNEL_MESSAGES
     }
 }

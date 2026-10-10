@@ -24,6 +24,10 @@ const fakeActiveRoom = computed(() => {
 });
 
 const peerKeysStatusMap = new Map<string, string>();
+const fakeAcceptInvite = vi.hoisted(() =>
+  vi.fn(async (_roomId: string): Promise<"joined" | "banned" | "failed"> => "joined"),
+);
+const fakeToast = vi.hoisted(() => vi.fn());
 const activeMessagesRef = ref<unknown[]>([]);
 const selectedMessageIdsRef = ref<Set<string>>(new Set());
 
@@ -60,7 +64,7 @@ vi.mock("@/entities/chat", async () => {
       setActiveRoom: vi.fn(),
       cancelForward: vi.fn(),
       exitSelectionMode: vi.fn(),
-      acceptInvite: vi.fn(),
+      acceptInvite: fakeAcceptInvite,
       declineInvite: vi.fn(),
       checkPeerKeys: vi.fn(),
       getRoomPowerLevels: vi.fn(() => ({ myLevel: 0 })),
@@ -73,11 +77,14 @@ vi.mock("@/entities/chat", async () => {
 });
 
 // ── Mock auth store ───────────────────────────────────────────────
+const fakeAuth = vi.hoisted(() => ({
+  address: null,
+  pcrypto: null,
+  ownKeysMissing: false,
+  republishKeysFromUi: vi.fn(async () => ({ state: "republished" })),
+}));
 vi.mock("@/entities/auth", () => ({
-  useAuthStore: () => ({
-    address: null,
-    pcrypto: null,
-  }),
+  useAuthStore: () => fakeAuth,
 }));
 
 // ── Mock channel store ────────────────────────────────────────────
@@ -138,7 +145,7 @@ vi.mock("@/features/wallet", () => ({
 }));
 
 vi.mock("@/shared/lib/use-toast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: fakeToast }),
 }));
 
 vi.mock("@/features/messaging/model/use-paste-drop", () => ({
@@ -406,6 +413,95 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     expect(header.find('[aria-label="chat.search"]').exists()).toBe(true);
     expect(header.find('[aria-label="info.title"]').exists()).toBe(true);
 
+    wrapper.unmount();
+  });
+
+  // Audit S7-03: a group with a member who never published keys can't encrypt,
+  // so every send failed after ~31 s of retries — and the banner that explains
+  // it was hard-suppressed for groups, leaving everyone guessing.
+  it("explains missing member keys in a group instead of hiding the banner", async () => {
+    fakeActiveRoomId.value = "!grp:matrix.org";
+    fakeRooms.value = [{ id: "!grp:matrix.org", name: "Team", isGroup: true, members: [], membership: "join" }];
+    fakeRoomsInitialized.value = true;
+    peerKeysStatusMap.set("!grp:matrix.org", "missing");
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("chat.groupMemberKeysMissing");
+    expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+    wrapper.unmount();
+  });
+
+  // Audit W2A-01: when THIS account's keys are missing, the banner blamed the
+  // peer and offered no way out; it now says so and offers to publish them.
+  it("tells the user their own keys are missing and offers to publish them", async () => {
+    fakeAuth.ownKeysMissing = true;
+    try {
+      fakeActiveRoomId.value = "!dm:matrix.org";
+      fakeRooms.value = [{ id: "!dm:matrix.org", name: "Alice", isGroup: false, members: [], membership: "join" }];
+      fakeRoomsInitialized.value = true;
+      peerKeysStatusMap.set("!dm:matrix.org", "missing");
+
+      const wrapper = mount(ChatWindow, mountOpts);
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("chat.ownKeysMissing");
+      expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+      const publish = wrapper.findAll("button").find((b) => b.text() === "chat.publishOwnKeys");
+      expect(publish).toBeDefined();
+      await publish!.trigger("click");
+      await flushPromises();
+      expect(fakeAuth.republishKeysFromUi).toHaveBeenCalledTimes(1);
+      wrapper.unmount();
+    } finally {
+      fakeAuth.ownKeysMissing = false;
+    }
+  });
+
+  // Audit S3b-03: a failed join brought the invite screen back with no word.
+  it("says so when accepting an invite fails, and stays quiet when it works", async () => {
+    fakeActiveRoomId.value = "!inv:matrix.org";
+    fakeRooms.value = [{ id: "!inv:matrix.org", name: "Team", isGroup: true, members: [], membership: "invite" }];
+    fakeRoomsInitialized.value = true;
+    fakeToast.mockClear();
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+    const accept = wrapper.findAll("button").find((b) => b.text() === "chat.accept");
+    expect(accept).toBeDefined();
+
+    fakeAcceptInvite.mockResolvedValueOnce("failed");
+    await accept!.trigger("click");
+    await flushPromises();
+    expect(fakeAcceptInvite).toHaveBeenCalledWith("!inv:matrix.org");
+    expect(fakeToast).toHaveBeenCalledWith("chat.acceptInviteFailed", "error");
+
+    // A ban is not a connection problem; say what it is.
+    fakeToast.mockClear();
+    fakeAcceptInvite.mockResolvedValueOnce("banned");
+    await accept!.trigger("click");
+    await flushPromises();
+    expect(fakeToast).toHaveBeenCalledWith("chat.acceptInviteBanned", "error");
+
+    fakeToast.mockClear();
+    fakeAcceptInvite.mockResolvedValueOnce("joined");
+    await accept!.trigger("click");
+    await flushPromises();
+    expect(fakeToast).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("keeps the 1:1 wording for a direct chat whose peer has no keys", async () => {
+    fakeActiveRoomId.value = "!dm:matrix.org";
+    fakeRooms.value = [{ id: "!dm:matrix.org", name: "Alice", isGroup: false, members: [], membership: "join" }];
+    fakeRoomsInitialized.value = true;
+    peerKeysStatusMap.set("!dm:matrix.org", "missing");
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("chat.peerKeysMissing");
     wrapper.unmount();
   });
 

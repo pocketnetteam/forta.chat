@@ -56,7 +56,7 @@
     "@capacitor/status-bar": "^8.0.1",
     "@capgo/capacitor-device-info": "^8.0.10",
     "@capgo/capacitor-downloader": "^8.1.31",
-    "@capgo/capacitor-incoming-call-kit": "github:j-bitmaker/capacitor-incoming-call-kit#8.2.1-forta.2",
+    "@capgo/capacitor-incoming-call-kit": "github:j-bitmaker/capacitor-incoming-call-kit#8.2.1-forta.3",
     "@capgo/capacitor-share-target": "^8.0.25",
     "@capgo/capacitor-webview-version-checker": "^8.2.1",
     "@noble/secp256k1": "^2.3.0",

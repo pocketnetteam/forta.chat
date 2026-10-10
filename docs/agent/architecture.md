@@ -71,6 +71,8 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### SyncEngine
 - FIFO outbound queue with exponential backoff + jitter (up to 30s, then "failed")
 - `processQueue()` runs after DB recovery; `setOnline(true/false)` pauses/resumes
+- Lanes: a room, and a room's file uploads beside it; new text may pass a stuck upload (`pickClaimableOp`); each kind of lane gets three slots (`hasLaneSlot`)
+- Every send uses the message's `clientId` as the Matrix txnId, so a retry is deduped by the server. The SDK keeps a failed send's local echo under that txnId; `sendMessageEvent` in `matrix-client.ts` resends it instead of a second `sendEvent`, which the SDK refuses
 
 ### Matrix service (`entities/matrix/`)
 - Wrapper around the Matrix SDK and E2E crypto: client service, per-room crypto instances, key management
@@ -85,6 +87,13 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 
 ### Pinia stores
 - `useAuthStore()` (auth, sessions, Matrix init), `useChatStore()` (rooms, active room, metadata), `useUserStore()`, `useCallStore()` (WebRTC), `useChannelStore()`, `useThemeStore()`, `useLocaleStore()`, `useTorStore()`, `useMediaStore()`, local-ai and ai-chat stores
+
+### Calls (`src/features/video-calls/model/`)
+- `useCallService()` in `call-service.ts` is a facade over `call-outgoing`, `call-incoming`, `call-answer`, `call-media`; event wiring in `call-events`, timers in `call-timers`, the single exit in `finalize-call`.
+- One owner per call resource, keyed by `callId`: the JS exit (`finalizeCall`), the native exit (`CallTeardown`), the ringer (`IncomingRinger`), the Telecom slot, and the audio routing (`AudioRouter` owner, `AudioRouterOwnership`). A late action for another call is dropped, not applied.
+- One incoming setup runs at a time (`call-incoming.ts`): a second invite waits for it and is then judged like any other — busy if that call took the slot, ringing if it came to nothing. A late step of an ended call (catch of a placement or an answer, an expired invite) leaves a call that took the slot meanwhile alone.
+- Source-contract tests read `call-*.ts` and the Kotlin sources as text: moving code means updating them (see `call-service.test.ts`, `android/app/src/test/.../*ContractTest.kt`).
+- Call-service tests sit next to the module they cover (`call-outgoing`, `call-incoming`, `call-answer`, `call-audio-routing`, `call-events`, `call-media`, `call-service` `.test.ts`). They share one mock set, `call-service.harness.ts`: import it before anything else (its `vi.mock` calls must register before a test imports `./call-service`) and run `resetCallServiceHarness` in `beforeEach`.
 
 ## Entry points
 
@@ -107,4 +116,5 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 - **Offline sync:** `SyncEngine.setOnline()` follows network state; inbound events queue in the SDK; `useLiveQuery()` reads from Dexie; the app catches up on reconnect without an explicit trigger
 - **Reactivity:** Dexie triggers `useLiveQuery()`; Pinia stores expose computed refs; example `const messages = useLiveQuery(() => getChatDb().messages.findByRoom(roomId))`
 - **Mobile layout:** neither WebView resizes for the soft keyboard, so native code publishes the insets and CSS adapts. `--app-bottom-inset` (Android: max(IME, nav bar) from `MainActivity.injectAllCssVars`; iOS: keyboard height from `useIOSKeyboardCssVar`) drives the bottom padding of the blocks that hold a text field, through the `.safe-bottom` / `.safe-y` / `.safe-all` utilities — one rule for both platforms. Only those blocks move: the root shell stays `position: fixed; inset: 0`. Safe-area CSS custom properties for Capacitor; `is-electron` / `is-electron-mac` classes for drag regions
+- **Push notifications (Android):** with the page asleep `FortaFirebaseMessagingService` draws the notification from the push payload and SharedPreferences caches that JS fills: room names, group flags, sender names (pushes overwrite these) and contact aliases (`sender_alias_*`, written only by JS, read first). When the page runs, `push-service.ts` replaces the text once it can show plaintext (`isBastyonCiphertext` guards it). A tap reaches JS through `pushOpenRoom`, or through `getPendingIntent` when the page has not loaded yet
 - **Platform flags:** `isNative` (Capacitor), `isElectron`; Electron uses a Service Worker transport proxy for Matrix sync; native has Tor daemon, status bar, keyboard height, push notifications, share target

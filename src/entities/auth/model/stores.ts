@@ -5,6 +5,7 @@ import {
 import { PocketnetInstance } from "@/app/providers/chat-scripts/config/pocketnetinstance";
 import { blockchainWs } from "@/shared/lib/blockchain-ws";
 import { useChatStore } from "@/entities/chat";
+import { matrixIdToAddress } from "@/entities/chat/lib/chat-helpers";
 import { useUserStore } from "@/entities/user/model";
 import { useCallStore } from "@/entities/call/model/call-store";
 import { useChannelStore } from "@/entities/channel/model/channel-store";
@@ -22,6 +23,9 @@ import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
 import { looksLikeProperName } from "@/entities/chat/lib/chat-helpers";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
+import { openChatDb } from "@/shared/lib/local-db/open-chat-db";
+import { useToast } from "@/shared/lib/use-toast";
+import { tRaw } from "@/shared/lib/i18n";
 import { initMediaCache, clearMediaCache, closeMediaCache } from "@/shared/lib/media-cache";
 import { clearAllDrafts } from "@/shared/lib/drafts";
 import { clearQueue } from "@/shared/lib/offline-queue";
@@ -61,13 +65,14 @@ import {
   clearSelfProfile,
   mergeSelfProfileWithRemote,
   resolveKeyRepublishAction,
-  countCachedKeys,
+  ownKeyCountFromCaches,
+  profileAnswerInconclusive,
   countPublishedKeys,
   REQUIRED_ENCRYPTION_KEYS,
   createBackoffRetry,
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
-import { armMatrixReconnect, onForeground } from "../lib/matrix-reconnect";
+import { armMatrixReconnect, matrixRetryDelayMs, onForeground } from "../lib/matrix-reconnect";
 import { createKeyPair } from "./key-pair";
 import { generateEncryptionKeys, clearEncryptionKeysCache } from "./encryption-keys";
 
@@ -148,6 +153,12 @@ let _appStateHandle: { remove: () => Promise<void> } | null = null;
 // launched without network); retries initMatrix() when the network or the app
 // comes back. See armMatrixReconnectAfterFailure.
 let _matrixReconnectUnsub: (() => void) | null = null;
+// Failed Matrix starts in a row; spaces the scheduled retries (matrixRetryDelayMs).
+let _matrixStartFailures = 0;
+// Accounts whose own encryption keys were already checked in this app session —
+// keeps an explicit login (which also checks), or a switch back to an account
+// whose republish is not on the chain yet, from republishing twice.
+const _keysVerifiedFor = new Set<string>();
 function stopMatrixReconnect(): void {
   if (_matrixReconnectUnsub) { _matrixReconnectUnsub(); _matrixReconnectUnsub = null; }
 }
@@ -258,6 +269,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   // Forta's 12 encryption keys — i.e. it was registered outside Forta, almost
   // certainly via Bastyon. Feeds the dual-install warning (see bastyon-warning).
   const likelyBastyonUser = ref(false);
+  // This account's own encryption keys are not on the chain (found by the key
+  // check). Without them no encrypted chat works, and the peer-keys banner used
+  // to blame the other side (audit W2A-01).
+  const ownKeysMissing = ref(false);
   let registrationPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Monotonic token identifying the current poll loop. `startRegistrationPoll`
@@ -443,6 +458,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     stopMatrixReconnect();
     // Signed out while the start was failing: logout already tore down.
     if (!address.value || !privateKey.value) return;
+    _matrixStartFailures += 1;
     _matrixReconnectUnsub = armMatrixReconnect(
       { onConnectivityChange, onForeground },
       {
@@ -451,10 +467,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           console.info("[auth] network or app is back, retrying the Matrix start");
           void initMatrix();
         },
-        // The network came back while this start was still failing, so its
-        // transition has already been reported. Only a start that began offline
-        // gets this, which keeps an unreachable server from looping.
-        retryAfterMs: startedOffline && useConnectivity().isOnline.value ? 2_000 : undefined,
+        // A start that began offline and failed with the network back retries
+        // at once (its transition was already reported). Every other failure
+        // still gets a timed retry: with the homeserver unreachable behind a
+        // VPN, DNS or provider block `navigator.onLine` never changes, so no
+        // event would ever fire (audit S2-01, forta-bugs#1398).
+        retryAfterMs: startedOffline && useConnectivity().isOnline.value
+          ? 2_000
+          : matrixRetryDelayMs(_matrixStartFailures),
       },
     );
   };
@@ -585,6 +605,17 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           });
         },
       );
+      // Dexie opens lazily, so a database that could not open (no space, Safari
+      // private mode, a corrupted or blocked store) used to leave an empty chat
+      // list with no error. Open it now: say so, and let the failed start be
+      // retried by the reconnect timer (audit S3-04).
+      try {
+        await openChatDb(chatDbKit.db);
+      } catch (e) {
+        console.error("[auth] local database did not open:", e);
+        useToast().toast(tRaw("sync.localDbOpenFailed"), "error", 10_000);
+        throw e;
+      }
       chatStore.setChatDbKit(chatDbKit);
       useAiChatStore().setChatDbKit(chatDbKit);
 
@@ -775,7 +806,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           try {
             const callService = useCallService();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            callService.handleIncomingCall(call as any);
+            callService.handleIncomingCall(call as any).catch((err: unknown) => {
+              console.error("[auth] Failed to handle incoming call:", err);
+            });
           } catch (err) {
             console.error("[auth] Failed to handle incoming call:", err);
             try { (call as any).reject?.(); } catch { /* ignore */ }
@@ -827,9 +860,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
       if (connectResult.ready) {
         stopMatrixReconnect();
+        _matrixStartFailures = 0;
         bootStatus.setStep("sync");
         matrixReady.value = true;
         matrixError.value = null;
+        // Messages that gave up waiting for Matrix while it was down go out
+        // now, without a manual retry (audit S2-01).
+        chatDbKit.syncEngine.retryNotReadyFailures().catch((e) => {
+          console.warn("[auth] retrying messages that waited for Matrix failed:", e);
+        });
+        // A restored session or a switched-to account checks its own keys too,
+        // not only an explicit login (audit S5-01). Background: never blocks.
+        void verifyOwnKeysOnce();
 
         // Sync Pocketnet name → Matrix displayname when it changed since last push.
         // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
@@ -1036,6 +1078,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               return map;
             });
 
+            // Push titles use the chat's own names, contact aliases first
+            // (audit S6-01), both in JS and in the cache native reads.
+            const pushSenderName = (userId: string): string | null => {
+              const address = matrixIdToAddress(userId);
+              // Only a name the chat knows; otherwise the push keeps the Matrix
+              // member name rather than a truncated address.
+              return address ? chatStore.getKnownDisplayName(address) : null;
+            };
+            pushService.setSenderNameResolver(pushSenderName);
+
             pushService.setAllSenderNamesGetter(() => {
               const senders: Record<string, string> = {};
               const client = matrixService.client;
@@ -1043,7 +1095,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               for (const room of client.getRooms()) {
                 for (const member of room.getJoinedMembers()) {
                   const userId = member.userId;
-                  const name = member.name;
+                  const name = pushSenderName(userId) || member.name;
                   if (name && name !== userId && !senders[userId]) {
                     senders[userId] = name;
                   }
@@ -1062,6 +1114,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 }
               }
               return senders;
+            });
+
+            // Native draws the title while the page sleeps; it gets the
+            // aliases apart from the names, which pushes overwrite (S6-01).
+            pushService.setSenderAliasesGetter(() => {
+              const aliases: Record<string, string> = {};
+              for (const [addr, alias] of Object.entries(chatStore.localAliases)) {
+                if (alias) aliases[matrixService.matrixId(hexEncode(addr))] = alias;
+              }
+              return aliases;
             });
 
             pushService.setSenderNameGetter((userId) => {
@@ -1334,6 +1396,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  Skips if registration is already in progress (register() handles it). */
   const verifyAndRepublishKeys = async () => {
     if (!address.value || !privateKey.value) return;
+    // The account this check is for. Read again after every await: an account
+    // switch between them published A's profile under B's address and keys
+    // (review 2026-10-08, H2).
+    const subjectAddress = address.value;
+    const subjectKey = privateKey.value;
+    const accountChanged = () => address.value !== subjectAddress || privateKey.value !== subjectKey;
 
     // Don't interfere with active registration — register() manages its own poll
     if (registrationPending.value || pendingRegProfile.value) {
@@ -1341,9 +1409,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Step 1: Quick check via local SDK cache.
-    const userData = appInitializer.getUserData(address.value);
-    const cachedKeyCount = countCachedKeys(userData);
+    // Step 1: Quick check via the local caches: the SDK's, or the self-profile
+    // snapshot, which still has the keys when the nodes do not answer.
+    const userData = appInitializer.getUserData(subjectAddress);
+    const selfProfile = readSelfProfile(subjectAddress);
+    const cachedKeyCount = ownKeyCountFromCaches(userData, selfProfile);
 
     // Step 2: Cache may be stale/empty after login — verify via fresh SDK
     // profile load, but only when the cache is short.
@@ -1352,12 +1422,20 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (cachedKeyCount < REQUIRED_ENCRYPTION_KEYS) {
       console.log("[auth] Cache shows", cachedKeyCount, "keys, verifying via RPC...");
       try {
-        const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
-        blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
+        const rawProfiles = await appInitializer.loadUsersInfoRaw([subjectAddress]);
+        if (profileAnswerInconclusive(rawProfiles, selfProfile)) {
+          // The profile was loaded before and cannot be gone: the nodes did
+          // not answer. Not a reason to call the keys missing.
+          console.warn("[auth] Own profile not returned, key check inconclusive");
+          blockchainCheckFailed = true;
+        } else {
+          blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
+        }
       } catch (e) {
         console.warn("[auth] RPC key check failed, skipping re-publish:", e);
         blockchainCheckFailed = true;
       }
+      if (accountChanged()) return;
     }
 
     // checkUnspents only affects the republish-vs-needs-funds split; query it
@@ -1368,8 +1446,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       !blockchainCheckFailed &&
       (blockchainKeyCount ?? 0) < REQUIRED_ENCRYPTION_KEYS;
     const hasUnspents = mayNeedRepublish
-      ? await appInitializer.checkUnspents(address.value)
+      ? await appInitializer.checkUnspents(subjectAddress)
       : false;
+    if (accountChanged()) return;
 
     const action = resolveKeyRepublishAction({
       cachedKeyCount,
@@ -1390,6 +1469,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     switch (action.kind) {
       case "keys-ok":
         console.log(`[auth] Key verification OK (${action.source}):`, action.keyCount, "keys");
+        ownKeysMissing.value = false;
         return;
       case "rpc-failed":
         // Inconclusive — don't block login, keys may well be fine.
@@ -1398,20 +1478,22 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // Existing on-chain account without Forta keys → registered elsewhere
         // (Bastyon). Flag it for the dual-install warning (WEE-35).
         likelyBastyonUser.value = true;
+        ownKeysMissing.value = true;
         interopLog("auth", "existing account missing Forta keys (no PKOIN) — likely Bastyon-registered");
         console.warn("[auth] Missing encryption keys but no PKOIN — login proceeds, publish keys later from settings");
         return;
       case "republish": {
         likelyBastyonUser.value = true;
+        ownKeysMissing.value = true;
         interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
-        const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
+        const encPublicKeys = generateEncryptionKeys(subjectKey).map(k => k.public);
         const profile = {
           name: userData?.name ?? "",
           language: userData?.language ?? "en",
           about: userData?.about ?? "",
         };
         const image = userData?.image ?? "";
-        const republishAddress = address.value;
+        const republishAddress = subjectAddress;
         // Fire-and-forget: the broadcast is a blockchain round-trip that must
         // not add latency to login. It can no longer hang the UI (never flips
         // registrationPending) and failure is non-fatal — login proceeds either
@@ -1419,8 +1501,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         void (async () => {
           try {
             await appInitializer.syncNodeTime();
+            // The broadcast signs with the signed-in account's key.
+            if (accountChanged()) {
+              console.warn("[auth] Background key re-publish dropped: the account changed");
+              return;
+            }
             await appInitializer.registerUserProfile(republishAddress, profile, encPublicKeys, image);
             console.log("[auth] Encryption keys re-published in background (existing-account login)");
+            if (address.value === republishAddress) ownKeysMissing.value = false;
           } catch (e) {
             console.error("[auth] Background key re-publish failed (login proceeds):", e);
           }
@@ -1443,6 +1531,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     | { state: "skipped"; reason: string };
 
   const republishKeysFromUi = async (): Promise<RepublishResult> => {
+    const result = await republishOwnKeys();
+    if (result.state === "already-ok" || result.state === "republished") ownKeysMissing.value = false;
+    if (result.state === "needs-funds") ownKeysMissing.value = true;
+    return result;
+  };
+
+  const republishOwnKeys = async (): Promise<RepublishResult> => {
     if (!address.value || !privateKey.value) {
       return { state: "skipped", reason: "no-credentials" };
     }
@@ -1540,11 +1635,27 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  and initMatrix() catches its own errors — but kept `async`/unswallowed
    *  here so a genuinely unexpected throw still surfaces to callers that
    *  await it directly (e.g. the plain `login()` below). */
+  /** Check (and re-publish if missing) this account's own encryption keys once
+   *  per app session. It used to run only on an explicit login, so an added or
+   *  switched-to account, and every restart of a saved session, never checked
+   *  — an account without Forta keys stayed unable to use encrypted chats
+   *  (audit S5-01). */
+  const verifyOwnKeysOnce = async (): Promise<void> => {
+    const current = address.value;
+    if (!current || _keysVerifiedFor.has(current)) return;
+    _keysVerifiedFor.add(current);
+    try {
+      await verifyAndRepublishKeys();
+    } catch (e) {
+      console.warn("[auth] own key verification failed:", e);
+    }
+  };
+
   const completeLoginNetwork = async (): Promise<void> => {
     await fetchUserInfo();
 
     // Verify encryption keys are published; re-publish if missing
-    await verifyAndRepublishKeys();
+    await verifyOwnKeysOnce();
 
     // Initialize Matrix after successful auth
     await initMatrix();
@@ -1630,6 +1741,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // ── 3. Clean up listeners & intervals ──
     if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
     stopMatrixReconnect();
+    _matrixStartFailures = 0;
+    _keysVerifiedFor.clear();
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
     clearPeerKeysRecheck();
     if (_appStateHandle) {
@@ -1658,7 +1771,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // torn down. Otherwise the Filesystem entries leak to disk under the
     // new user's session.
     await clearMediaCache();
-    await deleteChatDb().catch(() => {});
+    await deleteChatDb();
 
     // ── 6. Delete legacy IndexedDB cache ──
     deleteLegacyCache();
@@ -1676,6 +1789,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     setPendingRegProfile(null);
     setRegistrationPhase("init");
     likelyBastyonUser.value = false;
+    ownKeysMissing.value = false;
     stopRegistrationPoll();
     clearMnemonic();
 
@@ -2505,6 +2619,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       // Cleanup listeners
       if (_connectivityUnsub) { _connectivityUnsub(); _connectivityUnsub = null; }
       stopMatrixReconnect();
+      _matrixStartFailures = 0;
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
       clearPeerKeysRecheck();
 
@@ -2519,6 +2634,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       syncSessionsFromStorage();
       userInfo.value = undefined;
       cancelOwnProfileRetry();
+      // Per-account verdict of the key check: the previous account's "likely a
+      // Bastyon account" must not show for this one (audit S5-02).
+      likelyBastyonUser.value = false;
+      ownKeysMissing.value = false;
 
       // 4. INIT new context (reuses the existing initMatrix which reads from computed address/privateKey)
       await fetchUserInfo();
@@ -2612,6 +2731,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     submitUpvote,
     userInfo,
     republishKeysFromUi,
-    likelyBastyonUser
+    likelyBastyonUser,
+    ownKeysMissing
   };
 });

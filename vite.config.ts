@@ -1,10 +1,42 @@
 /// <reference types="vitest" />
 import vue from "@vitejs/plugin-vue";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import AutoImport from "unplugin-auto-import/vite";
 import Components from "unplugin-vue-components/vite";
 import { defineConfig } from "vite";
+import { downlevelForOldWebView } from "./scripts/lib/downlevel-public-js.mjs";
 import { manualChunks } from "./scripts/lib/vite-manual-chunks.mjs";
+
+// public/js holds the Bastyon SDK, which Vite copies verbatim. Lower its syntax
+// to the bundle's chrome60 target in every `vite build` (Android, iOS, Electron
+// and web all build this way), or WebView < 80 fails on `?.` / `??` and the app
+// has no SDK for login or registration (audit W2B-01).
+function downlevelPublicJs() {
+  let outDir = "";
+  return {
+    name: "downlevel-public-js",
+    apply: "build" as const,
+    configResolved(config: { root: string; build: { outDir: string } }) {
+      outDir = path.resolve(config.root, config.build.outDir);
+    },
+    closeBundle(this: { warn: (message: string) => void }) {
+      const jsDir = path.join(outDir, "js");
+      if (!existsSync(jsDir)) return;
+      for (const rel of readdirSync(jsDir, { recursive: true }) as string[]) {
+        if (!rel.endsWith(".js")) continue;
+        const file = path.join(jsDir, rel);
+        const code = readFileSync(file, "utf8");
+        try {
+          const lowered = downlevelForOldWebView(code);
+          if (lowered !== code) writeFileSync(file, lowered);
+        } catch (e) {
+          this.warn(`js/${rel}: syntax not lowered (${String(e).split("\n")[0]})`);
+        }
+      }
+    },
+  };
+}
 
 export default defineConfig({
   base: "./",
@@ -62,6 +94,7 @@ export default defineConfig({
         return html.replace(/ crossorigin/g, "");
       },
     },
+    downlevelPublicJs(),
     Components({
       deep: true,
       dirs: ["src/shared/ui"],

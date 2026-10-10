@@ -21,6 +21,8 @@ interface PushDataPlugin extends Plugin {
   cacheRoomName(options: { roomId: string; name: string }): Promise<void>;
   cacheRoomNames(options: { rooms: Record<string, string> }): Promise<void>;
   cacheSenderNames(options: { senders: Record<string, string> }): Promise<void>;
+  /** Contact aliases by Matrix user id for native notification titles; replaces the whole set. */
+  cacheSenderAliases(options: { aliases: Record<string, string> }): Promise<void>;
   /** roomId -> isGroup. The push payload has no group marker, so the native
    *  cold-start notification builder reads this cache to decide whether to
    *  title the notification with the room name. */
@@ -34,7 +36,7 @@ interface PushDataPlugin extends Plugin {
   replaceNotificationContent(options: { roomId: string; eventId?: string; title: string; body: string }): Promise<void>;
   getPendingIntent(): Promise<{ roomId?: string; eventId?: string }>;
   /** False when google-services.json was missing at APK build time — skip FCM register. */
-  isFcmAvailable(): Promise<{ available: boolean }>;
+  isFcmAvailable(): Promise<{ available: boolean; playServices?: boolean }>;
   /** WEE-44 / forta-bugs#732, #766: returns Build.MANUFACTURER + MODEL so JS
    *  can show a one-time hint pointing the user at battery optimization
    *  settings for known-hostile vendors (Samsung, HONOR/Huawei, Xiaomi, OPPO,
@@ -52,6 +54,10 @@ interface PushDataPlugin extends Plugin {
   getFullScreenIntentStatus(): Promise<{ allowed: boolean; manageable: boolean }>;
   /** Open the system screen that grants the full-screen intent (Android 14+). */
   openFullScreenIntentSettings(): Promise<void>;
+  /** Missed push calls T3: is the app exempt from battery optimization (Doze)? Android only. */
+  getBatteryOptimizationStatus(): Promise<{ ignoring: boolean }>;
+  /** Open the system dialog that exempts the app; the user decides there. Android only. */
+  requestIgnoreBatteryOptimizations(): Promise<void>;
   /** The account is signed in: pushes ring (Android FCM service, iOS PushKit). */
   markSessionActive(): Promise<void>;
   /** The account is signing out. From now on Android's FCM service drops every
@@ -60,6 +66,8 @@ interface PushDataPlugin extends Plugin {
   markLoggedOut(): Promise<void>;
   /** "Incoming calls" switch: off, a call push neither rings nor shows (see incoming-calls-setting). */
   setIncomingCallsEnabled(options: { enabled: boolean }): Promise<void>;
+  /** Native's copy of the switch; JS reads it when WebView storage lost its own (C05). */
+  getIncomingCallsEnabled(): Promise<{ enabled: boolean }>;
   addListener(event: 'pushReceived', handler: (data: PushPayload) => void): Promise<PluginListenerHandle>;
   addListener(event: 'pushOpenRoom', handler: (data: { roomId: string; eventId?: string }) => void): Promise<PluginListenerHandle>;
 }
