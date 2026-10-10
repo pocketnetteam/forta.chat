@@ -77,4 +77,35 @@ describe("BatteryOptimizationHint", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="battery-hint"]').exists()).toBe(true);
   });
+
+  // Review 2026-10-10: a Matrix reconnect is not a sign-out. The hint used to
+  // vanish on any network blip and, already counted as shown, stay away for
+  // 30 days.
+  it("stays on screen through a Matrix reconnect", async () => {
+    getBatteryOptimizationStatus.mockResolvedValue({ ignoring: false });
+    const wrapper = await mountHint();
+    expect(wrapper.find('[data-testid="battery-hint"]').exists()).toBe(true);
+
+    auth.matrixReady = false;
+    await flushPromises();
+    auth.matrixReady = true;
+    await flushPromises();
+    expect(wrapper.find('[data-testid="battery-hint"]').exists()).toBe(true);
+    expect(getBatteryOptimizationStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not come up for a check that finishes after sign-out", async () => {
+    getBatteryOptimizationStatus.mockResolvedValue({ ignoring: false });
+    let answer: (v: { manufacturer: string; model: string; sdk: number }) => void = () => {};
+    getDeviceManufacturer.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const wrapper = await mountHint();
+
+    auth.isAuthenticated = false;
+    await flushPromises();
+    answer({ manufacturer: "samsung", model: "SM-A528B", sdk: 34 });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="battery-hint"]').exists()).toBe(false);
+    expect(localStorage.getItem("forta.batteryHint.lastShownAt")).toBeNull();
+  });
 });

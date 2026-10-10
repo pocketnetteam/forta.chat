@@ -31,10 +31,13 @@ const visible = ref(false);
 const vendorName = ref<string | null>(null);
 /** Checked for this sign-in: the hint is a once-per-session question at most. */
 let checkedThisSession = false;
+/** Bumped on sign-out: a check still running belongs to the old session. */
+let session = 0;
 
 const evaluate = async () => {
   if (checkedThisSession || !isNative || !isAndroid) return;
   checkedThisSession = true;
+  const mySession = session;
   let ignoring: boolean | null = null;
   try {
     ignoring = (await PushData.getBatteryOptimizationStatus()).ignoring;
@@ -59,6 +62,7 @@ const evaluate = async () => {
   } catch (e) {
     console.warn("[battery-hint] vendor detection failed:", e);
   }
+  if (mySession !== session || !authStore.isAuthenticated) return;
   writeBatteryHintLastShownAt(now);
   visible.value = true;
 };
@@ -67,13 +71,21 @@ watch(
   () => authStore.isAuthenticated && authStore.matrixReady,
   (ready) => {
     if (ready) void evaluate();
-    else {
-      // Signed out: the next sign-in asks again (still at most every 30 days).
-      checkedThisSession = false;
-      visible.value = false;
-    }
   },
   { immediate: true },
+);
+
+// Only a sign-out ends the session: a Matrix reconnect (matrixReady false for
+// a moment) used to hide the hint, already counted as shown, for 30 days.
+watch(
+  () => authStore.isAuthenticated,
+  (signedIn) => {
+    if (signedIn) return;
+    // The next sign-in asks again (still at most every 30 days).
+    session++;
+    checkedThisSession = false;
+    visible.value = false;
+  },
 );
 
 const allow = async () => {
