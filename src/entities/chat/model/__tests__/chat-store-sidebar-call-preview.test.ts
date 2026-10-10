@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: the chat list kept a last-message preview that Dexie had already changed.
  * A hangup record can be rewritten in place — same event, same timestamp, same
@@ -6,6 +7,7 @@
  * room when a field outside the call info changed, and its per-room cache was
  * keyed on those same fields, so the list showed the old reading until restart.
  */
+import { MessageType } from "@/entities/chat/model/types";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
@@ -77,6 +79,8 @@ function callRoom(missed: boolean): LocalRoom {
     lastMessagePreview: "[message]",
     lastMessageEventId: "$hangup",
     lastMessageSenderId: "peer",
+    // Call records are system messages (every writer stores the type with callInfo).
+    lastMessageType: MessageType.system,
     lastMessageCallInfo: { callType: "voice", missed },
     lastMessageSystemMeta: { template: missed ? "system.missedVoiceCall" : "system.voiceCall", senderAddr: "peer" },
   } as LocalRoom;
@@ -105,6 +109,7 @@ function makeKit(capture: { cb?: (changes: RoomChange[]) => void }) {
       getClearedAtTs: vi.fn(() => undefined),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages: vi.fn(async () => {}),
       writeEdit: vi.fn(async () => {}),

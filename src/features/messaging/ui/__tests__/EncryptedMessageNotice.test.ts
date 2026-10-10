@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression (audit A5): EncryptedMessageNotice auto-retried in onMounted
  * with a one-shot flag — opening a room with N stuck messages fired N

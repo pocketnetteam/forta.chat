@@ -1153,6 +1153,7 @@ const handleKitchenSelect = async (imageUrl: string) => {
 
         <!-- Textarea -->
         <textarea
+          autocomplete="off"
           data-testid="message-input"
           ref="textareaRef" v-model="text" :placeholder="t('message.placeholder')" rows="1"
           class="flex-1 resize-none rounded-2xl bg-chat-input-bg px-4 py-2.5 text-base leading-[24px] text-text-color outline-none transition-shadow duration-200 placeholder:text-neutral-grad-2 focus:ring-2 focus:ring-color-bg-ac/30"

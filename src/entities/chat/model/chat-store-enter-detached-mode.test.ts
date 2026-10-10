@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: enterDetachedMode() ("jump to message" for a target outside
  * the loaded tail window — search results, quoted replies, pinned messages)
@@ -142,6 +143,7 @@ function makeKit(opts: { getMessages?: (roomId: string) => Promise<LocalMessage[
       getClearedAtTs: vi.fn(() => undefined),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages: vi.fn(() => Promise.resolve()),
       writeEdit: vi.fn(async () => {}),

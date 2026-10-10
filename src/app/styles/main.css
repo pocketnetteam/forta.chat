@@ -159,6 +159,9 @@
 
   /* Chat-specific */
   --chat-bubble-own: 0, 164, 255;
+  /* Links and mentions inside own (accent) bubbles: near-white light blue,
+     readable on any accent colour */
+  --chat-link-own: 224, 242, 255;
   --chat-bubble-other: 235, 235, 240;
   --chat-sidebar: 250, 250, 250;
   --chat-input-bg: 240, 242, 245;
@@ -216,6 +219,7 @@
 
   /* Chat-specific dark */
   --chat-bubble-own: 0, 90, 210;
+  --chat-link-own: 214, 236, 255;
   --chat-bubble-other: 30, 36, 45;
   --chat-sidebar: 15, 25, 38;
   --chat-input-bg: 15, 22, 34;
@@ -291,6 +295,23 @@ body {
 
 a {
   color: inherit;
+}
+
+/*
+ * Mobile long-press: on touch devices a long press over a bubble opens the
+ * message context menu, and the browser simultaneously started a native text
+ * selection (plus the iOS callout) under the menu. Selection is pointless
+ * there — the menu has its own "Copy" — so on coarse-pointer devices the
+ * `.select-text` opt-in inside a message bubble is switched back off.
+ * Desktop keeps normal selection.
+ */
+@media (hover: none) and (pointer: coarse) {
+  .message-bubble,
+  .message-bubble .select-text {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
 }
 
 ::-moz-selection {

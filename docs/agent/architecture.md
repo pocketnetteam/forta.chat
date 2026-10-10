@@ -19,7 +19,7 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 
 ### `src/pages/`
 - Purpose: route containers that assemble features + layouts
-- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `ProfilePage.vue`, `AppearancePage.vue` (`/settings/appearance`); settings hub is `widgets/sidebar/ui/SettingsPanel.vue`
+- Contains: `ChatPage.vue`, `LoginPage.vue`, `RegisterPage.vue`, `WelcomePage.vue`, `ProfilePage.vue`, `ProfileEditPage.vue`, `DownloadPage.vue`, `AppsDownloadPage.vue`, `AppearancePage.vue` (`/settings/appearance`); settings hub is `widgets/sidebar/ui/SettingsPanel.vue`
 - Depends on features, widgets, entities; used by Vue Router (`app/providers/router/`)
 
 ### `src/widgets/`
@@ -62,6 +62,12 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### EventWriter
 - Parses and atomically writes Matrix events to Dexie: messages, reactions, edits, redactions, read receipts; transactional writes
 
+### Opening a chat and history continuity
+- Opening a room reads Dexie only: `MessageList` branches on a 1-row peek (`room-open-plan.ts`, `room-open-load.ts`); the network is awaited only for a room with no rows, under an 8 s budget with "Retry". A recent room shows its last liveQuery emission in the first frame (`chatStore` room snapshots).
+- Dexie knows where its history has holes: a limited `/sync` (`Room.timelineReset`) marks `LocalRoom.gapToken` (+ `gapBeforeTs`, `gapAnchorTs`); `entities/chat/model/history-backfill.ts` pages `/messages` back in the background until the anchor. Scroll-up pages from `LocalRoom.paginationToken`, not SDK scrollback, so the SDK's in-memory timeline does not grow.
+- History loads parse only events Dexie lacks (`entities/chat/lib/timeline-parse-plan.ts`); one event classifier serves the parser and the plan. `loadRoomMessages` stays for rooms with no rows and list previews.
+- Diagnostics: `localStorage["forta-chat:perf"]="1"` logs one `[room-open]` line per open; `scripts/device-e2e/measure-room-open.mjs` measures on a device. Plan: `docs/plans/2026-09-28-chat-open-local-first.md`.
+
 ### SyncEngine
 - FIFO outbound queue with exponential backoff + jitter (up to 30s, then "failed")
 - `processQueue()` runs after DB recovery; `setOnline(true/false)` pauses/resumes
@@ -69,9 +75,23 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### Matrix service (`entities/matrix/`)
 - Wrapper around the Matrix SDK and E2E crypto: client service, per-room crypto instances, key management
 - `decryptEvent()`, `encryptEvent()`, `getRoomMembers()`, `fetchEventContext()`
+- E2E is Bastyon's Pcrypto (`matrix-crypto.ts`: secp256k1 + AES-SIV, AES-CBC for files), not Olm/Megolm; the SDK's Rust crypto is never initialised and stays a lazy chunk
+- The SDK's IndexedDB sync store runs in a Web Worker where the WebView supports it (`sync-store-worker.ts`: probed once, falls back to the main thread; a failed probe is remembered per userAgent)
+- Room members: `ensureRoomMembers()` (`ensure-room-members.ts`) before encryption decisions; peer keys for several rooms are fetched in one batch via `chatStore.preloadRoomKeys()`. `lazyLoadMembers` stays `false` (plan `docs/plans/2026-10-03-initial-sync-lazy-members.md`, phase II cancelled)
+
+### Vendored Pocketnet SDK (`public/js/lib/client/sdk.js`)
+- Loaded as a classic `<script>`, not bundled; edited in place. Mark each local change with a `Forta Chat:` comment and cover it in `src/app/providers/initializers/__tests__/sdk-*.test.ts` (sdk.js runs in a `vm` sandbox there).
+- `userInfo.load(addresses, light, update)` always sends `getuserprofile` in the short form (`[addresses, "1"]`), own profile included. The full form only adds `subscribes[]` / `subscribers[]` / `blocking[]` / `content`, which the chat never reads and which grow with the account's audience. The short form still carries every field the UserInfo transaction re-publishes on a profile edit (`a`, `s`, `l`, `b`, `r`, `k`), plus `reputation` and the `*_count` fields. `light` now selects only the cache: `userInfoFull` (10 min TTL, `userInfoFullFB` offline fallback) for the logged-in account, `userInfoLight` (~14 days) for peers. Subscriptions and blocks have their own SDK loaders (`getusersubscribes`, `self.blocking`) if they are ever needed.
 
 ### Pinia stores
 - `useAuthStore()` (auth, sessions, Matrix init), `useChatStore()` (rooms, active room, metadata), `useUserStore()`, `useCallStore()` (WebRTC), `useChannelStore()`, `useThemeStore()`, `useLocaleStore()`, `useTorStore()`, `useMediaStore()`, local-ai and ai-chat stores
+
+### Calls (`src/features/video-calls/model/`)
+- `useCallService()` in `call-service.ts` is a facade over `call-outgoing`, `call-incoming`, `call-answer`, `call-media`; event wiring in `call-events`, timers in `call-timers`, the single exit in `finalize-call`.
+- One owner per call resource, keyed by `callId`: the JS exit (`finalizeCall`), the native exit (`CallTeardown`), the ringer (`IncomingRinger`), the Telecom slot, and the audio routing (`AudioRouter` owner, `AudioRouterOwnership`). A late action for another call is dropped, not applied.
+- One incoming setup runs at a time (`call-incoming.ts`): a second invite waits for it and is then judged like any other — busy if that call took the slot, ringing if it came to nothing. A late step of an ended call (catch of a placement or an answer, an expired invite) leaves a call that took the slot meanwhile alone.
+- Source-contract tests read `call-*.ts` and the Kotlin sources as text: moving code means updating them (see `call-service.test.ts`, `android/app/src/test/.../*ContractTest.kt`).
+- Call-service tests sit next to the module they cover (`call-outgoing`, `call-incoming`, `call-answer`, `call-audio-routing`, `call-events`, `call-media`, `call-service` `.test.ts`). They share one mock set, `call-service.harness.ts`: import it before anything else (its `vi.mock` calls must register before a test imports `./call-service`) and run `resetCallServiceHarness` in `beforeEach`.
 
 ## Entry points
 

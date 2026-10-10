@@ -15,6 +15,8 @@
  *  to land before the user perceives the button as broken. */
 export type PeerKeysStatus =
   | "available"
+  | "loading"
+  | "load-failed"
   | "missing"
   | "not-encrypted"
   | "unknown"
@@ -29,5 +31,6 @@ export interface PeerKeysOkInput {
 export function isPeerKeysOk(input: PeerKeysOkInput): boolean {
   if (input.isGroupOrPublic) return true;
   if (input.inGracePeriod) return true;
-  return input.status !== "missing";
+  // "load-failed": sends would fail with ENCRYPTION_REQUIRED_NO_KEYS anyway.
+  return input.status !== "missing" && input.status !== "load-failed";
 }

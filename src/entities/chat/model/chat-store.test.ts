@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
@@ -326,6 +327,67 @@ describe("chat-store", () => {
       expect(store.mutedRoomIds.has("!r1:s")).toBe(true);
       store.toggleMuteRoom("!r1:s");
       expect(store.mutedRoomIds.has("!r1:s")).toBe(false);
+    });
+  });
+
+  // Web had no server mute sync: a group muted on another device kept
+  // beeping in the browser. Live `m.push_rules` account_data must reach the
+  // mute set the web notifier reads — in both directions.
+  describe("mute state from m.push_rules account_data", () => {
+    const pushRulesEvent = (mutedIds: string[]) => ({
+      getType: () => "m.push_rules",
+      getContent: () => ({
+        global: { room: mutedIds.map((rule_id) => ({ rule_id, enabled: true, actions: ["dont_notify"] })) },
+      }),
+    });
+    const service = mockMatrixService as typeof mockMatrixService & { client?: unknown };
+
+    afterEach(() => {
+      delete service.client;
+    });
+
+    it("mutes a room muted on another device", async () => {
+      await store.handleAccountDataEvent(pushRulesEvent(["!group:s"]));
+      expect(store.mutedRoomIds.has("!group:s")).toBe(true);
+    });
+
+    it("unmutes a room unmuted on another device", async () => {
+      await store.handleAccountDataEvent(pushRulesEvent(["!group:s"]));
+      await store.handleAccountDataEvent(pushRulesEvent([]));
+      expect(store.mutedRoomIds.has("!group:s")).toBe(false);
+    });
+
+    it("a stale echo does not undo a local unmute the server has not confirmed", async () => {
+      await store.handleAccountDataEvent(pushRulesEvent(["!group:s"]));
+      let confirm!: () => void;
+      service.client = {
+        setRoomMutePushRule: vi.fn(() => new Promise<void>((r) => { confirm = r; })),
+      };
+
+      const unmute = store.setRoomMute("!group:s", false);
+      await store.handleAccountDataEvent(pushRulesEvent(["!group:s"])); // echo from before the delete
+      expect(store.mutedRoomIds.has("!group:s")).toBe(false);
+
+      confirm();
+      await unmute;
+      // Confirmed: the server is the truth again.
+      await store.handleAccountDataEvent(pushRulesEvent(["!group:s"]));
+      expect(store.mutedRoomIds.has("!group:s")).toBe(true);
+    });
+
+    it("keeps a mute whose server write failed", async () => {
+      service.client = { setRoomMutePushRule: vi.fn(async () => { throw new Error("offline"); }) };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await store.setRoomMute("!local:s", true);
+      await store.handleAccountDataEvent(pushRulesEvent([]));
+      expect(store.mutedRoomIds.has("!local:s")).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("ignores a payload without room rules", async () => {
+      await store.handleAccountDataEvent(pushRulesEvent(["!group:s"]));
+      await store.handleAccountDataEvent({ getType: () => "m.push_rules", getContent: () => ({}) });
+      expect(store.mutedRoomIds.has("!group:s")).toBe(true);
     });
   });
 

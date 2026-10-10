@@ -39,9 +39,9 @@
 
 ## Возможности
 
-- 🔒 **E2E-шифрование** личных и групповых чатов (Matrix Olm/Megolm через `matrix-js-sdk-bastyon`)
+- 🔒 **E2E-шифрование** личных и групповых чатов (Pcrypto Bastyon: secp256k1 + AES-SIV, совместимо с чатом Bastyon)
 - 📴 **Local-first**: Dexie (IndexedDB) как единственный источник правды, оффлайн-первая отправка через `SyncEngine` (FIFO + exponential backoff)
-- 📞 **Видеозвонки** 1:1 и групповые через WebRTC — см. [docs/webrtc-architecture.md](docs/webrtc-architecture.md)
+- 📞 **Звонки** 1:1 (аудио и видео) через WebRTC; в группах — внешние ссылки на звонок — см. [docs/webrtc-architecture.md](docs/webrtc-architecture.md)
 - 🎙 **Медиа**: фото, видео, голосовые, видеокружки, файлы с crash-recovery загрузкой
 - 🌐 **Публичные комнаты и инвайт-ссылки**, реакции, опросы, read-watermarks, редактирование/удаление
 - 🔑 **Вход через Bastyon**: приватный ключ Bastyon-аккаунта — см. [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
@@ -78,8 +78,8 @@
 
 ### Пререквизиты
 
-- Node.js 18+
-- npm 7+
+- Node.js 22+
+- npm 10+
 
 ### Установка
 
@@ -140,11 +140,11 @@ Capacitor-конфиг: [capacitor.config.ts](capacitor.config.ts) (`appId: com.
 
 ### iOS (Capacitor)
 
-Требуется macOS 14+, Xcode 16+, CocoaPods и аккаунт Apple Developer. Сборка под iOS не работает на Windows и Linux.
+Требуется macOS 14+, Xcode 16+ и аккаунт Apple Developer. Нативные зависимости подключаются через Swift Package Manager (`ios/App/CapApp-SPM`), не CocoaPods. Сборка под iOS не работает на Windows и Linux.
 
 ```bash
-npm run cap:build:ios   # vite build + cap sync ios
-npm run cap:open:ios    # открыть ios/App/App.xcworkspace в Xcode
+npm run cap:build:ios   # vite build + cap sync ios + исправление имён SPM-продуктов
+npm run cap:open:ios    # открыть ios/App/App.xcodeproj в Xcode
 npm run cap:run:ios     # запустить в симуляторе / на устройстве
 ```
 
@@ -192,7 +192,8 @@ src/
 
 | Файл | О чём |
 |------|-------|
-| [CLAUDE.md](CLAUDE.md) | Правила для разработки (стек, архитектура, конвенции, верификация) |
+| [AGENTS.md](AGENTS.md) | Правила для разработки (стек, архитектура, конвенции, верификация) |
+| [docs/manual-verification.md](docs/manual-verification.md) | Фиксы, ждущие проверки на устройстве |
 | [docs/local-first-architecture.md](docs/local-first-architecture.md) | Local-first: Dexie, SyncEngine, EventWriter |
 | [docs/architecture-data-flow.md](docs/architecture-data-flow.md) | Потоки данных и реактивность |
 | [docs/ux-specification.md](docs/ux-specification.md) | UX-спецификация |
@@ -203,7 +204,7 @@ src/
 | [docs/android-local-build.md](docs/android-local-build.md) | Локальная сборка Android APK |
 | [docs/ios-local-build.md](docs/ios-local-build.md) | Локальная сборка iOS |
 | [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md) | Как получить приватный ключ Bastyon |
-| [docs/plans/](docs/plans/) | Дизайн-документы и планы фич (historical) |
+| [docs/plans/](docs/plans/README.md) | Дизайн-документы и планы фич, со сводкой статусов |
 
 ## Разработка
 
@@ -214,7 +215,7 @@ npm run build              # сборка (уже включает vue-tsc --noE
 npm run test               # тесты
 ```
 
-Конвенции, TDD, code review и прочее — в [CLAUDE.md](CLAUDE.md). Отдельного `npm run lint` в репозитории нет.
+Конвенции, TDD, code review и прочее — в [AGENTS.md](AGENTS.md). Отдельного `npm run lint` в репозитории нет.
 
 Коммит-сообщения: [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `perf:`, `chore:`).
 

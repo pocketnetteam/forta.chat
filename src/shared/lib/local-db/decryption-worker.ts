@@ -2,14 +2,57 @@ import type { ChatDatabase, DecryptionJob, LocalMessage } from "./schema";
 import type { RoomRepository } from "./room-repository";
 import { MessageType } from "@/entities/chat/model/types";
 import { cryptoDebug } from "@/shared/lib/utils/crypto-debug";
+import { eventKeyAddresses } from "@/shared/lib/matrix/pcrypto-recipients";
 
-type GetRoomCrypto = (roomId: string) => Promise<{ decryptEvent(raw: unknown): Promise<{ body: string }> } | undefined>;
+type RoomCrypto = {
+  decryptEvent(raw: unknown): Promise<{ body: string }>;
+  getKeysLoadState?(): string;
+};
+type GetRoomCrypto = (roomId: string) => Promise<RoomCrypto | undefined>;
 type FetchRawEvent = (roomId: string, eventId: string) => Promise<Record<string, unknown> | undefined>;
+/** Starts one batched load of these users' encryption keys (fire-and-forget). */
+type PreloadKeys = (addresses: string[]) => void;
 
 const FAST_BACKOFF_MS = [2_000, 5_000, 10_000];
 const SLOW_BACKOFF_MS = [30_000, 120_000, 600_000, 3_600_000];
 const MAX_ATTEMPTS = 8;
 const BATCH_SIZE = 20;
+
+/** Pcrypto's "no AES key for the sender" error. Once the room's keys have
+ *  loaded it means the message was never encrypted for us, so retrying can't
+ *  help: the job goes dead immediately and recovery never resurrects it. */
+const EMPTY_KEY_ERROR = "emptykey";
+
+function isEmptyKeyError(e: unknown): boolean {
+  return e instanceof Error && e.message === EMPTY_KEY_ERROR;
+}
+
+/** emptykey counts as final only after a successful key fetch: before that
+ *  (cold start, getusersinfo timeout) the sender's keys may simply be missing. */
+function isPermanentFailure(e: unknown, roomCrypto: RoomCrypto | undefined): boolean {
+  return isEmptyKeyError(e) && roomCrypto?.getKeysLoadState?.() === "loaded";
+}
+
+/** AES-SIV MAC mismatch ("AES-SIV: ciphertext verification failure!"): the
+ *  ciphertext doesn't match any key we derive. It can still heal once (keys
+ *  refetched after a rotation), so it is retried, but only this many times in
+ *  total: re-queueing resets `attempts`, so without a separate counter such a
+ *  message was re-queued on every key load / room open forever. */
+const SIV_VERIFICATION_ERROR = "ciphertext verification failure";
+export const MAX_SIV_FAILURES = 5;
+
+function isSivVerificationError(e: unknown): boolean {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.includes(SIV_VERIFICATION_ERROR);
+}
+
+function hasExhaustedSivRetries(job: DecryptionJob): boolean {
+  return (job.sivFailures ?? 0) >= MAX_SIV_FAILURES;
+}
+
+function isUndecryptableJob(job: DecryptionJob): boolean {
+  return job.status === "dead" && (job.lastError === EMPTY_KEY_ERROR || hasExhaustedSivRetries(job));
+}
 
 /**
  * Background worker that retries decryption of messages with temporarily
@@ -29,6 +72,7 @@ export class DecryptionWorker {
     private getRoomCrypto: GetRoomCrypto,
     private roomRepo?: RoomRepository,
     private fetchRawEvent?: FetchRawEvent,
+    private preloadKeys?: PreloadKeys,
   ) {}
 
   /** Enqueue a failed decryption for retry. Idempotent — skips if eventId already queued. */
@@ -70,6 +114,8 @@ export class DecryptionWorker {
   async decryptMessageNow(eventId: string): Promise<boolean> {
     const msg = await this.db.messages.where("eventId").equals(eventId).first();
     if (!msg) return false;
+    const existingJob = await this.db.decryptionQueue.where("eventId").equals(eventId).first();
+    if (existingJob && isUndecryptableJob(existingJob)) return false;
 
     let encryptedBody = msg.encryptedBody;
     if (!encryptedBody) {
@@ -83,9 +129,10 @@ export class DecryptionWorker {
       });
     }
 
+    let roomCrypto: RoomCrypto | undefined;
     try {
       const raw = JSON.parse(encryptedBody);
-      const roomCrypto = await this.getRoomCrypto(msg.roomId);
+      roomCrypto = await this.getRoomCrypto(msg.roomId);
       if (!roomCrypto) return false;
 
       const result = await roomCrypto.decryptEvent(raw);
@@ -102,9 +149,78 @@ export class DecryptionWorker {
       const job = await this.db.decryptionQueue.where("eventId").equals(eventId).first();
       if (job && job.status !== "processing") await this.db.decryptionQueue.delete(job.id!);
       return true;
-    } catch {
+    } catch (e) {
+      if (isPermanentFailure(e, roomCrypto)) {
+        await this.markUndecryptable(eventId, msg.roomId, encryptedBody, e).catch(() => {});
+      } else if (isSivVerificationError(e)) {
+        await this.recordSivFailure(eventId, msg.roomId, encryptedBody, e).catch(() => {});
+      }
       return false;
     }
+  }
+
+  /** Count an AES-SIV failure of an out-of-queue decrypt against the message's
+   *  total budget; the last allowed one kills the job for good. */
+  private async recordSivFailure(
+    eventId: string,
+    roomId: string,
+    encryptedBody: string,
+    e: unknown,
+  ): Promise<void> {
+    await this.db.transaction(
+      "rw",
+      [this.db.messages, this.db.rooms, this.db.decryptionQueue],
+      async () => {
+        let job = await this.db.decryptionQueue.where("eventId").equals(eventId).first();
+        if (job?.status === "processing" || (job && isUndecryptableJob(job))) return;
+        if (!job) {
+          const now = Date.now();
+          const id = await this.db.decryptionQueue.add({
+            eventId, roomId, encryptedBody, status: "waiting", attempts: 0,
+            nextAttemptAt: now + FAST_BACKOFF_MS[0], createdAt: now,
+          });
+          job = await this.db.decryptionQueue.get(id);
+          if (!job) return;
+          this.scheduleNext();
+        }
+        const sivFailures = (job.sivFailures ?? 0) + 1;
+        if (sivFailures >= MAX_SIV_FAILURES) {
+          await this.commitFailure(job, e, true); // counts this failure → sivFailures = MAX
+        } else {
+          await this.db.decryptionQueue.update(job.id!, {
+            sivFailures,
+            lastError: String(e instanceof Error ? e.message : e),
+          });
+        }
+      },
+    );
+  }
+
+  /** Record a permanent failure for a message decrypted outside the queue:
+   *  a dead job is the marker every recovery path checks before retrying. */
+  private async markUndecryptable(
+    eventId: string,
+    roomId: string,
+    encryptedBody: string,
+    e: unknown,
+  ): Promise<void> {
+    await this.db.transaction(
+      "rw",
+      [this.db.messages, this.db.rooms, this.db.decryptionQueue],
+      async () => {
+        let job = await this.db.decryptionQueue.where("eventId").equals(eventId).first();
+        if (job?.status === "processing") return;
+        if (!job) {
+          const now = Date.now();
+          const id = await this.db.decryptionQueue.add({
+            eventId, roomId, encryptedBody, status: "queued", attempts: 0, nextAttemptAt: now, createdAt: now,
+          });
+          job = await this.db.decryptionQueue.get(id);
+          if (!job) return;
+        }
+        await this.commitFailure(job, e, true);
+      },
+    );
   }
 
   /** Process all ready jobs in the queue.
@@ -123,10 +239,14 @@ export class DecryptionWorker {
 
       // Pick + bulk "processing" mark in ONE transaction so a concurrent
       // retryForRoom reset can't be clobbered between read and mark.
+      // Latest-due first (`reverse`): a backlog is enqueued oldest -> newest,
+      // so ascending order spent the first ticks on the oldest history while
+      // the newest messages (sidebar preview, bottom of the open chat) waited.
       const jobs = await this.db.transaction("rw", this.db.decryptionQueue, async () => {
         const queuedJobs = await this.db.decryptionQueue
           .where("[status+nextAttemptAt]")
           .between(["queued", 0], ["queued", now], true, true)
+          .reverse()
           .limit(BATCH_SIZE)
           .toArray();
 
@@ -135,6 +255,7 @@ export class DecryptionWorker {
           ? await this.db.decryptionQueue
               .where("[status+nextAttemptAt]")
               .between(["waiting", 0], ["waiting", now], true, true)
+              .reverse()
               .limit(remaining)
               .toArray()
           : [];
@@ -157,17 +278,32 @@ export class DecryptionWorker {
       // the open chat / the sidebar preview) resolve before older history.
       jobs.sort((a, b) => b.createdAt - a.createdAt);
 
-      // Decrypt phase — pure crypto, no DB writes.
-      const results: Array<{ job: DecryptionJob; ok: boolean; body?: string; error?: unknown }> = [];
-      for (const job of jobs) {
+      // One key request for the whole tick: the jobs span many rooms and are
+      // decrypted one by one, each loading its sender's keys on its own.
+      const parsed = jobs.map((job) => {
         try {
-          const raw = JSON.parse(job.encryptedBody);
-          const roomCrypto = await this.getRoomCrypto(job.roomId);
+          return JSON.parse(job.encryptedBody) as Record<string, unknown>;
+        } catch {
+          return null; // reported per job below
+        }
+      });
+      if (this.preloadKeys) {
+        const addresses = eventKeyAddresses(parsed);
+        if (addresses.length > 0) this.preloadKeys(addresses);
+      }
+
+      // Decrypt phase — pure crypto, no DB writes.
+      const results: Array<{ job: DecryptionJob; ok: boolean; body?: string; error?: unknown; permanent?: boolean }> = [];
+      for (const [i, job] of jobs.entries()) {
+        let roomCrypto: RoomCrypto | undefined;
+        try {
+          const raw = parsed[i] ?? JSON.parse(job.encryptedBody);
+          roomCrypto = await this.getRoomCrypto(job.roomId);
           if (!roomCrypto) throw new Error("Room crypto not available");
           const result = await roomCrypto.decryptEvent(raw);
           results.push({ job, ok: true, body: result.body });
         } catch (e) {
-          results.push({ job, ok: false, error: e });
+          results.push({ job, ok: false, error: e, permanent: isPermanentFailure(e, roomCrypto) });
         }
       }
 
@@ -181,7 +317,7 @@ export class DecryptionWorker {
               if (r.ok) {
                 await this.commitSuccess(r.job, r.body!);
               } else {
-                await this.commitFailure(r.job, r.error);
+                await this.commitFailure(r.job, r.error, r.permanent);
               }
             } catch (err) {
               // Fault-tolerant: one bad job must not abort the whole commit.
@@ -200,7 +336,7 @@ export class DecryptionWorker {
   async retryForRoom(roomId: string): Promise<void> {
     await this.db.decryptionQueue
       .where("roomId").equals(roomId)
-      .filter(j => j.status !== "processing")
+      .filter(j => j.status !== "processing" && !isUndecryptableJob(j))
       .modify({
         status: "queued",
         attempts: 0,
@@ -235,7 +371,7 @@ export class DecryptionWorker {
 
     let count = 0;
     for (const m of rows) {
-      if (await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)) count++;
+      if ((await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)).requeued) count++;
     }
     if (count > 0) {
       console.info(`[decryption] recovered ${count} stuck message(s) for room ${roomId}`);
@@ -269,7 +405,7 @@ export class DecryptionWorker {
 
     let count = 0;
     for (const m of rows) {
-      if (await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)) count++;
+      if ((await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)).requeued) count++;
     }
     if (count > 0) {
       console.info(`[decryption] boot recovery re-queued ${count} stuck message(s)`);
@@ -321,12 +457,19 @@ export class DecryptionWorker {
       if (!cur || m.timestamp > cur.timestamp) latestPerRoom.set(m.roomId, m);
     }
 
-    let count = 0;
+    // Why each message is still stuck: the previous attempt's error, so a
+    // message re-queued over and over (keys refetched but still unusable)
+    // shows its cause instead of a bare count.
+    const reasons: string[] = [];
     for (const m of latestPerRoom.values()) {
-      if (await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!)) count++;
+      const { requeued, lastError } = await this.requeueStuckMessage(m.eventId!, m.roomId, m.encryptedBody!);
+      if (!requeued) continue;
+      const reason = lastError ? lastError.slice(0, 200) : "no previous attempt";
+      reasons.push(`${m.eventId} in ${m.roomId} (${m.decryptionStatus}): ${reason}`);
     }
+    const count = reasons.length;
     if (count > 0) {
-      console.info(`[decryption] re-queued ${count} latest stuck message(s)`);
+      console.info(`[decryption] re-queued ${count} latest stuck message(s):\n  ${reasons.join("\n  ")}`);
       this.scheduleNext();
     }
     return count;
@@ -335,24 +478,28 @@ export class DecryptionWorker {
   /** (Re)create a ready queue job for a persisted stuck message. Resets a
    *  dead/waiting job to queued; skips one that's currently processing.
    *  The read + write run in one rw transaction so the processing-skip guard
-   *  is atomic against processJob (which flips status to "processing"). */
+   *  is atomic against processJob (which flips status to "processing").
+   *  A permanently undecryptable job (emptykey) is left dead.
+   *  `lastError` is the reset job's previous failure, if any. */
   private async requeueStuckMessage(
     eventId: string,
     roomId: string,
     encryptedBody: string,
-  ): Promise<boolean> {
+  ): Promise<{ requeued: boolean; lastError?: string }> {
     return this.db.transaction("rw", this.db.decryptionQueue, async () => {
       const existing = await this.db.decryptionQueue
         .where("eventId").equals(eventId).first();
       if (existing) {
-        if (existing.status === "processing") return false;
+        if (existing.status === "processing" || isUndecryptableJob(existing)) {
+          return { requeued: false };
+        }
         await this.db.decryptionQueue.update(existing.id!, {
           status: "queued",
           attempts: 0,
           nextAttemptAt: Date.now(),
           encryptedBody,
         });
-        return true;
+        return { requeued: true, lastError: existing.lastError };
       }
       await this.db.decryptionQueue.add({
         eventId,
@@ -363,7 +510,7 @@ export class DecryptionWorker {
         nextAttemptAt: Date.now(),
         createdAt: Date.now(),
       });
-      return true;
+      return { requeued: true };
     });
   }
 
@@ -458,15 +605,18 @@ export class DecryptionWorker {
     await this.db.decryptionQueue.delete(job.id!);
   }
 
-  /** Commit a failed decrypt (backoff/dead) — runs inside the tick's commit transaction. */
-  private async commitFailure(job: DecryptionJob, e: unknown): Promise<void> {
+  /** Commit a failed decrypt (backoff/dead) — runs inside the tick's commit
+   *  transaction. `permanent` kills the job at once instead of backing off. */
+  private async commitFailure(job: DecryptionJob, e: unknown, permanent = false): Promise<void> {
     const attempts = job.attempts + 1;
-    const isDead = attempts >= MAX_ATTEMPTS;
+    const sivFailures = (job.sivFailures ?? 0) + (isSivVerificationError(e) ? 1 : 0);
+    const isDead = permanent || attempts >= MAX_ATTEMPTS || sivFailures >= MAX_SIV_FAILURES;
 
     cryptoDebug("retry:fail", {
       eventId: job.eventId,
       roomId: job.roomId,
       attempts,
+      sivFailures,
       isDead,
       error: e instanceof Error ? e.message : String(e),
     });
@@ -486,6 +636,7 @@ export class DecryptionWorker {
     await this.db.decryptionQueue.update(job.id!, {
       status: isDead ? "dead" : "waiting",
       attempts,
+      sivFailures,
       nextAttemptAt: isDead ? 0 : Date.now() + delay + jitter,
       lastError: String(e instanceof Error ? e.message : e),
     });

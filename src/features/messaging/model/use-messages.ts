@@ -5,6 +5,7 @@ import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
 import { getMatrixClientService } from "@/entities/matrix";
 import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { buildTransferMessageBody } from "@/shared/lib/bastyon-link";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
@@ -22,6 +23,7 @@ import { useToast } from "@/shared/lib/use-toast";
 import { isServerEventId } from "./redact-target";
 import { SendError, sendDiag } from "./send-errors";
 import { reportSendError } from "./send-error-bus";
+import { optimizeChatImage } from "@/shared/lib/upload-image";
 
 /** Per-phase media pipeline timeouts. Splitting the old single 5-minute cap
  *  lets us surface phase-specific failures (e.g. crypto hang vs upload stall)
@@ -131,6 +133,16 @@ export function useMessages() {
   const chatStore = useChatStore();
   const authStore = useAuthStore();
   const { isOnline } = useConnectivity();
+
+  /** The room's crypto with its participant list complete — canBeEncrypt()
+   *  and the recipients are decided from it (lazy-loaded members). Throws if
+   *  the members could not be loaded: the send fails instead of encrypting
+   *  for part of the room. */
+  const getSendCrypto = async (roomId: string): Promise<PcryptoRoomInstance | undefined> => {
+    const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+    await roomCrypto?.ensureMembers?.();
+    return roomCrypto;
+  };
 
   /** Extract width/height from an image file */
   const getImageDimensions = (file: File): Promise<{ w: number; h: number }> => {
@@ -252,7 +264,7 @@ export function useMessages() {
     }
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       let serverEventId: string;
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(trimmed);
@@ -290,7 +302,7 @@ export function useMessages() {
       try {
         const matrixService = getMatrixClientService();
         if (!matrixService.isReady()) break;
-        const roomCrypto = authStore.pcrypto?.rooms[msg.roomId] as PcryptoRoomInstance | undefined;
+        const roomCrypto = await getSendCrypto(msg.roomId);
         let serverEventId: string;
         if (roomCrypto?.canBeEncrypt()) {
           const encrypted = await roomCrypto.encryptEvent(msg.content);
@@ -445,7 +457,10 @@ export function useMessages() {
     // HEIC must be converted before getImageDimensions — Chromium <img> cannot
     // decode HEIC at all, so reading naturalWidth/Height on the original blob
     // would produce zeros and corrupt the m.image event payload.
-    const processedFile = await convertHeicToJpeg(file);
+    const converted = await convertHeicToJpeg(file);
+    // Downscale to 2048 px / q=0.85 (sendFile keeps the original). Forwards are
+    // skipped: the sender already optimized it and a second encode only loses quality.
+    const processedFile = options.forwardedFrom ? converted : await optimizeChatImage(converted);
     // No Matrix-readiness gate: queued like text, see sendFile (audit S2-02).
 
     const dimensions = await getImageDimensions(processedFile);
@@ -878,7 +893,7 @@ export function useMessages() {
     }
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
 
       const msgContent: Record<string, unknown> = {
         body: trimmed,
@@ -998,7 +1013,7 @@ export function useMessages() {
       const matrixService = getMatrixClientService();
       if (!matrixService.isReady()) return false;
 
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       const fwdMeta = forwardMeta
         ? { sender_id: forwardMeta.senderId, sender_name: forwardMeta.senderName }
         : undefined;
@@ -1124,7 +1139,7 @@ export function useMessages() {
     }
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
 
       if (roomCrypto?.canBeEncrypt()) {
         // The same content the SyncEngine sends: `m.new_content` is the encrypted event, never
@@ -1228,9 +1243,13 @@ export function useMessages() {
       fileInfo?: FileInfo;
       roomId: string;
     }> = [];
-    for (const roomMessages of Object.values(chatStore.messages)) {
+    // The active room's rendered list first: a room opened from Dexie has no
+    // in-memory copy in chatStore.messages unless a history load ran.
+    const seen = new Set<string>();
+    for (const roomMessages of [chatStore.activeMessages ?? [], ...Object.values(chatStore.messages)]) {
       for (const m of roomMessages) {
-        if (idSet.has(m.id)) {
+        if (idSet.has(m.id) && !seen.has(m.id)) {
+          seen.add(m.id);
           collected.push({
             id: m.id,
             content: m.content,
@@ -1310,7 +1329,7 @@ export function useMessages() {
       }
 
       // Legacy fallback — direct encrypted/plaintext send to target room.
-      const roomCrypto = authStore.pcrypto?.rooms[targetRoomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(targetRoomId);
       if (roomCrypto?.canBeEncrypt()) {
         const encrypted = await roomCrypto.encryptEvent(src.content);
         if (withSenderInfo) {
@@ -1411,109 +1430,11 @@ export function useMessages() {
     return { succeeded, failed };
   };
 
-  /** Send a PKOIN transfer message.
-   *  Uses Dexie optimistic UI (createLocal → syncEngine) so the transfer bubble
-   *  appears instantly, just like regular text messages. Falls back to legacy
-   *  in-memory path if Dexie is not ready. */
-  const sendTransferMessage = async (
-    txId: string,
-    amount: number,
-    receiverAddress: string,
-    message?: string,
-  ) => {
-    const roomId = chatStore.activeRoomId;
-    if (!roomId) return;
-
-    const transferInfo = {
-      txId,
-      amount,
-      from: authStore.address ?? "",
-      to: receiverAddress,
-      message: message || undefined,
-    };
-    const displayContent = message || `Sent ${amount} PKOIN`;
-
-    // ── Dexie path: optimistic insert FIRST, then enqueue for sync ──
-    if (isChatDbReady()) {
-      let localClientId: string | undefined;
-      try {
-        const dbKit = getChatDb();
-
-        // 1. Optimistic insert — transfer appears in UI immediately via liveQuery
-        const localMsg = await dbKit.messages.createLocal({
-          roomId,
-          senderId: authStore.address ?? "",
-          content: displayContent,
-          type: MessageType.transfer,
-          transferInfo,
-        });
-        localClientId = localMsg.clientId;
-
-        // 2. Enqueue for background sync. Not-ready Matrix client (boot/re-init)
-        //    → SyncEngine queues the op until ready instead of instant-fail (WEE-85).
-        //    SyncEngine.syncSendTransfer() handles
-        //    encryption and Matrix API call, then confirms via messageRepo.confirmSent()
-        await dbKit.syncEngine.enqueue(
-          "send_transfer",
-          roomId,
-          { txId, amount, from: authStore.address ?? "", to: receiverAddress, message: message || undefined },
-          localMsg.clientId,
-        );
-        return;
-      } catch (e) {
-        console.error("[sendTransferMessage] Dexie path failed:", e);
-        if (localClientId) {
-          try { await getChatDb().messages.markFailed(localClientId); } catch { /* already logging */ }
-          return; // message IS visible as failed
-        }
-        console.warn("[sendTransferMessage] Falling back to legacy path");
-      }
-    }
-
-    // ── Legacy path: in-memory optimistic + direct Matrix API call ──
-    const matrixService = getMatrixClientService();
-    if (!matrixService.isReady()) return;
-
-    const transferBody = JSON.stringify({ _transfer: true, ...transferInfo });
-    const tempId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const optimistic: Message = {
-      id: tempId,
-      roomId,
-      senderId: authStore.address ?? "",
-      content: displayContent,
-      timestamp: Date.now(),
-      status: MessageStatus.sending,
-      type: MessageType.transfer,
-      transferInfo,
-    };
-    chatStore.addMessage(roomId, optimistic);
-
-    try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
-      let serverEventId: string;
-      if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await roomCrypto.encryptEvent(transferBody);
-        serverEventId = await matrixService.sendEncryptedText(roomId, encrypted);
-      } else {
-        // Defense in depth: transfer body JSON contains txId + recipient
-        // address. Shipping it plaintext into a private room exposes
-        // financial metadata that users reasonably expect to stay inside
-        // the encryption envelope.
-        if (roomCrypto?.requiresEncryption()) {
-          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — sendTransferMessage legacy path`);
-        }
-        serverEventId = await matrixService.sendText(roomId, transferBody);
-      }
-      if (serverEventId) {
-        chatStore.updateMessageIdAndStatus(roomId, tempId, serverEventId, MessageStatus.sent);
-      } else {
-        chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
-      }
-    } catch (e) {
-      console.error("Failed to send transfer message:", e);
-      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.failed);
-    }
-  };
+  /** Announce a PKOIN transfer in the active chat the way Bastyon does: a plain
+   *  message with the `bastyon://i?stx=<txid>` link (plus the sender's note).
+   *  The receiving side renders it from the chain, see buildTransferMessageBody. */
+  const sendTransferMessage = async (txId: string, message?: string): Promise<boolean> =>
+    sendMessage(buildTransferMessageBody(txId, message), true);
 
   /** Send a poll (MSC3381 org.matrix.msc3381.poll.start) */
   const sendPoll = async (question: string, options: string[]) => {
@@ -1692,7 +1613,7 @@ export function useMessages() {
         (async () => {
           try {
             const gifMime = resolveMime(file);
-            const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+            const roomCrypto = await getSendCrypto(roomId);
 
             let fileToUpload: Blob = file;
             let secrets: Record<string, unknown> | undefined;
@@ -1710,11 +1631,17 @@ export function useMessages() {
             const onProgress = makeThrottledProgress((percent) => {
               dbKit.messages.updateUploadProgress(localMsg.clientId, percent);
             });
+            const gifUpload = new AbortController();
             const url = await withTimeout(
-              matrixService.uploadContent(fileToUpload, onProgress),
+              matrixService.uploadContent(fileToUpload, onProgress, gifUpload.signal),
               UPLOAD_TIMEOUT_MS,
               "GIF upload",
-            );
+            ).catch((e: unknown) => {
+              // The timeout does not stop the upload: abort it, or it keeps
+              // sending and writing progress after the message failed.
+              gifUpload.abort();
+              throw e;
+            });
 
             const content: Record<string, unknown> = {
               body: info?.title || "GIF",
@@ -1801,7 +1728,7 @@ export function useMessages() {
     chatStore.addMessage(roomId, message);
 
     try {
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
 
       let fileToUpload: Blob = file;
       let secrets: Record<string, unknown> | undefined;
@@ -1910,7 +1837,7 @@ export function useMessages() {
       await dbKit.db.messages.where("clientId").equals(localMsg.clientId)
         .modify({ uploadPhase: "encrypting" });
 
-      const roomCrypto = authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined;
+      const roomCrypto = await getSendCrypto(roomId);
       let fileToUpload: Blob = file;
       let secrets: Record<string, unknown> | undefined;
 
@@ -2097,6 +2024,18 @@ export function useMessages() {
     }
   };
 
+  /** Cancel a failed text send: the message leaves the chat and the queue. */
+  const cancelFailedMessage = async (message: Message): Promise<void> => {
+    if (message.status !== MessageStatus.failed) return;
+    const mKey = (message as Message & { _key?: string })._key;
+    if (!mKey || !isChatDbReady()) return;
+    try {
+      await getChatDb().eventWriter.discardFailedMessage(mKey);
+    } catch (e) {
+      console.error("[cancelFailedMessage] Failed to discard:", e);
+    }
+  };
+
   /** Cancel an in-flight or failed media upload */
   const cancelMediaUpload = async (message: Message): Promise<void> => {
     const mKey = (message as Message & { _key?: string })._key;
@@ -2129,6 +2068,7 @@ export function useMessages() {
   };
 
   return {
+    cancelFailedMessage,
     cancelMediaUpload,
     deleteMessage,
     deleteMessages,

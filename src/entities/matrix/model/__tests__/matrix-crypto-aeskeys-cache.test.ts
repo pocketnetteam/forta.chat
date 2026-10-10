@@ -50,7 +50,7 @@ describe("eaa.aeskeys — no longer self-caches", () => {
 
   it("aeskeys() is a pure derivation with no cache lookup/store", () => {
     const source = getSource();
-    const fn = extractFunction(source, "aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number) {");
+    const fn = extractFunction(source, "aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number | undefined) {");
     expect(fn).not.toMatch(/cache/i);
   });
 });
@@ -83,7 +83,7 @@ describe("aeskeysls — persistent, membership-aware AES-key cache", () => {
     const fn = source.slice(start, source.indexOf("\n    }\n", start));
     expect(fn).toMatch(/const keyUsers = usersIds \? preparedUsersById\(usersIds, v\) : preparedUsers\(_time, v\);/);
     expect(fn).toMatch(/md5\(keyUsers\.map\(\(u\) => `\$\{u\.id\}:\$\{\(u\.keys \?\? \[\]\)\.join\(","\)\}`\)\.join\("\|"\)\)/);
-    expect(fn).toMatch(/-\$\{v \|\| version\}-\$\{keysFingerprint\}`;/);
+    expect(fn).toMatch(/-\$\{v && v > 1 \? v : 1\}-\$\{keysFingerprint\}`;/);
   });
 
   it("persists derived keys through pcrypto.ls (IndexedDB), not an in-memory Map", () => {
@@ -117,7 +117,8 @@ describe("orderedIdsHash — order-independent hash of an explicit user list", (
     const end = source.indexOf("\n    }\n", start);
     const fn = source.slice(start, end);
 
-    expect(fn).toMatch(/\.sort\(/);
+    // underscore sortBy — the same call the original pcrypto.js makes
+    expect(fn).toMatch(/_\.sortBy\(/);
     expect(fn).toMatch(/md5\(/);
   });
 });

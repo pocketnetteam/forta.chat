@@ -1,8 +1,10 @@
+// @vitest-environment happy-dom
 /**
  * Audit S3-03: an edit or a reaction whose target message was not in the same
  * parsed batch (an older message) was skipped, so it showed only after a later
  * scroll re-parsed both events together. They now go to the event writer,
- * which updates the stored message or keeps them until it lands.
+ * which updates the stored message or keeps them until it lands. The edit
+ * carries its sender: writeEdit applies only the author's edit (H4).
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
@@ -105,6 +107,7 @@ function makeKit() {
       getMessages: vi.fn(() => Promise.resolve([])),
       patchUnresolvedReplies: vi.fn(async () => {}),
       updateReactions: vi.fn(async () => {}),
+      bulkUpdateReactions: vi.fn(async () => 0),
       getByEventIds: vi.fn(async () => []),
     },
     eventWriter: {
@@ -154,7 +157,7 @@ describe("loadRoomMessages — edits and reactions to a message outside the batc
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       store.setChatDbKit(makeKit() as any);
 
-      await store.loadRoomMessages("!a:s");
+      await store.loadRoomMessages("!a:s", { awaitWrite: true });
 
       expect(writeEdit).not.toHaveBeenCalled();
     } finally {
@@ -169,11 +172,11 @@ describe("loadRoomMessages — edits and reactions to a message outside the batc
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     store.setChatDbKit(makeKit() as any);
 
-    await store.loadRoomMessages("!a:s");
+    await store.loadRoomMessages("!a:s", { awaitWrite: true });
 
     expect(writeEdit).toHaveBeenCalledWith(
       "!a:s",
-      expect.objectContaining({ targetEventId: "$old", newContent: "fixed text", editTs: 2100 }),
+      expect.objectContaining({ senderId: "peer", targetEventId: "$old", newContent: "fixed text", editTs: 2100 }),
     );
     expect(writeReaction).toHaveBeenCalledWith(
       expect.objectContaining({ eventId: "$reaction", targetEventId: "$old", emoji: "👍", isMine: false }),

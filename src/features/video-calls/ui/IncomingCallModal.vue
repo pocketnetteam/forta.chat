@@ -57,8 +57,9 @@ function startCountdown() {
   countdownInterval = setInterval(() => {
     countdown.value--;
     if (countdown.value <= 0) {
+      // Display only: the 30 s deadline belongs to the call service
+      // (armIncomingTimeout), so the call is rejected in one place.
       stopCountdown();
-      callService.rejectCall();
     }
   }, 1000);
 }

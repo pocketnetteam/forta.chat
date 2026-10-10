@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: on Android an ICE restart never reached the peer. `restartIce()` marks the native
  * connection, libwebrtc then reports renegotiation-needed, and NativeWebRTCManager suppresses that

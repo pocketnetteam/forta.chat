@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { toBastyonPostHttpsUrl } from "@/shared/lib/bastyon-link";
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
 import { usePostScores } from "../model/use-post-scores";
@@ -10,6 +11,7 @@ import PostAuthor from "./PostAuthor.vue";
 import PostActions from "./PostActions.vue";
 import PostComments from "./PostComments.vue";
 import ArticleBody from "./ArticleBody.vue";
+import PostImageGallery from "./PostImageGallery.vue";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
 import { useChatStore } from "@/entities/chat";
 import { parseVideoUrl } from "@/shared/lib/video-embed";
@@ -36,7 +38,7 @@ const {
 
 const {
   comments, loading: commentsLoading, submitting: commentsSubmitting,
-  load: loadComments, submit: submitComment,
+  load: loadComments, submit: submitComment, ensureComment,
 } = usePostComments(props.post.txid);
 
 const { showDonateModal, boostAddress, openBoost, closeBoost } = usePostBoost();
@@ -55,8 +57,9 @@ const isOwnPost = computed(() => props.post.address === authStore.address);
 const isArticle = computed(() => props.post.settings?.v === "a");
 
 const images = computed(() =>
-  (props.post.images || []).map((img) => normalizePocketnetImageUrl(img))
+  (props.post.images || []).map((img) => normalizePocketnetImageUrl(img)).filter(Boolean)
 );
+const showGallery = ref(false);
 
 const handleRate = async (value: number) => {
   await submitVote(value);
@@ -68,7 +71,7 @@ const handleBoost = () => {
 
 const handleShare = () => {
   chatStore.initPostForward(
-    `bastyon://post?s=${props.post.txid}`,
+    toBastyonPostHttpsUrl(props.post.txid),
     props.authorName || undefined,
   );
 };
@@ -82,28 +85,28 @@ const handleCommentSubmit = async (message: string) => {
 };
 
 const onKeydown = (e: KeyboardEvent) => {
-  if (e.key === "Escape") emit("close");
+  // Escape over the open gallery closes only the gallery.
+  if (e.key === "Escape" && !showGallery.value) emit("close");
 };
 
-// Scroll to target comment after comments load
-if (props.initialCommentId) {
-  watch(comments, (list) => {
-    if (list.length > 0) {
-      nextTick(() => {
-        const el = document.getElementById(`comment-${props.initialCommentId}`);
-        if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          el.classList.add("ring-2", "ring-color-bg-ac", "ring-offset-1");
-          setTimeout(() => el.classList.remove("ring-2", "ring-color-bg-ac", "ring-offset-1"), 3000);
-        }
-      });
-    }
-  }, { once: true });
+/** Load comments; for a shared comment link also load that comment (a reply
+ *  is not in the top-level list), then scroll to it and highlight it. */
+async function loadCommentsAndFocus(): Promise<void> {
+  await loadComments();
+  const target = props.initialCommentId;
+  if (!target) return;
+  await ensureComment(target);
+  await nextTick();
+  const el = document.getElementById(`comment-${target}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("ring-2", "ring-color-bg-ac", "ring-offset-1");
+  setTimeout(() => el.classList.remove("ring-2", "ring-color-bg-ac", "ring-offset-1"), 3000);
 }
 
 onMounted(() => {
   loadScores();
-  loadComments();
+  void loadCommentsAndFocus();
   document.addEventListener("keydown", onKeydown);
 });
 
@@ -138,7 +141,14 @@ onUnmounted(() => {
                flow (WEE-82 / forta-bugs#963). -->
           <VideoPlayer v-if="videoInfo" :url="post.url" autoplay />
           <div v-else-if="images.length" class="max-h-80 overflow-hidden">
-            <img :src="images[0]" alt="" class="w-full object-cover" loading="lazy" />
+            <img
+              :src="images[0]"
+              alt=""
+              class="w-full cursor-pointer object-cover"
+              loading="lazy"
+              data-testid="post-modal-image"
+              @click="showGallery = true"
+            />
           </div>
 
           <div class="flex flex-col gap-4 p-5 text-text-color">
@@ -231,6 +241,11 @@ onUnmounted(() => {
         @close="closeBoost"
       />
 
+      <PostImageGallery
+        v-if="showGallery && images.length"
+        :images="images"
+        @close="showGallery = false"
+      />
     </div>
   </Teleport>
 </template>

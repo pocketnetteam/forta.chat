@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { computed, ref } from "vue";
@@ -272,23 +273,63 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     wrapper.unmount();
   });
 
-  it("shows select-prompt placeholder when activeRoomId points to a missing (zombie) room but rooms are initialized", async () => {
-    // After rooms initialized, the selfHealZombieRoom logic takes over — UI just
-    // shows the empty state while the zombie gets cleared.
-    fakeActiveRoomId.value = "!dead:matrix.org";
+  it("keeps the loading placeholder when a pushed room is missing from an initialized room list", async () => {
+    // Push tap / deep link names a room the app does not hold yet (first
+    // message in a group the user was just added to). `roomsInitialized` only
+    // says the LIST is ready, so the select-prompt here was a dead end: the
+    // sidebar is hidden on mobile and the tap looked like it did nothing.
+    fakeActiveRoomId.value = "!pushed:matrix.org";
     fakeRooms.value = [];
     fakeRoomsInitialized.value = true;
 
     const wrapper = mount(ChatWindow, mountOpts);
     await flushPromises();
 
-    const selectPrompt = wrapper.find('[data-testid="chat-select-prompt"]');
-    expect(selectPrompt.exists()).toBe(true);
-
-    const loading = wrapper.find('[data-testid="chat-loading"]');
-    expect(loading.exists()).toBe(false);
+    expect(wrapper.find('[data-testid="chat-loading"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="chat-select-prompt"]').exists()).toBe(false);
 
     wrapper.unmount();
+  });
+
+  it("renders the room as soon as sync delivers it, without waiting out the grace window", async () => {
+    fakeActiveRoomId.value = "!pushed:matrix.org";
+    fakeRooms.value = [];
+    fakeRoomsInitialized.value = true;
+
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+    expect(wrapper.find('[data-testid="chat-loading"]').exists()).toBe(true);
+
+    fakeRooms.value = [{ id: "!pushed:matrix.org", name: "Group", isGroup: true, members: [] }];
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="chat-loading"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="chat-select-prompt"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("falls back to the select-prompt when the room never arrives, so the user is not stuck on a skeleton", async () => {
+    vi.useFakeTimers();
+    try {
+      fakeActiveRoomId.value = "!dead:matrix.org";
+      fakeRooms.value = [];
+      fakeRoomsInitialized.value = true;
+
+      const wrapper = mount(ChatWindow, mountOpts);
+      await flushPromises();
+      expect(wrapper.find('[data-testid="chat-loading"]').exists()).toBe(true);
+
+      vi.advanceTimersByTime(15_000);
+      await flushPromises();
+
+      expect(wrapper.find('[data-testid="chat-select-prompt"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="chat-loading"]').exists()).toBe(false);
+
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders chat header with back button while room is loading so mobile users can exit cold-load state", async () => {
@@ -489,5 +530,39 @@ describe("ChatWindow — loading vs select-prompt placeholders", () => {
     joined.unmount();
 
     __resetCallFeedbackPromptForTests();
+  });
+});
+
+describe("ChatWindow — peer-keys banner", () => {
+  const ROOM = "!dm:matrix.org";
+  const mountDm = async (status: string | undefined) => {
+    fakeActiveRoomId.value = ROOM;
+    fakeRooms.value = [{ id: ROOM, name: "Peer", isGroup: false, members: [] }];
+    fakeRoomsInitialized.value = true;
+    if (status) peerKeysStatusMap.set(ROOM, status);
+    const wrapper = mount(ChatWindow, mountOpts);
+    await flushPromises();
+    return wrapper;
+  };
+
+  it("hides the banner while keys are still loading", async () => {
+    const wrapper = await mountDm("loading");
+    expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+    expect(wrapper.text()).not.toContain("chat.peerKeysLoadFailed");
+    wrapper.unmount();
+  });
+
+  it("says the peer has no keys only for 'missing'", async () => {
+    const wrapper = await mountDm("missing");
+    expect(wrapper.text()).toContain("chat.peerKeysMissing");
+    wrapper.unmount();
+  });
+
+  it("says the keys could not be loaded for 'load-failed', with Retry", async () => {
+    const wrapper = await mountDm("load-failed");
+    expect(wrapper.text()).toContain("chat.peerKeysLoadFailed");
+    expect(wrapper.text()).not.toContain("chat.peerKeysMissing");
+    expect(wrapper.text()).toContain("chat.peerKeysRetry");
+    wrapper.unmount();
   });
 });

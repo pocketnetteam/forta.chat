@@ -1,77 +1,121 @@
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+// @vitest-environment happy-dom
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+
+import { makeUser, type TestUser } from "@/entities/matrix/model/__tests__/pcrypto-harness";
+import type { WorkerRequest, WorkerResponse } from "./crypto.worker";
 
 /**
- * Regression: worker-side decrypt failures never evicted the poisoned
- * derived-key cache entry (keyCache), unlike the already-fixed main-thread
- * fallback in matrix-crypto.ts's _decrypt (which mirrors the original
- * bastyon-chat pcrypto.js self.decrypt behavior — evict on failure so the
- * next attempt re-derives instead of repeatedly failing against the same
- * bad key). Concretely: schema.ts v19 documents a production incident where
- * an `aeskeys` cache-key collision caused messages to derive the WRONG AES
- * key, exhaust DecryptionWorker's MAX_ATTEMPTS, and land permanently in the
- * terminal "failed" bucket — requiring a one-time DB migration to recover.
- * Since isCryptoWorkerSupported() makes the Worker path the primary path in
- * production (the main-thread path is only a fallback for old WebViews),
- * the worker's own keyCache was the actual blast radius for that class of
- * incident, and it had no eviction at all.
+ * Behavioural tests for the crypto worker's derived-key cache, driving the
+ * real worker module through `self.onmessage` with real secp256k1 keys.
  *
- * Source verification, following this directory's/matrix-crypto's established
- * convention for the crypto layer (see matrix-crypto-aeskeys-cache.test.ts):
- * the module runs inside a real Web Worker and pulls in miscreant + secp256k1
- * point arithmetic, which is impractical to drive end-to-end with fabricated
- * (non-matching) key material in a unit test — the interesting property here
- * is the *shape* of the eviction wiring, not the underlying crypto math.
+ * 1. Per-account cache: the cache key used to be `block|userIds` — no myId.
+ *    After a logout / account switch in the same tab (no reload), the second
+ *    account received the FIRST account's key map ({peer: K} instead of
+ *    {us: K}) and failed every decrypt with `emptykey`, forever.
+ * 2. Decrypt failures evict the entry (schema v19 aeskeys incident): a wrong
+ *    cached key must not fail every retry identically.
  */
-const getSource = (): string =>
-  readFileSync(resolve(__dirname, "./crypto.worker.ts"), "utf-8");
 
-describe("crypto.worker keyCache — keyed on the members' public keys (audit S1-05)", () => {
-  it("builds the cache key from each member's id and keys, not the ids alone", () => {
-    const source = getSource();
-    const body = source.slice(source.indexOf("function cacheKeyFor("), source.indexOf("function getCachedKeys("));
-    expect(body).toContain("users.map((u) => `${u.id}:${u.keys.join(\",\")}`).join(\";\")");
+/** Omit that distributes over the request union. */
+type RequestBody = WorkerRequest extends infer R ? (R extends WorkerRequest ? Omit<R, "id"> : never) : never;
+
+type Handler = (e: MessageEvent<WorkerRequest>) => Promise<void>;
+
+let handler: Handler;
+const posted: WorkerResponse[] = [];
+let nextId = 1;
+
+beforeAll(async () => {
+  vi.spyOn(self, "postMessage").mockImplementation(((msg: WorkerResponse) => {
+    posted.push(msg);
+  }) as typeof self.postMessage);
+  await import("./crypto.worker");
+  handler = self.onmessage as unknown as Handler;
+});
+
+beforeEach(() => {
+  posted.length = 0;
+});
+
+async function call(msg: RequestBody): Promise<WorkerResponse> {
+  const id = nextId++;
+  await handler({ data: { ...msg, id } as WorkerRequest } as MessageEvent<WorkerRequest>);
+  const res = posted.find((p) => p.id === id);
+  if (!res) throw new Error("no response for " + id);
+  return res;
+}
+
+const hex = (u: TestUser) => u.privates.map((p) => p.toString("hex"));
+const pub = (u: TestUser) => ({ id: u.id, keys: u.publics });
+
+describe("crypto.worker key cache", () => {
+  it("serves each account its own derived keys for the same users + block", async () => {
+    const alice = makeUser("aaaa11", 1);
+    const bob = makeUser("bbbb22", 2);
+    const users = [pub(alice), pub(bob)];
+    const block = 777;
+
+    // Account A encrypts to B — this fills the cache for (users, block).
+    const enc = await call({
+      type: "encrypt", users, myId: alice.id, privateKeys: hex(alice),
+      targetUserId: bob.id, text: "hi bob", time: 0, block,
+    });
+    expect(enc.error).toBeUndefined();
+
+    // Same worker, now account B (logout + login without reload).
+    const dec = await call({
+      type: "decrypt", users, myId: bob.id, privateKeys: hex(bob),
+      targetUserId: alice.id, encData: enc.result as { encrypted: string; nonce: string },
+      time: 0, block,
+    });
+    expect(dec.error).toBeUndefined();
+    expect(dec.result).toBe("hi bob");
+  });
+
+  it("re-derives after a peer re-publishes keys under the same id", async () => {
+    const alice = makeUser("aaaa33", 1);
+    const bobOld = makeUser("bbbb44", 2);
+    const bobNew = makeUser("bbbb44", 2);
+    const block = 778;
+
+    const warm = await call({
+      type: "encrypt", users: [pub(alice), pub(bobOld)], myId: alice.id, privateKeys: hex(alice),
+      targetUserId: bobOld.id, text: "old", time: 0, block,
+    });
+    expect(warm.error).toBeUndefined();
+
+    const enc = await call({
+      type: "encrypt", users: [pub(alice), pub(bobNew)], myId: alice.id, privateKeys: hex(alice),
+      targetUserId: bobNew.id, text: "new keys", time: 0, block,
+    });
+    const dec = await call({
+      type: "decrypt", users: [pub(alice), pub(bobNew)], myId: bobNew.id, privateKeys: hex(bobNew),
+      targetUserId: alice.id, encData: enc.result as { encrypted: string; nonce: string }, time: 0, block,
+    });
+    expect(dec.result).toBe("new keys");
+  });
+
+  it("reports a decrypt failure (and evicts) instead of resolving", async () => {
+    const alice = makeUser("aaaa55", 1);
+    const bob = makeUser("bbbb66", 2);
+    const users = [pub(alice), pub(bob)];
+
+    const res = await call({
+      type: "decrypt", users, myId: bob.id, privateKeys: hex(bob), targetUserId: alice.id,
+      encData: { encrypted: Buffer.alloc(32, 1).toString("base64"), nonce: Buffer.alloc(32, 2).toString("base64") },
+      time: 0, block: 779,
+    });
+    expect(res.error).toMatch(/verification/i);
   });
 });
 
-describe("crypto.worker keyCache — evicts on decrypt failure", () => {
-  it("defines evictCachedKeys using the exact same cache-key scheme as getCachedKeys", () => {
-    const source = getSource();
-    expect(source).toMatch(/function cacheKeyFor\(/);
-    expect(source).toMatch(/function evictCachedKeys\(/);
-
-    // Both getCachedKeys and evictCachedKeys must derive the cache key via
-    // the same cacheKeyFor() helper — two independently-computed key
-    // strings could silently drift and evict the wrong (or no) entry.
-    const getCachedKeysBody = source.slice(
-      source.indexOf("function getCachedKeys("),
-      source.indexOf("function evictCachedKeys("),
-    );
-    expect(getCachedKeysBody).toMatch(/cacheKeyFor\(users, block\)/);
-
-    const evictBody = source.slice(source.indexOf("function evictCachedKeys("));
-    expect(evictBody).toMatch(/keyCache\.delete\(cacheKeyFor\(users, block\)\)/);
-  });
-
-  it("the decrypt message handler evicts the cache entry when aesSivDecrypt throws", () => {
-    const source = getSource();
-    const start = source.indexOf('case "decrypt": {');
-    expect(start).toBeGreaterThan(-1);
-    const end = source.indexOf('case "encrypt": {', start);
-    const decryptCase = source.slice(start, end);
-
-    // The decrypt attempt must be wrapped so a thrown error triggers eviction
-    // BEFORE propagating to the outer handler (which reports it to the caller).
-    expect(decryptCase).toMatch(/try\s*\{[\s\S]*aesSivDecrypt\([\s\S]*\}\s*catch/);
-    expect(decryptCase).toMatch(/evictCachedKeys\(msg\.users, msg\.block\)/);
-    // Eviction must happen INSIDE the catch, before the error is re-thrown —
-    // not merely present somewhere later in the case block.
-    const catchIdx = decryptCase.indexOf("catch");
-    const evictIdx = decryptCase.indexOf("evictCachedKeys(msg.users, msg.block)");
-    const rethrowIdx = decryptCase.indexOf("throw decryptErr");
-    expect(catchIdx).toBeGreaterThan(-1);
-    expect(evictIdx).toBeGreaterThan(catchIdx);
-    expect(rethrowIdx).toBeGreaterThan(evictIdx);
+describe("crypto.worker eviction wiring", () => {
+  it("evicts with the same (users, myId, block) key it caches under", async () => {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const source = readFileSync(resolve(__dirname, "./crypto.worker.ts"), "utf-8");
+    expect(source).toMatch(/const cacheKey = cacheKeyFor\(users, myId, block\)/);
+    expect(source).toMatch(/keyCache\.delete\(cacheKeyFor\(users, myId, block\)\)/);
+    expect(source).toMatch(/catch \(decryptErr\) \{[\s\S]*evictCachedKeys\(msg\.users, msg\.myId, msg\.block\);[\s\S]*throw decryptErr/);
   });
 });

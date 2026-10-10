@@ -36,6 +36,7 @@ Key decisions:
 - **SyncEngine** (`shared/lib/local-db/sync-engine.ts`): offline-first outbound queue (FIFO, exponential backoff + jitter).
 - **EventWriter** (`shared/lib/local-db/event-writer.ts`): transactional writes of Matrix events into Dexie.
 - **ChatVirtualScroller** (`shared/ui/ChatVirtualScroller.vue`): custom virtual scroll (column-reverse).
+- **Calls**: `useCallService()` is a facade over `features/video-calls/model/call-*.ts`; every call resource has one owner keyed by `callId` (details in architecture.md, "Calls").
 
 Layers, data flow, key abstractions, cross-cutting concerns: [docs/agent/architecture.md](docs/agent/architecture.md). Deeper dives: [docs/local-first-architecture.md](docs/local-first-architecture.md), [docs/architecture-data-flow.md](docs/architecture-data-flow.md), [docs/webrtc-architecture.md](docs/webrtc-architecture.md).
 
@@ -46,6 +47,7 @@ Layers, data flow, key abstractions, cross-cutting concerns: [docs/agent/archite
 - Tailwind utilities and CSS design tokens; no ad-hoc CSS.
 - Errors: explicit `try-catch`, module-prefixed logs (`[App]`), user-facing text through i18n keys, no `console.log` in production code.
 - Tests co-located with source (`*.test.ts`). Target 200-400 lines per file, split at 800.
+- Tests run in Node by default; a file that needs a DOM starts with `// @vitest-environment happy-dom`. While iterating run single files (`npx vitest run <file>`); run the full suite in the background or with a 10-minute timeout, never two at once (details in conventions.md, "Tests").
 - No ESLint/Prettier in the repo; `vue-tsc` is the type gate.
 
 Full list with examples and the quality checklist: [docs/agent/conventions.md](docs/agent/conventions.md).
@@ -80,4 +82,5 @@ Do not commit until all checks pass. There is no separate `lint` script.
 - Builds: [docs/android-local-build.md](docs/android-local-build.md), [docs/ios-local-build.md](docs/ios-local-build.md), [docs/vite-cold-start-optimization.md](docs/vite-cold-start-optimization.md)
 - Calls: [docs/webrtc-architecture.md](docs/webrtc-architecture.md), [docs/webrtc-calls-troubleshooting.md](docs/webrtc-calls-troubleshooting.md), [docs/webrtc-logs-analysis.md](docs/webrtc-logs-analysis.md), [docs/webrtc-solution-proposal.md](docs/webrtc-solution-proposal.md), [docs/call-bug-reproduction-matrix.md](docs/call-bug-reproduction-matrix.md), [docs/call-fix-checklist.md](docs/call-fix-checklist.md), [docs/call-bugs-needing-you.md](docs/call-bugs-needing-you.md)
 - Product and audits: [docs/ux-specification.md](docs/ux-specification.md), [docs/bastyon-chat-vs-forta-audit.md](docs/bastyon-chat-vs-forta-audit.md), [docs/emoji.md](docs/emoji.md), [docs/how-to-get-private-key.md](docs/how-to-get-private-key.md)
-- Verification: [docs/manual-verification.md](docs/manual-verification.md); plans in `docs/plans/`
+- Verification: [docs/manual-verification.md](docs/manual-verification.md); Android E2E (Maestro): [e2e/README.md](e2e/README.md)
+- Plans: `docs/plans/`, status of each in [docs/plans/README.md](docs/plans/README.md) — update it when a plan's stage lands

@@ -19,12 +19,17 @@ export interface SyncStatusReturn {
   bannerVariant: ComputedRef<"warning" | "info" | "success" | "error">;
 }
 
-const RECONNECT_THRESHOLD = 5_000;
 const STALE_TIMEOUT = 30_000;
 const ERROR_STALE_TIMEOUT = 60_000;
+/** Two /sync long-poll timeouts (pollTimeout = 60s in matrix-client.ts): a
+ *  healthy client completes a sync at least once per poll, so a gap this long
+ *  means the chat list is behind and the next sync is a catch-up. */
+const SYNC_FRESHNESS_THRESHOLD = 2 * 60_000;
+/** Cap for the catch-up indicator; a long offline gap makes the first /sync slow. */
+const CATCH_UP_STALE_TIMEOUT = 2 * 60_000;
+const LAST_SYNC_KEY = "forta.sync.lastSuccessAt";
 
 const rawStatus = ref<SyncPhase>("connecting");
-let lastUpToDateAt = 0;
 let initialized = false;
 let staleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -62,7 +67,10 @@ function startStaleTimer() {
   // healthy PREPARED/SYNCING clears it via clearStaleTimer, and the matrix
   // watchdog escalates a genuinely stuck sync to a mirror failover.
   if (staleTimer) return;
-  const timeout = rawStatus.value === "error" ? ERROR_STALE_TIMEOUT : STALE_TIMEOUT;
+  const timeout =
+    rawStatus.value === "error" ? ERROR_STALE_TIMEOUT
+    : rawStatus.value === "catching_up" ? CATCH_UP_STALE_TIMEOUT
+    : STALE_TIMEOUT;
   staleTimer = setTimeout(() => {
     staleTimer = null;
     // An error stays an error until a real sync clears it: turning it into
@@ -74,7 +82,45 @@ function startStaleTimer() {
   }, timeout);
 }
 
-export function handleSdkSync(sdkState: string): void {
+function readLastSyncAt(): number | null {
+  try {
+    const v = Number(localStorage.getItem(LAST_SYNC_KEY));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSyncAt(ts: number): void {
+  try {
+    localStorage.setItem(LAST_SYNC_KEY, String(ts));
+  } catch {
+    // Storage unavailable (private mode) — freshness check just stays off.
+  }
+}
+
+/** Last completed /sync is older than the threshold → the next sync is a
+ *  catch-up. Unknown (first launch) counts as fresh: nothing to compare with. */
+function isSyncStale(): boolean {
+  const last = readLastSyncAt();
+  return last !== null && Date.now() - last > SYNC_FRESHNESS_THRESHOLD;
+}
+
+/** Show the catch-up indicator when the app comes back (cold start from the
+ *  SDK cache, or resume from background) after the last successful sync went
+ *  stale. Cleared by the next SYNCING. Never overrides offline/error states. */
+export function checkSyncFreshness(): void {
+  if (typeof navigator !== "undefined" && !navigator.onLine) return;
+  if (isActivePhase(rawStatus.value) || !isSyncStale()) return;
+  rawStatus.value = "catching_up";
+  startStaleTimer();
+}
+
+/** True once a live /sync completed in this page. Until then the chat list is
+ *  whatever the SDK cache held, and the header spinner stays up. */
+let liveSyncSeen = false;
+
+export function handleSdkSync(sdkState: string, info?: { fromCache?: boolean }): void {
   if (typeof navigator !== "undefined" && !navigator.onLine) {
     rawStatus.value = "offline";
     startStaleTimer();
@@ -82,19 +128,30 @@ export function handleSdkSync(sdkState: string): void {
   }
 
   switch (sdkState) {
-    case "PREPARED": {
-      lastUpToDateAt = Date.now();
+    case "PREPARED":
+      // PREPARED replayed from the SDK cache does not prove the data is
+      // current: keep the spinner up until the first live /sync of the page.
+      if (info?.fromCache && !liveSyncSeen) {
+        rawStatus.value = "catching_up";
+        startStaleTimer();
+        break;
+      }
+      liveSyncSeen = true;
+      writeLastSyncAt(Date.now());
       rawStatus.value = "up_to_date";
       clearStaleTimer();
       break;
-    }
-    case "SYNCING": {
-      const gap = Date.now() - lastUpToDateAt;
-      rawStatus.value = gap > RECONNECT_THRESHOLD ? "catching_up" : "syncing";
-      if (rawStatus.value === "catching_up") startStaleTimer();
-      else clearStaleTimer();
+    case "SYNCING":
+      // The SDK emits SYNCING after every completed /sync, including routine
+      // long-poll returns every ~30s and the first sync after a reconnect.
+      // Either way the data is already in, so it is a healthy state. Measuring
+      // the time since PREPARED flagged every routine poll as catch-up and kept
+      // the header spinner on permanently.
+      liveSyncSeen = true;
+      rawStatus.value = "syncing";
+      clearStaleTimer();
+      writeLastSyncAt(Date.now());
       break;
-    }
     case "ERROR":
     case "STOPPED":
       rawStatus.value = "error";
@@ -107,9 +164,23 @@ export function handleSdkSync(sdkState: string): void {
   }
 }
 
+function attachResumeListeners(): void {
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) checkSyncFreshness();
+    });
+  }
+  // Capacitor's appStateChange can fire before visibilitychange on Android.
+  import("@capacitor/app")
+    .then(({ App }) => App.addListener("appStateChange", ({ isActive }) => {
+      if (isActive) checkSyncFreshness();
+    }))
+    .catch(() => { /* @capacitor/app unavailable on web */ });
+}
+
 export function resetSyncStatus(): void {
+  liveSyncSeen = false;
   rawStatus.value = "connecting";
-  lastUpToDateAt = 0;
   clearStaleTimer();
 }
 
@@ -125,6 +196,8 @@ export function useSyncStatus(): SyncStatusReturn {
         rawStatus.value = "connecting";
       }
     });
+
+    attachResumeListeners();
   }
 
   const { visibleStatus } = getDebounced();

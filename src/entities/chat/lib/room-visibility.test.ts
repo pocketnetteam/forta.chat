@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { makeRoom, makeMsg } from "@/test-utils";
-import { hasDisplayableContent, filterRoomsForTab } from "./room-visibility";
+import { hasDisplayableContent, filterRoomsForTab, countUnreadRoomsForTab } from "./room-visibility";
 import type { ChatRoom } from "@/entities/chat/model/types";
 
 describe("hasDisplayableContent", () => {
@@ -101,5 +101,19 @@ describe("filterRoomsForTab", () => {
     const b = makeRoom({ id: "!b:s", lastMessage: makeMsg({ timestamp: 200 }) });
     const c = makeRoom({ id: "!c:s", lastMessage: makeMsg({ timestamp: 50 }) });
     expect(filterRoomsForTab([a, b, c], "all").map(r => r.id)).toEqual(["!a:s", "!b:s", "!c:s"]);
+  });
+});
+
+describe("countUnreadRoomsForTab", () => {
+  it("counts joined group rooms with unread messages, skipping muted, 1:1 and invites", () => {
+    const rooms = [
+      makeRoom({ id: "!g1", isGroup: true, unreadCount: 3, name: "G1" }),
+      makeRoom({ id: "!g2", isGroup: true, unreadCount: 0, name: "G2" }),
+      makeRoom({ id: "!g3", isGroup: true, unreadCount: 99, name: "G3" }),
+      makeRoom({ id: "!muted", isGroup: true, unreadCount: 5, name: "M" }),
+      makeRoom({ id: "!dm", isGroup: false, unreadCount: 2, name: "DM" }),
+      makeRoom({ id: "!inv", isGroup: true, unreadCount: 1, name: "I", membership: "invite" }),
+    ];
+    expect(countUnreadRoomsForTab(rooms, "groups", new Set(["!muted"]))).toBe(2);
   });
 });

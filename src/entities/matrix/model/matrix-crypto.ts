@@ -6,6 +6,11 @@
  */
 
 import * as miscreant from "miscreant";
+// Same library the original uses (global `_` in bastyon-chat). Every step
+// whose ORDER feeds cuhash — member history, user filtering, sortBy on
+// source.id, orderedIdsHash — goes through underscore so tie-breaking,
+// null/undefined placement and object iteration match pcrypto.js exactly.
+import _ from "underscore";
 // @ts-expect-error — no types for pbkdf2
 import pbkdf2 from "pbkdf2";
 // @ts-expect-error — no types for bn.js default export
@@ -17,6 +22,7 @@ import {
   workerDecryptFile,
   isCryptoWorkerSupported,
   isWorkerInfraError,
+  terminateCryptoWorker,
 } from "@/shared/lib/crypto-worker/bridge";
 import {
   deriveFileKey,
@@ -36,9 +42,41 @@ import { createChatStorage, type ChatStorageInstance } from "@/shared/lib/matrix
 import { cryptoDebug, looksLikeMention } from "@/shared/lib/utils/crypto-debug";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import { everyMemberProfileLoaded } from "./group-key-members";
+import { ensureRoomMembers, type LazyMembersRoom } from "./ensure-room-members";
 
 const salt = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const m = 12;
+/** Part of the group common-key hash (original `usershashVersion`). */
+const USERSHASH_VERSION = 13;
+/** Original getCommonKey: f.pretry(check, 50, 5000). */
+const COMMON_KEY_POLL_MS = 50;
+const COMMON_KEY_WAIT_MS = 5000;
+/** Decrypt path: how long a confirmed common-key miss skips the wait. */
+const COMMON_KEY_MISS_TTL_MS = 30_000;
+
+/** Port of bastyon-chat functions.js pretry/retry: resolves as soon as
+ *  `check()` is truthy, polling every `time` ms, or once `totaltime` ms have
+ *  passed either way — the caller re-checks and decides. */
+function pretry(check: () => unknown, time: number, totaltime: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (check()) {
+      resolve();
+      return;
+    }
+    let totalTimeCounter = 0;
+    const interval = setInterval(() => {
+      if (check() || totaltime <= totalTimeCounter) {
+        clearInterval(interval);
+        resolve();
+      }
+      totalTimeCounter += time;
+    }, time);
+  });
+}
+
+interface CommonKeyStateEvent {
+  event: Record<string, unknown> & { state_key?: string; content?: Record<string, unknown> };
+}
 
 /** Hard ceiling for the Pocketnet getuserprofile RPC that resolves
  *  participants' encryption keys (`getUsersInfoCb` → loadUsersInfo →
@@ -199,6 +237,17 @@ export interface PcryptoRoomInstance {
    *  for fresh keys. Set only from an explicit user retry — never from an
    *  automatic/periodic recheck, to avoid hammering the network. */
   prepare(forceRefresh?: boolean): Promise<PcryptoRoomInstance>;
+  /** Where the participants' key request stands. "loading"/"failed" mean the
+   *  keys are not known yet — NOT that the peer has none. Optional so test
+   *  stubs need not implement it. */
+  getKeysLoadState?(): KeysLoadState;
+  /** Bring the participant list up to date before anything derives
+   *  recipients from it (canBeEncrypt, the 1:1 recipients, the group key
+   *  hash): loads lazy-loaded members, re-reads member state, and fetches
+   *  keys only for participants that changed. Call before deciding whether
+   *  to encrypt. Throws if the members could not be loaded. Optional so test
+   *  stubs need not implement it. */
+  ensureMembers?(): Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _encrypt(userid: string, text: string, v?: number): Promise<{ encrypted: string; nonce: string }>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -216,6 +265,10 @@ export interface PcryptoRoomInstance {
   clear(): void;
   destroy(): void;
 }
+
+/** State of a room's participant key request (getusersinfo).
+ *  idle: never requested (no helper, or a ≥50-member room that skips it). */
+export type KeysLoadState = "idle" | "loading" | "loaded" | "failed";
 
 // ---- Main Pcrypto class ----
 
@@ -242,6 +295,8 @@ export class Pcrypto {
 
   /** Called when user crypto keys are successfully loaded for a room */
   onKeysLoaded?: (roomId: string) => void;
+  /** Called when a room's key request times out or fails */
+  onKeysFailed?: (roomId: string) => void;
 
   init(user: UserWithPrivateKeys) {
     this.user = user;
@@ -301,6 +356,14 @@ export class Pcrypto {
     // unforced (cached) call started before the forced one — silently
     // clobbering freshly-fetched keys with stale data.
     let usersinfoGeneration = 0;
+    // Forced (user Retry) getusersinfo calls still in flight. A later call
+    // makes their response stale; a call that must start meanwhile is forced
+    // too, so the newest generation still carries fresh keys.
+    let forcedRefreshesInFlight = 0;
+    // Outcome of the latest getusersinfo() call. Lets callers tell "keys not
+    // received yet" apart from "the peer has no keys" — canBeEncrypt() is
+    // false in both cases.
+    let keysLoadState: KeysLoadState = "idle";
 
     const version = 2;
     // Bumped (10 -> 11) to invalidate any decrypted-plaintext entries cached
@@ -312,12 +375,15 @@ export class Pcrypto {
     // ---- persistent AES-key cache (pcrypto.ls) — original lines 36, 61 ----
     const lcachekey = "pcrypto10_" + roomId + "_";
     const lsspromises: Record<string, Promise<{ keys: Record<string, unknown>; k: string }>> = {};
+    // getCommonKey: in-flight waits and recent misses, per state key.
+    const commonKeyWaits: Record<string, Promise<void>> = {};
+    const commonKeyMisses: Record<string, number> = {};
 
     // ---- getusersbytime — EXACT match of original lines 294-307 ----
     function getusersbytime(time: number): { id: string; life: { start: number; end?: number }[] }[] {
-      const result: typeof users[string][] = [];
-      for (const ui of Object.values(users)) {
-        const l = ui.life.find(function (l) {
+      
+      return _.filter(users, function (ui) {
+        const l = _.find(ui.life, function (l) {
           if (!time) {
             if (l.start && !l.end) return true;
           } else {
@@ -325,29 +391,24 @@ export class Pcrypto {
           }
           return false;
         });
-        if (l) result.push(ui);
-      }
-      return result;
+        return !!l;
+      });
     }
 
     // ---- getusersinfobytime — EXACT match of original lines 280-292 ----
     function getusersinfobytime(time: number): CryptoUserInfo[] {
       const us = getusersbytime(time);
-      // _.map then _.filter(truthy) — map to usersinfo, filter out undefined
-      return us.map(function (u) { return usersinfo[u.id]; }).filter(function (u) { return !!u; });
+      return _.filter(
+        _.map(us, function (u) { return usersinfo[u.id]; }),
+        function (u) { return !!u; },
+      );
     }
 
-    // Sort comparator matching lodash _.sortBy(arr, u => u.source.id):
-    // null/undefined values go to the END (lodash behaviour), NOT to the beginning.
-    function sortBySourceId(a: CryptoUserInfo, b: CryptoUserInfo): number {
-      const aId = a.source?.id;
-      const bId = b.source?.id;
-      if (aId == null && bId == null) return 0;
-      if (aId == null) return 1;   // null → end (matches lodash _.sortBy)
-      if (bId == null) return -1;  // null → end (matches lodash _.sortBy)
-      if (aId < bId) return -1;
-      if (aId > bId) return 1;
-      return 0;
+    // Original: _.sortBy(r, u => u.source.id). `?.` instead of a bare
+    // `u.source.id` only so a profile without `source` sorts last (underscore
+    // puts undefined at the end) rather than throwing a TypeError.
+    function bySourceId(u: CryptoUserInfo): number | string | undefined {
+      return u.source?.id;
     }
 
     // ---- preparedUsers — match of original lines 66-86 ----
@@ -357,32 +418,26 @@ export class Pcrypto {
     }
 
     function preparedUsers(time: number, v?: number): CryptoUserInfo[] {
-      const filtered = getusersinfobytime(time).filter(function (ui) {
-        return ui.keys && ui.keys.length >= m;
+      const r = _.filter(getusersinfobytime(time), function (ui) {
+        return !!ui.keys && ui.keys.length >= m;
       });
-      if (v && v > 1) {
-        // Must match lodash _.sortBy(r, u => u.source.id) — null/undefined goes LAST
-        filtered.sort(sortBySourceId);
-      }
-      return filtered;
+      if (!v || v <= 1) return r;
+      return _.sortBy(r, bySourceId);
     }
 
-    // ---- preparedUsersById — match of original lines 88-110 ----
+    // ---- preparedUsersById — EXACT match of original lines 88-110 ----
     function preparedUsersById(ids: string[], v?: number): CryptoUserInfo[] {
       const ui: CryptoUserInfo[] = [];
-      for (const u of Object.values(users)) {
-        if (ids.indexOf(u.id) > -1) {
+      _.each(users, function (u) {
+        if (_.indexOf(ids, u.id) > -1) {
           const info = usersinfo[u.id];
           if (info && info.keys && info.keys.length >= m) {
             ui.push(info);
           }
         }
-      }
-      if (v && v > 1) {
-        // Must match lodash _.sortBy(r, u => u.source.id) — null/undefined goes LAST
-        ui.sort(sortBySourceId);
-      }
-      return ui;
+      });
+      if (!v || v <= 1) return ui;
+      return _.sortBy(ui, bySourceId);
     }
 
     // ---- getuserseventshistory — EXACT match of original lines 175-219 ----
@@ -393,47 +448,43 @@ export class Pcrypto {
       const chatAny = chat as any;
       const tetatet = pcrypto.getIsTetatetChat?.(chat) ?? false;
 
-      // Collect all member state events (dedup by event_id)
-      const oldState = (chatAny.oldState?.getStateEvents?.("m.room.member") ?? []) as unknown[];
-      const curState = (chatAny.currentState?.getStateEvents?.("m.room.member") ?? []) as unknown[];
+      // Collect all member state events (dedup by event_id). Entries without
+      // `.event` are dropped up front — the original would throw on them.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      type MemberStateEvent = { event: any };
+      const curState = (chatAny.currentState?.getStateEvents?.("m.room.member") ?? []) as MemberStateEvent[];
+      const oldState = (chatAny.oldState?.getStateEvents?.("m.room.member") ?? []) as MemberStateEvent[];
 
-      const seen = new Set<string>();
-      const allevents: unknown[] = [];
-      for (const e of [...curState, ...oldState]) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ev = (e as any)?.event;
-        if (!ev) continue;
-        if (seen.has(ev.event_id)) continue;
-        seen.add(ev.event_id);
-        allevents.push(e);
-      }
 
-      let history: HistoryEntry[] = [];
+      const allevents = _.uniq(
+        _.filter(([] as MemberStateEvent[]).concat(curState, oldState), function (e) { return !!e?.event; }),
+        false,
+        function (e) { return e.event.event_id; },
+      );
 
-      for (const ue of allevents) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const event = (ue as any).event;
-        const membership = event.content.membership as string;
+      const history = _.filter(
+        _.map(allevents, function (ue): HistoryEntry | null {
+          const event = ue.event;
+          const membership = event.content.membership as string;
 
-        if (
-          membership == "invite" ||
-          membership == "join" ||
-          (membership == "leave" && !tetatet)
-        ) {
-          history.push({
-            time: event.origin_server_ts || 1,
-            membership: membership,
-            id:
-              membership == "invite"
-                ? getmatrixid(event.state_key)
-                : getmatrixid(event.sender),
-          });
-        }
-      }
+          if (
+            membership == "invite" ||
+            membership == "join" ||
+            (membership == "leave" && !tetatet)
+          ) {
+            return {
+              time: event.origin_server_ts || 1,
+              membership: membership,
+              id: getmatrixid(event.state_key || event.sender),
+            };
+          }
 
-      // Sort by time
-      history = history.sort(function (a, b) { return a.time - b.time; });
-      return history;
+          return null;
+        }),
+        function (h) { return !!h; },
+      ) as HistoryEntry[];
+
+      return _.sortBy(history, function (ui) { return ui.time; });
     }
 
     // ---- period — EXACT match of original lines 221-232 ----
@@ -458,10 +509,9 @@ export class Pcrypto {
 
     // ---- orderedIdsHash — EXACT match of original lines 841-845 ----
     function orderedIdsHash(ids: string[]): string {
-      const sorted = [...ids].sort(function (a, b) {
-        return Number(a.replace(/[^0-9]/g, "")) - Number(b.replace(/[^0-9]/g, ""));
-      });
-      return md5(sorted.join(""));
+      return md5(_.sortBy(ids, function (id) {
+        return Number(id.replace(/[^0-9]/g, ""));
+      }).join(""));
     }
 
     // ---- getusershistory — EXACT match of original lines 244-278 ----
@@ -472,7 +522,7 @@ export class Pcrypto {
       // Build users dict — EXACT match of original lines 244-278
       users = {};
 
-      for (const ui of history) {
+      _.each(history, function (ui) {
         if (!users[ui.id]) {
           users[ui.id] = {
             id: ui.id,
@@ -495,8 +545,7 @@ export class Pcrypto {
             last.end = ui.time;
           }
         }
-      }
-
+      });
     }
 
     // ---- getusersinfo — EXACT match of original lines 157-173 ----
@@ -508,6 +557,8 @@ export class Pcrypto {
       const us = Object.values(users).map(function (uh) { return uh.id; });
       if (!pcrypto.getUsersInfoCb) return;
       const myGeneration = ++usersinfoGeneration;
+      keysLoadState = "loading";
+      if (forceRefresh) forcedRefreshesInFlight++;
       let _usersinfo: CryptoUserInfo[];
       try {
         // Bound the key-resolution RPC: a stalled Pocketnet node must never
@@ -521,9 +572,16 @@ export class Pcrypto {
           "getusersinfo",
         );
       } catch (e) {
+        if (forceRefresh) forcedRefreshesInFlight--;
         console.warn("[pcrypto] getusersinfo timed out/failed:", e);
+        // A newer call is in flight — its outcome decides the state.
+        if (myGeneration === usersinfoGeneration) {
+          keysLoadState = "failed";
+          pcrypto.onKeysFailed?.(roomId);
+        }
         return;
       }
+      if (forceRefresh) forcedRefreshesInFlight--;
       // Discard a stale response: a newer getusersinfo() call (e.g. a forced
       // retry started while this unforced one was still in flight) already
       // wrote more current data — applying this one now would clobber it.
@@ -532,6 +590,7 @@ export class Pcrypto {
       for (const ui of _usersinfo) {
         usersinfo[ui.id] = ui;
       }
+      keysLoadState = "loaded";
       // Notify that keys are loaded — triggers decryption retry
       pcrypto.onKeysLoaded?.(roomId);
     }
@@ -539,7 +598,7 @@ export class Pcrypto {
     // ---- eaa object — EXACT match of original lines 405-527 ----
     const eaa = {
       cuhash: function (users: CryptoUserInfo[], num: number, block: number): Buffer {
-        const input = users.map(function (u) { return u.keys[num]; }).join("") + (block || pcrypto.currentblock.height);
+        const input = _.map(users, function (u) { return u.keys[num]; }).join("") + (block || pcrypto.currentblock.height);
         return pbkdf2.pbkdf2Sync(
           sha224(input).toString("hex"),
           salt,
@@ -549,29 +608,29 @@ export class Pcrypto {
         );
       },
 
-      userspublics: function (time: number, block: number, usersIds: string[] | null, v: number) {
+      userspublics: function (time: number, block: number, usersIds: string[] | null, v: number | undefined) {
         // Original line 423: use preparedUsersById when usersIds is provided
         const _users = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(time, v);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const sum: Record<string, any> = {};
 
-        for (const user of _users) {
+        _.each(_users, function (user) {
           // Original skips self in userspublics (line 430)
           if (user.id == pcrypto.user?.userinfo?.id && _users.length > 1) {
-            continue;
+            return;
           }
 
-          const publics = user.keys.map(function (key) {
+          const publics = _.map(user.keys, function (key) {
             return Buffer.from(key, "hex");
           });
 
           sum[user.id] = eaa.points(time, block, publics, usersIds, v);
-        }
+        });
 
         return sum;
       },
 
-      current: function (time: number, block: number, usersIds: string[] | null, v: number) {
+      current: function (time: number, block: number, usersIds: string[] | null, v: number | undefined) {
         const privates = pcrypto.user!.private!.map(function (key) {
           return key.private;
         });
@@ -583,7 +642,7 @@ export class Pcrypto {
       },
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      scalars: function (time: number, block: number, scalars: any[], usersIds: string[] | null, v: number) {
+      scalars: function (time: number, block: number, scalars: any[], usersIds: string[] | null, v: number | undefined) {
         // Original line 458: use preparedUsersById when usersIds is provided
         const _users = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(time, v);
 
@@ -608,7 +667,7 @@ export class Pcrypto {
       },
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      points: function (time: number, block: number, points: any[], usersIds: string[] | null, v: number) {
+      points: function (time: number, block: number, points: any[], usersIds: string[] | null, v: number | undefined) {
         // Original line 482: use preparedUsersById when usersIds is provided
         const _users = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(time, v);
 
@@ -634,14 +693,14 @@ export class Pcrypto {
       // Pure derivation, no caching here — caching lives one level up, in
       // aeskeysls() below (matches original: eaa.aeskeys is raw, the cache
       // is in eaac.aeskeysls).
-      aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number) {
+      aeskeys: function (time: number, block: number, usersIds: string[] | null, v: number | undefined) {
         const us = eaa.userspublics(time, block, usersIds, v);
         const c = eaa.current(time, block, usersIds, v);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const su: Record<string, any> = {};
 
-        for (const [id, s] of Object.entries(us)) {
+        _.each(us, function (s, id) {
           if (id != pcrypto.user?.userinfo?.id) {
             const shared = bitcoin.ecc.pointMultiply(s, c, undefined, true);
             // pointMultiply may return Uint8Array, not Buffer — use Buffer.from for safe hex
@@ -654,7 +713,7 @@ export class Pcrypto {
               "sha512"
             );
           }
-        }
+        });
 
         return su;
       },
@@ -681,12 +740,18 @@ export class Pcrypto {
         _block = tetatet ? pcrypto.currentblock.height : 10;
       }
 
-      // The members' public keys are part of the key: a member who rotated
+      // `v` is the RAW event version (undefined for legacy messages) — the
+      // derivation below must see it unmodified, like the original, because
+      // v <= 1 means an unsorted user list. The cache-key suffix normalises
+      // undefined → 1 instead of the original's `v || self.version`: that
+      // made v1 and v2 share one entry despite deriving different keys.
+      // The members' public keys are part of the key too: a member who rotated
       // keys without a membership change kept the cached shared secret for
-      // the whole generation (audit S1-05). `k` stays local (cache + clear).
+      // the whole generation (audit S1-05). Local storage only — no effect on
+      // the wire format.
       const keyUsers = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(_time, v);
       const keysFingerprint = md5(keyUsers.map((u) => `${u.id}:${(u.keys ?? []).join(",")}`).join("|")).slice(0, 12);
-      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v || version}-${keysFingerprint}`;
+      const k = `${usersIds ? "ul+" + orderedIdsHash(usersIds) : period(_time)}-${_block}-${v && v > 1 ? v : 1}-${keysFingerprint}`;
       const ek = `${lcachekey}${pcrypto.user?.userinfo?.id}-${k}`;
 
       if (!lsspromises[ek]) {
@@ -700,7 +765,7 @@ export class Pcrypto {
             }
             return { keys, k };
           } catch {
-            const keys = eaa.aeskeys(_time, _block, usersIds, v as number);
+            const keys = eaa.aeskeys(_time, _block, usersIds, v);
             if (preparedUsers(_time, v).length > 1) {
               const serialized: Record<string, string> = {};
               for (const [id, buf] of Object.entries(keys)) {
@@ -719,7 +784,7 @@ export class Pcrypto {
     }
 
     /** Prepare users data for Worker serialization (fast — no crypto, just filtering). */
-    function prepareWorkerUsers(usersIds: string[] | null, v: number): Array<{ id: string; keys: string[] }> {
+    function prepareWorkerUsers(usersIds: string[] | null, v: number | undefined): Array<{ id: string; keys: string[] }> {
       const _users = usersIds ? preparedUsersById(usersIds, v) : preparedUsers(0, v);
       return _users.map(u => ({ id: u.id, keys: [...u.keys] }));
     }
@@ -732,20 +797,26 @@ export class Pcrypto {
     }
 
     // ---- usershash — match of original lines 824-839 ----
+    // Keyed by membership alone, not by the members' public keys: the group's
+    // common-key event is reused until somebody joins or leaves. A member whose
+    // published keys change cannot read events wrapped for the old keys until
+    // the membership changes. Keys are derived from the account key, so this
+    // takes a deliberate republish of a different set (review 2026-10-08, H1);
+    // changing it means a new wire format, agreed with Bastyon.
     function usershash(): string {
       const _users = preparedUsers(0, version);
       return md5(
-        _users
-          .map(function (user) { return user.id; })
-          .filter(function (uid) { return uid && uid != pcrypto.user?.userinfo?.id; })
-          .join("") + "_v13_" + version
+        _.filter(
+          _.map(_users, function (user) { return user.id; }),
+          function (uid) { return !!uid && uid != pcrypto.user?.userinfo?.id; },
+        ).join("") + "_v" + USERSHASH_VERSION + "_" + version
       );
     }
 
     // ---- Group chat helpers (common key system) ----
 
-    /** Find the common key state event for a user+hash */
-    function getCommonKeyEvent(userid?: string, _hash?: string): unknown | undefined {
+    // ---- getCommonKeyEvent — EXACT match of original lines 870-886 ----
+    function getCommonKeyEvent(userid?: string, _hash?: string): CommonKeyStateEvent | undefined {
       const hash = _hash || usershash();
       const uid = userid || pcrypto.user?.userinfo?.id;
       if (!uid) return undefined;
@@ -753,36 +824,57 @@ export class Pcrypto {
       const state_key = "pcrypto." + uid + "." + hash;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const chatAny = chat as any;
-      const events = chatAny.currentState?.getStateEvents?.("m.room.encryption") ?? [];
+      const events = (chatAny.currentState?.getStateEvents?.("m.room.encryption") ?? []) as CommonKeyStateEvent[];
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const found = (events as any[]).find((e: any) => {
-        return e?.event?.state_key === state_key;
+      return _.find(events, function (e) {
+        return e?.event?.state_key == state_key;
       });
-
-      return found;
     }
 
-    /** Get common key event, trying multiple senders */
-    function getCommonKey(sender: string, hash: string): Record<string, unknown> | undefined {
-      // Try the message sender first
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let evt = getCommonKeyEvent(sender, hash) as any;
-      if (evt) return evt.event;
+    // ---- getCommonKey — EXACT match of original lines 888-908 ----
+    // Only the requested user's key event is accepted — never another
+    // member's event under the same hash: group bodies are AES-CBC with no
+    // MAC, so a wrong key can yield garbage that passes the padding check.
+    // Waits up to COMMON_KEY_WAIT_MS for the event to land in room state
+    // (right after sendStateEvent, or while state is still syncing).
+    //
+    // `rememberMiss` (decrypt path only) is a local performance guard, not a
+    // protocol change: the original decrypts lazily per rendered message, but
+    // our timeline/preview loops decrypt serially, so N messages from a
+    // sender with no key event would cost N × 5 s. Concurrent callers share
+    // one wait per state key, and a miss is remembered for
+    // COMMON_KEY_MISS_TTL_MS so later messages fail fast.
+    async function getCommonKey(
+      userid?: string,
+      _hash?: string,
+      rememberMiss = false,
+    ): Promise<Record<string, unknown>> {
+      const hash = _hash || usershash();
+      const stateKey = "pcrypto." + (userid || pcrypto.user?.userinfo?.id) + "." + hash;
 
-      // Try self
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      evt = getCommonKeyEvent(undefined, hash) as any;
-      if (evt) return evt.event;
-
-      // Try all known users
-      for (const uid of Object.keys(users)) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        evt = getCommonKeyEvent(uid, hash) as any;
-        if (evt) return evt.event;
+      if (!getCommonKeyEvent(userid, hash)) {
+        const missAt = rememberMiss ? commonKeyMisses[stateKey] : undefined;
+        if (!missAt || Date.now() - missAt >= COMMON_KEY_MISS_TTL_MS) {
+          if (!commonKeyWaits[stateKey]) {
+            commonKeyWaits[stateKey] = pretry(
+              () => getCommonKeyEvent(userid, hash),
+              COMMON_KEY_POLL_MS,
+              COMMON_KEY_WAIT_MS,
+            ).finally(() => {
+              delete commonKeyWaits[stateKey];
+            });
+          }
+          await commonKeyWaits[stateKey];
+        }
       }
 
-      return undefined;
+      const e = getCommonKeyEvent(userid, hash);
+      if (!e) {
+        if (rememberMiss) commonKeyMisses[stateKey] = Date.now();
+        throw new Error("No common key event found for hash=" + hash);
+      }
+      delete commonKeyMisses[stateKey];
+      return e.event;
     }
 
     // ---- Room interface ----
@@ -855,6 +947,32 @@ export class Pcrypto {
         }
 
         return room;
+      },
+
+      getKeysLoadState(): KeysLoadState {
+        return keysLoadState;
+      },
+
+      async ensureMembers(): Promise<void> {
+        // Rooms Pcrypto never encrypts need no recipients (same gate as prepare()).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (((chat as any).getJoinedMemberCount?.() ?? 0) >= 50) return;
+        // fresh: a list possibly stale after a limited sync is reloaded first.
+        await ensureRoomMembers(chat as LazyMembersRoom, { fresh: true });
+        // Local recompute from room state — members may also have arrived
+        // through sync or another caller since the last prepare(). Again after
+        // each key load: a member who joined while it ran was left out of the
+        // recipients (review 2026-10-08, H3). Bounded, so a room whose
+        // membership churns faster than three loads sends with what it has.
+        for (let pass = 0; pass < 3; pass++) {
+          const before = Object.keys(users).sort().join(",");
+          getusershistory();
+          if (Object.keys(users).sort().join(",") === before) return;
+          await getusersinfo(forcedRefreshesInFlight > 0);
+          // canBeEncrypt() reads usersinfo: after a failed request it still
+          // holds the old participants and would encrypt without the new ones.
+          if (keysLoadState === "failed") throw new Error("participant keys not loaded");
+        }
       },
 
       // ---- encryptEvent — routes to group or 1:1 path ----
@@ -1028,11 +1146,14 @@ export class Pcrypto {
         const usersList = [...new Set([...bodyUserIds, sender])];
 
 
-        // Always decrypt with the EXPLICIT usersList from the body keys + sender.
-        // This is the canonical user set the sender encrypted to — using anything
-        // else (e.g. preparedUsers(time, v) via null) yields a different ECDH
-        // cuhash and an AES-SIV MAC failure when web's lazy-loaded m.room.member
-        // events haven't fully synced. Matches bastyon-chat/src/application/pcrypto.js.
+        // Deliberate deviation: the original decryptEvent passes users=null,
+        // i.e. preparedUsers(time, v) from local member state. We use the
+        // body keys + sender instead (the scheme the original uses only in
+        // decryptKey) — the exact set the sender encrypted to. It derives the
+        // same key whenever local member state is complete, and still works
+        // when web's lazy-loaded m.room.member events haven't synced yet
+        // (otherwise: different cuhash → AES-SIV MAC failure). The raw
+        // `eventVersion` keeps legacy (unsorted, v1) ordering intact.
         const decrypted = await room._decrypt(keyindex!, body[bodyindex], time, block, usersList, eventVersion);
 
         const data = {
@@ -1064,16 +1185,12 @@ export class Pcrypto {
           }
         } catch { /* not cached */ }
 
-        // Find the common key state event.
-        // If not found, re-prepare room state (member events may not have been
-        // loaded yet due to lazyLoadMembers / initialSyncLimit).
-        let commonKeyEvt = getCommonKey(sender, hash);
-        if (!commonKeyEvt) {
-          getusershistory();
-          await getusersinfo();
-          commonKeyEvt = getCommonKey(sender, hash);
-        }
-        if (!commonKeyEvt) {
+        // The SENDER's common key only (original line 1001), waiting for it to
+        // land in room state. decryptKey re-prepares members on its own.
+        let commonKeyEvt: Record<string, unknown>;
+        try {
+          commonKeyEvt = await getCommonKey(sender, hash, true);
+        } catch (e) {
           cryptoDebug("decrypt:group:no-common-key", {
             roomId,
             eventId: event.event_id,
@@ -1084,16 +1201,20 @@ export class Pcrypto {
             sender,
             memberCount: Object.keys(usersinfo).length,
           });
-          throw new Error("No common key event found for hash=" + hash);
+          throw e;
         }
         // Decrypt the common key (AES-SIV per-user encrypted key)
-        let commonKey: string;
-        commonKey = await room.decryptKey(commonKeyEvt);
+        const commonKey = await room.decryptKey(commonKeyEvt);
 
         // Decrypt message body (hex-encoded AES-CBC ciphertext)
         const bodyHex = content.body as string;
         const bodyBytes = Buffer.from(bodyHex, "hex");
-        const decryptedBuffer = await pcrypto.pcryptoFile.decrypt(bodyBytes.buffer, commonKey);
+        // Exact byte range: a Buffer may be a view into a larger pooled
+        // ArrayBuffer (Node does this; the browser polyfill happens not to).
+        const decryptedBuffer = await pcrypto.pcryptoFile.decrypt(
+          bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
+          commonKey,
+        );
 
         const dec = new TextDecoder();
         const data = {
@@ -1125,18 +1246,18 @@ export class Pcrypto {
         return encryptedEvent;
       },
 
-      // ---- getOrCreateCommonKey — find or create group common key ----
+      // ---- getOrCreateCommonKey — match of original lines 910-935 ----
       async getOrCreateCommonKey(): Promise<{ key: string; hash: string; block: number }> {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ce = getCommonKeyEvent() as any;
+        const ce = getCommonKeyEvent();
 
         if (ce) {
           const evt = ce.event;
           const key = await room.decryptKey(evt);
+          const evtContent = evt.content as Record<string, unknown>;
           return {
             key,
-            hash: evt.content.hash as string,
-            block: evt.content.block as number,
+            hash: evtContent.hash as string,
+            block: evtContent.block as number,
           };
         }
 
@@ -1144,13 +1265,9 @@ export class Pcrypto {
         return room.sendCommonKey();
       },
 
-      // ---- sendCommonKey — create and send a new common key as state event ----
+      // ---- sendCommonKey — original createMyCommonKey + sendCommonKey
+      // (lines 937-984, 847-868) and the decryptKey step of getOrCreateCommonKey.
       async sendCommonKey(): Promise<{ key: string; hash: string; block: number }> {
-        const hash = usershash();
-        const secret = await pcrypto.pcryptoFile.randomKey();
-        const encrypted = await room.encryptKey(secret);
-
-        // Send as state event (requires matrix client access)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const chatAny = chat as any;
         const matrixClient = chatAny.client;
@@ -1158,20 +1275,40 @@ export class Pcrypto {
           throw new Error("Cannot send state event: no matrix client access");
         }
 
-        const stateContent = {
+        const me = pcrypto.user!.userinfo!.id;
+        const hash = usershash();
+        const secret = await pcrypto.pcryptoFile.randomKey();
+        const encrypted = await room.encryptKey(secret);
+
+        const exportContent = {
+          version: version,
           hash,
           keys: encrypted.keys,
           block: encrypted.block,
-          version: version,
         };
 
-        const stateKey = "pcrypto." + pcrypto.user!.userinfo!.id + "." + hash;
-        await matrixClient.sendStateEvent(roomId, "m.room.encryption", stateContent, stateKey);
+        // Self-check before publishing: the key we are about to put into room
+        // state must decrypt back for us — otherwise nobody gets a key that
+        // cannot be read.
+        await room.decryptKey({
+          type: "m.room.encryption",
+          sender: me,
+          origin_server_ts: Date.now(),
+          content: { ...exportContent },
+        });
+
+        await matrixClient.sendStateEvent(roomId, "m.room.encryption", exportContent, "pcrypto." + me + "." + hash);
+
+        // Like the original: read the key back from the state event once it
+        // lands, rather than trusting the local secret.
+        const evt = await getCommonKey(me, hash);
+        const key = await room.decryptKey(evt);
+        const evtContent = evt.content as Record<string, unknown>;
 
         return {
-          key: secret,
-          hash,
-          block: encrypted.block,
+          key,
+          hash: evtContent.hash as string,
+          block: evtContent.block as number,
         };
       },
 
@@ -1197,8 +1334,10 @@ export class Pcrypto {
         }
 
         if (isCryptoWorkerSupported()) {
-          // Prepare serializable data for Worker (fast — no crypto, just array ops)
-          const workerUsers = prepareWorkerUsers(usersIds, v || version);
+          // Prepare serializable data for Worker (fast — no crypto, just array ops).
+          // Raw `v`, never `v || version`: legacy events carry no version and
+          // the original derives their keys from the UNSORTED user list.
+          const workerUsers = prepareWorkerUsers(usersIds, v);
           const myId = pcrypto.user!.userinfo!.id;
           const privateKeys = getPrivateKeysHex();
 
@@ -1226,7 +1365,7 @@ export class Pcrypto {
         // decrypt failure or missing key, evict the cached entry so the
         // next attempt recomputes fresh instead of failing forever on a
         // stale key.
-        const { keys, k } = await aeskeysls(_time, _block, usersIds, v || version);
+        const { keys, k } = await aeskeysls(_time, _block, usersIds, v);
         const key = keys[userid];
         if (key) {
           try {
@@ -1257,7 +1396,7 @@ export class Pcrypto {
         }
 
         if (isCryptoWorkerSupported()) {
-          const workerUsers = prepareWorkerUsers(null, v || version);
+          const workerUsers = prepareWorkerUsers(null, v);
           const myId = pcrypto.user!.userinfo!.id;
           const privateKeys = getPrivateKeysHex();
 
@@ -1280,7 +1419,7 @@ export class Pcrypto {
         // Main-thread fallback — see _decrypt above and aeskeysls() for the
         // eviction rationale (matches original self.encrypt, pcrypto.js
         // lines 558-572).
-        const { keys, k } = await aeskeysls(_time, _block, null, v || version);
+        const { keys, k } = await aeskeysls(_time, _block, null, v);
         const key = keys[userid];
         if (key) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1372,20 +1511,21 @@ export class Pcrypto {
         let block: number;
         let v: number | undefined;
 
-        // Match original: different extraction for m.room.encryption vs file events
+        // EXACT match of original lines 728-747: m.room.encryption carries the
+        // fields at the top level; file events only under info/pbody.secrets.
         if (eventType === "m.room.encryption") {
           secrets = content.keys;
           block = content.block;
           v = content.version || 1;
         } else {
-          secrets = content.keys ?? content.info?.secrets?.keys ?? content.pbody?.secrets?.keys;
-          block = content.block ?? content.info?.secrets?.block ?? content.pbody?.secrets?.block;
-          v = content.version ?? content.info?.secrets?.v ?? content.pbody?.secrets?.v ?? 1;
+          secrets = content.info?.secrets?.keys || content.pbody?.secrets?.keys;
+          block = content.info?.secrets?.block || content.pbody?.secrets?.block;
+          v = content.info?.secrets?.version || content.info?.secrets?.v ||
+            content.pbody?.secrets?.version || content.pbody?.secrets?.v || 1;
         }
 
-        if (!secrets || !block) {
-          throw new Error("Missing secrets or block");
-        }
+        if (!secrets) throw new Error("secrets");
+        if (!block) throw new Error("block");
 
         const sender = getmatrixid(event.sender as string);
         const me = pcrypto.user.userinfo.id;
@@ -1436,7 +1576,10 @@ export class Pcrypto {
           keyindex = sender;
         }
 
+        
+
         if (!bodyindex || !body[bodyindex]) {
+
           throw new Error("emptyforme");
         }
 
@@ -1473,5 +1616,8 @@ export class Pcrypto {
       room.destroy();
     }
     this.rooms = {};
+    // The worker's derived-key cache belongs to this account — drop it with
+    // the session (logout / account switch) instead of keeping it in memory.
+    terminateCryptoWorker();
   }
 }

@@ -153,7 +153,12 @@ onBeforeUnmount(() => {
 
 // Refresh encryption status when panel opens or room changes
 watch([room, () => props.show], async ([r, visible]) => {
-  if (r && visible) await chatStore.checkPeerKeys(r.id);
+  if (!r || !visible) return;
+  // Banned members come from the SDK member list — complete it when the SDK
+  // lazy-loads members, then re-read it (the SDK room isn't reactive;
+  // bannedMembers reads stateMarker for that).
+  if (await chatStore.ensureRoomMembersLoaded(r.id)) stateMarker.value++;
+  await chatStore.checkPeerKeys(r.id);
 }, { immediate: true });
 
 const togglePublic = async () => {
@@ -412,6 +417,8 @@ const isActionMemberMuted = computed(() => {
 
 // ── Banned members ──
 const bannedMembers = computed(() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  stateMarker.value;
   if (!room.value) return [];
   return chatStore.getBannedMembers(room.value.id);
 });
@@ -714,6 +721,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
                   </div>
                   <div v-else class="mt-2 w-full text-left">
                     <textarea
+                      autocomplete="off"
                       v-model="topicDraft"
                       class="w-full rounded-lg bg-chat-input-bg px-3 py-2 text-xs text-text-color outline-none placeholder:text-neutral-grad-2"
                       :placeholder="t('chatInfo.addDescription')"
@@ -791,6 +799,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               <template v-if="roomShareable">
                 <div class="flex items-center gap-2">
                   <input
+                    autocomplete="off"
                     :value="inviteLink"
                     readonly
                     class="min-w-0 flex-1 rounded-lg bg-chat-input-bg px-3 py-2 text-xs text-text-color outline-none"
@@ -936,6 +945,7 @@ const openGallery = (tab: "media" | "files" | "links" | "voice" = "media") => {
               <!-- Add member search (inline) -->
               <div v-if="showAddMember" class="mb-3">
                 <input
+                  autocomplete="off"
                   :value="addSearchQuery"
                   type="text"
                   :placeholder="t('info.searchToAdd')"

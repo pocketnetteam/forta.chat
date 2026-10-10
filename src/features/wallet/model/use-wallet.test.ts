@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect } from "vitest";
 import { selectUtxos, SATOSHI, DUST_LIMIT } from "./use-wallet";
 import type { UTXO } from "./use-wallet";

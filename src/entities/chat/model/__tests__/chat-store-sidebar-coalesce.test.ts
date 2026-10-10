@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: opening a chat after being away streams a backlog of messages,
  * each surfacing as a Dexie room delta. The sidebar (sortedRooms) must NOT
@@ -101,6 +102,7 @@ function makeKit(capture: { cb?: (changes: RoomChange[]) => void }) {
       getClearedAtTs: vi.fn(() => undefined),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages: vi.fn(async () => {}),
       writeEdit: vi.fn(async () => {}),

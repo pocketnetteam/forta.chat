@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect } from "vitest";
 
 // The PcryptoFile class encrypts file bytes with AES-CBC and wraps them

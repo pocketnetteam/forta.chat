@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect } from "vitest";
 import {
   renderArticleText,
@@ -320,10 +321,27 @@ describe("renderArticleHtml (full render, sanitized)", () => {
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
-  it("does NOT add rel for non-blank links", () => {
+  it("forces target=_blank + rel on http(s) links without a target", () => {
     const html = renderArticleHtml(
       json([{ type: "paragraph", data: { text: '<a href="https://x.com">x</a>' } }]),
     );
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noopener noreferrer"');
+  });
+
+  it("overrides target=_self on external links (never navigate the app WebView)", () => {
+    const html = renderArticleHtml(
+      json([{ type: "paragraph", data: { text: '<a href="https://x.com" target="_self">x</a>' } }]),
+    );
+    expect(html).not.toContain("_self");
+    expect(html).toContain('target="_blank"');
+  });
+
+  it("does NOT add target/rel for mailto / anchor links", () => {
+    const html = renderArticleHtml(
+      json([{ type: "paragraph", data: { text: '<a href="mailto:a@b.c">m</a> <a href="#top">t</a>' } }]),
+    );
+    expect(html).not.toContain("target=");
     expect(html).not.toContain("rel=");
   });
 
@@ -450,5 +468,45 @@ describe("renderArticleHtml (full render, sanitized)", () => {
     );
     // Should not produce <p></p> but should still render the second one
     expect(html).toContain("X");
+  });
+});
+
+describe("renderArticleHtml autolinks bare URLs", () => {
+  it("wraps a bare URL in a paragraph into an external link", () => {
+    const html = renderArticleHtml(
+      json([{ type: "paragraph", data: { text: "See https://example.com/page now" } }]),
+    );
+    expect(html).toContain(
+      '<a href="https://example.com/page" target="_blank" rel="noopener noreferrer">https://example.com/page</a>',
+    );
+    expect(html).toContain("See ");
+    expect(html).toContain(" now");
+  });
+
+  it("autolinks a URL that is not the first node of the paragraph", () => {
+    const html = renderArticleHtml(
+      json([{ type: "paragraph", data: { text: "<b>a</b> text https://x.com" } }]),
+    );
+    expect(html).toContain('<a href="https://x.com" target="_blank"');
+  });
+
+  it("does not nest a link inside an existing anchor", () => {
+    const html = renderArticleHtml(
+      json([{ type: "paragraph", data: { text: '<a href="https://a.com">https://a.com</a>' } }]),
+    );
+    expect(html.match(/<a /g)).toHaveLength(1);
+  });
+
+  it("autolinks inside list items and formatting tags", () => {
+    const html = renderArticleHtml(
+      json([{ type: "list", data: { style: "unordered", items: ["<b>go www.site.org</b>"] } }]),
+    );
+    expect(html).toContain('<b>go <a href="https://www.site.org" target="_blank"');
+  });
+
+  it("autolinks plain-text (non-JSON) fallback and escapes the rest", () => {
+    const html = renderArticleHtml("<i>x</i> https://example.com");
+    expect(html).toContain("&lt;i&gt;x&lt;/i&gt;");
+    expect(html).toContain('href="https://example.com"');
   });
 });

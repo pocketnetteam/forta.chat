@@ -19,6 +19,12 @@ import { withTimeout } from "@/shared/lib/with-timeout";
 
 import { getStoredDeviceId, storeDeviceId } from "./device-id-storage";
 import {
+  isSyncStoreWorkerSupported,
+  releaseSyncStoreWorker,
+  startSyncStoreWorker,
+  trackSyncStoreWorker,
+} from "./sync-store-worker";
+import {
   pickLiveMatrixHost,
   nextMatrixHost,
   hostFromBaseUrl,
@@ -34,8 +40,35 @@ import {
   MATRIX_SYNC_HOSTS,
 } from "./sync-failover";
 import type { MatrixCredentials, MatrixClient, MatrixSDK } from "./types";
+import { markRoomMembersStale } from "./ensure-room-members";
+import {
+  clearCachedMatrixHost,
+  clearCachedMatrixSession,
+  clearCachedSyncFilterId,
+  readCachedMatrixHost,
+  readCachedMatrixSession,
+  readCachedSyncFilterId,
+  writeCachedMatrixHost,
+  writeCachedMatrixSession,
+  writeCachedSyncFilterId,
+} from "./matrix-session-cache";
 
-export type SyncCallback = (state: "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING") => void;
+/** /login and /register response fields the client needs. */
+interface MatrixLoginData {
+  user_id: string;
+  access_token: string;
+  device_id: string;
+}
+
+/** Placeholder refresh token: the SDK only calls tokenRefreshFunction when one
+ *  is set. The "refresh" is a password re-login (see reloginForExpiredToken). */
+const RELOGIN_REFRESH_TOKEN = "forta-password-relogin";
+
+/** `fromCache`: PREPARED replayed from the local SDK store, before any live /sync. */
+export type SyncCallback = (
+  state: "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING",
+  info?: { fromCache?: boolean },
+) => void;
 export type TimelineCallback = (event: unknown, room: unknown) => void;
 export type MembershipCallback = (event: unknown, member: unknown) => void;
 export type TypingCallback = (event: unknown, member: unknown) => void;
@@ -84,6 +117,10 @@ export class MatrixClientService {
   private clientRecoveryListenersAttached = false;
   private onOnlineRecovery: (() => void) | null = null;
   private onVisibilityRecovery: (() => void) | null = null;
+  // One shared re-login for every request that hit 401 at once.
+  private reloginInFlight: Promise<{ accessToken: string; refreshToken: string }> | null = null;
+  // The cached live host is tried once per page; a retry of a failed start pings.
+  private hostCacheTried = false;
 
   setTorProxyUrl(url: string) {
     this.torProxyUrl = url;
@@ -102,6 +139,7 @@ export class MatrixClientService {
   private onRoomAccountData: RoomAccountDataCallback | null = null;
   private onAccountData: ((event: unknown) => void) | null = null;
   private onEncryptionKeyArrived: ((roomId: string) => void) | null = null;
+  private onTimelineReset: ((roomId: string, backToken: string | null) => void) | null = null;
 
   constructor(domain?: string) {
     this.baseUrl = `https://${domain ?? MATRIX_SERVER}`;
@@ -125,6 +163,9 @@ export class MatrixClientService {
     onRoomAccountData?: RoomAccountDataCallback;
     onAccountData?: (event: unknown) => void;
     onEncryptionKeyArrived?: (roomId: string) => void;
+    /** A limited sync replaced a room's live timeline: `backToken` pages back
+     *  into the hole between it and what was there before. */
+    onTimelineReset?: (roomId: string, backToken: string | null) => void;
   }) {
     if (handlers.onSync) this.onSync = handlers.onSync;
     if (handlers.onTimeline) this.onTimeline = handlers.onTimeline;
@@ -138,6 +179,7 @@ export class MatrixClientService {
     if (handlers.onRoomAccountData) this.onRoomAccountData = handlers.onRoomAccountData;
     if (handlers.onAccountData) this.onAccountData = handlers.onAccountData;
     if (handlers.onEncryptionKeyArrived) this.onEncryptionKeyArrived = handlers.onEncryptionKeyArrived;
+    if (handlers.onTimelineReset) this.onTimelineReset = handlers.onTimelineReset;
   }
 
   /** Custom request function using axios (matching bastyon-chat pattern) */
@@ -195,17 +237,12 @@ export class MatrixClientService {
     return client;
   }
 
-  /** Main login/register + start client flow */
-  async getClient(): Promise<MatrixClient | null> {
+  /** Password login, falling back to registration for a new account.
+   *  Returns null for a deactivated account (and sets `error`). Persists the
+   *  device_id and caches the session so the next boot can skip /login. */
+  private async passwordLogin(client: MatrixClient): Promise<MatrixLoginData | null> {
     if (!this.credentials) throw new Error("No credentials set");
-    const build = ++this.clientBuildGeneration;
-
-    const opts: Record<string, unknown> = {
-      baseUrl: this.baseUrl,
-      request: this.request.bind(this)
-    };
-
-    const client = this.createMtrxClient(opts);
+    const credentials = this.credentials;
 
     // Reuse the persisted device_id if we already have one for this account.
     // This stops Synapse from spawning a fresh device on every login, which
@@ -213,11 +250,11 @@ export class MatrixClientService {
     // messages pile up for each abandoned device.
     const storedDeviceId = getStoredDeviceId(this.credentials.address);
 
-    let userData;
+    let userData: MatrixLoginData;
     try {
       const loginParams: Record<string, unknown> = {
-        user: this.credentials.username,
-        password: this.credentials.password,
+        user: credentials.username,
+        password: credentials.password,
         initial_device_display_name: "Forta Chat",
       };
       if (storedDeviceId) {
@@ -239,10 +276,10 @@ export class MatrixClientService {
       }
       // Try to register
       try {
-        if (await client.isUsernameAvailable(this.credentials.username)) {
+        if (await client.isUsernameAvailable(credentials.username)) {
           userData = await client.register(
-            this.credentials.username,
-            this.credentials.password,
+            credentials.username,
+            credentials.password,
             null,
             { type: "m.login.dummy" }
           );
@@ -254,18 +291,46 @@ export class MatrixClientService {
       }
     }
 
-    if (build !== this.clientBuildGeneration) {
-      console.warn("[matrix] a newer client build started while this login was waiting, dropping it");
-      return null;
-    }
-
     // Persist the device_id so the next login reuses the same device.
     if (userData?.device_id) {
       storeDeviceId(this.credentials.address, userData.device_id);
     }
 
     localStorage.accessToken = userData.access_token;
+    writeCachedMatrixSession(credentials.address, {
+      userId: userData.user_id,
+      accessToken: userData.access_token,
+      deviceId: userData.device_id,
+    });
+    return userData;
+  }
 
+  /** The SDK calls this on 401 M_UNKNOWN_TOKEN and retries the request with the
+   *  returned token. There is no real refresh token: we log in with the password
+   *  again (same device), which covers both a cached token that expired and a
+   *  long-open tab outliving its token. Concurrent 401s share one login. */
+  private reloginForExpiredToken(): Promise<{ accessToken: string; refreshToken: string }> {
+    if (this.reloginInFlight) return this.reloginInFlight;
+    this.reloginInFlight = (async () => {
+      console.warn("[matrix] access token rejected, logging in again");
+      if (this.credentials) clearCachedMatrixSession(this.credentials.address);
+      const userData = await this.passwordLogin(this.createLoginClient());
+      if (!userData) throw new Error("Matrix re-login failed: account deactivated");
+      return { accessToken: userData.access_token, refreshToken: RELOGIN_REFRESH_TOKEN };
+    })().finally(() => {
+      this.reloginInFlight = null;
+    });
+    return this.reloginInFlight;
+  }
+
+  /** Unauthenticated client used only for /login and /register. */
+  private createLoginClient(): MatrixClient {
+    return this.createMtrxClient({ baseUrl: this.baseUrl, request: this.request.bind(this) });
+  }
+
+  /** Create and open the SDK sync store for this account. */
+  private async openSyncStore(username: string): Promise<InstanceType<typeof sdk.IndexedDBStore>> {
+    const useSyncStoreWorker = await isSyncStoreWorkerSupported();
     // v6 → v7: bump forces every client to rebuild its local Matrix sync
     // store from scratch instead of reconciling incrementally on top of
     // state cached while member lazy-loading was still on. Without this, an
@@ -273,11 +338,63 @@ export class MatrixClientService {
     // indefinitely — canBeEncrypt() would still see it as incomplete — since
     // disabling lazy loading only changes what *future* /sync responses
     // contain, it doesn't retroactively backfill an already-populated store.
-    const indexedDBStore = new sdk.IndexedDBStore({
+    // The store runs in a Web Worker where the WebView supports it (see
+    // sync-store-worker.ts), on the main thread otherwise.
+    const store = new sdk.IndexedDBStore({
       indexedDB: window.indexedDB,
-      dbName: "matrix-js-sdk-v7:" + this.credentials.username,
-      localStorage: window.localStorage
+      dbName: "matrix-js-sdk-v7:" + username,
+      localStorage: window.localStorage,
+      ...(useSyncStoreWorker ? { workerFactory: startSyncStoreWorker } : {}),
     });
+    if (useSyncStoreWorker) trackSyncStoreWorker(store);
+    try {
+      await withTimeout(store.startup(), 10_000, "Matrix IndexedDB startup");
+    } catch (e) {
+      console.error("Matrix IndexedDB startup error:", e);
+    }
+    return store;
+  }
+
+  /** Main login/register + start client flow */
+  async getClient(): Promise<MatrixClient | null> {
+    if (!this.credentials) throw new Error("No credentials set");
+    const build = ++this.clientBuildGeneration;
+    const credentials = this.credentials;
+
+    // The sync store does not depend on the login, so open it while /login is
+    // in flight instead of after it. The worker probe is cached per session.
+    const storePromise = this.openSyncStore(credentials.username);
+
+    // A session from a login less than 3 days ago skips /login entirely; if
+    // the server has revoked it, reloginForExpiredToken() recovers on the first
+    // authed request. The device must be the one this account is pinned to.
+    const cachedSession = readCachedMatrixSession(credentials.address);
+    const storedDeviceId = getStoredDeviceId(credentials.address);
+    const reusable = cachedSession && (!storedDeviceId || storedDeviceId === cachedSession.deviceId)
+      ? cachedSession
+      : null;
+
+    let userData: MatrixLoginData | null;
+    try {
+      userData = reusable
+        ? { user_id: reusable.userId, access_token: reusable.accessToken, device_id: reusable.deviceId }
+        : await this.passwordLogin(this.createLoginClient());
+    } catch (e) {
+      void storePromise.then(releaseSyncStoreWorker);
+      throw e;
+    }
+    if (!userData) {
+      void storePromise.then(releaseSyncStoreWorker);
+      return null;
+    }
+
+    if (build !== this.clientBuildGeneration) {
+      console.warn("[matrix] a newer client build started while this login was waiting, dropping it");
+      void storePromise.then(releaseSyncStoreWorker);
+      return null;
+    }
+
+    const indexedDBStore = await storePromise;
 
     const userClientData: Record<string, unknown> = {
       baseUrl: this.baseUrl,
@@ -287,6 +404,8 @@ export class MatrixClientService {
       timelineSupport: true,
       store: indexedDBStore,
       deviceId: userData.device_id,
+      refreshToken: RELOGIN_REFRESH_TOKEN,
+      tokenRefreshFunction: () => this.reloginForExpiredToken(),
       request: this.request.bind(this),
       /*iceCandidatePoolSize: 20,
       // Session 02 — explicit public STUN fallback.
@@ -308,14 +427,9 @@ export class MatrixClientService {
 
     const userClient = this.createMtrxClient(userClientData);
 
-    try {
-      await withTimeout(indexedDBStore.startup(), 10_000, "Matrix IndexedDB startup");
-    } catch (e) {
-      console.error("Matrix IndexedDB startup error:", e);
-    }
-
     if (build !== this.clientBuildGeneration) {
       console.warn("[matrix] a newer client build started during store startup, dropping this one");
+      releaseSyncStoreWorker(indexedDBStore);
       return null;
     }
     // Replacing a client that is still running (a late success of an attempt the
@@ -388,7 +502,22 @@ export class MatrixClientService {
           types: ["m.fully_read", "m.tag", "m.bastyon.clear_history"],
         },
       };
-      syncFilter = await userClient.createFilter(filterDefinition);
+      // The SDK re-checks the filter by name before /sync (GET /filter/{id}
+      // when it is not in its in-memory store). Seeding the store with the id
+      // uploaded for this exact definition skips both the POST and the GET.
+      const filterName = `FILTER_SYNC_${userData.user_id}`;
+      const cachedFilterId = readCachedSyncFilterId(credentials.address, filterDefinition);
+      if (cachedFilterId) {
+        syncFilter = sdk.Filter.fromJson(userData.user_id, cachedFilterId, filterDefinition);
+        userClient.store.storeFilter(syncFilter);
+      } else {
+        syncFilter = await userClient.createFilter(filterDefinition);
+      }
+      const filterId = syncFilter?.filterId;
+      if (filterId) {
+        userClient.store.setFilterIdByName(filterName, filterId);
+        writeCachedSyncFilterId(credentials.address, filterDefinition, filterId);
+      }
     } catch (e) {
       console.warn("Failed to create sync filter, falling back to unfiltered sync:", e);
     }
@@ -425,6 +554,7 @@ export class MatrixClientService {
       console.warn("[matrix] a newer client build started while this client was starting, stopping it");
       try { userClient.removeAllListeners(); } catch { /* ignore */ }
       try { userClient.stopClient(); } catch { /* ignore */ }
+      releaseSyncStoreWorker(userClient.store);
       if (this.client === userClient) this.client = null;
       return null;
     }
@@ -496,6 +626,24 @@ export class MatrixClientService {
 
     const userId = this.client.credentials?.userId;
 
+    // Not gated on chatsReady: limited syncs happen during the catch-up sync,
+    // and a hole missed here is a hole Dexie never learns about.
+    this.client.on("Room.timelineReset", (room: unknown, timelineSet: unknown) => {
+      const r = room as {
+        roomId?: string;
+        getUnfilteredTimelineSet?: () => unknown;
+        getLiveTimeline?: () => { getPaginationToken?: (dir: string) => string | null };
+      } | null;
+      // Only the room's main timeline — threads and the notification set re-emit too.
+      if (!r?.roomId || r.getUnfilteredTimelineSet?.() !== timelineSet) return;
+      // With lazy-loaded members a limited sync omits membership changes of
+      // users who didn't post in the gap: the next encryption reloads the
+      // room's member list (see markRoomMembersStale).
+      markRoomMembersStale(r.roomId);
+      const backToken = r.getLiveTimeline?.()?.getPaginationToken?.("b") ?? null;
+      this.onTimelineReset?.(r.roomId, backToken);
+    });
+
     this.client.on("RoomMember.membership", (event: unknown, member: unknown) => {
       if (!this.chatsReady) return;
       this.onMembership?.(event, member);
@@ -553,7 +701,13 @@ export class MatrixClientService {
     });
 
     // Fires when MY membership changes in a room (join→leave = kicked, join→ban, etc.)
+    // Gated like the other room handlers: while the SDK replays its cached sync,
+    // every room goes undefined→join/invite once (thousands of calls with many
+    // invites), and each debounced refreshRooms() could start a full refresh over a
+    // half-loaded room list. The PREPARED full refresh covers all of those rooms, and
+    // kick handling waits for roomsInitialized anyway.
     this.client.on("Room.myMembership", (room: unknown, membership: string, prevMembership: string | undefined) => {
+      if (!this.chatsReady) return;
       this.onMyMembership?.(room, membership, prevMembership);
     });
 
@@ -592,7 +746,7 @@ export class MatrixClientService {
       }
     });
 
-    this.client.on("sync", (state: string) => {
+    this.client.on("sync", (state: string, _prev: string | null, data?: { error?: { message?: string }; fromCache?: boolean }) => {
       if (state === "PREPARED" || state === "SYNCING") {
         if (!this.chatsReady) {
           this.chatsReady = true;
@@ -606,13 +760,18 @@ export class MatrixClientService {
         // (WEE-105 H2). Now we retry the same host behind exponential backoff
         // while the watchdog (below) escalates to a mirror if it stays stuck.
         this.scheduleErrorRetry();
+        // A cached filter id the server no longer knows fails every /sync;
+        // forget it so the next start uploads the filter again.
+        if (/filter/i.test(data?.error?.message ?? "") && this.credentials) {
+          clearCachedSyncFilterId(this.credentials.address);
+        }
       } else if (state === "STOPPED") {
         console.warn("[matrix] Sync stopped unexpectedly");
       }
       // Feed every state to the watchdog so it can fail over to a mirror when
       // the sync is wedged while online (WEE-105 H3).
       this.watchdog?.notifySync(state);
-      this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING");
+      this.onSync?.(state as "PREPARED" | "SYNCING" | "ERROR" | "STOPPED" | "RECONNECTING", { fromCache: data?.fromCache === true });
     });
 
     // The homeserver rejected the access token (M_UNKNOWN_TOKEN). The SDK stops
@@ -658,7 +817,16 @@ export class MatrixClientService {
     // would add seconds to every start. The watchdog probes the mirrors (with
     // the Tor budget) once sync is actually stuck — see findLiveHost.
     if (this.torProxyUrl) return hostFromBaseUrl(this.baseUrl);
-    return pickLiveMatrixHost((host) => this.probeHost(host));
+    let liveHost: string | null = null;
+    const picked = await pickLiveMatrixHost(async (host) => {
+      const live = await this.probeHost(host);
+      if (live && !liveHost) liveHost = host;
+      return live;
+    });
+    // pickLiveMatrixHost falls back to the primary when nothing answered —
+    // only a host that actually answered is worth remembering.
+    if (liveHost === picked) writeCachedMatrixHost(picked);
+    return picked;
   }
 
   /** Single-host /versions probe. Under Tor it travels the way the SDK's own
@@ -679,7 +847,9 @@ export class MatrixClientService {
    *  Probes under Tor too: answering "the current host" without asking kept the
    *  watchdog failing over to the same dead host for hours (audit S8-01). */
   private async findLiveHost(order: readonly string[]): Promise<string | null> {
-    return findLiveMatrixHost((host) => this.probeHost(host), order);
+    const host = await findLiveMatrixHost((host) => this.probeHost(host), order);
+    if (host) writeCachedMatrixHost(host);
+    return host;
   }
 
   /** Stop the current SDK client without tearing down handlers/credentials/
@@ -690,6 +860,7 @@ export class MatrixClientService {
     if (this.client) {
       try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { this.client.stopClient(); } catch { /* ignore */ }
+      releaseSyncStoreWorker(this.client.store);
     }
     this.client = null;
     this.chatsReady = false;
@@ -718,6 +889,7 @@ export class MatrixClientService {
     for (const host of order) {
       const live = await this.probeHost(host);
       if (!live) continue;
+      writeCachedMatrixHost(host);
       try {
         this.baseUrl = `https://${host}`;
         const rebuilt = await this.getClient();
@@ -920,11 +1092,24 @@ export class MatrixClientService {
       // Ping-and-pick a live homeserver before connecting (WEE-105 H1/A1).
       // Skipped during an in-flight mirror failover, which has already set
       // baseUrl to the mirror it wants and must not be reset back to primary.
+      // A host that answered within the last 3 days is used without probing:
+      // which homeserver is reachable depends on regional blocking and rarely
+      // changes. Only the first start of the page trusts it; a retry pings.
+      let usedCachedHost = false;
       if (!this.failoverActive) {
-        try {
-          this.baseUrl = `https://${await this.pingServers()}`;
-        } catch (e) {
-          console.warn("[matrix] pingServers failed, using current baseUrl:", e);
+        const cachedHost = this.torProxyUrl || this.hostCacheTried
+          ? null
+          : readCachedMatrixHost(MATRIX_SYNC_HOSTS);
+        this.hostCacheTried = true;
+        if (cachedHost) {
+          this.baseUrl = `https://${cachedHost}`;
+          usedCachedHost = true;
+        } else {
+          try {
+            this.baseUrl = `https://${await this.pingServers()}`;
+          } catch (e) {
+            console.warn("[matrix] pingServers failed, using current baseUrl:", e);
+          }
         }
       }
       this.ensureWatchdog();
@@ -938,6 +1123,8 @@ export class MatrixClientService {
       if (this.client) {
         this.store = this.client.store;
         this.ready = true;
+      } else if (usedCachedHost) {
+        clearCachedMatrixHost();
       }
     } catch (e) {
       if (attempt !== this.initGeneration) {
@@ -946,6 +1133,8 @@ export class MatrixClientService {
       }
       console.error("Matrix init error:", e);
       this.error = String(e);
+      // The retry pings anyway; drop the cache so the next launch does too.
+      clearCachedMatrixHost();
     } finally {
       if (attempt === this.initGeneration) this.building = false;
     }
@@ -1296,6 +1485,40 @@ export class MatrixClientService {
     }
   }
 
+  /** One page of a room's history, newest first, backwards from `fromToken`
+   *  (plan 2026-09-28, stage 3). Unlike scrollback it does not grow the
+   *  SDK's in-memory timeline. Throws on network errors; `end: null` means
+   *  the start of the room. */
+  async fetchMessagesPage(
+    roomId: string,
+    fromToken: string,
+    limit: number,
+  ): Promise<{ chunk: Record<string, unknown>[]; end: string | null }> {
+    if (!this.client) throw new Error("Client not initialized");
+    const res = await this.client.createMessagesRequest(roomId, fromToken, limit, sdk.Direction.Backward);
+    const chunk = (res?.chunk ?? []) as Record<string, unknown>[];
+    // Same body → pbody parse the live timeline handler does for m.file.
+    for (const raw of chunk) {
+      const content = raw.content as Record<string, unknown> | undefined;
+      if (content?.msgtype === "m.file" && typeof content.body === "string" && content.pbody === undefined) {
+        try { content.pbody = JSON.parse(content.body); } catch { /* not JSON */ }
+      }
+    }
+    return { chunk, end: res?.end ?? null };
+  }
+
+  /** `/messages` token that pages back from just before `eventId` (the
+   *  `start` of a zero-size /context), or null if the server has none. */
+  async fetchTokenBefore(roomId: string, eventId: string): Promise<string | null> {
+    if (!this.client) return null;
+    const path = `/rooms/${encodeURIComponent(roomId)}/context/${encodeURIComponent(eventId)}`;
+    const client = this.client as unknown as {
+      http: { authedRequest: (method: string, path: string, query?: Record<string, string>) => Promise<{ start?: string }> };
+    };
+    const res = await client.http.authedRequest("GET", path, { limit: "0" });
+    return res?.start ?? null;
+  }
+
   /** Fetch a specific event and its surrounding context from the server.
    *  Uses the Matrix SDK timeline API. Returns raw timeline events. */
   async fetchEventContext(roomId: string, eventId: string, limit = 50): Promise<unknown[]> {
@@ -1498,6 +1721,7 @@ export class MatrixClientService {
     if (this.client) {
       this.client.removeAllListeners();
       this.client.stopClient();
+      releaseSyncStoreWorker(this.client.store);
     }
     this.chatsReady = false;
     this.ready = false;

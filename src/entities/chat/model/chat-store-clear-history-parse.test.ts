@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression test: loadRoomMessages() must exclude pre-clear timeline events
  * BEFORE parsing/decrypting them, not just from the final displayed list.
@@ -113,6 +114,7 @@ function makeKit() {
       getClearedAtTs: vi.fn(() => CLEARED_AT_TS),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages,
       writeEdit: vi.fn(async () => {}),

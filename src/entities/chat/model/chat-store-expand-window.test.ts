@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression (audit B3/B4): MessageList waited 300ms for
  * `activeMessages.length` to change after expandMessageWindow(), while the
@@ -102,6 +103,7 @@ function makeKit() {
       getClearedAtTs: vi.fn(() => undefined),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages: vi.fn(() => Promise.resolve()),
       writeEdit: vi.fn(async () => {}),

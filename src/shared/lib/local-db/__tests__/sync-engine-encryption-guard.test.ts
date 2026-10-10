@@ -158,16 +158,16 @@ describe("use-messages legacy path guards plaintext fallback", () => {
     expect(section).toContain("requiresEncryption");
   });
 
-  it("sendTransferMessage legacy path refuses plaintext when encryption is required", () => {
+  it("sendTransferMessage goes through the guarded sendMessage path", () => {
     const source = getUseMessagesSource();
-    // Locate the legacy transfer fallback — the plain sendText below the
-    // Dexie path fallback message. Transfer bodies carry recipient address
-    // + txId so this is especially sensitive.
+    // A transfer is a plain stx-link message now: it must reuse sendMessage
+    // (whose legacy path refuses plaintext) rather than a send of its own.
     const fnIdx = source.indexOf("const sendTransferMessage = async");
     expect(fnIdx).toBeGreaterThan(-1);
     const end = source.indexOf("const sendPoll =", fnIdx);
     const section = source.slice(fnIdx, end > -1 ? end : fnIdx + 4000);
-    expect(section).toContain("requiresEncryption");
+    expect(section).toContain("sendMessage(");
+    expect(section).not.toMatch(/matrixService\.sendText/);
   });
 });
 
@@ -187,9 +187,29 @@ describe("shared error tag ensures consistent log grep", () => {
   it("every use-messages throw uses the shared tag", () => {
     const source = getUseMessagesSource();
     const throws = source.match(/throw new Error\(`\$\{ENCRYPTION_REQUIRED_NO_KEYS\}/g) ?? [];
-    // sendMessage legacy, drainOfflineQueue, sendForward legacy, editMessage
-    // legacy, forwardMessages bulk, sendTransferMessage legacy, retryMediaUpload
-    // (audit batch-2 review: it used to send files in the clear) — 7 sites.
-    expect(throws.length).toBe(7);
+    // sendMessage legacy (also carries transfers), drainOfflineQueue,
+    // sendForward legacy, editMessage legacy, forwardMessages bulk,
+    // retryMediaUpload (audit batch-2 review: it used to send files in the
+    // clear) — 6 sites.
+    expect(throws.length).toBe(6);
+  });
+});
+
+describe("use-messages completes the participants before deciding to encrypt", () => {
+  // With lazy-loaded members canBeEncrypt() reads an incomplete list unless
+  // the room's members are loaded first (getSendCrypto → ensureMembers).
+  it("every legacy send takes its room crypto from getSendCrypto", () => {
+    const source = getUseMessagesSource();
+    const helperIdx = source.indexOf("const getSendCrypto = async");
+    expect(helperIdx).toBeGreaterThan(-1);
+    const helperEnd = source.indexOf("\n  };", helperIdx);
+    expect(source.slice(helperIdx, helperEnd)).toContain("ensureMembers");
+
+    const outside = source.slice(0, helperIdx) + source.slice(helperEnd);
+    expect(outside).not.toMatch(/pcrypto\?\.rooms\[/);
+    const decisions = (source.match(/roomCrypto\?\.canBeEncrypt\(\)/g) ?? []).length;
+    const lookups = (source.match(/await getSendCrypto\(/g) ?? []).length;
+    expect(lookups).toBeGreaterThan(0);
+    expect(decisions).toBeGreaterThanOrEqual(lookups);
   });
 });

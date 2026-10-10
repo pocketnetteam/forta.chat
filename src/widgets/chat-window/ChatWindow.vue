@@ -12,6 +12,7 @@ import SelectionBar from "@/features/messaging/ui/SelectionBar.vue";
 import ForwardPicker from "@/features/messaging/ui/ForwardPicker.vue";
 import ChatSearch from "@/features/messaging/ui/ChatSearch.vue";
 import { useToast } from "@/shared/lib/use-toast";
+import { formatMessageForCopy } from "@/shared/lib/message-format";
 import { ChatInfoPanel, UserProfilePanel } from "@/features/chat-info";
 import PinnedBar from "@/features/messaging/ui/PinnedBar.vue";
 import { UserAvatar } from "@/entities/user";
@@ -37,11 +38,58 @@ const emit = defineEmits<{ back: [] }>();
 
 const isChannelView = computed(() => channelStore.activeChannelAddress !== null);
 
+/**
+ * How long a room named by a push tap / deep link may stay unresolved before
+ * the window gives up and falls back to the select-prompt.
+ *
+ * A notification can point at a room the app does not hold yet (first message
+ * in a group the user was just added to, a room the cold-start sync has not
+ * delivered). `roomsInitialized` says the room LIST is ready, not that THIS
+ * room is — so gating the skeleton on it alone dropped the push-tap user on
+ * "Select a chat to start messaging" with the sidebar hidden: a dead end that
+ * reads as "the tap did nothing". Keep the skeleton while sync catches up, but
+ * bounded, so a room that never arrives still leaves a way out.
+ */
+const PENDING_ROOM_GRACE_MS = 15_000;
+
+const pendingRoomTimedOut = ref(false);
+let pendingRoomTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** The room we are waiting on, or null when there is nothing to wait for.
+ *  A plain id (not a tuple) so the watcher below re-arms its timer only when
+ *  the waited-for room actually changes — `activeRoom` is invalidated by every
+ *  Dexie room delta, and re-arming on those would push the deadline out
+ *  indefinitely while sync churns. */
+const pendingRoomId = computed(() =>
+  chatStore.activeRoomId && !chatStore.activeRoom ? chatStore.activeRoomId : null,
+);
+
+watch(
+  pendingRoomId,
+  (roomId) => {
+    if (pendingRoomTimer !== null) {
+      clearTimeout(pendingRoomTimer);
+      pendingRoomTimer = null;
+    }
+    pendingRoomTimedOut.value = false;
+    if (!roomId) return;
+    pendingRoomTimer = setTimeout(() => {
+      pendingRoomTimer = null;
+      pendingRoomTimedOut.value = true;
+    }, PENDING_ROOM_GRACE_MS);
+  },
+  { immediate: true },
+);
+
+onUnmounted(() => {
+  if (pendingRoomTimer !== null) clearTimeout(pendingRoomTimer);
+});
+
 const isRoomLoading = computed(() =>
   Boolean(
     chatStore.activeRoomId &&
     !chatStore.activeRoom &&
-    !chatStore.roomsInitialized,
+    (!chatStore.roomsInitialized || !pendingRoomTimedOut.value),
   ),
 );
 
@@ -116,7 +164,7 @@ const peerKeysMissing = computed(() => {
   // without keys makes every send in the group fail after its retries, and
   // hiding the reason left the whole group guessing (audit S7-03).
   if (chatStore.isRoomPublic(roomId)) return false;
-  return status === "missing";
+  return status === "missing" || status === "load-failed";
 });
 
 const { toast } = useToast();
@@ -126,8 +174,13 @@ const { t } = useI18n();
 // the banner must say so instead of blaming the peer (audit W2A-01).
 const ownKeysMissing = computed(() => authStore.ownKeysMissing === true);
 
-const peerKeysMissingText = computed(() => {
+// One banner text, most specific cause first: our own keys are missing
+// (audit W2A-01), the keys could not be loaded ("load-failed" is not "the
+// peer has none"), then a group member or the peer has none.
+const peerKeysBannerText = computed(() => {
   if (ownKeysMissing.value) return t("chat.ownKeysMissing");
+  const roomId = chatStore.activeRoomId;
+  if (roomId && chatStore.peerKeysStatus.get(roomId) === "load-failed") return t("chat.peerKeysLoadFailed");
   return chatStore.activeRoom?.isGroup ? t("chat.groupMemberKeysMissing") : t("chat.peerKeysMissing");
 });
 
@@ -160,9 +213,8 @@ const publishOwnKeys = async () => {
 
 // Retry handler for the peer-keys banner. The banner is no longer a hard
 // blocker (regression #597/#598/#639) — it offers an escape hatch so a stuck
-// "missing" state never traps the user. There is deliberately no "republish
-// my own keys" action here: the banner means the PEER hasn't published keys,
-// not the local user — republishing keys that already exist is a no-op.
+// "missing" state never traps the user. Publishing our own keys is a separate
+// action (publishOwnKeys), shown only when our own keys are the ones missing.
 const peerKeysRetrying = ref(false);
 
 const retryPeerKeys = async () => {
@@ -376,7 +428,7 @@ watch(() => chatStore.forwardPickerRequested, (v) => {
 const handleSelectionCopy = () => {
   const ids = chatStore.selectedMessageIds;
   const msgs = chatStore.activeMessages.filter(m => ids.has(m.id));
-  const text = msgs.map(m => m.content).join("\n");
+  const text = msgs.map(m => formatMessageForCopy(m.content, (id) => chatStore.getLocalAlias(id))).join("\n");
   navigator.clipboard.writeText(text).then(() => toast(t("chat.copiedToClipboard")));
   chatStore.exitSelectionMode();
 };
@@ -710,7 +762,7 @@ onUnmounted(() => {
             <path d="M12 9v4m0 4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
           </svg>
           <div class="flex-1 min-w-0">
-            <p class="leading-snug">{{ peerKeysMissingText }}</p>
+            <p class="leading-snug">{{ peerKeysBannerText }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
                 v-if="ownKeysMissing"

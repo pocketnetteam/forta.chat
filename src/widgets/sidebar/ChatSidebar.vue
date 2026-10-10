@@ -23,6 +23,12 @@ import { useSidebarTab } from "./model/use-sidebar-tab";
 import type { SidebarTab } from "./model/use-sidebar-tab";
 import { shouldClearSearch, shouldResetFilter } from "./model/chat-back-actions";
 import { getSidebarFabMode } from "./model/sidebar-fab";
+import {
+  isAlwaysVisibleFilter,
+  loadSidebarFilter,
+  saveSidebarFilter,
+  type SidebarFilter,
+} from "./model/sidebar-filter-storage";
 
 const emit = defineEmits<{ selectRoom: []; newGroup: [] }>();
 const chatStore = useChatStore();
@@ -31,7 +37,7 @@ const aiChatStore = useAiChatStore();
 const localAiStore = useLocalAiStore();
 const authStore = useAuthStore();
 const selectionStore = useSelectionStore();
-const tabProgress = ref<number | undefined>(undefined);
+const tabProgress = ref<number | null>(null);
 
 useAndroidBackHandler("chat-selection", 92, () => {
   if (selectionStore.isSelectionMode) {
@@ -67,6 +73,7 @@ const { t } = useI18n();
 const { activeTab, setTab, openSettingsContent } = useSidebarTab();
 
 const sidebarSearchQuery = ref("");
+const isSidebarSearching = ref(false);
 
 const searchPlaceholder = computed(() => {
   const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
@@ -75,7 +82,9 @@ const searchPlaceholder = computed(() => {
   const shortcut = isMac ? "⌘K" : "Ctrl+K";
   return `${t("contactSearch.placeholderShort")} (${shortcut})`;
 });
-const activeFilter = ref<"all" | "personal" | "groups" | "invites" | "channels" | "ai">("all");
+const restoredFilter = loadSidebarFilter();
+const activeFilter = ref<SidebarFilter>(isAlwaysVisibleFilter(restoredFilter) ? restoredFilter : "all");
+watch(activeFilter, saveSidebarFilter);
 
 // Android Back inside the Chats tab cascades before the app is allowed to
 // minimize (forta-bugs#877): clear an active search first, then collapse a
@@ -143,6 +152,33 @@ const visibleTabValues = computed(() => {
   if (isLocalAiFeatureEnabled && isNativePlatform()) tabs.push("ai");
   return tabs;
 });
+
+// Invites / channels tabs only appear once their data loads from Dexie, so a
+// restored filter pointing at one of them is applied when the tab shows up.
+// The wait is bounded: a tab that appears much later (a new invite arriving)
+// must not yank the user away from where they are, nor must a tab they have
+// already left by hand.
+const RESTORE_FILTER_WINDOW_MS = 15_000;
+let pendingRestoreFilter: SidebarFilter | null = isAlwaysVisibleFilter(restoredFilter) ? null : restoredFilter;
+const restoreFilterTimer = setTimeout(() => { pendingRestoreFilter = null; }, RESTORE_FILTER_WINDOW_MS);
+onBeforeUnmount(() => clearTimeout(restoreFilterTimer));
+watch(
+  [visibleTabValues, activeFilter],
+  ([tabs, filter], prev) => {
+    if (!pendingRestoreFilter) return;
+    // Any filter change other than our own restore means the user moved on.
+    if (prev && filter !== prev[1]) {
+      pendingRestoreFilter = null;
+      return;
+    }
+    if (tabs.includes(pendingRestoreFilter)) {
+      const target = pendingRestoreFilter;
+      pendingRestoreFilter = null;
+      activeFilter.value = target;
+    }
+  },
+  { immediate: true },
+);
 
 // The room-list skeleton must not hide channels that are already hydrated from
 // Dexie: channels are a separate local-first pipeline and shouldn't wait on the
@@ -363,11 +399,21 @@ const walletStore = useWalletStore();
               <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
+              autocomplete="off"
               :value="sidebarSearchQuery"
               :placeholder="searchPlaceholder"
-              class="w-full rounded-lg bg-chat-input-bg py-2 pl-8 pr-8 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
+              class="w-full rounded-lg bg-chat-input-bg py-2 pl-8 pr-12 text-sm text-text-color outline-none placeholder:text-neutral-grad-2"
               @input="sidebarSearchQuery = ($event.target as HTMLInputElement).value"
             />
+            <!-- Centred by flex, not translate: animate-spin's transform would
+                 override -translate-y-1/2 and the spinner wobbled off-centre. -->
+            <span
+              v-if="isSidebarSearching && sidebarSearchQuery.trim()"
+              class="pointer-events-none absolute inset-y-0 right-7 flex items-center"
+              data-testid="sidebar-search-spinner"
+            >
+              <span class="contain-strict h-3.5 w-3.5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent" />
+            </span>
             <button
               v-if="sidebarSearchQuery"
               class="absolute right-2 top-1/2 -translate-y-1/2 text-text-on-main-bg-color hover:text-text-color"
@@ -388,6 +434,7 @@ const walletStore = useWalletStore();
             @room-created="handleRoomCreated"
             @select-message="handleSelectMessage"
             @clear="sidebarSearchQuery = ''"
+            @searching="isSidebarSearching = $event"
           />
         </template>
         <template v-else>
@@ -405,6 +452,7 @@ const walletStore = useWalletStore();
               <template #all>
                 <ContactList
                   filter="all"
+                  :active="activeFilter === 'all'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                   @select-channel="handleSelectRoom"
@@ -413,6 +461,7 @@ const walletStore = useWalletStore();
               <template #personal>
                 <ContactList
                   filter="personal"
+                  :active="activeFilter === 'personal'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                 />
@@ -420,6 +469,7 @@ const walletStore = useWalletStore();
               <template #groups>
                 <ContactList
                   filter="groups"
+                  :active="activeFilter === 'groups'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                 />
@@ -427,6 +477,7 @@ const walletStore = useWalletStore();
               <template #invites>
                 <ContactList
                   filter="invites"
+                  :active="activeFilter === 'invites'"
                   class="h-full overflow-y-auto"
                   @select-room="handleSelectRoom"
                 />
@@ -571,18 +622,14 @@ const walletStore = useWalletStore();
   opacity: 0;
 }
 
-/* Invite FAB — gradient + subtle glow pulse.
-   Glow ring shrunk from 6px → 2px so it no longer overlaps the search input
-   on narrow layouts. z-index ensures the search input stays clickable. */
+/* Invite FAB — gradient + static glow. No infinite animation: a pulsing
+   box-shadow is not compositable and repainted the page every frame while
+   idle. z-index ensures the search input stays clickable. */
 .invite-fab {
   background: linear-gradient(135deg, rgb(var(--color-bg-ac-bright)), rgb(var(--color-bg-ac-2)));
-  animation: invite-pulse 2s ease-in-out infinite;
+  box-shadow: 0 4px 16px rgba(var(--color-bg-ac-bright), 0.4);
   position: relative;
   z-index: 10;
-}
-@keyframes invite-pulse {
-  0%, 100% { box-shadow: 0 4px 16px rgba(var(--color-bg-ac-bright), 0.4), 0 0 0 0 rgba(var(--color-bg-ac-2), 0); }
-  50% { box-shadow: 0 6px 24px rgba(var(--color-bg-ac-bright), 0.55), 0 0 0 2px rgba(var(--color-bg-ac-2), 0.15); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -593,9 +640,6 @@ const walletStore = useWalletStore();
   .sidebar-slide-right-enter-active,
   .sidebar-slide-right-leave-active {
     transition: none;
-  }
-  .invite-fab {
-    animation: none;
   }
 }
 </style>

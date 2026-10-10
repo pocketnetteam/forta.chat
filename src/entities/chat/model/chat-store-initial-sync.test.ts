@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * WEE-55 — post-update Matrix sync hang regression tests.
  *
@@ -196,18 +197,27 @@ describe("chat-store room-list first-load states", () => {
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
   });
 
-  it("accepts authoritative empty after degraded escape window", () => {
-    store.startInitialSyncWatch();
+  it("keeps the slow skeleton after degrade until the first sync lands (empty cache)", () => {
+    store.setHelpers(mockMatrixService.kit as never, {} as never);
     vi.advanceTimersByTime(INITIAL_SYNC_TIMEOUT_MS);
     expect(store.isRoomListLoadingSlow).toBe(true);
+
+    // A slow initial /sync is still downloading: no false "no chats".
+    vi.advanceTimersByTime(10 * 60_000);
     expect(store.isRoomListAuthoritativeEmpty).toBe(false);
+    expect(store.isRoomListLoading).toBe(true);
+    expect(store.isRoomListLoadingSlow).toBe(true);
 
-    // DEGRADED_EMPTY_ESCAPE_MS = 8000
-    vi.advanceTimersByTime(8000);
+    // The first sync finally lands with no rooms → normal PREPARED grace.
+    store.refreshRooms("PREPARED");
+    vi.advanceTimersByTime(150);
+    expect(store.initialSyncStatus).toBe("ready");
+    expect(store.isRoomListLoadingSlow).toBe(false);
+    expect(store.isRoomListLoading).toBe(true);
 
+    vi.advanceTimersByTime(3000);
     expect(store.isRoomListAuthoritativeEmpty).toBe(true);
     expect(store.isRoomListLoading).toBe(false);
-    expect(store.isRoomListLoadingSlow).toBe(false);
   });
 
   it("does NOT show authoritative empty at PREPARED with an empty snapshot", () => {

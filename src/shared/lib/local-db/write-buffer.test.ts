@@ -204,3 +204,53 @@ describe("WriteBuffer", () => {
     expect(onFlush).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("WriteBuffer.hasPending", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("sees a buffered item of the room", () => {
+    const buf = new WriteBuffer<BufferedWrite>(async () => {});
+    buf.enqueue(makeItem("!a:s"));
+    expect(buf.hasPending((i) => i.roomId === "!a:s")).toBe(true);
+    expect(buf.hasPending((i) => i.roomId === "!b:s")).toBe(false);
+  });
+
+  it("still sees an item whose flush is committing, until the commit ends", async () => {
+    let finish!: () => void;
+    const buf = new WriteBuffer<BufferedWrite>(() => new Promise<void>((r) => { finish = r; }), { delayMs: 150 });
+    buf.enqueue(makeItem("!a:s"));
+    await vi.advanceTimersByTimeAsync(150); // timer moved the item into the in-flight flush
+
+    expect(buf.hasPending((i) => i.roomId === "!a:s")).toBe(true);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(buf.hasPending((i) => i.roomId === "!a:s")).toBe(false);
+  });
+
+  // Merge of the audit retry with the in-flight set: a batch that went back
+  // into the buffer behind a failed one stayed in the set after its retry
+  // committed, so the room looked pending for the rest of the session.
+  it("forgets a batch that was requeued behind a failed one once the retry commits", async () => {
+    let failFirst!: (e: Error) => void;
+    const onFlushSpy = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<void>((_, reject) => { failFirst = reject; }))
+      .mockImplementation(async () => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const buf = new WriteBuffer<BufferedWrite>(onFlushSpy, { delayMs: 100, maxSize: 1 });
+
+    buf.enqueue(makeItem("!old:s", "old")); // flush #1 starts and stays pending
+    buf.enqueue(makeItem("!new:s", "new")); // flush #2 chained behind #1
+    await vi.advanceTimersByTimeAsync(0);
+    failFirst(new Error("DB busy"));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(onFlushSpy).toHaveBeenCalledTimes(2);
+    expect(buf.hasPending((i) => i.roomId === "!new:s")).toBe(false);
+    expect(buf.hasPending((i) => i.roomId === "!old:s")).toBe(false);
+    warn.mockRestore();
+    await buf.dispose();
+  });
+});
+

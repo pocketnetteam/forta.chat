@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
-import { getKitchenCombos, type KitchenCombo } from "@/shared/lib/emoji-kitchen";
+import { onMounted, ref, watch } from "vue";
+import { getKitchenCombos, loadKitchenRecipes, type KitchenCombo } from "@/shared/lib/emoji-kitchen";
 
 const MAX_COMBOS = 30;
 
@@ -28,11 +28,23 @@ watch(
       }, 200);
       return;
     }
-    combos.value = getKitchenCombos(emoji).slice(0, MAX_COMBOS);
-    visible.value = combos.value.length > 0;
+    showCombos(emoji);
   },
   { immediate: true },
 );
+
+function showCombos(emoji: string) {
+  combos.value = getKitchenCombos(emoji).slice(0, MAX_COMBOS);
+  visible.value = combos.value.length > 0;
+}
+
+// The dataset loads on first mount; an emoji picked before it arrives
+// gets its combos once it does.
+onMounted(() => {
+  void loadKitchenRecipes().then(() => {
+    if (props.selectedEmoji) showCombos(props.selectedEmoji);
+  });
+});
 </script>
 
 <template>

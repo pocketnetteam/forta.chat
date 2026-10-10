@@ -17,13 +17,38 @@ describe("ContactList row cache", () => {
   });
 
   it("compares and stores the key for every room row", () => {
-    const start = source.indexOf("const allFilteredRooms = computed");
-    const end = source.indexOf("if (props.filter === \"personal\")", start);
+    const start = source.indexOf("const filteredRooms = computed");
+    const end = source.indexOf("return allFilteredRooms.value", start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const toItem = source.slice(start, end);
     expect(toItem).toContain("const lastMessageKey = lastMessageRowKey(r);");
     expect(toItem).toContain("cached.lastMessageKey === lastMessageKey");
     expect(toItem).toMatch(/_unifiedItemCache\.set\(r\.id, \{[^}]*lastMessageKey[^}]*item \}\)/);
+  });
+
+  // Perf: the invites tab holds thousands of rooms; a row (spread + title) per room on
+  // every list change made each mounted tab's setup take ~150 ms on cold start.
+  it("builds rows only for the displayed page, not for every room of the tab", () => {
+    const start = source.indexOf("const allFilteredRooms = computed");
+    const end = source.indexOf("const filteredRooms = computed", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const all = source.slice(start, end);
+    expect(all).not.toContain("toItem");
+    expect(all).not.toContain("getRoomTitle");
+    const page = source.slice(end, source.indexOf("// RecycleScroller gets the same array", end));
+    expect(page).toMatch(/allFilteredRooms\.value\s*\.slice\(0, displayLimit\.value\)\s*\.map\(/);
+  });
+
+  // Perf: every mounted tab built its own name index over all rooms (4× the same work),
+  // and later one shared index still re-resolved every room on each profile batch.
+  it("resolves names through the shared store, only for displayed rows", () => {
+    expect(source).toContain("const resolveRoomName = (room: ChatRoom): string => roomNamesStore.resolveInfo(room).name;");
+    expect(source).not.toContain("createRoomNameIndex");
+    expect(source).not.toContain("createRoomNameResolver");
+    expect(source).not.toContain("roomNameIndex");
+    // Unresolved rooms come from the displayed page, not from every room.
+    expect(source).toMatch(/const pageUnresolvedRooms = computed\(\(\) => \{\s*const next = new Set<string>\(\);\s*for \(const it of filteredRooms\.value\)/);
   });
 });

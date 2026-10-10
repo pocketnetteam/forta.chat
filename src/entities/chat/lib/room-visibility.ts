@@ -56,3 +56,13 @@ export function filterRoomsForTab(rooms: ChatRoom[], tab: ContactListTab): ChatR
   if (tab === "personal") return base.filter(r => !r.isGroup);
   return base.filter(r => r.isGroup);
 }
+
+/** Badge for a folder tab: how many of its rooms have unread messages.
+ *  Muted rooms do not count — they are muted so they do not call for attention. */
+export function countUnreadRoomsForTab(
+  rooms: ChatRoom[],
+  tab: ContactListTab,
+  mutedRoomIds: ReadonlySet<string>,
+): number {
+  return filterRoomsForTab(rooms, tab).filter(r => r.unreadCount > 0 && !mutedRoomIds.has(r.id)).length;
+}

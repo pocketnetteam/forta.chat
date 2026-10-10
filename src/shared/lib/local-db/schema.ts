@@ -84,8 +84,18 @@ export interface LocalRoom {
 
   // Sync metadata
   syncedAt: number;              // last sync from server
-  paginationToken?: string;      // Matrix backwards pagination token
+  paginationToken?: string;      // Matrix backwards pagination token from the OLDEST stored event
   hasMoreHistory: boolean;       // false = we reached the beginning
+  /** Hole between stored history and newer events (limited sync): `/messages`
+   *  token to page back from to close it; null/absent = history is contiguous.
+   *  Not indexed — no schema version bump. */
+  gapToken?: string | null;
+  /** Timestamp of the first event after the hole (debugging / UI). */
+  gapBeforeTs?: number;
+  /** Timestamp of the newest message stored BEFORE the hole, fixed when the
+   *  hole was marked: paging back closes the hole once it reaches it. Fixed
+   *  at mark time because other loads may later write rows inside the hole. */
+  gapAnchorTs?: number;
 
   /** Timestamp (ms) when user cleared chat history. Events before this are hidden/purged. */
   clearedAtTs?: number;
@@ -295,6 +305,9 @@ export interface DecryptionJob {
   attempts: number;
   nextAttemptAt: number;         // Timestamp for backoff scheduling
   lastError?: string;
+  /** AES-SIV verification failures across ALL attempts — unlike `attempts`,
+   *  never reset when the job is re-queued (see DecryptionWorker). */
+  sivFailures?: number;
   createdAt: number;
 }
 

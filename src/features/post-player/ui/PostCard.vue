@@ -9,7 +9,12 @@ import { useToast } from "@/shared/lib/use-toast";
 import VideoPlayer from "./VideoPlayer.vue";
 import StarRating from "./StarRating.vue";
 import PostPlayerModal from "./PostPlayerModal.vue";
+import CommentPreview from "./CommentPreview.vue";
+import PostImageGallery from "./PostImageGallery.vue";
 import { renderArticleText } from "@/shared/lib/article-blocks";
+import { parseTextLinks, truncateLinkSegments } from "@/shared/lib/linkify";
+import { openExternalUrl } from "@/shared/lib/open-external-url";
+import { toBastyonPostHttpsUrl } from "@/shared/lib/bastyon-link";
 import { withTimeout } from "@/shared/lib/with-timeout";
 import { useChatStore } from "@/entities/chat";
 import DonateModal from "@/features/wallet/ui/DonateModal.vue";
@@ -23,6 +28,8 @@ interface Props {
   txid: string;
   isOwn: boolean;
   initialCommentId?: string;
+  /** Nested inside another card (repost original): full width, no outer margin. */
+  embedded?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -53,16 +60,19 @@ const showModal = ref(false);
 const videoInfo = computed(() => post.value?.url ? parseVideoUrl(post.value.url) : null);
 const isArticle = computed(() => post.value?.settings?.v === "a");
 
-const firstImage = computed(() => {
-  if (!post.value?.images?.length) return null;
-  return normalizePocketnetImageUrl(post.value.images[0]);
-});
+const images = computed(() =>
+  (post.value?.images ?? []).map((img) => normalizePocketnetImageUrl(img)).filter(Boolean),
+);
+const firstImage = computed(() => images.value[0] ?? null);
+const showGallery = ref(false);
 
-/** Plain-text preview that handles both Editor.js JSON (articles) and plain messages. */
-const truncatedMessage = computed(() => {
+/** Plain-text preview that handles both Editor.js JSON (articles) and plain
+ *  messages, split into text/link segments. Truncated after linkifying so a
+ *  cut-off link still points at its full URL. */
+const messageSegments = computed(() => {
   const raw = post.value?.message ?? "";
-  if (!raw) return "";
-  return renderArticleText(raw, { maxLength: 200 });
+  if (!raw) return [];
+  return truncateLinkSegments(parseTextLinks(renderArticleText(raw)), 200);
 });
 
 const authorAvatarError = ref(false);
@@ -86,11 +96,16 @@ const visibleTags = computed(() => {
   return post.value.tags.slice(0, 5);
 });
 
-const postUrl = computed(() => `bastyon://post?s=${props.txid}`);
+const postUrl = computed(() => toBastyonPostHttpsUrl(props.txid));
+
+/** Card frame; a nested repost card fills its parent instead of the fixed bubble width. */
+const frameClass = computed(() =>
+  props.embedded ? "w-full rounded-xl" : "my-1.5 w-[20rem] max-w-full rounded-2xl sm:w-[28rem]",
+);
 const isOwnPost = computed(() => post.value?.address === authStore.address);
 
 const hasOwnContent = computed(() =>
-  !!(post.value?.caption || truncatedMessage.value || firstImage.value || videoInfo.value),
+  !!(post.value?.caption || messageSegments.value.length || firstImage.value || videoInfo.value),
 );
 
 /** WEE-101: a repost wrapper whose original txid could not be resolved has no
@@ -125,9 +140,13 @@ function onVote(value: number) {
   }
 }
 
+function onLinkClick(href: string) {
+  void openExternalUrl(href);
+}
+
 function onShare() {
   chatStore.initPostForward(
-    `bastyon://post?s=${props.txid}`,
+    postUrl.value,
     authorName.value || undefined,
   );
 }
@@ -174,8 +193,8 @@ onMounted(loadPostData);
   <!-- Loading skeleton — matches loaded card dimensions to prevent layout shift -->
   <div
     v-if="loading"
-    class="post-card my-1.5 w-[20rem] max-w-full overflow-hidden rounded-2xl border sm:w-[28rem]"
-    :class="isOwn ? 'border-white/10 bg-white/10' : 'border-neutral-grad-1/50 bg-background-total-theme'"
+    class="post-card overflow-hidden border"
+    :class="[frameClass, isOwn ? 'border-white/10 bg-white/10' : 'border-neutral-grad-1/50 bg-background-total-theme']"
   >
     <!-- Author skeleton -->
     <div class="flex items-center gap-2 p-3 pb-2 sm:gap-3 sm:p-4 sm:pb-3">
@@ -212,8 +231,9 @@ onMounted(loadPostData);
       :href="postUrl"
       target="_blank"
       rel="noopener noreferrer"
-      class="text-color-txt-ac underline hover:no-underline"
-      @click.stop
+      class="underline hover:no-underline"
+      :class="isOwn ? 'text-chat-link-own' : 'text-color-txt-ac'"
+      @click.stop.prevent="onLinkClick(postUrl)"
     >{{ t(isUnresolvedRepost ? "post.openOriginal" : "post.notFound") }}</a>
     <button
       v-if="!isUnresolvedRepost"
@@ -225,8 +245,8 @@ onMounted(loadPostData);
   <!-- Post card -->
   <div
     v-else-if="post"
-    class="post-card my-1.5 w-[20rem] max-w-full overflow-hidden rounded-2xl border sm:w-[28rem]"
-    :class="isOwn ? 'border-white/10 bg-white/[0.08]' : 'border-neutral-grad-1/50 bg-background-total-theme'"
+    class="post-card overflow-hidden border"
+    :class="[frameClass, isOwn ? 'border-white/10 bg-white/[0.08]' : 'border-neutral-grad-1/50 bg-background-total-theme']"
   >
     <!-- Author header — clickable to open profile -->
     <div
@@ -271,14 +291,30 @@ onMounted(loadPostData);
          embedding the iframe in the feed, which would lock feed scroll (WEE-74). -->
     <VideoPlayer v-if="videoInfo" :url="post.url" inline @expand="showModal = true" />
 
-    <!-- Image -->
-    <img
+    <!-- Image — tap opens the gallery with all of the post's images -->
+    <div
       v-else-if="firstImage"
-      :src="firstImage"
-      alt=""
-      class="max-h-64 w-full object-cover"
-      loading="lazy"
-    />
+      class="relative cursor-pointer"
+      data-testid="post-card-image"
+      @click.stop="showGallery = true"
+    >
+      <img
+        :src="firstImage"
+        alt=""
+        class="max-h-64 w-full object-cover"
+        loading="lazy"
+      />
+      <div
+        v-if="images.length > 1"
+        class="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-black/50 px-2 py-0.5 text-xs font-medium text-white"
+        :aria-label="t('postPlayer.imageCount', { count: images.length })"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+        </svg>
+        {{ images.length }}
+      </div>
+    </div>
 
     <!-- Content section -->
     <div class="flex flex-col gap-1.5 px-3 pt-2 sm:gap-2 sm:px-4 sm:pt-3">
@@ -291,10 +327,18 @@ onMounted(loadPostData);
 
       <!-- Message -->
       <div
-        v-if="truncatedMessage"
+        v-if="messageSegments.length"
         class="select-text break-words text-xs leading-relaxed sm:text-[13px]"
         :class="isOwn ? 'text-white/80' : 'text-text-color/80'"
-      >{{ truncatedMessage }}</div>
+      ><template v-for="(seg, i) in messageSegments" :key="i"><a
+        v-if="seg.type === 'link'"
+        :href="seg.href"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="break-all underline hover:no-underline"
+        :class="isOwn ? 'text-white' : 'text-color-txt-ac'"
+        @click.stop.prevent="onLinkClick(seg.href)"
+      >{{ seg.content }}</a><template v-else>{{ seg.content }}</template></template></div>
 
       <!-- Tags -->
       <div v-if="visibleTags.length" class="flex flex-wrap gap-1">
@@ -306,17 +350,18 @@ onMounted(loadPostData);
         >#{{ tag }}</span>
       </div>
 
-      <!-- Repost (shared post) -->
-      <div
-        v-if="post.repost"
-        class="mt-1 rounded-xl border p-2"
-        :class="[
-          isOwn ? 'border-white/10 bg-white/5' : 'border-neutral-grad-1/50 bg-neutral-grad-0/30',
-          isBareRepostWrapper ? 'mb-3' : '',
-        ]"
-      >
-        <PostCard :txid="post.repost.txid" :is-own="isOwn" />
+      <!-- Repost (shared post): the original's own card is the only frame -->
+      <div v-if="post.repost" class="mt-1" :class="isBareRepostWrapper ? 'mb-3' : ''">
+        <PostCard :txid="post.repost.txid" :is-own="isOwn" embedded />
       </div>
+
+      <!-- Shared comment link (…&commentid=): the comment under the post -->
+      <CommentPreview
+        v-if="props.initialCommentId"
+        :comment-id="props.initialCommentId"
+        :is-own="isOwn"
+        @open="showModal = true"
+      />
     </div>
 
     <!-- Rating + actions row — hidden for a bare repost wrapper, whose only
@@ -381,7 +426,7 @@ onMounted(loadPostData);
         :class="isOwn ? 'bg-white/20 hover:bg-white/30' : 'bg-color-bg-ac hover:bg-color-bg-ac-1'"
         @click.stop="showModal = true"
       >
-        {{ t("postPlayer.openPost") }}
+        {{ t(props.initialCommentId ? "postPlayer.goToComment" : "postPlayer.openPost") }}
       </button>
     </div>
   </div>
@@ -394,6 +439,12 @@ onMounted(loadPostData);
     :author-avatar-url="authorAvatarUrl"
     :initial-comment-id="props.initialCommentId"
     @close="showModal = false"
+  />
+
+  <PostImageGallery
+    v-if="showGallery && images.length"
+    :images="images"
+    @close="showGallery = false"
   />
 
   <!-- Donate modal for boost -->

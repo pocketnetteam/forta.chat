@@ -2,6 +2,11 @@
 
 **Goal:** Stop duplicating work the vendor Actions SDK already does autonomously (broadcasting the `userInfo` action, watching for incoming PKOIN, re-checking confirmation) and shrink `stores.ts`'s registration poll down to only the parts with no SDK equivalent: collision-safety across our own retry entry points, and product UX (bounded timeout, cancel button, progress signal).
 
+> **Status (checked against the code, 2026-10-05): not started.** None of the files this plan creates exist
+> (`registration-flags.ts`, `registration-status.ts`, `captcha-flow-bridge.ts`, their tests); the poll in
+> `stores.ts` still re-forces the broadcast through `ensureActionBroadcast` and treats `undefined_status` as
+> registered inline. Task 6 "Findings" is still empty. Both tracks (A and B) are open.
+
 **Architecture:** No new modules. Split the existing `poll()` tick in `stores.ts` into "kick the SDK once" (on `register()`/`retryRegistration*()` entry only) vs. "observe status" (every subsequent tick, read-only). Keep every product-level and Forta-specific piece (`PollTimer`, 30-min timeout, 10-min cancel, key republish, username-taken handling) untouched.
 
 **Tech Stack:** Vue 3 + Pinia + TypeScript, vendor Actions SDK (`public/js/lib/client/actions.js`, non-npm, loaded as a global `Actions`/`Api`/`pSDK`), Vitest.

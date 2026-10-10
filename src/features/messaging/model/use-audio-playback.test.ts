@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 
 // Mock platform detection

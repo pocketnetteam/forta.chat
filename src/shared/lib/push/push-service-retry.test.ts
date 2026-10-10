@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // The push service module has a non-trivial import surface (Capacitor
@@ -52,8 +53,10 @@ describe('PushService.registerPusher retry behaviour', () => {
   async function callRegisterPusher(client: { setPusher: ReturnType<typeof vi.fn>; getPushers: ReturnType<typeof vi.fn> }) {
     const mod = await import('./push-service');
     const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
       registerPusher: (c: typeof client, t: string) => Promise<void>;
     };
+    svc.matrixClient = client; // init() sets the client before any registration event
     return svc.registerPusher(client, 'token-abc');
   }
 
@@ -112,5 +115,142 @@ describe('PushService.registerPusher retry behaviour', () => {
     await expect(callRegisterPusher(client)).resolves.toBeUndefined();
     expect(client.setPusher).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem('push_pusher_dead_letter')).toBeNull();
+  });
+
+  // Regression: the VoIP pusher was PUT once; iOS delivers the token once per
+  // launch, so one transient failure meant no CallKit ring until relaunch.
+  it('drops a pending pusher retry when the account logged out during the backoff', async () => {
+    const client = {
+      setPusher: vi.fn().mockRejectedValueOnce(new Error('network blip')).mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as { matrixClient: unknown };
+    const promise = callRegisterPusher(client);
+    await vi.advanceTimersByTimeAsync(0);
+    svc.matrixClient = null; // what unregisterForLogout does first
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(1);
+    expect(client.getPushers).not.toHaveBeenCalled();
+    expect(localStorage.getItem('push_pusher_dead_letter')).toBeNull();
+  });
+
+  it('takes back a pusher whose registration landed after logout', async () => {
+    let land!: () => void;
+    const client = {
+      setPusher: vi.fn()
+        .mockImplementationOnce(() => new Promise<void>((r) => { land = r; }))
+        .mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as { matrixClient: unknown };
+    const promise = callRegisterPusher(client);
+    await vi.advanceTimersByTimeAsync(0);
+    svc.matrixClient = null; // logout ran while the PUT was in flight
+    land();
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(2);
+    expect(client.setPusher.mock.calls[1][0]).toMatchObject({ pushkey: 'token-abc', kind: null });
+    expect(client.getPushers).not.toHaveBeenCalled();
+  });
+
+  // Review 2026-10-08: a logout and a fresh login to the same account on this
+  // device register the same pushkey, so the late take-back deleted the new
+  // session's pusher.
+  it('keeps a late pusher when the same account signed in again meanwhile', async () => {
+    let land!: () => void;
+    const client = {
+      getUserId: () => '@alice:server',
+      setPusher: vi.fn()
+        .mockImplementationOnce(() => new Promise<void>((r) => { land = r; }))
+        .mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as { matrixClient: unknown };
+    const promise = callRegisterPusher(client);
+    await vi.advanceTimersByTimeAsync(0);
+    svc.matrixClient = { getUserId: () => '@alice:server' }; // logout, then the same account again
+    land();
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes back a VoIP pusher whose registration landed after logout (review 2026-10-08, P2)', async () => {
+    let land!: () => void;
+    const client = {
+      setPusher: vi.fn()
+        .mockImplementationOnce(() => new Promise<void>((r) => { land = r; }))
+        .mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerVoipPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = client;
+    const promise = svc.registerVoipPusher(client, 'voip-late');
+    await vi.advanceTimersByTimeAsync(0);
+    svc.matrixClient = null; // logout ran while the PUT was in flight
+    land();
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(2);
+    expect(client.setPusher.mock.calls[1][0]).toMatchObject({ pushkey: 'voip-late', kind: null });
+  });
+
+  it('does not register a VoIP pusher for a client that is no longer signed in', async () => {
+    const client = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerVoipPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = null; // logout landed while init() awaited the VoIP token
+    await svc.registerVoipPusher(client, 'voip-stale');
+    expect(client.setPusher).not.toHaveBeenCalled();
+  });
+
+  it('retries the VoIP pusher registration on transient failure', async () => {
+    const client = {
+      setPusher: vi.fn().mockRejectedValueOnce(new Error('network blip')).mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerVoipPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = client;
+    const promise = svc.registerVoipPusher(client, 'voip-abc');
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(2);
+    expect(client.getPushers).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a pending VoIP pusher retry when the account logged out during the backoff', async () => {
+    const client = {
+      setPusher: vi.fn().mockRejectedValueOnce(new Error('network blip')).mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerVoipPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = client;
+    const promise = svc.registerVoipPusher(client, 'voip-abc');
+    await vi.advanceTimersByTimeAsync(0);
+    svc.matrixClient = null; // what unregisterForLogout does first
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    expect(client.setPusher).toHaveBeenCalledTimes(1);
+    expect(client.getPushers).not.toHaveBeenCalled();
   });
 });

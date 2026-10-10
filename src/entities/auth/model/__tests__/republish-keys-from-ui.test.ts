@@ -98,3 +98,20 @@ describe("verifyAndRepublishKeys (login path) never mounts the registration UI",
     expect(body).toContain('action.kind');
   });
 });
+
+// Review 2026-10-08 (H2): an account switch between the awaits published A's
+// profile under B's address and keys.
+describe("verifyAndRepublishKeys stays with the account it started for", () => {
+  it("captures the account at entry and checks it after each await", () => {
+    const body = extractFunctionBody("verifyAndRepublishKeys");
+    expect(body).toContain("const subjectAddress = address.value;");
+    expect(body).toContain("const subjectKey = privateKey.value;");
+    expect(body).toContain("generateEncryptionKeys(subjectKey)");
+    expect(body).not.toContain("generateEncryptionKeys(privateKey.value)");
+    // After the RPC check, after checkUnspents, and right before the broadcast.
+    expect(body.match(/accountChanged\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    const broadcast = body.indexOf("registerUserProfile(");
+    const lastCheck = body.lastIndexOf("accountChanged()");
+    expect(lastCheck).toBeLessThan(broadcast);
+  });
+});

@@ -253,8 +253,82 @@ describe("rpcFetchWithFailover", () => {
         startIndex: 0,
         timeoutMs: 20,
       })
-    ).rejects.toThrow(/timeout after 20ms/);
+    ).rejects.toThrow(/timeout after 60ms/);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not cancel a slow node: asks the next one alongside and takes the first answer", async () => {
+    let answerSlow: (r: Response) => void = () => {};
+    const slowSignals: AbortSignal[] = [];
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce((_url: string, init?: RequestInit) => {
+        if (init?.signal) slowSignals.push(init.signal);
+        return new Promise<Response>((resolve) => { answerSlow = resolve; });
+      })
+      // node 2 is asked after the hedge delay and stays silent
+      .mockImplementationOnce(() => new Promise<Response>(() => { /* silent */ }));
+
+    const pending = rpcFetchWithFailover("/rpc/getsubscribeschannels", {}, {
+      nodes: NODES,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      startIndex: 0,
+      timeoutMs: 20,
+      hardTimeoutMs: 1_000,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(slowSignals[0].aborted).toBe(false);
+
+    answerSlow(fakeResponse(200, { data: { channels: [1] } }));
+    await expect(pending).resolves.toEqual({ data: { channels: [1] } });
+  });
+
+  it("a client error from the slow node does not cancel the node asked alongside", async () => {
+    let answerSlow: (r: Response) => void = () => {};
+    let answerSecond: (r: Response) => void = () => {};
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { answerSlow = resolve; }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { answerSecond = resolve; }));
+
+    const pending = rpcFetchWithFailover("/rpc/getsubscribeschannels", {}, {
+      nodes: NODES,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      startIndex: 0,
+      timeoutMs: 20,
+      hardTimeoutMs: 1_000,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    answerSlow(fakeResponse(500));
+    await new Promise((r) => setTimeout(r, 10));
+    answerSecond(fakeResponse(200, { data: { channels: [2] } }));
+
+    await expect(pending).resolves.toEqual({ data: { channels: [2] } });
+    // The client error stops the rotation: node 3 is never asked.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts the other in-flight nodes once one answers", async () => {
+    const signals: AbortSignal[] = [];
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce((_url: string, init?: RequestInit) => {
+        if (init?.signal) signals.push(init.signal);
+        return new Promise<Response>(() => { /* silent */ });
+      })
+      .mockResolvedValueOnce(fakeResponse(200, { ok: 2 }));
+
+    const json = await rpcFetchWithFailover("/rpc/x", {}, {
+      nodes: NODES,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      startIndex: 0,
+      timeoutMs: 20,
+      hardTimeoutMs: 1_000,
+    });
+
+    expect(json).toEqual({ ok: 2 });
+    expect(signals[0].aborted).toBe(true);
   });
 
   it("passes an abort signal to fetch so the deadline is enforceable", async () => {

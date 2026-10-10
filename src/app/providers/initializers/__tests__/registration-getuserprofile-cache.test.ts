@@ -32,7 +32,7 @@ describe("registration getuserprofile bypasses local SDK cache", () => {
     const src = appInitSrc();
     const start = src.indexOf("initializeAndFetchUserData(");
     expect(start).toBeGreaterThan(-1);
-    const body = src.slice(start, start + 500);
+    const body = src.slice(start, start + 1000);
     expect(body).toContain("options?: { update?: boolean }");
     expect(body).toContain("loadUserData([address], onLoad, options)");
   });

@@ -40,7 +40,7 @@ npm run build   # включает vue-tsc --noEmit
 npm run test
 ```
 
-Отдельного `npm run lint` в репозитории нет — см. [CLAUDE.md](../../CLAUDE.md).
+Отдельного `npm run lint` в репозитории нет — см. [AGENTS.md](../../../AGENTS.md).
 
 ## Ссылки
 

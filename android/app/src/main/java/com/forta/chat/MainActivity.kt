@@ -74,7 +74,7 @@ class MainActivity : BridgeActivity() {
             Log.w(
                 TAG,
                 "WebView render process gone (didCrash=" +
-                    "${runCatching { detail?.didCrash() }.getOrNull()}) -> $decision",
+                    "${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) detail?.didCrash() else null}) -> $decision",
             )
             // Android forbids *using* a WebView whose renderer is gone. Who
             // destroys it depends on whether anyone else still will.
@@ -147,6 +147,14 @@ class MainActivity : BridgeActivity() {
     private fun liftKeyguardForCallAccept(launchIntent: Intent?) {
         val cameFromCallAccept = launchIntent?.getBooleanExtra("push_call_accept", false) == true
         if (!cameFromCallAccept) return
+        // Consumed either way: a replay of this intent (recreate, task restore)
+        // must not lift the keyguard again.
+        launchIntent?.removeExtra("push_call_accept")
+        if (!KeyguardLiftGate.consume(SystemClock.elapsedRealtime())) {
+            Log.w(TAG, "push_call_accept without a fresh Accept tap — keyguard left in place")
+            return
+        }
+        keyguardLifted = true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -177,6 +185,36 @@ class MainActivity : BridgeActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         liftKeyguardForCallAccept(intent)
+    }
+
+    /** Set while the window shows over the keyguard for a lock-screen Accept. */
+    private var keyguardLifted = false
+
+    /**
+     * The keyguard lift is for the answer only. Once this window leaves the
+     * screen — the call screen covers it, or the user locks the phone — the
+     * flags go, so the chats are never shown over the lock screen again
+     * without the PIN.
+     */
+    private fun restoreKeyguard() {
+        if (!keyguardLifted) return
+        keyguardLifted = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
+            )
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        restoreKeyguard()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

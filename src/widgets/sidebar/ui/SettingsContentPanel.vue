@@ -341,7 +341,7 @@ const title = computed(() => {
           </div>
           <div v-if="showCustomAccent" class="mt-3 flex items-center gap-2">
             <div class="h-8 w-8 shrink-0 rounded-full border border-neutral-grad-0" :style="{ backgroundColor: isValidHex(customHex) ? customHex : '#ccc' }" />
-            <input v-model="customHex" type="text" maxlength="7" placeholder="#3B82F6" class="h-9 flex-1 rounded-lg border border-neutral-grad-0 bg-background-secondary-theme px-3 text-sm text-text-color outline-none focus:border-color-bg-ac" />
+            <input autocomplete="off" v-model="customHex" type="text" maxlength="7" placeholder="#3B82F6" class="h-9 flex-1 rounded-lg border border-neutral-grad-0 bg-background-secondary-theme px-3 text-sm text-text-color outline-none focus:border-color-bg-ac" />
             <button class="h-9 rounded-lg bg-color-bg-ac px-4 text-sm font-medium text-text-on-bg-ac-color transition-colors disabled:opacity-50" :disabled="!isValidHex(customHex)" @click="applyCustomAccent">{{ t("appearance.apply") }}</button>
             <button class="h-9 rounded-lg px-3 text-sm text-text-on-main-bg-color hover:bg-neutral-grad-0" @click="showCustomAccent = false">{{ t("appearance.cancel") }}</button>
           </div>
@@ -387,7 +387,7 @@ const title = computed(() => {
           </div>
           <div v-if="showCustomWallpaper" class="mt-2 flex items-center gap-2">
             <div class="h-8 w-8 shrink-0 rounded-lg border border-neutral-grad-0" :style="{ backgroundColor: isValidHex(customWallpaperHex) ? customWallpaperHex : '#ccc' }" />
-            <input v-model="customWallpaperHex" type="text" maxlength="7" placeholder="#1e293b" class="h-9 flex-1 rounded-lg border border-neutral-grad-0 bg-background-secondary-theme px-3 text-sm text-text-color outline-none focus:border-color-bg-ac" />
+            <input autocomplete="off" v-model="customWallpaperHex" type="text" maxlength="7" placeholder="#1e293b" class="h-9 flex-1 rounded-lg border border-neutral-grad-0 bg-background-secondary-theme px-3 text-sm text-text-color outline-none focus:border-color-bg-ac" />
             <button class="h-9 rounded-lg bg-color-bg-ac px-4 text-sm font-medium text-text-on-bg-ac-color transition-colors disabled:opacity-50" :disabled="!isValidHex(customWallpaperHex)" @click="applyCustomWallpaper">{{ t("appearance.apply") }}</button>
           </div>
         </SettingsSection>

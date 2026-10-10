@@ -4,6 +4,12 @@
 >
 > **Контекст:** Дополнение к [android-chat-open-send-fix](2026-06-30-android-chat-open-send-fix.md). Локальная регрессия перед релизом: «чат открылся» и «сообщение ушло» на debug APK в эмуляторе. Приватный ключ тестового аккаунта — в `.env` (не в git).
 
+> **Статус (сверено с кодом 2026-10-05): реализован иначе, актуальная инструкция — [`e2e/README.md`](../../e2e/README.md).**
+> Запуск — `scripts/e2e-android.sh` (не `npm run e2e:android` / `.mjs`), `.env.example` с `MAESTRO_E2E_*` есть.
+> Флоу: `00-smoke-launch`, `01-open-chat`, `02-send-text`, `03-login` и звонки `04`–`06`
+> (`scripts/e2e-call.sh`, два устройства). **Флоу `03-room-switch` (manual matrix #2) не сделан** — номер 03
+> занят логином. Коммиты: `0d2a8ccd`, `cabe7505`, `de62e005`. Чекбоксы Definition of Done ниже не отмечались.
+
 **Goal:** Три стабильных Maestro-флоу на `app-debug.apk`, запускаемых одной командой после `npm run cap:build`. Покрывают manual test matrix #1, #2, #3 из android-chat-open-send-fix.
 
 **Architecture:**

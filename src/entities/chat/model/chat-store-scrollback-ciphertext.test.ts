@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression (audit A2): loadRoomMessages / loadMoreMessages /
  * prefetchNextBatch built their EventWriter input without `encryptedRaw`.
@@ -105,6 +106,7 @@ function makeKit() {
       getClearedAtTs: vi.fn(() => undefined),
       setClearedAtTs: vi.fn(),
       flushWriteBuffer: vi.fn(() => Promise.resolve()),
+      hasBufferedWritesFor: vi.fn(() => false),
       clearUnread: vi.fn(async () => {}),
       writeMessages,
       writeEdit: vi.fn(async () => {}),

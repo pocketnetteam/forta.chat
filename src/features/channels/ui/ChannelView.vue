@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { toBastyonPostHttpsUrl } from "@/shared/lib/bastyon-link";
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useChannelStore } from "@/entities/channel";
 import { useAuthStore } from "@/entities/auth";
@@ -193,7 +194,7 @@ function onCtxMenuSelect(action: string) {
 
   if (action === "forward") {
     chatStore.initPostForward(
-      `bastyon://post?s=${txid}`,
+      toBastyonPostHttpsUrl(txid),
       activeChannel.value?.name,
     );
   } else if (action === "copy") {
@@ -204,7 +205,7 @@ function onCtxMenuSelect(action: string) {
       }
     });
   } else if (action === "copyLink") {
-    navigator.clipboard.writeText(`bastyon://post?s=${txid}`).then(() => toast(t("chat.copiedToClipboard")));
+    navigator.clipboard.writeText(toBastyonPostHttpsUrl(txid)).then(() => toast(t("chat.copiedToClipboard")));
   }
 }
 </script>

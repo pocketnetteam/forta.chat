@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ref, nextTick } from "vue";
 import { usePasteDrop } from "./use-paste-drop";
@@ -8,12 +9,14 @@ function makeFile(name: string, type: string): File {
   return new File(["content"], name, { type });
 }
 
-function makePasteEvent(files?: File[]): ClipboardEvent {
+function makePasteEvent(files?: File[], strings?: Record<string, string>): ClipboardEvent {
   const event = new ClipboardEvent("paste", {
     clipboardData: files ? new DataTransfer() : undefined,
+    cancelable: true,
   });
   if (files && event.clipboardData) {
     files.forEach((f) => event.clipboardData!.items.add(f));
+    Object.entries(strings ?? {}).forEach(([type, value]) => event.clipboardData!.setData(type, value));
   }
   return event;
 }
@@ -144,6 +147,47 @@ describe("usePasteDrop", () => {
 
       expect(onMediaFiles).not.toHaveBeenCalled();
       expect(onOtherFiles).not.toHaveBeenCalled();
+    });
+
+    it("pastes text, not the bitmap preview, when copying Excel cells", () => {
+      const { handlePaste } = setup();
+      const event = makePasteEvent([makeFile("image.png", "image/png")], {
+        "text/plain": "42\t=SUM(A1:A3)\n",
+        "text/html": "<table><tr><td>42</td></tr></table>",
+      });
+      const spy = vi.spyOn(event, "preventDefault");
+
+      handlePaste(event);
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(onMediaFiles).not.toHaveBeenCalled();
+      expect(onOtherFiles).not.toHaveBeenCalled();
+    });
+
+    it("pastes text when clipboard has RTF + plain text + image (Word)", () => {
+      const { handlePaste } = setup();
+      handlePaste(makePasteEvent([makeFile("image.png", "image/png")], {
+        "text/plain": "hello",
+        "text/rtf": "{\\rtf1 hello}",
+      }));
+
+      expect(onMediaFiles).not.toHaveBeenCalled();
+    });
+
+    it("still attaches an image copied from a browser (html, no plain text)", () => {
+      const { handlePaste } = setup();
+      const png = makeFile("image.png", "image/png");
+      handlePaste(makePasteEvent([png], { "text/html": "<img src=\"x.png\">" }));
+
+      expect(onMediaFiles).toHaveBeenCalledWith([png]);
+    });
+
+    it("still attaches a file copied from a file manager (plain-text name only)", () => {
+      const { handlePaste } = setup();
+      const png = makeFile("photo.png", "image/png");
+      handlePaste(makePasteEvent([png], { "text/plain": "photo.png" }));
+
+      expect(onMediaFiles).toHaveBeenCalledWith([png]);
     });
 
     it("does nothing when clipboardData is undefined", () => {

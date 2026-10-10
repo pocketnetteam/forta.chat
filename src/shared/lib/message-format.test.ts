@@ -6,6 +6,8 @@ import {
   parseMessage,
   stripMentionAddresses,
   stripBastyonLinks,
+  formatMessageForCopy,
+  isBlockSegment,
   isSafeUrl,
   truncateMessage,
   applyLocalAlias,
@@ -60,6 +62,15 @@ describe("parseMessage", () => {
     expect(bastyonLink).toBeDefined();
     expect((bastyonLink as any).txid).toBe(txid);
     expect((bastyonLink as any).isVideo).toBe(false);
+  });
+
+  it("turns a shared comment link into a post card with the comment id (regression: was a plain link)", () => {
+    const post = "a".repeat(64);
+    const comment = "b".repeat(64);
+    const url = `https://bastyon.com/daniel_satchkov?s=${post}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${comment}`;
+    expect(parseMessage(url)).toEqual([
+      { type: "bastyonLink", content: url, txid: post, commentId: comment, isVideo: false },
+    ]);
   });
 
   it("detects bastyon:// video link (index?v=)", () => {
@@ -189,12 +200,32 @@ describe("stripMentionAddresses", () => {
 describe("stripBastyonLinks", () => {
   it("replaces bastyon:// links with label", () => {
     const txid = "e".repeat(64);
-    expect(stripBastyonLinks(`bastyon://post?s=${txid}`)).toContain("Bastyon post");
+    expect(stripBastyonLinks(`bastyon://post?s=${txid}`)).toContain("📝 Post");
   });
 
   it("replaces bastyon.com links with label", () => {
     const txid = "f".repeat(64);
-    expect(stripBastyonLinks(`https://bastyon.com/index?v=${txid}`)).toContain("Bastyon post");
+    expect(stripBastyonLinks(`https://bastyon.com/index?v=${txid}`)).toContain("📝 Post");
+  });
+
+  it("labels a shared comment link (username path + commentid) as a comment", () => {
+    const url = `https://bastyon.com/daniel_satchkov?s=${"a".repeat(64)}&address=phdw4pwwbfdoofvhsefpshgradmrvzdbe5&commentid=${"b".repeat(64)}`;
+    expect(stripBastyonLinks(`look ${url}`)).toBe("look 💬 Comment");
+  });
+
+  it("labels transaction links in both the bastyon:// and the https form", () => {
+    const txid = "d".repeat(64);
+    expect(stripBastyonLinks(`bastyon://i?stx=${txid}`)).toBe("💸 Transaction");
+    expect(stripBastyonLinks(`thanks https://bastyon.com/i?stx=${txid}!`)).toBe("thanks 💸 Transaction!");
+  });
+
+  it("labels collection links", () => {
+    expect(stripBastyonLinks(`bastyon://collection?c=${"c".repeat(64)}`)).toBe("🗂 Collection");
+  });
+
+  it("keeps other links: bastyon:// profiles become https, foreign URLs stay as they are", () => {
+    expect(stripBastyonLinks("bastyon://daniel_satchkov")).toBe("https://bastyon.com/daniel_satchkov");
+    expect(stripBastyonLinks("see https://example.com/a?stx=1")).toBe("see https://example.com/a?stx=1");
   });
 
   it("returns empty string for empty input", () => {
@@ -212,10 +243,10 @@ describe("stripBastyonLinks", () => {
     const { cleanMatrixIds } = await import("@/entities/chat/lib/chat-helpers");
     const link = `bastyon://post?s=${"a".repeat(64)}`;
 
-    expect(cleanMatrixIds(stripBastyonLinks(link))).toBe("📝 Bastyon post");
+    expect(cleanMatrixIds(stripBastyonLinks(link))).toBe("📝 Post");
     // The reversed order leaves a mangled link in the preview — pinned so
     // nobody "simplifies" the call order back.
-    expect(stripBastyonLinks(cleanMatrixIds(link))).not.toBe("📝 Bastyon post");
+    expect(stripBastyonLinks(cleanMatrixIds(link))).not.toBe("📝 Post");
   });
 });
 
@@ -366,5 +397,117 @@ describe("applyLocalAlias (WEE-39 follow-up)", () => {
       return null;
     });
     expect(receivedId).toBe("deadbeef");
+  });
+});
+
+describe("Bastyon collection links (shared collections)", () => {
+  const txid = "c".repeat(64);
+
+  it("parses a collection link into a bastyonCollection block segment", () => {
+    const segs = parseMessage(`Look: https://bastyon.com/collection?c=${txid}`);
+    expect(segs).toEqual([
+      { type: "text", content: "Look: " },
+      { type: "bastyonCollection", content: `https://bastyon.com/collection?c=${txid}`, txid },
+    ]);
+  });
+
+  it("does not duplicate the collection link as a generic link", () => {
+    const segs = parseMessage(`https://bastyon.com/collection?c=${txid}`);
+    expect(segs.filter((s) => s.type === "link")).toHaveLength(0);
+  });
+
+  it("keeps post links as bastyonLink next to a collection", () => {
+    const post = "d".repeat(64);
+    const types = parseMessage(`bastyon://post?s=${post} bastyon://collection?c=${txid}`)
+      .map((s) => s.type)
+      .filter((t) => t !== "text");
+    expect(types).toEqual(["bastyonLink", "bastyonCollection"]);
+  });
+
+  it("stripBastyonLinks replaces collection links with a label", () => {
+    expect(stripBastyonLinks(`bastyon://collection?c=${txid}`)).toBe("🗂 Collection");
+  });
+});
+
+describe("bastyon:// deep links", () => {
+  const REF = "pagmrr7irwgghwe3xusfvumdaedwtwrdn2";
+  const post = "c".repeat(64);
+
+  it("turns a username deep link into a profile segment", () => {
+    expect(parseMessage(`Hi bastyon://kleine_viogelein?ref=${REF}!`)).toEqual([
+      { type: "text", content: "Hi " },
+      {
+        type: "bastyonProfile",
+        content: `bastyon://kleine_viogelein?ref=${REF}`,
+        href: `https://bastyon.com/kleine_viogelein?ref=${REF}`,
+        name: "kleine_viogelein",
+      },
+      { type: "text", content: "!" },
+    ]);
+  });
+
+  it("turns a bastyon.com username URL into a profile segment", () => {
+    expect(parseMessage("https://bastyon.com/kleine_viogelein")[0])
+      .toMatchObject({ type: "bastyonProfile", name: "kleine_viogelein" });
+  });
+
+  it("renders other deep links as https links", () => {
+    expect(parseMessage("bastyon://faq")).toEqual([
+      { type: "link", content: "https://bastyon.com/faq", href: "https://bastyon.com/faq" },
+    ]);
+  });
+
+  it("keeps post links as post cards next to profile links", () => {
+    const types = parseMessage(`bastyon://post?s=${post} bastyon://kleine_viogelein`).map((s) => s.type);
+    expect(types).toEqual(["bastyonLink", "text", "bastyonProfile"]);
+  });
+
+  it("keeps ordinary URLs as links", () => {
+    expect(parseMessage("https://example.com/name")[0]).toMatchObject({ type: "link" });
+  });
+
+  it("keeps a deep link inside an https URL as part of that URL", () => {
+    const url = "https://example.com/redirect?to=bastyon://john";
+    expect(parseMessage(url)).toEqual([{ type: "link", content: url, href: url }]);
+    expect(formatMessageForCopy(`see ${url}`)).toBe(`see ${url}`);
+  });
+
+  it("turns publicroom= links into room segments", () => {
+    const room = "!AbC123:matrix.pocketnet.app";
+    expect(parseMessage(`join bastyon://welcome?publicroom=${room}`)[1]).toEqual({
+      type: "bastyonRoom",
+      content: `bastyon://welcome?publicroom=${room}`,
+      href: `https://bastyon.com/welcome?publicroom=${room}`,
+      roomId: room,
+    });
+    expect(parseMessage(`https://bastyon.com/welcome?publicroom=${room}`)[0])
+      .toMatchObject({ type: "bastyonRoom", roomId: room });
+  });
+
+  it("turns stx= links into transaction segments", () => {
+    expect(parseMessage(`bastyon://i?stx=${post}`)[0]).toMatchObject({ type: "bastyonTransaction", txid: post });
+  });
+
+  it("turns connect= links into profile segments by address", () => {
+    const address = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
+    expect(parseMessage(`https://bastyon.com/welcome?connect=${address}`)[0])
+      .toMatchObject({ type: "bastyonProfile", address });
+  });
+
+  it("isBlockSegment marks only Bastyon cards as blocks", () => {
+    const types = parseMessage(`a https://example.com bastyon://kleine_viogelein bastyon://i?stx=${post}`)
+      .filter(isBlockSegment)
+      .map((s) => s.type);
+    expect(types).toEqual(["bastyonProfile", "bastyonTransaction"]);
+  });
+
+  it("stripBastyonLinks shows profile deep links in https form", () => {
+    expect(stripBastyonLinks("see bastyon://kleine_viogelein")).toBe("see https://bastyon.com/kleine_viogelein");
+  });
+
+  it("formatMessageForCopy uses the real domain and cleans mentions", () => {
+    const addr = "a".repeat(40);
+    expect(formatMessageForCopy(`@${addr}:Bob look bastyon://kleine_viogelein?ref=${REF} and bastyon://post?s=${post}`))
+      .toBe(`@Bob look https://bastyon.com/kleine_viogelein?ref=${REF} and https://bastyon.com/post?s=${post}`);
   });
 });

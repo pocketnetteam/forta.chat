@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * WEE-98 regression — bulk forward must preserve the source chronological
  * order. forwardMessages sorts by source timestamp, but the pre-fix code

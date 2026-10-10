@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   CALL_SELECT_ANSWER_PUSH_RULE_ID,

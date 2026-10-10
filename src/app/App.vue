@@ -41,12 +41,8 @@ import { useUnreadDocumentTitle } from "@/shared/lib/composables/use-unread-docu
 import { useElectronUnreadBadge } from "@/shared/lib/composables/use-electron-unread-badge";
 import { registerDeepLinkHandlers } from "@/app/providers/initializers/deep-link-handler";
 import { setNotificationClickHandler } from "@/shared/lib/notifications/web-notifier";
+import { JOIN_ROOM_REQUEST_EVENT } from "@/shared/lib/join-room-request";
 import { AppPages, AppRoutes, EAppProviders } from "./providers";
-import { loadArchivedPeertubeServers } from "@/shared/lib/image-url";
-import { PROXY_NODES } from "@/shared/config/constants";
-
-// Non-critical: if the request fails, images keep original URLs until next session.
-loadArchivedPeertubeServers(`https://${PROXY_NODES[0].host}:${PROXY_NODES[0].port}`);
 
 const { t } = useI18n();
 
@@ -385,9 +381,23 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
   }
 };
 
+const requestJoin = (roomId: string) => {
+  localStorage.setItem("bastyon-chat-join-room", roomId);
+  if (authStore.isAuthenticated && authStore.matrixReady) {
+    processJoinRoom();
+  }
+};
+
+// Room link cards in messages (requestJoinRoom) — same pipeline as /join links.
+const onJoinRoomRequest = (e: Event) => {
+  const roomId = (e as CustomEvent<{ roomId?: string }>).detail?.roomId;
+  if (roomId) requestJoin(roomId);
+};
+
 onMounted(async () => {
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener(JOIN_ROOM_REQUEST_EVENT, onJoinRoomRequest);
 
   // Deep-link handlers: Capacitor's appUrlOpen / Electron deep-link:open are
   // already wired from main.ts. Now that the router is mounted, install the
@@ -402,12 +412,7 @@ onMounted(async () => {
         processReferral();
       }
     },
-    onJoin: ({ roomId }) => {
-      localStorage.setItem("bastyon-chat-join-room", roomId);
-      if (authStore.isAuthenticated && authStore.matrixReady) {
-        processJoinRoom();
-      }
-    },
+    onJoin: ({ roomId }) => requestJoin(roomId),
     onMalformed: (rawUrl) => {
       console.warn("[App] malformed forta deep-link:", rawUrl);
       showToast(t("invite.malformed"), "error");
@@ -455,11 +460,17 @@ onMounted(async () => {
   // would show raw nicknames forever. Reading Dexie needs no connectivity.
   authStore.hydrateLocalAliasesEarly().catch(() => { /* best-effort */ });
 
-  try {
-    await authStore.fetchUserInfo();
-  } catch (e) {
+  // With the own profile (keys + id) cached by an earlier session, Matrix does
+  // not need the Bastyon proxy: start it right away and let the profile load
+  // alongside. Without the cache (first start, cleared storage) the profile
+  // must arrive first, as before.
+  const profileLoad = authStore.fetchUserInfo().catch((e) => {
     console.error("[App] fetchUserInfo error:", e);
-  }
+  });
+  const startMatrixWithoutProfile = authStore.isAuthenticated
+    && !authStore.registrationPending
+    && authStore.hasCachedOwnProfile();
+  if (!startMatrixWithoutProfile) await profileLoad;
 
   // If registration is still pending from a previous session, resume polling
   if (authStore.isAuthenticated && authStore.registrationPending) {
@@ -474,13 +485,15 @@ onMounted(async () => {
       .catch((e) => console.warn("[App] push settle for signed-out launch failed:", e));
   }
 
-  // Process referral / join links after Matrix is ready
+  // Process referral / join links after Matrix is ready (and the profile, as before)
+  await profileLoad;
   await processReferral();
   await processJoinRoom();
 });
 
 onUnmounted(() => {
   window.removeEventListener("resize", onResize);
+  window.removeEventListener(JOIN_ROOM_REQUEST_EVENT, onJoinRoomRequest);
   window.removeEventListener("keydown", handleGlobalKeydown);
   setNotificationClickHandler(null);
 });

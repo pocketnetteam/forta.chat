@@ -10,9 +10,11 @@ CAP_PLUGIN(IOSPushIntentPlugin, "PushData",
     CAP_PLUGIN_METHOD(cacheRoomName, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(cacheRoomNames, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(cacheSenderNames, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(cacheGroupRooms, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(cancelNotification, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(replaceNotificationContent, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(markSessionActive, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(markLoggedOut, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(setIncomingCallsEnabled, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(getIncomingCallsEnabled, CAPPluginReturnPromise);
 )

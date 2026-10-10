@@ -64,6 +64,8 @@ export interface ParsedReaction {
 
 /** A parsed edit event */
 export interface ParsedEdit {
+  /** Address of the edit event's sender; only the target's author may edit it. */
+  senderId: string;
   targetEventId: string;
   newContent: string;
   editTs?: number;  // origin_server_ts of edit event — for out-of-order guard
@@ -197,6 +199,11 @@ export class EventWriter {
       myAddress,
       activeRoomId,
     });
+  }
+
+  /** True if the message buffer still holds events of `roomId`. */
+  hasBufferedWritesFor(roomId: string): boolean {
+    return this.writeBuffer?.hasPending((item) => item.roomId === roomId) ?? false;
   }
 
   /** Force-flush the write buffer immediately. No-op if batching not enabled. */
@@ -752,20 +759,39 @@ export class EventWriter {
   }
 
   /** Edits whose base message hasn't arrived yet (keyed by target eventId) */
-  private pendingEdits = new Map<string, { roomId: string; edit: ParsedEdit; stashedAt: number }>();
+  /**
+   * The newest stashed edit per sender for each target: the author is not
+   * known until the target lands, so another member's edit must not push the
+   * author's out (writeEdit then drops the other one, H4).
+   */
+  private pendingEdits = new Map<string, Array<{ roomId: string; edit: ParsedEdit; stashedAt: number }>>();
   private static readonly PENDING_EDIT_TTL_MS = 5 * 60_000; // 5 minutes
   private static readonly PENDING_EDIT_MAX_SIZE = 200;
 
-  /** Apply an edit to a message in the local DB, updating room preview if needed */
+  /**
+   * Apply an edit to a message in the local DB, updating room preview if needed.
+   * [roomId] is the room the edit event was sent in. Only the target's author
+   * may edit it, and only from the target's room (Matrix spec for m.replace;
+   * review 2026-10-08, H4): any member could otherwise rewrite another
+   * member's message for everyone else, and the global lookup by event id let
+   * an edit sent in one room rewrite a message of another.
+   */
   async writeEdit(roomId: string, edit: ParsedEdit): Promise<void> {
-    const exists = await this.db.messages
+    const target = await this.db.messages
       .where("eventId")
       .equals(edit.targetEventId)
-      .count();
+      .first();
 
-    if (exists === 0) {
+    if (target && (target.roomId !== roomId || target.senderId !== edit.senderId)) {
+      console.warn("[EventWriter] edit ignored: not from the target's author in the target's room", edit.targetEventId);
+      return;
+    }
+
+    if (!target) {
       // Base message not in Dexie yet — stash for later
-      this.pendingEdits.set(edit.targetEventId, { roomId, edit, stashedAt: Date.now() });
+      const others = (this.pendingEdits.get(edit.targetEventId) ?? [])
+        .filter((entry) => entry.edit.senderId !== edit.senderId);
+      this.pendingEdits.set(edit.targetEventId, [...others, { roomId, edit, stashedAt: Date.now() }]);
       this.evictStalePendingEdits();
       return;
     }
@@ -787,25 +813,28 @@ export class EventWriter {
   }
 
   /** Apply a stashed edit after its base message has been written */
-  async applyPendingEdit(eventId: string, roomId: string): Promise<void> {
+  async applyPendingEdit(eventId: string, _roomId: string): Promise<void> {
     const stashed = this.pendingEdits.get(eventId);
     if (!stashed) return;
     this.pendingEdits.delete(eventId);
-    await this.writeEdit(roomId, stashed.edit);
+    // The edit's own room, not the one its target landed in: writeEdit
+    // compares the two and keeps only the author's edit (H4).
+    for (const entry of stashed) await this.writeEdit(entry.roomId, entry.edit);
   }
 
   /** Evict stale or overflow entries from the pending edits buffer */
   private evictStalePendingEdits(): void {
     const now = Date.now();
-    for (const [key, entry] of this.pendingEdits) {
-      if (now - entry.stashedAt > EventWriter.PENDING_EDIT_TTL_MS) {
-        this.pendingEdits.delete(key);
-      }
+    for (const [key, entries] of this.pendingEdits) {
+      const fresh = entries.filter((entry) => now - entry.stashedAt <= EventWriter.PENDING_EDIT_TTL_MS);
+      if (fresh.length === 0) this.pendingEdits.delete(key);
+      else if (fresh.length !== entries.length) this.pendingEdits.set(key, fresh);
     }
-    // Hard cap: drop oldest entries if over limit
+    // Hard cap: drop the targets whose newest stash is oldest
     if (this.pendingEdits.size > EventWriter.PENDING_EDIT_MAX_SIZE) {
+      const newest = (entries: Array<{ stashedAt: number }>) => Math.max(...entries.map((e) => e.stashedAt));
       const sorted = [...this.pendingEdits.entries()]
-        .sort((a, b) => a[1].stashedAt - b[1].stashedAt);
+        .sort((a, b) => newest(a[1]) - newest(b[1]));
       const toRemove = sorted.slice(0, sorted.length - EventWriter.PENDING_EDIT_MAX_SIZE);
       for (const [key] of toRemove) {
         this.pendingEdits.delete(key);
@@ -857,6 +886,57 @@ export class EventWriter {
     });
 
     this.onChange?.(redaction.roomId);
+  }
+
+  /** Discard an own message whose send failed («Отменить» on the failed
+   *  bubble). The server never saw it, so it is removed outright: no
+   *  redaction, no «Сообщение удалено» placeholder. Its queued send ops go
+   *  too, and a chat-list preview that still shows it rolls back to the
+   *  newest remaining message (a local send never sets lastMessageEventId,
+   *  so writeRedaction's rollback can't find it).
+   *  Returns false, touching nothing, unless the message is failed and local-only
+   *  with no op mid-send. */
+  async discardFailedMessage(clientId: string): Promise<boolean> {
+    let roomId: string | undefined;
+    const discarded = await this.db.transaction(
+      "rw",
+      [this.db.messages, this.db.rooms, this.db.pendingOps],
+      async () => {
+        const msg = await this.messageRepo.getByClientId(clientId);
+        if (!msg || msg.status !== "failed" || msg.eventId || msg.localId == null) return false;
+        const ops = await this.db.pendingOps.where("clientId").equals(clientId).toArray();
+        if (ops.some((op) => op.status === "syncing")) return false;
+
+        roomId = msg.roomId;
+        await this.db.messages.delete(msg.localId);
+        await this.db.pendingOps.bulkDelete(ops.map((op) => op.id!));
+
+        const room = await this.roomRepo.getRoom(msg.roomId);
+        if (room?.lastMessageTimestamp !== msg.timestamp) return true;
+
+        const prev = await this.messageRepo.getLastVisible(msg.roomId, room.clearedAtTs);
+        if (!prev) {
+          await this.roomRepo.clearLastMessage(msg.roomId);
+          return true;
+        }
+        await this.roomRepo.updateLastMessage(
+          msg.roomId,
+          this.getPreviewText(prev.type, prev.content, prev.fileInfo) || "[message]",
+          prev.timestamp,
+          prev.senderId,
+          prev.type,
+          prev.eventId ?? undefined,
+          prev.callInfo,
+          prev.systemMeta,
+          true,
+        );
+        await this.db.rooms.update(msg.roomId, { lastMessageLocalStatus: prev.status });
+        return true;
+      },
+    );
+
+    if (discarded && roomId) this.onChange?.(roomId);
+    return discarded;
   }
 
   // ---------------------------------------------------------------------------
@@ -972,7 +1052,6 @@ export class EventWriter {
   private getPreviewText(
     type: MessageType,
     content: string,
-    transferAmount?: number,
     fileInfo?: { name?: string },
   ): string {
     if (type === MessageType.image) return tRaw("message.photo");
@@ -981,7 +1060,8 @@ export class EventWriter {
     if (type === MessageType.videoCircle) return tRaw("message.videoMessage");
     if (type === MessageType.file) return fileInfo?.name || tRaw("message.file");
     if (type === MessageType.poll) return tRaw("message.poll");
-    if (type === MessageType.transfer) return `${tRaw("message.transfer")} ${transferAmount ?? 0} PKOIN`;
+    // The amount of a legacy JSON transfer is unverified — never show it.
+    if (type === MessageType.transfer) return `${tRaw("message.transfer")} PKOIN`;
     if (type === MessageType.callLink) return content; // "📞 <label>" — already human-readable
     return content;
   }
@@ -1015,7 +1095,6 @@ export class EventWriter {
       preview = this.getPreviewText(
         parsed.type,
         parsed.content,
-        parsed.transferInfo?.amount,
         parsed.fileInfo,
       );
     } catch (err) {

@@ -484,6 +484,48 @@ export class RoomRepository {
     });
   }
 
+  /** Mark a hole in the room's stored history, or clear it (null). A new
+   *  mark replaces the token (the newest hole is paged first) but keeps the
+   *  earliest `gapBeforeTs` / `gapAnchorTs`: paging back from the newest hole
+   *  down to the history stored before the earliest one closes both. No-op
+   *  for rooms not in Dexie yet. */
+  async setGap(
+    roomId: string,
+    gapToken: string | null,
+    bounds: { beforeTs?: number; anchorTs?: number } = {},
+  ): Promise<void> {
+    await this.db.transaction("rw", this.db.rooms, async () => {
+      const room = await this.db.rooms.get(roomId);
+      if (!room) return;
+      if (!gapToken) {
+        await this.db.rooms.update(roomId, { gapToken: null, gapBeforeTs: undefined, gapAnchorTs: undefined });
+        return;
+      }
+      const earliest = (prev: number | undefined, next: number | undefined) => {
+        const known = [room.gapToken ? prev : undefined, next].filter((n): n is number => typeof n === "number");
+        return known.length > 0 ? Math.min(...known) : undefined;
+      };
+      await this.db.rooms.update(roomId, {
+        gapToken,
+        gapBeforeTs: earliest(room.gapBeforeTs, bounds.beforeTs),
+        gapAnchorTs: earliest(room.gapAnchorTs, bounds.anchorTs),
+      });
+    });
+  }
+
+  /** Move the hole's token from `expected` to `next` (null = closed) — only
+   *  if nobody marked a newer hole meanwhile. Returns false when it did not. */
+  async advanceGap(roomId: string, expected: string, next: string | null): Promise<boolean> {
+    return this.db.transaction("rw", this.db.rooms, async () => {
+      const room = await this.db.rooms.get(roomId);
+      if (!room || room.gapToken !== expected) return false;
+      await this.db.rooms.update(roomId, next
+        ? { gapToken: next }
+        : { gapToken: null, gapBeforeTs: undefined, gapAnchorTs: undefined });
+      return true;
+    });
+  }
+
   /** Mark room as synced */
   async markSynced(roomId: string): Promise<void> {
     await this.db.rooms.update(roomId, { syncedAt: Date.now() });
@@ -656,6 +698,7 @@ export class RoomRepository {
       unreadCount: 0,
       paginationToken: null as unknown as undefined,
       hasMoreHistory: false,
+      gapToken: null,
     });
   }
 

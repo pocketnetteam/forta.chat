@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia } from "pinia";
 import { createTestingPinia } from "@pinia/testing";
@@ -142,32 +143,28 @@ describe("useMessages", () => {
   // ─── sendTransferMessage ──────────────────────────────────────
 
   describe("sendTransferMessage", () => {
-    it("builds JSON body with _transfer: true marker", async () => {
-      await messaging.sendTransferMessage("txid123", 5.5, "PReceiverAddr", "Payment for lunch");
+    const TXID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-      // Optimistic message should be in store
-      const msgs = chatStore.messages["!room:server"];
-      expect(msgs).toHaveLength(1);
-      expect(msgs[0].type).toBe(MessageType.transfer);
-      expect(msgs[0].transferInfo).toEqual({
-        txId: "txid123",
-        amount: 5.5,
-        from: "PMyAddress123456789012345678901234",
-        to: "PReceiverAddr",
-        message: "Payment for lunch",
-      });
-    });
+    it("sends a plain Bastyon stx link, not a JSON body with unverifiable amount/parties", async () => {
+      await messaging.sendTransferMessage(TXID);
 
-    it("sends the transfer message via Matrix", async () => {
-      await messaging.sendTransferMessage("txid456", 1.0, "PReceiverAddr");
-
-      // sendText or sendEncryptedText should have been called
       expect(mockSendText).toHaveBeenCalled();
       const body = (mockSendText.mock.calls[0] as any[])[1] as string;
-      const parsed = JSON.parse(body);
-      expect(parsed._transfer).toBe(true);
-      expect(parsed.txId).toBe("txid456");
-      expect(parsed.amount).toBe(1.0);
+      expect(body).toBe(`bastyon://i?stx=${TXID}`);
+      expect(body).not.toContain("_transfer");
+
+      // Shown like any message with a transaction link (TransactionLinkCard).
+      const msgs = chatStore.messages["!room:server"];
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].type).toBe(MessageType.text);
+      expect(msgs[0].transferInfo).toBeUndefined();
+    });
+
+    it("puts the sender's note before the link", async () => {
+      await messaging.sendTransferMessage(TXID, "  Payment for lunch ");
+
+      const body = (mockSendText.mock.calls[0] as any[])[1] as string;
+      expect(body).toBe(`Payment for lunch\nbastyon://i?stx=${TXID}`);
     });
   });
 

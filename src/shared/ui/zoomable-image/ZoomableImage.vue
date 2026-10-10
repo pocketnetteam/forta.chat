@@ -12,6 +12,8 @@
  * - One-finger swipe down at 1x → emit "close"
  * - Two-finger pinch → zoom (clamped to MIN/MAX_SCALE)
  * - Double tap → toggle 1x / 2x
+ * - One-finger horizontal swipe at 1x → emit "swipe" ("next" / "prev");
+ *   the caller decides whether there is anything to navigate to.
  * - ArrowLeft/Right do nothing here; navigation is the caller's job.
  */
 import { ref, watch, onMounted, onUnmounted } from "vue";
@@ -23,7 +25,10 @@ interface Props {
 }
 
 const props = defineProps<Props>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; swipe: [direction: "next" | "prev"] }>();
+
+/** Horizontal travel (px) a 1x one-finger drag needs to count as a swipe. */
+const SWIPE_THRESHOLD_PX = 60;
 
 const scale = ref(1);
 const translateX = ref(0);
@@ -40,6 +45,7 @@ watch(() => props.src, resetTransform);
 
 let touchStartX = 0;
 let touchStartY = 0;
+let touchDeltaX = 0;
 let pinchLastDistance = 0;
 let panStartX = 0;
 let panStartY = 0;
@@ -50,10 +56,12 @@ const onTouchstart = (e: TouchEvent) => {
       [e.touches[0].clientX, e.touches[0].clientY],
       [e.touches[1].clientX, e.touches[1].clientY],
     );
+    touchDeltaX = 0;
     return;
   }
   touchStartX = e.touches[0].clientX;
   touchStartY = e.touches[0].clientY;
+  touchDeltaX = 0;
   if (scale.value > 1) {
     panStartX = translateX.value;
     panStartY = translateY.value;
@@ -82,6 +90,7 @@ const onTouchmove = (e: TouchEvent) => {
   // At 1x: a clear vertical swipe-down dismisses, matching MediaViewer.
   const deltaY = e.touches[0].clientY - touchStartY;
   const deltaX = e.touches[0].clientX - touchStartX;
+  touchDeltaX = deltaX;
   if (Math.abs(deltaY) > 80 && Math.abs(deltaY) > Math.abs(deltaX)) {
     emit("close");
   }
@@ -94,6 +103,7 @@ const onTouchend = (e: TouchEvent) => {
   if (e.touches.length === 1) {
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
+    touchDeltaX = 0;
     if (scale.value > 1) {
       panStartX = translateX.value;
       panStartY = translateY.value;
@@ -104,6 +114,11 @@ const onTouchend = (e: TouchEvent) => {
   if (scale.value < MIN_SCALE + 0.05 && scale.value !== MIN_SCALE) {
     resetTransform();
   }
+  const deltaX = touchDeltaX;
+  touchDeltaX = 0;
+  if (scale.value > 1) return;
+  if (deltaX > SWIPE_THRESHOLD_PX) emit("swipe", "prev");
+  else if (deltaX < -SWIPE_THRESHOLD_PX) emit("swipe", "next");
 };
 
 let lastTapTime = 0;

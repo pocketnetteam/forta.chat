@@ -305,6 +305,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 :style="{ backgroundColor: isValidHex(customHex) ? customHex : '#ccc' }"
               />
               <input
+                autocomplete="off"
                 v-model="customHex"
                 type="text"
                 maxlength="7"
@@ -380,6 +381,7 @@ const previewSpacing = computed(() => DENSITY_MAP[themeStore.messageDensity]);
                 :style="{ backgroundColor: isValidHex(customWallpaperHex) ? customWallpaperHex : '#ccc' }"
               />
               <input
+                autocomplete="off"
                 v-model="customWallpaperHex"
                 type="text"
                 maxlength="7"

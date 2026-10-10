@@ -132,6 +132,7 @@ const handleAvatarChange = (e: Event) => {
       <!-- Search input -->
       <div class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
         <input
+          autocomplete="off"
           :value="searchQuery"
           type="text"
           :placeholder="t('group.searchUsers')"
@@ -238,6 +239,7 @@ const handleAvatarChange = (e: Event) => {
 
           <!-- Group name input -->
           <input
+            autocomplete="off"
             ref="nameInput"
             v-model="groupName"
             type="text"

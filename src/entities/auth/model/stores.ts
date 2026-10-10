@@ -18,8 +18,10 @@ import {
   Pcrypto,
 } from "@/entities/matrix";
 import type { UserWithPrivateKeys } from "@/entities/matrix/model/matrix-crypto";
+import { clearCachedMatrixSession } from "@/entities/matrix/model/matrix-session-cache";
 import { useCallService } from "@/features/video-calls/model/call-service";
 import { getmatrixid } from "@/shared/lib/matrix/functions";
+import { looksLikeProperName } from "@/entities/chat/lib/chat-helpers";
 import { initChatDb, deleteChatDb, closeChatDb } from "@/shared/lib/local-db";
 import { openChatDb } from "@/shared/lib/local-db/open-chat-db";
 import { useToast } from "@/shared/lib/use-toast";
@@ -58,12 +60,15 @@ import {
   syncDisplayNameAfterInit,
   readSelfProfile,
   writeSelfProfile,
+  writeSelfCryptoIdentity,
+  resolveCryptoUsersInfo,
   clearSelfProfile,
   mergeSelfProfileWithRemote,
   resolveKeyRepublishAction,
   countCachedKeys,
   countPublishedKeys,
   REQUIRED_ENCRYPTION_KEYS,
+  createBackoffRetry,
 } from "../lib";
 import { connectMatrixWithRetry } from "../lib/connect-matrix-with-retry";
 import { armMatrixReconnect, matrixRetryDelayMs, onForeground } from "../lib/matrix-reconnect";
@@ -112,7 +117,7 @@ function hexDecode(hex: string): string {
   return result;
 }
 
-let _onSyncStatusCallback: ((state: string) => void) | null = null;
+let _onSyncStatusCallback: ((state: string, info?: { fromCache?: boolean }) => void) | null = null;
 
 /** Extract a numeric error code from various error shapes returned by the SDK/RPC layer.
  *  The Actions system wraps errors differently — this covers common patterns:
@@ -157,8 +162,14 @@ function stopMatrixReconnect(): void {
   if (_matrixReconnectUnsub) { _matrixReconnectUnsub(); _matrixReconnectUnsub = null; }
 }
 let _blockHeightInterval: ReturnType<typeof setInterval> | null = null;
-// Per-room debounce timers for peer-keys recheck after member events.
-const _peerKeysRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Peer-keys recheck after member events: rooms collected over one window,
+// then rechecked together (see onMembership).
+const _peerKeysRecheckRooms = new Set<string>();
+let _peerKeysRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+function clearPeerKeysRecheck(): void {
+  if (_peerKeysRecheckTimer) { clearTimeout(_peerKeysRecheckTimer); _peerKeysRecheckTimer = null; }
+  _peerKeysRecheckRooms.clear();
+}
 
 /** Trigger an immediate registration poll iteration. Set inside
  *  `startRegistrationPoll`, cleared inside `stopRegistrationPoll`.
@@ -209,6 +220,13 @@ function clearWalletRefreshSchedule(): void {
 export const useAuthStore = defineStore(NAMESPACE, () => {
   const sessionManager = new SessionManager();
   const backgroundSyncManager = new BackgroundSyncManager();
+
+  /** Chain tip (block height) from getnodeinfo polls and WS `new block`;
+   *  0 until the first report. Only moves forward. */
+  const blockHeight = ref(0);
+  const noteBlockHeight = (height: number) => {
+    if (height > blockHeight.value) blockHeight.value = height;
+  };
 
   // Reactive session list + active account
   const sessions = ref<StoredSession[]>(sessionManager.getSessions());
@@ -460,6 +478,26 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     );
   };
 
+  /** Push the Pocketnet name to the Matrix displayname (no-op until both the
+   *  profile and Matrix are there; the helper skips an unchanged name). */
+  const syncOwnDisplayNameToMatrix = () => {
+    if (!matrixReady.value || !address.value || !userInfo.value?.name) return;
+    void syncDisplayNameAfterInit(getMatrixClientService(), {
+      userId: address.value,
+      name: userInfo.value.name,
+    });
+  };
+
+  /** True when an earlier session cached this account's own profile with its
+   *  encryption keys and numeric id — enough for room crypto to resolve the
+   *  own participant offline, so Matrix can start without waiting for the
+   *  Bastyon proxy. Without it the profile must load first. */
+  const hasCachedOwnProfile = (): boolean => {
+    if (!address.value) return false;
+    const cached = readSelfProfile(address.value);
+    return !!cached?.keys && cached.keys.length >= REQUIRED_ENCRYPTION_KEYS && cached.id != null;
+  };
+
   /** Initialize Matrix client, kit and crypto after login */
   const initMatrixInner = async () => {
     if (!address.value || !privateKey.value) {
@@ -506,71 +544,18 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         getUsersInfo: async (ids: string[], options?: { forceUpdate?: boolean }) => {
           // ids are hex-encoded addresses; decode to raw for Pocketnet API
           try {
-            const rawAddresses = ids.map((id) => hexDecode(id));
-
-            // Single SDK load (getuserprofile once per batch); raw rows stored pre-cleanData in SDK.
-            // forceUpdate bypasses the SDK's in-memory profile cache — only set
-            // from an explicit user retry (peer-keys "Retry" button), never from
-            // an automatic recheck, so a stale cached peer profile (e.g. fetched
-            // before they had keys) can't get stuck for the rest of the session.
-            await appInitializer
-              .loadUsersInfo(rawAddresses, { update: options?.forceUpdate ?? false })
-              .catch((e) => {
-                console.warn("[pcrypto] loadUsersInfo failed:", e);
-              });
-
-            const rawProfileMap = new Map<string, Record<string, unknown>>();
-            for (const rawAddr of rawAddresses) {
-              const sdkRow = appInitializer.getUserData(rawAddr) as
-                | (Record<string, unknown> & { export?: (strip?: boolean) => Record<string, unknown> })
-                | null;
-
-              if (sdkRow && typeof sdkRow.address === "string") {
-                const exported = typeof sdkRow.export === "function"
-                  ? sdkRow.export(true)
-                  : sdkRow;
-                rawProfileMap.set(sdkRow.address, exported);
-              }
-            }
-
-            return ids.map((hexId, idx) => {
-              const rawAddr = rawAddresses[idx];
-              const sdkUser = appInitializer.getUserData(rawAddr);
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              let keys: string[] = (sdkUser as any)?.keys ?? [];
-              const rawProfile = rawProfileMap.get(rawAddr);
-              const sdkPath = keys.length > 0;
-
-              // Fallback: if SDK keys empty (e.g. filterXSS error in cleanData),
-              // extract keys directly from raw RPC response (k or keys field)
-              if (keys.length === 0 && rawProfile) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const rawKeys = (rawProfile as any).k ?? (rawProfile as any).keys ?? "";
-                if (Array.isArray(rawKeys)) {
-                  keys = rawKeys.filter((k: string) => k);
-                } else if (typeof rawKeys === "string" && rawKeys) {
-                  keys = rawKeys.split(",").filter((k: string) => k);
-                }
-              }
-
-              // Ensure source always has a numeric `id` field for deterministic
-              // sort order in preparedUsers (must match lodash _.sortBy(u => u.source.id)
-              // used by the old bastyon-chat client).
-              // Priority: rawProfile (has Pocketnet numeric id) > sdkUser > empty.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const rawSource: Record<string, unknown> = rawProfile
-                ? rawProfile
-                : (sdkUser ? { ...(sdkUser as any), address: rawAddr } : { address: rawAddr });
-
-              // If source still has no `id`, try to extract from SDK user data.
-              // Without a numeric id the sort order diverges from the old client
-              // (lodash _.sortBy places undefined at end; missing id would break ECDH).
-              const source: Record<string, unknown> = rawSource;
-              if (source.id == null && sdkUser && (sdkUser as any).id != null) {
-                source.id = (sdkUser as any).id;
-              }
-
-              return { id: hexId, keys, source };
+            const selfAddress = address.value ?? "";
+            return await resolveCryptoUsersInfo(ids, options, {
+              selfAddress,
+              requiredKeys: REQUIRED_ENCRYPTION_KEYS,
+              loadUsersInfo: (addrs, opts) => appInitializer.loadUsersInfo(addrs, opts),
+              getUserData: (addr) => appInitializer.getUserData(addr),
+              readSelfIdentity: () => {
+                const cached = readSelfProfile(selfAddress);
+                return cached?.keys && cached.id != null ? { keys: cached.keys, id: cached.id } : null;
+              },
+              writeSelfIdentity: (identity) =>
+                writeSelfCryptoIdentity(selfAddress, identity, REQUIRED_ENCRYPTION_KEYS),
             });
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
@@ -610,6 +595,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         async (url: string) => {
           const { fetchPreview } = await import("@/features/messaging/model/use-link-preview");
           return fetchPreview(url);
+        },
+        (addresses: string[]) => {
+          const others = addresses.filter((a) => a !== address.value);
+          if (others.length === 0) return;
+          appInitializer.loadUsersInfo(others).catch((e) => {
+            console.warn("[auth] decryption key preload failed:", e);
+          });
         },
       );
       // Dexie opens lazily, so a database that could not open (no space, Safari
@@ -659,13 +651,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       if (cryptoInstance) {
         cryptoInstance.onKeysLoaded = (roomId: string) => {
           chatDbKit.retryRoomDecryption?.(roomId);
+          chatStore.retryRoomPreview(roomId);
+          chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
+        };
+        // A failed key request must not leave a stale "missing" banner; the
+        // re-check reports "loading" and retries for the open chat.
+        cryptoInstance.onKeysFailed = (roomId: string) => {
           chatStore.checkPeerKeys(roomId).catch(() => { /* best-effort */ });
         };
       }
 
       let _lastSyncState: string | null = null;
       matrixService.setHandlers({
-        onSync: (state) => {
+        onSync: (state, info) => {
           const wasDisconnected = _lastSyncState === "ERROR" || _lastSyncState === "RECONNECTING";
           _lastSyncState = state;
 
@@ -694,7 +692,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           } else if (state === "STOPPED") {
             chatStore.setSyncState(state);
           }
-          _onSyncStatusCallback?.(state);
+          _onSyncStatusCallback?.(state, info);
+        },
+        // Not gated on roomsInitialized: a limited sync during the catch-up
+        // sync is exactly where holes in stored history come from.
+        onTimelineReset: (roomId: string, backToken: string | null) => {
+          chatStore.handleTimelineReset(roomId, backToken);
         },
         onTimeline: (event: unknown, room: unknown) => {
           const roomId = typeof room === "string" ? room : (room as any)?.roomId;
@@ -715,32 +718,39 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           const roomId = (member as any)?.roomId as string;
           if (roomId) {
             chatStore.markRoomChanged(roomId);
-            // Re-evaluate peer-keys after a member event (debounced) — fixes the
-            // stuck "peer hasn't published encryption keys" banner that used to
-            // wait until the next chat switch to clear.
-            const prev = _peerKeysRecheckTimers.get(roomId);
-            if (prev) clearTimeout(prev);
-            const t = setTimeout(() => {
-              _peerKeysRecheckTimers.delete(roomId);
-              // Refresh the room's cached crypto membership/key state
-              // (users/usersinfo) BEFORE checkPeerKeys — canBeEncrypt() only
-              // reads that cache, it never refetches on its own. Without this,
-              // a member added to an already-prepared room's crypto instance
-              // is silently and permanently excluded from the group common
-              // key: usershash() keeps hashing the OLD member set, so every
-              // future encryptEventGroup() keeps finding and reusing the
-              // pre-existing common-key event that was never wrapped for the
-              // new member (matrix-crypto.ts getOrCreateCommonKey/usershash).
-              // prepare() here is unforced — getusershistory() is a pure local
-              // recompute from already-synced room state (no network), and
-              // getusersinfo() only skips its *own* forceUpdate flag, so a
-              // genuinely new member's keys are still fetched.
-              const roomCrypto = pcrypto.value?.rooms[roomId];
-              (roomCrypto ? roomCrypto.prepare().catch(() => {}) : Promise.resolve())
-                .then(() => chatStore.checkPeerKeys(roomId))
-                .catch(() => { /* best-effort */ });
+            // Re-evaluate peer-keys after a member event — fixes the stuck
+            // "peer hasn't published encryption keys" banner that used to
+            // wait until the next chat switch to clear. Rooms are collected
+            // over one 500 ms window (not re-armed per event, so a steady
+            // stream of member events cannot postpone it) and rechecked
+            // together: their keys go out in one request instead of one per
+            // room (member list loads emit an event per loaded member).
+            _peerKeysRecheckRooms.add(roomId);
+            if (!_peerKeysRecheckTimer) _peerKeysRecheckTimer = setTimeout(() => {
+              _peerKeysRecheckTimer = null;
+              const roomIds = [..._peerKeysRecheckRooms];
+              _peerKeysRecheckRooms.clear();
+              chatStore.preloadRoomKeys(roomIds.filter((id) => pcrypto.value?.rooms[id]));
+              for (const roomId of roomIds) {
+                // Refresh the room's cached crypto membership/key state
+                // (users/usersinfo) BEFORE checkPeerKeys — canBeEncrypt() only
+                // reads that cache, it never refetches on its own. Without this,
+                // a member added to an already-prepared room's crypto instance
+                // is silently and permanently excluded from the group common
+                // key: usershash() keeps hashing the OLD member set, so every
+                // future encryptEventGroup() keeps finding and reusing the
+                // pre-existing common-key event that was never wrapped for the
+                // new member (matrix-crypto.ts getOrCreateCommonKey/usershash).
+                // prepare() here is unforced — getusershistory() is a pure local
+                // recompute from already-synced room state (no network), and
+                // getusersinfo() only skips its *own* forceUpdate flag, so a
+                // genuinely new member's keys are still fetched.
+                const roomCrypto = pcrypto.value?.rooms[roomId];
+                (roomCrypto ? roomCrypto.prepare().catch(() => {}) : Promise.resolve())
+                  .then(() => chatStore.checkPeerKeys(roomId))
+                  .catch(() => { /* best-effort */ });
+              }
             }, 500);
-            _peerKeysRecheckTimers.set(roomId, t);
           }
           chatStore.refreshRooms();
         },
@@ -795,7 +805,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           try {
             const callService = useCallService();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            callService.handleIncomingCall(call as any);
+            callService.handleIncomingCall(call as any).catch((err: unknown) => {
+              console.error("[auth] Failed to handle incoming call:", err);
+            });
           } catch (err) {
             console.error("[auth] Failed to handle incoming call:", err);
             try { (call as any).reject?.(); } catch { /* ignore */ }
@@ -862,12 +874,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
         // Sync Pocketnet name → Matrix displayname when it changed since last push.
         // Fire-and-forget: must not block or break init (see syncDisplayNameAfterInit).
-        if (address.value && userInfo.value?.name) {
-          void syncDisplayNameAfterInit(matrixService, {
-            userId: address.value,
-            name: userInfo.value.name,
-          });
-        }
+        // When the profile is still loading (Matrix started from the cached
+        // profile), fetchUserInfo runs this once it arrives.
+        syncOwnDisplayNameToMatrix();
 
         // WEE-11 (forta-bugs#660): pre-warm the native sender-names cache as
         // soon as Matrix is connected, BEFORE we wait for PREPARED. The
@@ -931,6 +940,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         // Fetch blockchain block height and update Pcrypto (critical for encryption key derivation).
         // In legacy code this was provided by the parent app via pcrypto.set.block().
         appInitializer.getBlockHeight().then((height) => {
+          noteBlockHeight(height);
           if (height > 0 && cryptoInstance) {
             cryptoInstance.setBlock({ height });
             console.log("[auth] Pcrypto block height set to", height);
@@ -942,6 +952,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         _blockHeightInterval = setInterval(() => {
           if (!pcrypto.value) { clearInterval(_blockHeightInterval!); _blockHeightInterval = null; return; }
           appInitializer.getBlockHeight().then((height) => {
+            noteBlockHeight(height);
             if (height > 0) pcrypto.value!.setBlock({ height });
           }).catch(() => {});
         }, 60_000);
@@ -958,6 +969,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             getLastKnownBlock: () => pcrypto.value?.currentblock?.height ?? 0,
             handlers: {
               onBlock: ({ height }) => {
+                noteBlockHeight(height);
                 if (height > 0 && pcrypto.value) {
                   pcrypto.value.setBlock({ height });
                 }
@@ -1002,6 +1014,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
           console.warn("[auth] Failed to init call tab lock:", err);
         });
 
+        // Web/Electron has no push service, but its in-tab beep reads the same
+        // mute set: pull server mute rules here too, or a group muted on another
+        // device keeps beeping in this browser (native syncs after push init).
+        if (!isNative && matrixService.client) {
+          chatStore.syncMutedRoomsFromMatrix({ fromSdk: true }).catch((err) => {
+            console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
+          });
+        }
+
         // Init push notifications FIRST (before call bridge which steals focus for audio permission)
         if (isNative && matrixService.client) {
           try {
@@ -1025,8 +1046,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             pushService.setRoomInfoGetter((roomId) => {
               // Use Dexie-backed store (has resolved names) instead of Matrix SDK (may return hash)
               const chatRoom = chatStore.rooms.find(r => r.id === roomId);
-              if (chatRoom?.name) return { roomName: chatRoom.name };
-              // Fallback to Matrix SDK
+              if (chatRoom?.name) return { roomName: chatRoom.name, isGroup: chatRoom.isGroup };
+              // Fallback to Matrix SDK. Group-ness is unknown here, so the
+              // notification degrades to the direct-chat layout rather than
+              // guessing from the member count.
               const room = matrixService.client?.getRoom(roomId);
               if (!room) return null;
               return { roomName: room.name || 'Forta Chat' };
@@ -1035,7 +1058,21 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             pushService.setAllRoomNamesGetter(() => {
               const map: Record<string, string> = {};
               for (const room of chatStore.rooms) {
-                if (room.name) map[room.id] = room.name;
+                // An unresolved 1:1 name (#hash, the peer's address) would become
+                // the notification title; skip it so native keeps its last good one.
+                const peerAddr = room.avatar?.startsWith("__pocketnet__:")
+                  ? room.avatar.slice("__pocketnet__:".length)
+                  : undefined;
+                if (!room.name || (!room.isGroup && !looksLikeProperName(room.name, peerAddr))) continue;
+                map[room.id] = room.name;
+              }
+              return map;
+            });
+
+            pushService.setAllGroupRoomsGetter(() => {
+              const map: Record<string, boolean> = {};
+              for (const room of chatStore.rooms) {
+                map[room.id] = room.isGroup;
               }
               return map;
             });
@@ -1063,7 +1100,26 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                   }
                 }
               }
+              // Lazy-loaded members leave peers out of the SDK lists; the
+              // stored rooms and the profile cache still name them.
+              const users = useUserStore().users;
+              for (const room of chatStore.rooms) {
+                for (const hexId of room.members) {
+                  const userId = matrixService.matrixId(hexId);
+                  if (senders[userId]) continue;
+                  const addr = hexDecode(hexId);
+                  const name = users[addr]?.name;
+                  if (name && looksLikeProperName(name, addr)) senders[userId] = name;
+                }
+              }
               return senders;
+            });
+
+            pushService.setSenderNameGetter((userId) => {
+              const hexId = getmatrixid(userId);
+              const addr = hexId ? hexDecode(hexId) : "";
+              const name = addr ? useUserStore().users[addr]?.name : "";
+              return name && looksLikeProperName(name, addr) ? name : null;
             });
 
             console.log('[auth] Initializing push service...');
@@ -1075,7 +1131,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             // same mute state across devices and across APK reinstalls —
             // localStorage is treated as a cache, not the source of truth.
             try {
-              await chatStore.syncMutedRoomsFromMatrix();
+              await chatStore.syncMutedRoomsFromMatrix({ fromSdk: true });
             } catch (err) {
               console.warn('[auth] Failed to sync muted rooms from Matrix:', err);
             }
@@ -1195,6 +1251,29 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** Give the Pocketnet SDK the account's address and key pair (signed
+   *  requests, wallet). Both are known locally — this used to run only inside
+   *  a successful own-profile load, so one failed getuserprofile at boot left
+   *  the SDK without a signer for the whole session. */
+  const configureSdkUser = (addr: string, key: string) => {
+    PocketnetInstanceConfigurator.setUserAddress(addr);
+    PocketnetInstanceConfigurator.setUserGetKeyPairFc(() => createKeyPair(key));
+  };
+
+  // A failed own-profile load was never retried (only logged as non-fatal),
+  // so the session ran without the profile until a manual reload. Retry in
+  // the background; one request per minute at most once backed off.
+  const ownProfileRetry = createBackoffRetry([3_000, 10_000, 30_000, 60_000]);
+  const cancelOwnProfileRetry = () => ownProfileRetry.cancel();
+  const scheduleOwnProfileRetry = (requestAddress: string) => {
+    // Registration runs its own poll for the profile.
+    if (registrationPending.value) return;
+    ownProfileRetry.schedule(() => {
+      if (address.value !== requestAddress) return;
+      void fetchUserInfo();
+    });
+  };
+
   const fetchUserInfo = async () => {
     if (!address.value || !privateKey.value) {
       return;
@@ -1205,6 +1284,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // second account's cache slot.
     const requestAddress = address.value;
     const requestPrivateKey = privateKey.value;
+    configureSdkUser(requestAddress, requestPrivateKey);
+    // Image URL rewriting list; goes out with the profile once the proxy answered.
+    void appInitializer.loadArchivedPeertubeServers();
 
     // During registration the local SDK may still hold an empty profile from
     // the first post-login getuserprofile — always hit the network.
@@ -1220,7 +1302,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     // preloader hangs after registration until manual reload"). 15s matches
     // REGISTRATION_RPC_TIMEOUT for this class of proxy call.
     try {
-      await withTimeout(
+      const loaded = await withTimeout(
         appInitializer.initializeAndFetchUserData(
           requestAddress,
           (userData: UserData) => {
@@ -1245,10 +1327,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             const merged = mergeSelfProfileWithRemote(cached, userData);
 
             setUserInfo(merged);
-            PocketnetInstanceConfigurator.setUserAddress(requestAddress);
-            PocketnetInstanceConfigurator.setUserGetKeyPairFc(() =>
-              createKeyPair(requestPrivateKey)
-            );
+            syncOwnDisplayNameToMatrix();
 
             writeSelfProfile({
               address: requestAddress,
@@ -1260,6 +1339,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               localEditedAt: cached?.localEditedAt ?? 0,
               syncedAt: Date.now(),
             });
+            // Keys + numeric id let room crypto resolve the own participant
+            // offline next time (see resolveCryptoUsersInfo).
+            const selfId = (userData as { id?: number | string }).id;
+            if (Array.isArray(userData.keys) && selfId != null) {
+              writeSelfCryptoIdentity(
+                requestAddress,
+                { keys: userData.keys as string[], id: selfId },
+                REQUIRED_ENCRYPTION_KEYS,
+              );
+            }
 
             // Sync own profile to userStore so Avatar components show correct name/initial
             if (merged.name) {
@@ -1278,8 +1367,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         RPC_CALL_TIMEOUT,
         "fetchUserInfo",
       );
+      // null without an error = API not ready (no reachable proxy) or no
+      // profile row — the same "failed at boot" case, so keep retrying.
+      if (address.value === requestAddress) {
+        if (loaded) cancelOwnProfileRetry();
+        else scheduleOwnProfileRetry(requestAddress);
+      }
     } catch (e) {
       console.warn("[auth] fetchUserInfo: initializeAndFetchUserData failed (non-fatal):", e);
+      if (address.value === requestAddress) scheduleOwnProfileRetry(requestAddress);
     }
   };
 
@@ -1289,6 +1385,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
    *  Skips if registration is already in progress (register() handles it). */
   const verifyAndRepublishKeys = async () => {
     if (!address.value || !privateKey.value) return;
+    // The account this check is for. Read again after every await: an account
+    // switch between them published A's profile under B's address and keys
+    // (review 2026-10-08, H2).
+    const subjectAddress = address.value;
+    const subjectKey = privateKey.value;
+    const accountChanged = () => address.value !== subjectAddress || privateKey.value !== subjectKey;
 
     // Don't interfere with active registration — register() manages its own poll
     if (registrationPending.value || pendingRegProfile.value) {
@@ -1297,7 +1399,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     }
 
     // Step 1: Quick check via local SDK cache.
-    const userData = appInitializer.getUserData(address.value);
+    const userData = appInitializer.getUserData(subjectAddress);
     const cachedKeyCount = countCachedKeys(userData);
 
     // Step 2: Cache may be stale/empty after login — verify via fresh SDK
@@ -1307,12 +1409,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     if (cachedKeyCount < REQUIRED_ENCRYPTION_KEYS) {
       console.log("[auth] Cache shows", cachedKeyCount, "keys, verifying via RPC...");
       try {
-        const rawProfiles = await appInitializer.loadUsersInfoRaw([address.value]);
+        const rawProfiles = await appInitializer.loadUsersInfoRaw([subjectAddress]);
         blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
       } catch (e) {
         console.warn("[auth] RPC key check failed, skipping re-publish:", e);
         blockchainCheckFailed = true;
       }
+      if (accountChanged()) return;
     }
 
     // checkUnspents only affects the republish-vs-needs-funds split; query it
@@ -1323,8 +1426,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       !blockchainCheckFailed &&
       (blockchainKeyCount ?? 0) < REQUIRED_ENCRYPTION_KEYS;
     const hasUnspents = mayNeedRepublish
-      ? await appInitializer.checkUnspents(address.value)
+      ? await appInitializer.checkUnspents(subjectAddress)
       : false;
+    if (accountChanged()) return;
 
     const action = resolveKeyRepublishAction({
       cachedKeyCount,
@@ -1362,14 +1466,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         likelyBastyonUser.value = true;
         ownKeysMissing.value = true;
         interopLog("auth", "existing account missing Forta keys — re-publishing in background, likely Bastyon-registered");
-        const encPublicKeys = generateEncryptionKeys(privateKey.value).map(k => k.public);
+        const encPublicKeys = generateEncryptionKeys(subjectKey).map(k => k.public);
         const profile = {
           name: userData?.name ?? "",
           language: userData?.language ?? "en",
           about: userData?.about ?? "",
         };
         const image = userData?.image ?? "";
-        const republishAddress = address.value;
+        const republishAddress = subjectAddress;
         // Fire-and-forget: the broadcast is a blockchain round-trip that must
         // not add latency to login. It can no longer hang the UI (never flips
         // registrationPending) and failure is non-fatal — login proceeds either
@@ -1377,6 +1481,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
         void (async () => {
           try {
             await appInitializer.syncNodeTime();
+            // The broadcast signs with the signed-in account's key.
+            if (accountChanged()) {
+              console.warn("[auth] Background key re-publish dropped: the account changed");
+              return;
+            }
             await appInitializer.registerUserProfile(republishAddress, profile, encPublicKeys, image);
             console.log("[auth] Encryption keys re-published in background (existing-account login)");
             if (address.value === republishAddress) ownKeysMissing.value = false;
@@ -1564,6 +1673,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     // ── 0. Clear in-memory auth state ──
     userInfo.value = undefined;
+    cancelOwnProfileRetry();
 
     // ── 1. Reset Pinia stores (in-memory state) ──
     useChatStore().cleanup();
@@ -1594,14 +1704,15 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
 
     // ── 2. Tear down Matrix (before async DB work to stop incoming events) ──
     resetMatrixClientService();
+    // The next sign-in of this account must log in, not reuse the old token.
+    if (logoutAddress) clearCachedMatrixSession(logoutAddress);
     matrixReady.value = false;
     matrixError.value = null;
     matrixKit.value = null;
 
     if (pcrypto.value) {
-      for (const room of Object.values(pcrypto.value.rooms)) {
-        room.destroy();
-      }
+      // destroy() also terminates the crypto worker (per-account key cache)
+      pcrypto.value.destroy();
       pcrypto.value = null;
     }
     // WEE-97: drop memoized BIP32 key material with the rest of the session
@@ -1613,8 +1724,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     _matrixStartFailures = 0;
     _keysVerifiedFor.clear();
     if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
-    for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
-    _peerKeysRecheckTimers.clear();
+    clearPeerKeysRecheck();
     if (_appStateHandle) {
       await _appStateHandle.remove().catch(() => { /* ignore */ });
       _appStateHandle = null;
@@ -2345,7 +2455,19 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** Load a Bastyon post by txid (delegates to AppInitializer RPC + cache) */
   const loadPost = (txid: string) => appInitializer.loadPost(txid);
 
+  /** Load a raw PKOIN transaction by txid (verbose getrawtransaction). */
+  const loadTransaction = (txid: string, update = false) => appInitializer.loadTransaction(txid, update);
+
+  /** Fetch the chain tip when nothing has reported it yet (e.g. a transaction
+   *  card rendered before the first poll / WS block). */
+  const ensureBlockHeight = async (): Promise<number> => {
+    if (blockHeight.value > 0) return blockHeight.value;
+    noteBlockHeight(await appInitializer.getBlockHeight());
+    return blockHeight.value;
+  };
+
   const loadPostComments = (txid: string) => appInitializer.loadPostComments(txid, address.value || undefined);
+  const loadCommentsByIds = (ids: string[]) => appInitializer.loadCommentsByIds(ids, address.value || undefined);
   const loadMyPostScore = (txid: string) => appInitializer.loadMyPostScore(txid, address.value!);
   const submitUpvote = (txid: string, value: number) => appInitializer.submitUpvote(txid, value, address.value!);
   const submitComment = (txid: string, message: string, parentId?: string) => appInitializer.submitComment(txid, message, parentId, address.value || undefined);
@@ -2359,10 +2481,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   const getCachedPost = (txid: string) => appInitializer.getCachedPost(txid);
   const cachePost = (raw: Record<string, unknown>) => appInitializer.cachePost(raw);
 
+  /** Load a shared Bastyon collection preview by txid (psdk + cache, without its publications) */
+  const loadCollection = (txid: string) => appInitializer.loadCollection(txid);
+  const getCachedCollection = (txid: string) => appInitializer.getCachedCollection(txid);
+
   const getProfileFeed = (authorAddress: string, options?: { height?: number; startTxid?: string; count?: number }) =>
     appInitializer.getProfileFeed(authorAddress, options);
 
-  function setSyncStatusCallback(cb: (state: string) => void) {
+  function setSyncStatusCallback(cb: (state: string, info?: { fromCache?: boolean }) => void) {
     _onSyncStatusCallback = cb;
   }
 
@@ -2465,9 +2591,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       matrixKit.value = null;
 
       if (pcrypto.value) {
-        for (const room of Object.values(pcrypto.value.rooms)) {
-          room.destroy();
-        }
+        // destroy() also terminates the crypto worker (per-account key cache)
+        pcrypto.value.destroy();
         pcrypto.value = null;
       }
 
@@ -2476,8 +2601,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       stopMatrixReconnect();
       _matrixStartFailures = 0;
       if (_blockHeightInterval) { clearInterval(_blockHeightInterval); _blockHeightInterval = null; }
-      for (const t of _peerKeysRecheckTimers.values()) clearTimeout(t);
-      _peerKeysRecheckTimers.clear();
+      clearPeerKeysRecheck();
 
       // Close Dexie without deleting
       closeChatDb();
@@ -2489,6 +2613,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       sessionManager.setActive(targetAddress);
       syncSessionsFromStorage();
       userInfo.value = undefined;
+      cancelOwnProfileRetry();
       // Per-account verdict of the key check: the previous account's "likely a
       // Bastyon account" must not show for this one (audit S5-02).
       likelyBastyonUser.value = false;
@@ -2527,11 +2652,13 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     editUserData,
     fetchCaptcha,
     fetchUserInfo,
+    hasCachedOwnProfile,
     findRegistrationProxy,
     generateRegistrationKeys,
     hydrateLocalAliasesEarly,
     cachePost,
     getCachedPost,
+    getCachedCollection,
     getBastyonUserData,
     getProfileFeed,
     getSubscribesChannels,
@@ -2539,9 +2666,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     isAuthenticated,
     isEditingUserData,
     isLoggingIn,
+    loadCollection,
     loadMyPostScore,
     loadPost,
+    loadTransaction,
+    blockHeight,
+    ensureBlockHeight,
     loadPostComments,
+    loadCommentsByIds,
     loadUsersInfo: (addresses: string[], options?: { update?: boolean }) =>
       appInitializer.loadUsersInfo(addresses, options),
     login,

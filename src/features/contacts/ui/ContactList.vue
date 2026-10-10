@@ -18,6 +18,7 @@ import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 import { getRoomTitleForUI, getMessagePreviewForUI, type DisplayResult } from "@/entities/chat";
 import { useLongPress } from "@/shared/lib/gestures";
 import { ContextMenu } from "@/shared/ui/context-menu";
+import { RoomListSkeleton } from "@/shared/ui/skeleton";
 import type { ContextMenuItem } from "@/shared/ui/context-menu";
 import { UserAvatar } from "@/entities/user";
 import { useUserStore } from "@/entities/user/model";
@@ -28,12 +29,19 @@ import { useSelectionStore } from "@/features/selection";
 import RenameContactDialog from "@/features/chat-info/ui/RenameContactDialog.vue";
 import { hapticImpact } from "@/shared/lib/haptics";
 import { lastMessageRowKey } from "@/features/contacts/lib/last-message-row-key";
+import { reuseIfSameKeys } from "@/features/contacts/lib/stable-scroller-items";
+import { sameSet } from "@/features/contacts/lib/room-name-index";
+import { mergeRoomsAndChannels } from "@/features/contacts/lib/merge-rooms-and-channels";
+import { useRoomNamesStore } from "@/features/contacts/model/room-names-store";
 
 interface Props {
   filter?: "all" | "personal" | "groups" | "invites" | "channels";
+  /** This list's tab is the one on screen (SwipeableTabs keeps every tab
+   *  mounted) — only the active list reports its rows for preview decrypt. */
+  active?: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), { filter: "all" });
+const props = withDefaults(defineProps<Props>(), { filter: "all", active: true });
 
 const chatStore = useChatStore();
 const authStore = useAuthStore();
@@ -70,148 +78,42 @@ function isChannel(item: ChatRoom | Channel): item is Channel {
   return "address" in item && !("id" in item);
 }
 
-/** Get unified sort timestamp for a list item */
-function getItemTimestamp(item: ChatRoom | Channel): number {
-  if (isChannel(item)) {
-    return item.lastContent ? item.lastContent.time * 1000 : 0;
-  }
-  return item.lastMessage?.timestamp ?? item.updatedAt;
-}
-
-/** Reactive map of room ID → resolved display name.
- *  Incrementally updated: only creates a new map reference when at least one name
- *  actually changed. This prevents cascading re-renders in allFilteredRooms/RecycleScroller
- *  when a profile load returns the same names (e.g. stale cache refresh). */
-let _prevNameMapResult: Record<string, string> = {};
-const roomNameMap = computed(() => {
-  const allUsers = userStore.users;
-  const myHexId = authStore.address ? hexEncode(authStore.address) : "";
-  const map: Record<string, string> = {};
-  let changed = false;
-  for (const room of chatStore.sortedRooms) {
-    const name = _resolveRoomName(room, allUsers, myHexId);
-    map[room.id] = name;
-    if (!changed && _prevNameMapResult[room.id] !== name) changed = true;
-  }
-  // Also detect removed rooms
-  if (!changed) {
-    for (const id in _prevNameMapResult) {
-      if (!(id in map)) { changed = true; break; }
-    }
-  }
-  if (!changed) return _prevNameMapResult;
-  _prevNameMapResult = map;
-  return map;
-});
-
-/** Resolve room display name — matches original bastyon-chat name.vue exactly:
- *  1. For 1:1: get other members → hexDecode(hexId) → look up name in userStore → join with ", "
- *  2. If no names found → "-"
- *  3. If room name starts with "@" → strip "@"
- *  4. For groups/public: use room name as-is */
-
-// Cache hexDecode results to avoid repeated computation
-const hexDecodeCache = new Map<string, string>();
-function cachedHexDecode(hex: string): string {
-  let result = hexDecodeCache.get(hex);
-  if (result === undefined) {
-    result = hexDecode(hex);
-    hexDecodeCache.set(hex, result);
-  }
-  return result;
-}
-
-/** Resolve member names — checks Pocketnet profiles first, then Matrix displaynames.
- *  Matrix displaynames come from m.room.member state events (free, already in sync)
- *  and are available instantly without any RPC call.
- *
- *  Walks BOTH joined and invited, otherwise the contact list shows a blank
- *  name for DMs whose peer hasn't accepted the invite yet (`members` would
- *  only contain the inviter). */
-function _resolveMemberNames(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string[] {
-  const otherMembers = [
-    ...room.members,
-    ...(room.invitedMembers ?? []),
-  ].filter(m => m !== myHexId);
-
-  // Read localAliases reactively (Session 51) — Pinia ref access here makes
-  // the calling computed re-evaluate when an alias is set/cleared.
-  const aliases = chatStore.localAliases;
-
-  const names: string[] = [];
-  for (const hexId of otherMembers) {
-    const addr = cachedHexDecode(hexId);
-    if (/^[A-Za-z0-9]+$/.test(addr)) {
-      // Priority 0: User-set local alias — overrides everything below.
-      const alias = aliases[addr];
-      if (alias) { names.push(alias); continue; }
-      // Priority 1: Pocketnet profile (richest data)
-      const user = allUsers[addr];
-      if (user?.name && !isUnresolvedName(user.name) && user.name !== addr) {
-        names.push(user.name); continue;
-      }
-      // Priority 2: Matrix m.room.member displayname (free, from sync)
-      const matrixName = chatStore.getDisplayName(addr);
-      if (matrixName && matrixName !== addr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-        names.push(matrixName); continue;
-      }
-    }
-  }
-
-  // Fallback: try avatar address
-  if (names.length === 0 && room.avatar?.startsWith("__pocketnet__:")) {
-    const avatarAddr = room.avatar.slice("__pocketnet__:".length);
-    const alias = aliases[avatarAddr];
-    if (alias) { names.push(alias); }
-    else {
-      const user = allUsers[avatarAddr];
-      if (user?.name && !isUnresolvedName(user.name) && user.name !== avatarAddr) {
-        names.push(user.name);
-      } else {
-        const matrixName = chatStore.getDisplayName(avatarAddr);
-        if (matrixName && matrixName !== avatarAddr && matrixName !== "?" && !isUnresolvedName(matrixName)) {
-          names.push(matrixName);
-        }
-      }
-    }
-  }
-
-  return names;
-}
+/** Shared across all mounted tabs — see room-names-store.ts. Resolves on demand,
+ *  so only rows of the displayed page are ever resolved. */
+const roomNamesStore = useRoomNamesStore();
 
 /** Rooms where name resolution permanently failed — stop showing skeleton for these */
 const gaveUpRooms = ref(new Set<string>());
 
-/** Track which rooms have no real display name yet */
-const unresolvedRoomSet = computed(() => {
-  const set = new Set<string>();
-  const allUsers = userStore.users;
-  const myHexId = authStore.address ? hexEncode(authStore.address) : "";
-  for (const room of chatStore.sortedRooms) {
-    if (gaveUpRooms.value.has(room.id)) continue;
-    const resolved = _resolveMemberNames(room, allUsers, myHexId);
-    if (resolved.length === 0) set.add(room.id);
+/** Displayed rooms without any resolved member name (same Set while unchanged).
+ *  Retries only ever target visible rooms, so the displayed page is enough. */
+let _prevPageUnresolved: ReadonlySet<string> = new Set();
+const pageUnresolvedRooms = computed(() => {
+  const next = new Set<string>();
+  for (const it of filteredRooms.value) {
+    if (!isChannel(it) && !roomNamesStore.resolveInfo(it).hasMemberNames) next.add(it.id);
   }
-  return set;
+  if (!sameSet(_prevPageUnresolved, next)) _prevPageUnresolved = next;
+  return _prevPageUnresolved;
+});
+
+/** Track which rooms have no real display name yet (same Set while unchanged) */
+let _prevUnresolved: ReadonlySet<string> = new Set();
+const unresolvedRoomSet = computed(() => {
+  const all = pageUnresolvedRooms.value;
+  const gaveUp = gaveUpRooms.value;
+  let next = all;
+  if (gaveUp.size > 0) {
+    const filtered = new Set<string>();
+    for (const id of all) if (!gaveUp.has(id)) filtered.add(id);
+    next = filtered;
+  }
+  if (!sameSet(_prevUnresolved, next)) _prevUnresolved = next;
+  return _prevUnresolved;
 });
 
 
-function _resolveRoomName(room: ChatRoom, allUsers: Record<string, any>, myHexId: string): string {
-  if (!room.isGroup) {
-    const names = _resolveMemberNames(room, allUsers, myHexId);
-    if (names.length > 0) return names.join(", ");
-    return cleanMatrixIds(room.name);
-  }
-  if (room.name?.startsWith("@")) return room.name.slice(1);
-  if (!isUnresolvedName(room.name)) return cleanMatrixIds(room.name);
-  const names = _resolveMemberNames(room, allUsers, myHexId);
-  if (names.length > 0) return names.join(", ");
-  return cleanMatrixIds(room.name);
-}
-
-const resolveRoomName = (room: ChatRoom): string => {
-  return roomNameMap.value[room.id] ?? cleanMatrixIds(room.name);
-};
+const resolveRoomName = (room: ChatRoom): string => roomNamesStore.resolveInfo(room).name;
 
 /** Unified display state for room title: resolving → skeleton, failed → fallback, ready → text */
 function getRoomTitle(room: ChatRoom): DisplayResult {
@@ -354,8 +256,11 @@ const getVisibleRoomIds = (): Set<string> => {
   return ids;
 };
 
-watch(unresolvedRoomSet, (set) => {
+/** unresolvedRoomSet keeps its reference while unchanged, so the watcher no longer
+ *  re-arms on every room patch — the timer schedules the next attempt itself. */
+const scheduleNameRetry = (set: ReadonlySet<string>) => {
   if (set.size === 0) {
+    clearTimeout(nameRetryTimer);
     nameRetryCount = 0;
     return;
   }
@@ -375,27 +280,15 @@ watch(unresolvedRoomSet, (set) => {
     // Only retry rooms that are currently visible — don't fire /members for off-screen rooms
     const visible = getVisibleRoomIds();
     const toRetry = [...set].filter(id => visible.has(id));
-    if (toRetry.length === 0) return;
-    chatStore.clearProfileCache(toRetry);
-    chatStore.loadMembersForRooms(toRetry);
+    if (toRetry.length > 0) {
+      chatStore.clearProfileCache(toRetry);
+      chatStore.loadMembersForRooms(toRetry);
+    }
+    scheduleNameRetry(unresolvedRoomSet.value);
   }, delay);
-}, { immediate: true });
+};
 
 onUnmounted(() => clearTimeout(nameRetryTimer));
-
-// If user profiles arrive late (e.g. from background refresh), remove gave-up flag
-watch(() => userStore.users, () => {
-  if (gaveUpRooms.value.size === 0) return;
-  const myHexId = authStore.address ? hexEncode(authStore.address) : "";
-  const allUsers = userStore.users;
-  for (const roomId of [...gaveUpRooms.value]) {
-    const room = chatStore.sortedRooms.find(r => r.id === roomId);
-    if (!room) continue;
-    if (_resolveMemberNames(room, allUsers, myHexId).length > 0) {
-      gaveUpRooms.value.delete(roomId);
-    }
-  }
-}, { deep: false });
 
 /** Format last message preview — delegated to shared composable */
 
@@ -450,20 +343,33 @@ type UnifiedItem = (ChatRoom | Channel) & { _key: string; _title?: DisplayResult
 // Cache UnifiedItem objects by room id + version to reduce GC pressure.
 // Only create a new object when the room's display-affecting fields change.
 // IMPORTANT: resolvedName is included in the cache key so that background profile
-// loading (triggerRef on userStore.users → roomNameMap recompute) invalidates
+// loading (triggerRef on userStore.users → new name context) invalidates
 // stale titles that were computed before profiles arrived.
 const _unifiedItemCache = new Map<string, { ts: number; unread: number; name: string; membership: string; msgStatus: string; preview: string; resolvedName: string; decryptionStatus: string; senderId: string; avatar: string; lastMessageKey: string; item: UnifiedItem }>();
 
-const allFilteredRooms = computed<UnifiedItem[]>(() => {
+/** Every row of this tab, in display order, as raw rooms / channels. Rows are built
+ *  only for the displayed page (filteredRooms): the invites tab alone can hold
+ *  thousands of rooms, and building a row per room on every list change cost
+ *  each mounted tab tens of milliseconds for rows nobody sees. */
+const allFilteredRooms = computed<(ChatRoom | Channel)[]>(() => {
   const rooms = chatStore.sortedRooms;
-  // Read roomNameMap eagerly to maintain reactive dependency even on cache-hit paths.
-  // Without this, Vue drops the dependency after first all-hit evaluation.
-  const nameMap = roomNameMap.value;
+  if (props.filter === "personal") return filterRoomsForTab(rooms, "personal");
+  if (props.filter === "groups") return filterRoomsForTab(rooms, "groups");
+  if (props.filter === "invites") return filterRoomsForTab(rooms, "invites");
+  // "all": joined rooms AND pending invites (WEE-59) interleaved with channels by activity.
+  // Only empty placeholder rooms are filtered out to prevent blank stripes in
+  // RecycleScroller (each slot reserves ITEM_HEIGHT even when its content is empty).
+  return mergeRoomsAndChannels(filterRoomsForTab(rooms, "all"), channelStore.channels);
+});
+
+const filteredRooms = computed<UnifiedItem[]>(() => {
   const toItem = (r: ChatRoom): UnifiedItem => {
     const ts = r.lastMessage?.timestamp ?? r.updatedAt ?? 0;
     const msgStatus = r.lastMessage?.status ?? "";
     const preview = r.lastMessage?.content ?? "";
-    const resolvedName = nameMap[r.id] ?? "";
+    // Read on every call, cache hit or not: it keeps the dependency on the name
+    // sources, so a late profile re-renders the row.
+    const resolvedName = roomNamesStore.resolveInfo(r).name;
     const decryptionStatus = r.lastMessage?.decryptionStatus ?? "";
     const senderId = r.lastMessage?.senderId ?? "";
     const avatar = r.avatar ?? "";
@@ -484,52 +390,35 @@ const allFilteredRooms = computed<UnifiedItem[]>(() => {
     return item;
   };
 
-  if (props.filter === "personal") return filterRoomsForTab(rooms, "personal").map(toItem);
-  if (props.filter === "groups") return filterRoomsForTab(rooms, "groups").map(toItem);
-  if (props.filter === "invites") return filterRoomsForTab(rooms, "invites").map(toItem);
-
-  // "all": merge-sort rooms + channels (both already sorted by time desc).
-  // O(n+m) instead of O((n+m) log(n+m)).
-  // Joined rooms AND pending invites are shown here (WEE-59), interleaved by
-  // activity — their relative order comes from the upstream sortedRooms sort
-  // (membershipRank below only tie-breaks room-vs-channel at equal timestamps).
-  // Only empty placeholder rooms are filtered out to prevent blank stripes in
-  // RecycleScroller (each slot reserves ITEM_HEIGHT even when its content is empty).
-  const roomItems: UnifiedItem[] = filterRoomsForTab(rooms, "all").map(toItem);
-  const channelItems: UnifiedItem[] = channelStore.channels
-    .map(c => ({ ...c, _key: `ch:${c.address}` }))
-    .sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
-
-  // Membership rank for tie-breaking: joined rooms > invites > channels
-  const membershipRank = (item: ChatRoom | Channel): number => {
-    if (isChannel(item)) return 2;
-    return (item as ChatRoom).membership === "invite" ? 1 : 0;
-  };
-
-  const merged: UnifiedItem[] = [];
-  let ri = 0, ci = 0;
-  while (ri < roomItems.length && ci < channelItems.length) {
-    const rTs = getItemTimestamp(roomItems[ri]);
-    const cTs = getItemTimestamp(channelItems[ci]);
-    if (rTs > cTs) {
-      merged.push(roomItems[ri++]);
-    } else if (cTs > rTs) {
-      merged.push(channelItems[ci++]);
-    } else {
-      // Same timestamp: rooms before channels
-      if (membershipRank(roomItems[ri]) <= membershipRank(channelItems[ci])) {
-        merged.push(roomItems[ri++]);
-      } else {
-        merged.push(channelItems[ci++]);
-      }
-    }
-  }
-  while (ri < roomItems.length) merged.push(roomItems[ri++]);
-  while (ci < channelItems.length) merged.push(channelItems[ci++]);
-  return merged;
+  return allFilteredRooms.value
+    .slice(0, displayLimit.value)
+    .map(it => (isChannel(it) ? { ...it, _key: `ch:${it.address}` } : toItem(it)));
 });
 
-const filteredRooms = computed(() => allFilteredRooms.value.slice(0, displayLimit.value));
+// RecycleScroller gets the same array while the row order holds (see reuseIfSameKeys);
+// each row reads its current data from liveItemByKey.
+let _prevScrollerItems: UnifiedItem[] | null = null;
+const scrollerItems = computed(() => {
+  _prevScrollerItems = reuseIfSameKeys(_prevScrollerItems, filteredRooms.value);
+  return _prevScrollerItems;
+});
+// Watchers on the page's names sit below filteredRooms: an immediate watcher reads it
+// during setup.
+watch(unresolvedRoomSet, scheduleNameRetry, { immediate: true });
+
+// If names arrive late (profiles from a background refresh, members, aliases), remove
+// the gave-up flag of displayed rooms that now have a name.
+watch(pageUnresolvedRooms, (unresolved) => {
+  if (gaveUpRooms.value.size === 0) return;
+  const shown = new Set(filteredRooms.value.map(it => it._key));
+  for (const roomId of [...gaveUpRooms.value]) {
+    if (shown.has(roomId) && !unresolved.has(roomId)) gaveUpRooms.value.delete(roomId);
+  }
+});
+
+const liveItemByKey = computed(() => new Map(filteredRooms.value.map(i => [i._key, i])));
+const liveItem = (viewItem: UnifiedItem): UnifiedItem => liveItemByKey.value.get(viewItem._key) ?? viewItem;
+
 const hasMoreRooms = computed(() => displayLimit.value < allFilteredRooms.value.length);
 
 // Reset page when filter changes and reload visible profiles
@@ -549,6 +438,44 @@ const loadMoreRooms = () => {
 let viewportGeneration = 0;
 let _layoutRetries = 0;
 
+/** Rows in the viewport + small overscan (1 above, 2 below); channels excluded. */
+const visibleRange = (scrollTop: number, clientHeight: number) => {
+  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 1);
+  const lastIdx = Math.min(
+    filteredRooms.value.length - 1,
+    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + 2,
+  );
+  const visibleIds: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const item = filteredRooms.value[i];
+    if (item && !isChannel(item)) visibleIds.push((item as ChatRoom).id);
+  }
+  return { firstIdx, lastIdx, visibleIds };
+};
+
+// Identifies this list instance to the store's visible-rows report.
+const visibleRowsOwner = Symbol("ContactList");
+
+/** Re-report the visible rows after the list reordered (a new message moves
+ *  a room to the top without any scroll) — cheap, no profile/message loads. */
+let reportVisibleTimer: ReturnType<typeof setTimeout> | null = null;
+const reportVisibleRoomsSoon = () => {
+  if (reportVisibleTimer || !props.active) return;
+  reportVisibleTimer = setTimeout(() => {
+    reportVisibleTimer = null;
+    const el = scrollerRef.value?.$el as HTMLElement | undefined;
+    if (!props.active || !el || el.clientHeight === 0) return;
+    chatStore.setVisibleSidebarRooms(visibleRange(el.scrollTop, el.clientHeight).visibleIds, visibleRowsOwner);
+  }, 150);
+};
+
+// Tab switched: the list now on screen reports; the one leaving gives up its
+// rows (no-op if the new tab already reported).
+watch(() => props.active, (isActive) => {
+  if (isActive) nextTick(loadVisibleRooms);
+  else chatStore.releaseVisibleSidebarRooms(visibleRowsOwner, "hidden");
+});
+
 /** Calculate which rooms are visible, load profiles + messages for them.
  *  On scroll: cancels previous batch, loads only new visible rooms. */
 const loadVisibleRooms = () => {
@@ -565,18 +492,14 @@ const loadVisibleRooms = () => {
   }
   _layoutRetries = 0;
 
-  // Only the actual viewport + small overscan (1 above, 2 below)
-  const firstIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - 1);
-  const lastIdx = Math.min(
-    filteredRooms.value.length - 1,
-    Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + 2,
-  );
+  const { firstIdx, lastIdx, visibleIds } = visibleRange(scrollTop, clientHeight);
 
-  const visibleIds: string[] = [];
-  for (let i = firstIdx; i <= lastIdx; i++) {
-    const item = filteredRooms.value[i];
-    if (item && !isChannel(item)) visibleIds.push((item as ChatRoom).id);
-  }
+  // Encrypted previews of what is on screen decrypt first. Reported even
+  // when empty (empty filter) — otherwise the store would keep stale rows.
+  // Not while the list has no height (hidden behind an open chat on mobile):
+  // that would report just the overscan rows; the ResizeObserver below
+  // reports once the list is shown again.
+  if (props.active && clientHeight > 0) chatStore.setVisibleSidebarRooms(visibleIds, visibleRowsOwner);
 
   if (visibleIds.length === 0) return;
 
@@ -631,10 +554,19 @@ const onScrollerScroll = () => {
 
 // Attach native scroll listener to RecycleScroller's root element
 let scrollEl: HTMLElement | null = null;
+// Re-report the visible rows when the list's size changes: shown again after
+// an open chat hid it (mobile), or a taller window shows more rows.
+const resizeObserver = typeof ResizeObserver !== "undefined"
+  ? new ResizeObserver(() => reportVisibleRoomsSoon())
+  : null;
 const attachScrollListener = () => {
-  if (scrollEl) scrollEl.removeEventListener("scroll", onScrollerScroll);
+  if (scrollEl) {
+    scrollEl.removeEventListener("scroll", onScrollerScroll);
+    resizeObserver?.unobserve(scrollEl);
+  }
   scrollEl = (scrollerRef.value?.$el as HTMLElement) ?? null;
   scrollEl?.addEventListener("scroll", onScrollerScroll, { passive: true });
+  if (scrollEl) resizeObserver?.observe(scrollEl);
 };
 
 onMounted(() => {
@@ -666,6 +598,7 @@ watch(
     if (roomIds.length > 0) {
       chatStore.loadProfilesForRoomIds(roomIds);
     }
+    reportVisibleRoomsSoon();
   },
   { immediate: true },
 );
@@ -686,6 +619,9 @@ watch(
 onUnmounted(() => {
   scrollEl?.removeEventListener("scroll", onScrollerScroll);
   longPressCache.clear();
+  if (reportVisibleTimer) { clearTimeout(reportVisibleTimer); reportVisibleTimer = null; }
+  resizeObserver?.disconnect();
+  chatStore.releaseVisibleSidebarRooms(visibleRowsOwner, "unmounted");
 });
 
 // Context menu
@@ -849,8 +785,16 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
          The "no conversations" hint is authoritative only when the whole list is empty
          after a real SYNCING sync (isRoomListAuthoritativeEmpty) OR when this specific
          tab is empty while other tabs have rooms (sortedRooms.length > 0). -->
+    <!-- First sync not landed and Dexie holds no rooms: ChatSidebar skips its own
+         skeleton once channels are cached, so a room tab (personal, groups) would
+         render blank. Show the loader here until rooms arrive or empty is accepted. -->
+    <RoomListSkeleton
+      v-if="filteredRooms.length === 0 && chatStore.isRoomListLoading"
+      :first-load="true"
+      :slow="chatStore.isRoomListLoadingSlow"
+    />
     <div
-      v-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
+      v-else-if="filteredRooms.length === 0 && (chatStore.sortedRooms.length > 0 || chatStore.isRoomListAuthoritativeEmpty)"
       class="flex flex-col items-center gap-3 px-6 py-12 text-center"
     >
       <div class="flex h-14 w-14 items-center justify-center rounded-full bg-neutral-grad-0">
@@ -861,16 +805,27 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
       <p class="text-sm text-text-on-main-bg-color">{{ t("contactList.noConversations") }}</p>
     </div>
 
+    <!-- "all" with cached channels but no rooms yet: channels render, chats still
+         come with the first sync — keep the loading header above the channels. -->
+    <RoomListSkeleton
+      v-if="filteredRooms.length > 0 && chatStore.isRoomListLoading"
+      :first-load="true"
+      :slow="chatStore.isRoomListLoadingSlow"
+      :rows="0"
+      class="shrink-0"
+    />
     <RecycleScroller
       v-if="filteredRooms.length > 0"
       ref="scrollerRef"
-      :items="filteredRooms"
+      :items="scrollerItems"
       :item-size="ITEM_HEIGHT"
       :style="{ '--recycle-item-size': `${ITEM_HEIGHT}px` }"
       key-field="_key"
-      class="h-full"
+      class="min-h-0 flex-1"
     >
-      <template #default="{ item }">
+      <template #default="{ item: viewItem }">
+      <!-- The scroller's item can be stale (scrollerItems); bind the live row as `item`. -->
+      <template v-for="item in [liveItem(viewItem)]">
         <!-- Channel item (same layout as chat room) -->
         <button
           v-if="isChannel(item)"
@@ -1077,6 +1032,7 @@ const onRoomContextMenu = (e: MouseEvent, room: ChatRoom) => {
             </div>
           </div>
         </button>
+      </template>
       </template>
     </RecycleScroller>
 

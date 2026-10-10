@@ -125,12 +125,15 @@ const DEFERRED_RECOVERY_SETTLE_MS = 1_000;
  * @param userId  Bastyon hex address (used to namespace the DB: `bastyon-chat-{userId}`)
  * @param getRoomCrypto  Function to get Pcrypto room instance for encryption
  * @param onChange  Optional callback invoked when a room's data changes
+ * @param preloadKeysFn  Optional: starts one batched key load for these
+ *   addresses; the decryption worker calls it before each tick's decrypts
  */
 export function initChatDb(
   userId: string,
   getRoomCrypto: (roomId: string) => Promise<PcryptoRoomInstance | undefined>,
   onChange?: (roomId: string) => void,
   fetchPreviewFn?: (url: string) => Promise<import("@/entities/chat/model/types").LinkPreview | null>,
+  preloadKeysFn?: (addresses: string[]) => void,
 ): ChatDbKit {
   // If same user, return existing kit
   if (currentKit && currentUserId === userId) {
@@ -160,8 +163,11 @@ export function initChatDb(
   const decryptionWorker = new DecryptionWorker(db, async (roomId: string) => {
     const crypto = await getRoomCrypto(roomId);
     if (!crypto) return undefined;
-    return { decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>) };
-  }, rooms, fetchRawEventFromServer);
+    return {
+      decryptEvent: (raw: unknown) => crypto.decryptEvent(raw as Record<string, unknown>),
+      getKeysLoadState: () => crypto.getKeysLoadState?.() ?? "idle",
+    };
+  }, rooms, fetchRawEventFromServer, preloadKeysFn);
 
   // --- Event-driven decryption retry triggers ---
   const debouncedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();

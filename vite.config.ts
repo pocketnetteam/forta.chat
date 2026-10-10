@@ -6,6 +6,7 @@ import AutoImport from "unplugin-auto-import/vite";
 import Components from "unplugin-vue-components/vite";
 import { defineConfig } from "vite";
 import { downlevelForOldWebView } from "./scripts/lib/downlevel-public-js.mjs";
+import { manualChunks } from "./scripts/lib/vite-manual-chunks.mjs";
 
 // public/js holds the Bastyon SDK, which Vite copies verbatim. Lower its syntax
 // to the bundle's chrome60 target in every `vite build` (Android, iOS, Electron
@@ -41,11 +42,20 @@ export default defineConfig({
   base: "./",
   test: {
     globals: true,
-    environment: "happy-dom",
+    // Building a happy-dom window costs ~0.7 s per file, so files run in plain
+    // Node by default. A file that needs browser APIs (document, window,
+    // localStorage, location, @vue/test-utils mount) opts in with a first line
+    // `// @vitest-environment happy-dom`.
+    environment: "node",
     include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
     setupFiles: ["./src/test-setup.ts"],
-    // Prevent cross-file mock/timer pollution (call-service, sync-engine races).
-    fileParallelism: false,
+    // Files run in parallel, each in its own forked process (isolate is on),
+    // so mocks and fake timers cannot leak between files.
+    // Many tests `await import()` a heavy module graph (chat-store, call-service,
+    // .vue components) inside the test or hook. A cold import under parallel
+    // load can take several seconds, so the defaults (5 s / 10 s) flake.
+    testTimeout: 15_000,
+    hookTimeout: 30_000,
     // entities/local-ai's tests construct a real `local-ai` LocalAiClient
     // against `local-ai/adapters/node-testing`'s NodeSqliteAdapter (node:sqlite),
     // which is still experimental on Node 22 — mirrors local-ai's own
@@ -63,6 +73,20 @@ export default defineConfig({
   },
   plugins: [
     vue(),
+    // Tests import Node CLI scripts (scripts/*.mjs) that start with
+    // `#!/usr/bin/env node`. Vitest's transform puts its import-interop lines
+    // above the shebang, and the module no longer parses ("Invalid character
+    // `!`"). Turn the shebang into a comment — same line count, so stack
+    // traces keep their line numbers. Test runs only; builds never see it.
+    {
+      name: "test-strip-shebang",
+      enforce: "pre",
+      apply: () => !!process.env.VITEST,
+      transform(code, id) {
+        if (!code.startsWith("#!") || !/\.[cm]?js$/.test(id.split("?")[0])) return null;
+        return { code: `//${code.slice(2)}`, map: null };
+      },
+    },
     // Strip `crossorigin` from HTML — breaks Electron's file:// protocol
     {
       name: "strip-crossorigin",
@@ -131,12 +155,7 @@ export default defineConfig({
     },
     rollupOptions: {
       output: {
-        manualChunks(id) {
-          if (id.includes("matrix-js-sdk") || id.includes("@matrix-org")) return "matrix";
-          if (id.includes("node_modules/vue") || id.includes("vue-router") || id.includes("pinia")) return "vue-core";
-          if (id.includes("vue-virtual-scroller")) return "virtual-scroller";
-          if (id.includes("node_modules/buffer") || id.includes("stream-browserify") || id.includes("pbkdf2") || id.includes("create-hash") || id.includes("bn.js")) return "crypto-polyfills";
-        },
+        manualChunks,
       },
     },
     chunkSizeWarningLimit: 800,

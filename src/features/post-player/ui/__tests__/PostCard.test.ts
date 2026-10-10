@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
@@ -48,6 +49,9 @@ vi.mock("@/shared/lib/image-url", () => ({
   normalizePocketnetImageUrl: (x: string) => x,
 }));
 
+const { openExternalUrl } = vi.hoisted(() => ({ openExternalUrl: vi.fn() }));
+vi.mock("@/shared/lib/open-external-url", () => ({ openExternalUrl }));
+
 vi.stubGlobal("useI18n", () => ({ t: (k: string) => k }));
 
 import PostCard from "../PostCard.vue";
@@ -73,6 +77,7 @@ const stubs = {
   PostPlayerModal: true,
   DonateModal: true,
   PostCard: true,
+  CommentPreview: true,
 };
 
 function mountCard() {
@@ -166,6 +171,18 @@ describe("PostCard unresolved repost fallback (WEE-101)", () => {
     expect(w.find("button").exists()).toBe(false);
   });
 
+  it("fallback-ссылка ведёт на https://bastyon.com и открывается через openExternalUrl", async () => {
+    openExternalUrl.mockReset();
+    getCachedPost.mockReturnValue(emptyRepostWrapper);
+    const w = mountCard();
+    await flushPromises();
+
+    const link = w.find("a");
+    expect(link.attributes("href")).toBe("https://bastyon.com/post?s=tx123");
+    await link.trigger("click");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://bastyon.com/post?s=tx123");
+  });
+
   it("обёртка с разрешённым repost рендерит вложенный PostCard, а не fallback", async () => {
     getCachedPost.mockReturnValue({
       ...emptyRepostWrapper,
@@ -244,5 +261,178 @@ describe("PostCard channel feed video expand (WEE-74)", () => {
 
     // Playback is routed to the modal instead of embedding in the feed.
     expect(w.findComponent({ name: "PostPlayerModal" }).exists()).toBe(true);
+  });
+});
+
+describe("PostCard message links", () => {
+  const textPost: BastyonPostData = {
+    ...videoPost,
+    url: "",
+    caption: "",
+    message: "Details at https://example.com/article and more",
+  };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockVideoInfo = null;
+    openExternalUrl.mockReset();
+    getCachedPost.mockReturnValue(textPost);
+  });
+
+  it("renders URLs in the post text as highlighted links", async () => {
+    const w = mountCard();
+    await flushPromises();
+    const link = w.find('a[href="https://example.com/article"]');
+    expect(link.exists()).toBe(true);
+    expect(link.text()).toBe("https://example.com/article");
+    expect(w.text()).toContain("Details at");
+    expect(w.text()).toContain("and more");
+  });
+
+  it("opens the link externally and does not bubble to the bubble/card", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const onParentClick = vi.fn();
+    host.addEventListener("click", onParentClick);
+    const w = mount(PostCard, {
+      props: { txid: "tx123", isOwn: false },
+      global: { stubs },
+      attachTo: host,
+    });
+    await flushPromises();
+    await w.find('a[href="https://example.com/article"]').trigger("click");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/article");
+    expect(onParentClick).not.toHaveBeenCalled();
+    w.unmount();
+    host.remove();
+  });
+
+  it("keeps the full href when the preview truncates through a link", async () => {
+    const longUrl = `https://example.com/${"a".repeat(300)}`;
+    getCachedPost.mockReturnValue({ ...textPost, message: `x ${longUrl}` });
+    const w = mountCard();
+    await flushPromises();
+    const link = w.find("a[href^='https://example.com/']");
+    expect(link.attributes("href")).toBe(longUrl);
+    expect(link.text().endsWith("...")).toBe(true);
+  });
+});
+
+describe("PostCard comment link and repost frame", () => {
+  const textPost: BastyonPostData = { ...videoPost, url: "", caption: "Title", message: "text" };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockVideoInfo = null;
+    getCachedPost.mockReturnValue(textPost);
+  });
+
+  afterEach(() => {
+    getCachedPost.mockReturnValue(null);
+  });
+
+  it("a comment link shows the comment and a 'go to comment' button instead of 'open post'", async () => {
+    const w = mount(PostCard, {
+      props: { txid: "tx123", isOwn: false, initialCommentId: "c".repeat(64) },
+      global: { stubs },
+    });
+    await flushPromises();
+
+    expect(w.findComponent({ name: "CommentPreview" }).props("commentId")).toBe("c".repeat(64));
+    const buttons = w.findAll("button").map((b) => b.text());
+    expect(buttons).toContain("Go to comment");
+    expect(buttons).not.toContain("Open");
+  });
+
+  it("a plain post link keeps 'open post' and no comment block", async () => {
+    const w = mountCard();
+    await flushPromises();
+
+    expect(w.findComponent({ name: "CommentPreview" }).exists()).toBe(false);
+    expect(w.findAll("button").map((b) => b.text())).toContain("Open");
+  });
+
+  it("a repost nests the original as an embedded card without an extra frame around it", async () => {
+    getCachedPost.mockReturnValue({ ...textPost, repost: { ...textPost, txid: "orig456" } });
+    const w = mountCard();
+    await flushPromises();
+
+    const nested = w.find("post-card-stub");
+    expect(nested.attributes("txid")).toBe("orig456");
+    expect(nested.attributes()).toHaveProperty("embedded");
+    expect(nested.element.parentElement?.className).not.toMatch(/border/);
+  });
+
+  it("an embedded card fills its parent instead of the fixed bubble width", async () => {
+    const w = mount(PostCard, { props: { txid: "tx123", isOwn: false, embedded: true }, global: { stubs } });
+    await flushPromises();
+
+    const classes = w.find(".post-card").classes();
+    expect(classes).toContain("w-full");
+    expect(classes).not.toContain("my-1.5");
+  });
+});
+
+describe("PostCard image gallery", () => {
+  const imagePost: BastyonPostData = {
+    ...videoPost,
+    url: "",
+    caption: "Photos",
+    images: ["one.jpg", "two.jpg", "three.jpg"],
+  };
+  const galleryStubs = { ...stubs, PostImageGallery: true };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockVideoInfo = null;
+    getCachedPost.mockReturnValue(imagePost);
+  });
+
+  afterEach(() => {
+    getCachedPost.mockReturnValue(null);
+  });
+
+  it("tapping the image opens the gallery with all of the post's images", async () => {
+    const w = mount(PostCard, { props: { txid: "tx123", isOwn: false }, global: { stubs: galleryStubs } });
+    await flushPromises();
+
+    expect(w.findComponent({ name: "PostImageGallery" }).exists()).toBe(false);
+    await w.find("[data-testid='post-card-image']").trigger("click");
+
+    const gallery = w.findComponent({ name: "PostImageGallery" });
+    expect(gallery.exists()).toBe(true);
+    expect(gallery.props("images")).toEqual(["one.jpg", "two.jpg", "three.jpg"]);
+
+    gallery.vm.$emit("close");
+    await flushPromises();
+    expect(w.findComponent({ name: "PostImageGallery" }).exists()).toBe(false);
+  });
+
+  it("the image tap does not bubble to the message bubble", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const onParentClick = vi.fn();
+    host.addEventListener("click", onParentClick);
+    const w = mount(PostCard, {
+      props: { txid: "tx123", isOwn: false },
+      global: { stubs: galleryStubs },
+      attachTo: host,
+    });
+    await flushPromises();
+    await w.find("[data-testid='post-card-image']").trigger("click");
+    expect(onParentClick).not.toHaveBeenCalled();
+    w.unmount();
+    host.remove();
+  });
+
+  it("shows the image count badge only for multi-image posts", async () => {
+    const multi = mountCard();
+    await flushPromises();
+    expect(multi.find("[data-testid='post-card-image']").text()).toContain("3");
+
+    getCachedPost.mockReturnValue({ ...imagePost, images: ["one.jpg"] });
+    const single = mountCard();
+    await flushPromises();
+    expect(single.find("[data-testid='post-card-image']").text()).toBe("");
   });
 });

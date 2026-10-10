@@ -4,6 +4,7 @@ import type { MessageRepository } from "./message-repository";
 import type { RoomRepository } from "./room-repository";
 import { getMatrixClientService } from "@/entities/matrix";
 import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
+import { buildTransferMessageBody } from "@/shared/lib/bastyon-link";
 import { withTimeout } from "@/shared/lib/with-timeout";
 
 type GetRoomCryptoFn = (roomId: string) => Promise<PcryptoRoomInstance | undefined>;
@@ -580,6 +581,13 @@ export class SyncEngine {
           this.kickScheduler(0);
         });
       }
+    } catch (e) {
+      // processTick runs from a bare setTimeout, so a rejection here would be
+      // unhandled. The DB closing mid-claim (logout, dispose) is expected; any
+      // other failure leaves the ops queued for the watchdog to re-kick.
+      if (!this.disposed && !isDbClosedError(e)) {
+        console.warn("[SyncEngine] queue tick failed:", e);
+      }
     } finally {
       this.processing = false;
       if (this.online && !this.disposed) {
@@ -853,6 +861,8 @@ export class SyncEngine {
     };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
+    // Recipients are decided from the member list — complete it first (lazy-loaded members).
+    await roomCrypto?.ensureMembers?.();
 
     let serverEventId: string;
     if (roomCrypto?.canBeEncrypt()) {
@@ -961,6 +971,8 @@ export class SyncEngine {
 
       // --- Phase 1: encrypt (fast, fails loudly) ----------------------------
       const roomCrypto = await this.getRoomCrypto(op.roomId);
+      // Recipients are decided from the member list — complete it first (lazy-loaded members).
+      await roomCrypto?.ensureMembers?.();
       let fileToUpload: Blob = attachment.localBlob;
       let secrets: Record<string, unknown> | undefined;
 
@@ -995,6 +1007,9 @@ export class SyncEngine {
       // whole upload phase (including in-attempt retries) rather than being
       // reset between attempts — protects against a runaway 4×4-min loop on
       // a flaky link.
+      // withTimeout does not cancel what it races: abort the upload when the
+      // deadline fires, or the XHR goes on sending in the background and its
+      // progress writes land on a message already marked failed.
       const url = await withTimeout(
         uploadWithRetry(
           () =>
@@ -1007,7 +1022,10 @@ export class SyncEngine {
         ),
         MEDIA_UPLOAD_TIMEOUT_MS,
         "Media upload",
-      );
+      ).catch((e: unknown) => {
+        if (!controller.signal.aborted) controller.abort();
+        throw e;
+      });
 
       await this.db.attachments.update(attachment.id!, {
         status: "uploaded",
@@ -1123,6 +1141,8 @@ export class SyncEngine {
     const payload = op.payload as { eventId: string; newContent: string };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
+    // Recipients are decided from the member list — complete it first (lazy-loaded members).
+    await roomCrypto?.ensureMembers?.();
 
     let content: Record<string, unknown>;
     if (roomCrypto?.canBeEncrypt()) {
@@ -1224,16 +1244,13 @@ export class SyncEngine {
     };
     const matrixService = getMatrixClientService();
     const roomCrypto = await this.getRoomCrypto(op.roomId);
+    // Recipients are decided from the member list — complete it first (lazy-loaded members).
+    await roomCrypto?.ensureMembers?.();
 
-    // Encode transfer as JSON body (same format as use-messages.ts)
-    const transferBody = JSON.stringify({
-      _transfer: true,
-      txId: payload.txId,
-      amount: payload.amount,
-      from: payload.from,
-      to: payload.to,
-      message: payload.message,
-    });
+    // New sends go out as plain text (use-messages → send_message); this op
+    // only drains transfers queued by an older build. Send them the same way:
+    // the Bastyon stx link, verified from the chain by every receiver.
+    const transferBody = buildTransferMessageBody(payload.txId, payload.message);
 
     // Transfers MUST dedupe on retry — a double-send here would mean a
     // duplicate tip bubble for the recipient. Pass clientId as the Matrix

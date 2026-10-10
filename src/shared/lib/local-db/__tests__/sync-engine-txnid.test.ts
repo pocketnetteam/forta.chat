@@ -277,8 +277,10 @@ describe("SyncEngine txnId propagation (regression)", () => {
     await waitForProcessed(h.db);
 
     expect(mockMatrix.sendText).toHaveBeenCalledTimes(1);
-    const [, , txnId] = mockMatrix.sendText.mock.calls[0];
+    const [, body, txnId] = mockMatrix.sendText.mock.calls[0];
     expect(txnId).toBe("cli_xfer_plain_1");
+    // A transfer queued by an older build drains as the stx link, not JSON.
+    expect(body).toBe("bastyon://i?stx=def456");
     // And nothing leaked to the encrypted path
     expect(mockMatrix.sendEncryptedText).not.toHaveBeenCalled();
   });

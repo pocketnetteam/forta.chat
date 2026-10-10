@@ -29,10 +29,10 @@ Detail reference for [AGENTS.md](../../AGENTS.md). Versions are ranges from `pac
 - `matrix-js-sdk-bastyon` ^23.2.5: Matrix client (Bastyon fork)
 - Capacitor plugins: camera, filesystem, share, push/local notifications, haptics, app, status-bar, keyboard, network, device
 - `@capgo/capacitor-share-target`, `@capgo/capacitor-incoming-call-kit`, `@capacitor-community/sqlite`, `@capacitor-community/safe-area`
-- Crypto: `@noble/secp256k1`, `miscreant`, `pbkdf2`, `bn.js`, `create-hash`
+- Crypto: `@noble/secp256k1`, `miscreant`, `pbkdf2`, `bn.js`, `create-hash`; `underscore` in `matrix-crypto.ts` for every ordering step that feeds key derivation (same library as bastyon-chat `pcrypto.js`, so sort/uniq/iteration semantics match exactly)
 - UI/media: `emoji-kitchen-mart`, `virtua`, `vue-virtual-scroller`, `heic2any`, `audio-recorder-polyfill`, `file-saver`
 - Tor: `socks-proxy-agent`; forms: `vee-validate` + `@vee-validate/zod` + `zod`
-- Local AI (optional/native): `local-ai` (file dep), `llama-cpp-pro`
+- Local AI (optional/native): `local-ai` (git dependency `maxgithubprofile/local-ai`, pinned commit), `llama-cpp-pro` (git dependency, fork `j-bitmaker/llama-cpp-pro`, tag `v0.2.4-local-ai.2`)
 
 ## Configuration
 

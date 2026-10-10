@@ -32,4 +32,16 @@ describe("reply quotes wait for the original to decrypt (audit S1-04)", () => {
     const after = body.slice(decrypt, decrypt + 400);
     expect(after).toMatch(/catch \{[\s\S]*return;/);
   });
+
+  // Merge of S1-04 with the once-per-session refetch guard: marking the event
+  // fetched before decrypting it left an undecryptable original out of every
+  // later pass, so its quote stayed "[encrypted]" for the whole session.
+  it("marks a fetched original as done only after it decrypts", () => {
+    const fetch = body.indexOf("await matrixService.client!.fetchRoomEvent(roomId, eventId)");
+    const decrypt = body.indexOf("await roomCrypto.decryptEvent(raw", fetch);
+    expect(fetch).toBeGreaterThan(-1);
+    expect(body.slice(fetch, decrypt)).not.toMatch(/replyFetchAttempted\.add\(eventId\);\s*\n\s*if \(!raw\) return;/);
+    const doneAfterDecrypt = body.indexOf("replyFetchAttempted.add(eventId)", decrypt);
+    expect(doneAfterDecrypt).toBeGreaterThan(decrypt);
+  });
 });

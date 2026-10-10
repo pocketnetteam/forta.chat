@@ -5,6 +5,12 @@ function isMediaFile(file: File): boolean {
   return file.type.startsWith("image/") || file.type.startsWith("video/");
 }
 
+function isRichTextClipboard(data: DataTransfer): boolean {
+  const types = Array.from(data.types);
+  const hasRichText = types.includes("text/html") || types.includes("text/rtf");
+  return hasRichText && data.getData("text/plain").trim().length > 0;
+}
+
 export function usePasteDrop(options: {
   onMediaFiles: (files: File[]) => void;
   onOtherFiles: (files: File[]) => void;
@@ -24,8 +30,13 @@ export function usePasteDrop(options: {
   };
 
   const handlePaste = (event: ClipboardEvent) => {
-    const files = event.clipboardData?.files;
-    if (!files || files.length === 0) return;
+    const data = event.clipboardData;
+    const files = data?.files;
+    if (!data || !files || files.length === 0) return;
+    // Office apps (Excel, Word, LibreOffice) put a bitmap preview of the
+    // selection next to the text. Rich text + plain text means the user copied
+    // text, so let the textarea paste it instead of attaching the preview.
+    if (isRichTextClipboard(data)) return;
     event.preventDefault();
     classifyAndRoute(files);
   };

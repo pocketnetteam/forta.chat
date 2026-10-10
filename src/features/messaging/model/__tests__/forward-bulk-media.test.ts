@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Bulk forward — selecting multiple media + text messages and forwarding
  * them must produce per-type events on the target side: m.image for images,

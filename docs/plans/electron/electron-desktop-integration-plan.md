@@ -5,7 +5,7 @@
 **Стек:** Vue 3 + Vite + Electron 40 + electron-builder 26  
 **Связанные документы:**
 - [tor/forta-chat-tor-integration-plan.md](../tor/forta-chat-tor-integration-plan.md) — Tor в Electron (proxy16, SW fetch bridge)
-- [2026-03-19-capacitor-mobile-app-design.md](../2026-03-19-capacitor-mobile-app-design.md) — platform abstraction (`isElectron` / `isNative` / `isWeb`)
+- `docs/plans/2026-03-19-capacitor-mobile-app-design.md` (удалён, см. `docs/plans/README.md`) — platform abstraction (`isElectron` / `isNative` / `isWeb`)
 
 ---
 

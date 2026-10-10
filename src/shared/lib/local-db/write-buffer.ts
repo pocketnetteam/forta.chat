@@ -47,6 +47,8 @@ export class WriteBuffer<T = BufferedWrite> {
    *  `requeuedHead` items there belong to it and any batch chained behind it. */
   private retryPending = false;
   private requeuedHead = 0;
+  /** Batches taken off the buffer whose onFlush has not finished yet. */
+  private readonly flushing = new Set<T[]>();
 
   constructor(
     private readonly onFlush: FlushCallback<T>,
@@ -74,6 +76,16 @@ export class WriteBuffer<T = BufferedWrite> {
         void this.flush();
       }, this.delayMs);
     }
+  }
+
+  /** True if any item not yet committed matches `predicate` — still
+   *  buffered, or in a flush that is running or queued. */
+  hasPending(predicate: (item: T) => boolean): boolean {
+    if (this.buffer.some(predicate)) return true;
+    for (const batch of this.flushing) {
+      if (batch.some(predicate)) return true;
+    }
+    return false;
   }
 
   /** Immediately drain the buffer (returns when flush completes — including
@@ -107,6 +119,7 @@ export class WriteBuffer<T = BufferedWrite> {
     this.buffer = [];
     this.retryPending = false;
     this.requeuedHead = 0;
+    this.flushing.add(items);
 
     // Chain on any in-flight flush so batches commit in enqueue order.
     const prev = this.inFlight ?? Promise.resolve();
@@ -116,6 +129,9 @@ export class WriteBuffer<T = BufferedWrite> {
       if (this.retryPending) {
         this.buffer.splice(this.requeuedHead, 0, ...items);
         this.requeuedHead += items.length;
+        // Back in the buffer, so hasPending() still sees them; a stale batch
+        // left in `flushing` would report them pending forever.
+        this.flushing.delete(items);
         return;
       }
       try {
@@ -134,6 +150,8 @@ export class WriteBuffer<T = BufferedWrite> {
           console.error(`[WriteBuffer] flush failed, dropping ${items.length} item(s):`, err);
           this.failures = 0;
         }
+      } finally {
+        this.flushing.delete(items);
       }
     });
     this.inFlight = run;

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // A mutable flag behind a getter, rather than `doMock` + `resetModules` +

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * Regression: two Matrix clients synced side by side after a slow start. connectMatrixWithRetry gives each
  * init() 45 s, and a timeout does not stop the attempt: its login kept waiting, the retry started a client,
@@ -72,6 +73,8 @@ function service(): MatrixClientService {
 describe("MatrixClientService — a superseded init() does not start its own client", () => {
   beforeEach(() => {
     created.length = 0;
+    // A login caches the session; each case must start from a cold boot.
+    localStorage.clear();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
@@ -202,6 +205,8 @@ describe("MatrixClientService — rejected access token (audit S3b-02)", () => {
 describe("MatrixClientService — init() retried while the homeserver is unreachable", () => {
   beforeEach(() => {
     created.length = 0;
+    // A cached session from an earlier test skips /login and makes the client ready.
+    localStorage.clear();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});

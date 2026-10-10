@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, inject, type Ref, ref } from "vue";
 import { Capacitor } from "@capacitor/core";
-import { parseMessage, applyLocalAlias } from "@/shared/lib/message-format";
+import { parseMessage, applyLocalAlias, isBlockSegment } from "@/shared/lib/message-format";
 import type { Segment } from "@/shared/lib/message-format";
 import { PostCard } from "@/features/post-player";
+import { CollectionCard } from "@/features/collection-preview";
+import { ProfileLinkCard, RoomLinkCard, TransactionLinkCard } from "@/features/bastyon-link-preview";
+import { isBastyonBlockUrl } from "@/shared/lib/bastyon-link";
 import { splitByQuery, type TextPart } from "@/shared/lib/utils/highlight";
 import type { LinkPreview } from "@/entities/chat";
 import { useChatStore } from "@/entities/chat";
@@ -32,8 +35,19 @@ const segments = computed<Segment[]>(() =>
 );
 const activeQuery = computed(() => searchQuery.value?.trim() ?? "");
 
-/** Inline segments (text, link, mention) vs block segments (bastyonLink) */
-const hasBlockSegments = computed(() => segments.value.some(s => s.type === "bastyonLink"));
+/** Accent-coloured links vanish on the accent-coloured own bubble. */
+const linkColorClass = computed(() => (props.isOwn ? "text-chat-link-own" : "text-color-txt-ac"));
+
+/** Inline segments (text, link, mention) vs block segments (Bastyon cards) */
+const hasBlockSegments = computed(() => segments.value.some(isBlockSegment));
+
+/** An OG preview of a Bastyon link would duplicate its block card */
+const visibleLinkPreview = computed(() => {
+  const preview = props.linkPreview;
+  if (!preview) return null;
+  if (hasBlockSegments.value && isBastyonBlockUrl(preview.url)) return null;
+  return preview;
+});
 
 // Capacitor Android WebView treats `<a target="_blank">` as a no-op (there is
 // no concept of a new tab), so a plain anchor leaves the user stuck. Intercept
@@ -79,12 +93,14 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
         v-else-if="seg.type === 'link'"
         :href="seg.href"
         rel="noopener noreferrer"
-        class="text-color-txt-ac underline hover:no-underline"
+        class="underline hover:no-underline"
+        :class="linkColorClass"
         @click="handleLinkClick($event, seg.href)"
       >{{ seg.content }}</a>
       <span
         v-else-if="seg.type === 'mention'"
-        class="cursor-pointer font-medium text-color-txt-ac"
+        class="cursor-pointer font-medium"
+        :class="linkColorClass"
         @click.stop="emit('mentionClick', seg.userId)"
       >{{ seg.content }}</span>
       <PostCard
@@ -93,8 +109,30 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
         :is-own="props.isOwn"
         :initial-comment-id="seg.commentId"
       />
+      <CollectionCard
+        v-else-if="seg.type === 'bastyonCollection'"
+        :txid="seg.txid"
+        :is-own="props.isOwn"
+      />
+      <ProfileLinkCard
+        v-else-if="seg.type === 'bastyonProfile'"
+        :href="seg.href"
+        :name="seg.name"
+        :address="seg.address"
+        :is-own="props.isOwn"
+      />
+      <RoomLinkCard
+        v-else-if="seg.type === 'bastyonRoom'"
+        :room-id="seg.roomId"
+        :is-own="props.isOwn"
+      />
+      <TransactionLinkCard
+        v-else-if="seg.type === 'bastyonTransaction'"
+        :txid="seg.txid"
+        :is-own="props.isOwn"
+      />
     </template>
-    <LinkPreviewCard v-if="props.linkPreview" :preview="props.linkPreview" :is-own="props.isOwn" />
+    <LinkPreviewCard v-if="visibleLinkPreview" :preview="visibleLinkPreview" :is-own="props.isOwn" />
   </div>
 
   <!-- Default: pure inline content (no block embeds) -->
@@ -114,12 +152,14 @@ async function handleLinkClick(event: MouseEvent, href: string): Promise<void> {
           v-else-if="seg.type === 'link'"
           :href="seg.href"
           rel="noopener noreferrer"
-          class="text-color-txt-ac underline hover:no-underline"
+          class="underline hover:no-underline"
+        :class="linkColorClass"
           @click="handleLinkClick($event, seg.href)"
         >{{ seg.content }}</a>
         <span
           v-else-if="seg.type === 'mention'"
-          class="cursor-pointer font-medium text-color-txt-ac"
+          class="cursor-pointer font-medium"
+        :class="linkColorClass"
           @click.stop="emit('mentionClick', seg.userId)"
         >{{ seg.content }}</span>
       </template>

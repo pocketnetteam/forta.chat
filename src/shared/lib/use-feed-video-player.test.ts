@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ref, effectScope, type EffectScope } from "vue";
 import { useFeedVideoPlayer, _resetActivePlayer, FEED_VIDEO_LOAD_TIMEOUT_MS } from "./use-feed-video-player";

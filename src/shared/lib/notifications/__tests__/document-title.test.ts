@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { formatAppDocumentTitle, applyAppDocumentTitle } from "../document-title";
 

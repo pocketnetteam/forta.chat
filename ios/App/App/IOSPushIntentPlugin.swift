@@ -87,6 +87,11 @@ public class IOSPushIntentPlugin: CAPPlugin {
         call.resolve()
     }
 
+    /// JS reads native's copy when WebView storage lost its own (C05).
+    @objc func getIncomingCallsEnabled(_ call: CAPPluginCall) {
+        call.resolve(["enabled": IncomingCallsSetting.isEnabled])
+    }
+
     @objc func getPendingIntent(_ call: CAPPluginCall) {
         let p = pendingTap ?? [:]
         pendingTap = nil
@@ -111,6 +116,17 @@ public class IOSPushIntentPlugin: CAPPlugin {
             return
         }
         SharedDataStore.cacheRoomNames(rooms)
+        call.resolve()
+    }
+
+    /// roomId -> isGroup, mirrored from Dexie so the NSE can mark a push as
+    /// coming from a group chat (the APNs payload has no such field).
+    @objc func cacheGroupRooms(_ call: CAPPluginCall) {
+        guard let rooms = call.getObject("rooms") as? [String: Bool] else {
+            call.reject("rooms must be an object of roomId -> isGroup booleans")
+            return
+        }
+        SharedDataStore.cacheGroupRooms(rooms)
         call.resolve()
     }
 

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { APP_NAME } from "@/shared/config";
 import { useLocalStorage } from "./use-local-storage";

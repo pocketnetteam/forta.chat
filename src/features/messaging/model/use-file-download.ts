@@ -21,7 +21,7 @@ import { runFileDecrypt } from "./decrypt-queue";
 import { createSemaphore } from "@/shared/lib/semaphore";
 import { getMediaCache, type MediaCacheCategory } from "@/shared/lib/media-cache";
 import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
-import { MessageType, MessageStatus } from "@/entities/chat";
+import { MessageType, MessageStatus, useChatStore } from "@/entities/chat";
 import { getChatDb, isChatDbReady } from "@/shared/lib/local-db";
 import {
   downloadMediaViaTorFile,
@@ -637,6 +637,12 @@ async function downloadAndDecrypt(
         const roomCrypto = await waitForRoomCrypto(
           roomId,
           () => authStore.pcrypto?.rooms[roomId] as PcryptoRoomInstance | undefined,
+          undefined,
+          // Register the room ourselves rather than waiting for someone else
+          // to do it. Observing `pcrypto.rooms` alone deadlocked whenever the
+          // SDK had not materialized the room: no other caller was on the way,
+          // so the poll ran its full budget and threw every single time.
+          () => useChatStore().ensureRoomCrypto(roomId),
         );
 
         // Build event-like object for decryptKey.

@@ -26,23 +26,33 @@ function bodyAfter(signature: RegExp): string {
   throw new Error(`unbalanced body after ${signature}`);
 }
 
+// Multi-line signatures; roomUnreadCount's default parameter has its own parentheses
+const ROOM_UNREAD_COUNT = /function roomUnreadCount\s*\([\s\S]*?\)\s*:\s*number\s*\{/;
+const READ_CALL_RULE_SINCES = /function readCallRuleSinces\s*\([^)]*\)[^{]*\{/;
+
 describe("chat-store: unread counts leave out peer call hangups", () => {
   it("matrixRoomToChatRoom reads its count through roomUnreadCount", () => {
-    const body = bodyAfter(/function matrixRoomToChatRoom\s*\([^)]*\)\s*:\s*ChatRoom\s*\{/);
-    expect(body).toContain("roomUnreadCount(room, myUserId)");
+    const body = bodyAfter(/function matrixRoomToChatRoom\s*\([\s\S]*?\)\s*:\s*ChatRoom\s*\{/);
+    expect(body).toContain("roomUnreadCount(room, myUserId, inputs?.callRules)");
     expect(body).not.toContain("getUnreadNotificationCount");
   });
 
   it("syncAllUnreadFromMatrix reads its count through roomUnreadCount", () => {
     const body = bodyAfter(/const syncAllUnreadFromMatrix = async \(\) => \{/);
-    expect(body).toContain("roomUnreadCount(mxRoom, myUserId)");
+    expect(body).toContain("roomUnreadCount(mxRoom, myUserId, callRules)");
     expect(body).not.toContain("getUnreadNotificationCount");
+    // The rule dates are read once before the loop, not per room
+    expect(body.indexOf("const callRules = readCallRuleSinces(myUserId)"))
+      .toBeLessThan(body.indexOf("for (const mxRoom of matrixRooms)"));
   });
 
   it("roomUnreadCount takes hangups out only while the rule is known", () => {
-    const body = bodyAfter(/function roomUnreadCount\s*\([^)]*\)\s*:\s*number\s*\{/);
+    const body = bodyAfter(ROOM_UNREAD_COUNT);
     expect(body).toContain('getUnreadNotificationCount?.("total")');
-    expect(body).toContain("callHangupRuleSince(");
+    expect(body).toContain("if (!callRules) return total;");
+    // The rule dates come from readCallRuleSinces (the default when not passed in)
+    expect(source).toMatch(/callRules: CallRuleSinces \| null = readCallRuleSinces\(myUserId\)/);
+    expect(bodyAfter(READ_CALL_RULE_SINCES)).toContain("callHangupRuleSince(");
     expect(body).toContain("unreadPeerHangupCount(");
     expect(body).toContain("unreadCountWithoutHangups(");
   });
@@ -50,7 +60,7 @@ describe("chat-store: unread counts leave out peer call hangups", () => {
   it("roomUnreadCount also counts the hangups a timeline gap hides from it", () => {
     // hburst1: three missed calls with JS dead, then the app opened — the live timeline held
     // one hangup of five and the badge went 2 → 9 instead of 2 → 5.
-    const body = bodyAfter(/function roomUnreadCount\s*\([^)]*\)\s*:\s*number\s*\{/);
+    const body = bodyAfter(ROOM_UNREAD_COUNT);
     expect(body).toContain("getReadReceiptForUserId?.(myUserId, true)");
     expect(body).toContain("getPaginationToken?.(");
     expect(body).toContain("hangupGapCounter.get(");
@@ -60,8 +70,8 @@ describe("chat-store: unread counts leave out peer call hangups", () => {
 
   it("roomUnreadCount takes the peer's select_answers out too, dated by their own rule", () => {
     // forta-bugs#809, variant A: every answered call adds one more to the server's count.
-    const body = bodyAfter(/function roomUnreadCount\s*\([^)]*\)\s*:\s*number\s*\{/);
-    expect(body).toContain("callSelectAnswerRuleSince(");
+    const body = bodyAfter(ROOM_UNREAD_COUNT);
+    expect(bodyAfter(READ_CALL_RULE_SINCES)).toContain("callSelectAnswerRuleSince(");
     // Both the live-timeline count and the gap count get it.
     expect(body.match(/^\s*selectAnswerSince,$/gm)?.length).toBe(2);
   });

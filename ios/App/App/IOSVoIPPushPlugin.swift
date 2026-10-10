@@ -30,4 +30,17 @@ public class IOSVoIPPushPlugin: CAPPlugin {
             call.resolve(["token": NSNull()])
         }
     }
+
+    /// JS answered `callId` and released its CallKit record to WebKit audio;
+    /// a repeated VoIP push for it must not ring again (C07).
+    @objc func markHandedOff(_ call: CAPPluginCall) {
+        guard let callId = call.getString("callId"), !callId.isEmpty else {
+            call.reject("callId required")
+            return
+        }
+        DispatchQueue.main.async {
+            VoIPPushCoordinator.shared.markHandedOff(callId)
+            call.resolve()
+        }
+    }
 }
