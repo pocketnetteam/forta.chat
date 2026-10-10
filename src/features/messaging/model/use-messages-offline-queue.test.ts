@@ -20,7 +20,7 @@ const online = ref(false);
 vi.mock("@/shared/lib/connectivity", () => ({ useConnectivity: vi.fn(() => ({ isOnline: online })) }));
 
 const matrix = { ready: true };
-const sendText = vi.fn<(roomId: string, text: string) => Promise<string>>(async () => "$server-event");
+const sendText = vi.fn<(roomId: string, text: string, txnId?: string) => Promise<string>>(async () => "$server-event");
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
     isReady: () => matrix.ready,
@@ -86,7 +86,7 @@ describe("legacy offline queue (audit S2-04)", () => {
     matrix.ready = true;
     auth.matrixReady = true;
     await nextTick();
-    await vi.waitFor(() => expect(sendText).toHaveBeenCalledWith(ROOM, "hello while offline"));
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledWith(ROOM, "hello while offline", expect.any(String)));
     await vi.waitFor(() => expect(getQueue()).toHaveLength(0));
     expect(statusOfLast()).toBe(MessageStatus.sent);
     scope.stop();
@@ -173,6 +173,77 @@ describe("legacy offline queue (audit S2-04)", () => {
     await new Promise((r) => setTimeout(r, 20));
 
     expect(sendText).toHaveBeenCalledTimes(1);
+    scope.stop();
+  });
+
+  // Review 2026-10-10: a send whose response was lost stays queued and goes
+  // out again; without the message's id as txnId the server got a duplicate.
+  it("sends with the message id as txnId so a repeat is deduped by the server", async () => {
+    const scope = effectScope();
+    const messaging = scope.run(() => useMessages())!;
+    await messaging.sendMessage("hello while offline");
+    const queuedId = getQueue()[0].id;
+
+    online.value = true;
+    await vi.waitFor(() => expect(getQueue()).toHaveLength(0));
+    expect(sendText).toHaveBeenCalledWith(ROOM, "hello while offline", queuedId);
+    scope.stop();
+  });
+
+  it("runs once more for a trigger that came while a drain was busy", async () => {
+    const scope = effectScope();
+    const messaging = scope.run(() => useMessages())!;
+    await messaging.sendMessage("first");
+    let fail: (e: Error) => void = () => {};
+    sendText.mockImplementationOnce(() => new Promise<string>((_r, rej) => { fail = rej; }));
+
+    online.value = true;
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+    // The network flaps while the first send hangs: this trigger must not be lost.
+    window.dispatchEvent(new Event("online"));
+    fail(new TypeError("Failed to fetch"));
+
+    await vi.waitFor(() => expect(getQueue()).toHaveLength(0));
+    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(statusOfLast()).toBe(MessageStatus.sent);
+    scope.stop();
+  });
+
+  it("keeps a send that hangs queued instead of holding the drain", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const scope = effectScope();
+      const messaging = scope.run(() => useMessages())!;
+      await messaging.sendMessage("hello while offline");
+      sendText.mockImplementationOnce(() => new Promise<string>(() => {}));
+
+      online.value = true;
+      await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(getQueue()).toHaveLength(1);
+      expect(statusOfLast()).toBe(MessageStatus.sending);
+
+      window.dispatchEvent(new Event("online"));
+      await vi.waitFor(() => expect(getQueue()).toHaveLength(0));
+      expect(statusOfLast()).toBe(MessageStatus.sent);
+      scope.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not drop the next queued message when the status update throws", async () => {
+    const scope = effectScope();
+    const messaging = scope.run(() => useMessages())!;
+    await messaging.sendMessage("first");
+    await messaging.sendMessage("second");
+    const store = useChatStore();
+    const spy = vi.spyOn(store, "updateMessageIdAndStatus").mockImplementationOnce(() => { throw new Error("store busy"); });
+
+    online.value = true;
+    await vi.waitFor(() => expect(getQueue()).toHaveLength(0));
+    expect(sendText.mock.calls.map((c) => c[1])).toEqual(["first", "second"]);
+    spy.mockRestore();
     scope.stop();
   });
 });

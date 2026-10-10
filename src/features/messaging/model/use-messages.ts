@@ -134,6 +134,21 @@ async function handleUploadCancelled(
  *  (MessageInput and MessageList each hold one) or another trigger — would
  *  send it again. */
 let draining = false;
+/** A drain trigger arrived while a drain was busy. */
+let drainAgain = false;
+
+/** A send from the legacy offline queue that hangs gives up after this and
+ *  stays queued; the same txnId keeps a late duplicate off the server. */
+const OFFLINE_QUEUE_SEND_TIMEOUT_MS = 30_000;
+
+/** Errors after which a queued message stays queued: the request never reached
+ *  the server, timed out, or an earlier attempt with its txnId is still in
+ *  flight in the SDK. */
+function isOfflineQueueSendTransient(e: unknown): boolean {
+  if (isNetworkBlocked(e)) return true;
+  const message = e instanceof Error ? e.message : String(e);
+  return /offline queue send timed out|known txnId/.test(message);
+}
 
 export function useMessages() {
   const chatStore = useChatStore();
@@ -301,52 +316,77 @@ export function useMessages() {
 
   /** Drain queued messages when coming back online or when Matrix is ready again. */
   const drainOfflineQueue = async () => {
-    if (draining) return;
+    if (draining) {
+      // A trigger while a drain is busy (the network flapped during a send)
+      // must not be lost: the busy drain runs once more.
+      drainAgain = true;
+      return;
+    }
     draining = true;
     try {
-      // One at a time, and only taken off the queue once it is sent or failed
-      // for good: taking it first lost it whenever the drain met a
-      // reconnecting client or a network that dropped again (audit S2-04).
-      // What stays queued goes out on the next drain.
-      while (isOnline.value) {
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) break;
-        const msg = getQueue()[0];
-        if (!msg) break;
-        try {
-          const roomCrypto = await getSendCrypto(msg.roomId);
-          let serverEventId: string;
-          if (roomCrypto?.canBeEncrypt()) {
-            const encrypted = await roomCrypto.encryptEvent(msg.content);
-            serverEventId = await matrixService.sendEncryptedText(msg.roomId, encrypted);
-          } else {
-            // Defense in depth: offline queue replay must not silently
-            // downgrade to plaintext if peer keys are gone by the time we
-            // come back online.
-            if (roomCrypto?.requiresEncryption()) {
-              throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — offline queue drain`);
-            }
-            serverEventId = await matrixService.sendText(msg.roomId, msg.content);
-          }
-          dequeue();
-          if (serverEventId) {
-            chatStore.updateMessageIdAndStatus(msg.roomId, msg.id, serverEventId, MessageStatus.sent);
-          } else {
-            chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.sent);
-          }
-        } catch (e) {
-          if (isNetworkBlocked(e)) {
-            // Never reached the server: it stays queued and "sending".
-            console.warn("[offline-queue] Network lost while sending, keeping the message queued:", e);
-            break;
-          }
-          console.error("[offline-queue] Failed to send queued message:", e);
-          dequeue();
-          chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.failed);
-        }
-      }
+      do {
+        drainAgain = false;
+        await drainOnce();
+      } while (drainAgain);
     } finally {
       draining = false;
+    }
+  };
+
+  /** One pass over the queue. A message leaves it only once it is sent or
+   *  refused for good: taking it first lost it whenever the drain met a
+   *  reconnecting client or a network that dropped again (audit S2-04). What
+   *  stays queued goes out on the next drain. */
+  const drainOnce = async () => {
+    while (isOnline.value) {
+      const matrixService = getMatrixClientService();
+      if (!matrixService.isReady()) return;
+      const msg = getQueue()[0];
+      if (!msg) return;
+      let serverEventId: string | undefined;
+      let outcome: "sent" | "keep" | "failed";
+      try {
+        // The message id is the txnId: a send whose response was lost goes
+        // out again and the server dedupes it.
+        const send = async (): Promise<string> => {
+          const roomCrypto = await getSendCrypto(msg.roomId);
+          if (roomCrypto?.canBeEncrypt()) {
+            const encrypted = await roomCrypto.encryptEvent(msg.content);
+            return matrixService.sendEncryptedText(msg.roomId, encrypted, msg.id);
+          }
+          // Defense in depth: offline queue replay must not silently
+          // downgrade to plaintext if peer keys are gone by the time we
+          // come back online.
+          if (roomCrypto?.requiresEncryption()) {
+            throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — offline queue drain`);
+          }
+          return matrixService.sendText(msg.roomId, msg.content, msg.id);
+        };
+        serverEventId = await withTimeout(send(), OFFLINE_QUEUE_SEND_TIMEOUT_MS, "offline queue send");
+        outcome = "sent";
+      } catch (e) {
+        if (isOfflineQueueSendTransient(e)) {
+          // Never reached the server, or may still: it stays queued and "sending".
+          console.warn("[offline-queue] Send did not finish, keeping the message queued:", e);
+          outcome = "keep";
+        } else {
+          console.error("[offline-queue] Failed to send queued message:", e);
+          outcome = "failed";
+        }
+      }
+      if (outcome === "keep") return;
+      dequeue();
+      try {
+        if (outcome === "failed") {
+          chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.failed);
+        } else if (serverEventId) {
+          chatStore.updateMessageIdAndStatus(msg.roomId, msg.id, serverEventId, MessageStatus.sent);
+        } else {
+          chatStore.updateMessageStatus(msg.roomId, msg.id, MessageStatus.sent);
+        }
+      } catch (e) {
+        console.warn("[offline-queue] Status update failed:", e);
+      }
     }
   };
 
