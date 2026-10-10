@@ -39,7 +39,7 @@ D desktop (Electron).
 | S4-02 | P1 | 4 | Ai | Feed/channel native video player has no timeout on the initial load — spinner forever, no error, no fallback | `src/shared/lib/use-feed-video-player.ts` | fixed |
 | S7-02 | P1 | 4 | AWD | Contact search reports "user not found" when the real cause is an RPC/network failure | `src/features/contacts/model/use-contacts.ts` | fixed |
 | W2C-06 | P1 | 6 | Ai | Voice messages recorded with one MIME/codec are not guaranteed playable where the other platform's default codec differs (no cross-platform transcoding) | `src/features/messaging/model/use-voice-recorder.ts` | open |
-| S10-05 | P1 | owner | WAiD | No Content-Security-Policy anywhere in the app | `index.html` | open |
+| S10-05 | P1 | owner | WAiD | No Content-Security-Policy anywhere in the app | `index.html` | partly: Electron sends a report-only CSP and logs violations (owner decision 2026-10-10); web and mobile have none yet, enforcing mode after the logs are clean |
 | S6-02 | P1 | 5 | W | Web/Electron never request `Notification` permission — the OS banner can never appear | `src/shared/lib/notifications/web-notifier.ts` | fixed |
 | W2C-05 | P1 | 4 | AiWD | A stuck large media upload blocks all further sends in that room, and every retry re-uploads the whole file | `src/shared/lib/local-db/sync-engine.ts` | fixed: a retry after the upload sends the finished upload; new text passes an upload that failed once or runs past 20 s (owner decision 2026-10-10: changes message order) |
 | S10-06 | P1 | owner | WAiD | Bug-report GitHub token bundled into the client with write scope; extensive PII shipped to a PUBLIC repo | `src/shared/lib/bug-report/bug-report-sender.ts` | open |

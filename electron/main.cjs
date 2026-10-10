@@ -29,6 +29,7 @@ const { createAppTray } = require("./tray.cjs");
 const { guardWindowNavigation } = require("./navigation.cjs");
 const { wireContextMenuAndReload } = require("./context-menu.cjs");
 const { initAutoUpdater } = require("./auto-updater.cjs");
+const { withReportOnlyCsp, isCspViolationMessage } = require("./csp.cjs");
 const {
   isElectronSmokeMode,
   resolveTorModeForBoot,
@@ -282,6 +283,11 @@ function bootElectronApp() {
       if (!isSmoke) win.show();
     });
 
+    // Report-only CSP violations land in the main-process log (audit S10-05).
+    win.webContents.on("console-message", (event) => {
+      if (isCspViolationMessage(event.message)) console.warn("[csp]", event.message);
+    });
+
     win.webContents.on("did-finish-load", () => {
       flushPendingDeepLink();
       if (isSmoke) {
@@ -367,10 +373,11 @@ function bootElectronApp() {
     });
 
     // Handle app:// protocol — serves files from dist/
-    protocol.handle("app", (request) => {
+    protocol.handle("app", async (request) => {
       const url = new URL(request.url);
       const filePath = path.join(__dirname, "..", "dist", url.pathname);
-      return net.fetch(`file://${filePath}`);
+      // Report-only CSP on the app's pages (audit S10-05); blocks nothing.
+      return withReportOnlyCsp(await net.fetch(`file://${filePath}`), url.pathname);
     });
 
     // Initialise Tor transport stack (smoke: neveruse — no binary download)
