@@ -247,8 +247,9 @@ describe("login key verification", () => {
     const source = getSource();
     const fnStart = source.indexOf("const verifyAndRepublishKeys");
     const fnSection = source.slice(fnStart, fnStart + 2000);
-    // Should check the local cache first (fast path)
-    expect(fnSection).toContain("countCachedKeys");
+    // Should check the local caches first (fast path): the SDK's and the
+    // self-profile snapshot's keys (ownKeyCountFromCaches wraps countCachedKeys)
+    expect(fnSection).toContain("ownKeyCountFromCaches");
     expect(fnSection).toContain("REQUIRED_ENCRYPTION_KEYS");
     // Fresh profile via SDK (loadUsersInfoRaw wraps loadUsersInfo + getRawProfile)
     expect(fnSection).toContain("loadUsersInfoRaw");

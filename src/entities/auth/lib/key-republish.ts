@@ -91,3 +91,30 @@ export function countPublishedKeys(rawProfile: unknown): number {
   }
   return 0;
 }
+
+/**
+ * Own published keys known without the network: the SDK cache, or the
+ * self-profile snapshot, which keeps the keys from the last profile the SDK
+ * returned (keys do not leave the chain). With the Pocketnet nodes unreachable
+ * the SDK cache is empty and only the snapshot still knows them (web bench,
+ * 2026-10-10: a login with published keys raised the missing-keys banner).
+ */
+export function ownKeyCountFromCaches(
+  sdkUserData: unknown,
+  selfProfile: { keys?: unknown } | null | undefined,
+): number {
+  return Math.max(countCachedKeys(sdkUserData), countCachedKeys(selfProfile));
+}
+
+/**
+ * Whether a profile load that returned no row says nothing about the keys: the
+ * account's profile was loaded before (`syncedAt`), and a profile does not
+ * disappear, so the nodes did not answer. An account never loaded keeps the
+ * old reading (no row, no keys).
+ */
+export function profileAnswerInconclusive(
+  rows: readonly unknown[],
+  selfProfile: { syncedAt?: number } | null | undefined,
+): boolean {
+  return rows.length === 0 && (selfProfile?.syncedAt ?? 0) > 0;
+}

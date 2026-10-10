@@ -55,4 +55,12 @@ describe("own key check (audit S5-01, S5-02, W2A-01)", () => {
     expect(verify).toMatch(/case "keys-ok":[\s\S]*ownKeysMissing\.value = false;/);
     expect(source).toMatch(/republishKeysFromUi,\s*likelyBastyonUser,\s*ownKeysMissing/);
   });
+
+  // Web bench 2026-10-10: with the Pocketnet nodes unreachable a login with
+  // published keys raised the missing-keys banner and the Bastyon flag.
+  it("counts the self-profile snapshot's keys and calls an empty answer inconclusive", () => {
+    const verify = slice("const verifyAndRepublishKeys = async", "\n  };");
+    expect(verify).toContain("const cachedKeyCount = ownKeyCountFromCaches(userData, selfProfile);");
+    expect(verify).toMatch(/if \(profileAnswerInconclusive\(rawProfiles, selfProfile\)\) \{[\s\S]*?blockchainCheckFailed = true;/);
+  });
 });

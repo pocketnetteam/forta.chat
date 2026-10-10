@@ -65,7 +65,8 @@ import {
   clearSelfProfile,
   mergeSelfProfileWithRemote,
   resolveKeyRepublishAction,
-  countCachedKeys,
+  ownKeyCountFromCaches,
+  profileAnswerInconclusive,
   countPublishedKeys,
   REQUIRED_ENCRYPTION_KEYS,
   createBackoffRetry,
@@ -1408,9 +1409,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       return;
     }
 
-    // Step 1: Quick check via local SDK cache.
+    // Step 1: Quick check via the local caches: the SDK's, or the self-profile
+    // snapshot, which still has the keys when the nodes do not answer.
     const userData = appInitializer.getUserData(subjectAddress);
-    const cachedKeyCount = countCachedKeys(userData);
+    const selfProfile = readSelfProfile(subjectAddress);
+    const cachedKeyCount = ownKeyCountFromCaches(userData, selfProfile);
 
     // Step 2: Cache may be stale/empty after login — verify via fresh SDK
     // profile load, but only when the cache is short.
@@ -1420,7 +1423,14 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
       console.log("[auth] Cache shows", cachedKeyCount, "keys, verifying via RPC...");
       try {
         const rawProfiles = await appInitializer.loadUsersInfoRaw([subjectAddress]);
-        blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
+        if (profileAnswerInconclusive(rawProfiles, selfProfile)) {
+          // The profile was loaded before and cannot be gone: the nodes did
+          // not answer. Not a reason to call the keys missing.
+          console.warn("[auth] Own profile not returned, key check inconclusive");
+          blockchainCheckFailed = true;
+        } else {
+          blockchainKeyCount = countPublishedKeys(rawProfiles[0]);
+        }
       } catch (e) {
         console.warn("[auth] RPC key check failed, skipping re-publish:", e);
         blockchainCheckFailed = true;
