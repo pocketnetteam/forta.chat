@@ -123,6 +123,7 @@ class PushDataPlugin : Plugin() {
         val data = JSObject()
         data.put("roomId", roomId)
         if (eventId != null) data.put("eventId", eventId)
+        android.util.Log.i("FortaPush", "push tap buffered from the launch intent (roomId=$roomId)")
         pendingPushRoom = data
     }
 
@@ -144,6 +145,16 @@ class PushDataPlugin : Plugin() {
         val data = JSObject()
         data.put("roomId", roomId)
         if (eventId != null) data.put("eventId", eventId)
+        // singleTask: with the app closed the task outlives the process, so a
+        // tap recreates the activity from the launcher intent and arrives here,
+        // before the page has loaded. Nobody listens yet; the tap waits for
+        // getPendingIntent instead of being dropped (Samsung, 2026-10-10).
+        if (!hasListeners("pushOpenRoom")) {
+            android.util.Log.i("FortaPush", "push tap buffered until JS listens (roomId=$roomId)")
+            pendingPushRoom = data
+            return
+        }
+        android.util.Log.i("FortaPush", "push tap forwarded to JS (roomId=$roomId)")
         notifyListeners("pushOpenRoom", data)
     }
 
