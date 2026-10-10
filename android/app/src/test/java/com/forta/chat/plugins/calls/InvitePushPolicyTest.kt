@@ -82,6 +82,20 @@ class InvitePushPolicyTest {
         )
     }
 
+    // Review 2026-10-10: a Doze backlog can deliver the caller's hangup before
+    // the invite; the cancelled-call dedup then dropped the stale invite
+    // before the stale branch, and the call was missed in silence again.
+    @Test
+    fun aStaleInviteForACallTheCallerHungUpIsMissed() {
+        assertTrue(InvitePushPolicy.cancelledInviteIsMissed(expired = true, handled = false))
+    }
+
+    @Test
+    fun aCancelledInviteStillLiveOrHandledIsNot() {
+        assertFalse(InvitePushPolicy.cancelledInviteIsMissed(expired = false, handled = false))
+        assertFalse(InvitePushPolicy.cancelledInviteIsMissed(expired = true, handled = true))
+    }
+
     // Review 2026-10-10: a call another device of the user answered is not
     // missed. Its select_answer can trail the stale invite in the same flush.
     @Test

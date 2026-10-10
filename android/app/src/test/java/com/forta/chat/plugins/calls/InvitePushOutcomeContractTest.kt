@@ -1,6 +1,7 @@
 package com.forta.chat.plugins.calls
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -39,14 +40,20 @@ class InvitePushOutcomeContractTest {
         assertTrue(helper >= 0 && service.indexOf("inviteTracker.append(", helper) > helper)
     }
 
+    private val helper by lazy {
+        val start = service.indexOf("private fun maybeShowMissedCallNotice(")
+        service.substring(start, service.indexOf("\n    }\n", start))
+    }
+
     @Test
     fun theStaleBranchShowsTheNoticeThroughThePolicyAndStillForwards() {
         val stale = service.indexOf("Stale call invite suppressed (S4)")
         val end = service.indexOf("return", stale)
         val branch = service.substring(stale, end)
-        val policy = branch.indexOf("InvitePushPolicy.showsMissedCallNotice(")
-        val notice = branch.indexOf("showMissedCallNotification(")
-        assertTrue("the notice must be gated by the policy:\n$branch", policy >= 0 && notice > policy)
+        assertTrue(branch, branch.contains("maybeShowMissedCallNotice(roomId, eventId, callId, sender, senderName, roomName)"))
+        val policy = helper.indexOf("InvitePushPolicy.showsMissedCallNotice(")
+        val notice = helper.indexOf("showMissedCallNotification(")
+        assertTrue("the notice must be gated by the policy:\n$helper", policy >= 0 && notice > policy)
         assertTrue("JS still gets the push:\n$branch", branch.contains("forwardToJs(data)"))
     }
 
@@ -72,20 +79,16 @@ class InvitePushOutcomeContractTest {
 
     // Review 2026-10-10: the stale branch must know the call this device holds.
     @Test
-    fun theStaleBranchPassesTheLiveCallToThePolicy() {
-        val stale = service.indexOf("Stale call invite suppressed (S4)")
-        val branch = service.substring(stale, service.indexOf("return", stale))
-        assertTrue(branch, branch.contains("liveCallId = CallConnectionService.currentConnection?.callId"))
+    fun theNoticePassesTheLiveCallToThePolicy() {
+        assertTrue(helper, helper.contains("liveCallId = CallConnectionService.currentConnection?.callId"))
     }
 
     // Review 2026-10-10: the push gateway sends a raw Matrix ID as the display
     // name when the sender has none; message titles already reject it.
     @Test
     fun theNoticeTitleGoesThroughTheTitleFallbackChain() {
-        val stale = service.indexOf("Stale call invite suppressed (S4)")
-        val branch = service.substring(stale, service.indexOf("return", stale))
-        val show = branch.indexOf("showMissedCallNotification(")
-        assertTrue(branch, show >= 0 && branch.indexOf("chooseNotificationTitle(", show) > show)
+        val show = helper.indexOf("showMissedCallNotification(")
+        assertTrue(helper, show >= 0 && helper.indexOf("chooseNotificationTitle(", show) > show)
     }
 
     // Review 2026-10-10: the notice sits in the messages channel, so the launcher
@@ -98,5 +101,40 @@ class InvitePushOutcomeContractTest {
             body,
             body.contains("nm.cancel(FortaFirebaseMessagingService.MISSED_CALL_TAG, FortaFirebaseMessagingService.missedCallSlot(roomId))"),
         )
+    }
+
+    // Review 2026-10-10: hangup before the invite (Doze backlog) left no notice.
+    @Test
+    fun aStaleInviteForACancelledCallStillLeavesTheNotice() {
+        val cancelled = service.indexOf("Suppressing invite for cancelled callId=")
+        val branch = service.substring(cancelled, service.indexOf("return", cancelled))
+        val decide = branch.indexOf("InvitePushPolicy.cancelledInviteIsMissed(")
+        val show = branch.indexOf("maybeShowMissedCallNotice(")
+        assertTrue(branch, decide >= 0 && show > decide && branch.contains(".wasHandled(callId)"))
+        assertTrue("JS still gets the push:\n$branch", branch.contains("forwardToJs(data)"))
+    }
+
+    @Test
+    fun aCallHandledHereOrElsewhereIsRememberedApartFromAnUnseenHangup() {
+        val mark = service.indexOf("CancelledCallStore(this).markCancelled(endedCallId)")
+        val after = service.substring(mark, service.indexOf("forwardToJs(data)", mark))
+        assertTrue(after, after.contains("if (msgType != \"m.call.hangup\" || handledHere)") && after.contains(".markHandled(endedCallId)"))
+        // handledHere is read before the teardown clears the ringer and the slot.
+        val branch = service.indexOf("Call ended remotely (type=")
+        val handled = service.indexOf("val handledHere =", branch)
+        assertTrue(handled > branch && handled < service.indexOf("IncomingCallActivity.dismissIfShowing(endedCallId)", branch))
+        val expr = service.substring(handled, service.indexOf("IncomingCallActivity.dismissIfShowing(endedCallId)", branch))
+        assertTrue(expr, expr.contains("lastRingingCallId") && expr.contains("IncomingRinger.ringingCallId") && expr.contains("currentConnection?.callId"))
+    }
+
+    // Review 2026-10-10: the noticed call lived in process memory, one for the
+    // whole app: a restart lost the retraction, and a second room overwrote it.
+    @Test
+    fun theNoticedCallIsKeptPerRoomOnDisk() {
+        assertFalse("no process-memory notice state", service.contains("lastMissedNoticeCallId"))
+        val select = service.indexOf("answered on another device")
+        val retract = service.substring(select, service.indexOf("cancelMissedCallNotice(", select))
+        assertTrue(retract, retract.contains("MissedCallNoticeStore(this).noticedCallId(roomId)"))
+        assertTrue(helper, helper.contains("store.noticedCallId(roomId)") && helper.contains("store.remember(roomId, callId)"))
     }
 }

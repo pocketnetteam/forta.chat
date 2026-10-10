@@ -52,6 +52,16 @@ object InvitePushPolicy {
     }
 
     /**
+     * Whether an invite for a call already ended ([CancelledCallStore]) is a
+     * missed call: a Doze backlog can deliver the caller's hangup before the
+     * invite, and the dedup dropped the stale invite before the stale branch.
+     * Only a stale one, and only when nobody [handled] the call: it did not
+     * ring or get answered here, and no other device of the user answered or
+     * declined it ([CancelledCallStore.markHandled]).
+     */
+    fun cancelledInviteIsMissed(expired: Boolean, handled: Boolean): Boolean = expired && !handled
+
+    /**
      * Whether a later push withdraws the missed-call notice: only the caller's
      * select_answer naming the noticed call, which means another device of the
      * user answered it. A hangup or reject leaves the call missed.
