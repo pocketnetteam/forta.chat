@@ -44,4 +44,10 @@ describe("reply quotes wait for the original to decrypt (audit S1-04)", () => {
     const doneAfterDecrypt = body.indexOf("replyFetchAttempted.add(eventId)", decrypt);
     expect(doneAfterDecrypt).toBeGreaterThan(decrypt);
   });
+
+  it("does not quote an encrypted original as ciphertext while the room has no crypto", () => {
+    const fetch = body.indexOf("await matrixService.client!.fetchRoomEvent(roomId, eventId)");
+    const decrypt = body.indexOf("await roomCrypto.decryptEvent(raw", fetch);
+    expect(body.slice(fetch, decrypt)).toMatch(/if \(content\?\.msgtype === "m\.encrypted"\) \{[\s\S]*if \(!roomCrypto\) return;/);
+  });
 });

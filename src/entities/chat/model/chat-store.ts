@@ -6479,7 +6479,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               senderId = matrixIdToAddress((raw.sender as string) ?? "");
 
               // Decrypt if needed
-              if (content?.msgtype === "m.encrypted" && roomCrypto) {
+              if (content?.msgtype === "m.encrypted") {
+                // No room crypto yet: quoting the ciphertext would stick for
+                // the session. A later pass decrypts it (audit S1-04).
+                if (!roomCrypto) return;
                 try {
                   const decrypted = await roomCrypto.decryptEvent(raw as Record<string, unknown>);
                   body = decrypted.body ?? "";
@@ -6685,33 +6688,38 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     await applyPageRelationsToStored(roomId, page, dbKit);
   };
 
-  /** Relations of a timeline whose target message is not in it. An edit
-   *  that cannot be read yet is skipped: written as "[encrypted]" over a
-   *  message it would have no retry path, and a later parse reads it. */
+  /** Relations of a timeline whose target message is not in it. Stored
+   *  targets go through applyPageRelationsToStored (writes only what changes);
+   *  for a target not in Dexie yet the event writer keeps the relation until
+   *  it lands. A pending edit uses the room crypto already registered (no new
+   *  instance for a room loaded in the background) and is skipped while it
+   *  cannot be read: "[encrypted]" over a message has no retry path. */
   const writeRelationsOutsideTimeline = async (
     roomId: string,
     rawEvents: ReadonlyArray<Record<string, unknown> | null>,
     inTimeline: ReadonlySet<string>,
     dbKit: ChatDbKit,
   ): Promise<void> => {
-    const matrixService = getMatrixClientService();
-    let roomCrypto: PcryptoRoomInstance | undefined;
-    let cryptoResolved = false;
-    for (const raw of rawEvents) {
-      if (!raw) continue;
+    const relationOf = (raw: Record<string, unknown>) =>
+      (raw.content as Record<string, unknown> | undefined)?.["m.relates_to"] as Record<string, unknown> | undefined;
+    const outside = rawEvents.filter((raw): raw is Record<string, unknown> => {
+      if (!raw) return false;
       const kind = classifyTimelineEvent(raw);
-      if (kind !== "edit" && kind !== "reaction") continue;
-      const rel = (raw.content as Record<string, unknown> | undefined)?.["m.relates_to"] as
-        | Record<string, unknown>
-        | undefined;
-      const targetId = rel?.event_id as string | undefined;
-      if (!targetId || inTimeline.has(targetId)) continue;
+      if (kind !== "edit" && kind !== "reaction") return false;
+      const targetId = relationOf(raw)?.event_id as string | undefined;
+      return !!targetId && !inTimeline.has(targetId);
+    });
+    if (outside.length === 0) return;
+
+    const stored = await applyPageRelationsToStored(roomId, outside, dbKit);
+    const matrixService = getMatrixClientService();
+    const roomCrypto = useAuthStore().pcrypto?.rooms[roomId];
+    for (const raw of outside) {
+      const rel = relationOf(raw)!;
+      const targetId = rel.event_id as string;
+      if (stored.has(targetId)) continue;
       const senderId = matrixIdToAddress((raw.sender as string) ?? "");
-      if (kind === "edit") {
-        if (!cryptoResolved) {
-          roomCrypto = await ensureRoomCrypto(roomId);
-          cryptoResolved = true;
-        }
+      if (classifyTimelineEvent(raw) === "edit") {
         const newContent = await resolveEditText(raw, roomCrypto);
         if (newContent === "[encrypted]") continue;
         await dbKit.eventWriter.writeEdit(roomId, {
@@ -6720,7 +6728,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           newContent,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
         });
-      } else if (typeof raw.event_id === "string" && typeof rel?.key === "string") {
+      } else if (typeof raw.event_id === "string" && typeof rel.key === "string") {
         await dbKit.eventWriter.writeReaction({
           eventId: raw.event_id,
           targetEventId: targetId,
@@ -6741,7 +6749,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomId: string,
     page: Record<string, unknown>[],
     dbKit: ChatDbKit,
-  ): Promise<void> => {
+  ): Promise<ReadonlySet<string>> => {
     const relations = page.filter((raw) => {
       const kind = classifyTimelineEvent(raw);
       return kind === "edit" || kind === "reaction";
@@ -6749,9 +6757,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const targetOf = (raw: Record<string, unknown>) =>
       ((raw.content as Record<string, unknown>)["m.relates_to"] as Record<string, unknown> | undefined)?.event_id as string | undefined;
     const targetIds = [...new Set(relations.map(targetOf).filter((id): id is string => !!id))];
-    if (targetIds.length === 0) return;
+    if (targetIds.length === 0) return new Set();
     const stored = new Map((await dbKit.messages.getByEventIds(targetIds)).map((r) => [r.eventId!, r]));
-    if (stored.size === 0) return;
+    if (stored.size === 0) return new Set();
 
     const edits = relations
       .filter((raw) => classifyTimelineEvent(raw) === "edit" && stored.has(targetOf(raw)!))
@@ -6787,6 +6795,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return { eventId, reactions: merged };
     });
     if (await dbKit.messages.bulkUpdateReactions(entries) > 0) perfCount("dexie:rw:open");
+    return new Set(stored.keys());
   };
 
   /** Timestamp of the oldest row event in the SDK's live timeline. */

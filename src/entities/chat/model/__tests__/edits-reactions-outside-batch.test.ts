@@ -182,4 +182,31 @@ describe("loadRoomMessages — edits and reactions to a message outside the batc
       expect.objectContaining({ eventId: "$reaction", targetEventId: "$old", emoji: "👍", isMine: false }),
     );
   });
+
+  // Merge review: a stored target goes through the writer that only writes
+  // what changed; writeReaction re-wrote it and re-stamped the room preview
+  // on every load.
+  it("applies relations to a stored target through the change-only writer", async () => {
+    const store = useChatStore();
+    store.rooms = [makeRoom({ id: "!a:s" })];
+    store.activeRoomId = "!a:s";
+    const kit = makeKit();
+    kit.messages.getByEventIds = vi.fn(async (ids: string[]) =>
+      ids.includes("$old") ? [{ eventId: "$old", roomId: "!a:s", senderId: "peer", content: "old text", reactions: {} }] : [],
+    ) as typeof kit.messages.getByEventIds;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    store.setChatDbKit(kit as any);
+
+    await store.loadRoomMessages("!a:s", { awaitWrite: true });
+
+    expect(writeReaction).not.toHaveBeenCalled();
+    expect(kit.messages.bulkUpdateReactions).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ eventId: "$old" })]),
+    );
+    expect(writeEdit).toHaveBeenCalledTimes(1);
+    expect(writeEdit).toHaveBeenCalledWith(
+      "!a:s",
+      expect.objectContaining({ senderId: "peer", targetEventId: "$old", newContent: "fixed text" }),
+    );
+  });
 });
