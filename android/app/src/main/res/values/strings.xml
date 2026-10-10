@@ -7,6 +7,7 @@
 
     <!-- Push notifications -->
     <string name="push_new_message">New message</string>
+    <string name="push_missed_call">Missed call</string>
     <string name="push_photo">📷 Photo</string>
     <string name="push_video">🎥 Video</string>
     <string name="push_voice_message">🎙 Voice message</string>

@@ -19,6 +19,7 @@ import com.forta.chat.plugins.calls.DisplacedConnectionPolicy
 import com.forta.chat.plugins.calls.IncomingCallActivity
 import com.forta.chat.plugins.calls.IncomingRinger
 import com.forta.chat.plugins.calls.InviteThrottleGuard
+import com.forta.chat.plugins.calls.InvitePushPolicy
 import com.forta.chat.plugins.calls.InviteThrottleTracker
 import com.forta.chat.plugins.calls.RemoteHangupPolicy
 import com.forta.chat.plugins.calls.SecondRingPolicy
@@ -143,6 +144,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         // PushSessionPolicy.
         if (!PushSessionPolicy.shouldDeliver(PushSessionStore.read(this))) {
             Log.i(TAG, "Push dropped: signed out (msg_type=${data["msg_type"]})")
+            if (data["msg_type"] == "m.call.invite") recordInvite(message, InvitePushPolicy.Outcome.SIGNED_OUT)
             return
         }
 
@@ -177,6 +179,9 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 return
             }
             Log.i(TAG, "select_answer for $selectedCallId: answered on another device")
+            if (InvitePushPolicy.retractsMissedCallNotice(msgType, selectedCallId, lastMissedNoticeCallId)) {
+                cancelMissedCallNotice()
+            }
         }
 
         // Handle call cancel paths — full cleanup of incoming-call UI state.
@@ -282,6 +287,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             // Bastyon and the account's other devices keep ringing.
             if (!IncomingCallsStore.isEnabled(this)) {
                 Log.i(TAG, "Call push dropped: incoming calls are off")
+                recordInvite(message, InvitePushPolicy.Outcome.INCOMING_CALLS_OFF)
                 return
             }
             // Telecom creates this call's connection only after the push is
@@ -335,20 +341,32 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             // Session 41 diagnostic: lets us split timestamp-loss reports
             // (Huawei HMS-stub, FCM collapse) from genuinely stale invites
             // without needing a custom build for the user.
+            // FCM priority: a push sent high and delivered normal was
+            // downgraded (high-priority quota, Doze) — not a slow network.
             Log.i(TAG, "Call invite: callId=$callId, eventId=${data["event_id"]}, " +
                 "sentTime=$sentTime, lifetime=$lifetimeMs, expired=$expired, " +
-                "age=${nowMs - sentTime}ms, buildSdk=${Build.VERSION.SDK_INT}")
-            inviteTracker.append(
-                InviteThrottleTracker.Record(
-                    receivedAtMs = nowMs,
-                    sentAtMs = sentTime,
-                    expired = expired,
-                    callId = callId.takeIf { it.isNotEmpty() },
-                )
-            )
+                "age=${nowMs - sentTime}ms, priority=${InvitePushPolicy.priorityName(message.priority)}, " +
+                "originalPriority=${InvitePushPolicy.priorityName(message.originalPriority)}, " +
+                "buildSdk=${Build.VERSION.SDK_INT}")
             if (expired) {
                 Log.w(TAG, "Stale call invite suppressed (S4): callId=$callId sentTime=$sentTime " +
                     "ageMs=${nowMs - sentTime} lifetime=$lifetimeMs")
+                recordInvite(message, InvitePushPolicy.Outcome.STALE, nowMs)
+                // The call is over, so no ringer — but the user is told
+                // it came: an ordinary missed-call notice in the messages
+                // channel (missed push calls, T1).
+                if (InvitePushPolicy.showsMissedCallNotice(
+                        InvitePushPolicy.Outcome.STALE, roomId, callId.takeIf { it.isNotEmpty() }, lastMissedNoticeCallId,
+                    )
+                ) {
+                    lastMissedNoticeCallId = callId.takeIf { it.isNotEmpty() }
+                    lastMissedNoticeRoomId = roomId
+                    showMissedCallNotification(
+                        roomId,
+                        eventId,
+                        senderName ?: sender?.let { getCachedSenderName(it) } ?: getCachedRoomName(roomId) ?: "Forta Chat",
+                    )
+                }
                 // Forward to JS for telemetry/diagnostics but do NOT
                 // launch the ringer. JS sees the push and the app
                 // re-syncs Matrix — if the invite is genuinely live the
@@ -365,6 +383,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 ?.takeUnless { DisplacedConnectionPolicy.mayRelease(it.state) }
             if (established != null) {
                 Log.i(TAG, "Call $callId while ${established.callId} is established — not ringing")
+                recordInvite(message, InvitePushPolicy.Outcome.ESTABLISHED, nowMs)
                 forwardToJs(data)
                 return
             }
@@ -375,11 +394,13 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             val ringingCallId = IncomingRinger.ringingCallId
             if (!SecondRingPolicy.mayTakeOverRinger(callId, roomId, ringingCallId, ringingRoomFor(ringingCallId))) {
                 Log.i(TAG, "Second call $callId from $roomId while $ringingCallId rings — leaving the screen to that call")
+                recordInvite(message, InvitePushPolicy.Outcome.SECOND_RING, nowMs)
                 forwardToJs(data)
                 return
             }
 
             lastRingingCallId = callId.takeIf { it.isNotEmpty() }
+            recordInvite(message, InvitePushPolicy.Outcome.RANG, nowMs)
 
             // Cancel any existing message notification for this room
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -411,6 +432,66 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         // Forward to JS for decryption
         forwardToJs(data)
     }
+
+    /** Keeps what became of a call invite push for the bug report's invite history. */
+    private fun recordInvite(
+        message: RemoteMessage,
+        outcome: InvitePushPolicy.Outcome,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        val data = message.data
+        val sentTime = message.sentTime
+        inviteTracker.append(
+            InviteThrottleTracker.Record(
+                receivedAtMs = nowMs,
+                sentAtMs = sentTime,
+                expired = InviteThrottleGuard.isExpired(sentTime, nowMs, data["lifetime"]?.toLongOrNull()),
+                callId = (data["call_id"] ?: data["event_id"])?.takeIf { it.isNotEmpty() },
+                priority = message.priority,
+                originalPriority = message.originalPriority,
+                outcome = outcome.wire,
+            )
+        )
+    }
+
+    /** "Missed call" for an invite that came too late to ring; tap opens the room. */
+    private fun showMissedCallNotification(roomId: String, eventId: String?, callerName: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            putExtra(EXTRA_PUSH_ROOM_ID, roomId)
+            if (eventId != null) putExtra(EXTRA_PUSH_EVENT_ID, eventId)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        // Own request code and slot: the room's message notification and its
+        // intent stay as they are.
+        val pendingIntent = PendingIntent.getActivity(
+            this, missedCallSlot(roomId), intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(callerName)
+            .setContentText(getString(R.string.push_missed_call))
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
+            .build()
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(MISSED_CALL_TAG, missedCallSlot(roomId), notification)
+    }
+
+    /** Another device answered the call the notice was shown for: it was not missed. */
+    private fun cancelMissedCallNotice() {
+        val roomId = lastMissedNoticeRoomId ?: return
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.cancel(MISSED_CALL_TAG, missedCallSlot(roomId))
+        Log.i(TAG, "Missed-call notice for $lastMissedNoticeCallId withdrawn: answered on another device")
+        lastMissedNoticeCallId = null
+        lastMissedNoticeRoomId = null
+    }
+
+    private fun missedCallSlot(roomId: String): Int = "missed_$roomId".hashCode()
 
     /** Room of the call [ringingCallId] rings for, when the Telecom slot holds it; null when unknown. */
     private fun ringingRoomFor(ringingCallId: String?): String? {
@@ -681,7 +762,17 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
          * pattern to its envelope. Lets us split S1 (accept-crash) from
          * S3 (FCM throttle) when triaging user reports.
          */
-        val inviteTracker: InviteThrottleTracker = InviteThrottleTracker(maxRecords = 5)
+        val inviteTracker: InviteThrottleTracker = InviteThrottleTracker(maxRecords = 10)
+
+        /** Call the last missed-call notice was shown for: the caller's resent invites must not repeat it. */
+        @Volatile
+        private var lastMissedNoticeCallId: String? = null
+
+        @Volatile
+        private var lastMissedNoticeRoomId: String? = null
+
+        /** Missed-call notices live apart from the room's message notification. */
+        const val MISSED_CALL_TAG = "forta_missed_call"
 
         /**
          * Heuristic: does [value] look like a raw Matrix user ID such as

@@ -231,13 +231,14 @@ async function formatBody(
         '',
         '<details><summary>FCM invite history</summary>',
         '',
-        '| # | callId | latency (ms) | expired |',
-        '|---|--------|--------------|---------|',
+        '| # | callId | latency (ms) | expired | FCM priority | outcome |',
+        '|---|--------|--------------|---------|--------------|---------|',
       );
       diag.inviteHistory.forEach((r, i) => {
         const callIdShort = r.callId ? r.callId.slice(0, 12) : '(none)';
+        const latency = r.sentTimeSource === 'missing' ? 'no send time' : String(r.deliveryLatencyMs);
         lines.push(
-          `| ${i + 1} | \`${callIdShort}\` | ${r.deliveryLatencyMs} | ${r.expired ? 'yes' : 'no'} |`,
+          `| ${i + 1} | \`${callIdShort}\` | ${latency} | ${r.expired ? 'yes' : 'no'} | ${formatFcmPriority(r.priority, r.originalPriority)} | ${r.outcome ?? '?'} |`,
         );
       });
       lines.push('</details>');
@@ -301,6 +302,19 @@ export interface BugReportResult {
   issueNumber: number;
   screenshotsFailed: number;
   uploadError?: string;
+}
+
+const FCM_PRIORITY_NAMES: Record<number, string> = { 1: 'high', 2: 'normal' };
+
+/** FCM priority of an invite push; a push sent high and delivered lower was
+ *  downgraded by FCM (quota, Doze) rather than delayed by the network. */
+export function formatFcmPriority(priority?: number, originalPriority?: number): string {
+  if (priority === undefined) return '?';
+  const name = FCM_PRIORITY_NAMES[priority] ?? 'unknown';
+  if (originalPriority !== undefined && originalPriority !== priority && FCM_PRIORITY_NAMES[originalPriority]) {
+    return `${name} (sent ${FCM_PRIORITY_NAMES[originalPriority]})`;
+  }
+  return name;
 }
 
 export async function sendBugReport(

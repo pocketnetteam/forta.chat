@@ -31,6 +31,14 @@ export interface InviteThrottleRecord {
   expired: boolean;
   /** `call_id` from the FCM payload, "" when missing. */
   callId: string;
+  /** RemoteMessage.priority as delivered: 1 high, 2 normal, 0 unknown. Absent in older builds. */
+  priority?: number;
+  /** RemoteMessage.originalPriority as sent; differs when FCM downgraded the push. */
+  originalPriority?: number;
+  /** "fcm", or "missing" when the push carried no send time (the latency means nothing then). */
+  sentTimeSource?: string;
+  /** What became of the push: rang, stale, signed-out, incoming-calls-off, established, second-ring. */
+  outcome?: string;
 }
 
 /**

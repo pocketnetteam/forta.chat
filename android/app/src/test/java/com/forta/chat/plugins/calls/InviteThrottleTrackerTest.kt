@@ -24,6 +24,46 @@ class InviteThrottleTrackerTest {
         assertEquals("call-5", snapshot[2].callId)
     }
 
+    // Missed push calls T2: the report has to tell a push the FCM downgraded
+    // from one the network delayed, and say why no ringer came up.
+    @Test
+    fun wireMapCarriesPriorityAndOutcome() {
+        val record = InviteThrottleTracker.Record(
+            receivedAtMs = 2_000L,
+            sentAtMs = 1_000L,
+            expired = true,
+            callId = "call-1",
+            priority = 2,
+            originalPriority = 1,
+            outcome = "stale",
+        )
+        val wire = record.toWireMap()
+        assertEquals(2_000L, wire["receivedAtMs"])
+        assertEquals(1_000L, wire["sentAtMs"])
+        assertEquals(1_000L, wire["deliveryLatencyMs"])
+        assertEquals(true, wire["expired"])
+        assertEquals("call-1", wire["callId"])
+        assertEquals(2, wire["priority"])
+        assertEquals(1, wire["originalPriority"])
+        assertEquals("fcm", wire["sentTimeSource"])
+        assertEquals("stale", wire["outcome"])
+    }
+
+    @Test
+    fun wireMapMarksAMissingSentTimeAndDefaults() {
+        val wire = InviteThrottleTracker.Record(
+            receivedAtMs = 2_000L,
+            sentAtMs = 0L,
+            expired = false,
+            callId = null,
+        ).toWireMap()
+        assertEquals("missing", wire["sentTimeSource"])
+        assertEquals("", wire["callId"])
+        assertEquals(0, wire["priority"])
+        assertEquals(0, wire["originalPriority"])
+        assertEquals("rang", wire["outcome"])
+    }
+
     @Test
     fun deliveryLatencyMsComputed() {
         val record = InviteThrottleTracker.Record(

@@ -168,6 +168,43 @@ describe('sendBugReport — ICE and Tor rows (O05/O14)', () => {
     expect(without).not.toContain('Encryption diagnostics');
   });
 
+  // Missed push calls T2: the invite history says whether FCM downgraded the
+  // push and why no ringer came up, so "the push came, the ringer did not"
+  // reads off a report.
+  it('renders the FCM priority and the outcome of each invite push', async () => {
+    const fetchMock = mockIssueCreate(14);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendBugReport({
+      description: 'did not ring',
+      environment: fakeEnv,
+      callDiagnostics: {
+        audioMode: 'MODE_NORMAL',
+        isSpeakerOn: false,
+        isBtScoOn: false,
+        inviteHistory: [
+          { receivedAtMs: 2_000, sentAtMs: 1_000, deliveryLatencyMs: 1_000, expired: false, callId: 'call-rang-123456', priority: 1, originalPriority: 1, sentTimeSource: 'fcm', outcome: 'rang' },
+          { receivedAtMs: 90_000, sentAtMs: 1_000, deliveryLatencyMs: 89_000, expired: true, callId: 'call-stale-1234', priority: 2, originalPriority: 1, sentTimeSource: 'fcm', outcome: 'stale' },
+          { receivedAtMs: 3_000, sentAtMs: 0, deliveryLatencyMs: 3_000, expired: false, callId: '', priority: 0, originalPriority: 0, sentTimeSource: 'missing', outcome: 'incoming-calls-off' },
+          { receivedAtMs: 4_000, sentAtMs: 3_500, deliveryLatencyMs: 500, expired: false, callId: 'call-old-format' },
+        ],
+        expiredInviteCount: 1,
+        webrtcEngine: 'native',
+        audioTimeline: [],
+        ice: null,
+        tor: null,
+        fullScreenIntentAllowed: null,
+      },
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls.at(-1)![1].body as string).body as string;
+    expect(body).toContain('| # | callId | latency (ms) | expired | FCM priority | outcome |');
+    expect(body).toContain('| 1 | `call-rang-12` | 1000 | no | high | rang |');
+    expect(body).toContain('| 2 | `call-stale-1` | 89000 | yes | normal (sent high) | stale |');
+    expect(body).toContain('| 3 | `(none)` | no send time | no | unknown | incoming-calls-off |');
+    expect(body).toContain('| 4 | `call-old-for` | 500 | no | ? | ? |');
+  });
+
   it('omits the rows when the facts are unknown', async () => {
     const fetchMock = mockIssueCreate(12);
     vi.stubGlobal('fetch', fetchMock);

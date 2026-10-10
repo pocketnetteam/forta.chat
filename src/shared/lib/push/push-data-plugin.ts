@@ -52,6 +52,10 @@ interface PushDataPlugin extends Plugin {
   getFullScreenIntentStatus(): Promise<{ allowed: boolean; manageable: boolean }>;
   /** Open the system screen that grants the full-screen intent (Android 14+). */
   openFullScreenIntentSettings(): Promise<void>;
+  /** Missed push calls T3: is the app exempt from battery optimization (Doze)? Android only. */
+  getBatteryOptimizationStatus(): Promise<{ ignoring: boolean }>;
+  /** Open the system dialog that exempts the app; the user decides there. Android only. */
+  requestIgnoreBatteryOptimizations(): Promise<void>;
   /** The account is signed in: pushes ring (Android FCM service, iOS PushKit). */
   markSessionActive(): Promise<void>;
   /** The account is signing out. From now on Android's FCM service drops every

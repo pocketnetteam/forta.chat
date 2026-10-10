@@ -19,6 +19,7 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 |---|---|---|
 | [2026-09-28-full-app-audit](2026-09-28-full-app-audit.md) | 51 of 63 findings fixed; merged with the calls cleanup (`c121d525`) | S2-04, W2C-05, W2D-02 (virtualization), owner decisions S10-01, S10-05, S10-06, S8-02, S4-05, W2C-06 |
 | [2026-10-08-calls-next-session](2026-10-08-calls-next-session.md) | calls cleanup in PR #276 | iOS checks on the XR (C06, C07, C08), Tor proxy `Host`, WebRTC engine toggle removal |
+| [2026-10-10-missed-push-calls](2026-10-10-missed-push-calls.md) | T1–T3 done on `audit/full-app-2026-09` | T4 (Doze run by the owner), T5 (tester data); missed-call card for an invite with no hangup |
 | [2026-10-08-background-voice-playback](2026-10-08-background-voice-playback.md) | not started | everything (stages 0–8) |
 | [2026-10-02-decrypt-priority-roadmap](2026-10-02-decrypt-priority-roadmap.md) | stages 0–3, 5 done | 4 (decrypt only visible bubbles on open), 6 (partly), 7 (`fullRoomRefresh` 35 s) |
 | [2026-10-03-initial-sync-lazy-members](2026-10-03-initial-sync-lazy-members.md) | phase I done (`5ff01d6d`), phase II cancelled | slow first `/sync`: stage 1A (proxy timeout, server side), response composition, variant D |

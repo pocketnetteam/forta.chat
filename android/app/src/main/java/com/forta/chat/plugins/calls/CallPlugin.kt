@@ -871,13 +871,7 @@ class CallPlugin : Plugin() {
         val records = com.forta.chat.FortaFirebaseMessagingService.inviteTracker.snapshot()
         val arr = org.json.JSONArray()
         for (r in records) {
-            arr.put(org.json.JSONObject().apply {
-                put("receivedAtMs", r.receivedAtMs)
-                put("sentAtMs", r.sentAtMs)
-                put("deliveryLatencyMs", r.deliveryLatencyMs)
-                put("expired", r.expired)
-                put("callId", r.callId ?: "")
-            })
+            arr.put(org.json.JSONObject(r.toWireMap()))
         }
         call.resolve(JSObject().apply { put("records", arr) })
     }

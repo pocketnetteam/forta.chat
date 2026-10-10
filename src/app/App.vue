@@ -25,6 +25,7 @@ import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/com
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
 import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
 import { AppDownloadBanner } from "@/features/app-download-banner";
+import { BatteryOptimizationHint } from "@/features/battery-optimization-hint";
 import {
   BugReportStatusSheet,
   useBugReportStatus,
@@ -502,6 +503,8 @@ onUnmounted(() => {
 <template>
   <div class="safe-top fixed inset-0 flex flex-col overflow-hidden bg-background-total-theme text-text-color">
     <AppDownloadBanner />
+    <!-- Missed push calls T3: ask once to lift battery restrictions on calls -->
+    <BatteryOptimizationHint />
     <!-- Registration stepper overlay — shows progress during blockchain registration -->
     <RegistrationStepper
       v-if="authStore.registrationPending || authStore.registrationPhase === 'done' || authStore.registrationUsernameError || authStore.registrationErrorMessage"

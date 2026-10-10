@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import com.forta.chat.FortaFirebaseMessagingService
 import com.getcapacitor.JSObject
@@ -480,6 +481,46 @@ class PushDataPlugin : Plugin() {
             call.resolve()
         } catch (e: Exception) {
             call.reject("Could not open the full-screen intent settings: ${e.message}", "unavailable", e)
+        }
+    }
+
+    /**
+     * Missed push calls (T3): does Android exempt this app from battery
+     * optimization? Without the exemption Doze and App Standby can hold a call
+     * push back until the invite is over.
+     */
+    @PluginMethod
+    fun getBatteryOptimizationStatus(call: PluginCall) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        call.resolve(JSObject().apply {
+            put("ignoring", pm.isIgnoringBatteryOptimizations(context.packageName))
+        })
+    }
+
+    /**
+     * Ask the user to exempt the app: the system dialog decides, the app never
+     * changes the setting itself. Builds without that dialog get the list of
+     * apps instead.
+     */
+    @PluginMethod
+    fun requestIgnoreBatteryOptimizations(call: PluginCall) {
+        try {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:${context.packageName}"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            call.resolve()
+        } catch (e: Exception) {
+            try {
+                context.startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                call.resolve()
+            } catch (fallback: Exception) {
+                call.reject("Could not open the battery optimization settings: ${fallback.message}", "unavailable", fallback)
+            }
         }
     }
 

@@ -4,7 +4,8 @@ import { App as CapApp } from "@capacitor/app";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { SettingsSection } from "@/shared/ui/settings-section";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative } from "@/shared/lib/platform";
+import { isAndroid, isNative } from "@/shared/lib/platform";
+import { isBatteryHintDisabled, setBatteryHintDisabled } from "@/shared/lib/push/battery-hint-storage";
 import { requestNotificationPermission } from "@/shared/lib/notifications/web-notifier";
 import { useNotificationSettings } from "../model/use-notification-settings";
 
@@ -19,6 +20,13 @@ import { useNotificationSettings } from "../model/use-notification-settings";
  * aggressive OEMs (Xiaomi/MIUI, Samsung, …) we add a targeted hint.
  */
 const { t } = useI18n();
+// Missed push calls T3: the battery-restrictions reminder can be turned off.
+const showBatteryReminder = isNative && isAndroid;
+const batteryReminderOn = ref(!isBatteryHintDisabled());
+const setBatteryReminder = (on: boolean) => {
+  batteryReminderOn.value = on;
+  setBatteryHintDisabled(!on);
+};
 const {
   canOpenSystemSettings,
   vendorGuidanceId,
@@ -87,6 +95,14 @@ onUnmounted(() => {
           data-testid="incoming-calls-toggle"
           :model-value="incomingCallsEnabled"
           @update:model-value="setIncomingCallsEnabled"
+        />
+      </div>
+      <div v-if="showBatteryReminder" class="flex items-center justify-between rounded-lg p-3">
+        <span class="text-sm text-text-color">{{ t("notificationsSettings.batteryReminder") }}</span>
+        <Toggle
+          data-testid="battery-reminder-toggle"
+          :model-value="batteryReminderOn"
+          @update:model-value="setBatteryReminder"
         />
       </div>
     </SettingsSection>

@@ -201,6 +201,8 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Missed push calls T3: the battery hint asks for the exemption; the system dialog decides. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Required to keep the device awake while ringing — without it the
          full-screen-intent notification can fail to wake the screen on
          some OEM ROMs (Huawei in particular). Session 41. -->
