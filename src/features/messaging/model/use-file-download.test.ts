@@ -1530,6 +1530,63 @@ describe("useFileDownload", () => {
       expect(rewriteMediaHost(foreign, "matrix.2.pocketnet.app")).toBe(foreign);
     });
 
+    // 1.13.5 brought five "Download failed: 404" reports in a day (forta-bugs
+    // #1448–#1454) where history had one: a URL stored on one of our hosts
+    // never tried the other one, and 404 failed at once.
+    it("rewrites a URL stored on the mirror to the primary too", () => {
+      expect(
+        rewriteMediaHost("https://matrix.2.pocketnet.app/_matrix/media/v3/download/x/abc", "matrix.pocketnet.app"),
+      ).toBe("https://matrix.pocketnet.app/_matrix/media/v3/download/x/abc");
+    });
+
+    it("tries the other own host once after a 404, and names the host when both miss", async () => {
+      const seen: string[] = [];
+      (global.fetch as Mock).mockImplementation(async (url: string) => {
+        seen.push(new URL(url).hostname);
+        return { ok: false, status: 404, blob: () => Promise.resolve(new Blob()) };
+      });
+      const scope = effectScope();
+      let error: unknown;
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt404", _key: "client_404", roomId: "!room:server", senderId: "@u:server",
+          content: "file.pdf", timestamp: Date.now(), status: "sent", type: "file",
+          fileInfo: { name: "file.pdf", type: "application/pdf", size: 1024, url: "https://matrix.2.pocketnet.app/_matrix/media/v3/download/matrix.pocketnet.app/abc" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        await download(message);
+        error = getState("client_404").error;
+      });
+      scope.stop();
+      expect(new Set(seen)).toEqual(new Set(["matrix.pocketnet.app", "matrix.2.pocketnet.app"]));
+      expect(seen).toHaveLength(2);
+      expect(String(error ?? "")).toContain("404");
+    });
+
+    it("recovers when the other own host has the file", async () => {
+      (global.fetch as Mock).mockImplementation(async (url: string) =>
+        new URL(url).hostname === "matrix.2.pocketnet.app"
+          ? { ok: true, status: 200, blob: () => Promise.resolve(new Blob([new Uint8Array([1])])) }
+          : { ok: false, status: 404, blob: () => Promise.resolve(new Blob()) },
+      );
+      const scope = effectScope();
+      let state: unknown;
+      await scope.run(async () => {
+        const { download, getState } = useFileDownload();
+        const message = {
+          id: "$evt404b", _key: "client_404b", roomId: "!room:server", senderId: "@u:server",
+          content: "file.pdf", timestamp: Date.now(), status: "sent", type: "file",
+          fileInfo: { name: "file.pdf", type: "application/pdf", size: 1024, url: "https://matrix.pocketnet.app/_matrix/media/v3/download/matrix.pocketnet.app/abc" },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        await download(message);
+        state = getState("client_404b");
+      });
+      scope.stop();
+      expect((state as { objectUrl?: string } | undefined)?.objectUrl).toBeTruthy();
+    });
+
     it("leaves non-URL inputs (blob:/data:) untouched", () => {
       expect(rewriteMediaHost("blob:http://localhost/abc", "matrix.2.pocketnet.app")).toBe(
         "blob:http://localhost/abc",

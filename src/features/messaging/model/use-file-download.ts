@@ -475,20 +475,34 @@ export function mediaHostForAttempt(attempt: number): string {
   return MEDIA_HOSTS[idx];
 }
 
-/** Rewrite a resolved media URL's host to `host`. Only our own primary
- *  homeserver host is ever rewritten — external/CDN hosts and anything that
- *  isn't a parseable absolute URL (e.g. `blob:`/`data:` left untouched by
- *  resolveMediaUrl) pass through unchanged so we never point a foreign URL at
- *  a Pocketnet mirror. */
+/** Rewrite a resolved media URL's host to `host`. Only our own homeserver
+ *  hosts (primary and mirrors) are ever rewritten — external/CDN hosts and
+ *  anything that isn't a parseable absolute URL (e.g. `blob:`/`data:` left
+ *  untouched by resolveMediaUrl) pass through unchanged so we never point a
+ *  foreign URL at a Pocketnet host. A URL a sender stored on the mirror
+ *  reaches the primary too. */
 export function rewriteMediaHost(url: string, host: string): string {
-  if (host === MATRIX_SERVER) return url;
   try {
     const u = new URL(url);
-    if (u.hostname !== MATRIX_SERVER) return url;
+    if (!isOwnMediaHost(u.hostname) || u.hostname === host) return url;
     u.hostname = host;
     return u.toString();
   } catch {
     return url;
+  }
+}
+
+/** One of our homeserver hosts (primary or a mirror). */
+function isOwnMediaHost(hostname: string): boolean {
+  return MEDIA_HOSTS.includes(hostname);
+}
+
+/** Hostname of an absolute URL, "" when it has none. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
   }
 }
 
@@ -584,12 +598,17 @@ async function downloadAndDecrypt(
   if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
 
   let lastError: unknown;
+  /** Own hosts that answered 404/410: the file may still sit on another one. */
+  const missingOn = new Set<string>();
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (signal?.aborted) throw new DOMException("Download cancelled", "AbortError");
     if (attempt > 0) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 1] ?? 6000));
     }
+    // Read by the catch below: which URL and host this attempt fetched.
+    let resolvedUrl: string | null = null;
+    let fetchUrl = "";
 
     try {
       // Download the file (with hard timeout to avoid indefinite MIUI/Tor stalls).
@@ -600,7 +619,7 @@ async function downloadAndDecrypt(
       // with TypeError: Failed to fetch on every attempt.
       // On retry attempts, append a cache-bust so Service Workers / CDN edges
       // don't replay the prior failure response (issues #648, #641, #637).
-      const resolvedUrl = resolveMediaUrl(fileInfo.url);
+      resolvedUrl = resolveMediaUrl(fileInfo.url);
       if (resolvedUrl === null) {
         // Cannot translate mxc:// — Matrix client missing or unknown baseUrl.
         // This is terminal: the retry budget will hit the same null every time.
@@ -610,14 +629,15 @@ async function downloadAndDecrypt(
       // media-repo is bypassed on retry (WEE-90 H2). No-op for the first attempt
       // and for non-primary hosts.
       const hostUrl = rewriteMediaHost(resolvedUrl, mediaHostForAttempt(attempt));
-      const fetchUrl = appendCacheBust(hostUrl, attempt);
+      fetchUrl = appendCacheBust(hostUrl, attempt);
       let blob: Blob;
       if (shouldUseNativeTorDownload()) {
         blob = await downloadMediaViaTorFile(fetchUrl, undefined, { signal });
       } else {
         const response = await fetchWithTimeout(fetchUrl, signal);
         if (!response.ok) {
-          const err = new Error(`Download failed: ${response.status}`);
+          // The host is in the message so reports tell a mirror from the primary.
+          const err = new Error(`Download failed: ${response.status} at ${hostOf(fetchUrl)}`);
           // Mark non-retriable codes so the catch block below can throw immediately
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (err as any).status = response.status;
@@ -699,6 +719,13 @@ async function downloadAndDecrypt(
       if (e instanceof Error) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const status = (e as any).status as number | undefined;
+        // A file missing on one of our hosts may be on another: try each own
+        // host once before giving up (1.13.5 reports, forta-bugs #1448–#1454).
+        if (status === 404 || status === 410) {
+          missingOn.add(hostOf(fetchUrl));
+          const ownHostLeft = isOwnMediaHost(hostOf(resolvedUrl ?? "")) && MEDIA_HOSTS.some((h) => !missingOn.has(h));
+          if (ownHostLeft) continue;
+        }
         if (status !== undefined && NON_RETRIABLE_STATUSES.has(status)) throw e;
         // Legacy substring match in case status wasn't attached
         if (e.message.includes("404") || e.message.includes("403") || e.message.includes("415")) {
