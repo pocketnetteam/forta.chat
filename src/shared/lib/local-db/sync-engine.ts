@@ -13,8 +13,8 @@ type OnChangeCallback = (roomId: string) => void;
 const MAX_BACKOFF_MS = 30_000;
 const MIN_BACKOFF_MS = 1_000;
 
-/** Max rooms processed concurrently (WEE-94). Outbound ops stay strictly FIFO
- *  *within* a room (message order is a hard invariant), but a slow room —
+/** Max lanes processed concurrently (WEE-94). Outbound ops stay FIFO *within*
+ *  a room (only new text may pass a stuck upload, see pickClaimableOp), but a slow room —
  *  heavy encryption, slow link, retry backoff — must not head-of-line block
  *  sends in other rooms. 3 mirrors the `mediaDownloadGate` budget from
  *  use-file-download: enough overlap to hide one stuck room, small enough not
@@ -189,13 +189,91 @@ async function uploadWithRetry(
   throw lastErr;
 }
 
+/** How long a file upload may run before the text behind it in the same room
+ *  stops waiting for it (audit W2C-05, owner decision 2026-10-10: text may
+ *  overtake a stuck upload, which changes the message order). A healthy photo
+ *  upload ends well inside it, so "photo, then text" keeps its order. */
+export const STUCK_UPLOAD_MS = 20_000;
+
+type QueuedOp = Pick<PendingOperation, "id" | "type" | "roomId" | "status" | "retries" | "nextAttemptAt" | "lastAttemptAt" | "createdAt">;
+
+/** Concurrency lane of an op: a room's file uploads run beside its other ops,
+ *  so a long upload holds back only what has to stay behind it. */
+export function laneOf(op: Pick<PendingOperation, "roomId" | "type">): string {
+  return op.type === "send_file" ? `${op.roomId}\u0000file` : op.roomId;
+}
+
+/** A send_file op that has failed at least once, or has been in flight past
+ *  STUCK_UPLOAD_MS. */
+function isStuckUpload(op: QueuedOp, now: number): boolean {
+  if (op.status === "syncing") return now - (op.lastAttemptAt ?? op.createdAt ?? now) >= STUCK_UPLOAD_MS;
+  return op.retries > 0;
+}
+
+/**
+ * The op the claim loop may start next, or null. `ops` are the pending and
+ * syncing ops of every room; `activeLanes` the lanes this engine runs now.
+ *
+ * Within a room the order is FIFO — an op waits for every op created before
+ * it — with one exception: a new text message (`send_message`) may go ahead
+ * of file uploads, but only of stuck ones (failed once, or in flight past
+ * STUCK_UPLOAD_MS) and of nothing else (audit W2C-05). Edits, deletions,
+ * reactions and the rest keep waiting, and so does text behind a healthy
+ * upload or behind other text.
+ */
+export function pickClaimableOp(
+  ops: readonly QueuedOp[],
+  now: number,
+  activeLanes: ReadonlySet<string>,
+): QueuedOp | null {
+  const ordered = [...ops].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+  const rooms = new Map<string, { blocked: boolean; fileAhead: boolean; healthyFileAhead: boolean }>();
+  const markAhead = (st: { blocked: boolean; fileAhead: boolean; healthyFileAhead: boolean }, op: QueuedOp) => {
+    if (op.type !== "send_file") {
+      st.blocked = true;
+      return;
+    }
+    st.fileAhead = true;
+    if (!isStuckUpload(op, now)) st.healthyFileAhead = true;
+  };
+  for (const op of ordered) {
+    let st = rooms.get(op.roomId);
+    if (!st) {
+      st = { blocked: false, fileAhead: false, healthyFileAhead: false };
+      rooms.set(op.roomId, st);
+    }
+    if (op.status === "pending" && !st.blocked) {
+      const isHead = !st.fileAhead;
+      const overtakesStuckUpload = op.type === "send_message" && st.fileAhead && !st.healthyFileAhead;
+      const due = (op.nextAttemptAt ?? 0) <= now;
+      if ((isHead || overtakesStuckUpload) && due && !activeLanes.has(laneOf(op))) return op;
+    }
+    if (op.status === "pending" || op.status === "syncing") markAhead(st, op);
+  }
+  return null;
+}
+
+/** The upload a previous attempt of a send_file finished, when it can be sent
+ *  as is: uploaded, with a URL, and encrypted exactly when the room encrypts. */
+export function reusableUpload(
+  attachment: { status?: string; remoteUrl?: string; encryptionSecrets?: unknown },
+  roomCrypto: { canBeEncrypt(): boolean; requiresEncryption?(): boolean } | null | undefined,
+): { url: string; secrets: Record<string, unknown> | undefined } | null {
+  if (attachment.status !== "uploaded" || !attachment.remoteUrl) return null;
+  const secrets = (attachment.encryptionSecrets ?? undefined) as Record<string, unknown> | undefined;
+  const encryptsNow = !!roomCrypto?.canBeEncrypt();
+  if (!!secrets !== encryptsNow) return null;
+  return { url: attachment.remoteUrl, secrets };
+}
+
 /**
  * SyncEngine processes pending operations (outbound queue).
  *
  * Lifecycle:
  *   1. User action → MessageRepository writes to local DB + creates PendingOp
- *   2. SyncEngine.processQueue() picks up ops — strictly FIFO within a room,
- *      up to MAX_CONCURRENT_ROOMS rooms in parallel (WEE-94)
+ *   2. SyncEngine.processQueue() picks up ops — FIFO within a room (new text
+ *      may pass a stuck upload, see pickClaimableOp), up to
+ *      MAX_CONCURRENT_ROOMS lanes in parallel (WEE-94)
  *   3. Each op: encrypt if needed → call Matrix API → update local message status
  *   4. On failure: exponential backoff + retry, or mark as "failed"
  *
@@ -206,8 +284,9 @@ export class SyncEngine {
   /** True while the claim loop in processTick is running. Serializes claiming
    *  (op execution itself runs concurrently per room — see `activeRooms`). */
   private processing = false;
-  /** Rooms with an op currently executing in THIS engine instance. Bounded by
-   *  MAX_CONCURRENT_ROOMS; claimDueOp skips these rooms so per-room FIFO holds. */
+  /** Lanes (see laneOf: a room, or a room's file uploads) with an op executing
+   *  in THIS engine instance. Bounded by MAX_CONCURRENT_ROOMS; claimDueOp skips
+   *  these lanes so per-room order holds. */
   private activeRooms = new Set<string>();
   /** A kick arrived while the claim loop was running. processTick re-runs the
    *  loop once after it finishes so a room freed mid-loop is not stranded
@@ -385,10 +464,10 @@ export class SyncEngine {
 
   /**
    * Kick the claim loop. Each tick claims due ops — at most one in-flight op
-   * per room, at most MAX_CONCURRENT_ROOMS rooms in parallel (WEE-94) — and
-   * executes them concurrently. Within a room, order is strictly FIFO: only
-   * the room's head op is ever claimed, so a retrying head blocks its own
-   * room (message order is a hard invariant) but never other rooms.
+   * per lane (a room, or a room's uploads), at most MAX_CONCURRENT_ROOMS lanes
+   * in parallel (WEE-94) — and executes them concurrently. Within a room the
+   * head op is claimed, so a retrying head blocks its own room but never
+   * other rooms; new text may pass a stuck upload (pickClaimableOp).
    *
    * External callers use the public `processQueue()` which is a thin wrapper
    * kicking off the first tick without double-scheduling.
@@ -485,7 +564,7 @@ export class SyncEngine {
         .equals("syncing")
         .filter(
           (op) =>
-            !this.activeRooms.has(op.roomId) &&
+            !this.activeRooms.has(laneOf(op)) &&
             (op.lastAttemptAt ?? op.createdAt ?? 0) <= cutoff,
         )
         .toArray();
@@ -566,16 +645,19 @@ export class SyncEngine {
 
         if (!op) {
           // Nothing claimable right now — check whether an op is scheduled
-          // for later so we can set a wake-up timer in the finally block.
-          nextRetryDelay = await this.findNextRetryDelay();
+          // for later (a retry, or text waiting for an upload to count as
+          // stuck) so we can set a wake-up timer in the finally block.
+          const retry = await this.findNextRetryDelay();
+          const stuck = await this.findNextStuckUploadDelay();
+          nextRetryDelay = retry === null ? stuck : stuck === null ? retry : Math.min(retry, stuck);
           break;
         }
 
-        this.activeRooms.add(op.roomId);
+        this.activeRooms.add(laneOf(op));
         // Deliberately NOT awaited — rooms run in parallel. Errors are fully
         // handled inside runClaimedOp; the finally here only frees the slot.
         void this.runClaimedOp(op).finally(() => {
-          this.activeRooms.delete(op.roomId);
+          this.activeRooms.delete(laneOf(op));
           // Re-check the queue: this room is free again, and the op may have
           // scheduled a retry whose wake-up needs (re)computing.
           this.kickScheduler(0);
@@ -725,7 +807,8 @@ export class SyncEngine {
           // proceed immediately. The delay is tracked via nextAttemptAt in the
           // DB; the post-completion kick recomputes the wake-up timer. Note
           // that within THIS room the retrying op stays the head, so later
-          // messages in the room wait for it — FIFO order is a hard invariant.
+          // ops in the room wait for it — except new text, which may pass a
+          // file upload that keeps failing (pickClaimableOp, audit W2C-05).
         }
       } catch (bookkeepingErr) {
         if (this.disposed || isDbClosedError(bookkeepingErr)) return;
@@ -736,10 +819,10 @@ export class SyncEngine {
 
   /**
    * Atomically claim the next claimable op (WEE-94). An op is claimable when
-   * it is the HEAD of its room's queue (first pending op of the room in
-   * creation order — FIFO within a room is a hard invariant), it is due
-   * (nextAttemptAt <= now), and its room is busy in neither this engine
-   * (`activeRooms`) nor any other tab (a "syncing" op of the same room).
+   * it is the head of its room's queue (FIFO within a room; the one exception
+   * is text going ahead of a stuck upload — see pickClaimableOp), it is due
+   * (nextAttemptAt <= now), and its lane is busy in neither this engine
+   * (`activeRooms`) nor any other tab (a "syncing" op ahead of it).
    * Returns null if nothing is claimable.
    *
    * The whole select-and-mark runs in one rw-transaction on pendingOps, same
@@ -747,42 +830,18 @@ export class SyncEngine {
    * record, and a room claimed by another tab is excluded via its "syncing"
    * marker row, so two tabs can't run the same room out of order either.
    *
-   * Iteration walks the "status" index, whose entries within one status value
-   * are ordered by primary key (`++id` = creation order), and stops at the
-   * first claimable head. The realistic outbound queue is tiny (tens of ops);
-   * the previous O(log n) single-op lookup via [status+nextAttemptAt] cannot
-   * express "head per room", so a short ordered walk replaces it.
+   * The realistic outbound queue is tiny (tens of ops), so the pending and
+   * syncing rows are read whole and walked in creation order (`++id`).
    */
   private async claimDueOp(): Promise<PendingOperation | null> {
     return this.db.transaction("rw", this.db.pendingOps, async () => {
       const now = Date.now();
-
-      // Rooms with an op currently in flight somewhere (this tab marks ops
-      // "syncing" too, but activeRooms is checked as well to close the gap
-      // between transaction commit and the worker registering the room).
-      const busyRooms = new Set<string>(this.activeRooms);
-      await this.db.pendingOps
-        .where("status")
-        .equals("syncing")
-        .each((op) => {
-          busyRooms.add(op.roomId);
-        });
-
-      // Walk pending ops in creation order; the first op seen for a room is
-      // that room's head. Only a due head of a free room may be claimed.
-      const seenRooms = new Set<string>();
-      let claimed: PendingOperation | null = null;
-      await this.db.pendingOps
-        .where("status")
-        .equals("pending")
-        .until(() => claimed !== null)
-        .each((op) => {
-          if (claimed || seenRooms.has(op.roomId)) return;
-          seenRooms.add(op.roomId);
-          if (busyRooms.has(op.roomId)) return;
-          if ((op.nextAttemptAt ?? 0) > now) return; // head not due → room waits
-          claimed = op;
-        });
+      // Pending and in-flight ops of every room, this tab's and other tabs'
+      // ("syncing" rows); the queue is tiny (tens of ops). activeRooms holds
+      // this engine's busy lanes, closing the gap between the claim commit
+      // and the worker registering its lane.
+      const queued = await this.db.pendingOps.where("status").anyOf("pending", "syncing").toArray();
+      const claimed = pickClaimableOp(queued, now, this.activeRooms) as PendingOperation | null;
 
       if (!claimed) return null;
       const head = claimed as PendingOperation;
@@ -812,6 +871,22 @@ export class SyncEngine {
     if (!soonest) return null;
     const delay = (soonest.nextAttemptAt ?? 0) - now;
     return delay > 0 ? delay : null;
+  }
+
+  /** Time until the earliest in-flight upload counts as stuck (text behind it
+   *  may then go ahead), or null when no upload is in flight. */
+  private async findNextStuckUploadDelay(): Promise<number | null> {
+    const now = Date.now();
+    let soonest: number | null = null;
+    await this.db.pendingOps
+      .where("status")
+      .equals("syncing")
+      .each((op) => {
+        if (op.type !== "send_file") return;
+        const delay = (op.lastAttemptAt ?? op.createdAt ?? now) + STUCK_UPLOAD_MS - now;
+        if (delay > 0 && (soonest === null || delay < soonest)) soonest = delay;
+      });
+    return soonest;
   }
 
   /** Schedule a future tick to pick up retry-scheduled ops. */
@@ -969,68 +1044,81 @@ export class SyncEngine {
         throw new DOMException("Upload cancelled", "AbortError");
       }
 
-      // --- Phase 1: encrypt (fast, fails loudly) ----------------------------
       const roomCrypto = await this.getRoomCrypto(op.roomId);
       // Recipients are decided from the member list — complete it first (lazy-loaded members).
       await roomCrypto?.ensureMembers?.();
-      let fileToUpload: Blob = attachment.localBlob;
+
+      // An earlier attempt uploaded this file and failed later (the event
+      // PUT): send that upload instead of encrypting and uploading the whole
+      // file again (audit W2C-05). Only when the room's encryption still
+      // matches what was uploaded — never a plaintext upload into a room
+      // that encrypts now.
+      const previous = reusableUpload(attachment, roomCrypto);
+      let url: string;
       let secrets: Record<string, unknown> | undefined;
+      if (previous) {
+        url = previous.url;
+        secrets = previous.secrets;
+      } else {
+        // --- Phase 1: encrypt (fast, fails loudly) ----------------------------
+        let fileToUpload: Blob = attachment.localBlob;
 
-      if (roomCrypto?.canBeEncrypt()) {
-        const encrypted = await withTimeout(
-          roomCrypto.encryptFile(attachment.localBlob),
-          MEDIA_ENCRYPT_TIMEOUT_MS,
-          "Media encrypt",
-        );
-        fileToUpload = encrypted.file;
-        secrets = encrypted.secrets;
-      } else if (roomCrypto?.requiresEncryption()) {
-        // Defense in depth: refuse to upload a plaintext attachment into a
-        // private room. Same rationale as syncSendMessage.
-        throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncSendFile upload`);
+        if (roomCrypto?.canBeEncrypt()) {
+          const encrypted = await withTimeout(
+            roomCrypto.encryptFile(attachment.localBlob),
+            MEDIA_ENCRYPT_TIMEOUT_MS,
+            "Media encrypt",
+          );
+          fileToUpload = encrypted.file;
+          secrets = encrypted.secrets;
+        } else if (roomCrypto?.requiresEncryption()) {
+          // Defense in depth: refuse to upload a plaintext attachment into a
+          // private room. Same rationale as syncSendMessage.
+          throw new Error(`${ENCRYPTION_REQUIRED_NO_KEYS} — syncSendFile upload`);
+        }
+
+        await this.db.attachments.update(attachment.id!, {
+          status: "uploading",
+          encryptionSecrets: secrets,
+        });
+
+        // --- Phase 2: upload (longest — big files on slow links) --------------
+        if (controller.signal.aborted) {
+          throw new DOMException("Upload cancelled", "AbortError");
+        }
+        const onProgress = makeThrottledProgress((percent) => {
+          // fire-and-forget; progress is advisory and must not stall upload
+          void this.messageRepo.updateUploadProgress(op.clientId, percent);
+        });
+        // The retry loop sits *inside* the timeout so the deadline covers the
+        // whole upload phase (including in-attempt retries) rather than being
+        // reset between attempts — protects against a runaway 4×4-min loop on
+        // a flaky link.
+        // withTimeout does not cancel what it races: abort the upload when the
+        // deadline fires, or the XHR goes on sending in the background and its
+        // progress writes land on a message already marked failed.
+        url = await withTimeout(
+          uploadWithRetry(
+            () =>
+              matrixService.uploadContent(
+                fileToUpload,
+                onProgress,
+                controller.signal,
+              ),
+            controller.signal,
+          ),
+          MEDIA_UPLOAD_TIMEOUT_MS,
+          "Media upload",
+        ).catch((e: unknown) => {
+          if (!controller.signal.aborted) controller.abort();
+          throw e;
+        });
+
+        await this.db.attachments.update(attachment.id!, {
+          status: "uploaded",
+          remoteUrl: url,
+        });
       }
-
-      await this.db.attachments.update(attachment.id!, {
-        status: "uploading",
-        encryptionSecrets: secrets,
-      });
-
-      // --- Phase 2: upload (longest — big files on slow links) --------------
-      if (controller.signal.aborted) {
-        throw new DOMException("Upload cancelled", "AbortError");
-      }
-      const onProgress = makeThrottledProgress((percent) => {
-        // fire-and-forget; progress is advisory and must not stall upload
-        void this.messageRepo.updateUploadProgress(op.clientId, percent);
-      });
-      // The retry loop sits *inside* the timeout so the deadline covers the
-      // whole upload phase (including in-attempt retries) rather than being
-      // reset between attempts — protects against a runaway 4×4-min loop on
-      // a flaky link.
-      // withTimeout does not cancel what it races: abort the upload when the
-      // deadline fires, or the XHR goes on sending in the background and its
-      // progress writes land on a message already marked failed.
-      const url = await withTimeout(
-        uploadWithRetry(
-          () =>
-            matrixService.uploadContent(
-              fileToUpload,
-              onProgress,
-              controller.signal,
-            ),
-          controller.signal,
-        ),
-        MEDIA_UPLOAD_TIMEOUT_MS,
-        "Media upload",
-      ).catch((e: unknown) => {
-        if (!controller.signal.aborted) controller.abort();
-        throw e;
-      });
-
-      await this.db.attachments.update(attachment.id!, {
-        status: "uploaded",
-        remoteUrl: url,
-      });
 
       // --- Phase 3: send event (short, just a Matrix PUT) --------------------
       if (controller.signal.aborted) {
