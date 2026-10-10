@@ -30,4 +30,16 @@ class PushTapIntentContractTest {
         assertTrue("and buffer the tap without one:\n$body", body.indexOf("pendingPushRoom = data", check) > check)
         assertTrue(body.indexOf("notifyListeners(\"pushOpenRoom\", data)") > check)
     }
+
+    // Review 2026-10-10: onNewIntent runs on the main thread, addListener and
+    // getPendingIntent on the plugin thread; the check-then-buffer and the read
+    // share one lock so a tap cannot fall between them.
+    @Test
+    fun theBufferIsSharedUnderOneLock() {
+        assertTrue(plugin.contains("@Volatile\n    private var pendingPushRoom"))
+        val forward = plugin.substring(plugin.indexOf("private fun forwardPushIntent("))
+        assertTrue(forward.substring(0, forward.indexOf("\n    }\n")).contains("synchronized(pendingLock)"))
+        val read = plugin.substring(plugin.indexOf("fun getPendingIntent("))
+        assertTrue(read.substring(0, read.indexOf("\n    }\n")).contains("synchronized(pendingLock)"))
+    }
 }

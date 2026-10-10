@@ -153,4 +153,13 @@ class InvitePushOutcomeContractTest {
     fun theNoticeSkipsAHandledCall() {
         assertTrue(helper, helper.contains("handled = id != null && CancelledCallStore(this).wasHandled(id)"))
     }
+
+    // Review 2026-10-10 (second pass): an answer through JS skips onAnswer.
+    @Test
+    fun aCallConnectedThroughJsIsMarkedHandledUnderBothIds() {
+        val plugin = source("com/forta/chat/plugins/calls/CallPlugin.kt")
+        val start = plugin.indexOf("fun reportCallConnected(")
+        val body = plugin.substring(start, plugin.indexOf("\n    }\n", start))
+        assertTrue(body, body.contains("markHandled(callId)") && body.contains("markHandled(slotId)"))
+    }
 }

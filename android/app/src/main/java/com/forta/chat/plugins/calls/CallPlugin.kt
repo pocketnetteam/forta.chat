@@ -436,6 +436,14 @@ class CallPlugin : Plugin() {
         // the ledger only knows the Matrix id launchCallUI recorded.
         connection?.let { CallForegroundService.aliasCall(it.callId, callId) }
         connection?.setActive()
+        // Answered here through JS, which skips onAnswer: a stale copy of the
+        // invite must not show "missed call". The push's call_id is the Matrix
+        // id; a slot made from a push is keyed by the event id.
+        runCatching {
+            val store = CancelledCallStore(context)
+            callId?.takeIf { it.isNotEmpty() }?.let { store.markHandled(callId) }
+            connection?.callId?.takeIf { it.isNotEmpty() && it != callId }?.let { slotId -> store.markHandled(slotId) }
+        }.onFailure { Log.w(TAG, "could not mark $callId handled", it) }
         // The answer has been picked up: disarm the backstop that releases a
         // connection Telecom answered while JS was not there.
         connection?.markAdoptedByJs()

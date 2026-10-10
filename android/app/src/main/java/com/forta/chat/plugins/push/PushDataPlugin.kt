@@ -31,8 +31,11 @@ class PushDataPlugin : Plugin() {
         private const val MAX_CONSUMED_KEYS = 20
     }
 
-    /** Buffered push intent data for cold-start retrieval by JS */
+    /** Buffered push intent data for cold-start retrieval by JS. Written from
+     *  the main thread (onNewIntent), read on the plugin thread: under [pendingLock]. */
+    @Volatile
     private var pendingPushRoom: JSObject? = null
+    private val pendingLock = Any()
 
     override fun load() {
         // Register with FCM service so it can forward push data to us
@@ -149,9 +152,11 @@ class PushDataPlugin : Plugin() {
         // tap recreates the activity from the launcher intent and arrives here,
         // before the page has loaded. Nobody listens yet; the tap waits for
         // getPendingIntent instead of being dropped (Samsung, 2026-10-10).
-        if (!hasListeners("pushOpenRoom")) {
+        val buffered = synchronized(pendingLock) {
+            if (hasListeners("pushOpenRoom")) false else { pendingPushRoom = data; true }
+        }
+        if (buffered) {
             android.util.Log.i("FortaPush", "push tap buffered until JS listens (roomId=$roomId)")
-            pendingPushRoom = data
             return
         }
         android.util.Log.i("FortaPush", "push tap forwarded to JS (roomId=$roomId)")
@@ -161,8 +166,9 @@ class PushDataPlugin : Plugin() {
     /** Called by JS to retrieve buffered push intent from cold-start */
     @PluginMethod
     fun getPendingIntent(call: PluginCall) {
-        val pending = pendingPushRoom
-        pendingPushRoom = null
+        val pending = synchronized(pendingLock) {
+            pendingPushRoom.also { pendingPushRoom = null }
+        }
         if (pending != null) {
             call.resolve(pending)
         } else {
