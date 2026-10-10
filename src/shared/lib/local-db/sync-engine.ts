@@ -200,7 +200,19 @@ type QueuedOp = Pick<PendingOperation, "id" | "type" | "roomId" | "status" | "re
 /** Concurrency lane of an op: a room's file uploads run beside its other ops,
  *  so a long upload holds back only what has to stay behind it. */
 export function laneOf(op: Pick<PendingOperation, "roomId" | "type">): string {
-  return op.type === "send_file" ? `${op.roomId}\u0000file` : op.roomId;
+  return op.type === "send_file" ? `${op.roomId}${FILE_LANE_SUFFIX}` : op.roomId;
+}
+
+const FILE_LANE_SUFFIX = "\u0000file";
+
+/** Whether a free slot exists for `op`: file lanes and the other lanes each
+ *  get MAX_CONCURRENT_ROOMS, so stuck uploads in three rooms do not stop
+ *  text everywhere. */
+export function hasLaneSlot(op: Pick<PendingOperation, "type">, activeLanes: ReadonlySet<string>): boolean {
+  let fileLanes = 0;
+  for (const lane of activeLanes) if (lane.endsWith(FILE_LANE_SUFFIX)) fileLanes++;
+  const busy = op.type === "send_file" ? fileLanes : activeLanes.size - fileLanes;
+  return busy < MAX_CONCURRENT_ROOMS;
 }
 
 /** A send_file op that has failed at least once, or has been in flight past
@@ -219,7 +231,9 @@ function isStuckUpload(op: QueuedOp, now: number): boolean {
  * of file uploads, but only of stuck ones (failed once, or in flight past
  * STUCK_UPLOAD_MS) and of nothing else (audit W2C-05). Edits, deletions,
  * reactions and the rest keep waiting, and so does text behind a healthy
- * upload or behind other text.
+ * upload or behind other text. An edit or reaction that waits only for stuck
+ * uploads does not hold the text back: it would wait as long as the upload.
+ * An op also needs a free slot of its kind (hasLaneSlot).
  */
 export function pickClaimableOp(
   ops: readonly QueuedOp[],
@@ -230,7 +244,9 @@ export function pickClaimableOp(
   const rooms = new Map<string, { blocked: boolean; fileAhead: boolean; healthyFileAhead: boolean }>();
   const markAhead = (st: { blocked: boolean; fileAhead: boolean; healthyFileAhead: boolean }, op: QueuedOp) => {
     if (op.type !== "send_file") {
-      st.blocked = true;
+      const waitsOnlyForStuckUploads =
+        op.status === "pending" && op.type !== "send_message" && st.fileAhead && !st.healthyFileAhead;
+      if (!waitsOnlyForStuckUploads) st.blocked = true;
       return;
     }
     st.fileAhead = true;
@@ -246,7 +262,7 @@ export function pickClaimableOp(
       const isHead = !st.fileAhead;
       const overtakesStuckUpload = op.type === "send_message" && st.fileAhead && !st.healthyFileAhead;
       const due = (op.nextAttemptAt ?? 0) <= now;
-      if ((isHead || overtakesStuckUpload) && due && !activeLanes.has(laneOf(op))) return op;
+      if ((isHead || overtakesStuckUpload) && due && !activeLanes.has(laneOf(op)) && hasLaneSlot(op, activeLanes)) return op;
     }
     if (op.status === "pending" || op.status === "syncing") markAhead(st, op);
   }
@@ -261,6 +277,9 @@ export function reusableUpload(
 ): { url: string; secrets: Record<string, unknown> | undefined } | null {
   if (attachment.status !== "uploaded" || !attachment.remoteUrl) return null;
   const secrets = (attachment.encryptionSecrets ?? undefined) as Record<string, unknown> | undefined;
+  // A plaintext upload never goes into a room that requires encryption, even
+  // while its keys are not ready (the fresh path refuses that upload too).
+  if (!secrets && roomCrypto?.requiresEncryption?.()) return null;
   const encryptsNow = !!roomCrypto?.canBeEncrypt();
   if (!!secrets !== encryptsNow) return null;
   return { url: attachment.remoteUrl, secrets };
@@ -273,7 +292,8 @@ export function reusableUpload(
  *   1. User action → MessageRepository writes to local DB + creates PendingOp
  *   2. SyncEngine.processQueue() picks up ops — FIFO within a room (new text
  *      may pass a stuck upload, see pickClaimableOp), up to
- *      MAX_CONCURRENT_ROOMS lanes in parallel (WEE-94)
+ *      MAX_CONCURRENT_ROOMS upload lanes and as many other lanes in parallel
+ *      (WEE-94, hasLaneSlot)
  *   3. Each op: encrypt if needed → call Matrix API → update local message status
  *   4. On failure: exponential backoff + retry, or mark as "failed"
  *
@@ -285,8 +305,8 @@ export class SyncEngine {
    *  (op execution itself runs concurrently per room — see `activeRooms`). */
   private processing = false;
   /** Lanes (see laneOf: a room, or a room's file uploads) with an op executing
-   *  in THIS engine instance. Bounded by MAX_CONCURRENT_ROOMS; claimDueOp skips
-   *  these lanes so per-room order holds. */
+   *  in THIS engine instance. Bounded per kind by hasLaneSlot; claimDueOp
+   *  skips these lanes so per-room order holds. */
   private activeRooms = new Set<string>();
   /** A kick arrived while the claim loop was running. processTick re-runs the
    *  loop once after it finishes so a room freed mid-loop is not stranded
@@ -465,7 +485,7 @@ export class SyncEngine {
   /**
    * Kick the claim loop. Each tick claims due ops — at most one in-flight op
    * per lane (a room, or a room's uploads), at most MAX_CONCURRENT_ROOMS lanes
-   * in parallel (WEE-94) — and executes them concurrently. Within a room the
+   * of each kind in parallel (WEE-94, hasLaneSlot) — and executes them concurrently. Within a room the
    * head op is claimed, so a retrying head blocks its own room but never
    * other rooms; new text may pass a stuck upload (pickClaimableOp).
    *
@@ -621,8 +641,8 @@ export class SyncEngine {
   }
 
   /**
-   * Claim loop (WEE-94): claim due ops from distinct rooms until either no
-   * claimable op remains or MAX_CONCURRENT_ROOMS workers are in flight.
+   * Claim loop (WEE-94): claim due ops from distinct lanes until either no
+   * claimable op remains or both kinds of lane are full (hasLaneSlot).
    * Each claimed op is executed concurrently via runClaimedOp; its completion
    * frees the room and kicks the scheduler again.
    */
@@ -637,18 +657,23 @@ export class SyncEngine {
       while (
         !this.disposed &&
         this.online &&
-        this.activeRooms.size < MAX_CONCURRENT_ROOMS
+        (hasLaneSlot({ type: "send_message" }, this.activeRooms) || hasLaneSlot({ type: "send_file" }, this.activeRooms))
       ) {
         // Claim the head op of a free room transactionally so concurrent
         // engines (multi-tab) can't both pick the same record.
-        const op = await this.claimDueOp();
+        // One clock reading for the claim and for the wake-up below: the
+        // retry timer fires at whole milliseconds, a fractional nextAttemptAt
+        // can fall between two readings, and the op was then neither due nor
+        // in the future, so its retry waited for the 30 s watchdog.
+        const now = Date.now();
+        const op = await this.claimDueOp(now);
 
         if (!op) {
           // Nothing claimable right now — check whether an op is scheduled
           // for later (a retry, or text waiting for an upload to count as
           // stuck) so we can set a wake-up timer in the finally block.
-          const retry = await this.findNextRetryDelay();
-          const stuck = await this.findNextStuckUploadDelay();
+          const retry = await this.findNextRetryDelay(now);
+          const stuck = await this.findNextStuckUploadDelay(now);
           nextRetryDelay = retry === null ? stuck : stuck === null ? retry : Math.min(retry, stuck);
           break;
         }
@@ -833,9 +858,8 @@ export class SyncEngine {
    * The realistic outbound queue is tiny (tens of ops), so the pending and
    * syncing rows are read whole and walked in creation order (`++id`).
    */
-  private async claimDueOp(): Promise<PendingOperation | null> {
+  private async claimDueOp(now: number): Promise<PendingOperation | null> {
     return this.db.transaction("rw", this.db.pendingOps, async () => {
-      const now = Date.now();
       // Pending and in-flight ops of every room, this tab's and other tabs'
       // ("syncing" rows); the queue is tiny (tens of ops). activeRooms holds
       // this engine's busy lanes, closing the gap between the claim commit
@@ -862,8 +886,7 @@ export class SyncEngine {
    * no immediately-due work but will have work later. O(log n) via the
    * [status+nextAttemptAt] compound index — only reads the first future op.
    */
-  private async findNextRetryDelay(): Promise<number | null> {
-    const now = Date.now();
+  private async findNextRetryDelay(now: number): Promise<number | null> {
     const soonest = await this.db.pendingOps
       .where("[status+nextAttemptAt]")
       .above(["pending", now])
@@ -875,8 +898,7 @@ export class SyncEngine {
 
   /** Time until the earliest in-flight upload counts as stuck (text behind it
    *  may then go ahead), or null when no upload is in flight. */
-  private async findNextStuckUploadDelay(): Promise<number | null> {
-    const now = Date.now();
+  private async findNextStuckUploadDelay(now: number): Promise<number | null> {
     let soonest: number | null = null;
     await this.db.pendingOps
       .where("status")

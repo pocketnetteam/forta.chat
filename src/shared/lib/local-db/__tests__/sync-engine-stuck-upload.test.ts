@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Dexie from "dexie";
 import "fake-indexeddb/auto";
-import { SyncEngine, STUCK_UPLOAD_MS, laneOf, pickClaimableOp, reusableUpload } from "../sync-engine";
+import { SyncEngine, STUCK_UPLOAD_MS, hasLaneSlot, laneOf, pickClaimableOp, reusableUpload } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom, LocalAttachment } from "../schema";
 import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
@@ -74,6 +74,41 @@ describe("pickClaimableOp (audit W2C-05)", () => {
     expect(pickClaimableOp([file, text], NOW, new Set([laneOf(text)]))).toBe(file);
   });
 
+  // Review 2026-10-10: a reaction sent between the stuck upload and the text
+  // waited for the upload, and the text waited for the reaction.
+  it("lets text pass an edit or reaction that itself waits only for a stuck upload", () => {
+    const file = op({ type: "send_file", retries: 1, nextAttemptAt: NOW + 30_000 });
+    for (const type of ["send_reaction", "edit_message", "delete_message"] as const) {
+      const between = op({ type });
+      const text = op({ type: "send_message" });
+      expect(pickClaimableOp([file, between, text], NOW, new Set())).toBe(text);
+    }
+  });
+
+  it("keeps text behind an edit that waits for a healthy upload", () => {
+    const file = op({ type: "send_file", status: "syncing", lastAttemptAt: NOW - 1_000 });
+    const edit = op({ type: "edit_message" });
+    const text = op({ type: "send_message" });
+    expect(pickClaimableOp([file, edit, text], NOW, new Set([laneOf(file)]))).toBeNull();
+  });
+
+  // Review 2026-10-10: upload lanes counted toward the same three slots as
+  // text, so uploads stuck in three rooms stopped text in every room.
+  it("gives uploads and other ops three slots each", () => {
+    const uploads = ["!a:s", "!b:s", "!c:s"].map((roomId) =>
+      op({ type: "send_file", roomId, status: "syncing", lastAttemptAt: NOW - 1_000 }));
+    const busyUploads = new Set(uploads.map(laneOf));
+    const text = op({ type: "send_message", roomId: "!d:s" });
+    const file = op({ type: "send_file", roomId: "!d:s" });
+    expect(pickClaimableOp([...uploads, text], NOW, busyUploads)).toBe(text);
+    expect(hasLaneSlot(file, busyUploads)).toBe(false);
+
+    const busyText = new Set(["!a:s", "!b:s", "!c:s"]);
+    expect(hasLaneSlot(text, busyText)).toBe(false);
+    expect(pickClaimableOp([file], NOW, busyText)).toBe(file);
+    expect(pickClaimableOp([op({ type: "send_message", roomId: "!e:s" })], NOW, busyText)).toBeNull();
+  });
+
   it("runs other rooms independently", () => {
     const stuck = op({ type: "send_file", status: "syncing", lastAttemptAt: NOW - 1_000 });
     const elsewhere = op({ type: "send_message", roomId: "!other:s" });
@@ -93,6 +128,13 @@ describe("reusableUpload (audit W2C-05)", () => {
   it("reuses a plaintext upload only where the room does not encrypt", () => {
     expect(reusableUpload({ status: "uploaded", remoteUrl: "mxc://s/f" }, plain)).toEqual({ url: "mxc://s/f", secrets: undefined });
     expect(reusableUpload({ status: "uploaded", remoteUrl: "mxc://s/f" }, encrypting)).toBeNull();
+  });
+
+  // Review 2026-10-10: the fresh path refuses a plaintext upload into a room
+  // that requires encryption while its keys load; the reuse path did not.
+  it("does not reuse a plaintext upload where the room requires encryption", () => {
+    const noKeysYet = { canBeEncrypt: () => false, requiresEncryption: () => true };
+    expect(reusableUpload({ status: "uploaded", remoteUrl: "mxc://s/f" }, noKeysYet)).toBeNull();
   });
 
   it("does not reuse an unfinished upload", () => {
