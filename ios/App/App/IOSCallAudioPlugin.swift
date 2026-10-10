@@ -248,6 +248,13 @@ public class IOSCallAudioPlugin: CAPPlugin {
             case "speaker":
                 try session.overrideOutputAudioPort(.speaker)
             case "earpiece", "default":
+                // `.defaultToSpeaker` in callOptions, and `.videoChat` mode by
+                // itself, make "no override" mean the loudspeaker, so the
+                // earpiece was out of reach once a call started. Drop both
+                // for the rest of this call; `start()` sets them again.
+                try session.setCategory(
+                    .playAndRecord, mode: .voiceChat,
+                    options: Self.callOptions.subtracting(.defaultToSpeaker))
                 try session.overrideOutputAudioPort(.none)
             default:
                 // Unknown target — no-op. Don't reject; UI may surface
