@@ -807,6 +807,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  and updated optimistically by setContactAlias(). Cross-device sync is
    *  driven by the m.bastyon.contact_aliases global account_data event. */
   const localAliases = ref<Record<string, string>>({});
+  // Native draws notification titles while the page sleeps: it gets every
+  // alias change (audit S6-01, device check 2026-10-10).
+  if (isNative) {
+    watch(localAliases, () => {
+      void import("@/shared/lib/push")
+        .then(({ pushService }) => pushService.syncSenderAliasesToNative())
+        .catch(() => {});
+    });
+  }
 
   /** In-memory timestamp cache for alias entries (raw address → ms).
    *  Mirrors Dexie users.aliasUpdatedAt so cross-device LWW conflict

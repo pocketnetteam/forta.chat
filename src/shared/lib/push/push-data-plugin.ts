@@ -21,6 +21,8 @@ interface PushDataPlugin extends Plugin {
   cacheRoomName(options: { roomId: string; name: string }): Promise<void>;
   cacheRoomNames(options: { rooms: Record<string, string> }): Promise<void>;
   cacheSenderNames(options: { senders: Record<string, string> }): Promise<void>;
+  /** Contact aliases by Matrix user id for native notification titles; replaces the whole set. */
+  cacheSenderAliases(options: { aliases: Record<string, string> }): Promise<void>;
   /** roomId -> isGroup. The push payload has no group marker, so the native
    *  cold-start notification builder reads this cache to decide whether to
    *  title the notification with the room name. */

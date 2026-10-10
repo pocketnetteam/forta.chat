@@ -154,6 +154,18 @@ export function rememberOwnPushkey(appId: string, pushkey: string): void {
  * are already on screen. Running the JS replacement path would do work for
  * no observable effect.
  */
+/**
+ * A message body that is still Bastyon ciphertext, not text to show. The SDK
+ * never decrypts these (the app does, into Dexie). A group message is
+ * `m.encrypted` with an AES-CBC body in hex, only 32 characters for a short
+ * text, so the long-base64 check alone let it into the notification
+ * (2026-10-10); older payloads are a long base64 blob.
+ */
+export function isBastyonCiphertext(content: { msgtype?: unknown; body?: unknown } | null | undefined): boolean {
+  if (content?.msgtype === "m.encrypted") return true;
+  return typeof content?.body === "string" && /^[A-Za-z0-9+/]{50,}={0,2}$/.test(content.body);
+}
+
 export function shouldRunJsPushDecryption(opts: { isIOS: boolean }): boolean {
   return !opts.isIOS;
 }
@@ -287,6 +299,7 @@ class PushService {
 
   /** Push all known sender display names to native SharedPreferences */
   async syncSenderNamesToNative(): Promise<void> {
+    await this.syncSenderAliasesToNative();
     if (!this.getAllSenderNames) return;
     try {
       const senders = this.getAllSenderNames();
@@ -295,6 +308,26 @@ class PushService {
       }
     } catch (e) {
       console.warn('[PushService] Failed to sync sender names to native:', e);
+    }
+  }
+
+  /** Contact aliases by Matrix user id (audit S6-01). */
+  private getSenderAliases: (() => Record<string, string>) | null = null;
+
+  setSenderAliasesGetter(getter: () => Record<string, string>) {
+    this.getSenderAliases = getter;
+  }
+
+  /** Hand the contact aliases to native: with the page asleep it draws the
+   *  notification title, and the push carries only the Matrix name (audit
+   *  S6-01, device check 2026-10-10). The whole set every time, so a removed
+   *  alias leaves too. */
+  async syncSenderAliasesToNative(): Promise<void> {
+    if (!this.getSenderAliases) return;
+    try {
+      await PushData.cacheSenderAliases({ aliases: this.getSenderAliases() });
+    } catch (e) {
+      console.warn('[PushService] Failed to sync contact aliases to native:', e);
     }
   }
 
@@ -596,9 +629,7 @@ class PushService {
         const content = raw.content as Record<string, unknown>;
         const body = content?.body;
         if (body && typeof body === "string") {
-          // Skip if body is still ciphertext (base64 blob — Bastyon E2EE wraps
-          // encrypted payloads inside m.room.message with a base64-encoded body)
-          if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
+          if (isBastyonCiphertext(content)) return null;
           // Resolve display name from room member state instead of raw matrix ID
           const senderId = raw.sender as string;
           const room = this.matrixClient?.getRoom(roomId);
@@ -682,8 +713,7 @@ class PushService {
         const content = event.getContent?.();
         const body = content?.body;
         if (!body || typeof body !== 'string') return null;
-        // Skip if body is still ciphertext (base64 blob)
-        if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) return null;
+        if (isBastyonCiphertext(content)) return null;
         const senderName = this.senderNameFor(event.getSender?.(), event.sender?.name || event.getSender?.());
         return { senderName, body: this.formatBody(content) };
       };
@@ -731,7 +761,7 @@ class PushService {
       const content = ev.getContent?.();
       const body = content?.body;
       if (!body || typeof body !== 'string') continue;
-      if (/^[A-Za-z0-9+/]{50,}={0,2}$/.test(body)) continue;
+      if (isBastyonCiphertext(content)) continue;
       const senderName = this.senderNameFor(ev.getSender?.(), ev.sender?.name || ev.getSender?.());
       return { senderName, body: this.formatBody(content) };
     }

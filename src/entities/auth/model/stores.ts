@@ -1115,6 +1115,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               return senders;
             });
 
+            // Native draws the title while the page sleeps; it gets the
+            // aliases apart from the names, which pushes overwrite (S6-01).
+            pushService.setSenderAliasesGetter(() => {
+              const aliases: Record<string, string> = {};
+              for (const [addr, alias] of Object.entries(chatStore.localAliases)) {
+                if (alias) aliases[matrixService.matrixId(hexEncode(addr))] = alias;
+              }
+              return aliases;
+            });
+
             pushService.setSenderNameGetter((userId) => {
               const hexId = getmatrixid(userId);
               const addr = hexId ? hexDecode(hexId) : "";

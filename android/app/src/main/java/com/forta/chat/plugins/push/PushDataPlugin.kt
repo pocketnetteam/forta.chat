@@ -313,6 +313,22 @@ class PushDataPlugin : Plugin() {
         call.resolve()
     }
 
+    /** Contact aliases for notification titles (audit S6-01); replaces the whole set. */
+    @PluginMethod
+    fun cacheSenderAliases(call: PluginCall) {
+        val aliases = call.getObject("aliases") ?: run {
+            call.reject("aliases object is required"); return
+        }
+        val map = mutableMapOf<String, String>()
+        val keys = aliases.keys()
+        while (keys.hasNext()) {
+            val senderId = keys.next()
+            aliases.getString(senderId)?.let { map[senderId] = it }
+        }
+        FortaFirebaseMessagingService.replaceSenderAliases(context, map)
+        call.resolve()
+    }
+
     @PluginMethod
     fun cacheSenderNames(call: PluginCall) {
         val senders = call.getObject("senders") ?: run {

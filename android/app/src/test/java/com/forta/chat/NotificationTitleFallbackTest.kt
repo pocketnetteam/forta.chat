@@ -132,4 +132,33 @@ class NotificationTitleFallbackTest {
         )
         assertEquals("Carol", title)
     }
+
+    // Device check 2026-10-10 (audit S6-01): the push carries the sender's
+    // Matrix display name, which won over the contact alias, so with the page
+    // asleep a notification never showed the alias.
+    @Test
+    fun `the contact alias wins over the push display name`() {
+        val title = FortaFirebaseMessagingService.chooseNotificationTitle(
+            senderDisplayName = "test3823818",
+            cachedSenderName = "test3823818",
+            roomName = null,
+            cachedRoomName = null,
+            fallback = "New message",
+            senderAlias = "Alias S601",
+        )
+        assertEquals("Alias S601", title)
+    }
+
+    @Test
+    fun `a blank alias falls through to the display name`() {
+        val title = FortaFirebaseMessagingService.chooseNotificationTitle(
+            senderDisplayName = "Bob",
+            cachedSenderName = null,
+            roomName = null,
+            cachedRoomName = null,
+            fallback = "New message",
+            senderAlias = "  ",
+        )
+        assertEquals("Bob", title)
+    }
 }

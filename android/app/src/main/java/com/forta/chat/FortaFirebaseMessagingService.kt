@@ -420,7 +420,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             // Cancel any existing message notification for this room
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.cancel(NOTIF_TAG, roomId.hashCode())
-            showCallNotification(roomId, senderName ?: getCachedRoomName(roomId) ?: "Forta Chat", data)
+            showCallNotification(roomId, sender?.let { getSenderAlias(it) } ?: senderName ?: getCachedRoomName(roomId) ?: "Forta Chat", data)
             forwardToJs(data)
             return
         }
@@ -439,6 +439,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             isGroup = isGroupRoom(roomId),
             body = previewByMsgtype(contentMsgtype),
             fallback = getString(R.string.push_new_message),
+            senderAlias = sender?.let { getSenderAlias(it) },
         )
 
         // Show notification (JS may replace it later with decrypted content)
@@ -526,6 +527,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 roomName = roomName,
                 cachedRoomName = getCachedRoomName(roomId),
                 fallback = "Forta Chat",
+                senderAlias = sender?.let { getSenderAlias(it) },
             ),
         )
     }
@@ -567,6 +569,10 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString("room_name_$roomId", null)
     }
+
+    /** The contact alias JS keeps for [sender] (audit S6-01), null when none. */
+    private fun getSenderAlias(sender: String): String? =
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(SENDER_ALIAS_PREFIX + sender, null)
 
     private fun getCachedSenderName(sender: String): String? {
         return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -773,6 +779,25 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
     companion object {
         private const val TAG = "FortaPush"
         const val PREFS_NAME = "forta_push"
+
+        /** Prefix of the contact-alias keys in [PREFS_NAME] (audit S6-01). */
+        const val SENDER_ALIAS_PREFIX = "sender_alias_"
+
+        /**
+         * Replace the contact aliases notification titles use. JS owns them;
+         * the push path never writes them, so a push's display name cannot
+         * overwrite an alias the way it overwrites the sender-name cache.
+         */
+        @JvmStatic
+        fun replaceSenderAliases(context: Context, aliases: Map<String, String>) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val editor = prefs.edit()
+            prefs.all.keys.filter { it.startsWith(SENDER_ALIAS_PREFIX) }.forEach { editor.remove(it) }
+            for ((sender, alias) in aliases) {
+                if (alias.isNotBlank()) editor.putString(SENDER_ALIAS_PREFIX + sender, alias)
+            }
+            editor.apply()
+        }
         // WEE-75: single source of truth is MessageNotificationConfig. Kept
         // here as a const so existing references (PushDataPlugin builders,
         // badge-reset sweep) resolve to the migrated channel id.
@@ -865,13 +890,17 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             roomName: String?,
             cachedRoomName: String?,
             fallback: String,
+            senderAlias: String? = null,
         ): String {
             fun usable(value: String?, rejectMatrixId: Boolean): String? {
                 if (value.isNullOrBlank()) return null
                 if (rejectMatrixId && isMatrixId(value)) return null
                 return value
             }
-            return usable(senderDisplayName, rejectMatrixId = true)
+            // The contact alias the user gave the sender comes first, as in the
+            // chat (audit S6-01); the push carries only the Matrix name.
+            return usable(senderAlias, rejectMatrixId = false)
+                ?: usable(senderDisplayName, rejectMatrixId = true)
                 ?: usable(cachedSenderName, rejectMatrixId = true)
                 ?: usable(roomName, rejectMatrixId = false)
                 ?: usable(cachedRoomName, rejectMatrixId = false)
@@ -913,6 +942,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
             isGroup: Boolean,
             body: String,
             fallback: String,
+            senderAlias: String? = null,
         ): MessageNotification {
             val title = chooseNotificationTitle(
                 senderDisplayName = senderDisplayName,
@@ -920,6 +950,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 roomName = roomName,
                 cachedRoomName = cachedRoomName,
                 fallback = fallback,
+                senderAlias = senderAlias,
             )
             if (!isGroup) return MessageNotification(title, body)
 
