@@ -1,5 +1,5 @@
 import { buildEditContent } from "@/shared/lib/local-db/edit-content";
-import { onScopeDispose } from "vue";
+import { onScopeDispose, watch } from "vue";
 import { useChatStore, MessageStatus, MessageType, messageTypeFromMime, normalizeMime, MSC3245_VIDEO_NOTE_KEY } from "@/entities/chat";
 import type { FileInfo, Message, LinkPreview } from "@/entities/chat";
 import { useAuthStore } from "@/entities/auth";
@@ -10,7 +10,6 @@ import { hexEncode } from "@/shared/lib/matrix/functions";
 import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
-import type { QueuedMessage } from "@/shared/lib/offline-queue";
 import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
 import { detectUrl, fetchPreview } from "./use-link-preview";
 import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
@@ -258,8 +257,9 @@ export function useMessages() {
     }
 
     if (!isOnline.value) {
+      // Queued on this device only: it stays "sending" until the drain sends
+      // it (audit S2-04 — it used to read "sent" at once).
       enqueue({ id: tempId, roomId, content: trimmed, timestamp: Date.now() });
-      chatStore.updateMessageStatus(roomId, tempId, MessageStatus.sent);
       return true;
     }
 
@@ -292,16 +292,17 @@ export function useMessages() {
     return true;
   };
 
-  /** Drain queued messages when coming back online */
+  /** Drain queued messages when coming back online or when Matrix is ready again. */
   const drainOfflineQueue = async () => {
-    const queue = getQueue();
-    if (queue.length === 0) return;
-    // Process one at a time
-    let msg: QueuedMessage | undefined;
-    while ((msg = dequeue())) {
+    // One at a time, and only taken off the queue once Matrix can send it:
+    // taking it first lost it whenever the drain met a reconnecting client
+    // (audit S2-04). What stays queued goes out on the next drain.
+    while (getQueue().length > 0) {
+      const matrixService = getMatrixClientService();
+      if (!matrixService.isReady()) break;
+      const msg = dequeue();
+      if (!msg) break;
       try {
-        const matrixService = getMatrixClientService();
-        if (!matrixService.isReady()) break;
         const roomCrypto = await getSendCrypto(msg.roomId);
         let serverEventId: string;
         if (roomCrypto?.canBeEncrypt()) {
@@ -328,11 +329,17 @@ export function useMessages() {
     }
   };
 
-  // Listen for online event to drain queue (with cleanup)
+  // Drain on the browser's `online` event and when Matrix is ready again: a
+  // reconnect without a network change used to leave the queue untouched.
   if (typeof window !== "undefined") {
     window.addEventListener("online", drainOfflineQueue);
+    const stopReadyWatch = watch(
+      () => authStore.matrixReady,
+      (ready) => { if (ready) void drainOfflineQueue(); },
+    );
     onScopeDispose(() => {
       window.removeEventListener("online", drainOfflineQueue);
+      stopReadyWatch();
     });
   }
 
