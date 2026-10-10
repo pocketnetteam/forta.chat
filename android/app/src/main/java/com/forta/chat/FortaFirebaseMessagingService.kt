@@ -513,6 +513,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         if (!InvitePushPolicy.showsMissedCallNotice(
                 InvitePushPolicy.Outcome.STALE, roomId, id, store.noticedCallId(roomId),
                 liveCallId = CallConnectionService.currentConnection?.callId,
+                handled = id != null && CancelledCallStore(this).wasHandled(id),
             )
         ) return
         store.remember(roomId, callId)

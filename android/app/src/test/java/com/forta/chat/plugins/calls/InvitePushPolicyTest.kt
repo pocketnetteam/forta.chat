@@ -96,6 +96,18 @@ class InvitePushPolicyTest {
         assertFalse(InvitePushPolicy.cancelledInviteIsMissed(expired = true, handled = true))
     }
 
+    // Review 2026-10-10: a call answered or declined on this phone is not
+    // missed, even when a stale copy of its invite lands after the process
+    // restarted (the in-memory dedup is gone by then).
+    @Test
+    fun aHandledCallShowsNoNotice() {
+        assertFalse(
+            InvitePushPolicy.showsMissedCallNotice(
+                InvitePushPolicy.Outcome.STALE, roomId = "!r:s", callId = "c1", lastNoticedCallId = null, handled = true,
+            )
+        )
+    }
+
     // Review 2026-10-10: a call another device of the user answered is not
     // missed. Its select_answer can trail the stale invite in the same flush.
     @Test

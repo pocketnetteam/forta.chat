@@ -137,4 +137,20 @@ class InvitePushOutcomeContractTest {
         assertTrue(retract, retract.contains("MissedCallNoticeStore(this).noticedCallId(roomId)"))
         assertTrue(helper, helper.contains("store.noticedCallId(roomId)") && helper.contains("store.remember(roomId, callId)"))
     }
+
+    private val connection by lazy { source("com/forta/chat/plugins/calls/CallConnection.kt") }
+
+    @Test
+    fun answerAndDeclineOnThisPhoneMarkTheCallHandled() {
+        for (handler in listOf("override fun onAnswer()", "override fun onReject()")) {
+            val start = connection.indexOf(handler)
+            val body = connection.substring(start, connection.indexOf("\n    override fun ", start + handler.length).takeIf { it > 0 } ?: connection.length)
+            assertTrue("$handler must mark the call handled:\n$body", body.contains("CancelledCallStore(context).markHandled(callId)"))
+        }
+    }
+
+    @Test
+    fun theNoticeSkipsAHandledCall() {
+        assertTrue(helper, helper.contains("handled = id != null && CancelledCallStore(this).wasHandled(id)"))
+    }
 }

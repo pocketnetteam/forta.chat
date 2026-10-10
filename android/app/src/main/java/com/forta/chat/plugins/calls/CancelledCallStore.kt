@@ -73,11 +73,11 @@ class CancelledCallStore(context: Context) {
      * Stamp [callId] as handled: it rang or was answered on this device, or
      * another device of the user answered or declined it. Unlike a caller's
      * hangup of a call nobody saw, a stale invite for it is not a missed call.
-     * Same TTL as [markCancelled].
+     * Kept [HANDLED_TTL_MS]: a Doze backlog can hold an invite copy for long.
      */
     fun markHandled(
         callId: String,
-        ttlMs: Long = DEFAULT_TTL_MS,
+        ttlMs: Long = HANDLED_TTL_MS,
         nowMs: Long = System.currentTimeMillis(),
     ) {
         prefs.edit().putLong(HANDLED_PREFIX + callId, nowMs + ttlMs).commit()
@@ -115,6 +115,9 @@ class CancelledCallStore(context: Context) {
          * leaks through.
          */
         const val DEFAULT_TTL_MS: Long = 60_000L
+
+        /** How long a handled call keeps its stale invite copies from showing "missed call". */
+        const val HANDLED_TTL_MS: Long = 30 * 60_000L
         private const val PREFS_NAME = "forta_cancelled_calls"
         private const val HANDLED_PREFIX = "handled:"
     }

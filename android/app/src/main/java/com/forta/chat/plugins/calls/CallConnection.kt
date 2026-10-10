@@ -367,6 +367,12 @@ class CallConnection(
         }
         setActive()
         armAdoptionTimeout()
+        // Answered here: a stale copy of its invite landing later, even after
+        // the process restarted, must not show "missed call".
+        if (callId.isNotEmpty()) {
+            runCatching { CancelledCallStore(context).markHandled(callId) }
+                .onFailure { Log.w("CallConnection", "could not mark $callId handled", it) }
+        }
         // Every answer route reaches this method — the activity's own Accept
         // button calls it, and so does Telecom when it answers on its own from a
         // Bluetooth headset, Android Auto or the system call UI. Silencing here
@@ -417,6 +423,9 @@ class CallConnection(
         if (callId.isNotEmpty()) {
             runCatching { CancelledCallStore(context).markCancelled(callId) }
                 .onFailure { Log.w("CallConnection", "could not mark $callId cancelled", it) }
+            // Declined here, so not missed (see onAnswer).
+            runCatching { CancelledCallStore(context).markHandled(callId) }
+                .onFailure { Log.w("CallConnection", "could not mark $callId handled", it) }
         }
         // Wipe any stale accept markers so a late-arriving MatrixCall
         // for this room can't trigger the JS fast-path to auto-answer.
