@@ -357,6 +357,7 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                 // channel (missed push calls, T1).
                 if (InvitePushPolicy.showsMissedCallNotice(
                         InvitePushPolicy.Outcome.STALE, roomId, callId.takeIf { it.isNotEmpty() }, lastMissedNoticeCallId,
+                        liveCallId = CallConnectionService.currentConnection?.callId,
                     )
                 ) {
                     lastMissedNoticeCallId = callId.takeIf { it.isNotEmpty() }
@@ -364,7 +365,13 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
                     showMissedCallNotification(
                         roomId,
                         eventId,
-                        senderName ?: sender?.let { getCachedSenderName(it) } ?: getCachedRoomName(roomId) ?: "Forta Chat",
+                        chooseNotificationTitle(
+                            senderDisplayName = senderName,
+                            cachedSenderName = sender?.let { getCachedSenderName(it) },
+                            roomName = roomName,
+                            cachedRoomName = getCachedRoomName(roomId),
+                            fallback = "Forta Chat",
+                        ),
                     )
                 }
                 // Forward to JS for telemetry/diagnostics but do NOT
@@ -490,8 +497,6 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
         lastMissedNoticeCallId = null
         lastMissedNoticeRoomId = null
     }
-
-    private fun missedCallSlot(roomId: String): Int = "missed_$roomId".hashCode()
 
     /** Room of the call [ringingCallId] rings for, when the Telecom slot holds it; null when unknown. */
     private fun ringingRoomFor(ringingCallId: String?): String? {
@@ -773,6 +778,10 @@ class FortaFirebaseMessagingService : FirebaseMessagingService() {
 
         /** Missed-call notices live apart from the room's message notification. */
         const val MISSED_CALL_TAG = "forta_missed_call"
+
+        /** Notification id of [roomId]'s missed-call notice, under [MISSED_CALL_TAG]. */
+        @JvmStatic
+        fun missedCallSlot(roomId: String): Int = "missed_$roomId".hashCode()
 
         /**
          * Heuristic: does [value] look like a raw Matrix user ID such as

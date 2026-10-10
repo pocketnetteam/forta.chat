@@ -20,6 +20,7 @@ class InvitePushOutcomeContractTest {
     }
 
     private val service by lazy { source("com/forta/chat/FortaFirebaseMessagingService.kt") }
+    private val pushData by lazy { source("com/forta/chat/plugins/push/PushDataPlugin.kt") }
 
     @Test
     fun everyOutcomeIsRecorded() {
@@ -67,5 +68,35 @@ class InvitePushOutcomeContractTest {
         val logEnd = service.indexOf(")\n", log)
         val line = service.substring(log, logEnd)
         assertTrue(line, line.contains("priority=") && line.contains("originalPriority="))
+    }
+
+    // Review 2026-10-10: the stale branch must know the call this device holds.
+    @Test
+    fun theStaleBranchPassesTheLiveCallToThePolicy() {
+        val stale = service.indexOf("Stale call invite suppressed (S4)")
+        val branch = service.substring(stale, service.indexOf("return", stale))
+        assertTrue(branch, branch.contains("liveCallId = CallConnectionService.currentConnection?.callId"))
+    }
+
+    // Review 2026-10-10: the push gateway sends a raw Matrix ID as the display
+    // name when the sender has none; message titles already reject it.
+    @Test
+    fun theNoticeTitleGoesThroughTheTitleFallbackChain() {
+        val stale = service.indexOf("Stale call invite suppressed (S4)")
+        val branch = service.substring(stale, service.indexOf("return", stale))
+        val show = branch.indexOf("showMissedCallNotification(")
+        assertTrue(branch, show >= 0 && branch.indexOf("chooseNotificationTitle(", show) > show)
+    }
+
+    // Review 2026-10-10: the notice sits in the messages channel, so the launcher
+    // badge counts it; opening the room must clear it with the message one.
+    @Test
+    fun openingTheRoomClearsTheMissedCallNotice() {
+        val cancel = pushData.indexOf("fun cancelNotification(")
+        val body = pushData.substring(cancel, pushData.indexOf("call.resolve()", cancel))
+        assertTrue(
+            body,
+            body.contains("nm.cancel(FortaFirebaseMessagingService.MISSED_CALL_TAG, FortaFirebaseMessagingService.missedCallSlot(roomId))"),
+        )
     }
 }

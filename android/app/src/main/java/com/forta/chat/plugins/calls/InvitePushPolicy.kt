@@ -35,15 +35,19 @@ object InvitePushPolicy {
      * Whether this invite push leaves a "missed call" notice: only a stale
      * invite does, only with a room to open, and once per call — the caller
      * resends the invite, and a flushed backlog brings the copies together.
+     * Never for [liveCallId], the call this device holds in Telecom: a late
+     * copy of its invite does not make it missed.
      */
     fun showsMissedCallNotice(
         outcome: Outcome,
         roomId: String?,
         callId: String?,
         lastNoticedCallId: String?,
+        liveCallId: String? = null,
     ): Boolean {
         if (outcome != Outcome.STALE) return false
         if (roomId.isNullOrEmpty()) return false
+        if (!callId.isNullOrEmpty() && callId == liveCallId) return false
         return callId.isNullOrEmpty() || callId != lastNoticedCallId
     }
 

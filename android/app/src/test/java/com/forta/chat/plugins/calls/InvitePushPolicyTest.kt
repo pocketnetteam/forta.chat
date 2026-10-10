@@ -61,6 +61,27 @@ class InvitePushPolicyTest {
         }
     }
 
+    // Review 2026-10-10: the stale branch runs before the live-call check, so a
+    // late copy of the invite for the call this device is in told the user
+    // the call was missed in the middle of it.
+    @Test
+    fun aLateCopyOfTheCallThisDeviceHoldsShowsNoNotice() {
+        assertFalse(
+            InvitePushPolicy.showsMissedCallNotice(
+                InvitePushPolicy.Outcome.STALE, roomId = "!r:s", callId = "c1", lastNoticedCallId = null, liveCallId = "c1",
+            )
+        )
+    }
+
+    @Test
+    fun anotherCallInTelecomDoesNotHideTheNotice() {
+        assertTrue(
+            InvitePushPolicy.showsMissedCallNotice(
+                InvitePushPolicy.Outcome.STALE, roomId = "!r:s", callId = "c2", lastNoticedCallId = null, liveCallId = "c1",
+            )
+        )
+    }
+
     // Review 2026-10-10: a call another device of the user answered is not
     // missed. Its select_answer can trail the stale invite in the same flush.
     @Test

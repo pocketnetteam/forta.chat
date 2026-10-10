@@ -343,6 +343,9 @@ class PushDataPlugin : Plugin() {
         val nm = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE)
             as android.app.NotificationManager
         nm.cancel(FortaFirebaseMessagingService.NOTIF_TAG, roomId.hashCode())
+        // The room's missed-call notice sits in the messages channel too, so
+        // the launcher badge counts it until the room is opened.
+        nm.cancel(FortaFirebaseMessagingService.MISSED_CALL_TAG, FortaFirebaseMessagingService.missedCallSlot(roomId))
         // WEE-44 / forta-bugs#764: also cancel any orphan notifications for this
         // room. Some OEM launchers (Samsung One UI in particular) keep the badge
         // dot lit if ANY notification with this notification id is active in
