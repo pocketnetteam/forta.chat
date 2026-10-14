@@ -295,7 +295,7 @@ public class IOSTorFilePlugin: CAPPlugin, URLSessionDataDelegate, URLSessionTask
                 return
             }
             let mime = http?.mimeType ?? "application/octet-stream"
-            let finalDest = patchExtensionIfNeeded(dest, mime: mime)
+            let finalDest = destination(dest, withExtensionFor: mime)
             do {
                 try state.responseBody.write(to: finalDest, options: .atomic)
             } catch {
@@ -325,20 +325,15 @@ public class IOSTorFilePlugin: CAPPlugin, URLSessionDataDelegate, URLSessionTask
         ])
     }
 
-    /// Rename the temp `download_*.bin` placeholder to a proper extension
-    /// once we know the response MIME type. Mirrors Android's
-    /// `guessMimeExtension`. Returns the new URL on success, the original
-    /// on any failure (caller still gets a usable file).
-    private func patchExtensionIfNeeded(_ url: URL, mime: String) -> URL {
+    /// The `download_*.bin` path with the extension the response MIME type
+    /// calls for (mirrors Android's `guessMimeExtension`). The body is only
+    /// written after this, so there is no file to rename: the old version
+    /// moved a file that did not exist yet, the move always failed, and every
+    /// Tor download was saved as `.bin`.
+    private func destination(_ url: URL, withExtensionFor mime: String) -> URL {
         let ext = guessExtension(for: mime)
         guard ext != ".bin" else { return url }
-        let renamed = url.deletingPathExtension().appendingPathExtension(String(ext.dropFirst()))
-        do {
-            try FileManager.default.moveItem(at: url, to: renamed)
-            return renamed
-        } catch {
-            return url
-        }
+        return url.deletingPathExtension().appendingPathExtension(String(ext.dropFirst()))
     }
 
     private func guessExtension(for mime: String) -> String {

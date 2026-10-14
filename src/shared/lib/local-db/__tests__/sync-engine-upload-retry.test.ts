@@ -24,6 +24,21 @@ import { SyncEngine } from "../sync-engine";
 import type { PendingOperation, LocalMessage, LocalRoom, LocalAttachment } from "../schema";
 import { disposeSyncEngineHarness } from "./sync-engine-test-helpers";
 
+// Lets one test fire the media-upload deadline at once instead of after 4 min.
+const timeoutControl = vi.hoisted(() => ({ forceUploadTimeout: false }));
+vi.mock("@/shared/lib/with-timeout", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/shared/lib/with-timeout")>();
+  return {
+    withTimeout: <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+      if (timeoutControl.forceUploadTimeout && label === "Media upload") {
+        promise.catch(() => {});
+        return Promise.reject(new Error(`${label} timed out after ${ms}ms`));
+      }
+      return actual.withTimeout(promise, ms, label);
+    },
+  };
+});
+
 // --- Mocks -------------------------------------------------------------------
 
 const mockMatrix = {
@@ -195,6 +210,27 @@ describe("SyncEngine.syncSendFile — upload retry (WEE-50)", () => {
     // Two upload attempts, single send_file op succeeded (no queue retry).
     expect(mockMatrix.uploadContent).toHaveBeenCalledTimes(2);
     expect(h.messageRepo.confirmMediaSent).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: the deadline rejected but the upload went on in the
+  // background, and its progress writes landed on a failed message.
+  it("aborts the upload when the media-upload deadline fires", async () => {
+    h = makeHarness(`upload-timeout-${Date.now()}-${Math.random()}`);
+    await h.db.open();
+    let seen: AbortSignal | undefined;
+    mockMatrix.uploadContent.mockImplementation((_blob: Blob, _p?: unknown, signal?: AbortSignal) => {
+      seen = signal;
+      return new Promise<string>(() => {});
+    });
+    timeoutControl.forceUploadTimeout = true;
+    try {
+      const attachmentId = await seedAttachment(h.db);
+      await seedFileOp(h.db, "cli_deadline", attachmentId);
+      await h.engine.processQueue();
+      await vi.waitFor(() => expect(seen?.aborted).toBe(true), { timeout: 3000 });
+    } finally {
+      timeoutControl.forceUploadTimeout = false;
+    }
   });
 
   it("does NOT retry a 'too large' upload failure", async () => {

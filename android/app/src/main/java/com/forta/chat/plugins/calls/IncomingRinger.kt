@@ -27,6 +27,7 @@ import android.util.Log
 object IncomingRinger {
     private const val TAG = "IncomingRinger"
     const val AUTO_REJECT_TIMEOUT_MS = 30_000L
+    private const val LEGACY_LOOP_CHECK_MS = 1_000L
 
     private val ledger = IncomingRingerLedger()
     private val handler = Handler(Looper.getMainLooper())
@@ -95,6 +96,7 @@ object IncomingRinger {
     fun isRingingFor(callId: String): Boolean = ledger.isArmedFor(callId)
 
     private fun stopHardware() {
+        handler.removeCallbacks(legacyLoop)
         runCatching { ringtone?.stop() }
         ringtone = null
         runCatching { vibrator?.cancel() }
@@ -109,8 +111,24 @@ object IncomingRinger {
                 .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build()
-            isLooping = true
+            // Ringtone.setLooping is Android 9+; below it the call threw before
+            // play() and the phone rang silently. Replay it instead.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) isLooping = true
             play()
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) handler.postDelayed(legacyLoop, LEGACY_LOOP_CHECK_MS)
+    }
+
+    /** Android 7–8 loop: replay the ringtone while it is still the one ringing. */
+    private val legacyLoop: Runnable = object : Runnable {
+        override fun run() {
+            // Under the lock: stop() runs on the plugin thread too, and a replay
+            // that slipped in after it would ring on for a call already over.
+            synchronized(this@IncomingRinger) {
+                val current = ringtone ?: return
+                runCatching { if (!current.isPlaying) current.play() }
+                handler.postDelayed(this, LEGACY_LOOP_CHECK_MS)
+            }
         }
     }
 
@@ -121,7 +139,13 @@ object IncomingRinger {
             @Suppress("DEPRECATION")
             app.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-        vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 1000, 1000), 0))
+        val pattern = longArrayOf(0, 1000, 1000)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator?.vibrate(pattern, 0)
+        }
     }
 
     /**

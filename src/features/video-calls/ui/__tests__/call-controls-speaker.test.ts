@@ -238,4 +238,15 @@ describe("CallControls — native speaker toggle (WEE-60)", () => {
     expect(wrapper.find('[data-testid="speaker-toggle"]').exists()).toBe(false);
     expect(setAudioDevice).not.toHaveBeenCalled();
   });
+
+  // Regression: unmounting while the subscription was being set up left the
+  // audioDevicesChanged listener registered for good — one per cycle.
+  it("drops the device listener when unmounted before it was subscribed", async () => {
+    const store = useCallStore();
+    store.setActiveCall(makeCall("voice"));
+    const wrapper = mount(CallControls);
+    wrapper.unmount();
+    await flushPromises();
+    expect(audioDevicesCb).toBeNull();
+  });
 });

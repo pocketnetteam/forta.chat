@@ -33,7 +33,7 @@ class IncomingCallAcceptGuardTest {
     }
 
     private val activity: String by lazy { read("IncomingCallActivity.kt") }
-    private val connectionService: String by lazy { read("CallConnectionService.kt") }
+    private val connectionService: String by lazy { (read("CallConnectionService.kt") + "\n" + read("CallConnection.kt")) }
 
     @Test
     fun `the accept listener cannot let a throw reach the looper`() {

@@ -36,6 +36,7 @@ Key decisions:
 - **SyncEngine** (`shared/lib/local-db/sync-engine.ts`): offline-first outbound queue (FIFO, exponential backoff + jitter).
 - **EventWriter** (`shared/lib/local-db/event-writer.ts`): transactional writes of Matrix events into Dexie.
 - **ChatVirtualScroller** (`shared/ui/ChatVirtualScroller.vue`): custom virtual scroll (column-reverse).
+- **Calls**: `useCallService()` is a facade over `features/video-calls/model/call-*.ts`; every call resource has one owner keyed by `callId` (details in architecture.md, "Calls").
 
 Layers, data flow, key abstractions, cross-cutting concerns: [docs/agent/architecture.md](docs/agent/architecture.md). Deeper dives: [docs/local-first-architecture.md](docs/local-first-architecture.md), [docs/architecture-data-flow.md](docs/architecture-data-flow.md), [docs/webrtc-architecture.md](docs/webrtc-architecture.md).
 

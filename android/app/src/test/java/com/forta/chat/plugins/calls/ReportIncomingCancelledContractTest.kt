@@ -45,7 +45,7 @@ class ReportIncomingCancelledContractTest {
      */
     @Test
     fun onReject_marksTheCallCancelled() {
-        val connection = source("com/forta/chat/plugins/calls/CallConnectionService.kt")
+        val connection = (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt"))
         val body = withoutComments(functionBody(connection, "override\\s+fun\\s+onReject\\s*\\("))
         val released = body.indexOf("released.compareAndSet(false, true)")
         val marked = body.indexOf("CancelledCallStore(context).markCancelled(callId)")

@@ -154,16 +154,28 @@ const syncSpeakerFromNative = (active: string) => {
   if (active) speakerOn.value = active.toLowerCase() === "speaker";
 };
 
+let unmounted = false;
+
 onMounted(async () => {
   if (!isNative) return;
   const state = await nativeCallBridge.getAudioDevices();
+  if (unmounted) return;
   syncSpeakerFromNative(state.active);
-  unsubscribeAudioDevices = await nativeCallBridge.onAudioDevicesChanged(
+  const unsubscribe = await nativeCallBridge.onAudioDevicesChanged(
     (s) => syncSpeakerFromNative(s.active),
   );
+  // Unmounted while subscribing (minimize/restore, a call that ended at
+  // once): onUnmounted found nothing to remove, and the listener lived on —
+  // one more per cycle.
+  if (unmounted) {
+    unsubscribe();
+    return;
+  }
+  unsubscribeAudioDevices = unsubscribe;
 });
 
 onUnmounted(() => {
+  unmounted = true;
   unsubscribeAudioDevices?.();
   unsubscribeAudioDevices = null;
 });
