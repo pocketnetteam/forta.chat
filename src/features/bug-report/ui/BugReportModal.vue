@@ -16,12 +16,14 @@ import { isNative } from "@/shared/lib/platform";
 import { useAuthStore } from "@/entities/auth";
 import { collectAiDiagnostics } from "@/entities/local-ai";
 import { useBugReport } from "../model/use-bug-report";
+import { clearBugReportDraft, loadBugReportDraft, saveBugReportDraft } from "../model/bug-report-draft";
 
 const { isOpen, prefillContext, prefillError, close } = useBugReport();
 const authStore = useAuthStore();
 const { t } = useI18n();
 
 const description = ref("");
+const isPrefilled = ref(false);
 const screenshots = ref<{ base64: string; preview: string }[]>([]);
 const sending = ref(false);
 const sent = ref(false);
@@ -43,7 +45,12 @@ watch(isOpen, async (val) => {
     if (prefillError.value) {
       parts.push(`\n${t("bugReport.errorLabel")}: ${prefillError.value}`);
     }
-    description.value = parts.join("");
+    // A report opened for a specific error starts from it; otherwise the
+    // draft the user was typing comes back (audit W2B-04). A prefilled
+    // report is not the user's draft and must not replace it.
+    const prefilled = parts.join("");
+    isPrefilled.value = prefilled.length > 0;
+    description.value = prefilled || loadBugReportDraft();
 
     screenshots.value = [];
     sending.value = false;
@@ -63,6 +70,16 @@ watch(isOpen, async (val) => {
       collectEncryptionDiagnostics(),
     ]);
   }
+});
+
+watch(description, (text) => {
+  if (!sent.value && !isPrefilled.value) saveBugReportDraft(text);
+});
+
+// Remounted while open (the watch above only runs on a change of isOpen):
+// bring the draft back instead of an empty field.
+onMounted(() => {
+  if (isOpen.value && !description.value) description.value = loadBugReportDraft();
 });
 
 const addScreenshot = (base64: string, format: string) => {
@@ -142,6 +159,7 @@ const handleSend = async () => {
       console.log("[BugReport] tracked locally for", authStore.address);
     }
     sent.value = true;
+    clearBugReportDraft();
     if (result.screenshotsFailed > 0) {
       errorMsg.value = `${t("bugReport.screenshotUploadFailed")} (${result.uploadError ?? "unknown"})`;
     }

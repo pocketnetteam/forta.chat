@@ -1,4 +1,5 @@
 import { useCallStore } from "@/entities/call";
+import { isNative } from "@/shared/lib/platform";
 
 const CHANNEL = "bastyon_call_lock";
 const TAB_ID = crypto.randomUUID();
@@ -9,6 +10,10 @@ const TAB_CHECK_TIMEOUT_MS = 1000;
 let bc: BroadcastChannel | null = null;
 
 export function initCallTabLock() {
+  // One WebView, no other tabs: the check would only hold every dial and
+  // every incoming call for the full timeout, which widened the window where
+  // a dial and an invite could both claim the empty call slot.
+  if (isNative) return;
   bc = new BroadcastChannel(CHANNEL);
 
   bc.onmessage = (e) => {

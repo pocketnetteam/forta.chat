@@ -25,6 +25,28 @@ function getMemoryMb(): string {
 }
 
 /**
+ * OS and version from a user agent, for when no native API answers. Android and
+ * iOS give the bare version, as before; desktop names the OS too, since the
+ * report's platform (electron / web) does not. Desktop used to fall through to
+ * "n/a" in every Electron report (audit S10-07). Chrome freezes the macOS
+ * version at 10.15.7 and Windows 11 still says NT 10.0; better than nothing.
+ */
+export function parseOsVersionFromUserAgent(ua: string): string {
+  const android = ua.match(/Android\s+([\d.]+)/);
+  if (android) return android[1];
+  const ios = ua.match(/(?:iPhone|iPad|iPod).*?\bOS\s+([\d_]+)/);
+  if (ios) return ios[1].replace(/_/g, '.');
+  const windows = ua.match(/Windows NT\s+([\d.]+)/);
+  if (windows) return `Windows NT ${windows[1]}`;
+  const mac = ua.match(/Mac OS X\s+([\d_.]+)/);
+  if (mac) return `macOS ${mac[1].replace(/_/g, '.')}`;
+  if (/CrOS/.test(ua)) return 'ChromeOS';
+  const linux = ua.match(/Linux\s*([\w-]*)/);
+  if (linux) return linux[1] ? `Linux ${linux[1]}` : 'Linux';
+  return '';
+}
+
+/**
  * Collect device environment for bug reports.
  * Reuses the same approach as collectTelemetry() from the About screen.
  * Non-throwing — all native calls are wrapped in try/catch.
@@ -32,43 +54,49 @@ function getMemoryMb(): string {
 export async function collectEnvironment(): Promise<AppEnvironment> {
   let appVersion = '';
   let buildNumber = '';
-
-  if (isNative) {
-    try {
-      const { App } = await import('@capacitor/app');
-      const info = await App.getInfo();
-      appVersion = info.version ?? '';
-      buildNumber = info.build ?? '';
-    } catch {
-      // Capacitor App unavailable
-    }
-  }
-
   let webViewVersion = '';
   let osVersion = '';
   let deviceModel = '';
 
   if (isNative) {
-    try {
-      const { Device } = await import('@capacitor/device');
-      const info = await Device.getInfo();
-      osVersion = info.osVersion ?? '';
-      deviceModel = [info.manufacturer, info.model].filter(Boolean).join(' ');
-    } catch {
-      // Capacitor Device unavailable
-    }
+    // The three native lookups are independent; ask them at once instead of
+    // one after another (audit W2D-03).
+    await Promise.all([
+      (async () => {
+        try {
+          const { App } = await import('@capacitor/app');
+          const info = await App.getInfo();
+          appVersion = info.version ?? '';
+          buildNumber = info.build ?? '';
+        } catch {
+          // Capacitor App unavailable
+        }
+      })(),
+      (async () => {
+        try {
+          const { Device } = await import('@capacitor/device');
+          const info = await Device.getInfo();
+          osVersion = info.osVersion ?? '';
+          deviceModel = [info.manufacturer, info.model].filter(Boolean).join(' ');
+        } catch {
+          // Capacitor Device unavailable
+        }
+      })(),
+      (async () => {
+        if (!isAndroid) return;
+        try {
+          const { WebviewVersionChecker } = await import(
+            '@capgo/capacitor-webview-version-checker'
+          );
+          const result = await WebviewVersionChecker.check();
+          webViewVersion = result.currentVersion ?? '';
+        } catch {
+          // Plugin unavailable
+        }
+      })(),
+    ]);
 
-    if (isAndroid) {
-      try {
-        const { WebviewVersionChecker } = await import(
-          '@capgo/capacitor-webview-version-checker'
-        );
-        const result = await WebviewVersionChecker.check();
-        webViewVersion = result.currentVersion ?? '';
-      } catch {
-        // Plugin unavailable
-      }
-    } else if (isIOS) {
+    if (isIOS) {
       // WKWebView is pinned to the OS version on iOS; expose a label that
       // bug-report consumers can group on without a separate plugin.
       webViewVersion = osVersion ? `WKWebView (iOS ${osVersion})` : '';
@@ -84,13 +112,7 @@ export async function collectEnvironment(): Promise<AppEnvironment> {
   }
 
   if (!osVersion) {
-    const androidMatch = ua.match(/Android\s+([\d.]+)/);
-    const iosMatch = ua.match(/OS\s+([\d_]+)/);
-    if (androidMatch) {
-      osVersion = androidMatch[1];
-    } else if (iosMatch) {
-      osVersion = iosMatch[1].replace(/_/g, '.');
-    }
+    osVersion = parseOsVersionFromUserAgent(ua);
   }
 
   if (!deviceModel) {

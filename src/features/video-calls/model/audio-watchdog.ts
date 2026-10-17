@@ -108,15 +108,24 @@ export async function setupAudioWatchdog(): Promise<void> {
   if (isIOS && !interruptionListenerAttached) {
     interruptionListenerAttached = true;
     try {
-      await IOSCallAudio.addListener("audioInterruptionBegan", () => {
+      await IOSCallAudio.addListener("audioInterruptionBegan", (data) => {
         try {
           const callStore = useCallStore();
           if (!callStore.activeCall && !callStore.matrixCall) return;
+          // WebKit's GPU process starts the call's audio with a session of its
+          // own, and that interrupts this app's session (iPhone XR 2026-10-16:
+          // an outgoing call hung up the moment it connected). Native reports
+          // whether the system has a call in progress; Forta's own calls are not
+          // in CallKit by then. An older native build sends nothing: hang up.
+          if (data?.phoneCall === false) {
+            console.log("[audio-watchdog] interruption without a phone call in progress — ignoring");
+            return;
+          }
           // The adapter ends the CallKit record right after the answer to
           // hand the audio hardware to WebKit; CallKit then deactivates the
           // session it had activated, and that arrives here as an
           // interruption. It is our own doing, not a phone call.
-          if (isRecentCallKitRelease()) {
+          if (isRecentCallKitRelease(Date.now(), callStore.activeCall?.startedAt ?? null)) {
             console.log("[audio-watchdog] interruption follows our CallKit release — ignoring");
             return;
           }

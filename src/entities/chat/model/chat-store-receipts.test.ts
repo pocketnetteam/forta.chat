@@ -28,6 +28,7 @@ const mockSendReadReceipt = vi.fn(async () => true);
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
     isReady: () => true,
+    hasLiveSync: () => true,
     getUserId: () => "@mock:s",
     getRoom: vi.fn((roomId: string) => ({
       roomId,

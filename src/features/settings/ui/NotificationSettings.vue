@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { App as CapApp } from "@capacitor/app";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { SettingsSection } from "@/shared/ui/settings-section";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative } from "@/shared/lib/platform";
+import { isAndroid, isNative } from "@/shared/lib/platform";
+import { isBatteryHintDisabled, setBatteryHintDisabled } from "@/shared/lib/push/battery-hint-storage";
+import { requestNotificationPermission } from "@/shared/lib/notifications/web-notifier";
 import { useNotificationSettings } from "../model/use-notification-settings";
 
 /**
@@ -18,6 +20,13 @@ import { useNotificationSettings } from "../model/use-notification-settings";
  * aggressive OEMs (Xiaomi/MIUI, Samsung, …) we add a targeted hint.
  */
 const { t } = useI18n();
+// Missed push calls T3: the battery-restrictions reminder can be turned off.
+const showBatteryReminder = isNative && isAndroid;
+const batteryReminderOn = ref(!isBatteryHintDisabled());
+const setBatteryReminder = (on: boolean) => {
+  batteryReminderOn.value = on;
+  setBatteryHintDisabled(!on);
+};
 const {
   canOpenSystemSettings,
   vendorGuidanceId,
@@ -29,6 +38,18 @@ const {
   incomingCallsEnabled,
   setIncomingCallsEnabled,
 } = useNotificationSettings();
+
+// Outside the native apps a message banner needs the browser's permission, and
+// nothing ever asked for it: Notification.permission stayed "default" and no
+// banner could show (audit S6-02). Browsers want the request from a user
+// gesture, so it comes from this button.
+type WebNotificationPermission = NotificationPermission | "unsupported";
+const readWebPermission = (): WebNotificationPermission =>
+  typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported";
+const webPermission = ref<WebNotificationPermission>(isNative ? "unsupported" : readWebPermission());
+const askWebPermission = async () => {
+  webPermission.value = await requestNotificationPermission();
+};
 
 // The banner's button leaves the app for a system screen where the user flips
 // the permission. Read it again whenever the app returns to the foreground —
@@ -74,6 +95,14 @@ onUnmounted(() => {
           data-testid="incoming-calls-toggle"
           :model-value="incomingCallsEnabled"
           @update:model-value="setIncomingCallsEnabled"
+        />
+      </div>
+      <div v-if="showBatteryReminder" class="flex items-center justify-between rounded-lg p-3">
+        <span class="text-sm text-text-color">{{ t("notificationsSettings.batteryReminder") }}</span>
+        <Toggle
+          data-testid="battery-reminder-toggle"
+          :model-value="batteryReminderOn"
+          @update:model-value="setBatteryReminder"
         />
       </div>
     </SettingsSection>
@@ -196,6 +225,30 @@ onUnmounted(() => {
           {{ t("notificationsSettings.openSystem") }}
         </button>
       </div>
+    </SettingsSection>
+
+    <!-- Browser / desktop: the permission a message banner needs -->
+    <SettingsSection
+      v-if="webPermission !== 'unsupported'"
+      :title="t('notificationsSettings.webBannersTitle')"
+      :description="t('notificationsSettings.webBannersDesc')"
+    >
+      <button
+        v-if="webPermission === 'default'"
+        data-testid="web-notifications-allow"
+        class="flex w-full items-center gap-3 rounded-xl border border-neutral-grad-0 px-4 py-3 text-left transition-colors hover:bg-neutral-grad-0"
+        @click="askWebPermission"
+      >
+        <span class="flex-1 text-sm font-medium text-text-color">
+          {{ t("notificationsSettings.webBannersAllow") }}
+        </span>
+      </button>
+      <p v-else-if="webPermission === 'granted'" class="text-sm text-text-color">
+        {{ t("notificationsSettings.webBannersOn") }}
+      </p>
+      <p v-else class="text-sm text-text-color">
+        {{ t("notificationsSettings.webBannersBlocked") }}
+      </p>
     </SettingsSection>
 
     <!-- Non-native fallback note -->

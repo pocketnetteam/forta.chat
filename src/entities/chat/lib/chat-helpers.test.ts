@@ -11,7 +11,7 @@
  *   A bug here breaks: encrypted file decryption, image/video rendering.
  */
 import { describe, it, expect } from "vitest";
-import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, isVoiceAudioContent, isVoiceAudioMessage, MSC3245_VOICE_KEY } from "./chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, normalizeMime, parseFileInfo, looksLikeProperName, resolveSystemText, isUnresolvedName, cleanMatrixIds, isVoiceAudioContent, isVoiceAudioMessage, MSC3245_VOICE_KEY, mediaMessageType } from "./chat-helpers";
 import { hexEncode } from "@/shared/lib/matrix/functions";
 import { MessageType } from "../model/types";
 
@@ -901,5 +901,26 @@ describe("isVoiceAudioContent", () => {
 
   it("returns false when both inputs are null", () => {
     expect(isVoiceAudioContent(null, null)).toBe(false);
+  });
+});
+
+// Samsung 2026-10-12: a video circle from the web arrived as a plain video on
+// the phone. The live-event path mapped every m.video to a video and ignored
+// the video-note marker that the history path honoured; both now share this.
+describe("mediaMessageType", () => {
+  it("makes a marked m.video a video circle and an unmarked one a video", () => {
+    expect(mediaMessageType("m.video", { type: "video/mp4", videoNote: true })).toBe(MessageType.videoCircle);
+    expect(mediaMessageType("m.video", { type: "video/mp4" })).toBe(MessageType.video);
+  });
+
+  it("keeps voice notes apart from audio files", () => {
+    expect(mediaMessageType("m.audio", { type: "audio/ogg", isVoice: true })).toBe(MessageType.audio);
+    expect(mediaMessageType("m.audio", { type: "audio/mpeg" })).toBe(MessageType.file);
+  });
+
+  it("maps images, and m.file by MIME with audio files as files", () => {
+    expect(mediaMessageType("m.image", { type: "image/jpeg" })).toBe(MessageType.image);
+    expect(mediaMessageType("m.file", { type: "audio/mpeg" })).toBe(MessageType.file);
+    expect(mediaMessageType("m.file", { type: "image/png" })).toBe(MessageType.image);
   });
 });

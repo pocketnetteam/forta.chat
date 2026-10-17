@@ -65,6 +65,8 @@ object CallTeardownPolicy {
         val sessionMarkerOpen: Boolean,
         /** The call `IncomingRinger` is ringing for, or null when silent. */
         val ringingCallId: String? = null,
+        /** The call `AudioRouter` routes for (C02), or null when nobody owns it. */
+        val routerOwnerCallId: String? = null,
     )
 
     /**
@@ -80,12 +82,26 @@ object CallTeardownPolicy {
         val ringing = state.ringingCallId
         if (ringing != null && stopsRing(reason, ringing, callId)) actions.add(Action.STOP_RINGER)
         if (state.otherCallLive) return actions
+        // C02, native half (review 2026-10-08): the next call may hold the
+        // router without a Telecom slot of its own; a late teardown of this
+        // call must not reset that call's audio.
+        if (reason != Reason.COLD_START && routerOwnedByAnotherCall(state.routerOwnerCallId, callId)) return actions
         val abandoned = state.routerActive ||
             (state.sessionMarkerOpen && state.audioMode == AudioManager.MODE_IN_COMMUNICATION)
         if (!abandoned) return actions
         actions.add(Action.FORCE_STOP_ROUTER)
         if (state.foregroundServiceRunning) actions.add(Action.STOP_FOREGROUND_SERVICE)
         return actions
+    }
+
+    /**
+     * Both ids known, comparable and different. A push event id never equals
+     * a Matrix call id, so it proves nothing (see [CallSlotPolicy]).
+     */
+    fun routerOwnedByAnotherCall(owner: String?, callId: String?): Boolean {
+        if (owner.isNullOrEmpty() || callId.isNullOrEmpty()) return false
+        if (CallSlotPolicy.isEventId(owner) || CallSlotPolicy.isEventId(callId)) return false
+        return owner != callId
     }
 
     private fun stopsRing(reason: Reason, ringing: String, callId: String?): Boolean = when (reason) {

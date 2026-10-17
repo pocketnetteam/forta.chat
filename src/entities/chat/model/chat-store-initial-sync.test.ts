@@ -13,6 +13,7 @@ import { makeRoom } from "@/test-utils";
 
 const mockMatrixService = {
   isReady: vi.fn(() => true),
+  hasLiveSync: () => true,
   getUserId: vi.fn(() => "@me:server"),
   getRooms: vi.fn(() => [] as unknown[]),
   getRoom: vi.fn(() => ({ selfMembership: "join" })),

@@ -3,7 +3,7 @@ import type { Message } from "@/entities/chat";
 import { useChatStore, MessageStatus, MessageType } from "@/entities/chat";
 import { formatTime } from "@/shared/lib/format";
 import { stripMentionAddresses, stripBastyonLinks } from "@/shared/lib/message-format";
-import { useFileDownload } from "../model/use-file-download";
+import { useFileDownload, saveFailureMessageKey } from "../model/use-file-download";
 import { getMatrixClientService } from "@/entities/matrix";
 import { useLazyLoad } from "@/shared/lib/use-lazy-load";
 import { isMessageFailedForRetry } from "../model/message-failed-state";
@@ -34,7 +34,7 @@ import VideoCirclePlayer from "./VideoCirclePlayer.vue";
 import MediaDownloadProgress from "./MediaDownloadProgress.vue";
 import { ref, shallowRef, inject, onMounted, onBeforeUnmount } from "vue";
 import { getMediaCache } from "@/shared/lib/media-cache";
-import { useLongPress, useSwipeGesture } from "@/shared/lib/gestures";
+import { useLongPress, useSwipeGesture, hasTextSelectionIn } from "@/shared/lib/gestures";
 import { useThemeStore } from "@/entities/theme";
 import { hexDecode } from "@/shared/lib/matrix/functions";
 import { countEmojiOnly, JUMBO_EMOJI_MAX } from "@/shared/lib/emoji-only";
@@ -125,11 +125,20 @@ const forwardedFromName = computed(() => {
 });
 
 const longPressTriggered = ref(false);
-const { onPointerdown: lpPointerdown, onPointermove, onPointerup: lpPointerup, onPointerleave: lpPointerleave } = useLongPress({
+let pressedBubble: Element | null = null;
+const {
+  onPointerdown: lpPointerdown,
+  onPointermove,
+  onPointerup: lpPointerup,
+  onPointerleave: lpPointerleave,
+  onPointercancel: lpPointercancel,
+} = useLongPress({
   onTrigger: (e) => {
     // Guard emission (not the timer cleanup) — re-opening the context menu
     // mid-multiselect would steal the tap (WEE-66 / #863, #924).
     if (chatStore.selectionMode) return;
+    // The same press started a native text selection: leave it to the user.
+    if (hasTextSelectionIn(pressedBubble)) return;
     longPressTriggered.value = true;
     emit("contextmenu", { message: props.message, x: e.clientX, y: e.clientY });
   },
@@ -139,12 +148,14 @@ const onPointerdown = (e: PointerEvent) => {
   // arm long-press at all.
   if (chatStore.selectionMode) return;
   longPressTriggered.value = false;
+  pressedBubble = e.currentTarget instanceof Element ? e.currentTarget : null;
   lpPointerdown(e);
 };
 // Always run cleanup so a timer armed just before selection mode flipped on
 // can't survive to fire.
 const onPointerup = () => { lpPointerup(); };
 const onPointerleave = () => { lpPointerleave(); };
+const onPointercancel = () => { lpPointercancel(); };
 
 const handleRightClick = (e: MouseEvent) => {
   if (chatStore.selectionMode) return;
@@ -784,7 +795,7 @@ const handleFileDownload = async () => {
       showToast(t(isMedia ? "media.savedToGallery" : "media.savedToDownloads"), "success");
     } catch (e) {
       console.error("[MessageBubble] save failed:", e);
-      showToast(t("media.saveFailed"), "error");
+      showToast(t(saveFailureMessageKey(e)), "error");
     }
   } finally {
     isSavingFile.value = false;
@@ -924,6 +935,7 @@ const replyPreviewSender = computed(() => {
     @pointermove="onPointermove"
     @pointerup="onPointerup"
     @pointerleave="onPointerleave"
+    @pointercancel="onPointercancel"
     @contextmenu.prevent="handleRightClick"
     @touchstart="onTouchstart"
     @touchmove="onTouchmove"

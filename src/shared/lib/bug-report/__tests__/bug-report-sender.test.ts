@@ -130,6 +130,7 @@ describe('sendBugReport — ICE and Tor rows (O05/O14)', () => {
         expiredInviteCount: 0,
         webrtcEngine: 'native',
         audioTimeline: [],
+        ringAudio: [],
         ice: { total: 3, relay: 0, host: 2, srflx: 1, selectedPairType: null, lastIceState: 'failed', turnServers: 0 },
         tor: { enabled: true, connected: true },
         fullScreenIntentAllowed: false,
@@ -168,6 +169,81 @@ describe('sendBugReport — ICE and Tor rows (O05/O14)', () => {
     expect(without).not.toContain('Encryption diagnostics');
   });
 
+  // Missed push calls T2: the invite history says whether FCM downgraded the
+  // push and why no ringer came up, so "the push came, the ringer did not"
+  // reads off a report.
+  it('renders the FCM priority and the outcome of each invite push', async () => {
+    const fetchMock = mockIssueCreate(14);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendBugReport({
+      description: 'did not ring',
+      environment: fakeEnv,
+      callDiagnostics: {
+        audioMode: 'MODE_NORMAL',
+        isSpeakerOn: false,
+        isBtScoOn: false,
+        inviteHistory: [
+          { receivedAtMs: 2_000, sentAtMs: 1_000, deliveryLatencyMs: 1_000, expired: false, callId: 'call-rang-123456', priority: 1, originalPriority: 1, sentTimeSource: 'fcm', outcome: 'rang' },
+          { receivedAtMs: 90_000, sentAtMs: 1_000, deliveryLatencyMs: 89_000, expired: true, callId: 'call-stale-1234', priority: 2, originalPriority: 1, sentTimeSource: 'fcm', outcome: 'stale' },
+          { receivedAtMs: 3_000, sentAtMs: 0, deliveryLatencyMs: 3_000, expired: false, callId: '', priority: 0, originalPriority: 0, sentTimeSource: 'missing', outcome: 'incoming-calls-off' },
+          { receivedAtMs: 4_000, sentAtMs: 3_500, deliveryLatencyMs: 500, expired: false, callId: 'call-old-format' },
+        ],
+        expiredInviteCount: 1,
+        webrtcEngine: 'native',
+        audioTimeline: [],
+        ringAudio: [],
+        ice: null,
+        tor: null,
+        fullScreenIntentAllowed: null,
+      },
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls.at(-1)![1].body as string).body as string;
+    expect(body).toContain('| # | callId | latency (ms) | expired | FCM priority | outcome |');
+    expect(body).toContain('| 1 | `call-rang-12` | 1000 | no | high | rang |');
+    expect(body).toContain('| 2 | `call-stale-1` | 89000 | yes | normal (sent high) | stale |');
+    expect(body).toContain('| 3 | `(none)` | no send time | no | unknown | incoming-calls-off |');
+    expect(body).toContain('| 4 | `call-old-for` | 500 | no | ? | ? |');
+  });
+
+  // "Rings very quietly": the ring log says which audio mode the ringtone
+  // played in, whether a stranded VoIP mode was dropped, and whether Telecom
+  // held the call (none = the ring ran without Telecom).
+  it('renders the audio state of the last rings', async () => {
+    const fetchMock = mockIssueCreate(15);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendBugReport({
+      description: 'звонит очень тихо',
+      environment: fakeEnv,
+      callDiagnostics: {
+        audioMode: 'MODE_NORMAL',
+        isSpeakerOn: false,
+        isBtScoOn: false,
+        inviteHistory: [],
+        expiredInviteCount: 0,
+        webrtcEngine: 'native',
+        audioTimeline: [],
+        ringAudio: [
+          { atMs: Date.UTC(2026, 9, 15, 9, 41, 7), callId: 'call-quiet-123456', modeAtArm: 'MODE_IN_COMMUNICATION', modeReset: true, telecom: 'none', modeInRing: 'MODE_NORMAL' },
+          { atMs: Date.UTC(2026, 9, 15, 9, 45, 0), callId: 'call-waiting-1', modeAtArm: 'MODE_IN_COMMUNICATION', modeReset: false, telecom: 'ACTIVE, another call', modeInRing: '' },
+          { atMs: Number.NaN, callId: 'call-bad-time', modeAtArm: 'MODE_NORMAL', modeReset: false, telecom: 'none', modeInRing: 'MODE_NORMAL' },
+        ],
+        ice: null,
+        tor: null,
+        fullScreenIntentAllowed: null,
+      },
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls.at(-1)![1].body as string).body as string;
+    expect(body).toContain('<details><summary>Incoming ring audio</summary>');
+    expect(body).toContain('| # | time (UTC) | callId | mode at ring | stranded mode reset | mode in ring | Telecom |');
+    expect(body).toContain('| 1 | 09:41:07 | `call-quiet-1` | MODE_IN_COMMUNICATION | yes | MODE_NORMAL | none |');
+    expect(body).toContain('| 2 | 09:45:00 | `call-waiting` | MODE_IN_COMMUNICATION | no | — | ACTIVE, another call |');
+    expect(body).toContain('| 3 | ? | `call-bad-tim` | MODE_NORMAL | no | MODE_NORMAL | none |');
+  });
+
   it('omits the rows when the facts are unknown', async () => {
     const fetchMock = mockIssueCreate(12);
     vi.stubGlobal('fetch', fetchMock);
@@ -183,6 +259,7 @@ describe('sendBugReport — ICE and Tor rows (O05/O14)', () => {
         expiredInviteCount: 0,
         webrtcEngine: 'native',
         audioTimeline: [],
+        ringAudio: [],
         ice: null,
         tor: null,
         fullScreenIntentAllowed: null,
@@ -193,5 +270,6 @@ describe('sendBugReport — ICE and Tor rows (O05/O14)', () => {
     expect(body).not.toContain('| ICE candidates |');
     expect(body).not.toContain('| Tor during calls |');
     expect(body).not.toContain('| Full-screen intent |');
+    expect(body).not.toContain('Incoming ring audio');
   });
 });

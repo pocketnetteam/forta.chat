@@ -101,7 +101,7 @@ class IncomingCallSurfaceContractTest {
         // onReject writes a pendingReject marker, and the very next invite from
         // this room is the call being cleared for — it would be declined unheard.
         val body = functionBody(
-            read("java/com/forta/chat/plugins/calls/CallConnectionService.kt"),
+            (read("java/com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + read("java/com/forta/chat/plugins/calls/CallConnection.kt")),
             "fun\\s+releaseUnpresentedNow\\s*\\(",
         )
         assertTrue("must disconnect:\n$body", body.contains("connection.onDisconnect()"))
@@ -131,7 +131,7 @@ class IncomingCallSurfaceContractTest {
         // release would be disconnected mid-conversation. The state rule itself
         // is tested in DisplacedConnectionPolicyTest; this pins the wiring.
         val body = functionBody(
-            read("java/com/forta/chat/plugins/calls/CallConnectionService.kt"),
+            (read("java/com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + read("java/com/forta/chat/plugins/calls/CallConnection.kt")),
             "fun\\s+releaseUnpresentedNow\\s*\\(",
         )
         val guardAt = body.indexOf("mayReleaseUnpresented(connection.state)")
@@ -156,7 +156,7 @@ class IncomingCallSurfaceContractTest {
         // decision afterwards is the race; running the whole thing as one main
         // -looper message is what serializes it against them.
         val body = functionBody(
-            read("java/com/forta/chat/plugins/calls/CallConnectionService.kt"),
+            (read("java/com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + read("java/com/forta/chat/plugins/calls/CallConnection.kt")),
             "fun\\s+releaseUnpresentedConnection\\s*\\(",
         )
         assertTrue(

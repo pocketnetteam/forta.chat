@@ -26,6 +26,31 @@
  *  cap avatars at 5 MB (see shared/lib/upload-image.ts), so we mirror that. */
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 
+/** Longest wait for the avatar bytes. They come from the image server the
+ *  user just uploaded to (pocketnet.app:8092, often slow or silent), and the
+ *  fetch had no limit at all (audit S6-03). */
+export const AVATAR_FETCH_TIMEOUT_MS = 30_000;
+
+/** fetch with a deadline that also aborts the request where AbortController
+ *  exists. Not AbortSignal.timeout(): missing on the old WebViews we support. */
+async function fetchWithDeadline(url: string, timeoutMs: number): Promise<Response> {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new Error(`avatar fetch timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  const request = fetch(url, controller ? { signal: controller.signal } : undefined);
+  request.catch(() => undefined);
+  try {
+    return await Promise.race([request, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Subset of MatrixClientService used here — keeps the helper trivially testable. */
 export interface MatrixProfileSync {
   setDisplayName(name: string): Promise<void>;
@@ -71,7 +96,7 @@ export async function syncProfileToMatrix(
   }
 
   try {
-    const response = await fetch(params.image);
+    const response = await fetchWithDeadline(params.image, AVATAR_FETCH_TIMEOUT_MS);
     if (!response.ok) {
       console.warn("[profile] avatar fetch returned non-2xx:", response.status);
       return;

@@ -84,6 +84,14 @@ describe("finalizeCall — central call cleanup", () => {
     expect(mockCloseAllPeerConnections).toHaveBeenCalledOnce();
   });
 
+  // C02: the router stops only for the call that owns it, so the finalized
+  // call's id travels with the stop.
+  it("stops the audio routing for the finalized call only", async () => {
+    const { finalizeCall } = await import("./finalize-call");
+    await finalizeCall("hangup", "call-c02", "!room:server");
+    expect(mockStopAudioRouting).toHaveBeenCalledWith({ callId: "call-c02" });
+  });
+
   it("retires the call's pending answer/reject markers, with the room", async () => {
     // Without this the marker outlives the call and matches the NEXT invite
     // from the same room: the redial is auto-answered without a ringer, or
@@ -374,7 +382,21 @@ describe("waitForFinalizeSettled — the dial path waits for the previous call",
     const { finalizeCall } = await import("./finalize-call");
     await finalizeCall("hangup", "callId-named");
     expect(mockDismissCallUI).toHaveBeenCalledWith({ callId: "callId-named" });
-    expect(mockCloseAllPeerConnections).toHaveBeenCalledWith({ callId: "callId-named" });
+    expect(mockCloseAllPeerConnections).toHaveBeenCalledWith(expect.objectContaining({ callId: "callId-named" }));
+  });
+
+  it("N1: the close carries when the call ended, not when the step reached native", async () => {
+    // The next call's invite builds its PeerConnection while the earlier
+    // steps run; native leaves a connection created after this mark.
+    vi.useFakeTimers({ now: 1_791_462_201_539 });
+    mockDismissCallUI.mockReturnValueOnce(new Promise<void>((resolve) => setTimeout(resolve, 300)));
+    const { finalizeCall } = await import("./finalize-call");
+
+    const finalize = finalizeCall("hangup", "callId-n1");
+    await vi.advanceTimersByTimeAsync(400);
+    await finalize;
+
+    expect(mockCloseAllPeerConnections).toHaveBeenCalledWith({ callId: "callId-n1", createdBefore: 1_791_462_201_539 });
   });
 
   it("resolves at once when nothing is finalizing", async () => {
@@ -424,21 +446,3 @@ describe("waitForFinalizeSettled — the dial path waits for the previous call",
   });
 });
 
-describe("forceResetAudioState — recovery without callId", () => {
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    mockForceStopAudio.mockResolvedValue(undefined);
-  });
-
-  it("delegates to nativeCallBridge.forceStopAudio", async () => {
-    const { forceResetAudioState } = await import("./finalize-call");
-    await forceResetAudioState();
-    expect(mockForceStopAudio).toHaveBeenCalledOnce();
-  });
-
-  it("does not throw when the native bridge errors", async () => {
-    mockForceStopAudio.mockRejectedValueOnce(new Error("native fail"));
-    const { forceResetAudioState } = await import("./finalize-call");
-    await expect(forceResetAudioState()).resolves.toBeUndefined();
-  });
-});

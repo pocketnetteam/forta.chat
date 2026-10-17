@@ -296,6 +296,7 @@ export class MessageRepository {
   private getPreviewText(type: MessageType, content: string, fileInfo?: { name?: string }): string {
     if (type === MessageType.image) return "[photo]";
     if (type === MessageType.video) return "[video]";
+    if (type === MessageType.videoCircle) return "[video message]";
     if (type === MessageType.audio) return "[voice message]";
     if (type === MessageType.file) return fileInfo?.name || "[file]";
     if (type === MessageType.poll) return "[poll]";

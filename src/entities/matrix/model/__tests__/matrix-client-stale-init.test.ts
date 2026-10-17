@@ -178,3 +178,56 @@ describe("MatrixClientService — a superseded init() does not start its own cli
     expect(s.error).toBe(false);
   });
 });
+
+describe("MatrixClientService — rejected access token (audit S3b-02)", () => {
+  it("hands Session.logged_out to the watchdog so it logs in again at once", async () => {
+    created.length = 0;
+    loginImpl = async () => ({ user_id: "@u:matrix.example", access_token: "t1", device_id: "D" });
+    const s = service();
+    const sessionLost = vi.fn();
+    (s as unknown as { watchdog: { sessionLost: () => void; notifySync: () => void } }).watchdog = {
+      sessionLost,
+      notifySync: () => {},
+    };
+
+    await s.init();
+
+    const client = userClients()[0];
+    const handler = client.on.mock.calls.find(([event]) => event === "Session.logged_out")?.[1] as
+      | (() => void)
+      | undefined;
+    expect(handler).toBeTypeOf("function");
+    handler?.();
+    expect(sessionLost).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MatrixClientService — init() retried while the homeserver is unreachable", () => {
+  beforeEach(() => {
+    created.length = 0;
+    // A cached session from an earlier test skips /login and makes the client ready.
+    localStorage.clear();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  // Audit S2-01: the auth store now retries a failed start on a timer, so each
+  // init() must not open another file-storage handle that nothing closes.
+  it("opens the file storage once across failed attempts", async () => {
+    const { createChatStorage } = await import("@/shared/lib/matrix/chat-storage");
+    const opened = vi.mocked(createChatStorage);
+    opened.mockClear();
+    loginImpl = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    const s = service();
+
+    await s.init();
+    await s.init();
+    await s.init();
+
+    expect(s.isReady()).toBe(false);
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+});

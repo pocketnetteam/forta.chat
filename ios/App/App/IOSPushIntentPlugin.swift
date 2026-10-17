@@ -87,6 +87,11 @@ public class IOSPushIntentPlugin: CAPPlugin {
         call.resolve()
     }
 
+    /// JS reads native's copy when WebView storage lost its own (C05).
+    @objc func getIncomingCallsEnabled(_ call: CAPPluginCall) {
+        call.resolve(["enabled": IncomingCallsSetting.isEnabled])
+    }
+
     @objc func getPendingIntent(_ call: CAPPluginCall) {
         let p = pendingTap ?? [:]
         pendingTap = nil

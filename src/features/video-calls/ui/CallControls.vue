@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useCallStore, CallStatus } from "@/entities/call";
-import { isNative } from "@/shared/lib/platform";
+import { isIOS, isNative } from "@/shared/lib/platform";
 import { nativeCallBridge } from "@/shared/lib/native-calls/native-call-bridge";
 import type { NativeAudioDeviceType } from "@/shared/lib/native-calls/native-call-bridge";
 import { useCallService } from "../model/call-service";
@@ -18,6 +18,8 @@ const { t } = useI18n();
 const props = withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
 
 const { audioDevices, videoDevices, audioOutputDevices, enumerateDevices } = useMediaDevices();
+// iOS: WebKit routes the call audio itself; an output pick cannot move it (C06).
+const outputDevices = computed(() => (isIOS ? [] : audioOutputDevices.value));
 
 const showDeviceMenu = ref(false);
 const selectedAudioId = ref(localStorage.getItem(STORAGE_KEY_AUDIO) ?? "");
@@ -154,16 +156,28 @@ const syncSpeakerFromNative = (active: string) => {
   if (active) speakerOn.value = active.toLowerCase() === "speaker";
 };
 
+let unmounted = false;
+
 onMounted(async () => {
   if (!isNative) return;
   const state = await nativeCallBridge.getAudioDevices();
+  if (unmounted) return;
   syncSpeakerFromNative(state.active);
-  unsubscribeAudioDevices = await nativeCallBridge.onAudioDevicesChanged(
+  const unsubscribe = await nativeCallBridge.onAudioDevicesChanged(
     (s) => syncSpeakerFromNative(s.active),
   );
+  // Unmounted while subscribing (minimize/restore, a call that ended at
+  // once): onUnmounted found nothing to remove, and the listener lived on —
+  // one more per cycle.
+  if (unmounted) {
+    unsubscribe();
+    return;
+  }
+  unsubscribeAudioDevices = unsubscribe;
 });
 
 onUnmounted(() => {
+  unmounted = true;
   unsubscribeAudioDevices?.();
   unsubscribeAudioDevices = null;
 });
@@ -237,12 +251,12 @@ watch(
         </div>
 
         <!-- Speaker -->
-        <div v-if="audioOutputDevices.length > 0">
+        <div v-if="outputDevices.length > 0">
           <div class="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-white/40">
             {{ t("call.speaker") }}
           </div>
           <button
-            v-for="d in audioOutputDevices"
+            v-for="d in outputDevices"
             :key="d.deviceId"
             class="device-item flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[13px] text-white/80"
             :class="{ 'device-item--active': selectedOutputId === d.deviceId }"
@@ -261,7 +275,7 @@ watch(
 
         <!-- No devices -->
         <div
-          v-if="audioDevices.length === 0 && videoDevices.length === 0 && audioOutputDevices.length === 0"
+          v-if="audioDevices.length === 0 && videoDevices.length === 0 && outputDevices.length === 0"
           class="py-6 text-center text-sm text-white/30"
         >
           No devices found
@@ -340,9 +354,11 @@ watch(
         </svg>
       </button>
 
-      <!-- Speaker toggle (native) — standalone, independent of enumerateDevices -->
+      <!-- Speaker toggle (native) — standalone, independent of enumerateDevices.
+           Not on iOS: WebKit plays the call in its own audio session, on the
+           loudspeaker, and the app's output override never reaches it (C06). -->
       <button
-        v-if="isNative"
+        v-if="isNative && !isIOS"
         class="ctrl-btn"
         :class="[
           speakerOn ? 'ctrl-btn--screen-active' : 'ctrl-btn--default',

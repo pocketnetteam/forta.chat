@@ -1,34 +1,7 @@
 import { ref, computed, watch, onScopeDispose, type Ref } from "vue";
 import { getMatrixClientService } from "@/entities/matrix";
 import type { LinkPreview } from "@/entities/chat";
-
-/** Simple LRU cache for URL previews */
-class LRUCache<K, V> {
-  private map = new Map<K, V>();
-  constructor(private maxSize: number) {}
-
-  get(key: K): V | undefined {
-    const val = this.map.get(key);
-    if (val !== undefined) {
-      this.map.delete(key);
-      this.map.set(key, val);
-    }
-    return val;
-  }
-
-  set(key: K, val: V): void {
-    if (this.map.has(key)) this.map.delete(key);
-    this.map.set(key, val);
-    if (this.map.size > this.maxSize) {
-      const first = this.map.keys().next().value!;
-      this.map.delete(first);
-    }
-  }
-
-  has(key: K): boolean {
-    return this.map.has(key);
-  }
-}
+import { LRUCache } from "@/shared/lib/lru-cache";
 
 const cache = new LRUCache<string, LinkPreview | null>(200);
 const inflight = new Map<string, Promise<LinkPreview | null>>();

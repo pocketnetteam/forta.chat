@@ -356,12 +356,18 @@ const openMemberMenu = (e: MouseEvent, hexId: string) => {
 
 const kickingMember = ref(false);
 
+// The store reports a refused or failed member action as `false`; the menu
+// used to close as if it had worked (audit S7-04).
+const reportMemberAction = (ok: boolean) => {
+  if (!ok) showToast(t("info.memberActionFailed"), "error");
+};
+
 // kickMember expects raw address — decode hex before passing
 const handleKickMember = async () => {
   if (!room.value || kickingMember.value) return;
   kickingMember.value = true;
   const rawAddr = hexDecode(memberAction.value.hexId);
-  await chatStore.kickMember(room.value.id, rawAddr);
+  reportMemberAction(await chatStore.kickMember(room.value.id, rawAddr));
   kickingMember.value = false;
   memberAction.value.show = false;
 };
@@ -376,7 +382,7 @@ const handleToggleAdmin = async () => {
   const rawAddr = hexDecode(hexId);
   const currentLevel = getMemberPowerLevel(hexId);
   const newLevel = currentLevel >= 50 ? 0 : 50;
-  await chatStore.setMemberPowerLevel(room.value.id, rawAddr, newLevel);
+  reportMemberAction(await chatStore.setMemberPowerLevel(room.value.id, rawAddr, newLevel));
   togglingAdmin.value = false;
   memberAction.value.show = false;
 };
@@ -389,7 +395,7 @@ const handleBanMember = async () => {
   if (!room.value || banningMember.value) return;
   banningMember.value = true;
   const rawAddr = hexDecode(memberAction.value.hexId);
-  await chatStore.banMember(room.value.id, rawAddr);
+  reportMemberAction(await chatStore.banMember(room.value.id, rawAddr));
   banningMember.value = false;
   memberAction.value.show = false;
 };
@@ -399,7 +405,7 @@ const handleToggleMute = async () => {
   mutingMember.value = true;
   const rawAddr = hexDecode(memberAction.value.hexId);
   const muted = chatStore.isMemberMuted(room.value.id, memberAction.value.hexId);
-  await chatStore.muteMember(room.value.id, rawAddr, !muted);
+  reportMemberAction(await chatStore.muteMember(room.value.id, rawAddr, !muted));
   mutingMember.value = false;
   memberAction.value.show = false;
 };
@@ -422,7 +428,7 @@ const unbanningUser = ref<string | null>(null);
 const handleUnban = async (userId: string) => {
   if (!room.value || unbanningUser.value) return;
   unbanningUser.value = userId;
-  await chatStore.unbanMember(room.value.id, userId);
+  reportMemberAction(await chatStore.unbanMember(room.value.id, userId));
   unbanningUser.value = null;
 };
 

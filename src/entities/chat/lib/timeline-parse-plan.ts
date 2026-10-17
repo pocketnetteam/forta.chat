@@ -1,4 +1,5 @@
 import type { LocalMessage } from "@/shared/lib/local-db";
+import { indexCallEvents, isOrphanedInvite } from "./call-outcome";
 
 /**
  * Which SDK timeline events a history load still has to parse (plan
@@ -37,12 +38,19 @@ export interface TimelineDescription {
   messageEventIds: string[];
   /** Plain messages and call hangups — the events that always become rows. */
   rowEventIds: string[];
+  /**
+   * Invites nobody ended (`isOrphanedInvite`): rows from now on, standing in for a
+   * hangup that never came. Kept apart from `rowEventIds`, whose first id marks the
+   * oldest history row for hole detection.
+   */
+  orphanInviteIds: string[];
   edits: Array<{ targetId: string; ts: number }>;
 }
 
 /** What a history load needs to know before parsing any event. */
-export function describeTimeline(raws: ReadonlyArray<RawEvent | null>): TimelineDescription {
-  const out: TimelineDescription = { messageEventIds: [], rowEventIds: [], edits: [] };
+export function describeTimeline(raws: ReadonlyArray<RawEvent | null>, now: number = Date.now()): TimelineDescription {
+  const out: TimelineDescription = { messageEventIds: [], rowEventIds: [], orphanInviteIds: [], edits: [] };
+  let callEvents: ReturnType<typeof indexCallEvents> | undefined;
   for (const raw of raws) {
     const id = raw?.event_id as string | undefined;
     if (!raw || !id) continue;
@@ -53,6 +61,10 @@ export function describeTimeline(raws: ReadonlyArray<RawEvent | null>): Timeline
     } else if (kind === "message") {
       out.messageEventIds.push(id);
       if (raw.type === "m.room.message" || raw.type === "m.call.hangup") out.rowEventIds.push(id);
+      if (raw.type === "m.call.invite") {
+        callEvents ??= indexCallEvents(raws);
+        if (isOrphanedInvite(raw, callEvents, now)) out.orphanInviteIds.push(id);
+      }
     }
   }
   return out;

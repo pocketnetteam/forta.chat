@@ -166,9 +166,9 @@
   resolved "https://registry.npmjs.org/@capgo/capacitor-downloader/-/capacitor-downloader-8.1.31.tgz"
   integrity sha512-oT0BacSUa2f0ifq9TCNG1HDssnY7aga4xS3yFvd2+WjejZoraC8okjebKqswGvkT6n5aS6GyZ5YKIszmQh2VIg==
 
-"@capgo/capacitor-incoming-call-kit@github:j-bitmaker/capacitor-incoming-call-kit#8.2.1-forta.2":
+"@capgo/capacitor-incoming-call-kit@github:j-bitmaker/capacitor-incoming-call-kit#8.2.1-forta.3":
   version "8.2.1"
-  resolved "git+ssh://git@github.com/j-bitmaker/capacitor-incoming-call-kit.git#d1610c232cc358cfe0cb1aa38bfed8e15338437f"
+  resolved "git+ssh://git@github.com/j-bitmaker/capacitor-incoming-call-kit.git#db8933772785eec65e3605e0d94f3bdbf61b1532"
 
 "@capgo/capacitor-share-target@^8.0.25":
   version "8.0.26"

@@ -27,11 +27,17 @@ import android.util.Log
 object IncomingRinger {
     private const val TAG = "IncomingRinger"
     const val AUTO_REJECT_TIMEOUT_MS = 30_000L
+    private const val LEGACY_LOOP_CHECK_MS = 1_000L
+    /** Telecom switches to MODE_RINGTONE about 0.3 s after the ringer arms. */
+    private const val RING_AUDIO_SAMPLE_MS = 1_500L
 
     private val ledger = IncomingRingerLedger()
     private val handler = Handler(Looper.getMainLooper())
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
+
+    /** The audio state of the last rings, for the bug report (`CallPlugin.getRingAudioLog`). */
+    val audioLog = RingAudioLog()
 
     /** The call this process rings for right now, or null. */
     val ringingCallId: String?
@@ -44,6 +50,9 @@ object IncomingRinger {
      */
     fun arm(context: Context, callId: String, onTimeout: () -> Unit) {
         val app = context.applicationContext
+        // Outside the lock: the router's lock can be held through a Bluetooth
+        // SCO teardown, and the ringer's lock is taken on the main thread.
+        prepareRingAudio(app, callId)
         val token = synchronized(this) {
             stopHardware()
             val t = ledger.arm(callId)
@@ -95,6 +104,7 @@ object IncomingRinger {
     fun isRingingFor(callId: String): Boolean = ledger.isArmedFor(callId)
 
     private fun stopHardware() {
+        handler.removeCallbacks(legacyLoop)
         runCatching { ringtone?.stop() }
         ringtone = null
         runCatching { vibrator?.cancel() }
@@ -109,8 +119,24 @@ object IncomingRinger {
                 .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build()
-            isLooping = true
+            // Ringtone.setLooping is Android 9+; below it the call threw before
+            // play() and the phone rang silently. Replay it instead.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) isLooping = true
             play()
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) handler.postDelayed(legacyLoop, LEGACY_LOOP_CHECK_MS)
+    }
+
+    /** Android 7–8 loop: replay the ringtone while it is still the one ringing. */
+    private val legacyLoop: Runnable = object : Runnable {
+        override fun run() {
+            // Under the lock: stop() runs on the plugin thread too, and a replay
+            // that slipped in after it would ring on for a call already over.
+            synchronized(this@IncomingRinger) {
+                val current = ringtone ?: return
+                runCatching { if (!current.isPlaying) current.play() }
+                handler.postDelayed(this, LEGACY_LOOP_CHECK_MS)
+            }
         }
     }
 
@@ -121,7 +147,47 @@ object IncomingRinger {
             @Suppress("DEPRECATION")
             app.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-        vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 1000, 1000), 0))
+        val pattern = longArrayOf(0, 1000, 1000)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator?.vibrate(pattern, 0)
+        }
+    }
+
+    /**
+     * Drop a VoIP mode no call owns before the ringtone plays through the
+     * earpiece ([RingerModePolicy]), record the ring's audio state, and
+     * sample the mode again once Telecom had its chance to set
+     * `MODE_RINGTONE`. Best-effort: the ring goes on whatever fails here.
+     */
+    private fun prepareRingAudio(app: Context, callId: String) {
+        try {
+            val am = app.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            val modeAtArm = RingerModePolicy.modeName(runCatching { am.mode }.getOrNull())
+            val slotState = CallConnectionService.currentConnection?.state
+            val liveCall = RingerModePolicy.isLiveCall(slotState, CallForegroundService.isRunning)
+            val reset = AudioRouter.getSharedInstance(app).releaseModeForRing(liveCall)
+            val telecom = telecomLabel(callId)
+            val atMs = System.currentTimeMillis()
+            audioLog.armed(RingAudioLog.Record(atMs, callId, modeAtArm, reset, telecom))
+            Log.i(TAG, "ring audio callId=$callId mode=$modeAtArm reset=$reset telecom=$telecom")
+            handler.postDelayed({
+                if (!ledger.isArmedFor(callId)) return@postDelayed
+                val modeInRing = RingerModePolicy.modeName(runCatching { am.mode }.getOrNull())
+                val telecomInRing = telecomLabel(callId)
+                audioLog.sampled(callId, atMs, modeInRing, telecomInRing)
+                Log.i(TAG, "ring audio callId=$callId +${RING_AUDIO_SAMPLE_MS}ms mode=$modeInRing telecom=$telecomInRing")
+            }, RING_AUDIO_SAMPLE_MS)
+        } catch (e: Exception) {
+            Log.w(TAG, "prepareRingAudio failed", e)
+        }
+    }
+
+    private fun telecomLabel(callId: String): String {
+        val slot = CallConnectionService.currentConnection
+        return RingerModePolicy.slotLabel(slot?.state, slot != null && CallSlotPolicy.owns(slot.callId, callId))
     }
 
     /**

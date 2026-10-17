@@ -1,5 +1,6 @@
-import { ref, computed } from "vue";
+import { ref, computed, toRaw } from "vue";
 import type { Ref } from "vue";
+import { convertHeicToJpeg, isHeicFile } from "./heic-to-jpeg";
 
 export interface MediaFile {
   file: File;
@@ -16,6 +17,19 @@ export function useMediaUpload() {
 
   const activeFile = computed(() => files.value[activeIndex.value] ?? null);
 
+  /** Android WebView cannot draw HEIC, so the picked photo had no preview
+   *  (audit W2C-04). Convert it right away and keep the JPEG for sending too,
+   *  so the send path does not convert it again. */
+  const swapInJpeg = async (original: File) => {
+    const jpeg = await convertHeicToJpeg(original);
+    if (jpeg === original) return;
+    const item = files.value.find((f) => toRaw(f.file) === original);
+    if (!item) return; // removed while converting
+    URL.revokeObjectURL(item.previewUrl);
+    item.file = jpeg;
+    item.previewUrl = URL.createObjectURL(jpeg);
+  };
+
   const addFiles = (fileList: FileList | File[]) => {
     for (const file of Array.from(fileList)) {
       const type = file.type.startsWith("video/") ? "video" as const : "image" as const;
@@ -24,6 +38,7 @@ export function useMediaUpload() {
         previewUrl: URL.createObjectURL(file),
         type,
       });
+      if (type === "image" && isHeicFile(file)) void swapInJpeg(file);
     }
     activeIndex.value = 0;
   };
