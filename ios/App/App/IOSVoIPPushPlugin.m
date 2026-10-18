@@ -9,4 +9,5 @@
 // `voipTokenReceived` event.
 CAP_PLUGIN(IOSVoIPPushPlugin, "IOSVoIPPush",
     CAP_PLUGIN_METHOD(getToken, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(markHandedOff, CAPPluginReturnPromise);
 )

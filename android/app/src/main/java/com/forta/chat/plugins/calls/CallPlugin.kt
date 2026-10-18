@@ -70,9 +70,15 @@ class CallPlugin : Plugin() {
         // own persisted session marker — never on another app's live call —
         // and never touches MODE_RINGTONE, which Telecom releases itself when
         // the dead process's connections go with it.
-        runCatching {
-            CallTeardown.endCall(context, CallTeardownPolicy.Reason.COLD_START, null)
-        }.onFailure { Log.w(TAG, "cold-start teardown sweep threw", it) }
+        //
+        // Once per process: load() runs again for every new bridge — the app
+        // opened from a notification after exitApp or a task swipe left the
+        // process alive — and the sweep stopped a ringer that was still ringing.
+        if (ColdStartSweep.firstInProcess()) {
+            runCatching {
+                CallTeardown.endCall(context, CallTeardownPolicy.Reason.COLD_START, null)
+            }.onFailure { Log.w(TAG, "cold-start teardown sweep threw", it) }
+        }
 
         val onAnswered: (String, String) -> Unit = { callId, roomId ->
             notifyListeners("callAnswered", JSObject().apply {
@@ -171,6 +177,16 @@ class CallPlugin : Plugin() {
      * have installed its own, and clearing those would silence a live plugin.
      */
     override fun handleOnDestroy() {
+        // The bridge — and with it the WebView that runs the Matrix call — is
+        // going: renderer-death recreate(), a system destroy, exitApp. The JS
+        // call cannot survive it (WebRTCPlugin disposes the peer connections),
+        // but a live Telecom connection did: every later call hit the busy
+        // path while the process lived. Release it as a task removal does,
+        // telling the peer natively; a ringing call is left to its ringer.
+        if (activity?.isChangingConfigurations != true) {
+            val released = runCatching { CallConnectionService.releaseOnTaskRemoved() }.getOrDefault(false)
+            if (released) Log.w(TAG, "Bridge destroyed with a live call — released it")
+        }
         installedCallbacks?.let { (answered, rejected, ended) ->
             if (CallConnection.onAnswered === answered) CallConnection.onAnswered = null
             if (CallConnection.onRejected === rejected) CallConnection.onRejected = null
@@ -405,10 +421,10 @@ class CallPlugin : Plugin() {
     fun reportCallConnected(call: PluginCall) {
         // setActive() here bypasses CallConnection.onAnswer(), so the silencing
         // that lives there does not cover this route. JS reaches it whenever the
-        // call connects without Telecom having answered it itself.
-        IncomingRinger.stopAll()
-        IncomingCallActivity.stopRingerIfShowing()
+        // call connects without Telecom having answered it itself. Keyed by the
+        // call that connected: a ring already rebound to the next call stays.
         val callId = call.getString("callId")
+        IncomingCallActivity.stopRingerIfShowing(callId)
         captureHangupTarget(callId)
         val connection = CallConnectionService.currentConnection?.takeIf { slot ->
             CallSlotPolicy.owns(slot.callId, callId).also { owns ->
@@ -662,7 +678,8 @@ class CallPlugin : Plugin() {
     @PluginMethod
     fun startAudioRouting(call: PluginCall) {
         val callType = call.getString("callType") ?: "voice"
-        audioRouter?.start(callType)
+        // C02: the router remembers which call owns it; a stop for another call is dropped.
+        audioRouter?.start(callType, call.getString("callId"))
 
         // Session 31 (#644): bind MainActivity's hardware volume keys to
         // STREAM_VOICE_CALL for the duration of the call. CallActivity sets
@@ -685,11 +702,18 @@ class CallPlugin : Plugin() {
         // waiting for SCO_DISCONNECTED on API < 31; running it on the
         // plugin thread would serialize every other native call (push,
         // status bar, share) and risk ANRs.
+        val callId = call.getString("callId")
         cleanupExecutor.execute {
-            try {
-                audioRouter?.stop()
+            // C02: false when another call owns the router — leave its volume binding alone too.
+            val stopped = try {
+                audioRouter?.stop(callId) ?: true
             } catch (e: Exception) {
                 Log.e(TAG, "stopAudioRouting threw", e)
+                true
+            }
+            if (!stopped) {
+                call.resolve()
+                return@execute
             }
 
             // Session 31 (#644): restore the activity's volume rocker AFTER
