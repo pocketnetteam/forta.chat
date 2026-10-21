@@ -158,6 +158,42 @@ describe('PushService.registerPusher retry behaviour', () => {
     expect(client.getPushers).not.toHaveBeenCalled();
   });
 
+  // C04 (calls review 2026-10-04): a registration event that reaches the old
+  // account's client after logout (or after a switch to another account) must
+  // not PUT anything: registering and taking it back leaves the pusher alive
+  // whenever the take-back fails.
+  it('does not register a pusher for a client that logged out before the registration ran', async () => {
+    const client = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerPusher: (c: typeof client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = null; // unregisterForLogout ran before the token event
+    await svc.registerPusher(client, 'token-abc');
+    expect(client.setPusher).not.toHaveBeenCalled();
+    expect(client.getPushers).not.toHaveBeenCalled();
+  });
+
+  it('does not register a pusher for the previous account after a switch to another one', async () => {
+    const oldClient = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [] }),
+    };
+    const newClient = { setPusher: vi.fn(), getPushers: vi.fn() };
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerPusher: (c: typeof oldClient, t: string) => Promise<void>;
+    };
+    svc.matrixClient = newClient;
+    await svc.registerPusher(oldClient, 'token-abc');
+    expect(oldClient.setPusher).not.toHaveBeenCalled();
+  });
+
   // Review 2026-10-08: a logout and a fresh login to the same account on this
   // device register the same pushkey, so the late take-back deleted the new
   // session's pusher.

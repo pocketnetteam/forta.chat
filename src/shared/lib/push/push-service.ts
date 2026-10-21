@@ -404,6 +404,10 @@ class PushService {
     // the device with a valid FCM token that the homeserver had never been
     // told about — so no push ever arrived for that session.
     // iOS/Android use buildPusherPayload so app_id stays platform-correct.
+    // C04: not for a client that is no longer the signed-in one. A token event
+    // can reach a listener of the previous account after logout or an account
+    // switch; registering and taking it back leaves the pusher if that fails.
+    if (!matrixClient || this.matrixClient !== matrixClient) return;
     const payload = buildPusherPayload(token, { isIOS });
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= PushService.PUSHER_REGISTER_RETRIES; attempt++) {
@@ -1027,9 +1031,12 @@ class PushService {
 
 
     PushNotifications.addListener('registration', async ({ value: token }) => {
-      // FCM token received
+      // FCM token received. C04: not for a client that is no longer the signed-in one.
+      if (this.matrixClient !== matrixClient) return;
       this.fcmToken = token;
       await this.registerPusher(matrixClient, token);
+      // C04: logged out (or switched account) meanwhile — the rest is for the current account only.
+      if (this.matrixClient !== matrixClient) return;
       await this.ensureCallHangupPushRule(matrixClient);
       await this.ensureCallSelectAnswerPushRule(matrixClient);
       // WEE-44: if a previous boot left a dead-letter for the same token,
