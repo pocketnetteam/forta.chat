@@ -1,0 +1,11 @@
+# Cloudflare Worker for the bug-report proxy. Secrets are set with
+# `npx wrangler secret put <NAME>`, never here. See README.md.
+name = "forta-bug-report-proxy"
+main = "src/worker.ts"
+compatibility_date = "2025-09-01"
+
+[vars]
+# Repository that receives the reports, as owner/name. A private one is advised.
+GITHUB_REPO = "greenShirtMystery/forta-bugs"
+# "true" returns issue links to the app. Keep "false" for a private repository.
+PUBLIC_ISSUE_LINKS = "false"

@@ -234,7 +234,9 @@ describe("login key verification", () => {
       source.indexOf("const completeLoginNetwork") + 800
     );
     const fetchPos = loginSection.indexOf("fetchUserInfo");
-    const verifyPos = loginSection.indexOf("verifyAndRepublishKeys");
+    // Goes through verifyOwnKeysOnce (audit S5-01), which runs
+    // verifyAndRepublishKeys at most once per account per app session.
+    const verifyPos = loginSection.indexOf("verifyOwnKeysOnce");
     const matrixPos = loginSection.indexOf("initMatrix");
     expect(fetchPos).toBeGreaterThan(-1);
     expect(verifyPos).toBeGreaterThan(fetchPos);
@@ -245,8 +247,9 @@ describe("login key verification", () => {
     const source = getSource();
     const fnStart = source.indexOf("const verifyAndRepublishKeys");
     const fnSection = source.slice(fnStart, fnStart + 2000);
-    // Should check the local cache first (fast path)
-    expect(fnSection).toContain("countCachedKeys");
+    // Should check the local caches first (fast path): the SDK's and the
+    // self-profile snapshot's keys (ownKeyCountFromCaches wraps countCachedKeys)
+    expect(fnSection).toContain("ownKeyCountFromCaches");
     expect(fnSection).toContain("REQUIRED_ENCRYPTION_KEYS");
     // Fresh profile via SDK (loadUsersInfoRaw wraps loadUsersInfo + getRawProfile)
     expect(fnSection).toContain("loadUsersInfoRaw");

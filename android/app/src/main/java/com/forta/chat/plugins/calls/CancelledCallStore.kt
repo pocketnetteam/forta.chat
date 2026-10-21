@@ -70,6 +70,41 @@ class CancelledCallStore(context: Context) {
     }
 
     /**
+     * Stamp [callId] as handled: it rang or was answered on this device, or
+     * another device of the user answered or declined it. Unlike a caller's
+     * hangup of a call nobody saw, a stale invite for it is not a missed call.
+     * Kept [HANDLED_TTL_MS]: a Doze backlog can hold an invite copy for long.
+     */
+    fun markHandled(
+        callId: String,
+        ttlMs: Long = HANDLED_TTL_MS,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        prefs.edit().putLong(HANDLED_PREFIX + callId, nowMs + ttlMs).commit()
+    }
+
+    /** Stamp [callId] as seen: an invite push for it reached this phone. */
+    fun markInviteSeen(
+        callId: String,
+        ttlMs: Long = HANDLED_TTL_MS,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        prefs.edit().putLong(SEEN_PREFIX + callId, nowMs + ttlMs).apply()
+    }
+
+    /** `true` if an invite push for [callId] reached this phone within the TTL window. */
+    fun inviteSeen(
+        callId: String,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean = prefs.getLong(SEEN_PREFIX + callId, 0L) > nowMs
+
+    /** `true` if [callId] was marked by [markHandled] within the TTL window. */
+    fun wasHandled(
+        callId: String,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean = prefs.getLong(HANDLED_PREFIX + callId, 0L) > nowMs
+
+    /**
      * Drop entries whose expiry has already passed. Called from
      * [markCancelled] so the store cannot grow unbounded — call
      * volume is low (one entry per cancelled call, TTL ~60s) so an
@@ -95,6 +130,11 @@ class CancelledCallStore(context: Context) {
          * leaks through.
          */
         const val DEFAULT_TTL_MS: Long = 60_000L
+
+        /** How long a handled call keeps its stale invite copies from showing "missed call". */
+        const val HANDLED_TTL_MS: Long = 30 * 60_000L
         private const val PREFS_NAME = "forta_cancelled_calls"
+        private const val HANDLED_PREFIX = "handled:"
+        private const val SEEN_PREFIX = "seen:"
     }
 }

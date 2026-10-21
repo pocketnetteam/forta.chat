@@ -494,6 +494,15 @@ const isAnyScreenSharing = computed(
 
 <template>
   <Teleport to="body">
+    <!-- Hidden element that plays the peer's audio. Outside the container's v-if: inside
+         it, minimizing the call removed it and the peer went silent, and the
+         one made on restore never got the stream back (web, iOS, Electron). -->
+    <video
+      ref="remoteAudioRef"
+      class="pointer-events-none fixed h-0 w-0 opacity-0"
+      autoplay
+      playsinline
+    />
     <Transition name="call-window">
       <div
         v-if="show"
@@ -502,14 +511,6 @@ const isAnyScreenSharing = computed(
         @mousemove="showControls"
         @click="showControls"
       >
-        <!-- Hidden audio element — always in DOM for remote audio playback -->
-        <video
-          ref="remoteAudioRef"
-          class="absolute h-0 w-0 opacity-0"
-          autoplay
-          playsinline
-        />
-
         <!-- ═══ Header ═══ -->
         <Transition name="header-fade">
           <div

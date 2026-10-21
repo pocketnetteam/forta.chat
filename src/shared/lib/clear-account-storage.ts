@@ -17,10 +17,18 @@ export function clearAccountLocalStorage(address?: string): void {
   localStorage.removeItem("bastyon-chat-join-room");
   localStorage.removeItem("bastyon-chat-referral");
   localStorage.removeItem("bastyon-chat-deleted-rooms");
+  // Shared pin/mute keys an unbound session wrote; the next account must not inherit them.
+  localStorage.removeItem("chat_pinned_rooms");
+  localStorage.removeItem("chat_muted_rooms");
 
-  if (address) {
-    localStorage.removeItem(`chat_pinned_rooms:${address}`);
-    localStorage.removeItem(`chat_muted_rooms:${address}`);
-    localStorage.removeItem(`dsname_${address}`);
-  }
+  if (address) clearPerAccountKeys(address);
+}
+
+/** Remove one account's own keys only (pinned and muted rooms, unsent read
+ *  receipts, display name), e.g. when a background account is removed. */
+export function clearPerAccountKeys(address: string): void {
+  localStorage.removeItem(`chat_pinned_rooms:${address}`);
+  localStorage.removeItem(`chat_muted_rooms:${address}`);
+  localStorage.removeItem(`chat_pending_read_receipts:${address}`);
+  localStorage.removeItem(`dsname_${address}`);
 }

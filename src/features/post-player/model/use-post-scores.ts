@@ -1,27 +1,63 @@
+import { computed, getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
 import { useAuthStore } from "@/entities/auth";
 import type { BastyonPostData } from "@/app/providers/initializers";
 
 // Shared state per txid so PostCard and PostPlayerModal stay in sync.
 // The average/vote-count come from the getprofilefeed aggregate
 // (scoreSum/scoreCnt); only the current user's vote needs a network request.
-const scoresCache = new Map<
-  string,
-  { myScore: Ref<number | null>; scoreSum: Ref<number>; scoreCnt: Ref<number>; seeded: Ref<boolean> }
->();
+type ScoreState = { myScore: Ref<number | null>; scoreSum: Ref<number>; scoreCnt: Ref<number>; seeded: Ref<boolean> };
+const scoresCache = new Map<string, ScoreState>();
+/** Live users (mounted PostCard / PostPlayerModal) per txid. */
+const usersByTxid = new Map<string, number>();
+/** Txids nobody shows, oldest first; only these can be evicted (W2D-02). */
+const idle = new Set<string>();
+
+/** Score states kept for posts nobody shows. Every post ever seen used to stay
+ *  for the session (audit W2D-02); an entry in use is never evicted, so a card
+ *  and the player modal of one post keep sharing it. */
+export const POST_SCORES_IDLE_MAX = 500;
+
+function acquire(txid: string): ScoreState {
+  let state = scoresCache.get(txid);
+  if (!state) {
+    state = { myScore: ref<number | null>(null), scoreSum: ref(0), scoreCnt: ref(0), seeded: ref(false) };
+    scoresCache.set(txid, state);
+  }
+  idle.delete(txid);
+  usersByTxid.set(txid, (usersByTxid.get(txid) ?? 0) + 1);
+  return state;
+}
+
+function release(txid: string): void {
+  const users = (usersByTxid.get(txid) ?? 1) - 1;
+  if (users > 0) {
+    usersByTxid.set(txid, users);
+    return;
+  }
+  usersByTxid.delete(txid);
+  idle.add(txid);
+  while (idle.size > POST_SCORES_IDLE_MAX) {
+    const oldest = idle.values().next().value as string;
+    idle.delete(oldest);
+    scoresCache.delete(oldest);
+  }
+}
+
+export function postScoresCacheSize(): number {
+  return scoresCache.size;
+}
+
+export function resetPostScoresCacheForTests(): void {
+  scoresCache.clear();
+  usersByTxid.clear();
+  idle.clear();
+}
 
 export function usePostScores(txid: string) {
   const authStore = useAuthStore();
 
-  // Reuse existing reactive state for this txid, or create new
-  if (!scoresCache.has(txid)) {
-    scoresCache.set(txid, {
-      myScore: ref<number | null>(null),
-      scoreSum: ref(0),
-      scoreCnt: ref(0),
-      seeded: ref(false),
-    });
-  }
-  const cached = scoresCache.get(txid)!;
+  const cached = acquire(txid);
+  if (getCurrentScope()) onScopeDispose(() => release(txid));
   const myScore = cached.myScore;
   const scoreSum = cached.scoreSum;
   const scoreCnt = cached.scoreCnt;

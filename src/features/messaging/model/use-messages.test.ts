@@ -52,6 +52,7 @@ const mockSetTyping = vi.fn();
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
     isReady: () => mockIsReady(),
+    hasLiveSync: () => true,
     getUserId: () => "@mockuser:server",
     sendText: mockSendText,
     sendEncryptedText: mockSendEncryptedText,

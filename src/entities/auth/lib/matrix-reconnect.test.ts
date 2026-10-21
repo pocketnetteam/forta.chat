@@ -22,7 +22,20 @@ vi.mock("@capacitor/app", () => ({
   },
 }));
 
-import { armMatrixReconnect, onForeground } from "./matrix-reconnect";
+import { armMatrixReconnect, matrixRetryDelayMs, onForeground } from "./matrix-reconnect";
+
+describe("matrixRetryDelayMs (audit S2-01)", () => {
+  it("backs off from 15 s and doubles up to a 5-minute ceiling", () => {
+    expect([1, 2, 3, 4, 5, 6, 12].map(matrixRetryDelayMs)).toEqual([
+      15_000, 30_000, 60_000, 120_000, 240_000, 300_000, 300_000,
+    ]);
+  });
+
+  it("treats a zero or negative count as the first failure", () => {
+    expect(matrixRetryDelayMs(0)).toBe(15_000);
+    expect(matrixRetryDelayMs(-3)).toBe(15_000);
+  });
+});
 
 function sources() {
   const net = new Set<(change: { connected: boolean }) => void>();

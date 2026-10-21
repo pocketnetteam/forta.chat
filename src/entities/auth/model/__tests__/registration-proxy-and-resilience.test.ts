@@ -87,4 +87,18 @@ describe("registration: proxy rotation & resilience (session 05)", () => {
     // Return structured error — either success:false or reason:...
     expect(editFn).toMatch(/success:\s*false|reason:\s*['"]/);
   });
+
+  // Audit W2A-05: a profile save did not warm the unspent cache the way
+  // registration does, so a low balance could end in the absent captcha UI.
+  it("editUserData warms the unspent cache before sending, like registration", () => {
+    const src = getAppInitializerSource();
+    const editStart = src.indexOf("async editUserData");
+    const editFn = src.slice(editStart, editStart + 1800);
+    const warm = editFn.indexOf('await this.warmUnspents(address, "a profile edit");');
+    const send = editFn.indexOf("addActionAndSendIfCan(");
+    expect(warm).toBeGreaterThan(-1);
+    expect(send).toBeGreaterThan(warm);
+    const broadcast = src.slice(src.indexOf("private async broadcastUserInfoAction("));
+    expect(broadcast).toContain('await this.warmUnspents(address, "UserInfo broadcast");');
+  });
 });

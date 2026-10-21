@@ -3,11 +3,10 @@
  *
  * Everything is driven by the per-address localStorage cache populated at
  * submission time (trackCreatedIssue) and updated by the close/reopen
- * actions. We explicitly do NOT query GitHub search to list issues —
- * burning the PAT's 5000 req/hr rate limit for tens of thousands of users
- * each launch is not worth it.
+ * actions. The app holds no GitHub token (audit S10-06): a close or reopen
+ * goes through the bug-report proxy with the issue's manage key.
  *
- * Cost: one GitHub call per explicit close/reopen action only.
+ * Cost: one proxy call per explicit close/reopen action only.
  */
 import { ref, readonly } from 'vue';
 import { APP_NAME } from '@/shared/config';
@@ -19,7 +18,8 @@ import {
   type TrackedIssue,
 } from '@/shared/lib/bug-report';
 
-const REPO_URL = 'https://github.com/greenShirtMystery/forta-bugs/issues';
+/** Where reports went before the proxy; their cache entries carry no link. */
+const LEGACY_REPO_URL = 'https://github.com/greenShirtMystery/forta-bugs/issues';
 
 // ─── Boot-trigger policy ───────────────────────────────────────────────
 // The sheet is auto-opened after login when the user has locally-tracked
@@ -44,6 +44,15 @@ export function shouldCheckOnBoot(): boolean {
   return Date.now() - lastCheckedAt > INTERVAL_MS;
 }
 
+/** The boot sheet asks only about reports the user can close or reopen. */
+export function hasManageableIssue(issues: readonly TrackedIssue[]): boolean {
+  return issues.some((issue) => issue.canManage);
+}
+
+function usableKey(key: unknown): string | undefined {
+  return typeof key === 'string' && key ? key : undefined;
+}
+
 export function markBootCheckCompleted(): void {
   localStorage.setItem(CHECKED_AT_KEY, JSON.stringify(Date.now()));
 }
@@ -66,13 +75,18 @@ export function useBugReportStatus() {
         (c): TrackedIssue => ({
           number: c.number,
           title: c.title,
-          url: `${REPO_URL}/${c.number}`,
+          url: c.url ?? `${LEGACY_REPO_URL}/${c.number}`,
           state: c.lastKnownState,
           closedAt: null,
           stateReason: null,
+          canManage: !!usableKey(c.manageKey),
         }),
       )
       .sort((a, b) => b.number - a.number);
+  }
+
+  function manageKeyOf(address: string, issueNumber: number): string | undefined {
+    return usableKey(getLocalIssueCache(address).find((c) => c.number === issueNumber)?.manageKey);
   }
 
   async function markUnresolved(
@@ -81,12 +95,14 @@ export function useBugReportStatus() {
     reason: string,
   ): Promise<boolean> {
     if (!address) return false;
+    const manageKey = manageKeyOf(address, issueNumber);
+    if (!manageKey) return false;
     const comment = reason.trim()
       ? `Reporter says it is still broken:\n\n> ${reason.trim().slice(0, 1000)}`
       : 'Reporter reopened this via the app — the bug is not fixed.';
     loading.value = true;
     try {
-      const ok = await reopenIssue(issueNumber, comment);
+      const ok = await reopenIssue(issueNumber, comment, manageKey);
       if (!ok) return false;
       updateLocalIssueState(address, issueNumber, 'open');
       allIssues.value = allIssues.value.map((i) =>
@@ -106,12 +122,14 @@ export function useBugReportStatus() {
     reason: string,
   ): Promise<boolean> {
     if (!address) return false;
+    const manageKey = manageKeyOf(address, issueNumber);
+    if (!manageKey) return false;
     const comment = reason.trim()
       ? `Reporter closed this via the app with a note:\n\n> ${reason.trim().slice(0, 1000)}`
       : '';
     loading.value = true;
     try {
-      const ok = await closeIssue(issueNumber, comment);
+      const ok = await closeIssue(issueNumber, comment, manageKey);
       if (!ok) return false;
       updateLocalIssueState(address, issueNumber, 'closed');
       allIssues.value = allIssues.value.map((i) =>

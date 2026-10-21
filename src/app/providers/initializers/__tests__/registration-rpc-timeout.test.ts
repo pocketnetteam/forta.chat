@@ -43,7 +43,8 @@ describe("registration RPC timeouts (WEE-23)", () => {
     expect(body).toContain("registerUserProfile");
     expect(body).toContain("ensureActionBroadcast");
     expect(body).toContain("broadcastUserInfoAction");
-    expect(body).toContain("loadUnspents");
+    // The preload moved into warmUnspents, shared with profile saves (audit W2A-05).
+    expect(body).toMatch(/loadUnspents|warmUnspents\(/);
   });
 });
 

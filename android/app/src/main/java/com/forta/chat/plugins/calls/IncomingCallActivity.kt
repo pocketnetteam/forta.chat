@@ -47,9 +47,17 @@ class IncomingCallActivity : Activity() {
             IncomingRinger.ringingCallId
                 ?.takeIf { RemoteHangupPolicy.endsSurface(it, endedCallId) }
                 ?.let { IncomingRinger.stop(it) }
-            currentInstance?.takeIf { RemoteHangupPolicy.endsSurface(it.shownCallId, endedCallId) }?.let {
+            currentInstance?.takeIf { RemoteHangupPolicy.endsSurface(it.shownCallId, endedCallId) }?.let { screen ->
                 Log.d(TAG, "Dismissing incoming call screen (remote hangup)")
-                it.handler.post { it.dismissByRemote() }
+                screen.handler.post {
+                    // C09: an incoming intent queued ahead of this runnable may have
+                    // rebound the screen to another call; check again where it runs.
+                    if (RemoteHangupPolicy.endsSurface(screen.shownCallId, endedCallId)) {
+                        screen.dismissByRemote()
+                    } else {
+                        Log.d(TAG, "Remote hangup for $endedCallId skipped: screen now shows ${screen.shownCallId}")
+                    }
+                }
             }
         }
 
@@ -68,15 +76,25 @@ class IncomingCallActivity : Activity() {
          * markers alone: they are how the JS side learns to answer, and an
          * answered call is exactly when they are needed.
          */
-        fun stopRingerIfShowing() {
-            // The ringer is process-wide now, so this silences it even when the
-            // instance that armed it is no longer the one the pointer holds.
-            IncomingRinger.stopAll()
-            currentInstance?.let {
+        fun stopRingerIfShowing(answeredCallId: String? = null) {
+            // Only the answered call's ring and screen come down: a screen an
+            // incoming intent already rebound to the next call keeps ringing
+            // (review 2026-10-08). Without an id whatever rings and shows comes
+            // down, as before; a push event id matches anything (RemoteHangupPolicy).
+            IncomingRinger.ringingCallId
+                ?.takeIf { RemoteHangupPolicy.endsSurface(it, answeredCallId) }
+                ?.let { IncomingRinger.stop(it) }
+            currentInstance?.takeIf { RemoteHangupPolicy.endsSurface(it.shownCallId, answeredCallId) }?.let { screen ->
                 Log.d(TAG, "Call answered elsewhere — silencing ringer")
-                it.handler.post {
-                    it.cleanup()
-                    it.finish()
+                val shown = screen.shownCallId
+                screen.handler.post {
+                    // C09: leave a screen that a queued intent rebound to another call.
+                    if (screen.shownCallId != shown || !RemoteHangupPolicy.endsSurface(screen.shownCallId, answeredCallId)) {
+                        Log.d(TAG, "Answered-elsewhere close skipped: screen now shows ${screen.shownCallId}")
+                        return@post
+                    }
+                    screen.cleanup()
+                    screen.finish()
                 }
             }
         }
@@ -113,6 +131,15 @@ class IncomingCallActivity : Activity() {
                         Intent.FLAG_ACTIVITY_SINGLE_TOP
                 })
             }.onFailure { Log.w(TAG, "Failed to open MainActivity on a Recents relaunch", it) }
+            finish()
+            return
+        }
+        // Same race on the ringer screen: started for an invite whose hangup
+        // was handled before it surfaced, it found nothing to dismiss it and
+        // rang for 30 s.
+        val ringingCallId = intent.getStringExtra("callId").orEmpty()
+        if (ringingCallId.isNotEmpty() && CancelledCallStore(this).isCancelled(ringingCallId)) {
+            Log.i(TAG, "onCreate: $ringingCallId was cancelled before the ringer surfaced — closing")
             finish()
             return
         }
@@ -486,6 +513,8 @@ class IncomingCallActivity : Activity() {
             putExtra("callId", callId)
             putExtra("roomId", intent.getStringExtra("roomId"))
         }
+        // The only legitimate source of push_call_accept: see KeyguardLiftGate.
+        com.forta.chat.KeyguardLiftGate.arm(android.os.SystemClock.elapsedRealtime())
         startActivity(appBootIntent)
 
         CallConnectionService.dismissIncomingCallNotification(this)
@@ -653,7 +682,10 @@ class IncomingCallActivity : Activity() {
         // instance's onDestroy null out the pointer to the live one, turning
         // dismissIfShowing/stopRingerIfShowing into permanent no-ops and
         // orphaning a ringtone nothing can reach.
-        if (currentInstance === this) {
+        // A configuration change the manifest does not absorb (locale, font
+        // scale) recreates the screen for the same call: stopping here cleared
+        // the user's silence, and the new instance rang again from the start.
+        if (currentInstance === this && !isChangingConfigurations) {
             // A back press or a swipe from Recents: stop ringing, as before.
             // Telecom's own 45 s backstop still ends the connection.
             IncomingRinger.stop(shownCallId)

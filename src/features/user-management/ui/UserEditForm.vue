@@ -7,6 +7,7 @@ import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { fileToAvatarBase64, uploadImage } from "@/shared/lib/upload-image";
 import { useToast } from "@/shared/lib/use-toast";
 import ShowPrivateKeyDialog from "./ShowPrivateKeyDialog.vue";
+import { profileSaveErrorKey, type ProfileSaveFailure } from "../model/profile-save-error";
 
 const authStore = useAuthStore();
 const userStore = useUserStore();
@@ -132,10 +133,13 @@ const handleSave = async () => {
       "success" in result &&
       (result as { success: boolean }).success === false
     ) {
-      saveError.value = t("profile.saveFailed");
+      // Say why it failed — "check your connection" was wrong advice when the
+      // network answered and refused the change (audit W2A-04).
+      const message = t(profileSaveErrorKey((result as { reason?: ProfileSaveFailure }).reason));
+      saveError.value = message;
       // The inline error text is easy to miss on long forms (forta-bugs#281,
       // WEE-25) — surface a toast as well so the user gets immediate feedback.
-      toast(t("profile.saveFailed"), "error");
+      toast(message, "error");
       return;
     }
 

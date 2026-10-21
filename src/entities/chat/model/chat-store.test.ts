@@ -11,6 +11,8 @@ const mockGetUserIdFn = vi.fn(() => "@me:server");
 const mockMatrixService = {
   getUserId: mockGetUserIdFn,
   getRoom: mockGetRoom,
+  // Fake-timer tests advance into the debounced room refresh: not ready, so it stays out.
+  isReady: vi.fn(() => false),
   sendReadReceipt: vi.fn(async () => true),
   kit: {
     client: { getUserId: mockGetUserIdFn },
@@ -437,6 +439,17 @@ describe("chat-store", () => {
 
   // ─── markRoomAsRead ───────────────────────────────────────────
 
+  // Push titles fall back to the Matrix member name, which beats a truncated
+  // address — so they need to know when the chat has no name of its own.
+  describe("getKnownDisplayName", () => {
+    it("is null where getDisplayName would fall back to the address", () => {
+      const addr = "PPbNqCweFnTePQyXWR21B9jXWCiDJa2yYu";
+      expect(store.getKnownDisplayName(addr)).toBeNull();
+      expect(store.getKnownDisplayName("")).toBeNull();
+      expect(store.getDisplayName(addr)).toContain("PPbNqCwe");
+    });
+  });
+
   describe("markRoomAsRead", () => {
     it("resets unreadCount to 0", () => {
       store.addRoom(makeRoom({ id: "!r1:s", unreadCount: 10 }));
@@ -699,6 +712,116 @@ describe("chat-store", () => {
         const record = store.messages["!live:s"]?.[0];
         expect(record?.callInfo?.missed).toBe(true);
         expect(record?.systemMeta?.template).toBe("system.missedVoiceCall");
+      });
+
+      // The caller's client went away before its SDK sent `invite_timeout`: no hangup ever
+      // comes, and the call that rang left nothing in the chat. The invite stands in for it.
+      describe("invite nobody ended", () => {
+        const LIFETIME = 60_000;
+        const live = (type: string, sender: string, ts: number) => ({
+          ...callEvent(type, sender, type === "m.call.invite" ? { lifetime: LIFETIME } : {}),
+          origin_server_ts: ts,
+        });
+        beforeEach(() => {
+          vi.useFakeTimers();
+          vi.setSystemTime(100_000);
+        });
+        afterEach(() => {
+          vi.useRealTimers();
+        });
+
+        it("records a missed call once the invite's lifetime ran out without a hangup", async () => {
+          const invite = live("m.call.invite", "@peer:s", 100_000);
+          withTimeline([invite]);
+
+          await store.handleTimelineEvent(invite, "!live:s");
+          expect(store.messages["!live:s"] ?? []).toHaveLength(0); // still ringing
+
+          await vi.advanceTimersByTimeAsync(LIFETIME + 20_000);
+
+          const record = store.messages["!live:s"]?.[0];
+          expect(record?.id).toBe(invite.event_id);
+          expect(record?.callInfo).toMatchObject({ missed: true, callId: "call-1", fromInvite: true });
+          expect(record?.systemMeta?.template).toBe("system.missedVoiceCall");
+        });
+
+        it("checks again when the timer fires before the wall clock reaches the due time", async () => {
+          // Web bench 2026-10-15: timers run on a monotonic clock, Date.now() on the wall
+          // clock, and the one check fired a hair early and gave up — no record appeared.
+          const invite = live("m.call.invite", "@peer:s", 100_000);
+          withTimeline([invite]);
+
+          await store.handleTimelineEvent(invite, "!live:s");
+          vi.setSystemTime(Date.now() - 1_000); // the wall clock lags the timers
+          await vi.advanceTimersByTimeAsync(LIFETIME + 15_000);
+          expect(store.messages["!live:s"] ?? []).toHaveLength(0);
+
+          await vi.advanceTimersByTimeAsync(1_500);
+          expect(store.messages["!live:s"]?.[0]?.callInfo?.fromInvite).toBe(true);
+        });
+
+        // Web bench 2026-10-15: the callee's app rejected the unanswered call after 30 s and
+        // the caller's SDK ended it on the reject without a hangup — no record on either side.
+        it("records a missed call shortly after a reject that no hangup followed", async () => {
+          const invite = live("m.call.invite", "@peer:s", 100_000);
+          const reject = live("m.call.reject", "@me:server", 132_000);
+          const events: unknown[] = [invite];
+          withTimeline(events);
+
+          await store.handleTimelineEvent(invite, "!live:s");
+          await vi.advanceTimersByTimeAsync(32_000);
+          events.push(reject);
+          await store.handleTimelineEvent(reject, "!live:s");
+          await vi.advanceTimersByTimeAsync(6_000);
+
+          const record = store.messages["!live:s"]?.[0];
+          expect(record?.id).toBe(invite.event_id);
+          expect(record?.callInfo).toMatchObject({ missed: true, fromInvite: true });
+        });
+
+        it("records nothing after a reject when the caller's hangup follows it", async () => {
+          const invite = live("m.call.invite", "@peer:s", 100_000);
+          const reject = live("m.call.reject", "@me:server", 132_000);
+          withTimeline([invite, reject, live("m.call.hangup", "@peer:s", 132_500)]);
+
+          await store.handleTimelineEvent(reject, "!live:s");
+          await vi.advanceTimersByTimeAsync(LIFETIME + 20_000);
+
+          expect(store.messages["!live:s"] ?? []).toHaveLength(0);
+        });
+
+        it("records nothing when the call ended on its own", async () => {
+          const invite = live("m.call.invite", "@peer:s", 100_000);
+          withTimeline([invite, live("m.call.hangup", "@peer:s", 160_000)]);
+
+          await store.handleTimelineEvent(invite, "!live:s");
+          await vi.advanceTimersByTimeAsync(LIFETIME + 20_000);
+
+          expect(store.messages["!live:s"] ?? []).toHaveLength(0);
+        });
+
+        it("waits for the rest of a sync batch even for an invite that came late", async () => {
+          const invite = live("m.call.invite", "@peer:s", 100_000 - 10 * 60_000);
+          const events: unknown[] = [invite];
+          withTimeline(events);
+
+          await store.handleTimelineEvent(invite, "!live:s");
+          events.push(live("m.call.hangup", "@peer:s", 100_000)); // same batch, right after
+          await vi.advanceTimersByTimeAsync(10_000);
+
+          expect(store.messages["!live:s"] ?? []).toHaveLength(0);
+        });
+
+        it("records nothing after logout", async () => {
+          const invite = live("m.call.invite", "@peer:s", 100_000);
+          withTimeline([invite]);
+
+          await store.handleTimelineEvent(invite, "!live:s");
+          store.cleanup();
+          await vi.advanceTimersByTimeAsync(LIFETIME + 20_000);
+
+          expect(store.messages["!live:s"] ?? []).toHaveLength(0);
+        });
       });
 
       it("does not read an answered call the caller ended as missed", async () => {

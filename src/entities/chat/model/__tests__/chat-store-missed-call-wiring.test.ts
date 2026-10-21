@@ -48,4 +48,34 @@ describe("chat-store: missed call records", () => {
     expect(single).toContain("callEvents: CallEventIndex");
     expect(single).toContain("isMissedCallHangup(raw, callEvents)");
   });
+
+  // An invite nobody ended (call-outcome.ts, isOrphanedInvite) stands in for the missing
+  // hangup in the same places a hangup becomes a record.
+  it("the chat-list preview and history loads turn an invite nobody ended into a record", () => {
+    const preview = bodyAfter(/function matrixRoomToChatRoom\s*\([^)]*\)\s*:\s*ChatRoom\s*\{/);
+    expect(preview).toMatch(/isOrphanedInvite\(raw, callEvents, Date\.now\(\)\)/);
+    expect(preview).toContain("inviteCallRecord(raw, roomId)");
+
+    const start = source.indexOf("const parseSingleEvent = async (");
+    const end = source.indexOf("const parseTimelineEvents = async (");
+    const single = source.slice(start, end);
+    expect(single).toMatch(/isOrphanedInvite\(raw, callEvents, Date\.now\(\)\)/);
+    expect(single).toContain("inviteCallRecord(raw, roomId)");
+  });
+
+  // The first sync's events reach no live handler, so a call ringing while the app started
+  // got no live check (review 2026-10-16): the first full refresh arms them.
+  it("the first full room refresh arms checks for invites still pending", () => {
+    const refresh = bodyAfter(/const refreshRoomsImmediate = \(\)\s*=>\s*\{/);
+    expect(refresh).toMatch(/fullRoomRefresh\(matrixRooms, kit, myUserId\);\s*if \(isInitial\) armPendingOrphanInviteChecks\(matrixRooms\);/);
+    const arm = bodyAfter(/const armPendingOrphanInviteChecks = \(matrixRooms: unknown\[\]\)\s*=>\s*\{/);
+    expect(arm).toContain("pendingInvites(");
+    expect(arm).toContain("scheduleOrphanInviteCheck(invite, roomId)");
+  });
+
+  it("every room-open parse plan looks for invites nobody ended as well as rows", () => {
+    const plans = source.match(/planTimelineParse\([^;]*timeline\.rowEventIds[^;]*;/g) ?? [];
+    expect(plans.length).toBe(3);
+    for (const plan of plans) expect(plan).toContain("timeline.orphanInviteIds");
+  });
 });

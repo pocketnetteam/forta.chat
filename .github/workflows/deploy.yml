@@ -27,7 +27,7 @@ jobs:
         run: npx vite build && node scripts/minify-public-js.mjs
         env:
           VITE_KLIPY_API_KEY: ${{ secrets.VITE_KLIPY_API_KEY }}
-          VITE_BUG_REPORT_TOKEN: ${{ secrets.VITE_BUG_REPORT_TOKEN }}
+          VITE_BUG_REPORT_ENDPOINT: ${{ vars.BUG_REPORT_ENDPOINT }}
 
       # Android App Links verification: inject the real SHA-256 fingerprint of
       # the release keystore into dist/.well-known/assetlinks.json. The repo

@@ -10,6 +10,7 @@ const mockMatrixService = {
   getUserId: vi.fn(() => "@me:server"),
   getRoom: vi.fn(() => undefined),
   isReady: vi.fn(() => false),
+  hasLiveSync: () => true,
   getIgnoredMatrixUserIds: vi.fn(() => [] as string[]),
   matrixId: vi.fn((id: string) => id),
 };

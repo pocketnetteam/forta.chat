@@ -687,6 +687,7 @@ export class DecryptionWorker {
         let preview = decryptedBody;
         if (type === MessageType.image) preview = "[photo]";
         else if (type === MessageType.video) preview = "[video]";
+        else if (type === MessageType.videoCircle) preview = "[video message]";
         else if (type === MessageType.audio) preview = "[voice message]";
         else if (type === MessageType.file) preview = "[file]";
         else if (type === MessageType.poll) preview = "[poll]";

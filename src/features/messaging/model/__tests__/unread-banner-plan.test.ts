@@ -5,7 +5,7 @@
  * I/O on the render path.
  */
 import { describe, it, expect, vi } from "vitest";
-import { resolveUnreadBannerPlan } from "../unread-banner-plan";
+import { bannerUnreadCount, resolveUnreadBannerPlan } from "../unread-banner-plan";
 
 const makeSources = (overrides: Partial<Parameters<typeof resolveUnreadBannerPlan>[0]> = {}) => ({
   cachedRoom: undefined as { lastReadInboundTs: number } | undefined,
@@ -133,5 +133,36 @@ describe("resolveUnreadBannerPlan (WEE-95)", () => {
     // Banner still shows (count is known), anchor just can't be matched
     expect(plan.lastReadId).toBeNull();
     expect(plan.scrollToBanner).toBe(true);
+  });
+});
+
+// Samsung 2026-10-10: a cold push tap opened the chat with the banner saying
+// "1 unread message" over two: the second arrived through /sync after the
+// open-time snapshot was taken.
+describe("bannerUnreadCount", () => {
+  const me = "PMe";
+  it("counts the inbound messages below the banner when the snapshot is short", () => {
+    const below = [{ senderId: "PPeer", type: "text" }, { senderId: "PPeer", type: "text" }];
+    expect(bannerUnreadCount(1, below, me)).toBe(2);
+  });
+
+  it("keeps the snapshot when the loaded window holds fewer of them", () => {
+    expect(bannerUnreadCount(70, [{ senderId: "PPeer", type: "text" }], me)).toBe(70);
+  });
+
+  it("leaves out own messages and system rows", () => {
+    const below = [
+      { senderId: "PPeer", type: "text" },
+      { senderId: me, type: "text" },
+      { senderId: "PPeer", type: "system" },
+    ];
+    expect(bannerUnreadCount(0, below, me)).toBe(1);
+  });
+
+  // Review 2026-10-12: a deleted message is drawn as a placeholder, and the
+  // server does not count it as unread.
+  it("leaves out deleted messages", () => {
+    const below = [{ senderId: "PPeer", type: "text" }, { senderId: "PPeer", type: "text", deleted: true }];
+    expect(bannerUnreadCount(0, below, me)).toBe(1);
   });
 });

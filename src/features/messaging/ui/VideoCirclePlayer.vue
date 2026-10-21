@@ -3,6 +3,12 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import type { Message } from "@/entities/chat";
 import { useFileDownload } from "../model/use-file-download";
 import { useVideoStatePreservation } from "@/shared/lib/composables/use-video-state-preservation";
+import {
+  circleActionOnEnded,
+  clearCirclePausedByUser,
+  isCirclePausedByUser,
+  markCirclePausedByUser,
+} from "../model/video-circle-pause";
 import { BLANK_VIDEO_POSTER } from "@/shared/lib/video-poster";
 
 interface Props {
@@ -53,14 +59,28 @@ const videoSrc = computed(() => fileState.value.objectUrl);
 useVideoStatePreservation(videoEl, fileCacheKey, { dontResumePlay: true });
 
 let observer: IntersectionObserver | null = null;
+/** Last visibility the observer reported; it fires once on mount, often
+ *  before the video has loaded. */
+let inView = false;
+
+/** Muted autoplay for a circle that is on screen, unless the user stopped it. */
+const startIfInView = () => {
+  if (!inView || !videoEl.value || isCirclePausedByUser(fileCacheKey.value)) return;
+  videoEl.value.play().then(() => { isPlaying.value = true; showPlayIcon.value = false; }).catch(() => {});
+};
 
 const setupObserver = () => {
   if (!containerEl.value) return;
   observer = new IntersectionObserver(
     (entries) => {
-      const entry = entries[0];
-      if (!entry || !videoEl.value || !isLoaded.value) return;
+      // A delayed batch lists the newest change last.
+      const entry = entries[entries.length - 1];
+      if (!entry) return;
+      inView = entry.isIntersecting;
+      if (!videoEl.value || !isLoaded.value) return;
       if (entry.isIntersecting) {
+        // The user stopped this circle: coming back into view does not restart it.
+        if (isCirclePausedByUser(fileCacheKey.value)) return;
         videoEl.value.play().then(() => { isPlaying.value = true; showPlayIcon.value = false; }).catch(() => {});
       } else {
         videoEl.value.pause();
@@ -87,7 +107,9 @@ const handleClick = () => {
     videoEl.value.pause();
     isPlaying.value = false;
     showPlayIcon.value = true;
+    markCirclePausedByUser(fileCacheKey.value);
   } else {
+    clearCirclePausedByUser(fileCacheKey.value);
     videoEl.value.play().then(() => { isPlaying.value = true; showPlayIcon.value = false; }).catch(() => {});
   }
 };
@@ -95,13 +117,31 @@ const handleClick = () => {
 const onTimeUpdate = () => { if (videoEl.value) currentTime.value = videoEl.value.currentTime; };
 
 const onEnded = () => {
-  if (videoEl.value) {
-    videoEl.value.currentTime = 0;
-    videoEl.value.play().then(() => { isPlaying.value = true; }).catch(() => {});
+  const el = videoEl.value;
+  if (!el) return;
+  el.currentTime = 0;
+  if (circleActionOnEnded(isMuted.value) === "loop") {
+    el.play().then(() => { isPlaying.value = true; }).catch(() => {});
+    return;
   }
+  // Listened to with sound: stop at the end, back to a muted circle that
+  // waits for a tap instead of starting over.
+  isPlaying.value = false;
+  showPlayIcon.value = true;
+  isMuted.value = true;
+  el.muted = true;
+  markCirclePausedByUser(fileCacheKey.value);
 };
 
-const onCanPlay = () => { isLoaded.value = true; };
+// A circle already on screen when its video becomes ready starts here: the
+// observer fired before the load and does not fire again while it stays in
+// view, so a new circle never started (Samsung, 2026-10-12). Only the first
+// canplay; later ones follow seeks and the loop back to 0.
+const onCanPlay = () => {
+  const firstReady = !isLoaded.value;
+  isLoaded.value = true;
+  if (firstReady) startIfInView();
+};
 
 watch(videoSrc, (url) => {
   if (url && videoEl.value) { videoEl.value.src = url; videoEl.value.load(); }

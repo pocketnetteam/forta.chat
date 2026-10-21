@@ -13,15 +13,8 @@ export type {
 export { collectEncryptionDiagnostics } from './collect-encryption-diagnostics';
 export type { BugReportEncryptionDiagnostics } from './collect-encryption-diagnostics';
 export { sendBugReport } from './bug-report-sender';
+export { computeReporterHash } from './reporter-hash';
 export {
-  computeReporterHash,
-  buildReporterMarker,
-  extractReporterHashFromBody,
-  REPORTER_MARKER_PREFIX,
-} from './reporter-hash';
-export {
-  fetchUserClosedIssues,
-  fetchAllUserIssues,
   reopenIssue,
   closeIssue,
   getAcknowledgedNumbers,

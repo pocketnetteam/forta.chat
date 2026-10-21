@@ -64,6 +64,8 @@ export interface ParsedReaction {
 
 /** A parsed edit event */
 export interface ParsedEdit {
+  /** Address of the edit event's sender; only the target's author may edit it. */
+  senderId: string;
   targetEventId: string;
   newContent: string;
   editTs?: number;  // origin_server_ts of edit event — for out-of-order guard
@@ -302,6 +304,9 @@ export class EventWriter {
       if (item.parsed.eventId && this.pendingEdits.has(item.parsed.eventId)) {
         await this.applyPendingEdit(item.parsed.eventId, item.roomId);
       }
+      if (item.parsed.eventId && this.pendingReactions.has(item.parsed.eventId)) {
+        await this.applyPendingReactions(item.parsed.eventId);
+      }
       // Apply stashed poll votes/end for newly inserted poll.start messages
       if (
         item.parsed.eventId
@@ -368,6 +373,7 @@ export class EventWriter {
       // Apply any edit that arrived before the base message
       if (parsed.eventId) {
         await this.applyPendingEdit(parsed.eventId, parsed.roomId);
+        await this.applyPendingReactions(parsed.eventId);
       }
       // Apply any stashed poll votes/end that arrived before this poll.start
       if (parsed.eventId && parsed.type === MessageType.poll) {
@@ -411,6 +417,9 @@ export class EventWriter {
       if (m.eventId && this.pendingEdits.has(m.eventId)) {
         await this.applyPendingEdit(m.eventId, m.roomId);
       }
+      if (m.eventId && this.pendingReactions.has(m.eventId)) {
+        await this.applyPendingReactions(m.eventId);
+      }
       // Apply any stashed poll votes/end for poll.start messages
       if (m.eventId && m.type === MessageType.poll && this.pendingPollVotes.has(m.eventId)) {
         await this.applyPendingPollUpdates(m.eventId);
@@ -442,7 +451,12 @@ export class EventWriter {
     // Land messages first so the getByEventId lookups below don't drop fresh
     // reactions whose targets are merely un-flushed.
     await this.writeBuffer?.flushNow();
+    await this.applyReactions(ops);
+  }
 
+  /** Write reactions onto their target messages. Must not flush the message
+   *  buffer: it also runs from inside a message flush (applyPendingReactions). */
+  private async applyReactions(ops: ParsedReaction[]): Promise<void> {
     const changedRooms = new Set<string>();
 
     // Group by target message — one getByEventId + one updateReactions each.
@@ -457,7 +471,11 @@ export class EventWriter {
       for (const [targetEventId, list] of byTarget) {
         try {
           const msg = await this.messageRepo.getByEventId(targetEventId);
-          if (!msg) continue; // target not in Dexie (yet) — same drop semantics as before
+          if (!msg) {
+            // Target not in Dexie yet: keep the reactions until it lands.
+            this.stashPendingReactions(targetEventId, list);
+            continue;
+          }
 
           const reactions = msg.reactions ?? {};
           let last: ParsedReaction | null = null;
@@ -704,21 +722,76 @@ export class EventWriter {
   // Edits
   // ---------------------------------------------------------------------------
 
+  /** Reactions whose target message hasn't landed in Dexie yet, keyed by the
+   *  target eventId. They used to be dropped, so a reaction that arrived before
+   *  its message never showed (audit S3-02). */
+  private pendingReactions = new Map<string, { list: ParsedReaction[]; stashedAt: number }>();
+  private static readonly PENDING_REACTION_TTL_MS = 5 * 60_000;
+  private static readonly PENDING_REACTION_MAX_SIZE = 200;
+
+  private stashPendingReactions(targetEventId: string, list: ParsedReaction[]): void {
+    const entry = this.pendingReactions.get(targetEventId);
+    if (entry) {
+      for (const reaction of list) {
+        if (!entry.list.some((r) => r.eventId === reaction.eventId)) entry.list.push(reaction);
+      }
+    } else {
+      this.pendingReactions.set(targetEventId, { list: [...list], stashedAt: Date.now() });
+    }
+    const now = Date.now();
+    for (const [key, stashed] of this.pendingReactions) {
+      if (now - stashed.stashedAt > EventWriter.PENDING_REACTION_TTL_MS) this.pendingReactions.delete(key);
+    }
+    if (this.pendingReactions.size > EventWriter.PENDING_REACTION_MAX_SIZE) {
+      const oldest = [...this.pendingReactions.entries()]
+        .sort((a, b) => a[1].stashedAt - b[1].stashedAt)
+        .slice(0, this.pendingReactions.size - EventWriter.PENDING_REACTION_MAX_SIZE);
+      for (const [key] of oldest) this.pendingReactions.delete(key);
+    }
+  }
+
+  /** Apply reactions stashed for a message that has just been written. */
+  async applyPendingReactions(eventId: string): Promise<void> {
+    const stashed = this.pendingReactions.get(eventId);
+    if (!stashed) return;
+    this.pendingReactions.delete(eventId);
+    await this.applyReactions(stashed.list);
+  }
+
   /** Edits whose base message hasn't arrived yet (keyed by target eventId) */
-  private pendingEdits = new Map<string, { roomId: string; edit: ParsedEdit; stashedAt: number }>();
+  /**
+   * The newest stashed edit per sender for each target: the author is not
+   * known until the target lands, so another member's edit must not push the
+   * author's out (writeEdit then drops the other one, H4).
+   */
+  private pendingEdits = new Map<string, Array<{ roomId: string; edit: ParsedEdit; stashedAt: number }>>();
   private static readonly PENDING_EDIT_TTL_MS = 5 * 60_000; // 5 minutes
   private static readonly PENDING_EDIT_MAX_SIZE = 200;
 
-  /** Apply an edit to a message in the local DB, updating room preview if needed */
+  /**
+   * Apply an edit to a message in the local DB, updating room preview if needed.
+   * [roomId] is the room the edit event was sent in. Only the target's author
+   * may edit it, and only from the target's room (Matrix spec for m.replace;
+   * review 2026-10-08, H4): any member could otherwise rewrite another
+   * member's message for everyone else, and the global lookup by event id let
+   * an edit sent in one room rewrite a message of another.
+   */
   async writeEdit(roomId: string, edit: ParsedEdit): Promise<void> {
-    const exists = await this.db.messages
+    const target = await this.db.messages
       .where("eventId")
       .equals(edit.targetEventId)
-      .count();
+      .first();
 
-    if (exists === 0) {
+    if (target && (target.roomId !== roomId || target.senderId !== edit.senderId)) {
+      console.warn("[EventWriter] edit ignored: not from the target's author in the target's room", edit.targetEventId);
+      return;
+    }
+
+    if (!target) {
       // Base message not in Dexie yet — stash for later
-      this.pendingEdits.set(edit.targetEventId, { roomId, edit, stashedAt: Date.now() });
+      const others = (this.pendingEdits.get(edit.targetEventId) ?? [])
+        .filter((entry) => entry.edit.senderId !== edit.senderId);
+      this.pendingEdits.set(edit.targetEventId, [...others, { roomId, edit, stashedAt: Date.now() }]);
       this.evictStalePendingEdits();
       return;
     }
@@ -740,25 +813,28 @@ export class EventWriter {
   }
 
   /** Apply a stashed edit after its base message has been written */
-  async applyPendingEdit(eventId: string, roomId: string): Promise<void> {
+  async applyPendingEdit(eventId: string, _roomId: string): Promise<void> {
     const stashed = this.pendingEdits.get(eventId);
     if (!stashed) return;
     this.pendingEdits.delete(eventId);
-    await this.writeEdit(roomId, stashed.edit);
+    // The edit's own room, not the one its target landed in: writeEdit
+    // compares the two and keeps only the author's edit (H4).
+    for (const entry of stashed) await this.writeEdit(entry.roomId, entry.edit);
   }
 
   /** Evict stale or overflow entries from the pending edits buffer */
   private evictStalePendingEdits(): void {
     const now = Date.now();
-    for (const [key, entry] of this.pendingEdits) {
-      if (now - entry.stashedAt > EventWriter.PENDING_EDIT_TTL_MS) {
-        this.pendingEdits.delete(key);
-      }
+    for (const [key, entries] of this.pendingEdits) {
+      const fresh = entries.filter((entry) => now - entry.stashedAt <= EventWriter.PENDING_EDIT_TTL_MS);
+      if (fresh.length === 0) this.pendingEdits.delete(key);
+      else if (fresh.length !== entries.length) this.pendingEdits.set(key, fresh);
     }
-    // Hard cap: drop oldest entries if over limit
+    // Hard cap: drop the targets whose newest stash is oldest
     if (this.pendingEdits.size > EventWriter.PENDING_EDIT_MAX_SIZE) {
+      const newest = (entries: Array<{ stashedAt: number }>) => Math.max(...entries.map((e) => e.stashedAt));
       const sorted = [...this.pendingEdits.entries()]
-        .sort((a, b) => a[1].stashedAt - b[1].stashedAt);
+        .sort((a, b) => newest(a[1]) - newest(b[1]));
       const toRemove = sorted.slice(0, sorted.length - EventWriter.PENDING_EDIT_MAX_SIZE);
       for (const [key] of toRemove) {
         this.pendingEdits.delete(key);

@@ -4,7 +4,7 @@ import type { Pcrypto, PcryptoRoomInstance } from "@/entities/matrix/model/matri
 import { DEFAULT_WATCHDOG_CONFIG } from "@/entities/matrix/model/sync-failover";
 import { ensureRoomMembers, type LazyMembersRoom } from "@/entities/matrix/model/ensure-room-members";
 import { getmatrixid, hexEncode, hexDecode } from "@/shared/lib/matrix/functions";
-import { matrixIdToAddress, messageTypeFromMime, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
+import { matrixIdToAddress, messageTypeFromMime, mediaMessageType, parseFileInfo, cleanMatrixIds, looksLikeProperName, isVideoNoteInfo, isVoiceAudioMessage } from "../lib/chat-helpers";
 import { buildLastMessage, lastMessageFromMessage, resolveLastMessagePreview } from "../lib/last-message-builder";
 import { parseEditBody } from "../lib/parse-edit";
 import { countUnreadRoomsForTab } from "../lib/room-visibility";
@@ -17,13 +17,15 @@ import {
 import { classifyOpenedRoomHealth } from "./room-cleanup";
 import { sortMessagesTimelineAsc } from "../lib/message-utils";
 import { reuseIfUnchanged } from "../lib/message-memo";
+import { decidePeerKeysStatus } from "../lib/peer-keys-status";
 import { toParsedMessages } from "../lib/parsed-message";
 import { resetPowerLevel, isUserBanned } from "../lib/room-guards";
 import { categorizeJoinError, validateRoomId, type JoinRoomResult } from "../lib/join-error";
 import { getModeratorChange, isServiceRoomName, isWithinCreationBurst, isCreationBurstMemberEvent } from "../lib/system-event-filter";
 import { preservePendingRooms } from "../lib/preserve-pending-rooms";
 import { mergeIntoSortedRooms } from "../lib/merge-sorted-rooms";
-import { indexCallEvents, isMissedCallHangup, type CallEventIndex } from "../lib/call-outcome";
+import { indexCallEvents, isMissedCallHangup, isOrphanedInvite, orphanInviteDueAt, pendingInvites, type CallEventIndex } from "../lib/call-outcome";
+import { inviteCallRecord } from "../lib/invite-call-record";
 import {
   classifyTimelineEvent,
   describeTimeline,
@@ -35,6 +37,12 @@ import { collectTimelineReactions } from "../lib/timeline-reactions";
 import { createHistoryBackfill } from "./history-backfill";
 import { roomAddresses, roomsKeyAddresses } from "../lib/room-addresses";
 import { unreadPeerHangupCount, unreadCountWithoutHangups, hasCallEvent } from "../lib/call-hangup-unread";
+import {
+  PENDING_RECEIPT_MAX_AGE_MS,
+  parsePendingReceipts,
+  pendingReceiptsKey,
+  serializePendingReceipts,
+} from "../lib/pending-read-receipts";
 import { createHangupGapCounter } from "./hangup-gap-counter";
 import { callHangupRuleSince } from "@/shared/lib/push/call-hangup-push-rule";
 import { callSelectAnswerRuleSince } from "@/shared/lib/push/call-select-answer-push-rule";
@@ -63,6 +71,7 @@ import { isNative } from "@/shared/lib/platform";
 import { notifyNewMessage } from "@/shared/lib/notifications/web-notifier";
 import { buildMessageNotificationContent } from "@/shared/lib/notifications/message-notification-content";
 import { tRaw } from "@/shared/lib/i18n";
+import { useToast } from "@/shared/lib/use-toast";
 import { parseCallLinkBody, callLinkPreview } from "@/shared/lib/call-link";
 
 
@@ -431,6 +440,10 @@ function matrixRoomToChatRoom(
           callInfo: { callType: isVideo ? "video" : "voice", missed, duration: Math.round(durationMs / 1000), callId: callContent.call_id as string | undefined },
           systemMeta: { template: callTemplateKey, senderAddr: sender },
         };
+      } else if (raw.type === "m.call.invite") {
+        // An invite nobody ended stands in for the hangup that never came.
+        if (!callEvents) callEvents = indexCallEvents(timelineEvents.map(getRawEvent));
+        if (isOrphanedInvite(raw, callEvents, Date.now())) lastSystemMessage = inviteCallRecord(raw, roomId);
       }
     }
     if (lastMessage && lastTs) break;
@@ -805,6 +818,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  and updated optimistically by setContactAlias(). Cross-device sync is
    *  driven by the m.bastyon.contact_aliases global account_data event. */
   const localAliases = ref<Record<string, string>>({});
+  // Native draws notification titles while the page sleeps: it gets every
+  // alias change (audit S6-01, device check 2026-10-10).
+  if (isNative) {
+    watch(localAliases, () => {
+      void import("@/shared/lib/push")
+        .then(({ pushService }) => pushService.syncSenderAliasesToNative())
+        .catch(() => {});
+    });
+  }
 
   /** In-memory timestamp cache for alias entries (raw address → ms).
    *  Mirrors Dexie users.aliasUpdatedAt so cross-device LWW conflict
@@ -821,6 +843,19 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *    4. Truncated address fallback. */
   const getDisplayName = (address: string): string => {
     if (!address) return "?";
+    const known = getKnownDisplayName(address);
+    if (known) return known;
+    // Fallback: truncated address
+    if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
+    return address;
+  };
+
+  /** Steps 1-3 of `getDisplayName` (alias, Matrix name cache, user store)
+   *  without the truncated-address fallback: null when the chat does not know
+   *  a name yet, so a caller with its own better fallback (a push title with
+   *  the Matrix member name) can use it. */
+  const getKnownDisplayName = (address: string): string | null => {
+    if (!address) return null;
     // Try hex-decoded lookup (room.members stores hex IDs, cache uses raw addresses)
     let resolvedAddr = address;
     if (/^[a-f0-9]+$/i.test(address)) {
@@ -850,9 +885,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const uStore = useUserStore();
     const userProfile = uStore.users[resolvedAddr];
     if (userProfile?.name && isDisplayableName(userProfile.name)) return userProfile.name;
-    // Fallback: truncated address
-    if (address.length > 16) return address.slice(0, 8) + "\u2026" + address.slice(-4);
-    return address;
+    return null;
   };
 
   /** Same resolution chain as `getDisplayName` but SKIPS the local-alias
@@ -1250,8 +1283,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   // Room-level pin/mute (Batch 7) — per-account keys
-  let _pinnedKey = "chat_pinned_rooms";
-  let _mutedKey = "chat_muted_rooms";
+  const LEGACY_PINNED_KEY = "chat_pinned_rooms";
+  const LEGACY_MUTED_KEY = "chat_muted_rooms";
+  let _pinnedKey = LEGACY_PINNED_KEY;
+  let _mutedKey = LEGACY_MUTED_KEY;
+  /** Account whose keys are bound; null before the first bind and after cleanup. */
+  let _boundAddress: string | null = null;
 
   const pinnedRoomIds = ref<Set<string>>(new Set());
   const mutedRoomIds = ref<Set<string>>(new Set());
@@ -1260,13 +1297,52 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    *  A failed write stays here for the session so an offline mute holds. */
   const pendingMuteWrites = new Map<string, boolean>();
 
-  /** Called from auth store on login/switch to bind per-account keys */
+  /** The account's room set with the ids left under the shared key folded
+   *  in: a restored session used to write there (it never bound the keys). */
+  const loadRoomSet = (key: string, legacyKey: string): Set<string> => {
+    const read = (k: string): string[] => {
+      try {
+        const parsed: unknown = JSON.parse(localStorage.getItem(k) || "[]");
+        return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+      } catch {
+        return [];
+      }
+    };
+    const set = new Set([...read(key), ...read(legacyKey)]);
+    try {
+      if (localStorage.getItem(legacyKey) !== null) {
+        localStorage.setItem(key, JSON.stringify([...set]));
+        localStorage.removeItem(legacyKey);
+      }
+    } catch {
+      // Storage unavailable: the set in memory still holds both.
+    }
+    return set;
+  };
+
+  /** Bind the per-account keys. The auth store calls this on every Matrix
+   *  start, login and account switch; binding the bound account is a no-op. */
   const bindAccountKeys = (address: string) => {
+    if (_boundAddress === address) return;
+    _boundAddress = address;
     _pinnedKey = `chat_pinned_rooms:${address}`;
     _mutedKey = `chat_muted_rooms:${address}`;
     pendingMuteWrites.clear();
-    pinnedRoomIds.value = new Set(JSON.parse(localStorage.getItem(_pinnedKey) || "[]"));
-    mutedRoomIds.value = new Set(JSON.parse(localStorage.getItem(_mutedKey) || "[]"));
+    pinnedRoomIds.value = loadRoomSet(_pinnedKey, LEGACY_PINNED_KEY);
+    mutedRoomIds.value = loadRoomSet(_mutedKey, LEGACY_MUTED_KEY);
+    const receiptsKey = pendingReceiptsKey(address);
+    if (_pendingReceiptsKey !== receiptsKey) {
+      // Another account's reads stay in its own key. A read made before the
+      // first bind (nothing bound yet) belongs to this account and is kept.
+      if (_pendingReceiptsKey !== null) {
+        pendingReadWatermarks.clear();
+        watermarkQueuedAt.clear();
+        restoredReadWatermarks.clear();
+      }
+      _pendingReceiptsKey = receiptsKey;
+      restorePendingReadWatermarks();
+      persistPendingReadWatermarks();
+    }
   };
 
   const persistRoomSets = () => {
@@ -2752,6 +2828,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     _suppressDexieRecompute = true;
     try {
     perfMark("fullRoomRefresh-start");
+    // Before the first /sync the SDK's counts come from its store, which can
+    // be older than Dexie; syncAllUnreadFromMatrix reconciles after the /sync.
+    const reconcileUnread = getMatrixClientService().hasLiveSync();
     // Retry previously failed decryptions on full refresh
     decryptFailedRooms.clear();
     // The rows on screen need not wait for the whole refresh (35s observed on
@@ -2897,7 +2976,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         syncedAt: now,
         updatedAt: r.updatedAt,
         lastMessageTimestamp: r.lastMessage?.timestamp || r.updatedAt || undefined,
-        serverUnreadCount: r.unreadCount, // cross-device unread reconciliation
+        // cross-device unread reconciliation; a room whose receipt is still
+        // on its way keeps its local count
+        serverUnreadCount: reconcileUnread && !pendingReadWatermarks.has(r.id) ? r.unreadCount : undefined,
         // Full insert fields for genuinely new rooms
         unreadCount: r.unreadCount,
         lastMessagePreview: r.lastMessage?.deleted
@@ -3125,6 +3206,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     changed: Set<string>,
   ) => {
     const matrixService = getMatrixClientService();
+    // Same as fullRoomRefresh: no unread reconciliation from the SDK's store.
+    const reconcileUnread = matrixService.hasLiveSync();
     let removed = false;
 
     // Rebuild only changed rooms — fetch each individually from SDK
@@ -3135,6 +3218,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     for (const roomId of changed) {
       const matrixRoom = matrixService.getRoom(roomId) as any;
       if (!matrixRoom) {
+        // Keep the open room, as fullRoomRefresh does: getRoom() also misses
+        // rooms the SDK has not materialised yet and every room while the
+        // client is being rebuilt, and dropping the active one showed
+        // "select a chat" inside an open chat (audit S3b-01, forta-bugs#1390).
+        if (roomId === activeRoomId.value) continue;
         // Room gone from SDK — collect for batch removal
         if (roomsMap.has(roomId)) {
           roomsMap.delete(roomId);
@@ -3203,7 +3291,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           syncedAt: now,
           updatedAt: r.updatedAt,
           lastMessageTimestamp: r.lastMessage?.timestamp || r.updatedAt || undefined,
-          serverUnreadCount: r.unreadCount, // cross-device unread reconciliation
+          // cross-device unread reconciliation; a room whose receipt is still
+          // on its way keeps its local count
+          serverUnreadCount: reconcileUnread && !pendingReadWatermarks.has(r.id) ? r.unreadCount : undefined,
           unreadCount: r.unreadCount,
           lastMessagePreview: r.lastMessage?.deleted
             ? "🚫 Message deleted"
@@ -3512,11 +3602,24 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  /** A room refresh ran before the current client's first /sync and left
+   *  unread counts alone; the first refresh after that /sync heals every room. */
+  let unreadHealAfterSync = false;
+
   const refreshRoomsImmediate = () => {
     const matrixService = getMatrixClientService();
     const kit = matrixKitRef.value;
     if (!matrixService.isReady() || !kit) {
       return;
+    }
+
+    // The changed rooms may be gone with the skipped pass, and a rebuilt
+    // client replays its store after the one-time startup heal.
+    if (!matrixService.hasLiveSync()) {
+      unreadHealAfterSync = true;
+    } else if (unreadHealAfterSync) {
+      unreadHealAfterSync = false;
+      void syncAllUnreadFromMatrix();
     }
 
     refreshIgnoredMatrixUserCache();
@@ -3539,6 +3642,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const matrixRooms = matrixService.getRooms() as any[];
       fullRoomRefresh(matrixRooms, kit, myUserId);
+      if (isInitial) armPendingOrphanInviteChecks(matrixRooms);
     } else {
       // Incremental: only process changed room IDs, don't scan all rooms
       incrementalRoomRefresh(kit, myUserId, changed);
@@ -3885,6 +3989,77 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   // could not be sent (event not found in timeline, HTTP error, tab hidden, etc.).
   // Retried on every sync cycle so the server eventually learns about reads.
   const pendingReadWatermarks = new Map<string, number>();
+  /** Track when each pending watermark was first queued (staleness warnings, age limit) */
+  const watermarkQueuedAt = new Map<string, number>();
+  /** Storage key for this account's pending watermarks (set by bindAccountKeys).
+   *  They survive a restart: a read made offline is not lost to a swipe. */
+  let _pendingReceiptsKey: string | null = null;
+  /** Rooms whose watermark came from storage. After a restart the SDK's
+   *  timeline may lack the read event, so these go out by Dexie's event id. */
+  const restoredReadWatermarks = new Set<string>();
+
+  const persistPendingReadWatermarks = () => {
+    if (!_pendingReceiptsKey) return;
+    try {
+      if (pendingReadWatermarks.size === 0) {
+        localStorage.removeItem(_pendingReceiptsKey);
+        return;
+      }
+      const now = Date.now();
+      const entries = new Map(
+        [...pendingReadWatermarks].map(([roomId, ts]) => [roomId, { ts, at: watermarkQueuedAt.get(roomId) ?? now }]),
+      );
+      localStorage.setItem(_pendingReceiptsKey, serializePendingReceipts(entries));
+    } catch (e) {
+      console.warn("[chat-store] pending read receipts not saved:", e);
+    }
+  };
+
+  /** Queue a read position for the server (the highest one wins) and save it. */
+  const queueReadWatermark = (roomId: string, ts: number) => {
+    pendingReadWatermarks.set(roomId, Math.max(pendingReadWatermarks.get(roomId) ?? 0, ts));
+    if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, Date.now());
+    persistPendingReadWatermarks();
+  };
+
+  /** A delayed receipt reached the server. Its echo zeroes the room whatever
+   *  it points at, and refreshes skipped the room while it was pending, so the
+   *  room is reconciled once the /sync with the server's new count is in. */
+  const RECEIPT_RECONCILE_DELAY_MS = 3000;
+
+  /** Forget a room's pending watermark: the server has the read up to
+   *  `sentTs` (a newer read queued meanwhile stays), or the entry is given up. */
+  const dropReadWatermark = (roomId: string, sentTs?: number) => {
+    const pending = pendingReadWatermarks.get(roomId);
+    if (pending === undefined) return;
+    if (sentTs !== undefined && pending > sentTs) return;
+    pendingReadWatermarks.delete(roomId);
+    watermarkQueuedAt.delete(roomId);
+    restoredReadWatermarks.delete(roomId);
+    persistPendingReadWatermarks();
+    if (sentTs !== undefined) {
+      setTimeout(() => {
+        markRoomChanged(roomId);
+        refreshRooms();
+      }, RECEIPT_RECONCILE_DELAY_MS);
+    }
+  };
+
+  /** Load the pending watermarks this account left in storage last run. */
+  const restorePendingReadWatermarks = () => {
+    if (!_pendingReceiptsKey) return;
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(_pendingReceiptsKey);
+    } catch {
+      return;
+    }
+    for (const [roomId, { ts, at }] of parsePendingReceipts(raw, Date.now())) {
+      pendingReadWatermarks.set(roomId, Math.max(pendingReadWatermarks.get(roomId) ?? 0, ts));
+      if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, at);
+      restoredReadWatermarks.add(roomId);
+    }
+  };
 
   /** Send a read receipt if the page is visible, otherwise queue for later.
    *  On native platforms (Capacitor WebView), document.visibilityState is unreliable —
@@ -3898,7 +4073,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         if (!success) {
           // HTTP error (e.g. 500) — queue the watermark for retry on next sync
           const ts = (event as any)?.getTs?.() ?? (event as any)?.event?.origin_server_ts ?? 0;
-          if (ts > 0) pendingReadWatermarks.set(roomId, ts);
+          if (ts > 0) queueReadWatermark(roomId, ts);
         }
         return success;
       } catch (e) {
@@ -3919,11 +4094,25 @@ export const useChatStore = defineStore(NAMESPACE, () => {
    * read through roomUnreadCount, which takes the peer's call hangups out.
    * This heals any poisoned counts left in Dexie from previous buggy increments.
    */
+  let unreadHealRetry: ReturnType<typeof setTimeout> | null = null;
   const syncAllUnreadFromMatrix = async () => {
     const dbKit = chatDbKitRef.value;
     if (!dbKit) return;
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) return;
+    // Before the first /sync from the server the SDK holds only its cached
+    // state, older than Dexie: copying it turned a room's 1 into 0 at a cold
+    // start, and a push tap then opened that room without the unread banner
+    // (Samsung, 2026-10-12). Try again once a live sync has come in.
+    if (!matrixService.hasLiveSync()) {
+      if (unreadHealRetry === null) {
+        unreadHealRetry = setTimeout(() => {
+          unreadHealRetry = null;
+          void syncAllUnreadFromMatrix();
+        }, 3000);
+      }
+      return;
+    }
 
     try {
       const matrixRooms = matrixService.getRooms() as any[];
@@ -3933,6 +4122,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
       for (const mxRoom of matrixRooms) {
         const roomId = mxRoom.roomId as string;
+        // The server's count still holds what was read here until it has the receipt.
+        if (pendingReadWatermarks.has(roomId)) continue;
         const unreadCount = roomUnreadCount(mxRoom, myUserId, callRules);
         const localRoom = dexieRoomMap.get(roomId);
         if (localRoom && localRoom.unreadCount !== unreadCount) {
@@ -4021,6 +4212,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
+  // Incoming messages and reactions wait up to 150/500 ms in the event
+  // writer's buffers; an app closed or killed in that window lost them
+  // (audit S3-01). Write them out as soon as the app goes to the background.
+  const flushIncomingWrites = () => {
+    chatDbKitRef.value?.eventWriter.flushWriteBuffer().catch((e) => {
+      console.warn("[chat-store] flushing incoming writes on background failed:", e);
+    });
+  };
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushIncomingWrites();
+    });
+    window.addEventListener("pagehide", flushIncomingWrites);
+  }
+
   // Listen for visibility changes to send pending read receipts
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
@@ -4030,7 +4236,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           matrixService.sendReadReceipt(event).then((success) => {
             if (!success) {
               const ts = (event as any)?.getTs?.() ?? (event as any)?.event?.origin_server_ts ?? 0;
-              if (ts > 0) pendingReadWatermarks.set(roomId, ts);
+              if (ts > 0) queueReadWatermark(roomId, ts);
             }
           }).catch(() => {});
         }
@@ -4063,6 +4269,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
 
           // 4. Self-heal unread counts — fix any drift accumulated during suspension
           syncAllUnreadFromMatrix();
+        } else {
+          flushIncomingWrites();
         }
       });
     }).catch(() => {});
@@ -4146,8 +4354,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const lastSent = receiptCooldowns.get(roomId) ?? 0;
     if (now - lastSent < RECEIPT_COOLDOWN_MS) {
       // Queue for next flush — don't spam the server (keep highest pending ts)
-      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
-      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
+      queueReadWatermark(roomId, timestamp);
       return;
     }
 
@@ -4162,13 +4369,32 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           roomId,
           Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
         );
-        pendingReadWatermarks.delete(roomId);
-        watermarkQueuedAt.delete(roomId);
+        dropReadWatermark(roomId, timestamp);
       }
     } else {
-      const prevPending = pendingReadWatermarks.get(roomId) ?? 0;
-      pendingReadWatermarks.set(roomId, Math.max(prevPending, timestamp));
-      if (!watermarkQueuedAt.has(roomId)) watermarkQueuedAt.set(roomId, Date.now());
+      queueReadWatermark(roomId, timestamp);
+    }
+  };
+
+  /** A watermark kept from the last run. Dexie holds the full history, so the
+   *  read event is found by its position even when the SDK's timeline lacks it. */
+  const flushRestoredReadWatermark = async (roomId: string, ts: number) => {
+    const dbKit = chatDbKitRef.value;
+    if (!dbKit) return;
+    try {
+      const msg = await dbKit.messages.getLastMessageAtOrBefore(roomId, ts, dbKit.eventWriter.getClearedAtTs(roomId));
+      if (!msg?.eventId) {
+        // Nothing the server can point at (the history is gone or unsent).
+        dropReadWatermark(roomId);
+        return;
+      }
+      const sent = await getMatrixClientService().sendReadReceiptById(roomId, msg.eventId);
+      if (sent) {
+        lastReadReceiptSentTs.set(roomId, Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, msg.timestamp));
+        dropReadWatermark(roomId, ts);
+      }
+    } catch (e) {
+      console.warn("[chat-store] restored read receipt failed:", e);
     }
   };
 
@@ -4176,18 +4402,22 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   const WATERMARK_FLUSH_INTERVAL = 5000;
   const STALE_WATERMARK_WARN_MS = 30_000; // warn if a receipt is stuck for >30s
   let lastWatermarkFlush = 0;
-  /** Track when each pending watermark was first queued (for staleness warnings) */
-  const watermarkQueuedAt = new Map<string, number>();
   const flushPendingReadWatermarks = () => {
     const now = Date.now();
     if (now - lastWatermarkFlush < WATERMARK_FLUSH_INTERVAL) return;
     if (pendingReadWatermarks.size === 0) return;
+    // Before the first /sync the SDK's timeline is its saved store, which may
+    // not hold the read event yet (the store saves every 5 min).
+    if (!getMatrixClientService().hasLiveSync()) return;
     lastWatermarkFlush = now;
 
-    // Warn about stale pending receipts
-    for (const [roomId] of pendingReadWatermarks) {
+    // Warn about stale pending receipts; give up on those past the age limit
+    for (const roomId of [...pendingReadWatermarks.keys()]) {
       const queuedAt = watermarkQueuedAt.get(roomId);
-      if (queuedAt && now - queuedAt > STALE_WATERMARK_WARN_MS) {
+      if (queuedAt && now - queuedAt > PENDING_RECEIPT_MAX_AGE_MS) {
+        console.warn(`[chat-store] read receipt for room ${roomId} dropped after ${Math.round((now - queuedAt) / 3_600_000)} h`);
+        dropReadWatermark(roomId);
+      } else if (queuedAt && now - queuedAt > STALE_WATERMARK_WARN_MS) {
         console.warn(`[chat-store] stale read receipt for room ${roomId} — pending for ${Math.round((now - queuedAt) / 1000)}s`);
       } else if (!queuedAt) {
         watermarkQueuedAt.set(roomId, now);
@@ -4198,8 +4428,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const entries = [...pendingReadWatermarks];
     for (const [roomId, timestamp] of entries) {
       if (timestamp <= (lastReadReceiptSentTs.get(roomId) ?? 0)) {
-        pendingReadWatermarks.delete(roomId);
-        watermarkQueuedAt.delete(roomId);
+        dropReadWatermark(roomId);
+        continue;
+      }
+      if (restoredReadWatermarks.has(roomId)) {
+        receiptCooldowns.set(roomId, now);
+        void flushRestoredReadWatermark(roomId, timestamp);
         continue;
       }
       const event = findMatrixEventForTimestamp(roomId, timestamp);
@@ -4213,8 +4447,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               roomId,
               Math.max(lastReadReceiptSentTs.get(roomId) ?? 0, appliedTs),
             );
-            pendingReadWatermarks.delete(roomId);
-            watermarkQueuedAt.delete(roomId);
+            dropReadWatermark(roomId, timestamp);
           }
         }).catch(() => {});
       }
@@ -4596,7 +4829,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Accept an invite: join the room and update membership */
-  const acceptInvite = async (roomId: string) => {
+  /** Join an invited room. Resolves why the join did not happen, so the caller
+   *  can say so: the invite screen used to just come back with no word of what
+   *  went wrong (audit S3b-03). */
+  const acceptInvite = async (roomId: string): Promise<"joined" | "banned" | "failed"> => {
     try {
       const matrixService = getMatrixClientService();
       // Security (best-effort): block join if local state shows user is banned.
@@ -4604,7 +4840,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const myUserId = matrixService.getUserId() ?? "";
       if (isUserBanned(roomId, myUserId)) {
         console.warn("[chat-store] acceptInvite blocked: user is banned from room", roomId);
-        return;
+        return "banned";
       }
       await matrixService.joinRoom(roomId);
 
@@ -4634,8 +4870,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         profilesRequestedForRooms.delete(roomId);
         setActiveRoom(roomId);
       }
+      return "joined";
     } catch (e) {
       console.warn("[chat-store] acceptInvite error:", e);
+      return "failed";
     }
   };
 
@@ -4740,13 +4978,64 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Remove a room: kick other members → leave → forget → remove from local state.
-   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups). */
-  const removeRoom = async (roomId: string) => {
-    // Tombstone in Dexie — cross-device visible, survives reload
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "removed");
+  /** Tombstone a room the user is leaving and return the membership it had,
+   *  so a leave the server refuses can be undone. */
+  const tombstoneForLeave = async (
+    roomId: string,
+    reason: "left" | "removed",
+  ): Promise<LocalRoom["membership"] | undefined> => {
+    const kit = chatDbKitRef.value;
+    if (!kit) return undefined;
+    const previous = await kit.rooms.getRoom(roomId);
+    await kit.rooms.tombstoneRoom(roomId, reason);
+    return previous?.membership;
+  };
+
+  /** Whether the SDK already counts the user out of the room. */
+  const sdkSaysLeft = (roomId: string): boolean => {
+    try {
+      const room = getMatrixClientService().getRoom(roomId) as
+        | { selfMembership?: string; getMyMembership?: () => string }
+        | null;
+      const membership = room?.selfMembership ?? room?.getMyMembership?.();
+      return membership === "leave" || membership === "ban";
+    } catch {
+      return false;
     }
+  };
+
+  /** The leave failed: bring the room back now and say so. It used to vanish,
+   *  then quietly return at a later sync with no explanation, since the SDK
+   *  still counted the user as joined (audit S7-01). Resolves false, restoring
+   *  nothing, when /sync already reported the user out: the leave reached the
+   *  server and only its answer was lost. (If that /sync comes later, it
+   *  tombstones the room again through the membership handler.) */
+  const restoreRoomAfterFailedLeave = async (
+    roomId: string,
+    membership: LocalRoom["membership"] | undefined,
+    messageKey: "chat.leaveFailed" | "chat.deleteFailed",
+  ): Promise<boolean> => {
+    if (sdkSaysLeft(roomId)) {
+      console.warn("[chat-store] leave reported an error, but the user is already out of", roomId);
+      return false;
+    }
+    try {
+      await chatDbKitRef.value?.rooms.reviveRoom(roomId, membership);
+    } catch (e) {
+      console.warn("[chat-store] restoring a room after a failed leave:", e);
+    }
+    markRoomChanged(roomId);
+    refreshRooms();
+    useToast().toast(tRaw(messageKey), "error");
+    return true;
+  };
+
+  /** Remove a room: kick other members → leave → forget → remove from local state.
+   *  Kicks all other joined members so the chat disappears for everyone (both 1:1 and groups).
+   *  Resolves false (the room is back, the user told why) when the leave failed. */
+  const removeRoom = async (roomId: string): Promise<boolean> => {
+    // Tombstone in Dexie — cross-device visible, survives reload
+    const previousMembership = await tombstoneForLeave(roomId, "removed");
 
     // Optimistic: remove from UI immediately
     optimisticRemoveRoom(roomId);
@@ -4795,10 +5084,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       }
 
       await matrixService.leaveRoom(roomId);
-      await matrixService.forgetRoom(roomId);
     } catch (e) {
-      console.warn("[chat-store] removeRoom leave/forget error:", e);
+      console.warn("[chat-store] removeRoom leave error:", e);
+      return !(await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.deleteFailed"));
     }
+    try {
+      await getMatrixClientService().forgetRoom(roomId);
+    } catch (e) {
+      console.warn("[chat-store] removeRoom forget error:", e);
+    }
+    return true;
   };
 
   /** Clear chat history for current user only. Room membership is NOT affected.
@@ -4842,23 +5137,28 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
   };
 
-  /** Leave a group chat without kicking other members. */
-  const leaveGroup = async (roomId: string) => {
+  /** Leave a group chat without kicking other members. Resolves false (the room
+   *  is back, the user told why) when the leave failed. */
+  const leaveGroup = async (roomId: string): Promise<boolean> => {
     // Tombstone in Dexie — cross-device visible
-    if (chatDbKitRef.value) {
-      await chatDbKitRef.value.rooms.tombstoneRoom(roomId, "left");
-    }
+    const previousMembership = await tombstoneForLeave(roomId, "left");
 
     // Optimistic: remove from UI
     optimisticRemoveRoom(roomId);
 
+    const matrixService = getMatrixClientService();
     try {
-      const matrixService = getMatrixClientService();
       await matrixService.leaveRoom(roomId);
-      await matrixService.forgetRoom(roomId);
     } catch (e) {
       console.warn("[chat-store] leaveGroup error:", e);
+      return !(await restoreRoomAfterFailedLeave(roomId, previousMembership, "chat.leaveFailed"));
     }
+    try {
+      await matrixService.forgetRoom(roomId);
+    } catch (e) {
+      console.warn("[chat-store] leaveGroup forget error:", e);
+    }
+    return true;
   };
 
   /** Kick a single user from a room (requires admin power level).
@@ -5802,6 +6102,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return buildSystemMessage(raw, roomId);
     }
 
+    // An invite nobody ended stands in for the hangup that never came (isOrphanedInvite).
+    if (raw.type === "m.call.invite") {
+      return isOrphanedInvite(raw, callEvents, Date.now()) ? inviteCallRecord(raw, roomId) : null;
+    }
+
     // Handle call hangup events as system messages in timeline history
     if (raw.type === "m.call.hangup") {
       const callContent = raw.content as Record<string, unknown>;
@@ -5967,21 +6272,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (mtype === "m.image" || mtype === "m.file" || mtype === "m.audio" || mtype === "m.video") {
       fileInfo = parseFileInfo(content, mtype);
       if (fileInfo) {
-        if (mtype === "m.image") msgType = MessageType.image;
-        // m.audio carries either a voice recording (MSC3245 marker / waveform)
-        // or a regular audio file picked from gallery. The latter must render
-        // as a file-bubble with save-to-disk, not as the voice player UI
-        // (forta-bugs#841 / WEE-50).
-        else if (mtype === "m.audio") msgType = fileInfo.isVoice ? MessageType.audio : MessageType.file;
-        else if (mtype === "m.video") msgType = fileInfo.videoNote ? MessageType.videoCircle : MessageType.video;
-        // m.file: route audio MIME (mp3, m4a, …) to MessageType.file so the
-        // receiver renders a file-bubble with save-to-disk instead of the
-        // voice player UI. Forta ships gallery picks as m.file regardless
-        // of MIME, so without this override the receiver re-introduces the
-        // forta-bugs#841 misclassification.
-        else msgType = fileInfo.type.startsWith("audio/")
-          ? MessageType.file
-          : messageTypeFromMime(fileInfo.type);
+        // Voice vs audio file, video circle vs video: see mediaMessageType.
+        msgType = mediaMessageType(mtype, fileInfo);
         body = fileInfo.name;
       } else {
         if (mtype === "m.image") msgType = MessageType.image;
@@ -6140,12 +6432,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       const rel = content["m.relates_to"] as Record<string, unknown>;
       const targetId = rel.event_id as string;
       const target = msgMap.get(targetId);
-      if (target) {
+      const editorId = matrixIdToAddress((raw.sender as string) ?? "");
+      // Only the author edits a message (H4); writeEdit enforces it in Dexie too.
+      if (target && target.senderId === editorId) {
         target.content = await resolveEditText(raw, roomCrypto);
         target.edited = true;
 
         // Persist edit to Dexie so it survives reload
         await chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+          senderId: editorId,
           targetEventId: targetId,
           newContent: target.content,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
@@ -6346,8 +6641,11 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     // Step 1: Find unresolved replies in Dexie (source of truth for UI)
     const clearedAtTs = db.eventWriter.getClearedAtTs(roomId);
     const roomMsgs = await db.messages.getMessages(roomId, 200, undefined, clearedAtTs);
+    // A quote stored as "[encrypted]" was resolved while its original was still
+    // undecrypted; treat it as unresolved so it heals (audit S1-04).
     const unresolved = roomMsgs.filter(
-      m => m.replyTo && !m.replyTo.deleted && !m.replyTo.senderId && !m.replyTo.content,
+      m => m.replyTo && !m.replyTo.deleted
+        && ((!m.replyTo.senderId && !m.replyTo.content) || m.replyTo.content === "[encrypted]"),
     );
     if (unresolved.length === 0) return;
 
@@ -6371,8 +6669,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             try {
               perfCount("net:event");
               const raw = await matrixService.client!.fetchRoomEvent(roomId, eventId);
-              replyFetchAttempted.add(eventId);
-              if (!raw) return;
+              if (!raw) {
+                replyFetchAttempted.add(eventId);
+                return;
+              }
 
               let body = "";
               let senderId = "";
@@ -6382,22 +6682,34 @@ export const useChatStore = defineStore(NAMESPACE, () => {
               senderId = matrixIdToAddress((raw.sender as string) ?? "");
 
               // Decrypt if needed
-              if (content?.msgtype === "m.encrypted" && roomCrypto) {
+              if (content?.msgtype === "m.encrypted") {
+                // No room crypto yet: quoting the ciphertext would stick for
+                // the session. A later pass decrypts it (audit S1-04).
+                if (!roomCrypto) return;
                 try {
                   const decrypted = await roomCrypto.decryptEvent(raw as Record<string, unknown>);
                   body = decrypted.body ?? "";
                 } catch {
-                  body = "";
+                  // Not decryptable yet: leave the reply for a later pass
+                  // instead of quoting an empty text forever (audit S1-04).
+                  return;
                 }
               } else {
                 body = (content?.body as string) ?? "";
               }
+              // Done for this session only now: an original that did not decrypt
+              // yet stays eligible for a later pass (audit S1-04).
+              replyFetchAttempted.add(eventId);
 
               // Detect message type
               const mtype = content?.msgtype as string;
               if (mtype === "m.image") msgType = MessageType.image;
               else if (mtype === "m.audio") msgType = MessageType.audio;
-              else if (mtype === "m.video") msgType = MessageType.video;
+              else if (mtype === "m.video") {
+                msgType = isVideoNoteInfo(content?.info as Record<string, unknown> | undefined)
+                  ? MessageType.videoCircle
+                  : MessageType.video;
+              }
               else if (mtype === "m.file") msgType = MessageType.file;
 
               if (senderId) {
@@ -6433,6 +6745,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             eventId: msg.eventId,
             replyTo: { id: replyTo.id, senderId: "", content: "", deleted: true },
           });
+        } else if (
+          original.decryptionStatus === "pending"
+          || original.decryptionStatus === "failed"
+          || original.content === "[encrypted]"
+        ) {
+          // The original is still being decrypted: quoting it now baked
+          // "[encrypted]" into the reply for good (audit S1-04). Leave it
+          // unresolved; the next pass after the decrypt fills it in.
+          continue;
         } else {
           patches.push({
             eventId: msg.eventId,
@@ -6574,6 +6895,58 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     await applyPageRelationsToStored(roomId, page, dbKit);
   };
 
+  /** Relations of a timeline whose target message is not in it. Stored
+   *  targets go through applyPageRelationsToStored (writes only what changes);
+   *  for a target not in Dexie yet the event writer keeps the relation until
+   *  it lands. A pending edit uses the room crypto already registered (no new
+   *  instance for a room loaded in the background) and is skipped while it
+   *  cannot be read: "[encrypted]" over a message has no retry path. */
+  const writeRelationsOutsideTimeline = async (
+    roomId: string,
+    rawEvents: ReadonlyArray<Record<string, unknown> | null>,
+    inTimeline: ReadonlySet<string>,
+    dbKit: ChatDbKit,
+  ): Promise<void> => {
+    const relationOf = (raw: Record<string, unknown>) =>
+      (raw.content as Record<string, unknown> | undefined)?.["m.relates_to"] as Record<string, unknown> | undefined;
+    const outside = rawEvents.filter((raw): raw is Record<string, unknown> => {
+      if (!raw) return false;
+      const kind = classifyTimelineEvent(raw);
+      if (kind !== "edit" && kind !== "reaction") return false;
+      const targetId = relationOf(raw)?.event_id as string | undefined;
+      return !!targetId && !inTimeline.has(targetId);
+    });
+    if (outside.length === 0) return;
+
+    const stored = await applyPageRelationsToStored(roomId, outside, dbKit);
+    const matrixService = getMatrixClientService();
+    const roomCrypto = useAuthStore().pcrypto?.rooms[roomId];
+    for (const raw of outside) {
+      const rel = relationOf(raw)!;
+      const targetId = rel.event_id as string;
+      if (stored.has(targetId)) continue;
+      const senderId = matrixIdToAddress((raw.sender as string) ?? "");
+      if (classifyTimelineEvent(raw) === "edit") {
+        const newContent = await resolveEditText(raw, roomCrypto);
+        if (newContent === "[encrypted]") continue;
+        await dbKit.eventWriter.writeEdit(roomId, {
+          senderId,
+          targetEventId: targetId,
+          newContent,
+          editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
+        });
+      } else if (typeof raw.event_id === "string" && typeof rel.key === "string") {
+        await dbKit.eventWriter.writeReaction({
+          eventId: raw.event_id,
+          targetEventId: targetId,
+          emoji: rel.key,
+          senderAddress: senderId,
+          isMine: matrixService.isMe(raw.sender as string),
+        });
+      }
+    }
+  };
+
   /** Edits and reactions from a history page, applied to their targets as
    *  stored in Dexie: the parser only applies relations to messages it parses,
    *  and bulkInsert never updates a row that already exists. Idempotent —
@@ -6583,7 +6956,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     roomId: string,
     page: Record<string, unknown>[],
     dbKit: ChatDbKit,
-  ): Promise<void> => {
+  ): Promise<ReadonlySet<string>> => {
     const relations = page.filter((raw) => {
       const kind = classifyTimelineEvent(raw);
       return kind === "edit" || kind === "reaction";
@@ -6591,9 +6964,9 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     const targetOf = (raw: Record<string, unknown>) =>
       ((raw.content as Record<string, unknown>)["m.relates_to"] as Record<string, unknown> | undefined)?.event_id as string | undefined;
     const targetIds = [...new Set(relations.map(targetOf).filter((id): id is string => !!id))];
-    if (targetIds.length === 0) return;
+    if (targetIds.length === 0) return new Set();
     const stored = new Map((await dbKit.messages.getByEventIds(targetIds)).map((r) => [r.eventId!, r]));
-    if (stored.size === 0) return;
+    if (stored.size === 0) return new Set();
 
     const edits = relations
       .filter((raw) => classifyTimelineEvent(raw) === "edit" && stored.has(targetOf(raw)!))
@@ -6601,9 +6974,13 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     if (edits.length > 0) {
       const roomCrypto = await ensureRoomCrypto(roomId);
       for (const raw of edits) {
+        const newContent = await resolveEditText(raw, roomCrypto);
+        // Not readable yet: keep the stored text rather than a placeholder.
+        if (newContent === "[encrypted]") continue;
         await dbKit.eventWriter.writeEdit(roomId, {
+          senderId: matrixIdToAddress((raw.sender as string) ?? ""),
           targetEventId: targetOf(raw)!,
-          newContent: await resolveEditText(raw, roomCrypto),
+          newContent,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
         });
       }
@@ -6625,6 +7002,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return { eventId, reactions: merged };
     });
     if (await dbKit.messages.bulkUpdateReactions(entries) > 0) perfCount("dexie:rw:open");
+    return new Set(stored.keys());
   };
 
   /** Timestamp of the oldest row event in the SDK's live timeline. */
@@ -6811,7 +7189,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         return !clearedAtTs || ts === undefined || ts > clearedAtTs;
       });
       const timeline = describeTimeline(raws);
-      const pending = await planTimelineParse(raws, timeline, timeline.rowEventIds);
+      const pending = await planTimelineParse(raws, timeline, [...timeline.rowEventIds, ...timeline.orphanInviteIds]);
 
       const oldestId = timeline.rowEventIds[0];
       const backToken = matrixRoom.getLiveTimeline?.()?.getPaginationToken?.("b") ?? null;
@@ -6849,7 +7227,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       return !clearedAtTs || ts === undefined || ts > clearedAtTs;
     });
     const timeline = describeTimeline(raws);
-    if ((await planTimelineParse(raws, timeline, timeline.rowEventIds)).size > 0) {
+    if ((await planTimelineParse(raws, timeline, [...timeline.rowEventIds, ...timeline.orphanInviteIds])).size > 0) {
       await loadRoomMessages(roomId, { scrollback: false, awaitWrite: true });
     }
     if ((await dbKit.rooms.getRoom(roomId))?.gapToken) backfillRoom(roomId, { front: true });
@@ -7127,6 +7505,12 @@ export const useChatStore = defineStore(NAMESPACE, () => {
             perfCount("dexie:rw:open");
           }
 
+          // Edits and reactions whose target is not in this timeline (an older
+          // message): the event writer updates the stored row or keeps them
+          // until it lands. They used to wait for a later scroll to parse both
+          // events together (audit S3-03).
+          await writeRelationsOutsideTimeline(roomId, rawEvents, timelineMessageIds, dbKit);
+
           // Pins may point at messages this load just wrote (first open of a room).
           if (parsedMessages.length > 0 && roomId === activeRoomId.value) {
             await loadPinnedMessages(roomId);
@@ -7171,7 +7555,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         timelineLength: allEvents.length,
         hasMoreHistory: matrixRoom.oldState?.paginationToken !== null,
         minTimelineEvents: MIN_TIMELINE_EVENTS,
-        pendingIds: await planTimelineParse(rawEvents, timeline, timeline.rowEventIds),
+        pendingIds: await planTimelineParse(rawEvents, timeline, [...timeline.rowEventIds, ...timeline.orphanInviteIds]),
       });
     } catch (e) {
       console.warn("[chat-store] isRoomInSyncWithSdk failed:", e);
@@ -7605,6 +7989,88 @@ export const useChatStore = defineStore(NAMESPACE, () => {
   };
 
   /** Handle incoming timeline event from Matrix sync */
+  /**
+   * Live invites waiting for their call's record, by call id. An unanswered call that
+   * ends without a hangup gets its record from the invite (`isOrphanedInvite`): after a
+   * reject (the callee's app declines a call nobody answered after 30 s), or once the
+   * lifetime is over when the caller's client went away. History loads find it too; these
+   * checks cover a room that stays open meanwhile.
+   */
+  const orphanInviteChecks = new Map<string, ReturnType<typeof setTimeout>>();
+  /** A batch's later events (the call's own hangup) land before a check runs. */
+  const ORPHAN_INVITE_MIN_CHECK_MS = 5_000;
+
+  const armOrphanInviteCheck = (
+    invite: Record<string, unknown>,
+    roomId: string,
+    callId: string,
+    kit: ChatDbKit | null,
+    delay: number,
+  ) => {
+    const pending = orphanInviteChecks.get(callId);
+    if (pending) clearTimeout(pending);
+    orphanInviteChecks.set(callId, setTimeout(() => {
+      orphanInviteChecks.delete(callId);
+      // Another account's store by now: the record is not its to write.
+      if (chatDbKitRef.value !== kit) return;
+      const matrixRoom = getMatrixClientService().getRoom(roomId);
+      if (!matrixRoom) return;
+      const callEvents = indexCallEvents(getTimelineEvents(matrixRoom).map(getRawEvent));
+      if (isOrphanedInvite(invite, callEvents, Date.now())) {
+        const record = inviteCallRecord(invite, roomId);
+        addMessage(roomId, record);
+        dexieWriteMessage(record, roomId, invite);
+        return;
+      }
+      // Timers run on a monotonic clock and Date.now() on the wall clock, so a check can
+      // fire a hair before the invite is due (web bench, 2026-10-15): wait out the rest.
+      const left = orphanInviteDueAt(invite) - Date.now();
+      if (left > 0 && !callEvents.hungUp.has(callId) && !callEvents.answered.has(callId)) {
+        armOrphanInviteCheck(invite, roomId, callId, kit, left);
+      }
+    }, delay));
+  };
+
+  const scheduleOrphanInviteCheck = (invite: Record<string, unknown>, roomId: string) => {
+    const callId = (invite.content as Record<string, unknown> | undefined)?.call_id;
+    const dueAt = orphanInviteDueAt(invite);
+    if (typeof callId !== "string" || !callId || dueAt === 0 || orphanInviteChecks.has(callId)) return;
+    armOrphanInviteCheck(invite, roomId, callId, chatDbKitRef.value, Math.max(dueAt - Date.now(), ORPHAN_INVITE_MIN_CHECK_MS));
+  };
+
+  /** A reject ends the call without a record: check its invite soon, not at the lifetime. */
+  const checkInviteOfRejectedCall = (reject: Record<string, unknown>, roomId: string) => {
+    const callId = (reject.content as Record<string, unknown> | undefined)?.call_id;
+    if (typeof callId !== "string" || !callId) return;
+    const matrixRoom = getMatrixClientService().getRoom(roomId);
+    if (!matrixRoom) return;
+    const invite = getTimelineEvents(matrixRoom).map(getRawEvent).find((raw) =>
+      raw?.type === "m.call.invite" && (raw.content as Record<string, unknown> | undefined)?.call_id === callId);
+    if (invite) armOrphanInviteCheck(invite, roomId, callId, chatDbKitRef.value, ORPHAN_INVITE_MIN_CHECK_MS);
+  };
+
+  /**
+   * The first sync's events reach no live handler: the SDK replays its store before
+   * `chatsReady`, and stores.ts drops timeline events until `roomsInitialized`. A call
+   * that rang while the app started then never got its check (review 2026-10-16), so
+   * the first full refresh arms one for each invite still pending (`pendingInvites`).
+   */
+  const armPendingOrphanInviteChecks = (matrixRooms: unknown[]) => {
+    const now = Date.now();
+    for (const room of matrixRooms) {
+      const roomId = (room as { roomId?: unknown } | null)?.roomId;
+      if (typeof roomId !== "string") continue;
+      for (const invite of pendingInvites(getTimelineEvents(room).map(getRawEvent), now)) {
+        scheduleOrphanInviteCheck(invite, roomId);
+      }
+    }
+  };
+
+  const clearOrphanInviteChecks = () => {
+    for (const timer of orphanInviteChecks.values()) clearTimeout(timer);
+    orphanInviteChecks.clear();
+  };
+
   const handleTimelineEvent = async (event: unknown, roomId: string) => {
     try {
       const raw = getRawEvent(event);
@@ -7635,6 +8101,15 @@ export const useChatStore = defineStore(NAMESPACE, () => {
           addMessage(roomId, sysMsg);
           dexieWriteMessage(sysMsg, roomId, raw);
         }
+        return;
+      }
+
+      if (raw.type === "m.call.invite") {
+        scheduleOrphanInviteCheck(raw, roomId);
+        return;
+      }
+      if (raw.type === "m.call.reject") {
+        checkInviteOfRejectedCall(raw, roomId);
         return;
       }
 
@@ -7805,16 +8280,21 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         }
 
         const cleanBody = newBody.replace(/^\* /, "");
+        const editorId = matrixIdToAddress((raw.sender as string) ?? "");
 
-        // Persist to Dexie (survives reload, triggers useLiveQuery)
+        // Persist to Dexie (survives reload, triggers useLiveQuery). writeEdit
+        // drops an edit that is not from the target's author in this room (H4).
         chatDbKitRef.value?.eventWriter.writeEdit(roomId, {
+          senderId: editorId,
           targetEventId: targetId,
           newContent: cleanBody,
           editTs: typeof raw.origin_server_ts === "number" ? raw.origin_server_ts : undefined,
         });
 
-        // Immediate in-memory update (no Dexie round-trip delay)
-        updateMessageContent(roomId, targetId, cleanBody);
+        // Immediate in-memory update (no Dexie round-trip delay), for the
+        // author's own edit only.
+        const shown = messages.value[roomId]?.find((m) => m.id === targetId);
+        if (!shown || shown.senderId === editorId) updateMessageContent(roomId, targetId, cleanBody);
         return;
       }
 
@@ -7990,13 +8470,8 @@ export const useChatStore = defineStore(NAMESPACE, () => {
       if (mtype === "m.image" || mtype === "m.file" || mtype === "m.audio" || mtype === "m.video") {
         fileInfo = parseFileInfo(content, mtype);
         if (fileInfo) {
-          if (mtype === "m.image") msgType = MessageType.image;
-          // See decryption-path branch above for the voice vs. audio-file split.
-          else if (mtype === "m.audio") msgType = fileInfo.isVoice ? MessageType.audio : MessageType.file;
-          else if (mtype === "m.video") msgType = MessageType.video;
-          else msgType = fileInfo.type.startsWith("audio/")
-            ? MessageType.file
-            : messageTypeFromMime(fileInfo.type);
+          // Same mapping as the history path, video circles included.
+          msgType = mediaMessageType(mtype, fileInfo);
           body = fileInfo.name;
         } else {
           if (mtype === "m.image") msgType = MessageType.image;
@@ -8646,22 +9121,18 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     }
 
     const canEncrypt = roomCrypto.canBeEncrypt();
+    // canBeEncrypt returns false for rooms with ≥50 members, for missing peer
+    // keys, and while member profiles or keys are still loading — tell them apart.
+    let memberCount = 0;
     if (!canEncrypt) {
-      // canBeEncrypt returns false for rooms with ≥50 members or missing peer keys.
-      // Distinguish "too large" from "missing keys":
-      const matrixService = getMatrixClientService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const matrixRoom = matrixService.getRoom(roomId) as any;
-      const memberCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
-      if (memberCount >= 50) {
-        peerKeysStatus.set(roomId, "not-encrypted");
-        return "not-encrypted";
-      }
+      const matrixRoom = getMatrixClientService().getRoom(roomId) as any;
+      memberCount = matrixRoom?.getJoinedMemberCount?.() ?? 0;
       // Keys not received yet (request in flight, or it timed out) is not
       // "the peer has no keys": showing that banner here was a false alarm
       // on every cold open. A failed request for the open chat is retried.
       const keysState = roomCrypto.getKeysLoadState?.();
-      if (keysState === "loading" || keysState === "failed") {
+      if (memberCount < 50 && (keysState === "loading" || keysState === "failed")) {
         let status: PeerKeysStatus = "loading";
         if (keysState === "failed" && roomId === activeRoomId.value) {
           // After a few failed attempts, surface it: the banner's Retry forces
@@ -8672,13 +9143,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
         peerKeysStatus.set(roomId, status);
         return status;
       }
-      peerKeysStatus.set(roomId, "missing");
-      return "missing";
     }
-
-    activeRoomKeysRetryAttempts.delete(roomId);
-    peerKeysStatus.set(roomId, "available");
-    return "available";
+    // Available, too large, member profiles still loading (audit S1-01) or missing.
+    const status = decidePeerKeysStatus({
+      canEncrypt,
+      membersLoaded: roomCrypto.membersLoaded?.(),
+      memberCount,
+    });
+    if (status === "available") activeRoomKeysRetryAttempts.delete(roomId);
+    peerKeysStatus.set(roomId, status);
+    return status;
   };
 
   // Retry for the open chat's failed key request: backs off 3s → 6s → … → 30s
@@ -8713,9 +9187,10 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     activeRoomKeysRetryAttempts.clear();
   };
 
-  /** Reset all in-memory state and account-specific localStorage (called on logout) */
+  /** Reset all in-memory state (called on logout and account switch) */
   const cleanup = () => {
     discardRoomOpenQuiet();
+    clearOrphanInviteChecks();
     roomSnapshots.clear();
     historyBackfill.stop();
     historyBackfill = makeHistoryBackfill();
@@ -8776,10 +9251,16 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     _sortedRoomsRef.value = [];
     messageWindowSize.value = 50;
     lastReadReceiptSentTs.clear();
+    pendingReadWatermarks.clear();
+    watermarkQueuedAt.clear();
+    restoredReadWatermarks.clear();
 
-    // Clear localStorage account data
-    localStorage.removeItem(_pinnedKey);
-    localStorage.removeItem(_mutedKey);
+    // The account's keys stay in storage: an account switch needs them, and
+    // logout removes them (clearAccountLocalStorage).
+    _boundAddress = null;
+    _pendingReceiptsKey = null;
+    _pinnedKey = LEGACY_PINNED_KEY;
+    _mutedKey = LEGACY_MUTED_KEY;
   };
 
   return {
@@ -8815,6 +9296,7 @@ export const useChatStore = defineStore(NAMESPACE, () => {
     saveForwardDraft,
     restoreForwardDraft,
     getDisplayName,
+    getKnownDisplayName,
     getCanonicalDisplayName,
     /** Read-only: lets name caches track getDisplayName's Matrix-name source. */
     userDisplayNames,

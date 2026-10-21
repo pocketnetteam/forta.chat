@@ -54,6 +54,25 @@ export function isVideoNoteInfo(info: Record<string, unknown> | undefined | null
   return info.videoNote === true || info[MSC3245_VIDEO_NOTE_KEY] === true;
 }
 
+/**
+ * The message type of a media event once its file info is parsed. Shared by
+ * the history and the live-event paths: the live one mapped every m.video to
+ * a video, so a video circle received with the app open showed as a plain
+ * video (Samsung, 2026-10-12).
+ *  - m.audio: a voice recording (MSC3245 marker / waveform) or an audio file
+ *    from the gallery, which renders as a file bubble (forta-bugs#841 / WEE-50).
+ *  - m.file: by MIME, audio files as files for the same reason.
+ */
+export function mediaMessageType(
+  msgtype: string,
+  fileInfo: Pick<FileInfo, "type"> & { isVoice?: boolean; videoNote?: boolean },
+): MessageType {
+  if (msgtype === "m.image") return MessageType.image;
+  if (msgtype === "m.audio") return fileInfo.isVoice ? MessageType.audio : MessageType.file;
+  if (msgtype === "m.video") return fileInfo.videoNote ? MessageType.videoCircle : MessageType.video;
+  return fileInfo.type.startsWith("audio/") ? MessageType.file : messageTypeFromMime(fileInfo.type);
+}
+
 /** True when an `m.audio` event is a voice-message recording.
  *
  *  Heuristic, in priority order:

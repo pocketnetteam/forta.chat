@@ -71,12 +71,15 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 ### SyncEngine
 - FIFO outbound queue with exponential backoff + jitter (up to 30s, then "failed")
 - `processQueue()` runs after DB recovery; `setOnline(true/false)` pauses/resumes
+- Lanes: a room, and a room's file uploads beside it; new text may pass a stuck upload (`pickClaimableOp`); each kind of lane gets three slots (`hasLaneSlot`)
+- Every send uses the message's `clientId` as the Matrix txnId, so a retry is deduped by the server. The SDK keeps a failed send's local echo under that txnId; `sendMessageEvent` in `matrix-client.ts` resends it instead of a second `sendEvent`, which the SDK refuses
 
 ### Matrix service (`entities/matrix/`)
 - Wrapper around the Matrix SDK and E2E crypto: client service, per-room crypto instances, key management
 - `decryptEvent()`, `encryptEvent()`, `getRoomMembers()`, `fetchEventContext()`
 - E2E is Bastyon's Pcrypto (`matrix-crypto.ts`: secp256k1 + AES-SIV, AES-CBC for files), not Olm/Megolm; the SDK's Rust crypto is never initialised and stays a lazy chunk
 - The SDK's IndexedDB sync store runs in a Web Worker where the WebView supports it (`sync-store-worker.ts`: probed once, falls back to the main thread; a failed probe is remembered per userAgent)
+- The SDK saves that store every 5 min, so at a cold start it can be older than Dexie. Room refreshes and the startup heal `syncAllUnreadFromMatrix` reconcile stored unread counts with the SDK only after a /sync from the server (`hasLiveSync()`). The first refresh after that /sync runs the heal for every room. A room new to Dexie still takes the SDK count.
 - Room members: `ensureRoomMembers()` (`ensure-room-members.ts`) before encryption decisions; peer keys for several rooms are fetched in one batch via `chatStore.preloadRoomKeys()`. `lazyLoadMembers` stays `false` (plan `docs/plans/2026-10-03-initial-sync-lazy-members.md`, phase II cancelled)
 
 ### Vendored Pocketnet SDK (`public/js/lib/client/sdk.js`)
@@ -85,6 +88,15 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 
 ### Pinia stores
 - `useAuthStore()` (auth, sessions, Matrix init), `useChatStore()` (rooms, active room, metadata), `useUserStore()`, `useCallStore()` (WebRTC), `useChannelStore()`, `useThemeStore()`, `useLocaleStore()`, `useTorStore()`, `useMediaStore()`, local-ai and ai-chat stores
+- Per-account chat keys in localStorage hold pinned rooms, muted rooms and unsent read receipts. `initMatrix` binds them on every start through `chatStore.bindAccountKeys`, and so do login and account switch. Logout removes them through `clearAccountLocalStorage`. An account switch keeps them.
+- A read receipt that did not reach the server is saved per account (`entities/chat/lib/pending-read-receipts.ts`, 3 days). It goes out after the first live /sync, by the event id that Dexie holds for the read position. While it is pending, the room's unread count is not taken from the SDK.
+
+### Calls (`src/features/video-calls/model/`)
+- `useCallService()` in `call-service.ts` is a facade over `call-outgoing`, `call-incoming`, `call-answer`, `call-media`; event wiring in `call-events`, timers in `call-timers`, the single exit in `finalize-call`.
+- One owner per call resource, keyed by `callId`: the JS exit (`finalizeCall`), the native exit (`CallTeardown`), the ringer (`IncomingRinger`), the Telecom slot, and the audio routing (`AudioRouter` owner, `AudioRouterOwnership`). A late action for another call is dropped, not applied.
+- One incoming setup runs at a time (`call-incoming.ts`): a second invite waits for it and is then judged like any other — busy if that call took the slot, ringing if it came to nothing. A late step of an ended call (catch of a placement or an answer, an expired invite) leaves a call that took the slot meanwhile alone.
+- Source-contract tests read `call-*.ts` and the Kotlin sources as text: moving code means updating them (see `call-service.test.ts`, `android/app/src/test/.../*ContractTest.kt`).
+- Call-service tests sit next to the module they cover (`call-outgoing`, `call-incoming`, `call-answer`, `call-audio-routing`, `call-events`, `call-media`, `call-service` `.test.ts`). They share one mock set, `call-service.harness.ts`: import it before anything else (its `vi.mock` calls must register before a test imports `./call-service`) and run `resetCallServiceHarness` in `beforeEach`.
 
 ## Entry points
 
@@ -107,4 +119,5 @@ Detail reference for [AGENTS.md](../../AGENTS.md). See also [local-first-archite
 - **Offline sync:** `SyncEngine.setOnline()` follows network state; inbound events queue in the SDK; `useLiveQuery()` reads from Dexie; the app catches up on reconnect without an explicit trigger
 - **Reactivity:** Dexie triggers `useLiveQuery()`; Pinia stores expose computed refs; example `const messages = useLiveQuery(() => getChatDb().messages.findByRoom(roomId))`
 - **Mobile layout:** neither WebView resizes for the soft keyboard, so native code publishes the insets and CSS adapts. `--app-bottom-inset` (Android: max(IME, nav bar) from `MainActivity.injectAllCssVars`; iOS: keyboard height from `useIOSKeyboardCssVar`) drives the bottom padding of the blocks that hold a text field, through the `.safe-bottom` / `.safe-y` / `.safe-all` utilities — one rule for both platforms. Only those blocks move: the root shell stays `position: fixed; inset: 0`. Safe-area CSS custom properties for Capacitor; `is-electron` / `is-electron-mac` classes for drag regions
+- **Push notifications (Android):** with the page asleep `FortaFirebaseMessagingService` draws the notification from the push payload and SharedPreferences caches that JS fills: room names, group flags, sender names (pushes overwrite these) and contact aliases (`sender_alias_*`, written only by JS, read first). When the page runs, `push-service.ts` replaces the text once it can show plaintext (`isBastyonCiphertext` guards it). A tap reaches JS through `pushOpenRoom`, or through `getPendingIntent` when the page has not loaded yet
 - **Platform flags:** `isNative` (Capacitor), `isElectron`; Electron uses a Service Worker transport proxy for Matrix sync; native has Tor daemon, status bar, keyboard height, push notifications, share target

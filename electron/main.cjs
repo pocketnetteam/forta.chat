@@ -7,6 +7,8 @@ const {
   net,
   session,
   dialog,
+  Menu,
+  desktopCapturer,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -24,7 +26,10 @@ const {
   registerProtocolClient,
 } = require("./deep-links.cjs");
 const { createAppTray } = require("./tray.cjs");
+const { guardWindowNavigation } = require("./navigation.cjs");
+const { wireContextMenuAndReload } = require("./context-menu.cjs");
 const { initAutoUpdater } = require("./auto-updater.cjs");
+const { withReportOnlyCsp, isCspViolationMessage } = require("./csp.cjs");
 const {
   isElectronSmokeMode,
   resolveTorModeForBoot,
@@ -158,12 +163,18 @@ function bootElectronApp() {
 
     ipcMain.handle("file:save", async (_event, fileName, buffer) => {
       if (!mainWindow) return null;
+      if (typeof fileName !== "string" || !(buffer instanceof ArrayBuffer || ArrayBuffer.isView(buffer))) {
+        return null;
+      }
       const { filePath } = await dialog.showSaveDialog(mainWindow, {
-        defaultPath: fileName,
+        defaultPath: path.basename(fileName),
       });
       if (!filePath) return null;
-      fs.writeFileSync(filePath, Buffer.from(buffer));
-      shell.openPath(filePath);
+      await fs.promises.writeFile(filePath, Buffer.from(buffer));
+      // Reveal, never open: the name and the bytes come from whoever sent the
+      // file, and opening it ran a received .exe / .bat / .command right after
+      // the user only asked to save it.
+      shell.showItemInFolder(filePath);
       return filePath;
     });
 
@@ -258,9 +269,10 @@ function bootElectronApp() {
       if (mainWindow === win) mainWindow = null;
     });
 
-    // Close → tray (when enabled); Quit from tray sets isQuitting.
+    // Close → tray (when enabled); Quit from tray sets isQuitting. Without a
+    // tray icon there is no way back to a hidden window, so close normally.
     win.on("close", (event) => {
-      if (isQuitting || !desktopSettings.closeToTray) return;
+      if (isQuitting || !desktopSettings.closeToTray || !tray) return;
       event.preventDefault();
       win.hide();
       // macOS: hiding leaves the app in dock; fine for messenger UX.
@@ -269,6 +281,11 @@ function bootElectronApp() {
     // Show when ready to avoid white flash (smoke: keep hidden for headless CI)
     win.once("ready-to-show", () => {
       if (!isSmoke) win.show();
+    });
+
+    // Report-only CSP violations land in the main-process log (audit S10-05).
+    win.webContents.on("console-message", (event) => {
+      if (isCspViolationMessage(event.message)) console.warn("[csp]", event.message);
     });
 
     win.webContents.on("did-finish-load", () => {
@@ -301,11 +318,15 @@ function bootElectronApp() {
 
     registerWindowIpc();
     wireZoomShortcuts(win);
+    wireContextMenuAndReload(win, Menu);
 
-    // Open external links in the default browser
-    win.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url);
-      return { action: "deny" };
+    const appUrl = isDev ? process.env.VITE_DEV_SERVER_URL : "app://chat/index.html";
+
+    // Links open in the default browser (http/https/mailto only); the window
+    // itself never leaves the app.
+    guardWindowNavigation(win.webContents, {
+      appUrl,
+      openExternal: (url) => shell.openExternal(url),
     });
 
     // Mic / camera for calls
@@ -316,11 +337,27 @@ function bootElectronApp() {
       },
     );
 
-    if (isDev) {
-      win.loadURL(process.env.VITE_DEV_SERVER_URL);
-    } else {
-      win.loadURL("app://chat/index.html");
-    }
+    // Screen share in calls: without a handler Electron rejects every
+    // getDisplayMedia, so the call's share button always failed on desktop.
+    // macOS 15+ shows its own picker; elsewhere the primary screen is shared
+    // (the user just pressed "Share screen" in the call).
+    win.webContents.session.setDisplayMediaRequestHandler(
+      (_request, callback) => {
+        desktopCapturer
+          .getSources({ types: ["screen"] })
+          .then((sources) => {
+            if (sources.length === 0) return callback({});
+            callback({ video: sources[0] });
+          })
+          .catch((e) => {
+            console.warn("[main] screen share: no capture source", e);
+            callback({});
+          });
+      },
+      { useSystemPicker: true },
+    );
+
+    win.loadURL(appUrl);
 
     if (wantDevTools) {
       win.webContents.openDevTools({ mode: "detach" });
@@ -336,10 +373,11 @@ function bootElectronApp() {
     });
 
     // Handle app:// protocol — serves files from dist/
-    protocol.handle("app", (request) => {
+    protocol.handle("app", async (request) => {
       const url = new URL(request.url);
       const filePath = path.join(__dirname, "..", "dist", url.pathname);
-      return net.fetch(`file://${filePath}`);
+      // Report-only CSP on the app's pages (audit S10-05); blocks nothing.
+      return withReportOnlyCsp(await net.fetch(`file://${filePath}`), url.pathname);
     });
 
     // Initialise Tor transport stack (smoke: neveruse — no binary download)
@@ -440,7 +478,7 @@ function bootElectronApp() {
     // With close-to-tray the window is hidden, not destroyed — this only
     // fires when the last window is actually closed (quit / closeToTray off).
     if (process.platform !== "darwin") {
-      if (!desktopSettings.closeToTray || isQuitting) app.quit();
+      if (!desktopSettings.closeToTray || isQuitting || !tray) app.quit();
     }
   });
 }
