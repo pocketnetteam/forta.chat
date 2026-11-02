@@ -133,4 +133,31 @@ describe('PushService registration', () => {
     expect(client.addPushRule.mock.calls.map((c) => c[2])).toEqual(['com.forta.call.hangup', 'com.forta.call.select_answer']);
     expect(client.setPusher.mock.invocationCallOrder[0]).toBeLessThan(client.addPushRule.mock.invocationCallOrder[0]);
   });
+
+  // C04 (calls review 2026-10-04): a token event can reach the listener of the
+  // account that was signed in before; it must not set that account's pusher.
+  it('sets nothing for the previous account when its listener gets a token after a switch', async () => {
+    const mod = await import('./push-service');
+    const previous = makeClient([RULES_WITHOUT]);
+    const current = makeClient([RULES_WITHOUT]);
+    await mod.pushService.init(previous);
+    const staleListener = listeners.registration;
+    await mod.pushService.init(current);
+    await staleListener({ value: 'token-previous' });
+    expect(previous.setPusher).not.toHaveBeenCalled();
+    expect(previous.addPushRule).not.toHaveBeenCalled();
+  });
+
+  it('adds no push rules for an account that logged out while its pusher was being set', async () => {
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as { matrixClient: unknown };
+    const client = makeClient([RULES_WITHOUT]);
+    await mod.pushService.init(client);
+    client.setPusher.mockImplementationOnce(async () => {
+      svc.matrixClient = null; // logout landed while the pusher PUT was in flight
+    });
+    await listeners.registration({ value: 'token-abc' });
+    expect(client.setPusher).toHaveBeenCalled();
+    expect(client.addPushRule).not.toHaveBeenCalled();
+  });
 });
