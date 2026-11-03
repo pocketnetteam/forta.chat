@@ -9,6 +9,7 @@ export type {
   AudioTimelineEntry,
   InviteThrottleRecord,
   InviteThrottleSnapshot,
+  RingAudioRecord,
 } from './native-call-bridge';
 export {
   isInviteEventExpired,

@@ -18,4 +18,6 @@ CAP_PLUGIN(IOSCallAudioPlugin, "IOSCallAudio",
     CAP_PLUGIN_METHOD(forceStop, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(getStatus, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(setOutput, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(scheduleAnswerReminder, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(cancelAnswerReminder, CAPPluginReturnPromise);
 )

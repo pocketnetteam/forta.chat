@@ -135,8 +135,12 @@ export function useContacts() {
       // 2) Bastyon RPC — canonical Pocketnet search. On web this may fail with
       //    CORS; we still fall through to Matrix user_directory below.
       let rpcResults: Array<{ address: string; name: string; image: string }> = [];
+      // Whether any remote tier actually answered: an empty result from tiers
+      // that all failed is not "user not found" (audit S7-02).
+      let remoteAnswered = false;
       try {
         rpcResults = await getAppInit().searchUsers(trimmed);
+        remoteAnswered = true;
       } catch (rpcErr) {
         console.warn("[useContacts] Bastyon RPC searchUsers failed, falling back:", rpcErr);
       }
@@ -147,6 +151,7 @@ export function useContacts() {
       if (matrixService.isReady()) {
         try {
           const resp = await matrixService.searchUserDirectory(trimmed, 20);
+          remoteAnswered = true;
           matrixResults = resp.results
             .map(entry => normalizeMatrixDirectoryUser(entry, url => matrixService.mxcToHttp(url)))
             .filter((u): u is { address: string; name: string; image: string } => u !== null);
@@ -195,9 +200,10 @@ export function useContacts() {
       }
 
       if (searchResults.value.length === 0) {
-        // If all three tiers returned nothing, surface a localizable "not found"
-        // signal instead of whatever raw string the SDK may have produced.
-        searchError.value = "search.userNotFound";
+        // Nothing anywhere: "not found" only when a remote search actually
+        // answered, otherwise say the search is unavailable. Always an i18n
+        // key, never the raw string the SDK may have produced.
+        searchError.value = remoteAnswered ? "search.userNotFound" : "search.serviceUnavailable";
       }
     } catch (e) {
       console.error("[useContacts] searchUsers failed:", e);

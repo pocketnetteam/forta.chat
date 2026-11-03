@@ -102,7 +102,7 @@ class ModelDownloadService : Service() {
                 putExtra(EXTRA_HEADERS_JSON, headersJson)
             }
             try {
-                context.startForegroundService(intent)
+                androidx.core.content.ContextCompat.startForegroundService(context, intent)
             } catch (e: Throwable) {
                 // Same defensive pattern as CallForegroundService.start() —
                 // Android 12+ can reject a background-started FGS on some
@@ -337,6 +337,7 @@ class ModelDownloadService : Service() {
     }
 
     private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return // no channels before Android 8
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.channel_model_download),

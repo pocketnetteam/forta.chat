@@ -13,6 +13,7 @@ const mockMatrixService = {
   getUserId: vi.fn(() => "@me:server"),
   getRoom: vi.fn(() => sdkRoom),
   isReady: vi.fn(() => false),
+  hasLiveSync: () => true,
   getRoomAccountData: vi.fn(() => undefined),
   sendReadReceipt: vi.fn(async () => true),
   scrollback: vi.fn(async () => {}),

@@ -31,6 +31,14 @@ export interface InviteThrottleRecord {
   expired: boolean;
   /** `call_id` from the FCM payload, "" when missing. */
   callId: string;
+  /** RemoteMessage.priority as delivered: 1 high, 2 normal, 0 unknown. Absent in older builds. */
+  priority?: number;
+  /** RemoteMessage.originalPriority as sent; differs when FCM downgraded the push. */
+  originalPriority?: number;
+  /** "fcm", or "missing" when the push carried no send time (the latency means nothing then). */
+  sentTimeSource?: string;
+  /** What became of the push: rang, stale, signed-out, incoming-calls-off, established, second-ring. */
+  outcome?: string;
 }
 
 /**
@@ -46,6 +54,25 @@ export interface AudioTimelineEntry {
 
 export interface InviteThrottleSnapshot {
   records: InviteThrottleRecord[];
+}
+
+/**
+ * The audio state of one incoming ring, as recorded by `RingAudioLog.kt`.
+ * A ringtone played in an in-call audio mode goes to the earpiece: that is
+ * the "rings very quietly at full volume" report.
+ */
+export interface RingAudioRecord {
+  /** Wall clock when the ringer armed. */
+  atMs: number;
+  callId: string;
+  /** Audio mode when the ringer armed, e.g. "MODE_IN_COMMUNICATION". */
+  modeAtArm: string;
+  /** The ringer dropped a stranded MODE_IN_COMMUNICATION before it rang. */
+  modeReset: boolean;
+  /** The Telecom slot 1.5 s into the ring ("none": the ring ran without Telecom). */
+  telecom: string;
+  /** Audio mode 1.5 s into the ring; "" when the ring ended before. */
+  modeInRing: string;
 }
 
 /**
@@ -141,8 +168,9 @@ export interface NativeCallNativePlugin {
     devices: Array<{ type: string; name: string }>;
   }>;
   setAudioDevice(options: { type: string }): Promise<void>;
-  startAudioRouting(options: { callType: string }): Promise<void>;
-  stopAudioRouting(): Promise<void>;
+  /** `callId` names the call that owns the routing (C02); a stop for another call is dropped. */
+  startAudioRouting(options: { callType: string; callId?: string }): Promise<void>;
+  stopAudioRouting(options?: { callId?: string }): Promise<void>;
   /**
    * Brute-force reset of audio state without going through the
    * lifecycle guards. Used by the app-resume watchdog when the device
@@ -174,6 +202,11 @@ export interface NativeCallNativePlugin {
    * records. Surfaced by {@link NativeCallBridge.getInviteThrottleSnapshot}.
    */
   getInviteThrottleSnapshot(): Promise<InviteThrottleSnapshot>;
+  /**
+   * The audio state of the last incoming rings — see
+   * {@link NativeCallBridge.getRingAudioLog}.
+   */
+  getRingAudioLog(): Promise<{ records: RingAudioRecord[] }>;
   addListener(
     event: 'callAnswered',
     cb: (data: { callId: string; roomId?: string }) => void,

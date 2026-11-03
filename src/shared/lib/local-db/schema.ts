@@ -125,7 +125,8 @@ export interface LocalMessage {
   forwardedFrom?: { senderId: string; senderName?: string };
   /** `callId` lets the timeline collapse the pair of hangup events a call
    *  produces when both sides end it at once — see `dedupe-call-events.ts`. */
-  callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number; callId?: string };
+  /** `fromInvite`: taken from an invite nobody ended, standing in for its missing hangup. */
+  callInfo?: { callType: "voice" | "video"; missed: boolean; duration?: number; callId?: string; fromInvite?: boolean };
   pollInfo?: PollInfo;
   transferInfo?: TransferInfo;
   callLinkInfo?: CallLinkInfo;   // External call-link card (WEE-57)

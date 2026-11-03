@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  fetchUserClosedIssues,
   reopenIssue,
+  closeIssue,
+  trackCreatedIssue,
+  getLocalIssueCache,
   getAcknowledgedNumbers,
   acknowledgeIssue,
   clearAcknowledged,
@@ -10,98 +12,13 @@ import {
 } from '../bug-report-tracker';
 
 beforeEach(() => {
-  vi.stubEnv('VITE_BUG_REPORT_TOKEN', 'test-token');
+  vi.stubEnv('VITE_BUG_REPORT_ENDPOINT', 'https://bugs.test/');
   localStorage.clear();
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
-});
-
-describe('fetchUserClosedIssues', () => {
-  async function issueBody(address: string) {
-    const { computeReporterHash, buildReporterMarker } = await import(
-      '../reporter-hash'
-    );
-    const hash = await computeReporterHash(address);
-    return { marker: buildReporterMarker(hash), hash };
-  }
-
-  it('queries GitHub search API with quoted marker + in:body + state:closed', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ items: [] }),
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    await fetchUserClosedIssues('addr-1');
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const url = fetchMock.mock.calls[0][0] as string;
-    expect(url).toContain('/search/issues');
-    expect(url).toContain(
-      encodeURIComponent('repo:greenShirtMystery/forta-bugs'),
-    );
-    expect(url).toContain(encodeURIComponent('state:closed'));
-    expect(url).toContain(encodeURIComponent('in:body'));
-    // Quoted exact-phrase search
-    expect(url).toMatch(/%22reporter%3A[0-9a-f]{16}%22/);
-  });
-
-  it('keeps only items whose body actually contains the marker', async () => {
-    const { marker } = await issueBody('addr-1');
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            items: [
-              {
-                number: 42,
-                title: '[android] crash',
-                html_url: 'https://github.com/x/y/issues/42',
-                state: 'closed',
-                closed_at: '2026-04-10T00:00:00Z',
-                state_reason: 'completed',
-                body: `${marker}\n\n## Description\nfoo`,
-              },
-              // Decoy without the marker — search could return it from a
-              // different qualifier match; client-side filter MUST drop it.
-              {
-                number: 99,
-                title: '[x] other user',
-                html_url: 'https://github.com/x/y/issues/99',
-                state: 'closed',
-                body: 'No marker here.',
-              },
-            ],
-          }),
-      }),
-    );
-
-    const issues = await fetchUserClosedIssues('addr-1');
-    expect(issues.map((i) => i.number)).toEqual([42]);
-  });
-
-  it('returns [] on HTTP error', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({ ok: false, status: 403 }),
-    );
-    expect(await fetchUserClosedIssues('addr-1')).toEqual([]);
-  });
-
-  it('returns [] when fetch throws', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')));
-    expect(await fetchUserClosedIssues('addr-1')).toEqual([]);
-  });
-
-  it('returns [] when address is empty', async () => {
-    vi.stubGlobal('fetch', vi.fn());
-    expect(await fetchUserClosedIssues('')).toEqual([]);
-  });
 });
 
 describe('acknowledgements', () => {
@@ -142,40 +59,55 @@ describe('acknowledgements', () => {
   });
 });
 
-describe('reopenIssue', () => {
-  it('PATCHes issue with state=open, posts comment, returns true', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+describe('reopenIssue / closeIssue', () => {
+  const KEY = '0123456789abcdef0123456789abcdef';
+
+  it('asks the proxy, never GitHub, and sends no token', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal('fetch', fetchMock);
 
-    const ok = await reopenIssue(42, 'still broken after v1.2.3');
+    const ok = await reopenIssue(42, 'still broken after v1.2.3', KEY);
 
     expect(ok).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    const [patchUrl, patchInit] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(patchUrl).toContain('/repos/greenShirtMystery/forta-bugs/issues/42');
-    expect(patchInit.method).toBe('PATCH');
-    expect(JSON.parse(patchInit.body as string)).toMatchObject({ state: 'open' });
-
-    const [commentUrl, commentInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(commentUrl).toContain('/issues/42/comments');
-    expect(commentInit.method).toBe('POST');
-    const commentBody = JSON.parse(commentInit.body as string);
-    expect(commentBody.body).toContain('still broken');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://bugs.test/v1/reports/42/state');
+    expect(init.method).toBe('POST');
+    expect(JSON.stringify(init.headers)).not.toMatch(/authorization/i);
+    expect(JSON.parse(init.body as string)).toEqual({
+      state: 'open',
+      comment: 'still broken after v1.2.3',
+      manageKey: KEY,
+    });
   });
 
-  it('returns false when PATCH is not ok (still posts comment)', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 403 })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+  it('scrubs identifiers out of the note', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal('fetch', fetchMock);
 
-    const ok = await reopenIssue(1, 'x');
-    expect(ok).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await closeIssue(7, 'fixed for @abc123:matrix.pocketnet.app', KEY);
+
+    const payload = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(payload).toMatchObject({ state: 'closed', comment: 'fixed for <user>' });
+  });
+
+  it('returns false when the proxy refuses or cannot be reached', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 403 }));
+    expect(await reopenIssue(1, 'x', KEY)).toBe(false);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    expect(await closeIssue(1, 'x', KEY)).toBe(false);
+  });
+
+  it('returns false without an endpoint in the build', async () => {
+    vi.stubEnv('VITE_BUG_REPORT_ENDPOINT', '');
+    vi.stubGlobal('fetch', vi.fn());
+    expect(await reopenIssue(1, 'x', KEY)).toBe(false);
+  });
+});
+
+describe('trackCreatedIssue', () => {
+  it('keeps the manage key and the link the proxy returned', () => {
+    trackCreatedIssue('addr-1', { number: 5, title: 't', manageKey: 'k', url: null });
+    expect(getLocalIssueCache('addr-1')[0]).toMatchObject({ number: 5, manageKey: 'k', url: '' });
   });
 });

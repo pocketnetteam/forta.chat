@@ -182,6 +182,7 @@ void props.mode;
                     {{ stripPlatformPrefix(issue.title) }}
                   </p>
                   <a
+                    v-if="issue.url"
                     :href="issue.url"
                     target="_blank"
                     rel="noopener noreferrer"
@@ -205,8 +206,9 @@ void props.mode;
                   </a>
                 </div>
 
+                <!-- A report sent before the proxy has no manage key (audit S10-06). -->
                 <div
-                  v-if="actionFor?.number !== issue.number"
+                  v-if="issue.canManage && actionFor?.number !== issue.number"
                   class="mt-3 flex gap-2"
                 >
                   <button
@@ -225,7 +227,7 @@ void props.mode;
                   </button>
                 </div>
 
-                <div v-else class="mt-3 flex flex-col gap-2">
+                <div v-else-if="issue.canManage" class="mt-3 flex flex-col gap-2">
                   <label
                     :for="`reason-${issue.number}`"
                     class="text-xs text-text-on-main-bg-color"

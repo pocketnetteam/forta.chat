@@ -184,7 +184,7 @@ describe("EventWriter buffered reactions (WEE-93)", () => {
     await writer.disposeBuffer();
   });
 
-  it("drops reactions whose target message is missing without aborting others", async () => {
+  it("keeps reactions whose target message is missing without aborting others", async () => {
     const writer = new EventWriter(db, msgRepo, roomRepo, userRepo);
     writer.enableBatching();
     await db.messages.add(makeMsg({ eventId: "$exists" }));
@@ -195,6 +195,43 @@ describe("EventWriter buffered reactions (WEE-93)", () => {
 
     const msg = await db.messages.where("eventId").equals("$exists").first();
     expect(msg?.reactions?.["👍"].count).toBe(1);
+    await writer.disposeBuffer();
+  });
+});
+
+// Audit S3-02: a reaction that arrived before its message was dropped for good.
+describe("EventWriter reactions that arrive before their message", () => {
+  const parsed = (eventId: string) => ({
+    eventId,
+    roomId: ROOM_ID,
+    senderId: "user1",
+    content: "late message",
+    timestamp: 5000,
+    type: MessageType.text,
+  });
+
+  it("applies them when the message is written directly", async () => {
+    const writer = new EventWriter(db, msgRepo, roomRepo, userRepo);
+    await writer.writeReaction(makeReaction({ targetEventId: "$late", emoji: "🔥", senderAddress: "a" }));
+
+    await writer.writeMessage(parsed("$late"), "me", null);
+
+    const msg = await db.messages.where("eventId").equals("$late").first();
+    expect(msg?.reactions?.["🔥"]?.users).toEqual(["a"]);
+  });
+
+  it("applies them when the message comes through the write buffer, without deadlocking it", async () => {
+    const writer = new EventWriter(db, msgRepo, roomRepo, userRepo);
+    writer.enableBatching();
+    await writer.writeReaction(makeReaction({ eventId: "$r1", targetEventId: "$late", emoji: "👍", senderAddress: "a" }));
+    await writer.writeReaction(makeReaction({ eventId: "$r2", targetEventId: "$late", emoji: "👍", senderAddress: "b" }));
+    await writer.flushWriteBuffer(); // target still missing: stashed
+
+    await writer.writeMessageBuffered(parsed("$late"), "me", null);
+    await writer.flushWriteBuffer();
+
+    const msg = await db.messages.where("eventId").equals("$late").first();
+    expect(msg?.reactions?.["👍"]?.count).toBe(2);
     await writer.disposeBuffer();
   });
 });

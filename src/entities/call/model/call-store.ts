@@ -100,11 +100,29 @@ export const useCallStore = defineStore(NAMESPACE, () => {
     // Note: audioOutputId is NOT reset — it's a user preference across calls
   }
 
-  /** Schedule a clearCall after `delayMs`. Cancels any prior scheduled clear. */
+  /** The call in the single slot right now, if any. */
+  function slotOwner(): string | null {
+    return matrixCall.value?.callId ?? activeCall.value?.callId ?? null;
+  }
+
+  /**
+   * Schedule a clearCall after `delayMs` for the call in the slot now.
+   * Cancels any prior scheduled clear. If another call has taken the slot by
+   * then, nothing is cleared: clearCall strips every listener from the
+   * MatrixCall in the slot, and the newer call lost its handlers — its end was
+   * never handled and its Telecom connection stayed DIALING for 30 minutes
+   * (Samsung, a dial that crossed an incoming call, 2026-10-04).
+   */
   function scheduleClearCall(delayMs: number) {
     cancelScheduledClear();
+    const owner = slotOwner();
     scheduledClearId = setTimeout(() => {
       scheduledClearId = null;
+      const current = slotOwner();
+      if (owner && current && current !== owner) {
+        console.info("[call-store] clear for", owner, "skipped — the slot now holds", current);
+        return;
+      }
       clearCall();
     }, delayMs);
   }

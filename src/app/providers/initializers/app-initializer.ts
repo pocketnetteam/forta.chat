@@ -3,6 +3,7 @@ import type { UserData } from "./types";
 import { PocketnetInstanceConfigurator } from "../chat-scripts";
 import { PocketnetInstance } from "../chat-scripts/config/pocketnetinstance";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { LRUCache } from "@/shared/lib/lru-cache";
 import { flattenPeertubeServers } from "@/shared/lib/peertube/remove-peertube-account";
 import {
   hasFreshArchivedPeertubeServers,
@@ -195,6 +196,7 @@ type OnLoadUserData = (userData: UserData) => void;
  *  indefinitely. A 15s bound converts that hang into a surfaced error so the
  *  caller can rotate to another proxy / show retry UX (WEE-23). */
 const REGISTRATION_RPC_TIMEOUT = 15_000;
+const POST_CACHE_MAX = 500;
 /** Bound for each network step of account deletion (unspents, server list, accDel). */
 const ACCOUNT_DELETE_TIMEOUT = 30_000;
 /** Bound for each step of the archived peertube hosts load (ping, SDK call). */
@@ -209,7 +211,9 @@ export class AppInitializer {
   private psdk: InstanceType<typeof pSDK> | null = null;
   private pocketnetInstance: PocketnetInstanceType | null = null;
   private _available = false;
-  private postCache = new Map<string, BastyonPostData>();
+  /** Capped: every post ever seen in any channel stayed here for the session
+   *  (audit W2D-02). */
+  private postCache = new LRUCache<string, BastyonPostData>(POST_CACHE_MAX);
   private collectionCache = new Map<string, BastyonCollectionData>();
 
   // Coalesce per-post getpagescores requests into a single psdk.myScore.load
@@ -602,24 +606,7 @@ export class AppInitializer {
       }
     }
 
-    // Warm Actions unspent cache so makeTransaction does not hit
-    // actions_noinputs → requestUnspents → platform.ui.captcha (absent in chat).
-    try {
-      const account = (
-        this.actions as unknown as {
-          addAccount(addr: string): { loadUnspents?: () => Promise<unknown> };
-        }
-      ).addAccount(address);
-      if (typeof account?.loadUnspents === "function") {
-        await withTimeout(
-          account.loadUnspents(),
-          REGISTRATION_RPC_TIMEOUT,
-          "loadUnspents",
-        );
-      }
-    } catch (e) {
-      console.warn("[appInit] preload unspents before UserInfo broadcast failed:", e);
-    }
+    await this.warmUnspents(address, "UserInfo broadcast");
 
     const queued = (await this.actions!.addActionAndSendIfCan(
       userInfo,
@@ -649,6 +636,29 @@ export class AppInitializer {
 
   /** Extract the node address from a completed action's transaction via global txidnodestorage.
    *  txidnodestorage is populated by api.js after every sendrawtransaction. */
+  /** Warm the Actions unspent cache so makeTransaction does not hit
+   *  actions_noinputs → requestUnspents → platform.ui.captcha, a stub that
+   *  always rejects in the chat. Registration always did this; a profile save
+   *  did not, so on a low balance it could fail that way (audit W2A-05). */
+  private async warmUnspents(address: string, before: string): Promise<void> {
+    try {
+      const account = (
+        this.actions as unknown as {
+          addAccount(addr: string): { loadUnspents?: () => Promise<unknown> };
+        }
+      ).addAccount(address);
+      if (typeof account?.loadUnspents === "function") {
+        await withTimeout(
+          account.loadUnspents(),
+          REGISTRATION_RPC_TIMEOUT,
+          "loadUnspents",
+        );
+      }
+    } catch (e) {
+      console.warn(`[appInit] preload unspents before ${before} failed:`, e);
+    }
+  }
+
   private extractNodeFromAction(action: unknown): string | null {
     try {
       const txid = (action as Record<string, unknown>)?.transaction as string | undefined;
@@ -679,6 +689,8 @@ export class AppInitializer {
     userInfo.addresses.set(userData.addresses);
     userInfo.ref.set(userData.ref);
     userInfo.keys.set(userData.keys);
+
+    await this.warmUnspents(address, "a profile edit");
 
     try {
       // 30s timeout: UserInfo broadcast may queue on proxy; without a timeout

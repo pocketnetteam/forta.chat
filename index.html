@@ -62,6 +62,93 @@
       <div id="appLoading"></div>
     </div>
     <!--
+      Boot guard (audit W2B-01). A classic script runs before every ES module, so
+      it is the only place that can prepare old Android System WebView builds for
+      the bundle. matrix-js-sdk-bastyon touches `globalThis` at module top level;
+      WebView < 71 has no `globalThis`, so the whole module graph used to die
+      before Vue existed and the user got a blank white screen with no way out.
+      If the module graph still fails, or the WebView cannot run modules at all,
+      the guard replaces the blank page with an "update Android System WebView"
+      message. It is ES5 on purpose and cannot use i18n (it runs before the app).
+      src/main.ts sets window.__fortaBootStarted once the module graph evaluated.
+    -->
+    <script id="boot-guard">
+      (function (w, d, n) {
+        if (typeof w.globalThis === "undefined") {
+          w.globalThis = w;
+        }
+
+        var FALLBACK_DELAY_MS = 4000;
+        var scheduled = false;
+
+        function isOwnScript(filename) {
+          var origin = w.location && w.location.origin;
+          return !!filename && !!origin && origin !== "null" && filename.indexOf(origin) === 0;
+        }
+
+        function showUnsupported(detail) {
+          if (w.__fortaBootStarted) return;
+          var root = d.getElementById("app");
+          if (!root) return;
+          var ru = String((n && n.language) || "").toLowerCase().indexOf("ru") === 0;
+          var android = /Android/i.test(String((n && n.userAgent) || ""));
+          var box = d.createElement("div");
+          box.setAttribute("data-boot-fallback", "true");
+          box.style.cssText = "font-family:sans-serif;max-width:420px;margin:15vh auto 0;padding:0 20px;color:#1b1f24;text-align:center;line-height:1.45";
+          var title = d.createElement("h1");
+          title.style.cssText = "font-size:20px;margin:0 0 12px";
+          title.textContent = ru ? "Forta Chat не может запуститься" : "Forta Chat cannot start";
+          var text = d.createElement("p");
+          text.style.cssText = "font-size:15px;margin:0 0 20px";
+          if (android) {
+            text.textContent = ru
+              ? "Системный компонент «Android System WebView» на этом устройстве устарел. Обновите «Android System WebView» и Google Chrome в Google Play, затем откройте приложение снова."
+              : "The Android System WebView on this device is out of date. Update \"Android System WebView\" and Google Chrome in Google Play, then open the app again.";
+          } else {
+            text.textContent = ru
+              ? "Не удалось загрузить приложение. Обновите браузер или приложение и попробуйте снова."
+              : "The app could not load. Update your browser or the app, then try again.";
+          }
+          var button = d.createElement("button");
+          button.type = "button";
+          button.style.cssText = "font-size:15px;padding:10px 22px;border:0;border-radius:8px;background:#1f6f78;color:#fff";
+          button.textContent = ru ? "Попробовать снова" : "Try again";
+          button.onclick = function () { w.location.reload(); };
+          var info = d.createElement("p");
+          info.style.cssText = "font-size:12px;color:#6a737d;margin:24px 0 0;word-break:break-word";
+          info.textContent = detail ? String(detail) : "";
+          box.appendChild(title);
+          box.appendChild(text);
+          box.appendChild(button);
+          box.appendChild(info);
+          root.innerHTML = "";
+          root.appendChild(box);
+        }
+
+        w.__fortaShowUnsupported = showUnsupported;
+
+        // Capture phase: a module script that fails to load fires `error` at its
+        // <script> element only (it does not bubble); an exception while a
+        // module evaluates arrives as an ErrorEvent on window with `filename`.
+        w.addEventListener("error", function (event) {
+          if (w.__fortaBootStarted || scheduled || !event) return;
+          var target = event.target;
+          var scriptSrc = target && target.tagName === "SCRIPT" ? target.src : "";
+          if (target && target.tagName && !scriptSrc) return;
+          var source = scriptSrc || event.filename;
+          if (!isOwnScript(source)) return;
+          scheduled = true;
+          var detail = scriptSrc ? "Failed to load " + scriptSrc : event.message || "";
+          w.setTimeout(function () { showUnsupported(detail); }, FALLBACK_DELAY_MS);
+        }, true);
+      })(window, document, navigator);
+    </script>
+    <script nomodule>
+      window.__fortaShowUnsupported && window.__fortaShowUnsupported("ES modules are not supported");
+    </script>
+    <!-- Built-ins missing from old WebView builds (audit W2B-02); before the module entry. -->
+    <script src="./legacy-polyfills.js"></script>
+    <!--
       BUG-03: Prevent Android WebView from flipping text direction to RTL.
       Must run before any framework code — inline script, not module.
     -->

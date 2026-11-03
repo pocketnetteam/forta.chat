@@ -2,6 +2,7 @@
 <resources>
     <!-- Push notifications -->
     <string name="push_new_message">Новое сообщение</string>
+    <string name="push_missed_call">Пропущенный звонок</string>
     <string name="push_photo">📷 Фото</string>
     <string name="push_video">🎥 Видео</string>
     <string name="push_voice_message">🎙 Голосовое сообщение</string>

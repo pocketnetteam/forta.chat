@@ -18,6 +18,7 @@ vi.mock("@/shared/lib/cache/chat-cache", () => ({
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
     isReady: () => true,
+    hasLiveSync: () => true,
     getUserId: () => "@mock:s",
     getRoom: () => null,
     getRooms: () => [],
@@ -68,6 +69,7 @@ describe("preloadVisibleRooms", () => {
       createRoom: vi.fn(),
       getRoom: vi.fn(() => ({ getLiveTimeline: () => ({ getEvents: () => [] }), currentState: { getStateEvents: () => [] } })),
       isReady: vi.fn(() => true),
+      hasLiveSync: () => true,
       getUserId: vi.fn(() => "@mock:s"),
       getRooms: vi.fn(() => [{ roomId: "!fake:s" }]),
     } as any);

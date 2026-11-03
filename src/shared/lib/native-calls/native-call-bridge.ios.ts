@@ -1,4 +1,7 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { IOSVoIPPush } from '@/shared/lib/push/ios-voip-push';
+import { isCallKitReleaseEcho } from './callkit-release-echo';
+import { createAnswerReminder } from './answer-reminder';
 import { Camera } from '@capacitor/camera';
 import type {
   AudioProbeResult,
@@ -122,14 +125,20 @@ export interface IOSCallAudioPlugin {
     isBtScoOn: boolean;
   }>;
   setOutput(opts: { device: string }): Promise<void>;
+  /** A local notification in `delayMs`, replacing an earlier one (see answer-reminder.ts). */
+  scheduleAnswerReminder(opts: { delayMs: number; title: string; body: string }): Promise<void>;
+  /** Withdraws the reminder, pending or shown. */
+  cancelAnswerReminder(): Promise<void>;
   /**
    * AVAudioSession.interruptionNotification (.began). Fires when iOS takes
-   * the audio session away from us — typically a real cellular phone call,
-   * Siri activation, or a system alarm.
+   * the audio session away from us — a real cellular phone call, Siri, a
+   * system alarm, or WebKit's own GPU process starting the call's audio.
+   * `phoneCall`: the system has a call in progress (`CXCallObserver`);
+   * absent from native builds before 2026-10-16.
    */
   addListener(
     event: 'audioInterruptionBegan',
-    cb: () => void,
+    cb: (data?: { phoneCall?: boolean }) => void,
   ): Promise<PluginListenerHandle>;
   /**
    * AVAudioSession.interruptionNotification (.ended). The `shouldResume`
@@ -169,9 +178,11 @@ function unwrapEvent(e: IncomingCallEvent): { callId: string; roomId?: string } 
  */
 let lastCallKitReleaseAt = 0;
 
-/** True while an interruption could still be the echo of our own CallKit release. */
-export function isRecentCallKitRelease(now: number = Date.now()): boolean {
-  return now - lastCallKitReleaseAt < 5_000;
+/** True while an interruption could still be the echo of our own CallKit
+ *  release (see `isCallKitReleaseEcho`); `connectedAt` is the current call's
+ *  connect time, when it has connected. */
+export function isRecentCallKitRelease(now: number = Date.now(), connectedAt: number | null = null): boolean {
+  return isCallKitReleaseEcho(now, lastCallKitReleaseAt, connectedAt);
 }
 
 export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
@@ -222,6 +233,22 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
    */
   const releasedToWebKit = new Set<string>();
 
+  /** Tells the user to open Forta when an Accept off screen waits for the microphone. */
+  const answerReminder = createAnswerReminder({
+    schedule: (opts) => IOSCallAudio.scheduleAnswerReminder(opts),
+    cancel: () => IOSCallAudio.cancelAnswerReminder(),
+    isPageVisible: () => typeof document === 'undefined' || document.visibilityState === 'visible',
+    text: async (callerName) => {
+      const { tRaw } = await import('@/shared/lib/i18n');
+      return { title: callerName || 'Forta', body: tRaw('call.openToAnswer') };
+    },
+  });
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') answerReminder.settle();
+    });
+  }
+
   async function releaseCallKitAudio(): Promise<void> {
     try {
       const { calls } = await IncomingCallKit.getActiveCalls();
@@ -229,6 +256,11 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
       if (!accepted) return;
       releasedToWebKit.add(accepted.callId);
       lastCallKitReleaseAt = Date.now();
+      // The plugin forgets the call once its record ends; tell the VoIP push
+      // coordinator, so a repeated push for this call does not ring it again (C07).
+      void IOSVoIPPush.markHandedOff({ callId: accepted.callId }).catch((e: unknown) => {
+        console.warn('[NativeCallBridge.iOS] markHandedOff failed:', e);
+      });
       await IncomingCallKit.endCall({ callId: accepted.callId, reason: 'audio-handoff' });
       console.log('[NativeCallBridge.iOS] CallKit call released to WebKit audio:', accepted.callId);
     } catch (e) {
@@ -361,6 +393,7 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
     },
 
     async reportCallConnected(_opts) {
+      answerReminder.settle();
       // No `markConnected` in this plugin. CallKit's default behavior
       // for incoming calls auto-transitions to "connected" once the
       // user taps Accept. Outgoing calls aren't reported at all (see
@@ -368,6 +401,7 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
     },
 
     async reportCallEnded(opts) {
+      answerReminder.settle();
       knownCalls.delete(opts.callId);
       try {
         await IncomingCallKit.endCall({ callId: opts.callId });
@@ -413,15 +447,30 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
     },
 
     async getAudioDevices() {
-      // v1: single "default" entry — iOS's audio routing is exposed via
-      // the Control Center route picker, not an in-app device list.
-      // Custom picker UI is explicitly out of scope per Step 6 plan.
-      return { active: 'default', devices: [{ type: 'default', name: 'Default' }] };
+      // The speaker toggle syncs from `active` (C06). Headsets and AirPods
+      // stay with the system route picker, so only speaker vs earpiece is
+      // reported; an unreadable session leaves the route unknown.
+      const devices = [
+        { type: 'earpiece', name: 'Earpiece' },
+        { type: 'speaker', name: 'Speaker' },
+      ];
+      try {
+        const status = await IOSCallAudio.getStatus();
+        return { active: status.isSpeakerOn ? 'speaker' : 'earpiece', devices };
+      } catch (e) {
+        console.warn('[NativeCallBridge.ios] getStatus failed:', e);
+        return { active: '', devices };
+      }
     },
 
-    async setAudioDevice(_opts) {
-      // v1 no-op. Could route to IOSCallAudio.setOutput later when an
-      // in-app picker is added.
+    async setAudioDevice(opts) {
+      // C06 (calls review 2026-10-04): this was a no-op, so the speaker
+      // button only changed its icon. AVAudioSession's output override moves
+      // the call between earpiece and loudspeaker; other targets are left to
+      // the system route picker. A refusal rejects, and the bridge rolls the
+      // toggle back.
+      if (opts.type !== 'speaker' && opts.type !== 'earpiece') return;
+      await IOSCallAudio.setOutput({ device: opts.type });
     },
 
     async startAudioRouting(opts) {
@@ -486,6 +535,7 @@ export function createIOSNativeCallAdapter(): NativeCallNativePlugin {
             // dead as with CallKit alive — WebKit's audio started under the
             // CallKit session and did not recover once it was gone.
             void releaseCallKitAudio().finally(() => cb(unwrapEvent(e)));
+            answerReminder.answered(e.call?.callerName ?? '');
           });
         case 'callDeclined':
           return IncomingCallKit.addListener('callDeclined', (e) => {

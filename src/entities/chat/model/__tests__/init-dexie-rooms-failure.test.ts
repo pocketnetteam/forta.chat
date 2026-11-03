@@ -8,6 +8,7 @@ const mockMatrixService = {
   getRoom: vi.fn(() => ({ selfMembership: "join" })),
   sendReadReceipt: vi.fn(async () => true),
   isReady: vi.fn(() => false),
+  hasLiveSync: () => true,
   kit: {
     client: { getUserId: () => "@me:server" },
     isTetatetChat: vi.fn(() => true),

@@ -64,6 +64,7 @@ vi.mock("@/entities/matrix", () => ({
         }
       : undefined)),
     isReady: vi.fn(() => true),
+    hasLiveSync: () => true,
     getUserId: vi.fn(() => "@mock:s"),
     getRooms: vi.fn(() => []),
     getRoomAccountData: vi.fn(() => null),

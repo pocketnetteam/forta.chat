@@ -1,3 +1,13 @@
+// Electron Tor fetch over a BroadcastChannel to the main process.
+//
+// Live only under the Vite dev server (http://localhost): the packaged app loads
+// app://chat, initTransport() skips non-http(s) origins, the app scheme has no
+// service worker, and packaged Tor goes through the session SOCKS proxy. Known
+// gaps, left while the path stays dev-only (review 2026-10-08, DT1/DT2): a body
+// error after the headers rejects an already settled promise instead of
+// erroring the stream, so the reader waits for ever; an abort signal or a body
+// cancel never reaches the main handler; and offAll() is called without a
+// request id, so per-request listeners are not removed.
 class FetchReceiver {
     onmessageListeners = {};
 

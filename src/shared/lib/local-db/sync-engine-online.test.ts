@@ -25,6 +25,7 @@ class TestDb extends Dexie {
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: () => ({
     isReady: () => true,
+    hasLiveSync: () => true,
     sendEncryptedText: vi.fn(() => "$evt_server"),
     sendText: vi.fn(() => "$evt_server"),
     uploadContentMxc: vi.fn(() => "mxc://s/u"),

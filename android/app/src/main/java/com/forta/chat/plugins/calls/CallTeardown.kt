@@ -34,8 +34,15 @@ object CallTeardown {
                 when (action) {
                     CallTeardownPolicy.Action.STOP_RINGER ->
                         IncomingRinger.stop(state.ringingCallId)
+                    // The owner is checked again where the stop runs: a call
+                    // can take the router over between collectState and here
+                    // (AND1). A cold start has no owner to protect.
                     CallTeardownPolicy.Action.FORCE_STOP_ROUTER ->
-                        AudioRouter.getSharedInstance(app).forceStop("teardown $reason")
+                        if (reason == CallTeardownPolicy.Reason.COLD_START) {
+                            AudioRouter.getSharedInstance(app).forceStop("teardown $reason")
+                        } else {
+                            AudioRouter.getSharedInstance(app).forceStopUnlessOwnedByAnother(callId, "teardown $reason")
+                        }
                     CallTeardownPolicy.Action.STOP_FOREGROUND_SERVICE ->
                         CallForegroundService.stop(app, callId)
                 }
@@ -66,6 +73,7 @@ object CallTeardown {
             routerActive = AudioRouter.getSharedInstance(app).isRoutingActive(),
             sessionMarkerOpen = AudioRouter.hasOpenSessionMarker(app),
             ringingCallId = IncomingRinger.ringingCallId,
+            routerOwnerCallId = AudioRouter.getSharedInstance(app).routingOwner(),
         )
     }
 }

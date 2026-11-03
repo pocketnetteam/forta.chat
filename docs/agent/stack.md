@@ -42,8 +42,8 @@ Detail reference for [AGENTS.md](../../AGENTS.md). Versions are ranges from `pac
 
 ## Configuration
 
-- Env: `.env` via Vite `import.meta.env` (no separate `INTEGRATIONS.md`)
-- `vite.config.ts`: build + Vitest (`test` block: happy-dom, `src/**/*.test.ts` / `scripts/**/*.test.ts`); there is no separate `vitest.config.ts`
+- Env: `.env` via Vite `import.meta.env` (no separate `INTEGRATIONS.md`); `VITE_BUG_REPORT_ENDPOINT` is the bug-report proxy URL (CI variable `BUG_REPORT_ENDPOINT`)
+- `vite.config.ts`: build + Vitest (`test` block: happy-dom, `src/**/*.test.ts` / `scripts/**/*.test.ts` / `services/**/*.test.ts`); there is no separate `vitest.config.ts`
 - `tsconfig.json`: strict + path aliases (`@/`, `@app/`, `@entities/`, ...)
 - `tailwind.config.js`: theme tokens
 - `capacitor.config.ts`: `appId`, webDir, plugins; **minSdk/targetSdk** live in `android/variables.gradle` (24 / 36)

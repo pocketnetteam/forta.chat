@@ -5,7 +5,7 @@ package com.forta.chat.plugins.calls
  * events. Used by [InviteThrottleGuard]'s consumers to surface a snapshot
  * of recent invite delivery latencies in bug reports.
  *
- * Records last [maxRecords] entries with `(receivedAtMs, sentAtMs, isExpired)`.
+ * Records last [maxRecords] entries: timing, FCM priority and what became of the push.
  * The bug-reporter pulls a snapshot to help split S1 (accept-crash) from
  * S3 (FCM throttle / Doze) when the auto-bug-reporter envelope is sent.
  *
@@ -23,8 +23,30 @@ class InviteThrottleTracker(private val maxRecords: Int = 5) {
         val expired: Boolean,
         /** `call_id` from the FCM payload, or null when missing. */
         val callId: String?,
+        /** `RemoteMessage.priority` as delivered (1 high, 2 normal, 0 unknown). */
+        val priority: Int = 0,
+        /** `RemoteMessage.originalPriority` as sent; differs when FCM downgraded it. */
+        val originalPriority: Int = 0,
+        /** [InvitePushPolicy.Outcome.wire]: what became of the push. */
+        val outcome: String = InvitePushPolicy.Outcome.RANG.wire,
     ) {
         val deliveryLatencyMs: Long get() = receivedAtMs - sentAtMs
+
+        /** "missing" when the push carried no send time: the latency means nothing then. */
+        val sentTimeSource: String get() = if (sentAtMs > 0L) "fcm" else "missing"
+
+        /** Field map handed to JS (CallPlugin.getInviteThrottleSnapshot). */
+        fun toWireMap(): Map<String, Any> = mapOf(
+            "receivedAtMs" to receivedAtMs,
+            "sentAtMs" to sentAtMs,
+            "deliveryLatencyMs" to deliveryLatencyMs,
+            "expired" to expired,
+            "callId" to (callId ?: ""),
+            "priority" to priority,
+            "originalPriority" to originalPriority,
+            "sentTimeSource" to sentTimeSource,
+            "outcome" to outcome,
+        )
     }
 
     private val records: ArrayDeque<Record> = ArrayDeque(maxRecords)

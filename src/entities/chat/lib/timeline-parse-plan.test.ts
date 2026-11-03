@@ -86,6 +86,23 @@ describe("classifyTimelineEvent / describeTimeline", () => {
     expect(d.edits).toEqual([{ targetId: "$m", ts: 10 }]);
   });
 
+  it("lists invites nobody ended as rows apart from the message rows", () => {
+    const invite = (id: string, callId: string) => raw(id, "m.call.invite", { call_id: callId, lifetime: 60_000 });
+    const events = [
+      invite("$orphan", "c1"),
+      invite("$ended", "c2"),
+      raw("$h", "m.call.hangup", { call_id: "c2" }),
+      raw("$m", "m.room.message", { body: "hi" }),
+    ];
+    const later = 10 + 10 * 60_000;
+
+    const d = describeTimeline(events, later);
+    expect(d.orphanInviteIds).toEqual(["$orphan"]);
+    // The oldest message row still anchors hole detection: an invite is no history row.
+    expect(d.rowEventIds).toEqual(["$h", "$m"]);
+    expect(describeTimeline(events, 20).orphanInviteIds).toEqual([]); // still ringing
+  });
+
   it("pageEventIds takes the prepended page", () => {
     expect([...pageEventIds([raw("$1", "x", {}), raw("$2", "x", {}), raw("$3", "x", {})], 2)]).toEqual(["$1", "$2"]);
   });

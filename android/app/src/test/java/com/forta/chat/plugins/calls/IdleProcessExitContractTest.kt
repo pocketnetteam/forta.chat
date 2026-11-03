@@ -25,7 +25,7 @@ class IdleProcessExitContractTest {
             ?: error("$relative not found. Tried: $candidates from ${File(".").absolutePath}")
     }
 
-    private val connection by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val connection by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
     private val callService by lazy { source("com/forta/chat/plugins/calls/CallForegroundService.kt") }
     private val exit by lazy { source("com/forta/chat/plugins/calls/IdleProcessExit.kt") }
     private val push by lazy { source("com/forta/chat/FortaFirebaseMessagingService.kt") }

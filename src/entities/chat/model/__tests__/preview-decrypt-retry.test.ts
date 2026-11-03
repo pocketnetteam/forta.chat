@@ -34,6 +34,7 @@ const mockMatrixService = {
   getRoom: vi.fn(() => mxRoom),
   getRooms: vi.fn(() => [mxRoom]),
   isReady: vi.fn(() => true),
+  hasLiveSync: () => true,
   sendReadReceipt: vi.fn(async () => true),
   kit: {
     client: { getUserId: () => "@me:server" },

@@ -15,6 +15,10 @@ import { MATRIX_SERVER, MATRIX_MIRRORS } from "@/shared/config/constants";
 /** Short per-host probe budget for the boot ping-and-pick (A1/A5). */
 export const PING_TIMEOUT_MS = 4_000;
 
+/** Per-host probe budget under Tor, where a request to a host the circuit has
+ *  not reached yet easily takes longer than PING_TIMEOUT_MS (audit S8-01). */
+export const PING_TIMEOUT_TOR_MS = 20_000;
+
 /** Exponential backoff bounds for retrying the SAME host on a sync ERROR.
  *  Replaces the old tight `retryImmediately()` loop (WEE-105 H2). */
 export const ERROR_RETRY_BASE_MS = 2_000;
@@ -207,6 +211,15 @@ export class SyncWatchdog {
     this.clearStaleTimer();
     this.consecutiveErrors = 0;
     this.deps.onFailover();
+  }
+
+  /** The homeserver rejected the access token (M_UNKNOWN_TOKEN — the SDK's
+   *  Session.logged_out). The SDK stops syncing after that single ERROR, so
+   *  waiting for the stale timer left the app dead for 5 minutes while the
+   *  banner said "up to date". Recover now: onFailover logs in again with the
+   *  credentials derived from the key (audit S3b-02). */
+  sessionLost(): void {
+    this.trigger();
   }
 
   /** Re-arm after a failover recreate completes so the next mirror is watched

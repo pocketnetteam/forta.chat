@@ -194,7 +194,7 @@ class CallForegroundServiceDestroyContractTest {
         assertTrue(
             "releaseMediaAsync must be the thing that closes the peer " +
                 "connections:\n$helper",
-            helper.contains("closeAllPeerConnections()"),
+            helper.contains("closeAllPeerConnections(createdBefore)"),
         )
     }
 
@@ -277,7 +277,7 @@ class CallForegroundServiceDestroyContractTest {
         val helper = extractPrivateFunctionBody("releaseMediaAsync")
         val check = helper.indexOf("CallServiceStopPolicy.isStale(owner, startGeneration.get())")
         val execute = helper.indexOf("mediaReleaseExecutor.execute")
-        val close = helper.indexOf("closeAllPeerConnections()")
+        val close = helper.indexOf("closeAllPeerConnections(createdBefore)")
         assertTrue("the worker must re-check the owner:\n$helper", check >= 0)
         assertTrue("the re-check must run inside the worker, not before scheduling:\n$helper", check > execute)
         assertTrue("the re-check must come before closeAllPeerConnections():\n$helper", check < close)
@@ -331,7 +331,7 @@ class CallForegroundServiceDestroyContractTest {
                 webRtcPlugin.substring(start, i - 1)
             } ?: error("WebRTCPlugin.closeAllPeerConnections not found")
         val check = body.indexOf("CallForegroundService.isStartStale(callId)")
-        val close = body.indexOf("manager?.closeAllPeerConnections()")
+        val close = body.indexOf("manager?.closeAllPeerConnections(")
         assertTrue("closeAllPeerConnections must ask whether its call is stale:\n$body", check >= 0)
         assertTrue("the check must come before the close:\n$body", check < close)
         assertTrue("a stale close must return without closing:\n$body", body.contains("return"))

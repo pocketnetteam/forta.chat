@@ -26,6 +26,7 @@ import type {
   AudioTimelineEntry,
   InviteThrottleRecord,
   InviteThrottleSnapshot,
+  RingAudioRecord,
 } from "@/shared/lib/native-calls";
 
 /** Mirror of the call feature's IceSummary; kept here so shared/ owns the envelope shape. */
@@ -99,6 +100,11 @@ export interface BugReportCallDiagnostics {
    */
   audioTimeline: AudioTimelineEntry[];
   /**
+   * The audio state of the last incoming rings, oldest first: the mode the
+   * ringtone played in and whether Telecom held the call. Android only.
+   */
+  ringAudio: RingAudioRecord[];
+  /**
    * Relay/host/srflx candidates and the selected pair of the last call on
    * this device, from the call feature's diagnostics. Null when no call
    * has run in this process. Every platform.
@@ -122,6 +128,7 @@ export const EMPTY_CALL_DIAGNOSTICS: BugReportCallDiagnostics = {
   expiredInviteCount: 0,
   webrtcEngine: "native",
   audioTimeline: [],
+  ringAudio: [],
   ice: null,
   tor: null,
   fullScreenIntentAllowed: null,
@@ -153,6 +160,7 @@ export async function collectCallDiagnostics(): Promise<BugReportCallDiagnostics
   // this on non-Android, but the explicit `if (!isAndroid)` here keeps
   // the bug-report envelope shape obvious to triagers reading the JSON.
   let audioTimeline: AudioTimelineEntry[] = [];
+  let ringAudio: RingAudioRecord[] = [];
   let inviteHistory: InviteThrottleRecord[] = [];
   let fullScreenIntentAllowed: boolean | null = null;
   if (isAndroid) {
@@ -161,6 +169,7 @@ export async function collectCallDiagnostics(): Promise<BugReportCallDiagnostics
       .then((status) => (status.manageable ? status.allowed : null))
       .catch(() => null);
     audioTimeline = await nativeCallBridge.getAudioTimeline().catch(() => []);
+    ringAudio = await nativeCallBridge.getRingAudioLog().catch(() => []);
     const inviteSnapshot: InviteThrottleSnapshot = await nativeCallBridge
       .getInviteThrottleSnapshot()
       .catch(() => ({ records: [] }));
@@ -177,6 +186,7 @@ export async function collectCallDiagnostics(): Promise<BugReportCallDiagnostics
     expiredInviteCount: inviteHistory.filter((r) => r.expired).length,
     webrtcEngine,
     audioTimeline,
+    ringAudio,
     ...extras,
     fullScreenIntentAllowed,
   };

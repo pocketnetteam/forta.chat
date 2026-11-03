@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mockGetAudioStatus = vi.fn();
 const mockGetInviteThrottleSnapshot = vi.fn();
 const mockGetAudioTimeline = vi.fn();
+const mockGetRingAudioLog = vi.fn();
 
 const mockGetFullScreenIntentStatus = vi.fn();
 vi.mock("@/shared/lib/push/push-data-plugin", () => ({
@@ -16,6 +17,7 @@ vi.mock("@/shared/lib/native-calls", () => ({
     getAudioStatus: mockGetAudioStatus,
     getInviteThrottleSnapshot: mockGetInviteThrottleSnapshot,
     getAudioTimeline: mockGetAudioTimeline,
+    getRingAudioLog: mockGetRingAudioLog,
   },
 }));
 
@@ -24,6 +26,7 @@ describe("collectCallDiagnostics", () => {
     vi.resetAllMocks();
     vi.resetModules();
     mockGetAudioTimeline.mockResolvedValue([]);
+    mockGetRingAudioLog.mockResolvedValue([]);
   });
   afterEach(() => {
     vi.resetModules();
@@ -197,6 +200,49 @@ describe("collectCallDiagnostics", () => {
     expect(mockGetAudioTimeline).toHaveBeenCalledOnce();
   });
 
+  // "Rings very quietly": the report needs the mode the ringtone played in
+  // and whether Telecom held the call, not the mode when the form opened.
+  it("carries the audio state of the last rings on Android", async () => {
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: true,
+      isAndroid: true,
+      isIOS: false,
+    }));
+    mockGetAudioStatus.mockResolvedValue({ mode: "MODE_NORMAL", isSpeakerOn: false, isBtScoOn: false });
+    mockGetInviteThrottleSnapshot.mockResolvedValue({ records: [] });
+    const ring = {
+      atMs: 1_000,
+      callId: "call-1",
+      modeAtArm: "MODE_IN_COMMUNICATION",
+      modeReset: true,
+      telecom: "none",
+      modeInRing: "MODE_NORMAL",
+    };
+    mockGetRingAudioLog.mockResolvedValue([ring]);
+
+    const { collectCallDiagnostics } = await import("../collect-call-diagnostics");
+    const out = await collectCallDiagnostics();
+
+    expect(out.ringAudio).toEqual([ring]);
+  });
+
+  it("keeps the rest of the report when the ring log query fails", async () => {
+    vi.doMock("@/shared/lib/platform", () => ({
+      isNative: true,
+      isAndroid: true,
+      isIOS: false,
+    }));
+    mockGetAudioStatus.mockResolvedValue({ mode: "MODE_NORMAL", isSpeakerOn: false, isBtScoOn: false });
+    mockGetInviteThrottleSnapshot.mockResolvedValue({ records: [] });
+    mockGetRingAudioLog.mockRejectedValue(new Error("not registered"));
+
+    const { collectCallDiagnostics } = await import("../collect-call-diagnostics");
+    const out = await collectCallDiagnostics();
+
+    expect(out.ringAudio).toEqual([]);
+    expect(out.audioMode).toBe("MODE_NORMAL");
+  });
+
   it("keeps the rest of the report when the timeline query fails", async () => {
     vi.doMock("@/shared/lib/platform", () => ({
       isNative: true,
@@ -226,6 +272,7 @@ describe("collectCallDiagnostics — ICE and Tor extras (O05/O14)", () => {
     vi.resetAllMocks();
     vi.resetModules();
     mockGetAudioTimeline.mockResolvedValue([]);
+    mockGetRingAudioLog.mockResolvedValue([]);
     mockGetAudioStatus.mockResolvedValue({ mode: "MODE_NORMAL", isSpeakerOn: false, isBtScoOn: false });
     mockGetInviteThrottleSnapshot.mockResolvedValue({ records: [] });
   });
@@ -274,6 +321,7 @@ describe("collectCallDiagnostics — full-screen intent (O10)", () => {
     vi.resetAllMocks();
     vi.resetModules();
     mockGetAudioTimeline.mockResolvedValue([]);
+    mockGetRingAudioLog.mockResolvedValue([]);
     mockGetAudioStatus.mockResolvedValue({ mode: "MODE_NORMAL", isSpeakerOn: false, isBtScoOn: false });
     mockGetInviteThrottleSnapshot.mockResolvedValue({ records: [] });
   });

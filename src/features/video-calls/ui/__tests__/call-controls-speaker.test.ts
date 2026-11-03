@@ -30,13 +30,15 @@ vi.mock("@/shared/lib/native-webrtc", () => ({
 // Mutable platform flag — flipped per test before mount. The remaining
 // exports are stubbed as web defaults so a module pulled in transitively
 // (locale store, native-call bridge) does not fail on a missing export.
-const platformMock = { isNative: true };
+const platformMock = { isNative: true, isIOS: false };
 vi.mock("@/shared/lib/platform", () => ({
   get isNative() {
     return platformMock.isNative;
   },
   isAndroid: false,
-  isIOS: false,
+  get isIOS() {
+    return platformMock.isIOS;
+  },
   isElectron: false,
   isWeb: true,
   hasTor: false,
@@ -120,6 +122,7 @@ describe("CallControls — native speaker toggle (WEE-60)", () => {
   beforeEach(async () => {
     setActivePinia(createPinia());
     platformMock.isNative = true;
+    platformMock.isIOS = false;
     mediaDevicesState.audioOutputDevices.value = [];
     setAudioDevice.mockClear();
     toastSpy.mockClear();
@@ -237,5 +240,29 @@ describe("CallControls — native speaker toggle (WEE-60)", () => {
 
     expect(wrapper.find('[data-testid="speaker-toggle"]').exists()).toBe(false);
     expect(setAudioDevice).not.toHaveBeenCalled();
+  });
+
+  // iPhone XR 2026-10-14 (C06): WebKit plays the call audio in its own audio
+  // session, on the loudspeaker; the app's output override never reaches it,
+  // so the toggle switched its icon and nothing else. Hidden on iOS (owner).
+  it("does not render the toggle on iOS, where it cannot move the call audio", async () => {
+    platformMock.isIOS = true;
+
+    const store = useCallStore();
+    store.setActiveCall(makeCall("voice"));
+    const wrapper = mount(CallControls);
+
+    expect(wrapper.find('[data-testid="speaker-toggle"]').exists()).toBe(false);
+  });
+
+  // Regression: unmounting while the subscription was being set up left the
+  // audioDevicesChanged listener registered for good — one per cycle.
+  it("drops the device listener when unmounted before it was subscribed", async () => {
+    const store = useCallStore();
+    store.setActiveCall(makeCall("voice"));
+    const wrapper = mount(CallControls);
+    wrapper.unmount();
+    await flushPromises();
+    expect(audioDevicesCb).toBeNull();
   });
 });

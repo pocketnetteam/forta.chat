@@ -142,6 +142,11 @@ export interface Message {
      * on records written before it was stored.
      */
     callId?: string;
+    /**
+     * Taken from an invite nobody ended (`call-outcome.ts`, `isOrphanedInvite`):
+     * it stands in for the call's missing hangup and yields to it if it comes.
+     */
+    fromInvite?: boolean;
   };
   /** Poll metadata — present when type === poll */
   pollInfo?: PollInfo;

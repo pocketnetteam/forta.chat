@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ref, effectScope, type EffectScope } from "vue";
-import { useFeedVideoPlayer, _resetActivePlayer } from "./use-feed-video-player";
+import { useFeedVideoPlayer, _resetActivePlayer, FEED_VIDEO_LOAD_TIMEOUT_MS } from "./use-feed-video-player";
 import {
   getVideoPosition,
   saveVideoPosition,
@@ -501,6 +501,63 @@ describe("useFeedVideoPlayer", () => {
       await playPromise;
 
       expect(player.state.value).toBe("error");
+    });
+
+    // Audit S4-02: a connection that stalls fires neither loadedmetadata nor
+    // error — the spinner spun forever and every later tap was ignored.
+    it("gives up on a load that never answers, and the next tap plays", async () => {
+      const player = setup();
+
+      const playPromise = player.play();
+      await vi.advanceTimersByTimeAsync(FEED_VIDEO_LOAD_TIMEOUT_MS);
+      await playPromise;
+      expect(player.state.value).toBe("error");
+
+      // The retry reloads the source; a tap is no longer swallowed.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(player.state.value).toBe("loading");
+      await player.play();
+      expect(videoEl.play).toHaveBeenCalledTimes(1);
+      expect(player.state.value).toBe("playing");
+    });
+
+    it("gives up when playback never starts after metadata", async () => {
+      const player = setup();
+      (videoEl.play as ReturnType<typeof vi.fn>).mockReturnValueOnce(new Promise(() => {}));
+
+      const playPromise = player.play();
+      videoEl._emit("loadedmetadata");
+      await vi.advanceTimersByTimeAsync(FEED_VIDEO_LOAD_TIMEOUT_MS);
+      await playPromise;
+      expect(player.state.value).toBe("error");
+
+      await player.play();
+      expect(videoEl.play).toHaveBeenCalledTimes(2);
+    });
+
+    it("a stalled preload retries, then hands over to the fallback", async () => {
+      const onFatalError = vi.fn();
+      setup({ onFatalError });
+      triggerIO(getPreloadObserver(), true);
+
+      await vi.advanceTimersByTimeAsync(4 * FEED_VIDEO_LOAD_TIMEOUT_MS + 1000 + 3000 + 6000);
+      expect(onFatalError).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts one failed load once, though both the element and play() see it", async () => {
+      const onFatalError = vi.fn();
+      const player = setup({ onFatalError });
+
+      const playPromise = player.play();
+      videoEl._emit("error");
+      await playPromise;
+
+      for (const delay of [1000, 3000, 6000]) {
+        await vi.advanceTimersByTimeAsync(delay);
+        expect(onFatalError).not.toHaveBeenCalled();
+        videoEl._emit("error");
+      }
+      expect(onFatalError).toHaveBeenCalledTimes(1);
     });
   });
 

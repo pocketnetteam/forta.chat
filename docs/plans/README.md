@@ -17,6 +17,10 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 
 | Plan | State | What is open |
 |---|---|---|
+| [2026-09-28-full-app-audit](2026-09-28-full-app-audit.md) | 50 fixed, 3 partly (W2D-02, S10-05 Electron report-only CSP, S10-06 proxy in code), 4 closed otherwise, 4 open; merged with the calls cleanup (`c121d525`) | W2D-02 (ChannelView virtualization), S10-06 proxy deploy and token revocation by the maintainers, owner decisions S10-01, S8-02, S4-05, W2C-06; CSP on web and mobile |
+| [2026-10-08-calls-next-session](2026-10-08-calls-next-session.md) | calls cleanup in PR #276 | iOS checks on the XR (C06, C07, C08), Tor proxy `Host`, WebRTC engine toggle removal |
+| [2026-10-10-missed-push-calls](2026-10-10-missed-push-calls.md) | T1–T3 done on `audit/full-app-2026-09` | T4 done 2026-10-13 (rings in deep Doze on the Samsung); T5 tester data (questions handed to the owner); missed-call card for an invite with no hangup |
+| [2026-10-15-ios-native-webrtc](2026-10-15-ios-native-webrtc.md) | not started (owner: keep as a task) | everything: native WebRTC proxy on iOS, CallKit-owned audio, earpiece/speaker |
 | [2026-10-14-firebase-fortachat-migration](2026-10-14-firebase-fortachat-migration.md) | code in `7c99fe38`, switched off (release stays on `forta-chat`) | app_id + configs swap, Sygnal/APNs check, device check, iOS duplicates |
 | [2026-10-13-peertube-hls-player](2026-10-13-peertube-hls-player.md) | stages 0–6 in code (not committed) | 7: device checks (`manual-verification.md`) |
 | [2026-10-13-sdk-upstream-sliding-sync](2026-10-13-sdk-upstream-sliding-sync.md) | plan only; stage 0 decided (cache variant A) | stages 1–8: fork rebase in `C:\inetpub2022\matrix-js-sdk`, local test on Forta, usage docs, npm publish (owner) |

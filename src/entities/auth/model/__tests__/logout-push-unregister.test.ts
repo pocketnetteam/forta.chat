@@ -26,6 +26,18 @@ describe("logout stops this device's pushes", () => {
     expect(unregister).toBeLessThan(reset);
   });
 
+  // Logout cleared the call store and stopped Matrix without telling the peer: the
+  // caller rang until the invite expired (call-logout.ts has the behaviour).
+  it("ends the call in progress before the call store is cleared and Matrix is reset", () => {
+    const block = logoutBlock();
+    const endCall = block.indexOf("await endCallBeforeLogout()");
+    expect(endCall).toBeGreaterThan(-1);
+    expect(endCall).toBeLessThan(block.indexOf("useCallStore().clearCall()"));
+    expect(endCall).toBeLessThan(block.indexOf("resetMatrixClientService()"));
+    const src = readFileSync(resolve(__dirname, "../stores.ts"), "utf-8");
+    expect(src).toMatch(/async function endCallBeforeLogout\(\)[\s\S]{0,300}await endCallForLogout\(\)/);
+  });
+
   it("settles pushes when the app starts with nobody signed in", () => {
     const app = readFileSync(resolve(__dirname, "../../../../app/App.vue"), "utf-8");
     expect(app).toMatch(/else if \(!authStore\.isAuthenticated\)[\s\S]{0,200}settleSignedOutLaunch\(\)/);

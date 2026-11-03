@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest';
 import {
   PUSHER_APP_ID_ANDROID,
@@ -49,6 +50,7 @@ describe('isStalePusherEntry', () => {
       { app_id: 'fortaios', pushkey: 'old-token' },
       'fortaios',
       'new-token',
+      ['old-token'],
     );
     expect(stale).toBe(true);
   });
@@ -58,6 +60,7 @@ describe('isStalePusherEntry', () => {
       { app_id: 'fortaios', pushkey: 'same-token' },
       'fortaios',
       'same-token',
+      ['same-token'],
     );
     expect(stale).toBe(false);
   });
@@ -69,6 +72,7 @@ describe('isStalePusherEntry', () => {
       { app_id: 'fortaandroid', pushkey: 'android-device-token' },
       'fortaios',
       'ios-device-token',
+      ['android-device-token'],
     );
     expect(stale).toBe(false);
   });
@@ -78,6 +82,7 @@ describe('isStalePusherEntry', () => {
       { app_id: 'im.element.ios', pushkey: 'element-token' },
       'fortaios',
       'forta-token',
+      ['element-token'],
     );
     expect(stale).toBe(false);
   });
@@ -87,6 +92,7 @@ describe('isStalePusherEntry', () => {
       { pushkey: 'some-token' },
       'fortaios',
       'new-token',
+      ['some-token'],
     );
     expect(stale).toBe(false);
   });
@@ -145,12 +151,40 @@ describe('buildVoipPusherPayload (iOS PushKit)', () => {
   });
 });
 
+describe('isStalePusherEntry — other devices on the account', () => {
+  // Regression: two phones on one account deleted each other's pushers, since
+  // any same-app_id pusher with another token counted as stale.
+  it('keeps a same-platform pusher this install never registered', () => {
+    expect(
+      isStalePusherEntry({ app_id: 'fortaandroid', pushkey: 'other-phone' }, 'fortaandroid', 'mine', ['mine-old']),
+    ).toBe(false);
+  });
+
+  it('removes this install\'s own rotated token', () => {
+    expect(
+      isStalePusherEntry({ app_id: 'fortaandroid', pushkey: 'mine-old' }, 'fortaandroid', 'mine', ['mine-old']),
+    ).toBe(true);
+  });
+});
+
+describe('own pushkey memory', () => {
+  it('remembers the last few pushkeys per app id', async () => {
+    const { ownPushkeys, rememberOwnPushkey } = await import('./push-service');
+    localStorage.clear();
+    for (let i = 0; i < 7; i++) rememberOwnPushkey('fortaios.voip', `t${i}`);
+    rememberOwnPushkey('fortaios.voip', 't3');
+    expect(ownPushkeys('fortaios.voip')).toEqual(['t2', 't4', 't5', 't6', 't3']);
+    expect(ownPushkeys('fortaandroid')).toEqual([]);
+  });
+});
+
 describe('isStalePusherEntry — VoIP pusher cleanup', () => {
   it('flags a stale fortaios.voip pusher when the VoIP token rotated', () => {
     const stale = isStalePusherEntry(
       { app_id: 'fortaios.voip', pushkey: 'old-voip-token' },
       'fortaios.voip',
       'new-voip-token',
+      ['old-voip-token'],
     );
     expect(stale).toBe(true);
   });
@@ -162,6 +196,7 @@ describe('isStalePusherEntry — VoIP pusher cleanup', () => {
       { app_id: 'fortaios', pushkey: 'fcm-token' },
       'fortaios.voip',
       'voip-token',
+      ['fcm-token'],
     );
     expect(stale).toBe(false);
   });
@@ -173,6 +208,7 @@ describe('isStalePusherEntry — VoIP pusher cleanup', () => {
       { app_id: 'fortaios.voip', pushkey: 'voip-token' },
       'fortaios',
       'new-fcm-token',
+      ['voip-token'],
     );
     expect(stale).toBe(false);
   });

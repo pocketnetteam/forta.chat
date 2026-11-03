@@ -17,7 +17,7 @@ class CallSlotContractTest {
     }
 
     private val plugin by lazy { source("com/forta/chat/plugins/calls/CallPlugin.kt") }
-    private val service by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val service by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
     private val firebase by lazy { source("com/forta/chat/FortaFirebaseMessagingService.kt") }
     private val teardown by lazy { source("com/forta/chat/plugins/calls/CallTeardown.kt") }
     private val ringer by lazy { source("com/forta/chat/plugins/calls/IncomingCallActivity.kt") }

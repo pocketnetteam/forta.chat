@@ -42,6 +42,7 @@ vi.mock("@/shared/lib/local-db", () => ({
 vi.mock("@/entities/matrix", () => ({
   getMatrixClientService: vi.fn(() => ({
     isReady: () => true,
+    hasLiveSync: () => true,
     uploadContent: vi.fn(),
     sendEncryptedText: vi.fn(),
     setTyping: vi.fn(),

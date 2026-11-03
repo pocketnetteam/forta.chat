@@ -41,9 +41,10 @@ vi.mock("@/shared/lib/native-calls", () => ({
   },
 }));
 
-let iosInterruptionHandler: (() => void) | null = null;
+let iosInterruptionHandler: ((data?: { phoneCall?: boolean }) => void) | null = null;
+const { mockIsRecentCallKitRelease } = vi.hoisted(() => ({ mockIsRecentCallKitRelease: vi.fn(() => false) }));
 const mockIOSCallAudioAddListener: Mock = vi.fn(
-  async (event: string, handler: () => void) => {
+  async (event: string, handler: (data?: { phoneCall?: boolean }) => void) => {
     if (event === "audioInterruptionBegan") {
       iosInterruptionHandler = handler;
     }
@@ -57,7 +58,7 @@ vi.mock("@/shared/lib/native-calls/native-call-bridge.ios", () => ({
   },
   // No CallKit release in these cases: every interruption here is a real
   // phone call taking the session, so the watchdog must hang up.
-  isRecentCallKitRelease: () => false,
+  isRecentCallKitRelease: mockIsRecentCallKitRelease,
 }));
 
 // `vi.hoisted` so the spy survives `vi.resetModules()` — without this,
@@ -352,6 +353,43 @@ describe("setupAudioWatchdog — iOS AVAudioSession interruption (Step 6 Task 6)
       () => expect(mockCallServiceHangup).toHaveBeenCalledOnce(),
       { timeout: 1000 },
     );
+  });
+
+  // XR 2026-10-16: an outgoing call hung up the moment it connected. WebKit's GPU
+  // process started the call's audio and interrupted this app's own session
+  // (`interrupted_by com.apple.WebKit.GPU`); no phone call was in progress.
+  it("keeps the call when native reports no phone call in progress", async () => {
+    mockCallStore.activeCall = { callId: "live", status: "connected" };
+
+    const { setupAudioWatchdog } = await reload();
+    await setupAudioWatchdog();
+    iosInterruptionHandler!({ phoneCall: false });
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockCallServiceHangup).not.toHaveBeenCalled();
+  });
+
+  it("hangs up when native reports a phone call in progress", async () => {
+    mockCallStore.activeCall = { callId: "live", status: "connected" };
+
+    const { setupAudioWatchdog } = await reload();
+    await setupAudioWatchdog();
+    iosInterruptionHandler!({ phoneCall: true });
+
+    await vi.waitFor(() => expect(mockCallServiceHangup).toHaveBeenCalledOnce(), { timeout: 1000 });
+  });
+
+  // XR 2026-10-14: the echo of our CallKit release came 1.1 s after the
+  // connect and 6.7 s after the release; the check needs the connect time.
+  it("asks whether the interruption echoes our CallKit release with the call's connect time", async () => {
+    mockCallStore.activeCall = { callId: "live", status: "connected", startedAt: 4242 };
+    mockIsRecentCallKitRelease.mockClear();
+
+    const { setupAudioWatchdog } = await reload();
+    await setupAudioWatchdog();
+    iosInterruptionHandler!();
+
+    expect(mockIsRecentCallKitRelease).toHaveBeenCalledWith(expect.any(Number), 4242);
   });
 
   it("hangs up if matrixCall is set but activeCall is null (mid-setup) — interruption still ends the call cleanly", async () => {
