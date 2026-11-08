@@ -155,6 +155,20 @@ export function resetNodeFailover(): void {
   disabledUntil.clear();
 }
 
+/** Pin the sticky start index (e.g. when user selects a gateway in Settings). */
+export function setNodeFailoverStickyIndex(index: number): void {
+  if (!Number.isFinite(index) || index < 0) {
+    stickyIndex = 0;
+    return;
+  }
+  stickyIndex = Math.floor(index);
+}
+
+/** Current sticky index (tests / diagnostics). */
+export function getNodeFailoverStickyIndex(): number {
+  return stickyIndex;
+}
+
 /**
  * POST a JSON-RPC body to `<node><path>`, rotating across nodes on
  * 502/503/504/429/network failures. A failing node is cut off for a cooldown

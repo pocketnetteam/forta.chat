@@ -742,6 +742,21 @@ export const ru: Record<TranslationKey, string> = {
   "welcome.getStarted": "Начать",
 
   // ── Tor status ──
+  "proxy.title": "Прокси Pocketnet",
+  "proxy.description": "Выберите шлюз или подключайтесь к нодам блокчейна напрямую.",
+  "proxy.change": "Сменить",
+  "proxy.pickTitle": "Выбор прокси",
+  "proxy.healthIdle": "Ещё не проверено",
+  "proxy.healthChecking": "Проверка…",
+  "proxy.healthOk": "Доступен",
+  "proxy.healthError": "Недоступен",
+  "proxy.localReady": "Локальные ноды готовы",
+  "proxy.localEmpty": "Нет рабочих локальных нод",
+  "proxy.offerLocalTitle": "Переключиться на локальный прокси?",
+  "proxy.offerLocalBody": "Внешние прокси не отвечают. Хотите переключиться на локальный прокси?",
+  "proxy.offerLocalYes": "Да",
+  "proxy.offerLocalNo": "Нет",
+
   "tor.networking": "Сеть",
   "desktopSettings.title": "Рабочий стол",
   "desktopSettings.closeToTray": "Сворачивать в трей",

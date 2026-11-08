@@ -11,6 +11,8 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --host",
+    "local-node-cors": "node scripts/local-node-cors-relay.mjs",
+    "dev:local-node": "concurrently -k \"npm run local-node-cors\" \"npm run dev\"",
     "build": "node scripts/sync-vendor-assets.mjs && vue-tsc --noEmit && vite build && node scripts/minify-public-js.mjs",
     "preview": "vite preview",
     "test": "vitest run",

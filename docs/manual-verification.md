@@ -24,6 +24,33 @@
 
 ## Ожидают проверки
 
+### Local Node Proxy и переключатель прокси в Networking
+- Коммит: (коммит с `src/entities/proxy/` + `src/shared/lib/pocketnet/local-node/`)
+- Почему нужен человек: health ping и RPC к seed-нодам зависят от сети устройства; UI picker
+  и Tor-секция ниже проверяются взглядом. Unit-тесты покрывают store/allowlist/routing на моках.
+- На чём: Android (cleartext `usesCleartextTraffic=true`) и/или Electron; опционально localhost web.
+- Шаги:
+  1. Настройки → Сеть: над Tor виден блок «Прокси Pocketnet» с текущим значением и кнопкой «Сменить».
+  2. Выбрать gateway `2.pocketnet.app` — статус становится reachable; профили/каналы грузятся.
+  3. Выбрать **Local Node Proxy** — health «Локальные ноды готовы» (или ошибка, если ноды недоступны);
+     открыть свой профиль / поиск пользователей — данные приходят без gateway `:8899`.
+  4. Вернуть **Auto**, при доступных gateway — как раньше; Tor Never/Auto/Always не ломается.
+  5. Регистрация нового аккаунта при режиме Local не зависает на captcha (идёт через remote Proxy16).
+- Статус: ☐ не проверено
+
+### Диалог перехода на Local Proxy при мёртвых gateway (pdirectdialog)
+- Коммит: (коммит с `run-proxy-boot-offer` + `ProxyLocalOfferDialog`)
+- Почему нужен человек: нужен реальный недоступный `:8899` и живые seed-ноды; unit-тесты мокают race.
+- На чём: Android / Electron / **браузер localhost** (`npm run dev:local-node`); режим прокси **Auto** (не закреплённый gateway).
+- Шаги:
+  1. Заблокировать `*.pocketnet.app:8899` (hosts/firewall) так, чтобы Local Node Proxy (IP seeds) ещё отвечал.
+  2. Холодный старт → через ~4 с decision (если remotes ещё молчат, Local жив) диалог «Внешние прокси не отвечают…»; пинги remotes не abort’ятся на 4 с — поздний ответ закрывает диалог и оставляет gateway.
+  3. **Да** → в Networking выбран Local Node Proxy; профили грузятся.
+  4. Повторный старт с тем же блоком после **Нет** — диалог больше не показывается до перезапуска приложения.
+  5. Без блокировки remotes — диалог не появляется; sticky указывает на ответивший gateway.
+  6. Браузер: `npm run dev:local-node` (Vite + CORS relay `:18081`); без relay Local RPC на IP падает с `relaydisabled` / upstream error.
+- Статус: ☐ не проверено
+
 ### Пуши приходят на все Android-телефоны одного аккаунта
 - Коммит: (коммит с `push_own_pushkey` в `src/shared/lib/push/push-service.ts`)
 - Почему нужен человек: тесты проверяют, какие pusher'ы удаляются, на моках; что Sygnal

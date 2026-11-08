@@ -739,6 +739,22 @@ export const en = {
   "welcome.description": "Decentralized messaging with video calls. Private, secure, and censorship-resistant.",
   "welcome.getStarted": "Get Started",
 
+  // ── Pocketnet proxy (Networking) ──
+  "proxy.title": "Pocketnet proxy",
+  "proxy.description": "Choose a gateway or talk to blockchain nodes directly.",
+  "proxy.change": "Change",
+  "proxy.pickTitle": "Select proxy",
+  "proxy.healthIdle": "Not checked yet",
+  "proxy.healthChecking": "Checking…",
+  "proxy.healthOk": "Reachable",
+  "proxy.healthError": "Unreachable",
+  "proxy.localReady": "Local nodes ready",
+  "proxy.localEmpty": "No usable local nodes",
+  "proxy.offerLocalTitle": "Switch to Local Node Proxy?",
+  "proxy.offerLocalBody": "External proxies are not responding. Would you like to switch to a local proxy?",
+  "proxy.offerLocalYes": "Yes",
+  "proxy.offerLocalNo": "No",
+
   // ── Tor status ──
   "tor.networking": "Networking",
   "desktopSettings.title": "Desktop",

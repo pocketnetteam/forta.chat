@@ -26,6 +26,7 @@ import { initAndroidBackListener, useAndroidBackHandler } from "@/shared/lib/com
 import { initShareTargetListener, consumeShareData, saveShareData, type ExternalShareData } from "@/shared/lib/share-target";
 import RegistrationStepper from "@/features/auth/ui/RegistrationStepper.vue";
 import { AppDownloadBanner } from "@/features/app-download-banner";
+import { ProxyLocalOfferDialog } from "@/features/settings";
 import {
   BugReportStatusSheet,
   useBugReportStatus,
@@ -550,6 +551,7 @@ onUnmounted(() => {
       mode="manage"
       @close="handleBugStatusSheetClose"
     />
+    <ProxyLocalOfferDialog />
   </div>
 </template>
 

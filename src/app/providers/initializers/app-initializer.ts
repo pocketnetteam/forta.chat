@@ -20,7 +20,10 @@ import {
   callPocketnetRpc,
   unwrapRpcPayload,
   buildNodeBaseUrls,
+  setPocketnetRpcRouter,
+  setNodeFailoverStickyIndex,
 } from "@/shared/lib/pocketnet";
+import { useProxyStore } from "@/entities/proxy";
 import { primePeerTubeSources } from "@/shared/lib/video-embed";
 
 /** One page of `getprofilefeed`: posts, plus the profiles the page mentions. */
@@ -255,7 +258,30 @@ export class AppInitializer {
     // Configure the shared RPC node pool (1/2/4.pocketnet.app:8899) for the
     // centralized failover client — done before the standalone guard so direct
     // fetches have failover even when the SDK globals are absent.
-    configurePocketnetNodes(buildNodeBaseUrls(pocketnetInstance.options.listofproxies));
+    const listofproxies = pocketnetInstance.options.listofproxies;
+    configurePocketnetNodes(buildNodeBaseUrls(listofproxies));
+
+    // Sync Networking proxy switcher + route callPocketnetRpc through it.
+    try {
+      const proxyStore = useProxyStore();
+      if (listofproxies?.length) {
+        proxyStore.setGateways(listofproxies);
+      }
+      setPocketnetRpcRouter({
+        shouldUseLocal: () => proxyStore.shouldUseLocal(),
+        allowLocalFallback: () => proxyStore.allowLocalFallback(),
+        gatewayBaseUrls: () => proxyStore.gatewayBaseUrls(),
+      });
+      const urls = proxyStore.gatewayBaseUrls();
+      configurePocketnetNodes(urls);
+      const pin = proxyStore.pinnedGatewayId;
+      if (pin) {
+        const idx = urls.findIndex((u) => u.includes(pin));
+        if (idx >= 0) setNodeFailoverStickyIndex(idx);
+      }
+    } catch (e) {
+      console.warn("[AppInitializer] proxy store wire skipped:", e);
+    }
 
     // Api / Actions / pSDK are globals injected by Bastyon platform scripts.
     // In standalone (Electron) mode they don't exist — run in degraded mode.
