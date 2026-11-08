@@ -67,6 +67,12 @@ class WrappedFetch {
           return Promise.reject(error);
         }
 
+        if (!preparedArgs.agent && torCtrl.settings.enabled3 === 'auto') {
+          // The host failed directly: without this the retry trusts the cached
+          // probe (good for 30 min) and goes direct again.
+          this.transports.markNoDirectAccess(url);
+        }
+
         // Retry with Tor on network errors
         const isTorEnabled2 = (torCtrl.settings.enabled3 !== 'neveruse');
         const isRestricted2 = (torCtrl.settings.enabled3 === 'always');
@@ -128,10 +134,14 @@ class Transports {
   accessRecords = {};
   torAgent = null;
   torStartPromise = null;
+  resolveTorStart = null;
 
   constructor(torControl) {
     this.torControl = torControl;
     this.fetch = WrappedFetch.instantiate(this);
+    if (torControl) {
+      torControl.onAny((status) => this.settleTorStart(status));
+    }
   }
 
   static waitTimeout = (seconds, orReturn) => new Promise((resolve) => {
@@ -255,23 +265,51 @@ class Transports {
     return false;
   }
 
-  async waitTorReady() {
-    const timeout = Transports.waitTimeout(60, false);
+  /** The next check of this host answers "no direct access" and probes it again for the ones after. */
+  markNoDirectAccess(url) {
+    const { hostname } = new URL(url);
+    this.accessRecords[hostname] = { accessOk: false, nextTry: 0 };
+  }
 
-    let torStart;
-    if (this.torStartPromise) {
-      torStart = this.torStartPromise;
-    } else {
-      torStart = new Promise((resolve) => {
-        this.torControl.onAny((status) => {
-          if (status === 'started') resolve(true);
-          else if (status === 'stopped' || status === 'failed') resolve(false);
-        });
+  /**
+   * True at once when Tor is up; otherwise waits for its next outcome (started,
+   * failed, or switched off), at most 60 s. The wait used to be one promise for the
+   * app's life: the first outcome answered every later call, so a failed first
+   * start kept "always" mode refusing requests after Tor came up.
+   */
+  async waitTorReady() {
+    if (this.isTorReady()) return true;
+
+    if (!this.torStartPromise) {
+      this.torStartPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => this.finishTorWait(false), 60 * 1000);
+        this.resolveTorStart = (isStarted) => {
+          clearTimeout(timer);
+          resolve(isStarted);
+        };
       });
-      this.torStartPromise = torStart;
     }
 
-    return Promise.race([torStart, timeout]);
+    return this.torStartPromise;
+  }
+
+  settleTorStart(status) {
+    if (status === 'started') {
+      this.finishTorWait(true);
+    } else if (status === 'failed') {
+      this.finishTorWait(false);
+    } else if (status === 'stopped' && this.torControl.settings.enabled3 === 'neveruse') {
+      // Install and restart() pass through 'stopped' on the way up: only a
+      // stop the user asked for answers the wait.
+      this.finishTorWait(false);
+    }
+  }
+
+  finishTorWait(isStarted) {
+    const resolve = this.resolveTorStart;
+    this.torStartPromise = null;
+    this.resolveTorStart = null;
+    if (resolve) resolve(isStarted);
   }
 
   isTorReady() {

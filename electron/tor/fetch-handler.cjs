@@ -37,8 +37,8 @@ class FetchMainHandler {
     });
   }
 
-  onAbort(requestId) {
-    this.listen('Abort', requestId);
+  onAbort(requestId, listener) {
+    this.listen('Abort', requestId, listener);
   }
 
   offAbort(requestId) {
@@ -71,6 +71,17 @@ class FetchMainHandler {
       const url = requestData.url;
       delete requestData.url;
 
+      self.onAbort(requestId, () => controller.abort());
+
+      // An abort only stops the transfer: the renderer cancelled it and wants no reply.
+      const fail = (err) => {
+        self.offAbort(requestId);
+        if (!signal.aborted && err?.type !== 'aborted') {
+          self.sendError(requestId);
+        }
+        delete self.requests[requestId];
+      };
+
       options.fetchFunction(url, { signal, ...requestData })
         .then((data) => {
           const { status } = data;
@@ -91,14 +102,12 @@ class FetchMainHandler {
             self.sendEnd(requestId);
             delete self.requests[requestId];
           });
+
+          // A stream 'error' without a listener throws in the main process:
+          // a connection dropped mid-body crashed the app.
+          data.body.on('error', fail);
         })
-        .catch((err) => {
-          if (err.code !== 'FETCH_ABORTED') {
-            self.offAbort(requestId);
-            self.sendError(requestId);
-            delete self.requests[requestId];
-          }
-        });
+        .catch(fail);
     });
 
     return self;

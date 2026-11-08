@@ -252,7 +252,7 @@ export class AppInitializer {
   constructor(pocketnetInstance: PocketnetInstanceType) {
     this.pocketnetInstance = pocketnetInstance;
 
-    // Configure the shared RPC node pool (1/2.pocketnet.app:8899) for the
+    // Configure the shared RPC node pool (1/2/4.pocketnet.app:8899) for the
     // centralized failover client — done before the standalone guard so direct
     // fetches have failover even when the SDK globals are absent.
     configurePocketnetNodes(buildNodeBaseUrls(pocketnetInstance.options.listofproxies));

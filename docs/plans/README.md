@@ -33,7 +33,7 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 | [ios/](ios/README.md) | all sub-plans landed | Sygnal pushers, NSE decrypt, AASA check — see its status table |
 | [electron/](electron/README.md) | shipping | user install doc, `electron.d.ts`, IPC tests, signing checks (`ci-desktop.md`) |
 | [llama2/](llama2/README.md) | phases 1–7, perf tuning, multi-model done | device QA (`qa-checklist-phase7.md`), phase R (RAG) |
-| [tor/forta-chat-tor-integration-plan](tor/forta-chat-tor-integration-plan.md) | phases done | unit tests for `AltTransportActive` and `TorRouteDecider.kt`; first-run defaults (product decision) |
+| [tor/forta-chat-tor-integration-plan](tor/forta-chat-tor-integration-plan.md) | phases done | unit tests for `TorRouteDecider.kt`; first-run defaults (product decision) |
 
 **Done**
 
