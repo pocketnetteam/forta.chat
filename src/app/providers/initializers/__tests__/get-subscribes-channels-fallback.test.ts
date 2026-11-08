@@ -26,6 +26,10 @@ vi.mock("../../chat-scripts/config/pocketnetinstance", () => ({
     },
   },
 }));
+vi.mock("@/shared/lib/pocketnet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/shared/lib/pocketnet")>();
+  return { ...actual, installSdkRpcBridge: vi.fn() };
+});
 
 import { createAppInitializer } from "../app-initializer";
 

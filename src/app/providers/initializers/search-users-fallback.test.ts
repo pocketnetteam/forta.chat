@@ -21,6 +21,9 @@ vi.mock("@/shared/lib/pocketnet", () => ({
   // Mirror the real envelope unwrap: data → result → body.
   unwrapRpcPayload: (envelope: { data?: unknown; result?: unknown }) =>
     envelope?.data ?? envelope?.result ?? envelope,
+  installSdkRpcBridge: vi.fn(),
+  setPocketnetRpcRouter: vi.fn(),
+  setNodeFailoverStickyIndex: vi.fn(),
 }));
 
 // Avoid loading the heavy Bastyon chat-scripts / SDK config in the test env.
