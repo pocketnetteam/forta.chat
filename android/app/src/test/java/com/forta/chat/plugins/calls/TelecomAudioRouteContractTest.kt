@@ -28,7 +28,7 @@ class TelecomAudioRouteContractTest {
     }
 
     private val router by lazy { source("com/forta/chat/plugins/calls/AudioRouter.kt") }
-    private val service by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val service by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
 
     @Test
     fun everyRouteChange_asksTelecomBeforeTheAudioManager() {

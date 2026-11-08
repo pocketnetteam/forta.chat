@@ -28,7 +28,7 @@ class FocusLossMuteContractTest {
     }
 
     private val service by lazy { source("com/forta/chat/plugins/calls/CallForegroundService.kt") }
-    private val connections by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val connections by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
 
     @Test
     fun transientLoss_mutesOnlyWhenNoTelecomCallOwnsTheFocus() {

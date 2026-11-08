@@ -71,6 +71,8 @@ class FetchMainHandler {
       const url = requestData.url;
       delete requestData.url;
 
+      // The renderer sends Abort when the page cancels the request; nothing
+      // listened, so a cancelled download kept streaming through Tor.
       self.onAbort(requestId, () => controller.abort());
 
       // An abort only stops the transfer: the renderer cancelled it and wants no reply.
@@ -104,7 +106,7 @@ class FetchMainHandler {
           });
 
           // A stream 'error' without a listener throws in the main process:
-          // a connection dropped mid-body crashed the app.
+          // a connection dropped mid-body (Tor circuit closed) crashed the app.
           data.body.on('error', fail);
         })
         .catch(fail);

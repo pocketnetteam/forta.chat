@@ -141,8 +141,9 @@ export interface NativeCallNativePlugin {
     devices: Array<{ type: string; name: string }>;
   }>;
   setAudioDevice(options: { type: string }): Promise<void>;
-  startAudioRouting(options: { callType: string }): Promise<void>;
-  stopAudioRouting(): Promise<void>;
+  /** `callId` names the call that owns the routing (C02); a stop for another call is dropped. */
+  startAudioRouting(options: { callType: string; callId?: string }): Promise<void>;
+  stopAudioRouting(options?: { callId?: string }): Promise<void>;
   /**
    * Brute-force reset of audio state without going through the
    * lifecycle guards. Used by the app-resume watchdog when the device

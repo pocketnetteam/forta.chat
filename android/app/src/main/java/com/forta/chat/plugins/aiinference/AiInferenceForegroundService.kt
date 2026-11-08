@@ -49,7 +49,7 @@ class AiInferenceForegroundService : Service() {
         fun start(context: Context) {
             val intent = Intent(context, AiInferenceForegroundService::class.java).apply { action = ACTION_START }
             try {
-                context.startForegroundService(intent)
+                androidx.core.content.ContextCompat.startForegroundService(context, intent)
             } catch (e: Throwable) {
                 // Same defensive pattern as ModelDownloadService.start()/
                 // CallForegroundService.start() — Android 12+ can reject a
@@ -94,6 +94,7 @@ class AiInferenceForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return // no channels before Android 8
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.channel_ai_inference),

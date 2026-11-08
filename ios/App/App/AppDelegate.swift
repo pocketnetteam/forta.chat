@@ -68,6 +68,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate {
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         Messaging.messaging().apnsToken = deviceToken
+        // Every JS register() lands here, but Firebase calls the delegate below
+        // only when it issues a token — once at startup, before JS listens, and
+        // not again for an unchanged token. A login after a logout in the same
+        // process therefore never got `registration` and registered no pusher.
+        // Hand JS the current token on each registration instead.
+        Messaging.messaging().token { token, error in
+            guard let token, error == nil else { return }
+            NotificationCenter.default.post(
+                name: .capacitorDidRegisterForRemoteNotifications,
+                object: token
+            )
+        }
     }
 
     func application(_ application: UIApplication,

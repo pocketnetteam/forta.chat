@@ -35,6 +35,7 @@ const audioProbeSpy: Mock = vi.fn().mockResolvedValue({
 });
 
 const cameraRequestPermissionsSpy: Mock = vi.fn().mockResolvedValue({ camera: 'granted' });
+const markHandedOffSpy: Mock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('@capacitor/core', () => ({
   registerPlugin: (name: string) => {
@@ -61,6 +62,9 @@ vi.mock('@capacitor/core', () => ({
         getStatus: audioGetStatusSpy,
         setOutput: vi.fn().mockResolvedValue(undefined),
       };
+    }
+    if (name === 'IOSVoIPPush') {
+      return { markHandedOff: markHandedOffSpy };
     }
     return new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) });
   },
@@ -370,6 +374,9 @@ describe('createIOSNativeCallAdapter — addListener event mapping', () => {
     await vi.waitFor(() => expect(answered).toHaveBeenCalledOnce());
     expect(endCallSpy).toHaveBeenCalledWith({ callId: 'cid', reason: 'audio-handoff' });
     expect(endCallSpy.mock.invocationCallOrder[0]).toBeLessThan(answered.mock.invocationCallOrder[0]);
+    // C07: the push coordinator learns of the handoff, so a repeated VoIP
+    // push for this call does not ring it again.
+    expect(markHandedOffSpy).toHaveBeenCalledWith({ callId: 'cid' });
 
     // The plugin reports our own endCall with source "api": not a hangup.
     endedHandler({ call: { callId: 'cid', extra: { roomId: '!r:m' } }, source: 'api', reason: 'audio-handoff' });

@@ -23,7 +23,7 @@ class PendingMarkerStampContractTest {
             ?: error("$relative not found. Tried: $candidates from ${File(".").absolutePath}")
     }
 
-    private val service by lazy { source("com/forta/chat/plugins/calls/CallConnectionService.kt") }
+    private val service by lazy { (source("com/forta/chat/plugins/calls/CallConnectionService.kt") + "\n" + source("com/forta/chat/plugins/calls/CallConnection.kt")) }
     private val plugin by lazy { source("com/forta/chat/plugins/calls/CallPlugin.kt") }
     private val activity by lazy { source("com/forta/chat/plugins/calls/IncomingCallActivity.kt") }
 

@@ -164,6 +164,7 @@ describe("edit-handling", () => {
       await db.messages.add(msg);
 
       await eventWriter.writeEdit(ROOM_ID, {
+        senderId: "user1",
         targetEventId: "$msg1",
         newContent: "edited text",
       });
@@ -189,6 +190,7 @@ describe("edit-handling", () => {
       await db.messages.add(msg2);
 
       await eventWriter.writeEdit(ROOM_ID, {
+        senderId: "user1",
         targetEventId: "$msg1",
         newContent: "edited older",
       });
@@ -208,6 +210,7 @@ describe("edit-handling", () => {
 
       // Edit arrives before base message
       await eventWriter.writeEdit(ROOM_ID, {
+        senderId: "user1",
         targetEventId: "$future_msg",
         newContent: "edited before arrival",
       });
@@ -226,6 +229,7 @@ describe("edit-handling", () => {
 
       // 1. Edit arrives first
       await eventWriter.writeEdit(ROOM_ID, {
+        senderId: "user1",
         targetEventId: "$future_msg",
         newContent: "edited text",
       });
@@ -249,6 +253,76 @@ describe("edit-handling", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Who may edit (review 2026-10-08, H4): only the author, only in the
+  // target's room. Any room member could rewrite another member's message on
+  // every other client, and an edit sent in one room could rewrite a message
+  // of another room found by its event id.
+  // -------------------------------------------------------------------------
+  describe("EventWriter.writeEdit — only the author, in the target's room", () => {
+    it("ignores an edit from another sender", async () => {
+      await db.messages.add(makeMsg({ eventId: "$theirs", senderId: "user1", content: "original" }));
+
+      await eventWriter.writeEdit(ROOM_ID, { senderId: "user2", targetEventId: "$theirs", newContent: "forged" });
+
+      const stored = await db.messages.where("eventId").equals("$theirs").first();
+      expect(stored!.content).toBe("original");
+      expect(stored!.edited).toBeFalsy();
+    });
+
+    it("ignores an edit sent in another room", async () => {
+      await db.messages.add(makeMsg({ eventId: "$elsewhere", roomId: "!other:server", senderId: "user1", content: "original" }));
+
+      await eventWriter.writeEdit(ROOM_ID, { senderId: "user1", targetEventId: "$elsewhere", newContent: "forged" });
+
+      const stored = await db.messages.where("eventId").equals("$elsewhere").first();
+      expect(stored!.content).toBe("original");
+    });
+
+    it("drops a stashed edit from another sender when its target lands", async () => {
+      await db.rooms.add(makeRoom());
+      await eventWriter.writeEdit(ROOM_ID, { senderId: "user2", targetEventId: "$later", newContent: "forged" });
+
+      await eventWriter.writeMessage(
+        { eventId: "$later", roomId: ROOM_ID, senderId: "user1", content: "original", timestamp: Date.now(), type: MessageType.text },
+        "me",
+        null,
+      );
+
+      const stored = await db.messages.where("eventId").equals("$later").first();
+      expect(stored!.content).toBe("original");
+    });
+
+    it("a forged stashed edit does not push out the author's stashed edit", async () => {
+      await db.rooms.add(makeRoom());
+      await eventWriter.writeEdit(ROOM_ID, { senderId: "user1", targetEventId: "$both", newContent: "author's edit" });
+      await eventWriter.writeEdit(ROOM_ID, { senderId: "user2", targetEventId: "$both", newContent: "forged" });
+
+      await eventWriter.writeMessage(
+        { eventId: "$both", roomId: ROOM_ID, senderId: "user1", content: "original", timestamp: Date.now(), type: MessageType.text },
+        "me",
+        null,
+      );
+
+      const stored = await db.messages.where("eventId").equals("$both").first();
+      expect(stored!.content).toBe("author's edit");
+    });
+
+    it("drops a stashed edit sent in another room when its target lands", async () => {
+      await db.rooms.add(makeRoom({ id: "!other:server" }));
+      await eventWriter.writeEdit(ROOM_ID, { senderId: "user1", targetEventId: "$later2", newContent: "forged" });
+
+      await eventWriter.writeMessage(
+        { eventId: "$later2", roomId: "!other:server", senderId: "user1", content: "original", timestamp: Date.now(), type: MessageType.text },
+        "me",
+        null,
+      );
+
+      const stored = await db.messages.where("eventId").equals("$later2").first();
+      expect(stored!.content).toBe("original");
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // No duplicates
   // -------------------------------------------------------------------------
   describe("no duplicate messages from edits", () => {
@@ -257,6 +331,7 @@ describe("edit-handling", () => {
       await db.messages.add(msg);
 
       await eventWriter.writeEdit(ROOM_ID, {
+        senderId: "user1",
         targetEventId: "$msg1",
         newContent: "edited",
       });

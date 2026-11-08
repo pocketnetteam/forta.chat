@@ -56,8 +56,10 @@ export interface NativeWebRTCPlugin {
    */
   // Named by the finalize: native skips the close for a call a newer
   // launchCallUI has replaced, so a late finalize step cannot close the
-  // next call's connections. Unnamed, it closes everything.
-  closeAllPeerConnections(options?: { callId?: string }): Promise<{ skipped: boolean } | void>;
+  // next call's connections. Unnamed, it closes everything. `createdBefore`
+  // (ms since epoch) is when the call ended: a connection native created
+  // after it is the next call's invite and stays up (N1).
+  closeAllPeerConnections(options?: { callId?: string; createdBefore?: number }): Promise<{ skipped: boolean } | void>;
   getConnectionState(options: { peerId: string }): Promise<{ state: string }>;
 
   // ICE restart — perform a native ICE restart on the given PeerConnection.
