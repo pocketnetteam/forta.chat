@@ -220,7 +220,7 @@ export class LocalNodeManager {
     return this.ready && this.canuseNodes().length > 0;
   }
 
-  async waitreadywithrating(timeoutMs = LOCAL_NODE_CONSTANTS.WAIT_READY_MS): Promise<boolean> {
+  async waitreadywithrating(timeoutMs: number = LOCAL_NODE_CONSTANTS.WAIT_READY_MS): Promise<boolean> {
     const start = this.now();
     while (this.now() - start < timeoutMs) {
       if (this.canuseNodes().some((n) => n.rating() > 0 || n.canuse)) return true;

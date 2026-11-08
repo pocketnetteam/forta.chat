@@ -26,6 +26,7 @@
 - Registration / captcha stay on remote Proxy16 (SDK); `gatewaysOnly` forces gateway path for `callPocketnetRpc`.
 - Local disabled on production web hostnames (CORS); enabled on Capacitor / Electron / localhost.
 - **Browser localhost:** requests rewrite through CORS relay `127.0.0.1:18081` ([`scripts/local-node-cors-relay.mjs`](../../scripts/local-node-cors-relay.mjs)). Run `npm run local-node-cors` or `npm run dev:local-node` (Vite + relay). Native CapacitorHttp bypasses the relay.
+- **SDK bridge:** [`sdk-rpc-bridge.ts`](../../src/shared/lib/pocketnet/sdk-rpc-bridge.ts) wraps `Api.rpc` → `callPocketnetRpc` (Local / sticky gateways). `Proxy16.fetch` (`ping`, `nodes/*`, peertube list) stays on remotes.
 
 ## Source
 

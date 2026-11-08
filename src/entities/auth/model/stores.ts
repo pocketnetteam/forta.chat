@@ -2209,6 +2209,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 syncedAt: Date.now(),
               });
               // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+              const confirmedKeys = Array.isArray(data.keys)
+                ? (data.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                : [];
+              const confirmedId = (data as { id?: number | string }).id;
               useUserStore().setUser(confirmedAddress, {
                 address: confirmedAddress,
                 name: merged.name ?? "",
@@ -2216,7 +2220,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 image: merged.image ?? "",
                 site: merged.site ?? "",
                 language: merged.language ?? "",
+                keys: confirmedKeys.length > 0 ? confirmedKeys : undefined,
+                id: confirmedId,
               });
+              if (confirmedKeys.length >= REQUIRED_ENCRYPTION_KEYS && confirmedId != null) {
+                writeSelfCryptoIdentity(
+                  confirmedAddress,
+                  { keys: confirmedKeys, id: confirmedId },
+                  REQUIRED_ENCRYPTION_KEYS,
+                );
+              }
             },
             { update: true },
           ),

@@ -22,6 +22,7 @@ import {
   buildNodeBaseUrls,
   setPocketnetRpcRouter,
   setNodeFailoverStickyIndex,
+  installSdkRpcBridge,
 } from "@/shared/lib/pocketnet";
 import { useProxyStore } from "@/entities/proxy";
 import { primePeerTubeSources } from "@/shared/lib/video-embed";
@@ -289,7 +290,9 @@ export class AppInitializer {
       console.warn("[AppInitializer] Platform globals not available — running in standalone mode");
       return;
     }
+    // Route Api.rpc → callPocketnetRpc (Local / gateway sticky). Ping/fetch stay on remotes.
     this.api = new Api(pocketnetInstance);
+    installSdkRpcBridge(this.api);
 
     console.log('pocketnetInstance', pocketnetInstance)
 
