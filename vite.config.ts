@@ -17,7 +17,7 @@ export default defineConfig({
     // localStorage, location, @vue/test-utils mount) opts in with a first line
     // `// @vitest-environment happy-dom`.
     environment: "node",
-    include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "scripts/**/*.test.ts", "electron/**/*.test.ts"],
     setupFiles: ["./src/test-setup.ts"],
     // Files run in parallel, each in its own forked process (isolate is on),
     // so mocks and fake timers cannot leak between files.

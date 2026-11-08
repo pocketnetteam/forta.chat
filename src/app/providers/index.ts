@@ -190,6 +190,16 @@ export const setupProviders = async (app: App) => {
     await withTimeout(scriptsReady, 30_000, "Chat scripts loading");
   }
 
+  // Donor directdialog: race gateways; if none answer and Local is up, ask
+  // to switch. Non-blocking — after first paint / chats-interactive.
+  if (!isStaticRoute) {
+    whenChatsInteractive(5_000).then(() => {
+      import("@/entities/proxy")
+        .then(({ runProxyBootOffer }) => runProxyBootOffer())
+        .catch((e) => console.warn("[proxy-boot-offer] skipped:", e));
+    });
+  }
+
   bootStatus.setStep("auth");
   await setupRouter(app);
 };

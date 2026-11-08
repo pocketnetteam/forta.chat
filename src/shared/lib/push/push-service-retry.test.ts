@@ -110,6 +110,7 @@ describe('PushService.registerPusher retry behaviour', () => {
 
   it('does not abort registration when stale-pusher cleanup fails', async () => {
     // Primary setPusher succeeds; getPushers (used by cleanup) throws.
+    localStorage.setItem('push_own_pushkey', 'old-own-token');
     const client = {
       setPusher: vi.fn().mockResolvedValue(undefined),
       getPushers: vi.fn().mockRejectedValue(new Error('cleanup failed')),
@@ -320,5 +321,86 @@ describe('PushService.registerPusher legacy pusher removal', () => {
 
     expect(client.setPusher).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem('push_pusher_dead_letter')).toBeNull();
+  });
+});
+
+// Two Android phones on one account register under the same app_id. The old
+// cleanup removed every pusher with that app_id and another token, so each
+// phone deleted the other's pusher on start and only the last one opened got
+// pushes.
+describe('PushService pusher cleanup leaves other devices of the account alone', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  type Client = { setPusher: ReturnType<typeof vi.fn>; getPushers: ReturnType<typeof vi.fn> };
+
+  async function service(client: Client) {
+    const mod = await import('./push-service');
+    const svc = mod.pushService as unknown as {
+      matrixClient: unknown;
+      registerPusher: (c: Client, t: string) => Promise<void>;
+      registerVoipPusher: (c: Client, t: string) => Promise<void>;
+    };
+    svc.matrixClient = client; // init() sets the client before any registration event
+    return svc;
+  }
+
+  const otherPhone = { app_id: 'fortaandroid', pushkey: 'other-phone-token', kind: 'http' };
+
+  it('keeps the pusher of another phone with the same app_id', async () => {
+    const client: Client = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [otherPhone] }),
+    };
+
+    await (await service(client)).registerPusher(client, 'my-token');
+
+    expect(client.setPusher).toHaveBeenCalledTimes(1);
+    expect(client.setPusher).not.toHaveBeenCalledWith(expect.objectContaining({ kind: null }));
+    expect(localStorage.getItem('push_own_pushkey')).toBe('my-token');
+  });
+
+  it('removes only the pusher of this device\'s previous token', async () => {
+    localStorage.setItem('push_own_pushkey', 'my-old-token');
+    const myOld = { app_id: 'fortaandroid', pushkey: 'my-old-token', kind: 'http' };
+    const client: Client = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [myOld, otherPhone] }),
+    };
+
+    await (await service(client)).registerPusher(client, 'my-token');
+
+    expect(client.setPusher).toHaveBeenCalledWith({ ...myOld, kind: null });
+    expect(client.setPusher).not.toHaveBeenCalledWith(expect.objectContaining({ pushkey: 'other-phone-token', kind: null }));
+    expect(localStorage.getItem('push_own_pushkey')).toBe('my-token');
+  });
+
+  it('keeps the previous token for the next boot when the removal fails', async () => {
+    localStorage.setItem('push_own_pushkey', 'my-old-token');
+    const client: Client = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockRejectedValue(new Error('offline')),
+    };
+
+    await (await service(client)).registerPusher(client, 'my-token');
+
+    expect(localStorage.getItem('push_own_pushkey')).toBe('my-old-token');
+  });
+
+  it('VoIP: removes this iPhone\'s previous VoIP pusher, keeps another iPhone\'s', async () => {
+    localStorage.setItem('push_own_voip_pushkey', 'my-old-voip');
+    const myOld = { app_id: 'fortaios.voip', pushkey: 'my-old-voip', kind: 'http' };
+    const otherIphone = { app_id: 'fortaios.voip', pushkey: 'other-iphone-voip', kind: 'http' };
+    const client: Client = {
+      setPusher: vi.fn().mockResolvedValue(undefined),
+      getPushers: vi.fn().mockResolvedValue({ pushers: [myOld, otherIphone] }),
+    };
+
+    await (await service(client)).registerVoipPusher(client, 'my-voip');
+
+    expect(client.setPusher).toHaveBeenCalledWith({ ...myOld, kind: null });
+    expect(client.setPusher).not.toHaveBeenCalledWith(expect.objectContaining({ pushkey: 'other-iphone-voip', kind: null }));
+    expect(localStorage.getItem('push_own_voip_pushkey')).toBe('my-voip');
   });
 });

@@ -902,8 +902,14 @@ export class Pcrypto {
         // Guard against empty-array short-circuit: refuse until peer is loaded.
         if (usersinfoArray.length < 2) return false;
 
-        // ALL participants must have 12 published keys for ECDH to work
-        return usersinfoArray.every(u => u.keys && u.keys.length >= m);
+        const hasKeys = (u: CryptoUserInfo) => !!u.keys && u.keys.length >= m;
+        // 1:1: the only peer must have 12 published keys for ECDH to work.
+        if (pcrypto.getIsTetatetChat?.(chat) ?? false) return usersinfoArray.every(hasKeys);
+        // Groups, as in Bastyon: the room key goes to members with keys
+        // (preparedUsers), and usershash covers only them, so the key rotates
+        // once a keyless member publishes keys. A deleted account or an
+        // unfinished registration in the group must not block every send.
+        return usersinfoArray.filter(hasKeys).length >= 2;
       },
 
       async prepare(forceRefresh?: boolean): Promise<PcryptoRoomInstance> {

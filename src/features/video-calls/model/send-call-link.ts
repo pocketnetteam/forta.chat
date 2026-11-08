@@ -1,4 +1,4 @@
-import { getChatDb, isChatDbReady, type CallProvider } from "@/shared/lib/local-db";
+import { getChatDb, isChatDbReady, describeSendError, type CallProvider } from "@/shared/lib/local-db";
 import { getMatrixClientService } from "@/entities/matrix/model/matrix-client";
 import { useAuthStore } from "@/entities/auth";
 import { MessageType, type CallLinkInfo } from "@/entities/chat/model/types";
@@ -59,7 +59,7 @@ export async function sendCallLink(roomId: string, provider: CallProvider): Prom
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) {
       console.error("[sendCallLink] Matrix client not ready — saved locally as failed");
-      await dbKit.messages.markFailed(localClientId);
+      await dbKit.messages.markFailed(localClientId, "Matrix client not ready");
       return true;
     }
 
@@ -69,7 +69,7 @@ export async function sendCallLink(roomId: string, provider: CallProvider): Prom
   } catch (e) {
     console.error("[sendCallLink] Dexie path failed:", e);
     if (localClientId) {
-      try { await getChatDb().messages.markFailed(localClientId); } catch { /* already logged */ }
+      try { await getChatDb().messages.markFailed(localClientId, describeSendError(e)); } catch { /* already logged */ }
       return true;
     }
     return false;

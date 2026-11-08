@@ -6,6 +6,7 @@ import { getMatrixClientService } from "@/entities/matrix";
 import { ENCRYPTION_REQUIRED_NO_KEYS, type PcryptoRoomInstance } from "@/entities/matrix/model/matrix-crypto";
 import { buildTransferMessageBody } from "@/shared/lib/bastyon-link";
 import { withTimeout } from "@/shared/lib/with-timeout";
+import { describeSendError } from "./describe-send-error";
 
 type GetRoomCryptoFn = (roomId: string) => Promise<PcryptoRoomInstance | undefined>;
 type OnChangeCallback = (roomId: string) => void;
@@ -682,17 +683,28 @@ export class SyncEngine {
         }
 
         const retries = op.retries + 1;
+        const errorText = describeSendError(e);
+        const logCtx = {
+          type: op.type,
+          roomId: op.roomId,
+          clientId: op.clientId,
+          attempt: retries,
+          maxRetries: op.maxRetries,
+          error: errorText,
+        };
         if (retries >= op.maxRetries) {
+          console.error("[SyncEngine] op failed, giving up:", logCtx, e);
           await this.db.pendingOps.update(op.id!, {
             status: "failed",
             retries,
-            errorMessage: String(e),
+            errorMessage: errorText,
             lastAttemptAt: Date.now(),
           });
-          await this.markMessageFailed(op);
+          await this.markMessageFailed(op, errorText);
           this.onChange?.(op.roomId);
         } else {
           const delay = computeBackoff(retries);
+          console.warn("[SyncEngine] op attempt failed, will retry:", { ...logCtx, retryInMs: delay }, e);
           await this.db.pendingOps.update(op.id!, {
             status: "pending",
             retries,
@@ -1264,12 +1276,13 @@ export class SyncEngine {
    *  Without this guard the watchdog/retry-exhaustion path would flip a
    *  successfully delivered message back to "failed" and surface a false
    *  retry indicator (WEE-40). */
-  private async markMessageFailed(op: PendingOperation): Promise<void> {
+  private async markMessageFailed(op: PendingOperation, sendError?: string): Promise<void> {
     if (!op.clientId) return;
     if (await this.isMessageAlreadyConfirmed(op.clientId)) return;
     await this.messageRepo.updateStatus(
       { clientId: op.clientId },
       "failed",
+      sendError,
     );
 
     // WEE-64: mirror the success-path room write (:607-610) so the chat-list

@@ -67,15 +67,22 @@ class FetchMainHandler {
     self.onRequest((requestId, requestData) => {
       const controller = new AbortController();
       const signal = controller.signal;
-      // The renderer sends Abort when the page cancels the request; nothing
-      // listened, so a cancelled download kept streaming through Tor.
-      self.onAbort(requestId, () => {
-        controller.abort();
-        delete self.requests[requestId];
-      });
 
       const url = requestData.url;
       delete requestData.url;
+
+      // The renderer sends Abort when the page cancels the request; nothing
+      // listened, so a cancelled download kept streaming through Tor.
+      self.onAbort(requestId, () => controller.abort());
+
+      // An abort only stops the transfer: the renderer cancelled it and wants no reply.
+      const fail = (err) => {
+        self.offAbort(requestId);
+        if (!signal.aborted && err?.type !== 'aborted') {
+          self.sendError(requestId);
+        }
+        delete self.requests[requestId];
+      };
 
       options.fetchFunction(url, { signal, ...requestData })
         .then((data) => {
@@ -98,22 +105,11 @@ class FetchMainHandler {
             delete self.requests[requestId];
           });
 
-          // A socket error mid-body (Tor circuit dropped, abort) is emitted on
-          // the stream; with no listener it was an uncaught exception in the
-          // main process.
-          data.body.on('error', () => {
-            self.offAbort(requestId);
-            self.sendError(requestId);
-            delete self.requests[requestId];
-          });
+          // A stream 'error' without a listener throws in the main process:
+          // a connection dropped mid-body (Tor circuit closed) crashed the app.
+          data.body.on('error', fail);
         })
-        .catch((err) => {
-          if (err.code !== 'FETCH_ABORTED') {
-            self.offAbort(requestId);
-            self.sendError(requestId);
-            delete self.requests[requestId];
-          }
-        });
+        .catch(fail);
     });
 
     return self;

@@ -540,6 +540,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               },
               writeSelfIdentity: (identity) =>
                 writeSelfCryptoIdentity(selfAddress, identity, REQUIRED_ENCRYPTION_KEYS),
+              readUserStoreIdentity: (addr) => useUserStore().getCryptoIdentity(addr),
+              writeUserStoreIdentity: (addr, identity) =>
+                useUserStore().upsertCryptoKeys(addr, identity.keys, {
+                  id: identity.id,
+                  name: identity.name,
+                }),
             });
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
@@ -953,6 +959,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                   .then(() => {
                     const fresh = appInitializer.getUserData(addrFrom);
                     if (fresh) {
+                      const freshKeys = Array.isArray(fresh.keys)
+                        ? (fresh.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                        : [];
                       useUserStore().setUser(addrFrom, {
                         address: addrFrom,
                         name: fresh.name ?? "",
@@ -961,6 +970,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                         site: fresh.site ?? "",
                         language: fresh.language ?? "",
                         cachedAt: Date.now(),
+                        keys: freshKeys.length > 0 ? freshKeys : undefined,
+                        id: (fresh as { id?: number | string }).id,
                       });
                     }
                   })
@@ -1305,7 +1316,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             }
 
             // Sync own profile to userStore so Avatar components show correct name/initial
+            // and room crypto can read own/peer keys offline from the same cache.
             if (merged.name) {
+              const ownKeys = Array.isArray(userData.keys)
+                ? (userData.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                : [];
               useUserStore().setUser(requestAddress, {
                 address: requestAddress,
                 name: merged.name ?? "",
@@ -1313,6 +1328,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 image: merged.image ?? "",
                 site: merged.site ?? "",
                 language: merged.language ?? "",
+                keys: ownKeys.length > 0 ? ownKeys : undefined,
+                id: selfId,
               });
             }
           },
@@ -2207,6 +2224,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 syncedAt: Date.now(),
               });
               // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+              const confirmedKeys = Array.isArray(data.keys)
+                ? (data.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                : [];
+              const confirmedId = (data as { id?: number | string }).id;
               useUserStore().setUser(confirmedAddress, {
                 address: confirmedAddress,
                 name: merged.name ?? "",
@@ -2214,7 +2235,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 image: merged.image ?? "",
                 site: merged.site ?? "",
                 language: merged.language ?? "",
+                keys: confirmedKeys.length > 0 ? confirmedKeys : undefined,
+                id: confirmedId,
               });
+              if (confirmedKeys.length >= REQUIRED_ENCRYPTION_KEYS && confirmedId != null) {
+                writeSelfCryptoIdentity(
+                  confirmedAddress,
+                  { keys: confirmedKeys, id: confirmedId },
+                  REQUIRED_ENCRYPTION_KEYS,
+                );
+              }
             },
             { update: true },
           ),
@@ -2418,6 +2448,30 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
   /** An author's feed page. Profiles that came with it (rpc-ex) fill the user
    *  store for addresses it doesn't know yet — no profile request for the
    *  post author or the last commenter. */
+  /** Diagnostics: fetches the address's profile from the chain afresh and logs
+   *  the raw getuserprofile row, the SDK profile and its encryption key count. */
+  async function logUserProfile(addr: string): Promise<void> {
+    try {
+      await appInitializer.loadUsersInfo([addr], { update: true });
+      const raw = appInitializer.getRawUserProfile(addr);
+      const sdk = appInitializer.getUserData(addr);
+      const rawKeys = raw?.k ?? raw?.keys;
+      const keys = Array.isArray(rawKeys)
+        ? rawKeys
+        : typeof rawKeys === "string" ? rawKeys.split(",").filter(Boolean) : [];
+      console.info("[profile]", addr, {
+        registered: raw != null,
+        deleted: raw?.deleted === true,
+        keysCount: keys.length,
+        requiredKeys: REQUIRED_ENCRYPTION_KEYS,
+        raw,
+        sdk,
+      });
+    } catch (e) {
+      console.warn("[profile] load failed for", addr, e);
+    }
+  }
+
   const getProfileFeed = async (
     authorAddress: string,
     options?: { height?: number; startTxid?: string; count?: number },
@@ -2645,6 +2699,7 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
     loadCommentsByIds,
     loadUsersInfo: (addresses: string[], options?: { update?: boolean }) =>
       appInitializer.loadUsersInfo(addresses, options),
+    logUserProfile,
     login,
     logout,
     matrixError,

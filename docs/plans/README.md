@@ -17,6 +17,7 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 
 | Plan | State | What is open |
 |---|---|---|
+| [2026-11-08-local-node-proxy-networking](2026-11-08-local-node-proxy-networking.md) | code landed (+ boot offer + CORS relay + SDK rpc bridge) | device/browser QA (Local covers Api.rpc; ping stays remote) — see `manual-verification.md` |
 | [2026-10-14-firebase-fortachat-migration](2026-10-14-firebase-fortachat-migration.md) | code in `7c99fe38`, switched off (release stays on `forta-chat`) | app_id + configs swap, Sygnal/APNs check, device check, iOS duplicates |
 | [2026-10-13-peertube-hls-player](2026-10-13-peertube-hls-player.md) | stages 0–6 in code (not committed) | 7: device checks (`manual-verification.md`) |
 | [2026-10-13-sdk-upstream-sliding-sync](2026-10-13-sdk-upstream-sliding-sync.md) | plan only; stage 0 decided (cache variant A) | stages 1–8: fork rebase in `C:\inetpub2022\matrix-js-sdk`, local test on Forta, usage docs, npm publish (owner) |
@@ -33,7 +34,7 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 | [ios/](ios/README.md) | all sub-plans landed | Sygnal pushers, NSE decrypt, AASA check — see its status table |
 | [electron/](electron/README.md) | shipping | user install doc, `electron.d.ts`, IPC tests, signing checks (`ci-desktop.md`) |
 | [llama2/](llama2/README.md) | phases 1–7, perf tuning, multi-model done | device QA (`qa-checklist-phase7.md`), phase R (RAG) |
-| [tor/forta-chat-tor-integration-plan](tor/forta-chat-tor-integration-plan.md) | phases done | unit tests for `AltTransportActive` and `TorRouteDecider.kt`; first-run defaults (product decision) |
+| [tor/forta-chat-tor-integration-plan](tor/forta-chat-tor-integration-plan.md) | phases done | unit tests for `TorRouteDecider.kt`; first-run defaults (product decision) |
 
 **Done**
 

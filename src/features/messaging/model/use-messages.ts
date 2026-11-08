@@ -11,7 +11,7 @@ import { truncateMessage } from "@/shared/lib/message-format";
 import { useConnectivity } from "@/shared/lib/connectivity";
 import { enqueue, dequeue, getQueue } from "@/shared/lib/offline-queue";
 import type { QueuedMessage } from "@/shared/lib/offline-queue";
-import { isChatDbReady, getChatDb } from "@/shared/lib/local-db";
+import { isChatDbReady, getChatDb, describeSendError } from "@/shared/lib/local-db";
 import { detectUrl, fetchPreview } from "./use-link-preview";
 import { invalidateDownloadCache, getDecryptedBlobForMessage } from "./use-file-download";
 import { registerUploadAbort, unregisterUploadAbort, abortUpload } from "./upload-abort-registry";
@@ -251,7 +251,7 @@ export function useMessages() {
         if (localClientId) {
           try {
             const dbKit = getChatDb();
-            await dbKit.messages.markFailed(localClientId);
+            await dbKit.messages.markFailed(localClientId, describeSendError(e));
           } catch { /* already logging above */ }
           return true; // message IS visible (as failed)
         }
@@ -905,7 +905,7 @@ export function useMessages() {
         if (localClientId) {
           try {
             const dbKit = getChatDb();
-            await dbKit.messages.markFailed(localClientId);
+            await dbKit.messages.markFailed(localClientId, describeSendError(e));
           } catch { /* already logging above */ }
           return true;
         }
@@ -1045,7 +1045,7 @@ export function useMessages() {
         });
         if (localClientId) {
           try {
-            await getChatDb().messages.markFailed(localClientId);
+            await getChatDb().messages.markFailed(localClientId, describeSendError(e));
           } catch { /* already logging above */ }
           return true;
         }
@@ -1727,6 +1727,7 @@ export function useMessages() {
               await dbKit.db.messages.where("clientId").equals(localMsg.clientId).modify({
                 status: "failed" as import("@/shared/lib/local-db/schema").LocalMessageStatus,
                 uploadProgress: undefined,
+                sendError: describeSendError(e),
               });
             }
           }
@@ -1981,6 +1982,7 @@ export function useMessages() {
             status: "failed" as LocalMessageStatus,
             uploadProgress: undefined,
             uploadPhase: undefined,
+            sendError: describeSendError(e),
           });
           // WEE-64: the media retry pipeline bypasses SyncEngine, so mirror the
           // failed badge onto the chat-list preview (still-last guard in the repo).
@@ -2018,7 +2020,7 @@ export function useMessages() {
     const matrixService = getMatrixClientService();
     if (!matrixService.isReady()) {
       console.error("[retryMessage] Matrix client still not ready", { roomId, clientId: mKey });
-      await dbKit.messages.markFailed(mKey);
+      await dbKit.messages.markFailed(mKey, "Matrix client not ready");
       // WEE-64: this retry never reaches SyncEngine.markMessageFailed, so mirror
       // the failed badge onto the preview here (still-last guard in the repo).
       await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");
@@ -2048,7 +2050,7 @@ export function useMessages() {
       );
     } catch (e) {
       console.error("[retryMessage] Failed to enqueue:", e);
-      await dbKit.messages.markFailed(mKey);
+      await dbKit.messages.markFailed(mKey, describeSendError(e));
       // WEE-64: enqueue failed before SyncEngine took over — keep the preview
       // consistent with the failed message (still-last guard in the repo).
       await dbKit.rooms.syncLastMessageLocalStatus(roomId, localMsg.timestamp, "failed");

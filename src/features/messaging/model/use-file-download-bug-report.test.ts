@@ -200,6 +200,37 @@ describe("useFileDownload — auto bug-report blacklist & dedup", () => {
     expect(bugReportOpen).not.toHaveBeenCalled();
   });
 
+  // emptykey used to slip past CRYPTO_ERROR_PATTERNS (unlike emptyforme), so
+  // every encrypted attachment in a media-heavy chat auto-opened Report a Bug
+  // and Cancel looked broken as the next download finished and re-opened it.
+  it("does NOT auto-open bug-report when decryptKey throws emptykey", async () => {
+    decryptKeyMock.mockRejectedValue(new Error("emptykey"));
+
+    const scope = effectScope();
+    await scope.run(async () => {
+      const { download } = useFileDownload();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await runWithFakeTimers(() => download(makeMessage({ id: "$evt-emptykey", _key: "client-emptykey" }) as any));
+    });
+    scope.stop();
+
+    expect(bugReportOpen).not.toHaveBeenCalled();
+  });
+
+  it("fast-fails on emptykey (no 3-retry / 10s spinner)", async () => {
+    decryptKeyMock.mockRejectedValue(new Error("emptykey"));
+
+    const scope = effectScope();
+    await scope.run(async () => {
+      const { download } = useFileDownload();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await runWithFakeTimers(() => download(makeMessage({ id: "$evt-emptykey-fast", _key: "client-emptykey-fast" }) as any));
+    });
+    scope.stop();
+
+    expect(decryptKeyMock).toHaveBeenCalledTimes(1);
+  });
+
   it("emits exactly ONE bug-report when the same message fails 5 times with the same generic error", async () => {
     // Generic non-crypto error (e.g. quota exceeded) — eligible for auto-report.
     global.fetch = vi.fn(() => Promise.reject(new Error("QuotaExceeded"))) as unknown as Mock;

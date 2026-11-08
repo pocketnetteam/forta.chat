@@ -53,7 +53,7 @@ class FetchReceiver {
         delete this.onmessageListeners[requestId][eventName];
     }
 
-    unlistenAll(eventName, requestId) {
+    unlistenAll(requestId) {
         delete this.onmessageListeners[requestId];
     }
 
@@ -184,6 +184,10 @@ class FetchReceiver {
                     delete serializedOptions.body;
                 }
 
+                if (abortSignal.aborted) {
+                    return;
+                }
+
                 self.sendRequest(requestId, { ...serializedOptions, url });
             };
 
@@ -201,17 +205,26 @@ class FetchReceiver {
                     delete serializedOptions.body;
                 }
 
+                if (abortSignal.aborted) {
+                    return;
+                }
+
                 self.sendRequest(requestId, serializedOptions);
             };
 
+            const abortError = () => new DOMException('The user aborted a request.', 'AbortError');
+            let streamController = null;
+
             let readStream = new ReadableStream({
                 async start(controller) {
-                    if (abortSignal) {
-                        abortSignal.onabort = () => {
-                            self.sendAbort(requestId);
-                            controller.close();
-                        };
-                    }
+                    streamController = controller;
+
+                    abortSignal.onabort = () => {
+                        self.sendAbort(requestId);
+                        self.offAll(requestId);
+                        // A cut-off body must not read as a complete one.
+                        controller.error(abortError());
+                    };
 
                     self.onData(requestId, (data) => {
                         const chunkUint8 = new Uint8Array(data);
@@ -219,8 +232,14 @@ class FetchReceiver {
                     });
 
                     self.onEnd(requestId, () => {
+                        self.offAll(requestId);
                         controller.close();
                     });
+                },
+
+                // The page stopped reading the body (aborted or dropped the response).
+                cancel() {
+                    abortController.abort();
                 }
             });
 
@@ -244,12 +263,28 @@ class FetchReceiver {
                     });
 
                     resolve(response);
-                    self.offAll();
                 });
 
                 self.onError(requestId, (err) => {
+                    self.offAll(requestId);
+                    // After InitialData the promise is settled: the body has to fail instead.
+                    streamController?.error(new TypeError('Failed to fetch'));
                     reject(err);
                 });
+
+                // The main process stops the transfer and sends nothing back.
+                abortSignal.addEventListener('abort', () => reject(abortError()));
+
+                // A page cancelling its fetch reaches the SW as the request's signal.
+                const callerSignal = init?.signal || (input instanceof Request ? input.signal : null);
+
+                if (callerSignal) {
+                    if (callerSignal.aborted) {
+                        abortController.abort();
+                    } else {
+                        callerSignal.addEventListener('abort', () => abortController.abort(), { once: true });
+                    }
+                }
 
                 if (typeof input === 'string') {
                     return override1(input, init);

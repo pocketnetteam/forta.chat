@@ -5,8 +5,12 @@ import { ProfileLoader, PROFILE_LOADER_BATCH_ACTIVE } from "@/shared/lib/profile
 import { PromisePool } from "@/shared/lib/promise-pool";
 
 import { isEmptyUserProfile } from "../lib/is-empty-profile";
+import { normalizeUserKeys } from "../lib/normalize-user-keys";
 import { mergeUserUpdate } from "./merge-user-update";
 import type { User } from "./types";
+
+/** Forta publishes 12 encryption public keys on the profile; fewer is incomplete. */
+const REQUIRED_CRYPTO_KEYS = 12;
 
 const NAMESPACE = "user";
 const LS_KEY = "bastyon-chat-users";
@@ -107,7 +111,11 @@ function applyFetchedProfile(address: string, usersMap: Record<string, User>, us
   image?: string;
   site?: string;
   language?: string;
+  keys?: unknown;
+  id?: number | string;
+  k?: unknown;
 }): boolean {
+  const keys = normalizeUserKeys(userData.keys ?? userData.k);
   const next = mergeUserUpdate(usersMap[address], {
     address,
     name: userData.name ?? "",
@@ -115,6 +123,8 @@ function applyFetchedProfile(address: string, usersMap: Record<string, User>, us
     image: userData.image ?? "",
     site: userData.site ?? "",
     language: userData.language ?? "",
+    keys: keys.length > 0 ? keys : undefined,
+    id: userData.id,
   });
   if (isEmptyUserProfile(next)) {
     // Drop any previously cached empty stub for this address.
@@ -199,6 +209,43 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     return users.value[address];
   };
 
+  /** Complete encryption identity from the display cache (offline peer-keys fallback). */
+  const getCryptoIdentity = (
+    address: string,
+  ): { keys: string[]; id?: number | string } | null => {
+    const u = users.value[address];
+    if (!u?.keys || u.keys.length < REQUIRED_CRYPTO_KEYS) return null;
+    return { keys: u.keys, id: u.id };
+  };
+
+  /**
+   * Persist Forta encryption keys next to name/image after a successful
+   * getuserprofile / pcrypto resolve. No-ops when there is no display name
+   * yet (empty-name rows are never cached).
+   */
+  const upsertCryptoKeys = (
+    address: string,
+    keys: string[],
+    meta?: { id?: number | string; name?: string },
+  ): void => {
+    if (!address || keys.length < REQUIRED_CRYPTO_KEYS) return;
+    const prev = users.value[address];
+    const name = (meta?.name?.trim() || prev?.name || "").trim();
+    if (!name) return;
+    users.value[address] = mergeUserUpdate(prev, {
+      address,
+      name,
+      keys,
+      id: meta?.id,
+      image: prev?.image,
+      about: prev?.about,
+      site: prev?.site,
+      language: prev?.language,
+    });
+    debouncedTrigger();
+    debouncedCacheUsers(users.value);
+  };
+
   const setUser = (address: string, user: User) => {
     if (isEmptyUserProfile(user)) {
       // Never cache an empty profile; drop a stale empty stub if present.
@@ -240,8 +287,11 @@ export const useUserStore = defineStore(NAMESPACE, () => {
     if (!address) return;
     const cached = users.value[address];
     if (cached && cached.name) {
-      // Has real name — check if stale and schedule background revalidation
-      if (cached.cachedAt && Date.now() - cached.cachedAt > USER_TTL_MS) {
+      // Has real name — check if stale and schedule background revalidation.
+      // Missing cachedAt (legacy rows) counts as stale so a post-upgrade pass
+      // can fill encryption keys next to name/image.
+      const stale = !cached.cachedAt || Date.now() - cached.cachedAt > USER_TTL_MS;
+      if (stale) {
         _scheduleBackgroundRevalidation([address]);
       }
       return;
@@ -470,11 +520,13 @@ export const useUserStore = defineStore(NAMESPACE, () => {
   return {
     cleanup,
     enqueueProfiles,
+    getCryptoIdentity,
     getUser,
     loadUserIfMissing,
     loadUsersBatch,
     setUser,
     setUsers,
+    upsertCryptoKeys,
     users
   };
 });

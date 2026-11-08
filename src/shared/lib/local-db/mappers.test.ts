@@ -78,4 +78,11 @@ describe("localToMessage status derivation", () => {
     const msg = localToMessage(baseLocal, undefined, "alice");
     expect(msg.status).toBe(MessageStatus.sent); // "synced" → sent
   });
+
+  it("exposes sendError only while the message is failed", () => {
+    const failed = localToMessage({ ...baseLocal, status: "failed", sendError: "M_FORBIDDEN" });
+    expect(failed.sendError).toBe("M_FORBIDDEN");
+    const synced = localToMessage({ ...baseLocal, sendError: "stale" });
+    expect(synced.sendError).toBeUndefined();
+  });
 });

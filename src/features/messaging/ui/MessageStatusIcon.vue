@@ -5,7 +5,17 @@ import { computed } from "vue";
 const props = defineProps<{
   status: MessageStatus;
   light?: boolean;
+  /** Render the failed (!) as a button emitting `failedClick`. Off in lists
+   *  where the whole row is the click target (chat-list preview). */
+  clickableError?: boolean;
 }>();
+
+const emit = defineEmits<{
+  /** The red (!) was tapped — the parent shows why sending failed. */
+  failedClick: [];
+}>();
+
+const { t } = useI18n();
 
 const isSending = computed(() => props.status === MessageStatus.sending);
 const isFailed = computed(() => props.status === MessageStatus.failed);
@@ -27,7 +37,22 @@ const iconColor = computed(() => {
     <path d="M12 7v5l3 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" :style="{ color: iconColor }" />
   </svg>
 
-  <!-- Failed: exclamation -->
+  <!-- Failed: exclamation (tap shows the error) -->
+  <button
+    v-else-if="isFailed && props.clickableError"
+    type="button"
+    data-testid="send-error-icon"
+    class="inline-flex cursor-pointer align-text-bottom"
+    :aria-label="t('message.sendErrorShow')"
+    :title="t('message.sendErrorShow')"
+    @click.stop="emit('failedClick')"
+  >
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" class="inline-block">
+      <circle cx="12" cy="12" r="9" stroke="#FF4444" stroke-width="1.8" />
+      <path d="M12 8v5" stroke="#FF4444" stroke-width="2" stroke-linecap="round" />
+      <circle cx="12" cy="16" r="1" fill="#FF4444" />
+    </svg>
+  </button>
   <svg v-else-if="isFailed" width="14" height="14" viewBox="0 0 24 24" fill="none" class="inline-block align-text-bottom">
     <circle cx="12" cy="12" r="9" stroke="#FF4444" stroke-width="1.8" />
     <path d="M12 8v5" stroke="#FF4444" stroke-width="2" stroke-linecap="round" />

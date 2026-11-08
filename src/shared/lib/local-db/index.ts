@@ -46,6 +46,7 @@ export type { RoomChange } from "./room-repository";
 export { ChannelRepository } from "./channel-repository";
 export { UserRepository } from "./user-repository";
 export { SyncEngine } from "./sync-engine";
+export { describeSendError } from "./describe-send-error";
 export { EventWriter } from "./event-writer";
 export type {
   ParsedMessage,

@@ -296,3 +296,72 @@ describe("SyncEngine — WEE-64: chat-list preview reflects failed/retried send"
     ).resolves.toBeUndefined();
   });
 });
+
+/** The failure reason must reach the message row so tapping the red (!)
+ *  can show it — before, it only lived on the pendingOps row (and as
+ *  `String(e)`, which drops Matrix errcode / HTTP status). */
+describe("SyncEngine — failed send records why it failed", () => {
+  let h: Harness;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h = makeHarness(`sync-engine-send-error-${Date.now()}-${Math.random()}`);
+    await h.db.open();
+  });
+
+  afterEach(async () => {
+    await disposeSyncEngineHarness(h);
+    vi.restoreAllMocks();
+  });
+
+  it("stores the Matrix error on the message and the op", async () => {
+    await seedRoom(h.db);
+    const msg = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "hi" });
+    mockMatrix.sendEncryptedText.mockImplementation(async () => {
+      throw Object.assign(new Error("You are not allowed to send"), { errcode: "M_FORBIDDEN", httpStatus: 403 });
+    });
+
+    await seedOp(h.db, { clientId: msg.clientId, maxRetries: 1 });
+    await h.engine.processQueue();
+    await waitOpFailed(h, msg.clientId);
+
+    const expected = "M_FORBIDDEN · HTTP 403 · You are not allowed to send";
+    expect((await h.messages.getByClientId(msg.clientId))?.sendError).toBe(expected);
+    expect((await h.db.pendingOps.where("clientId").equals(msg.clientId).first())?.errorMessage).toBe(expected);
+    expect(console.error).toHaveBeenCalledWith(
+      "[SyncEngine] op failed, giving up:",
+      expect.objectContaining({ clientId: msg.clientId, error: expected }),
+      expect.anything(),
+    );
+  });
+
+  it("logs every failed attempt that will be retried", async () => {
+    await seedRoom(h.db);
+    const msg = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "hi" });
+    mockMatrix.sendEncryptedText.mockImplementation(async () => {
+      throw new Error("encrypt failed");
+    });
+
+    await seedOp(h.db, { clientId: msg.clientId, maxRetries: 5 });
+    await h.engine.processQueue();
+    await vi.waitFor(() => {
+      expect(console.warn).toHaveBeenCalledWith(
+        "[SyncEngine] op attempt failed, will retry:",
+        expect.objectContaining({ clientId: msg.clientId, attempt: 1, error: "encrypt failed" }),
+        expect.anything(),
+      );
+    });
+  });
+
+  it("a status write other than failed clears sendError", async () => {
+    await seedRoom(h.db);
+    const msg = await h.messages.createLocal({ roomId: ROOM_ID, senderId: "@me:server", content: "hi" });
+    await h.messages.markFailed(msg.clientId, "boom");
+    expect((await h.messages.getByClientId(msg.clientId))?.sendError).toBe("boom");
+
+    await h.messages.updateStatus({ clientId: msg.clientId }, "pending");
+    expect((await h.messages.getByClientId(msg.clientId))?.sendError).toBeUndefined();
+  });
+});

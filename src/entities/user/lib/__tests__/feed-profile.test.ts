@@ -27,4 +27,16 @@ describe("feedProfileToUser", () => {
   it("drops a row without an address", () => {
     expect(feedProfileToUser({ name: "x" })).toBeNull();
   });
+
+  it("keeps encryption keys and Pocketnet id when present", () => {
+    const keys = Array.from({ length: 12 }, (_, i) => `k${i}`);
+    const user = feedProfileToUser({
+      address: "P1",
+      name: "Alice",
+      id: 42,
+      k: keys.join(","),
+    });
+    expect(user?.keys).toEqual(keys);
+    expect(user?.id).toBe(42);
+  });
 });

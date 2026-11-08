@@ -154,6 +154,9 @@ export interface LocalMessage {
   uploadPhase?: "encrypting" | "uploading" | "sending_event";
   /** Local blob: URL for instant media preview before upload completes */
   localBlobUrl?: string;
+  /** Why the last send attempt failed (set with status "failed", cleared on
+   *  any other status write). Shown when the user taps the red (!) icon. */
+  sendError?: string;
 }
 
 /** Cached user profile */

@@ -4,6 +4,7 @@ import {
   getConfiguredPocketnetNodes,
   callPocketnetRpc,
   unwrapRpcPayload,
+  setPocketnetRpcRouter,
 } from "../node-rpc-client";
 import { resetNodeFailover } from "../node-failover";
 
@@ -44,6 +45,7 @@ describe("callPocketnetRpc", () => {
 
   beforeEach(() => {
     resetNodeFailover();
+    setPocketnetRpcRouter(null);
     configurePocketnetNodes(NODES);
     vi.restoreAllMocks();
     vi.spyOn(console, "warn").mockImplementation(() => {});

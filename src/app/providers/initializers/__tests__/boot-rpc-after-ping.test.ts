@@ -15,6 +15,10 @@ vi.mock("../../chat-scripts/config/pocketnetinstance", () => ({
     options: { listofproxies: [{ host: "1.pocketnet.app", port: 8899 }] },
   },
 }));
+vi.mock("@/shared/lib/pocketnet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/shared/lib/pocketnet")>();
+  return { ...actual, installSdkRpcBridge: vi.fn() };
+});
 
 const setArchived = vi.fn();
 const loadArchivedDirect = vi.fn(async () => [] as string[]);

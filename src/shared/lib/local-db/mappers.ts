@@ -46,6 +46,7 @@ export function localToMessage(
     uploadProgress: local.uploadProgress,
     decryptionStatus: (local.decryptionStatus === "pending" || local.decryptionStatus === "failed")
       ? local.decryptionStatus : undefined,
+    sendError: local.status === "failed" ? local.sendError : undefined,
   };
 }
 

@@ -349,6 +349,8 @@ const memberAction = ref<{ show: boolean; hexId: string; x: number; y: number }>
 });
 
 const openMemberMenu = (e: MouseEvent, hexId: string) => {
+  // Diagnostics: the member's chain profile and key count go to the console.
+  void authStore.logUserProfile(hexDecode(hexId));
   if (!isAdmin.value) return;
   if (hexId === myHexId.value) return; // can't manage self
   memberAction.value = { show: true, hexId, x: e.clientX, y: e.clientY };

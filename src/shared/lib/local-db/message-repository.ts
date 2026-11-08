@@ -612,17 +612,20 @@ export class MessageRepository {
   async updateStatus(
     identifier: { eventId?: string; clientId?: string },
     status: LocalMessageStatus,
+    sendError?: string,
   ): Promise<void> {
+    // sendError only travels with "failed"; any other status clears it.
+    const changes = { status, sendError: status === "failed" ? sendError : undefined };
     if (identifier.eventId) {
       await this.db.messages
         .where("eventId")
         .equals(identifier.eventId)
-        .modify({ status });
+        .modify(changes);
     } else if (identifier.clientId) {
       await this.db.messages
         .where("clientId")
         .equals(identifier.clientId)
-        .modify({ status });
+        .modify(changes);
     }
   }
 
@@ -640,14 +643,14 @@ export class MessageRepository {
    *  guard — safe because its callers fire on a *synchronous* enqueue failure,
    *  before any send is in flight, so there is no server-echo race to lose to.
    *  Do not reuse from a post-send/async context without adding that guard. */
-  async markFailed(clientId: string): Promise<void> {
+  async markFailed(clientId: string, sendError?: string): Promise<void> {
     await this.db.transaction("rw", [this.db.messages, this.db.rooms], async () => {
       const msg = await this.db.messages.where("clientId").equals(clientId).first();
       if (!msg) return;
       await this.db.messages
         .where("clientId")
         .equals(clientId)
-        .modify({ status: "failed" as LocalMessageStatus });
+        .modify({ status: "failed" as LocalMessageStatus, sendError });
       const room = await this.db.rooms.get(msg.roomId);
       if (room && room.lastMessageTimestamp === msg.timestamp) {
         await this.db.rooms.update(msg.roomId, {

@@ -326,7 +326,7 @@ describe("SyncEngine — marks message failed after maxRetries", () => {
       { timeout: 10_000, interval: 20 },
     );
 
-    expect(h.messageRepo.updateStatus).toHaveBeenCalledWith({ clientId: "op_max" }, "failed");
+    expect(h.messageRepo.updateStatus).toHaveBeenCalledWith({ clientId: "op_max" }, "failed", "permanent");
     expect(mockMatrix.sendEncryptedText).toHaveBeenCalledOnce();
     const op = await h.db.pendingOps.where("clientId").equals("op_max").first();
     expect(op?.retries).toBe(2);

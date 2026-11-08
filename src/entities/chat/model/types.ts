@@ -155,6 +155,8 @@ export interface Message {
   uploadProgress?: number;
   /** Decryption status — only set for encrypted messages (absence = ok/not encrypted) */
   decryptionStatus?: "pending" | "failed";
+  /** Why sending failed — only set while status === failed (may be absent for old rows) */
+  sendError?: string;
   /** Whether this message has been deleted/redacted */
   deleted?: boolean;
   /** For system messages: i18n template key + addresses for dynamic name resolution at render time */

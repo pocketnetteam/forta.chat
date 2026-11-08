@@ -8,6 +8,10 @@ vi.mock("../../chat-scripts", () => ({
 vi.mock("../../chat-scripts/config/pocketnetinstance", () => ({
   PocketnetInstance: { options: { listofproxies: [{ host: "1.pocketnet.app", port: 8899 }] } },
 }));
+vi.mock("@/shared/lib/pocketnet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/shared/lib/pocketnet")>();
+  return { ...actual, installSdkRpcBridge: vi.fn() };
+});
 
 import { createAppInitializer } from "../app-initializer";
 

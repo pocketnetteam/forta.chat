@@ -18,6 +18,7 @@ import {
   isPkoinWalletEnabled,
   resolveAppUpdaterEnabled,
 } from "@/shared/lib/platform";
+import { isLocalNodeProxyAvailable } from "@/entities/proxy";
 import { AppPages } from "@/app/providers/router";
 import { registerPlugin } from "@capacitor/core";
 import { App } from "@capacitor/app";
@@ -44,8 +45,12 @@ const router = useRouter();
 const { openSettingsContent } = useSidebarTab();
 const walletStore = useWalletStore();
 
+/** Tor settings (Android/Electron). */
 const showTor = hasTor;
-
+/** Proxy picker: Tor platforms, or browser localhost when Local Node is available. */
+const showNetworking = showTor || isLocalNodeProxyAvailable();
+/** Tor mode/IP badge in the settings list — only when Tor exists. */
+const showNetworkingStatus = showTor;
 
 const { t } = useI18n();
 
@@ -426,9 +431,9 @@ const handleLogout = () => {
           />
         </div>
 
-        <!-- Networking / Tor -->
+        <!-- Networking (Tor on Android/Electron; proxy-only on localhost when Local Node is available) -->
         <button
-          v-if="showTor"
+          v-if="showNetworking"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-neutral-grad-0"
           @click="openSettingsContent('networking')"
         >
@@ -444,14 +449,16 @@ const handleLogout = () => {
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
           </svg>
           <span class="text-sm text-text-color">{{ t("tor.networking") }}</span>
-          <span
-            v-if="torStatusInfo"
-            class="flex items-center gap-1 text-xs"
-            :class="[torStatusInfo.color, torStatusInfo.pulse ? 'animate-pulse' : '']"
-          >
-            <span>{{ torStatusInfo.text }}</span>
-          </span>
-          <span v-else class="text-xs text-text-on-main-bg-color">{{ torModeLabel }}</span>
+          <template v-if="showNetworkingStatus">
+            <span
+              v-if="torStatusInfo"
+              class="flex items-center gap-1 text-xs"
+              :class="[torStatusInfo.color, torStatusInfo.pulse ? 'animate-pulse' : '']"
+            >
+              <span>{{ torStatusInfo.text }}</span>
+            </span>
+            <span v-else class="text-xs text-text-on-main-bg-color">{{ torModeLabel }}</span>
+          </template>
           <span class="flex-1" />
           <svg
             width="16"

@@ -547,6 +547,20 @@ const isUploading = computed(() =>
 // peer actually received.
 const isFailed = computed(() => isMessageFailedForRetry(props.message));
 
+// Tapping the red (!) reveals why the send failed (stored on the message by
+// the send pipeline). Logged too, so the error can be grabbed from devtools.
+const isSendErrorShown = ref(false);
+const toggleSendError = () => {
+  isSendErrorShown.value = !isSendErrorShown.value;
+  if (isSendErrorShown.value) {
+    console.warn("[MessageBubble] send error:", {
+      roomId: props.message.roomId,
+      clientId: props.message._key,
+      error: props.message.sendError ?? null,
+    });
+  }
+};
+
 const fileIcon = computed(() => {
   const type = props.message.fileInfo?.type ?? "";
   if (type.startsWith("application/pdf")) return "pdf";
@@ -1150,7 +1164,7 @@ const replyPreviewSender = computed(() => {
           </div>
           <div v-if="themeStore.showTimestamps && !message.fileInfo?.caption" class="absolute bottom-1 right-2 flex items-center gap-1 rounded-full bg-black/40 px-2 py-0.5">
             <span class="text-[10px] text-white/90">{{ time }}</span>
-            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" light />
+            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" light clickable-error @failed-click="toggleSendError" />
           </div>
         </div>
 
@@ -1167,7 +1181,7 @@ const replyPreviewSender = computed(() => {
             :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'"
           >
             {{ time }}
-            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
           </span>
         </div>
 
@@ -1217,7 +1231,7 @@ const replyPreviewSender = computed(() => {
         <!-- Timestamp below the circle -->
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center gap-1" :class="props.isOwn ? 'justify-end text-text-on-main-bg-color' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
-          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
         </div>
         <!-- Reactions row -->
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
@@ -1406,7 +1420,7 @@ const replyPreviewSender = computed(() => {
           <span class="truncate text-xs" :class="props.isOwn || isVideoCardDark ? 'text-white/70' : 'text-text-on-main-bg-color'">{{ message.fileInfo?.name }}</span>
           <div v-if="themeStore.showTimestamps" class="flex items-center gap-1" :class="props.isOwn || isVideoCardDark ? 'text-white/60' : 'text-text-on-main-bg-color'">
             <span class="text-[10px]">{{ time }}</span>
-            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
           </div>
         </div>
         <!-- Caption -->
@@ -1422,7 +1436,7 @@ const replyPreviewSender = computed(() => {
             :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'"
           >
             {{ time }}
-            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
           </span>
         </div>
         <!-- Reactions row -->
@@ -1500,7 +1514,7 @@ const replyPreviewSender = computed(() => {
         </div>
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
-          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
         </div>
         <!-- Reactions row -->
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
@@ -1593,7 +1607,7 @@ const replyPreviewSender = computed(() => {
         </div>
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
-          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
         </div>
         <!-- Reactions row -->
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
@@ -1623,7 +1637,7 @@ const replyPreviewSender = computed(() => {
         />
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
-          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
         </div>
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
       </div>
@@ -1658,7 +1672,7 @@ const replyPreviewSender = computed(() => {
         >{{ message.transferInfo.message }}</p>
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
-          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
         </div>
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
       </div>
@@ -1681,7 +1695,7 @@ const replyPreviewSender = computed(() => {
         <CallLinkCard :info="message.callLinkInfo" :is-own="props.isOwn" />
         <div v-if="themeStore.showTimestamps" class="mt-1 flex items-center justify-end gap-1" :class="props.isOwn ? 'text-white/60' : 'text-text-on-main-bg-color'">
           <span class="text-[10px]">{{ time }}</span>
-          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+          <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
         </div>
         <ReactionRow v-if="message.reactions && Object.keys(message.reactions).length" :reactions="message.reactions" :is-own="props.isOwn" :my-address="props.myAddress" :message-id="message.id" @toggle="handleToggleReaction" @add-reaction="handleAddReaction" />
       </div>
@@ -1740,7 +1754,7 @@ const replyPreviewSender = computed(() => {
           >
             <span v-if="message.edited" class="italic">{{ t('message.edited') }}</span>
             {{ time }}
-            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
           </div>
         </div>
         <div v-else class="text-chat-base">
@@ -1753,7 +1767,7 @@ const replyPreviewSender = computed(() => {
           >
             <span v-if="message.edited" class="italic">{{ t('message.edited') }}</span>
             {{ time }}
-            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" />
+            <MessageStatusIcon v-if="props.isOwn" :status="msgStatus" clickable-error @failed-click="toggleSendError" />
           </span>
         </div>
 
@@ -1778,6 +1792,17 @@ const replyPreviewSender = computed(() => {
           >
             {{ t('message.cancelSend') }}
           </button>
+        </div>
+
+        <!-- Send error details, toggled by the red (!) status icon -->
+        <div
+          v-if="isFailed && props.isOwn && isSendErrorShown"
+          data-testid="send-error-details"
+          class="mt-1 select-text break-words rounded bg-red-50 px-2 py-1 text-[11px] text-[#FF4444] dark:bg-red-900/20"
+          @click.stop
+        >
+          <span class="font-medium">{{ t('message.sendErrorTitle') }}:</span>
+          {{ message.sendError || t('message.sendErrorUnknown') }}
         </div>
 
         <!-- Reactions row. Jumbo emoji have no bubble, so the chips get a small

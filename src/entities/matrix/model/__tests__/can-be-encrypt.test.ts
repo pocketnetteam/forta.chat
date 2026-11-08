@@ -5,11 +5,12 @@ import { resolve } from "path";
 const getSource = () => readFileSync(resolve(__dirname, "../matrix-crypto.ts"), "utf-8");
 
 describe("canBeEncrypt peer key check", () => {
-  it("should check that all usersinfo entries have >= m keys using .every()", () => {
+  // Groups skip keyless members (see matrix-crypto-group-keyless-member.test.ts).
+  it("should check that the 1:1 peer has >= m keys using .every()", () => {
     const source = getSource();
     const start = source.indexOf("canBeEncrypt(): boolean {");
     expect(start).toBeGreaterThan(-1);
-    const section = source.slice(start, start + 1200);
+    const section = source.slice(start, source.indexOf("\n      },", start));
     expect(section).toContain(".every(");
     expect(section).toContain("keys.length >= m");
   });

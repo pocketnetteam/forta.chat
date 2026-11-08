@@ -17,6 +17,11 @@ vi.mock("../../chat-scripts", () => ({
 vi.mock("../../chat-scripts/config/pocketnetinstance", () => ({
   PocketnetInstance: { options: { listofproxies: null } },
 }));
+// Keep stubbed Api.rpc for fnode assertions — do not wrap via SDK bridge.
+vi.mock("@/shared/lib/pocketnet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/shared/lib/pocketnet")>();
+  return { ...actual, installSdkRpcBridge: vi.fn() };
+});
 
 import { createAppInitializer } from "../app-initializer";
 
