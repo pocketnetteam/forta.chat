@@ -364,7 +364,7 @@ npm run test
 ```
 🔴 Manual QA на Android (см. чеклист выше)
 🟡 Unit-тесты TorRouteDecider.kt
-🟡 Unit-тесты AltTransportActive handler (init-transport.test.ts)
+✅ Unit-тесты AltTransportActive handler (`init-transport-alt-transport.test.ts`) и Electron-стека (`electron/tor/*.test.ts`)
 🟡 Blob-workaround — только если manual QA на старых WebView выявит проблему
 🟢 First-run AUTO для ru/fa — продуктовое решение (не в scope MVP)
 🟢 Onboarding-подсказка для цензурируемых регионов

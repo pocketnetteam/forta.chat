@@ -105,4 +105,26 @@ describe("mergeUserUpdate", () => {
     expect(result.site).toBe("");
     expect(result.language).toBe("");
   });
+
+  it("keeps cached encryption keys when fresh keys are empty", () => {
+    const cached: User = {
+      ...baseCached,
+      keys: Array.from({ length: 12 }, (_, i) => `k${i}`),
+      id: 42,
+    };
+    const result = mergeUserUpdate(cached, { keys: [], name: "Alice" });
+    expect(result.keys).toEqual(cached.keys);
+    expect(result.id).toBe(42);
+  });
+
+  it("replaces cached keys when fresh provides a complete set of 12", () => {
+    const cached: User = {
+      ...baseCached,
+      keys: Array.from({ length: 12 }, (_, i) => `old${i}`),
+    };
+    const freshKeys = Array.from({ length: 12 }, (_, i) => `new${i}`);
+    const result = mergeUserUpdate(cached, { keys: freshKeys, id: 7 });
+    expect(result.keys).toEqual(freshKeys);
+    expect(result.id).toBe(7);
+  });
 });

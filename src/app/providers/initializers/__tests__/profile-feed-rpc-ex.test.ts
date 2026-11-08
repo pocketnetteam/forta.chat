@@ -10,6 +10,7 @@ vi.mock("@/shared/lib/pocketnet", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/shared/lib/pocketnet")>();
   return {
     ...actual,
+    installSdkRpcBridge: vi.fn(),
     callPocketnetRpc: async (req: { endpoint?: string }) => {
       rpc.calls.push(req);
       return rpc.handler!(req.endpoint);

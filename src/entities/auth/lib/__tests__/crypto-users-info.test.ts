@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { hexEncode } from "@/shared/lib/matrix/functions";
-import { resolveCryptoUsersInfo, type CryptoUsersInfoDeps, type SelfCryptoIdentity } from "../crypto-users-info";
+import {
+  resolveCryptoUsersInfo,
+  type CryptoUsersInfoDeps,
+  type SelfCryptoIdentity,
+  type UserStoreCryptoIdentity,
+} from "../crypto-users-info";
 
 const ME = "PR7srzZt4EfcNb3s27grgmiG8aB9vYNV82";
 const PEER = "PQ8AiCHJaTZAThr2TnpkQYDyVd1Hidq4PM";
@@ -11,9 +16,11 @@ const sdkUser = (address: string, id: number, k: string[]) => ({ address, id, na
 function setup(opts: {
   memory?: Record<string, ReturnType<typeof sdkUser>>;
   cached?: SelfCryptoIdentity | null;
+  userStore?: Record<string, UserStoreCryptoIdentity>;
   load?: CryptoUsersInfoDeps["loadUsersInfo"];
 }) {
   const memory = { ...(opts.memory ?? {}) };
+  const userStore = { ...(opts.userStore ?? {}) };
   const deps: CryptoUsersInfoDeps = {
     selfAddress: ME,
     requiredKeys: 12,
@@ -21,8 +28,12 @@ function setup(opts: {
     getUserData: (a) => memory[a] ?? null,
     readSelfIdentity: () => opts.cached ?? null,
     writeSelfIdentity: vi.fn(),
+    readUserStoreIdentity: (a) => userStore[a] ?? null,
+    writeUserStoreIdentity: vi.fn((a, identity) => {
+      userStore[a] = { keys: identity.keys, id: identity.id };
+    }),
   };
-  return { deps, memory };
+  return { deps, memory, userStore };
 }
 
 const ids = [hexEncode(ME), hexEncode(PEER)];
@@ -109,5 +120,44 @@ describe("resolveCryptoUsersInfo", () => {
     });
     const res = await resolveCryptoUsersInfo(ids, undefined, deps);
     expect(res[1].keys).toEqual(keys("p"));
+  });
+
+  it("regression: peer keys come from useUserStore when proxy/SDK has nothing", async () => {
+    const { deps } = setup({
+      cached: { keys: keys("m"), id: 1 },
+      userStore: { [PEER]: { keys: keys("p"), id: 45 } },
+      load: async () => { throw new Error("proxy down"); },
+    });
+
+    const res = await resolveCryptoUsersInfo(ids, undefined, deps);
+
+    // Peer already complete in userStore — no SDK round-trip for them.
+    expect(deps.loadUsersInfo).not.toHaveBeenCalled();
+    expect(res[1]).toMatchObject({ keys: keys("p"), source: { id: 45 } });
+  });
+
+  it("writes peer keys back into useUserStore after a successful SDK resolve", async () => {
+    const { deps } = setup({
+      memory: { [ME]: sdkUser(ME, 1, keys("m")), [PEER]: sdkUser(PEER, 45, keys("p")) },
+    });
+
+    await resolveCryptoUsersInfo(ids, undefined, deps);
+
+    expect(deps.writeUserStoreIdentity).toHaveBeenCalledWith(
+      PEER,
+      expect.objectContaining({ keys: keys("p"), id: 45 }),
+    );
+  });
+
+  it("falls back to useUserStore for the peer when forceUpdate RPC fails", async () => {
+    const { deps } = setup({
+      cached: { keys: keys("m"), id: 1 },
+      userStore: { [PEER]: { keys: keys("cachedP"), id: 99 } },
+      load: async () => { throw new Error("rpc down"); },
+    });
+
+    const res = await resolveCryptoUsersInfo(ids, { forceUpdate: true }, deps);
+
+    expect(res[1]).toMatchObject({ keys: keys("cachedP"), source: { id: 99 } });
   });
 });

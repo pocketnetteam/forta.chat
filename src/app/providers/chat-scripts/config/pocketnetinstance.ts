@@ -22,7 +22,8 @@ export const PocketnetInstance: PocketnetInstanceType = {
     listofnodes: null,
     listofproxies: [
       { host: "1.pocketnet.app", port: 8899, wss: 8099 },
-      { host: "2.pocketnet.app", port: 8899, wss: 8099 }
+      { host: "2.pocketnet.app", port: 8899, wss: 8099 },
+      { host: "4.pocketnet.app", port: 8899, wss: 8099 }
     ],
     localStoragePrefix: "bastyon",
     matrix: "matrix.pocketnet.app",

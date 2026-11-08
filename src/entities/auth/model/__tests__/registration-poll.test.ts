@@ -95,10 +95,9 @@ describe("registration poll", () => {
     const source = getSource();
     const fnStart = source.indexOf("async function onRegistrationConfirmed");
     expect(fnStart).toBeGreaterThan(-1);
-    // Window widened (WEE-XX): loadUsersInfo/initializeAndFetchUserData here
-    // are now wrapped in withTimeout (same unguarded-hang class as fetchUserInfo),
-    // pushing the isRoomListLoading/retryImmediately/refreshRoomsNow block further in.
-    const fnSection = source.slice(fnStart, fnStart + 5200);
+    // Window widened: withTimeout wrappers + userStore keys write-back push the
+    // isRoomListLoading/retryImmediately/refreshRoomsNow block further in.
+    const fnSection = source.slice(fnStart, fnStart + 6500);
     // When matrixReady is already true, heal the empty-list skeleton instead of
     // skipping sync entirely (post-registration hang until refresh).
     expect(fnSection).toContain("isRoomListLoading");

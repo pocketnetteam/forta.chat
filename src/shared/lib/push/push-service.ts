@@ -23,10 +23,11 @@ import { buildMessageNotificationContent } from '@/shared/lib/notifications/mess
 import { interopLog } from '@/shared/lib/interop';
 
 /**
- * Sygnal `app_id` per platform. Both pushers can coexist on the same Matrix
- * account when a user is signed in on multiple devices; cleanup of stale
- * pushkeys is scoped to the device's own `app_id` so iOS does not delete
- * Android's pusher and vice versa.
+ * Sygnal `app_id` per platform. Pushers of several devices coexist on the
+ * same Matrix account, under one app_id when they are the same platform, so
+ * a device only removes pushers with its own earlier tokens (see
+ * {@link isLegacyPusherEntry}), never "same app_id, other token": that was
+ * every other phone of the account.
  *
  * The app_id picks the Firebase project Sygnal sends through, and it must
  * match the native configs (`google-services.json`, `GoogleService-Info.plist`):
@@ -108,25 +109,16 @@ export function buildVoipPusherPayload(
 }
 
 /**
- * Decide whether a pusher entry from `getPushers()` is stale and should be
- * removed. Stale = same `app_id` as our current platform's pusher but a
- * different `pushkey`. We never touch entries from other platforms — those
- * belong to other devices on this Matrix account.
- */
-export function isStalePusherEntry(
-  p: { app_id?: string; pushkey?: string },
-  currentAppId: string,
-  currentToken: string,
-): boolean {
-  return p.app_id === currentAppId && p.pushkey !== currentToken;
-}
-
-/**
- * Whether a pusher entry is this device's own older pusher: the one native
- * reported for the FCM token it replaced, under any app_id. Moving to a new
- * Firebase project changes both the token and the app_id (`fortaandroid` →
- * `fortaandroid2`), so {@link isStalePusherEntry} never matches it, and left
- * alone it doubles every push.
+ * Whether a pusher entry is this device's own older pusher: the one for a
+ * token this device registered before (native's replaced FCM token, or the
+ * pushkey JS stored, see {@link OWN_PUSHKEY_KEY}), under any app_id. Moving to
+ * a new Firebase project changes both the token and the app_id
+ * (`fortaandroid` → `fortaandroid2`), and left alone the old pusher doubles
+ * every push.
+ *
+ * Pushers with tokens this device never had belong to other devices of the
+ * account and stay. A dead one (app reinstalled, data cleared) goes by
+ * itself: FCM/APNs reject its token and the homeserver drops the pusher.
  */
 export function isLegacyPusherEntry(
   p: { pushkey?: string },
@@ -134,6 +126,27 @@ export function isLegacyPusherEntry(
   currentToken: string,
 ): boolean {
   return !!legacyToken && legacyToken !== currentToken && p.pushkey === legacyToken;
+}
+
+/** localStorage: the pushkey this device last registered, per pusher kind.
+ *  The next registration with another token removes that pusher. */
+export const OWN_PUSHKEY_KEY = 'push_own_pushkey';
+export const OWN_VOIP_PUSHKEY_KEY = 'push_own_voip_pushkey';
+
+function readOwnPushkey(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null; // localStorage may be unavailable in degraded WebViews
+  }
+}
+
+function writeOwnPushkey(key: string, token: string): void {
+  try {
+    localStorage.setItem(key, token);
+  } catch {
+    /* non-fatal: the old pusher then lives until FCM/APNs reject it */
+  }
 }
 
 /**
@@ -303,13 +316,18 @@ class PushService {
         // Pusher is live — best-effort stale cleanup is a separate concern;
         // its failure must not invalidate the successful registration above.
         const legacyToken = await this.confirmPusherRegistered(token);
+        const previousToken = readOwnPushkey(OWN_PUSHKEY_KEY);
         try {
-          const { pushers } = await matrixClient.getPushers();
-          for (const p of pushers) {
-            if (isStalePusherEntry(p, payload.app_id, token) || isLegacyPusherEntry(p, legacyToken, token)) {
-              await matrixClient.setPusher({ ...p, kind: null });
+          if (legacyToken || (previousToken && previousToken !== token)) {
+            const { pushers } = await matrixClient.getPushers();
+            for (const p of pushers) {
+              if (isLegacyPusherEntry(p, legacyToken, token) || isLegacyPusherEntry(p, previousToken, token)) {
+                await matrixClient.setPusher({ ...p, kind: null });
+              }
             }
           }
+          // Only after the removal: a failed one is retried on the next boot.
+          writeOwnPushkey(OWN_PUSHKEY_KEY, token);
           if (legacyToken) await PushData.clearLegacyFcmToken({ token: legacyToken });
         } catch (pe) {
           console.warn('[PushService] Could not clean stale pushers:', pe);
@@ -420,10 +438,9 @@ class PushService {
    * Register the iOS VoIP (PushKit) pusher for `m.call.invite` events.
    *
    * Idempotent: safe to call on every `voipTokenReceived` event including
-   * rotations. Cleans up stale `fortaios.voip` pushers from previous
-   * tokens on this device — without this, every reinstall + new token
-   * would leave a dead pusher on the homeserver and Sygnal would keep
-   * trying to deliver to gone-app tokens forever.
+   * rotations. Removes the VoIP pusher of this device's previous token
+   * ({@link OWN_VOIP_PUSHKEY_KEY}); pushers of other iPhones of the account
+   * stay. A reinstall's dead pusher goes once APNs rejects its token.
    */
   private async registerVoipPusher(
     matrixClient: any,
@@ -437,12 +454,16 @@ class PushService {
     try {
       await matrixClient.setPusher(payload);
       try {
-        const { pushers } = await matrixClient.getPushers();
-        for (const p of pushers) {
-          if (isStalePusherEntry(p, payload.app_id, voipToken)) {
-            await matrixClient.setPusher({ ...p, kind: null });
+        const previousToken = readOwnPushkey(OWN_VOIP_PUSHKEY_KEY);
+        if (previousToken && previousToken !== voipToken) {
+          const { pushers } = await matrixClient.getPushers();
+          for (const p of pushers) {
+            if (isLegacyPusherEntry(p, previousToken, voipToken)) {
+              await matrixClient.setPusher({ ...p, kind: null });
+            }
           }
         }
+        writeOwnPushkey(OWN_VOIP_PUSHKEY_KEY, voipToken);
       } catch (pe) {
         console.warn('[PushService] Could not clean stale VoIP pushers:', pe);
       }

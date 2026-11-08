@@ -4,10 +4,13 @@ import { useTorStore } from "@/entities/tor";
 import { formatBytes } from "@/entities/tor/lib/format-bytes";
 import { SettingsSection } from "@/shared/ui/settings-section";
 import { Toggle } from "@/shared/ui/toggle";
-import { isNative } from "@/shared/lib/platform";
+import { hasTor, isNative } from "@/shared/lib/platform";
+import ProxySettingsSection from "./ProxySettingsSection.vue";
 
 const { t } = useI18n();
 const torStore = useTorStore();
+/** Tor controls only on Android/Electron; browser localhost shows proxy picker alone. */
+const showTorControls = hasTor;
 
 const showDisableWarning = ref(false);
 const pendingMode = ref<TorMode | null>(null);
@@ -85,110 +88,115 @@ const handleSnowflakeToggle = (enabled: boolean) => {
 
 <template>
   <div class="mx-auto max-w-2xl space-y-6 p-6 pb-safe">
-    <!-- Tor mode -->
-    <SettingsSection
-      :title="t('tor.useTor')"
-      :description="activeModeHint"
-    >
-      <div class="flex rounded-lg bg-background-secondary-theme p-1">
-        <button
-          v-for="m in MODES"
-          :key="m.value"
-          class="flex-1 rounded-md px-2 py-2.5 text-sm font-medium transition-all"
-          :class="torStore.mode === m.value
-            ? 'bg-color-bg-ac text-text-on-bg-ac-color shadow-sm'
-            : 'text-text-on-main-bg-color hover:text-text-color'"
-          @click="handleModeSelect(m.value)"
-        >
-          {{ t(m.labelKey) }}
-        </button>
-      </div>
-    </SettingsSection>
+    <!-- Pocketnet proxy switcher (above Tor, Bastyon transportsmanagement-style) -->
+    <ProxySettingsSection />
 
-    <!-- Snowflake bridge -->
-    <SettingsSection
-      v-if="torStore.isEnabled"
-      :title="t('tor.useSnowflake')"
-      :description="t('tor.useSnowflakeHint')"
-    >
-      <div class="flex items-center justify-between rounded-xl bg-background-secondary-theme px-4 py-3">
-        <span class="text-sm text-text-color">{{ t("tor.useSnowflake") }}</span>
-        <Toggle
-          :model-value="torStore.isSnowflakeEnabled"
-          @update:model-value="handleSnowflakeToggle"
-        />
-      </div>
-    </SettingsSection>
-
-    <!-- Status -->
-    <SettingsSection
-      v-if="torStore.isEnabled"
-      :title="t('tor.status')"
-      :description="t('tor.statusHint')"
-    >
-      <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
-        <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0 flex-1">
-            <p
-              v-if="statusDisplay"
-              class="truncate text-sm font-medium"
-              :class="[statusDisplay.color, statusDisplay.pulse ? 'animate-pulse' : '']"
-            >
-              {{ statusDisplay.text }}
-            </p>
-            <p v-else class="text-sm text-text-on-main-bg-color">{{ t("tor.off") }}</p>
-          </div>
-
+    <template v-if="showTorControls">
+      <!-- Tor mode -->
+      <SettingsSection
+        :title="t('tor.useTor')"
+        :description="activeModeHint"
+      >
+        <div class="flex rounded-lg bg-background-secondary-theme p-1">
           <button
-            v-if="isNative && torStore.isConnected"
-            class="shrink-0 rounded-lg border border-neutral-grad-0 px-3 py-1.5 text-xs font-medium text-text-color transition-colors hover:bg-neutral-grad-0"
-            :disabled="torStore.isVerifying"
-            @click="torStore.verify()"
+            v-for="m in MODES"
+            :key="m.value"
+            class="flex-1 rounded-md px-2 py-2.5 text-sm font-medium transition-all"
+            :class="torStore.mode === m.value
+              ? 'bg-color-bg-ac text-text-on-bg-ac-color shadow-sm'
+              : 'text-text-on-main-bg-color hover:text-text-color'"
+            @click="handleModeSelect(m.value)"
           >
-            {{ torStore.isVerifying ? t("tor.verifying") : t("tor.verify") }}
+            {{ t(m.labelKey) }}
           </button>
         </div>
-      </div>
-    </SettingsSection>
+      </SettingsSection>
 
-    <!-- Network statistics -->
-    <SettingsSection
-      :title="t('tor.stats')"
-      :description="t('tor.statsHint')"
-    >
-      <div class="grid grid-cols-2 gap-3">
-        <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
-          <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statCurrentDirect") }}</p>
-          <p class="mt-1 text-sm font-semibold text-text-color">
-            {{ formatBytes(torStore.networkStats.directBytes) }}
-          </p>
+      <!-- Snowflake bridge -->
+      <SettingsSection
+        v-if="torStore.isEnabled"
+        :title="t('tor.useSnowflake')"
+        :description="t('tor.useSnowflakeHint')"
+      >
+        <div class="flex items-center justify-between rounded-xl bg-background-secondary-theme px-4 py-3">
+          <span class="text-sm text-text-color">{{ t("tor.useSnowflake") }}</span>
+          <Toggle
+            :model-value="torStore.isSnowflakeEnabled"
+            @update:model-value="handleSnowflakeToggle"
+          />
         </div>
+      </SettingsSection>
+
+      <!-- Status -->
+      <SettingsSection
+        v-if="torStore.isEnabled"
+        :title="t('tor.status')"
+        :description="t('tor.statusHint')"
+      >
         <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
-          <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statCurrentTor") }}</p>
-          <p class="mt-1 text-sm font-semibold text-color-good">
-            {{ formatBytes(torStore.networkStats.torBytes) }}
-          </p>
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <p
+                v-if="statusDisplay"
+                class="truncate text-sm font-medium"
+                :class="[statusDisplay.color, statusDisplay.pulse ? 'animate-pulse' : '']"
+              >
+                {{ statusDisplay.text }}
+              </p>
+              <p v-else class="text-sm text-text-on-main-bg-color">{{ t("tor.off") }}</p>
+            </div>
+
+            <button
+              v-if="isNative && torStore.isConnected"
+              class="shrink-0 rounded-lg border border-neutral-grad-0 px-3 py-1.5 text-xs font-medium text-text-color transition-colors hover:bg-neutral-grad-0"
+              :disabled="torStore.isVerifying"
+              @click="torStore.verify()"
+            >
+              {{ torStore.isVerifying ? t("tor.verifying") : t("tor.verify") }}
+            </button>
+          </div>
         </div>
-        <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
-          <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statTotalDirect") }}</p>
-          <p class="mt-1 text-sm font-semibold text-text-color">
-            {{ formatBytes(torStore.networkStats.totalDirectBytes) }}
-          </p>
+      </SettingsSection>
+
+      <!-- Network statistics -->
+      <SettingsSection
+        :title="t('tor.stats')"
+        :description="t('tor.statsHint')"
+      >
+        <div class="grid grid-cols-2 gap-3">
+          <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
+            <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statCurrentDirect") }}</p>
+            <p class="mt-1 text-sm font-semibold text-text-color">
+              {{ formatBytes(torStore.networkStats.directBytes) }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
+            <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statCurrentTor") }}</p>
+            <p class="mt-1 text-sm font-semibold text-color-good">
+              {{ formatBytes(torStore.networkStats.torBytes) }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
+            <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statTotalDirect") }}</p>
+            <p class="mt-1 text-sm font-semibold text-text-color">
+              {{ formatBytes(torStore.networkStats.totalDirectBytes) }}
+            </p>
+          </div>
+          <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
+            <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statTotalTor") }}</p>
+            <p class="mt-1 text-sm font-semibold text-color-good">
+              {{ formatBytes(torStore.networkStats.totalTorBytes) }}
+            </p>
+          </div>
         </div>
-        <div class="rounded-xl bg-background-secondary-theme px-4 py-3">
-          <p class="text-xs text-text-on-main-bg-color">{{ t("tor.statTotalTor") }}</p>
-          <p class="mt-1 text-sm font-semibold text-color-good">
-            {{ formatBytes(torStore.networkStats.totalTorBytes) }}
-          </p>
-        </div>
-      </div>
-    </SettingsSection>
+      </SettingsSection>
+    </template>
   </div>
 
   <!-- Disable confirm -->
   <Teleport to="body">
     <div
-      v-if="showDisableWarning"
+      v-if="showTorControls && showDisableWarning"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       @click.self="cancelDisableTor()"
     >

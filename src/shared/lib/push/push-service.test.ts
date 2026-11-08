@@ -7,7 +7,6 @@ import {
   buildPusherPayload,
   buildVoipPusherPayload,
   isLegacyPusherEntry,
-  isStalePusherEntry,
   shouldRunJsPushDecryption,
 } from './push-service';
 
@@ -40,55 +39,6 @@ describe('buildPusherPayload', () => {
   it('forwards the token verbatim as pushkey (FCM token, not APNs hex)', () => {
     expect(buildPusherPayload('fcm-xyz', { isIOS: true }).pushkey).toBe('fcm-xyz');
     expect(buildPusherPayload('fcm-xyz', { isIOS: false }).pushkey).toBe('fcm-xyz');
-  });
-});
-
-describe('isStalePusherEntry', () => {
-  it('flags same-platform pusher with a different pushkey as stale', () => {
-    const stale = isStalePusherEntry(
-      { app_id: 'fortaios', pushkey: 'old-token' },
-      'fortaios',
-      'new-token',
-    );
-    expect(stale).toBe(true);
-  });
-
-  it('does not flag the current pusher (same app_id, same pushkey)', () => {
-    const stale = isStalePusherEntry(
-      { app_id: 'fortaios', pushkey: 'same-token' },
-      'fortaios',
-      'same-token',
-    );
-    expect(stale).toBe(false);
-  });
-
-  it('never flags pushers from the other platform', () => {
-    // We're on iOS (currentAppId=fortaios). The user is also signed in on an
-    // Android device — its fortaandroid pusher must stay untouched.
-    const stale = isStalePusherEntry(
-      { app_id: 'fortaandroid', pushkey: 'android-device-token' },
-      'fortaios',
-      'ios-device-token',
-    );
-    expect(stale).toBe(false);
-  });
-
-  it('never flags pushers from a third-party app sharing the matrix account', () => {
-    const stale = isStalePusherEntry(
-      { app_id: 'im.element.ios', pushkey: 'element-token' },
-      'fortaios',
-      'forta-token',
-    );
-    expect(stale).toBe(false);
-  });
-
-  it('returns false when app_id is missing on the entry', () => {
-    const stale = isStalePusherEntry(
-      { pushkey: 'some-token' },
-      'fortaios',
-      'new-token',
-    );
-    expect(stale).toBe(false);
   });
 });
 
@@ -142,39 +92,6 @@ describe('buildVoipPusherPayload (iOS PushKit)', () => {
     expect(voip.lang).toBe('en');
     expect(voip.data.url).toBe(regular.data.url);
     expect(voip.app_display_name).toBe('Forta Chat');
-  });
-});
-
-describe('isStalePusherEntry — VoIP pusher cleanup', () => {
-  it('flags a stale fortaios.voip pusher when the VoIP token rotated', () => {
-    const stale = isStalePusherEntry(
-      { app_id: 'fortaios.voip', pushkey: 'old-voip-token' },
-      'fortaios.voip',
-      'new-voip-token',
-    );
-    expect(stale).toBe(true);
-  });
-
-  it('does NOT flag the regular fortaios pusher when cleaning the VoIP one', () => {
-    // We're cleaning fortaios.voip with a new VoIP token. The regular
-    // fortaios pusher (different app_id, different token) must stay.
-    const stale = isStalePusherEntry(
-      { app_id: 'fortaios', pushkey: 'fcm-token' },
-      'fortaios.voip',
-      'voip-token',
-    );
-    expect(stale).toBe(false);
-  });
-
-  it('does NOT flag the VoIP pusher when cleaning the regular fortaios one', () => {
-    // Symmetric guard: don't accidentally drop the VoIP pusher when
-    // re-registering the regular FCM-backed iOS pusher.
-    const stale = isStalePusherEntry(
-      { app_id: 'fortaios.voip', pushkey: 'voip-token' },
-      'fortaios',
-      'new-fcm-token',
-    );
-    expect(stale).toBe(false);
   });
 });
 

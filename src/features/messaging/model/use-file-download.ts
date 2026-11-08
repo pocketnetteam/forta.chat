@@ -107,11 +107,13 @@ export interface DownloadOpts {
  *   - `AES-SIV: ciphertext verification failure!` — miscreant.SIV.open()
  *   - `ciphertext verification` — generic miscreant phrasing
  *   - `emptyforme` — body has no entry for this user (stale recipient set)
+ *   - `emptykey` — derived AES key missing for userid (same class as emptyforme)
  *   - `no encrypted payload for this user` — same condition, friendlier text */
 const CRYPTO_ERROR_PATTERNS: RegExp[] = [
   /AES-SIV/i,
   /ciphertext verification/i,
   /\bemptyforme\b/i,
+  /\bemptykey\b/i,
   /no encrypted payload for this user/i,
 ];
 

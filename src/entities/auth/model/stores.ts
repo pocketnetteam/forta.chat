@@ -540,6 +540,12 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
               },
               writeSelfIdentity: (identity) =>
                 writeSelfCryptoIdentity(selfAddress, identity, REQUIRED_ENCRYPTION_KEYS),
+              readUserStoreIdentity: (addr) => useUserStore().getCryptoIdentity(addr),
+              writeUserStoreIdentity: (addr, identity) =>
+                useUserStore().upsertCryptoKeys(addr, identity.keys, {
+                  id: identity.id,
+                  name: identity.name,
+                }),
             });
           } catch (e) {
             console.error("[pcrypto] getUsersInfo error:", e);
@@ -951,6 +957,9 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                   .then(() => {
                     const fresh = appInitializer.getUserData(addrFrom);
                     if (fresh) {
+                      const freshKeys = Array.isArray(fresh.keys)
+                        ? (fresh.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                        : [];
                       useUserStore().setUser(addrFrom, {
                         address: addrFrom,
                         name: fresh.name ?? "",
@@ -959,6 +968,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                         site: fresh.site ?? "",
                         language: fresh.language ?? "",
                         cachedAt: Date.now(),
+                        keys: freshKeys.length > 0 ? freshKeys : undefined,
+                        id: (fresh as { id?: number | string }).id,
                       });
                     }
                   })
@@ -1303,7 +1314,11 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
             }
 
             // Sync own profile to userStore so Avatar components show correct name/initial
+            // and room crypto can read own/peer keys offline from the same cache.
             if (merged.name) {
+              const ownKeys = Array.isArray(userData.keys)
+                ? (userData.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                : [];
               useUserStore().setUser(requestAddress, {
                 address: requestAddress,
                 name: merged.name ?? "",
@@ -1311,6 +1326,8 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 image: merged.image ?? "",
                 site: merged.site ?? "",
                 language: merged.language ?? "",
+                keys: ownKeys.length > 0 ? ownKeys : undefined,
+                id: selfId,
               });
             }
           },
@@ -2192,6 +2209,10 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 syncedAt: Date.now(),
               });
               // Sync confirmed profile to userStore so Avatar/BottomTabBar update immediately
+              const confirmedKeys = Array.isArray(data.keys)
+                ? (data.keys as string[]).filter((k) => typeof k === "string" && !!k)
+                : [];
+              const confirmedId = (data as { id?: number | string }).id;
               useUserStore().setUser(confirmedAddress, {
                 address: confirmedAddress,
                 name: merged.name ?? "",
@@ -2199,7 +2220,16 @@ export const useAuthStore = defineStore(NAMESPACE, () => {
                 image: merged.image ?? "",
                 site: merged.site ?? "",
                 language: merged.language ?? "",
+                keys: confirmedKeys.length > 0 ? confirmedKeys : undefined,
+                id: confirmedId,
               });
+              if (confirmedKeys.length >= REQUIRED_ENCRYPTION_KEYS && confirmedId != null) {
+                writeSelfCryptoIdentity(
+                  confirmedAddress,
+                  { keys: confirmedKeys, id: confirmedId },
+                  REQUIRED_ENCRYPTION_KEYS,
+                );
+              }
             },
             { update: true },
           ),

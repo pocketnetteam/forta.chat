@@ -12,6 +12,9 @@ vi.mock("@/shared/lib/pocketnet", () => ({
   callPocketnetRpc: vi.fn(),
   unwrapRpcPayload: (envelope: { data?: unknown; result?: unknown }) =>
     envelope?.data ?? envelope?.result ?? envelope,
+  installSdkRpcBridge: vi.fn(),
+  setPocketnetRpcRouter: vi.fn(),
+  setNodeFailoverStickyIndex: vi.fn(),
 }));
 vi.mock("../chat-scripts", () => ({
   PocketnetInstanceConfigurator: { setTimeDifference: vi.fn() },
