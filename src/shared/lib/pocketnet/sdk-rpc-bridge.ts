@@ -15,7 +15,10 @@ const API_FLAG = "__fortaSdkApiRpcBridged";
 const CTOR_FLAG = "__fortaSdkRpcCtorBridged";
 const INST_FLAG = "__fortaSdkRpcBridged";
 
-export type SdkRpcBridgeCall = typeof callPocketnetRpc;
+/** Loose enough for vitest mocks and the vendor Api global shape. */
+export type SdkRpcBridgeCall = (
+  req: import("./node-rpc-client").PocketnetRpcRequest,
+) => Promise<unknown>;
 
 export interface SdkRpcBridgeDeps {
   callRpc?: SdkRpcBridgeCall;
@@ -31,14 +34,17 @@ type RpcFn = (
 
 type Proxy16Instance = {
   rpc?: RpcFn;
+  fetch?: (...args: unknown[]) => unknown;
   [INST_FLAG]?: boolean;
 };
 
-type ApiLike = {
-  rpc?: RpcFn;
-  get?: { proxies?: () => Proxy16Instance[] };
-  [API_FLAG]?: boolean;
-};
+/**
+ * Vendor `Api` from global.d.ts is a wide object type; we only touch `.rpc` /
+ * `.get.proxies` at runtime. Keep this as a loose bag so vue-tsc accepts
+ * `installSdkRpcBridge(this.api)`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ApiLike = Record<string, any>;
 
 type Proxy16Constructor = (new (
   meta?: unknown,
@@ -87,7 +93,9 @@ async function invokeBridgedRpc(
       node: resolveNode(rpcOpts),
       endpoint: rpcOpts.ex ? "rpc-ex" : "rpc",
     });
-    return unwrapRpcPayload(envelope);
+    return unwrapRpcPayload(
+      envelope as Parameters<typeof unwrapRpcPayload>[0],
+    );
   } catch (e) {
     normalizeRpcError(e);
   }
@@ -145,8 +153,11 @@ export function bridgeApiRpc(
 
   const callRpc = deps.callRpc ?? callPocketnetRpc;
   api[API_FLAG] = true;
-  api.rpc = (method, parameters, options) =>
-    invokeBridgedRpc(callRpc, method, parameters, options);
+  api.rpc = (
+    method: string,
+    parameters?: unknown[],
+    options?: Record<string, unknown> | null,
+  ) => invokeBridgedRpc(callRpc, method, parameters, options);
   return true;
 }
 

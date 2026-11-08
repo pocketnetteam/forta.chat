@@ -9,4 +9,4 @@ export {
   bridgeApiProxies,
   resetSdkRpcBridgeForTests,
 } from "./sdk-rpc-bridge";
-export type { SdkRpcBridgeDeps, SdkRpcBridgeCall } from "./sdk-rpc-bridge";
+export type { SdkRpcBridgeDeps, SdkRpcBridgeCall, ApiLike } from "./sdk-rpc-bridge";

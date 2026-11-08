@@ -4,6 +4,8 @@ import {
   bridgeProxy16Instance,
   installSdkRpcBridge,
   resetSdkRpcBridgeForTests,
+  type ApiLike,
+  type SdkRpcBridgeCall,
 } from "./sdk-rpc-bridge";
 
 describe("sdk-rpc-bridge", () => {
@@ -12,8 +14,8 @@ describe("sdk-rpc-bridge", () => {
   });
 
   it("bridgeApiRpc routes through callPocketnetRpc and unwraps data", async () => {
-    const callRpc = vi.fn(async () => ({ data: { name: "alice" } }));
-    const api = {
+    const callRpc: SdkRpcBridgeCall = vi.fn(async () => ({ data: { name: "alice" } }));
+    const api: ApiLike = {
       rpc: vi.fn(async () => {
         throw new Error("original should not run");
       }),
@@ -33,8 +35,8 @@ describe("sdk-rpc-bridge", () => {
   });
 
   it("maps options.ex / nested options.rpc to rpc-ex and node", async () => {
-    const callRpc = vi.fn(async () => ({ result: 1 }));
-    const api = { rpc: vi.fn() };
+    const callRpc: SdkRpcBridgeCall = vi.fn(async () => ({ result: 1 }));
+    const api: ApiLike = { rpc: vi.fn() };
     bridgeApiRpc(api, { callRpc });
 
     await api.rpc!("getprofilefeed", [1], {
@@ -49,10 +51,10 @@ describe("sdk-rpc-bridge", () => {
   });
 
   it("bridgeProxy16Instance does not touch fetch", async () => {
-    const callRpc = vi.fn(async () => ({ data: true }));
-    const fetchFn = vi.fn(async () => ({ ok: true }));
+    const callRpc: SdkRpcBridgeCall = vi.fn(async () => ({ data: true }));
+    const fetchFn = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
     const proxy = {
-      rpc: vi.fn(),
+      rpc: vi.fn(async (..._args: unknown[]) => undefined),
       fetch: fetchFn,
     };
 
@@ -66,17 +68,17 @@ describe("sdk-rpc-bridge", () => {
   });
 
   it("installSdkRpcBridge wraps the provided Api", async () => {
-    const callRpc = vi.fn(async () => ({ data: "ok" }));
-    const api = { rpc: vi.fn() };
+    const callRpc: SdkRpcBridgeCall = vi.fn(async () => ({ data: "ok" }));
+    const api: ApiLike = { rpc: vi.fn() };
     expect(installSdkRpcBridge(api, { callRpc })).toBe(true);
     await expect(api.rpc!("getaddressinfo", ["P"])).resolves.toBe("ok");
   });
 
   it("preserves error.code for SDK retry paths", async () => {
-    const callRpc = vi.fn(async () => {
+    const callRpc: SdkRpcBridgeCall = vi.fn(async () => {
       throw { code: 408, message: "timeout" };
     });
-    const api = { rpc: vi.fn() };
+    const api: ApiLike = { rpc: vi.fn() };
     bridgeApiRpc(api, { callRpc });
     await expect(api.rpc!("getnodeinfo")).rejects.toMatchObject({ code: 408 });
   });
