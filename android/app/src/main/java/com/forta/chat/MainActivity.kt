@@ -229,8 +229,9 @@ class MainActivity : BridgeActivity() {
         }
 
         // Read system bar + IME insets and inject as CSS custom properties.
-        // With adjustNothing the system does not resize the WebView — we handle
-        // ALL keyboard adaptation via --app-bottom-inset in CSS.
+        // Manifest still declares adjustResize, but edge-to-edge + CONSUMED
+        // insets mean the WebView does not shrink for the IME — CSS owns the
+        // lift via --app-bottom-inset (do not also pad the content view).
         val rootView = findViewById<View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { _, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())

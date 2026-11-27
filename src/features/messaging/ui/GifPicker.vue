@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { searchGifs, getTrending, type TenorGif } from "@/shared/lib/tenor";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { requestFocus } from "@/shared/lib/keyboard";
 
 const emit = defineEmits<{ select: [gif: TenorGif]; close: [] }>();
 
+const isMobile = useMobile();
 const search = ref("");
 const gifs = ref<TenorGif[]>([]);
 const nextPos = ref("");
@@ -19,10 +22,13 @@ let requestId = 0; // cancel stale requests
 let longPressTimer: ReturnType<typeof setTimeout> | null = null;
 let longPressTriggered = false;
 
-// Load trending on mount
+// Load trending on mount. Autofocus search only on desktop — on mobile the
+// IME would reopen right after MessageInput blurred for the emoji/GIF picker.
 onMounted(async () => {
   await nextTick();
-  searchInputRef.value?.focus();
+  void requestFocus(searchInputRef.value, "gif-search", {
+    isMobile: isMobile.value,
+  });
   await loadTrending();
 });
 

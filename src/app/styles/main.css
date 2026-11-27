@@ -98,9 +98,10 @@
  * - iOS: viewport-fit=cover (set in index.html) makes WKWebView resolve
  *   env(safe-area-inset-*) to the live notch / home-indicator insets. We do
  *   NOT port the Android injection pipeline; the only var driven from JS on
- *   iOS is --safe-area-inset-bottom (via useIOSKeyboardCssVar) so it can
- *   collapse to 0 while the keyboard is up, mirroring the Android contract.
- *   See docs/plans/ios/2026-05-12-ios-keyboard-safe-area.md Tasks 4 + 5.
+ *   iOS is --safe-area-inset-bottom (via useKeyboardInsets in
+ *   src/shared/lib/keyboard/) so it can collapse to 0 while the keyboard is
+ *   up, mirroring the Android contract. See docs/plans/ios/2026-05-12-ios-keyboard-safe-area.md
+ *   and docs/plans/2026-11-17-keyboard-ownership-refactor.md.
  * - The fallback below only applies if the inline <style> in index.html was
  *   stripped for some reason (should never happen in production).
  */

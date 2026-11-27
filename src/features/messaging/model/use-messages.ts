@@ -1263,7 +1263,17 @@ export function useMessages() {
   const forwardMessages = async (
     sourceMessageIds: string[],
     targetRoomId: string,
-    opts?: { withSenderInfo?: boolean },
+    opts?: {
+      withSenderInfo?: boolean;
+      /**
+       * Snapshot of the selected messages taken before the room switch.
+       * Required under Dexie local-first: after ForwardPicker calls
+       * setActiveRoom(target), `activeMessages` is the TARGET timeline and
+       * `chatStore.messages[source]` is often empty — looking up by id alone
+       * silently forwarded nothing.
+       */
+      sources?: Array<Pick<Message, "id" | "content" | "senderId" | "timestamp" | "type" | "fileInfo" | "roomId">>;
+    },
   ): Promise<{ succeeded: number; failed: number }> => {
     if (sourceMessageIds.length === 0) return { succeeded: 0, failed: 0 };
     const withSenderInfo = opts?.withSenderInfo ?? true;
@@ -1288,10 +1298,27 @@ export function useMessages() {
       fileInfo?: FileInfo;
       roomId: string;
     }> = [];
-    // The active room's rendered list first: a room opened from Dexie has no
-    // in-memory copy in chatStore.messages unless a history load ran.
+    // Prefer the explicit multi-select snapshot (and the in-flight
+    // forwardingMessages draft) over live room lists. ForwardPicker switches
+    // activeRoom to the target BEFORE Send, so activeMessages no longer holds
+    // the source selection; Dexie also keeps most rooms out of
+    // chatStore.messages until they are opened.
     const seen = new Set<string>();
-    for (const roomMessages of [chatStore.activeMessages ?? [], ...Object.values(chatStore.messages)]) {
+    const pools: Array<Iterable<{
+      id: string;
+      content: string;
+      senderId: string;
+      timestamp: number;
+      type: MessageType;
+      fileInfo?: FileInfo;
+      roomId: string;
+    }>> = [
+      opts?.sources ?? [],
+      chatStore.forwardingMessages ?? [],
+      chatStore.activeMessages ?? [],
+      ...Object.values(chatStore.messages),
+    ];
+    for (const roomMessages of pools) {
       for (const m of roomMessages) {
         if (idSet.has(m.id) && !seen.has(m.id)) {
           seen.add(m.id);
@@ -1306,6 +1333,13 @@ export function useMessages() {
           });
         }
       }
+    }
+    if (collected.length === 0) {
+      console.error(
+        "[use-messages] bulk forward found no source messages for ids",
+        sourceMessageIds,
+      );
+      return { succeeded: 0, failed: sourceMessageIds.length };
     }
     // Ship in original chronological order so recipients see the conversation flow.
     collected.sort((a, b) => a.timestamp - b.timestamp);

@@ -54,7 +54,7 @@ const shareUrl = (platform: string) => {
 </script>
 
 <template>
-  <Modal :show="props.show" :aria-label="t('invite.title')" @close="emit('close')">
+  <Modal :show="props.show" :aria-label="t('invite.title')" initial-focus="dialog" @close="emit('close')">
     <div class="flex flex-col items-center gap-5">
       <!-- Header -->
       <div class="flex flex-col items-center gap-2 text-center">

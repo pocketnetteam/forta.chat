@@ -506,6 +506,54 @@ describe("useMessages", () => {
       const content = call[1] as Record<string, unknown>;
       expect(content.forwarded_from).toBeUndefined();
     });
+
+    it("uses opts.sources when activeMessages/messages no longer hold the selection", async () => {
+      // Regression: ForwardPicker switches to the target room before Send.
+      // Under Dexie local-first the source timeline is gone from memory, so
+      // looking up by id alone forwarded nothing.
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "from-source", senderId: "user1", timestamp: 10 });
+      const m2 = makeMsg({ roomId: "!src:server", id: "$m2", content: "also-source", senderId: "user1", timestamp: 20 });
+      chatStore.activeRoomId = "!target:server";
+      // Target room only — mimics post-switch Dexie state with empty source cache.
+      chatStore.addMessage("!target:server", makeMsg({
+        roomId: "!target:server",
+        id: "$unrelated",
+        content: "already here",
+      }));
+
+      const result = await messaging.forwardMessages(
+        ["$m1", "$m2"],
+        "!target:server",
+        { sources: [m1, m2] },
+      );
+
+      expect(result.succeeded).toBe(2);
+      expect(result.failed).toBe(0);
+      const bodies = (mockSendEncryptedText.mock.calls as unknown[][]).map(
+        (c) => (c[1] as { body?: string })?.body,
+      );
+      expect(bodies).toEqual(["from-source", "also-source"]);
+    });
+
+    it("falls back to chatStore.forwardingMessages when sources opt is omitted", async () => {
+      const m1 = makeMsg({ roomId: "!src:server", id: "$m1", content: "drafted", senderId: "user1" });
+      chatStore.activeRoomId = "!target:server";
+      chatStore.forwardingMessages = [m1];
+
+      const result = await messaging.forwardMessages(["$m1"], "!target:server");
+
+      expect(result.succeeded).toBe(1);
+      expect(result.failed).toBe(0);
+      const body = (mockSendEncryptedText.mock.calls as unknown[][])[0][1] as { body?: string };
+      expect(body.body).toBe("drafted");
+    });
+
+    it("reports all failed when no source messages can be resolved", async () => {
+      chatStore.activeRoomId = "!target:server";
+      const result = await messaging.forwardMessages(["$missing"], "!target:server");
+      expect(result).toEqual({ succeeded: 0, failed: 1 });
+      expect(mockSendEncryptedText).not.toHaveBeenCalled();
+    });
   });
 
   // ─── setTyping ──────────────────────────────────────────────────

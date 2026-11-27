@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { isNative } from "@/shared/lib/platform";
 import { useSwipeDismiss } from "./use-swipe-dismiss";
+
+/** Where to put focus when the modal opens. */
+export type ModalInitialFocus = "first-focusable" | "dialog" | "none";
 
 interface Props {
   show: boolean;
@@ -10,13 +15,22 @@ interface Props {
   size?: "md" | "lg";
   /** No inner padding: the content (a video) runs to the card edges. */
   bare?: boolean;
+  /**
+   * Initial focus target. Default: `dialog` on native/mobile (no IME pop),
+   * `first-focusable` on desktop. Forms that need the keyboard pass
+   * `first-focusable` explicitly.
+   */
+  initialFocus?: ModalInitialFocus;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   ariaLabel: undefined,
   size: "md",
   bare: false,
+  initialFocus: undefined,
 });
+
+const isMobile = useMobile();
 /** `close` asks the owner to hide the modal; `closed` fires once the leave animation is over. */
 const emit = defineEmits<{ close: []; closed: [] }>();
 const { t } = useI18n();
@@ -88,23 +102,40 @@ const onKeydown = (e: KeyboardEvent) => {
   }
 };
 
-// Auto-focus the dialog when shown
-watch(() => props.show, (val) => {
-  if (val) {
-    // A sheet closed by a swipe kept its offset for the slide-out.
-    swipe.reset();
-    nextTick(() => {
-      // Focus the first focusable element inside, or the dialog itself
-      const el = dialogRef.value;
-      if (!el) return;
-      const firstFocusable = el.querySelector<HTMLElement>(
-        'button:not([data-modal-close]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      if (firstFocusable) firstFocusable.focus();
-      else el.focus();
-    });
-  }
-});
+function resolveInitialFocus(): ModalInitialFocus {
+  if (props.initialFocus) return props.initialFocus;
+  // Soft-keyboard risk: focusing an input opens the IME over the sheet.
+  if (isNative || isMobile.value) return "dialog";
+  return "first-focusable";
+}
+
+// Focus when shown — policy avoids IME on mobile unless the caller opts in.
+// `immediate` covers mount-with-show=true (Donate / forms that open already visible).
+watch(
+  () => props.show,
+  (val) => {
+    if (val) {
+      // A sheet closed by a swipe kept its offset for the slide-out.
+      swipe.reset();
+      nextTick(() => {
+        const el = dialogRef.value;
+        if (!el) return;
+        const mode = resolveInitialFocus();
+        if (mode === "none") return;
+        if (mode === "dialog") {
+          el.focus();
+          return;
+        }
+        const firstFocusable = el.querySelector<HTMLElement>(
+          'button:not([data-modal-close]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        if (firstFocusable) firstFocusable.focus();
+        else el.focus();
+      });
+    }
+  },
+  { immediate: true },
+);
 
 const onAfterLeave = () => {
   swipe.reset();

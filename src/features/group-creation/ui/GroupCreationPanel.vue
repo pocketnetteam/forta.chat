@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { nextTick } from "vue";
 import { UserAvatar } from "@/entities/user";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { requestFocusNextTick } from "@/shared/lib/keyboard";
 import { useGroupCreation } from "../model/use-group-creation";
 
 const { t } = useI18n();
+const isMobile = useMobile();
 
 const emit = defineEmits<{ created: [roomId: string]; close: [] }>();
 
@@ -41,7 +43,9 @@ const handleSearch = (e: Event) => {
 
 const handleNext = () => {
   goToStep2();
-  nextTick(() => nameInput.value?.focus());
+  void requestFocusNextTick(() => nameInput.value, "form-field", {
+    isMobile: isMobile.value,
+  });
 };
 
 const handleBack = () => {

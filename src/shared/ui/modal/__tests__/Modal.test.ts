@@ -6,6 +6,18 @@ import { nextTick } from "vue";
 vi.mock("@/shared/lib/composables/use-android-back-handler", () => ({ useAndroidBackHandler: vi.fn() }));
 vi.mock("@/shared/lib/i18n", () => ({ useI18n: () => ({ t: (k: string) => k }) }));
 
+const mockIsMobile = { value: false };
+vi.mock("@/shared/lib/composables/use-media-query", () => ({
+  useMobile: () => mockIsMobile,
+}));
+
+let mockIsNative = false;
+vi.mock("@/shared/lib/platform", () => ({
+  get isNative() {
+    return mockIsNative;
+  },
+}));
+
 import Modal from "../Modal.vue";
 
 /**
@@ -36,7 +48,11 @@ function mountModal(props: Record<string, unknown> = {}) {
 const card = (w: ReturnType<typeof mountModal>) => w.find('[role="dialog"]');
 
 describe("Modal", () => {
-  beforeEach(() => setSheetLayout(true));
+  beforeEach(() => {
+    setSheetLayout(true);
+    mockIsMobile.value = false;
+    mockIsNative = false;
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("closes from the corner button, the in-sheet button and the backdrop", async () => {
@@ -128,3 +144,59 @@ describe("Modal", () => {
     expect(card(w).attributes("style") ?? "").not.toContain("translateY");
   });
 });
+
+describe("Modal — initialFocus (keyboard policy)", () => {
+  beforeEach(() => {
+    setSheetLayout(true);
+    mockIsMobile.value = false;
+    mockIsNative = false;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = "";
+  });
+
+  function mountWithField(props: Record<string, unknown> = {}) {
+    return mount(Modal, {
+      props: { show: true, ...props },
+      slots: {
+        default: '<input data-testid="field" type="text" /><button type="button">Save</button>',
+      },
+      global: { stubs: { teleport: true, transition: false } },
+      attachTo: document.body,
+    });
+  }
+
+  it("defaults to first-focusable on desktop", async () => {
+    const w = mountWithField();
+    await nextTick();
+    expect(document.activeElement).toBe(w.find('[data-testid="field"]').element);
+    w.unmount();
+  });
+
+  it("defaults to dialog on mobile (no IME on the first input)", async () => {
+    mockIsMobile.value = true;
+    const w = mountWithField();
+    await nextTick();
+    expect(document.activeElement).toBe(card(w).element);
+    expect(document.activeElement).not.toBe(w.find('[data-testid="field"]').element);
+    w.unmount();
+  });
+
+  it("honours initial-focus=first-focusable on mobile for forms", async () => {
+    mockIsMobile.value = true;
+    const w = mountWithField({ initialFocus: "first-focusable" });
+    await nextTick();
+    expect(document.activeElement).toBe(w.find('[data-testid="field"]').element);
+    w.unmount();
+  });
+
+  it("honours initial-focus=none", async () => {
+    const w = mountWithField({ initialFocus: "none" });
+    await nextTick();
+    expect(document.activeElement).not.toBe(w.find('[data-testid="field"]').element);
+    w.unmount();
+  });
+});
+

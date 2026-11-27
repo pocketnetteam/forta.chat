@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted } from "vue";
+import { ref, watch, onMounted } from "vue";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { requestFocusNextTick } from "@/shared/lib/keyboard";
 
 interface Props {
   /** Raw Bastyon address (DM) or hex-encoded member ID (group). The chat-store
@@ -17,14 +19,16 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const isMobile = useMobile();
 const alias = ref(props.currentAlias ?? "");
 const inputRef = ref<HTMLInputElement | null>(null);
 
 // Autofocus on mount + when address changes (reusing dialog for another member).
 const focusInput = () => {
-  nextTick(() => {
-    inputRef.value?.focus();
-    inputRef.value?.select();
+  void requestFocusNextTick(() => inputRef.value, "form-field", {
+    isMobile: isMobile.value,
+  }).then((ok) => {
+    if (ok) inputRef.value?.select();
   });
 };
 

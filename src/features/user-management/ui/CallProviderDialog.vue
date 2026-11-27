@@ -35,7 +35,7 @@ function onSave(): void {
 </script>
 
 <template>
-  <Modal :show="props.show" :aria-label="t(provider ? 'settings.callProviders.editTitle' : 'settings.callProviders.addTitle')" @close="emit('close')">
+  <Modal :show="props.show" :aria-label="t(provider ? 'settings.callProviders.editTitle' : 'settings.callProviders.addTitle')" initial-focus="first-focusable" @close="emit('close')">
     <h3 class="mb-5 text-base font-semibold text-text-color">
       {{ t(provider ? "settings.callProviders.editTitle" : "settings.callProviders.addTitle") }}
     </h3>

@@ -35,9 +35,10 @@ import {
 } from "@/features/bug-report";
 import { useI18n } from "@/shared/lib/i18n";
 
-import { useKeyboardFallback } from "@/shared/lib/composables/use-keyboard-fallback";
-import { useIOSKeyboardCssVar } from "@/shared/lib/composables/use-ios-keyboard-css-var";
-import { useIOSKeyboardDismiss } from "@/shared/lib/composables/use-ios-keyboard-dismiss";
+import {
+  installKeyboardDismiss,
+  useKeyboardInsets,
+} from "@/shared/lib/keyboard";
 import { useResumeRedirect } from "@/shared/lib/composables/use-resume-redirect";
 import { useUnreadDocumentTitle } from "@/shared/lib/composables/use-unread-document-title";
 import { useElectronUnreadBadge } from "@/shared/lib/composables/use-electron-unread-badge";
@@ -428,15 +429,11 @@ onMounted(async () => {
   // Initialize Android hardware back button handler
   initAndroidBackListener();
 
-  // Android keyboard: auto-scroll to focused input + inset cross-check
-  useKeyboardFallback();
-
-  // iOS keyboard: drive --keyboardheight + --app-bottom-inset +
-  // --safe-area-inset-bottom from @capacitor/keyboard events. Android
-  // already drives these from MainActivity; this is a no-op there.
-  useIOSKeyboardCssVar();
-  // iOS: tap outside focused inputs blurs so the soft keyboard dismisses.
-  useIOSKeyboardDismiss();
+  // Soft keyboard: single owner — iOS CSS vars from @capacitor/keyboard,
+  // Android visualViewport cross-check (MainActivity remains primary),
+  // iOS outside-tap dismiss. See src/shared/lib/keyboard/.
+  useKeyboardInsets();
+  installKeyboardDismiss();
 
   // Initialize Android Share Target listener
   initShareTargetListener((data) => processExternalShare(data));

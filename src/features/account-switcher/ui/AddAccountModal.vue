@@ -41,7 +41,7 @@ watch(() => props.show, (val) => {
 </script>
 
 <template>
-  <Modal :show="props.show" :aria-label="t('settings.addAccount')" @close="emit('close')">
+  <Modal :show="props.show" :aria-label="t('settings.addAccount')" initial-focus="first-focusable" @close="emit('close')">
     <div class="flex flex-col gap-4">
       <h2 class="text-lg font-semibold text-text-color">
         {{ t("settings.addAccount") }}
