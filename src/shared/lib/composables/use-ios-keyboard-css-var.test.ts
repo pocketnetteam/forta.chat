@@ -14,6 +14,9 @@ vi.mock('@/shared/lib/platform', () => ({
   get isNative() {
     return mockIsNative;
   },
+  get isAndroid() {
+    return false;
+  },
 }));
 
 const showListeners: Array<(info: { keyboardHeight: number }) => void> = [];

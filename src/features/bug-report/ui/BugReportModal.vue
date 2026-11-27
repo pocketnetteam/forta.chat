@@ -156,7 +156,7 @@ const handleSend = async () => {
 </script>
 
 <template>
-  <Modal :show="isOpen" :aria-label="t('bugReport.title')" @close="close">
+  <Modal :show="isOpen" :aria-label="t('bugReport.title')" initial-focus="first-focusable" @close="close">
     <h2 class="mb-1 text-lg font-semibold text-text-color">
       {{ t("bugReport.title") }}
     </h2>

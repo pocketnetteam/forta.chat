@@ -24,6 +24,24 @@
 
 ## Ожидают проверки
 
+### Soft keyboard ownership (bulk forward / caption / search overlays)
+- Коммит: (коммит с `src/shared/lib/keyboard/` + ForwardPicker/MessageInput/Modal)
+- Почему нужен человек: IME open/close и inset lift видны только на реальном WebView;
+  unit-тесты покрывают policy и отсутствие autofocus, но не анимацию клавиатуры OEM.
+- На чём: Android Capacitor (желательно Samsung + Xiaomi) и iOS.
+- Шаги:
+  1. Мультиселект нескольких файлов → Переслать.
+     - **Ожидается:** ForwardPicker открывается **без** выезда клавиатуры; список чатов
+       полностью виден; поиск открывает IME только после тапа в поле поиска.
+  2. Выбрать целевой чат.
+     - **Ожидается:** один спокойный переход; клавиатура открывается у caption-композера
+       (не мигает open→close→open); bulk-preview виден.
+  3. Edit / Reply в обычном чате — IME открывается на поле ввода.
+  4. Emoji → вкладка GIF: сетка не перекрыта клавиатурой; поиск GIF — только по тапу.
+  5. Donate / Bug report: поле ввода получает фокус (формам разрешён autofocus).
+  6. Invite link modal: IME **не** открывается на readonly-поле.
+- Статус: ☐ не проверено
+
 ### Local Node Proxy и переключатель прокси в Networking
 - Коммит: (коммит с `src/entities/proxy/` + `src/shared/lib/pocketnet/local-node/`)
 - Почему нужен человек: health ping и RPC к seed-нодам зависят от сети устройства; UI picker

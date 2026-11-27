@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { useChatStore, type ChatRoom } from "@/entities/chat";
@@ -8,6 +8,7 @@ import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name"
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { useMobile } from "@/shared/lib/composables/use-media-query";
 import { useAndroidBackHandler } from "@/shared/lib/composables/use-android-back-handler";
+import { requestFocusNextTick } from "@/shared/lib/keyboard";
 import { buildForwardSharePlan, buildMessagesSharePlan } from "../model/external-share-plan";
 import { canShareExternally, useExternalShare } from "../model/use-external-share";
 type FilterValue = "all" | "personal" | "groups";
@@ -50,7 +51,8 @@ const memberCountCache = new Map<string, number>();
 // short-circuit the defer (or fire after close) on rapid close→reopen.
 let openGeneration = 0;
 
-// Focus search on open
+// Open: reset search + defer the heavy room list. Autofocus search only on
+ // desktop — on native/mobile it pops the IME over the chat list (policy 1A).
 watch(() => props.show, (v) => {
   if (v) {
     search.value = "";
@@ -61,7 +63,9 @@ watch(() => props.show, (v) => {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (props.show && gen === openGeneration) listReady.value = true;
     }));
-    nextTick(() => searchInputRef.value?.focus());
+    void requestFocusNextTick(() => searchInputRef.value, "forward-search", {
+      isMobile: isMobile.value,
+    });
   }
 }, { immediate: true });
 

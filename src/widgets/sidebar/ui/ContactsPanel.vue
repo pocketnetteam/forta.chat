@@ -6,6 +6,8 @@ import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { useResolvedRoomName } from "@/entities/chat/lib/use-resolved-room-name";
 import { isUnresolvedName } from "@/entities/chat/lib/chat-helpers";
 import { ContactSearch } from "@/features/contacts";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { requestFocusNextTick } from "@/shared/lib/keyboard";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
@@ -15,8 +17,11 @@ const emit = defineEmits<{ selectRoom: [] }>();
 const { resolve: resolveRoomName } = useResolvedRoomName();
 
 const { t } = useI18n();
+const isMobile = useMobile();
 const searchQuery = ref("");
 const searchOpen = ref(false);
+const searchInputRef = ref<HTMLInputElement>();
+const addInputRef = ref<HTMLInputElement>();
 
 // WEE-65 (H4 / #168, #545, #819): explicit "Add contact" entry. The Contacts
 // tab previously only filtered EXISTING DM rooms locally, so there was no
@@ -34,6 +39,9 @@ const openAddContact = () => {
   searchQuery.value = "";
   addQuery.value = "";
   addMode.value = true;
+  void requestFocusNextTick(() => addInputRef.value, "chat-search", {
+    isMobile: isMobile.value,
+  });
 };
 
 const closeAddContact = () => {
@@ -170,7 +178,13 @@ const handleSelect = (roomId: string) => {
 
 const toggleSearch = () => {
   searchOpen.value = !searchOpen.value;
-  if (!searchOpen.value) searchQuery.value = "";
+  if (!searchOpen.value) {
+    searchQuery.value = "";
+    return;
+  }
+  void requestFocusNextTick(() => searchInputRef.value, "chat-search", {
+    isMobile: isMobile.value,
+  });
 };
 </script>
 
@@ -258,12 +272,12 @@ const toggleSearch = () => {
           <span class="contain-strict h-3.5 w-3.5 animate-spin rounded-full border-2 border-text-on-main-bg-color border-t-transparent" />
         </span>
         <input
+          ref="addInputRef"
           autocomplete="off"
           v-model="addQuery"
           type="text"
           :placeholder="t('contacts.addPlaceholder')"
           class="h-9 w-full rounded-lg bg-neutral-grad-0 pl-3 pr-8 text-sm text-text-color outline-none placeholder:text-text-on-main-bg-color focus:ring-1 focus:ring-color-bg-ac"
-          autofocus
         />
       </div>
       <!-- Render results only once there's a query — ContactSearch's empty
@@ -289,12 +303,12 @@ const toggleSearch = () => {
     <!-- Search bar -->
     <div v-if="!addMode && searchOpen" class="shrink-0 border-b border-neutral-grad-0 px-3 py-2">
       <input
+        ref="searchInputRef"
         autocomplete="off"
         v-model="searchQuery"
         type="text"
         :placeholder="t('contacts.searchPlaceholder')"
         class="h-9 w-full rounded-lg bg-neutral-grad-0 px-3 text-sm text-text-color outline-none placeholder:text-text-on-main-bg-color focus:ring-1 focus:ring-color-bg-ac"
-        autofocus
       />
     </div>
 

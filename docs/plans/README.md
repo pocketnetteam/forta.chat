@@ -17,6 +17,7 @@ Commands inside plans (e.g. `npm run lint`, old paths like `com/bastyon/chat`, `
 
 | Plan | State | What is open |
 |---|---|---|
+| [2026-11-17-keyboard-ownership-refactor](2026-11-17-keyboard-ownership-refactor.md) | code landed (phases 1–3) | device QA: bulk forward IME, caption focus, GIF/search overlays — see `manual-verification.md` |
 | [2026-11-08-local-node-proxy-networking](2026-11-08-local-node-proxy-networking.md) | code landed (+ boot offer + CORS relay + SDK rpc bridge) | device/browser QA (Local covers Api.rpc; ping stays remote) — see `manual-verification.md` |
 | [2026-10-14-firebase-fortachat-migration](2026-10-14-firebase-fortachat-migration.md) | code in `7c99fe38`, switched off (release stays on `forta-chat`) | app_id + configs swap, Sygnal/APNs check, device check, iOS duplicates |
 | [2026-10-13-peertube-hls-player](2026-10-13-peertube-hls-player.md) | stages 0–6 in code (not committed) | 7: device checks (`manual-verification.md`) |

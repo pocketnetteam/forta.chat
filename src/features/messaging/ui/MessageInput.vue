@@ -28,6 +28,11 @@ import { insertEmojiAtCursor } from "../model/emoji-insertion";
 import { deriveInputLayout } from "../model/input-layout";
 import { isPeerKeysOk } from "../model/peer-keys-ok";
 import { isNative } from "@/shared/lib/platform";
+import {
+  requestFocus,
+  requestFocusNextTick,
+  releaseFocus,
+} from "@/shared/lib/keyboard";
 import { readShareUriAsBlob } from "@/shared/lib/share-target";
 import { sendExternalShareFiles } from "../model/send-external-share";
 import { narrowExternalShareForward } from "@/entities/chat/lib/external-share-forward";
@@ -170,21 +175,21 @@ watch(() => chatStore.editingMessage, (editing) => {
     text.value = editing.content;
     nextTick(() => {
       autoGrowSync();
-      // Use preventScroll to avoid WebView auto-scrolling the page
-      // (which pushes the chat header off-screen on Android).
-      // The CSS-driven layout (app-shell + --app-bottom-inset) handles
-      // keyboard avoidance — no manual scrollIntoView needed.
-      textareaRef.value?.focus({ preventScroll: true });
+      // preventScroll: avoid WebView pushing the chat header off-screen.
+      // CSS (--app-bottom-inset) handles keyboard avoidance.
+      void requestFocus(textareaRef.value, "composer-edit", {
+        isMobile: isMobileLike.value,
+      });
     });
   }
 }, { immediate: true });
 
 watch(() => chatStore.replyingTo, (reply) => {
-  if (reply) nextTick(() => textareaRef.value?.focus({ preventScroll: true }));
-});
-
-watch(() => chatStore.forwardingMessage, (fwd) => {
-  if (fwd) nextTick(() => textareaRef.value?.focus({ preventScroll: true }));
+  if (reply) {
+    void requestFocusNextTick(() => textareaRef.value, "composer-reply", {
+      isMobile: isMobileLike.value,
+    });
+  }
 });
 
 // Grace period after switching rooms: peer-keys may still be loading,
@@ -305,14 +310,32 @@ const handleSend = async () => {
       // Telegram-style: caption lands in the target room as its own message,
       // then all N forwarded messages follow in source-timestamp order.
       const targetRoomId = chatStore.activeRoomId;
-      const ids = chatStore.forwardingMessages.map((m) => m.id);
+      // Snapshot before cancel — forwardMessages must not depend on the
+      // target room's activeMessages (source selection lives elsewhere).
+      const sources = [...chatStore.forwardingMessages];
+      const ids = sources.map((m) => m.id);
       const withSenderInfo = chatStore.bulkForwardWithSenderInfo;
       if (rawText.trim()) {
         await sendMessage(rawText, linkPreview.dismissed.value);
       }
-      await forwardMessages(ids, targetRoomId, { withSenderInfo });
-      chatStore.cancelBulkForward(targetRoomId);
-      inserted = true;
+      const fwdResult = await forwardMessages(ids, targetRoomId, {
+        withSenderInfo,
+        sources,
+      });
+      if (fwdResult.succeeded === 0) {
+        toast(t("forward.sendFailed"), "error");
+        // Keep the bulk draft so the user can retry without re-selecting.
+        inserted = false;
+      } else {
+        if (fwdResult.failed > 0) {
+          toast(t("forward.resultSummary", {
+            succeeded: fwdResult.succeeded,
+            total: ids.length,
+          }), "error");
+        }
+        chatStore.cancelBulkForward(targetRoomId);
+        inserted = true;
+      }
     } else if (chatStore.forwardingMessage) {
       const fwd = chatStore.forwardingMessage;
 
@@ -512,6 +535,22 @@ const showBulkForwardPreview = computed(() => {
   const srcId = msgs[0].roomId;
   return chatStore.activeRoomId !== srcId;
 });
+
+// Forward caption: focus only after the target chat is active (preview
+// visible). Focusing while ForwardPicker is still open fought its search
+// field and caused IME open/close flicker — especially on bulk file forward.
+watch(
+  [showForwardPreview, showBulkForwardPreview],
+  ([singular, bulk], [wasSingular, wasBulk]) => {
+    const now = singular || bulk;
+    const was = wasSingular || wasBulk;
+    if (now && !was) {
+      void requestFocusNextTick(() => textareaRef.value, "composer-forward-caption", {
+        isMobile: isMobileLike.value,
+      });
+    }
+  },
+);
 
 const sendButtonVisible = computed(() => isSendButtonVisible({
   text: text.value,
@@ -888,7 +927,9 @@ const insertEmoji = (emoji: string) => {
   if (el) {
     nextTick(() => {
       el.selectionStart = el.selectionEnd = result.cursor;
-      el.focus({ preventScroll: true });
+      void requestFocus(el, "composer-emoji-restore", {
+        isMobile: isMobileLike.value,
+      });
       autoResize();
       // Re-run the @input pipeline: mention autocomplete, typing throttle,
       // and any v-model holdouts after a programmatic mutation.
@@ -899,10 +940,9 @@ const insertEmoji = (emoji: string) => {
 };
 
 const toggleEmojiPicker = (e: MouseEvent) => {
-  // Blur the textarea so the soft keyboard collapses before the picker opens —
-  // otherwise the picker has to fight the keyboard for the lower half of the
-  // screen and the textarea is hidden anyway.
-  textareaRef.value?.blur();
+  // Collapse the soft keyboard before the picker opens — otherwise the
+  // picker fights the IME for the lower half of the screen.
+  releaseFocus("picker", textareaRef.value);
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
   emojiPickerPos.value = { x: rect.left, y: rect.top };
   showEmojiPicker.value = !showEmojiPicker.value;

@@ -64,7 +64,7 @@ describe("keyboard inset utilities", () => {
 
   it("keeps one cross-platform rule instead of an iOS-only override", () => {
     // Android and iOS publish --app-bottom-inset with the same meaning
-    // (`MainActivity.injectAllCssVars` / `useIOSKeyboardCssVar`), so a
+    // (`MainActivity.injectAllCssVars` / `useKeyboardInsets`), so a
     // `.is-ios`-scoped padding override would only be able to disagree.
     expect(mainCss).not.toMatch(/\.is-ios\s+\.safe-/);
   });

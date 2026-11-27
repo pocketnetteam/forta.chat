@@ -4,6 +4,8 @@ import type { ChatRoom } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
 import Avatar from "@/shared/ui/avatar/Avatar.vue";
 import { splitByQuery } from "@/shared/lib/utils/highlight";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { requestFocusNextTick } from "@/shared/lib/keyboard";
 import { useSearch } from "../model/use-search";
 import { useFormatPreview } from "@/shared/lib/utils/format-preview";
 
@@ -13,6 +15,7 @@ const chatStore = useChatStore();
 const { query, chatResults, clearSearch } = useSearch();
 const { t } = useI18n();
 const { formatPreview } = useFormatPreview();
+const isMobile = useMobile();
 
 const inputRef = ref<HTMLInputElement>();
 const listRef = ref<HTMLElement>();
@@ -40,7 +43,9 @@ watch(selectedIndex, (idx) => {
 });
 
 onMounted(() => {
-  nextTick(() => inputRef.value?.focus());
+  void requestFocusNextTick(() => inputRef.value, "quick-search", {
+    isMobile: isMobile.value,
+  });
 });
 
 const handleKeydown = (e: KeyboardEvent) => {

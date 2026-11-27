@@ -140,7 +140,7 @@ watch(() => props.show, (v) => {
 </script>
 
 <template>
-  <Modal :show="show" @close="resetAndClose">
+  <Modal :show="show" initial-focus="first-focusable" @close="resetAndClose">
     <div class="flex flex-col gap-5">
       <!-- Header -->
       <div class="flex items-center gap-3">

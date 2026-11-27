@@ -463,6 +463,7 @@ export const en = {
   "forward.resultSuccess": "Forwarded: {count}",
   "forward.resultSummary": "Forwarded {succeeded} of {total}",
   "forward.mediaFailed": "Couldn't forward media — original unavailable or not decrypted",
+  "forward.sendFailed": "Couldn't forward messages",
   "forward.bulkTitle": "Forward {count} messages",
   "forward.bulkFrom": "From: {names}",
   "forward.bulkCancelConfirm.title": "{count} messages",

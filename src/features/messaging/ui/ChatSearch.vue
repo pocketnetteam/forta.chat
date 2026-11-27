@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch } from "vue";
 import { useChatStore } from "@/entities/chat";
 import type { Message } from "@/entities/chat";
 import { UserAvatar } from "@/entities/user";
@@ -7,6 +7,8 @@ import { splitByQuery } from "@/shared/lib/utils/highlight";
 
 import { formatRelativeTime } from "@/shared/lib/format";
 import { hexDecode } from "@/shared/lib/matrix/functions";
+import { useMobile } from "@/shared/lib/composables/use-media-query";
+import { requestFocus, requestFocusNextTick } from "@/shared/lib/keyboard";
 
 const emit = defineEmits<{
   close: [];
@@ -16,6 +18,7 @@ const emit = defineEmits<{
 
 const chatStore = useChatStore();
 const { t } = useI18n();
+const isMobile = useMobile();
 
 
 // --- State ---
@@ -139,12 +142,16 @@ const selectUser = (address: string) => {
   showDropdown.value = true;
   if (debounceTimer) clearTimeout(debounceTimer);
   debouncedQuery.value = query.value;
-  nextTick(() => inputRef.value?.focus());
+  void requestFocusNextTick(() => inputRef.value, "chat-search", {
+    isMobile: isMobile.value,
+  });
 };
 
 const removeUserFilter = () => {
   filterUser.value = null;
-  nextTick(() => inputRef.value?.focus());
+  void requestFocusNextTick(() => inputRef.value, "chat-search", {
+    isMobile: isMobile.value,
+  });
 };
 
 // Backspace on empty input removes user filter; Enter navigates when dropdown hidden
@@ -183,7 +190,7 @@ watch(selectedDropdownIndex, (idx) => {
 const inputRef = ref<HTMLInputElement>();
 
 onMounted(() => {
-  inputRef.value?.focus();
+  void requestFocus(inputRef.value, "chat-search", { isMobile: isMobile.value });
 });
 
 const handleClose = () => {
